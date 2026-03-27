@@ -1,0 +1,8 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.cppStandard": "c++26",
+  "testMate.cpp.test.executables": "${workspaceFolder}/build/Linux/linux-debug/filo_tests"
+}

@@ -1,0 +1,46 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Debug",
+            "type": "cmake",
+            "command": "build",
+            "preset": "linux-debug",
+            "targets": ["filo"],
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Release",
+            "type": "cmake",
+            "command": "build",
+            "preset": "linux-release",
+            "targets": ["filo"],
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Tests",
+            "type": "cmake",
+            "command": "build",
+            "preset": "linux-debug",
+            "targets": ["filo_tests"],
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Configure Debug",
+            "type": "cmake",
+            "command": "configure",
+            "preset": "linux-debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "Configure Release",
+            "type": "cmake",
+            "command": "configure",
+            "preset": "linux-release",
+            "problemMatcher": []
+        }
+    ]
+}

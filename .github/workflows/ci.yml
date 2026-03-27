@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+
+jobs:
+  build-and-test-opensuse:
+    name: Build & Test (openSUSE)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: opensuse/tumbleweed:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          zypper --non-interactive --gpg-auto-import-keys refresh
+          zypper --non-interactive install --no-recommends \
+            gcc-c++ \
+            cmake \
+            make \
+            pkg-config \
+            libopenssl-devel \
+            libicu-devel \
+            libcurl-devel \
+            python3 \
+            python3-devel \
+            git \
+            patch
+
+      - name: Configure
+        run: cmake --preset linux-debug
+
+      - name: Build
+        run: cmake --build --preset linux-debug -j2
+
+      - name: Test
+        run: ctest --preset linux-debug --output-on-failure

@@ -1,0 +1,161 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "common",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${hostSystemName}/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "common",
+      "generator": "Unix Makefiles",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug (Makefiles)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release (Makefiles)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux Debug TSAN (Makefiles)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "FILO_ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "xcode-base",
+      "hidden": true,
+      "inherits": "common",
+      "generator": "Xcode",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_XCODE_GENERATE_SCHEME": "ON"
+      }
+    },
+    {
+      "name": "xcode-debug",
+      "displayName": "macOS Debug (Xcode)",
+      "inherits": "xcode-base"
+    },
+    {
+      "name": "xcode-release",
+      "displayName": "macOS Release (Xcode)",
+      "inherits": "xcode-base"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
+      "jobs": 2
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "jobs": 2
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "jobs": 2
+    },
+    {
+      "name": "xcode-debug",
+      "configurePreset": "xcode-debug",
+      "configuration": "Debug",
+      "jobs": 2
+    },
+    {
+      "name": "xcode-release",
+      "configurePreset": "xcode-release",
+      "configuration": "Release",
+      "jobs": 2
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    },
+    {
+      "name": "xcode-debug",
+      "configurePreset": "xcode-debug",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    },
+    {
+      "name": "xcode-release",
+      "configurePreset": "xcode-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    }
+  ]
+}
