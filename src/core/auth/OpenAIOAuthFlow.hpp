@@ -22,23 +22,25 @@ namespace core::auth {
  * OpenAI token responses include a refresh_token; refresh() uses it to
  * obtain a new access_token without a browser round-trip.
  *
- * NOTE: This flow requires a registered OAuth2 client_id. Pass one
- * explicitly or set OPENAI_OAUTH_CLIENT_ID in the environment. The
- * token_url and auth_url can also be overridden for private deployments.
+ * By default this uses the same public client used by the official Codex
+ * login flow. You can override it by setting OPENAI_OAUTH_CLIENT_ID or by
+ * passing a client_id explicitly. token_url and auth_url can also be
+ * overridden for private deployments.
  *
  * The static pure functions are exposed for unit testing.
  */
 class OpenAIOAuthFlow : public IOAuthFlow {
 public:
-    // Reads client_id from OPENAI_OAUTH_CLIENT_ID. Throws if not set.
+    // Uses OPENAI_OAUTH_CLIENT_ID when provided, otherwise a built-in
+    // Codex-compatible public client id.
     OpenAIOAuthFlow();
 
     OpenAIOAuthFlow(std::string client_id,
                     std::string auth_url  = "https://auth.openai.com/authorize",
                     std::string token_url = "https://auth.openai.com/oauth/token",
-                    std::vector<std::string> scopes = {"openid", "email", "profile"},
-                    int port_start = 54321,
-                    int port_end   = 54400);
+                    std::vector<std::string> scopes = {"openid", "email", "profile", "offline_access"},
+                    int port_start = 1455,
+                    int port_end   = 1455);
 
     OAuthToken login() override;
     OAuthToken refresh(std::string_view refresh_token) override;

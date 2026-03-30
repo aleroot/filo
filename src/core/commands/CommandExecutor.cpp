@@ -101,6 +101,15 @@ std::vector<std::string_view> split_ascii_whitespace(std::string_view input) {
     return tokens;
 }
 
+bool is_valid_provider_token(std::string_view value) {
+    if (value.empty()) return false;
+    for (const unsigned char ch : value) {
+        if (std::isalnum(ch) || ch == '-' || ch == '_') continue;
+        return false;
+    }
+    return true;
+}
+
 FILE* open_pipe_write(const char* command) {
 #if defined(_WIN32)
     return _popen(command, "w");
@@ -772,7 +781,7 @@ public:
             "  /review [--staged]  Run AI code review on git diff (HEAD or staged)\n"
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
-            "  /init [options]     Scaffold .filo/config.json (and optional FILO.md)\n"
+            "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
@@ -1398,7 +1407,7 @@ class InitCommand : public Command {
 public:
     std::string get_name() const override { return "/init"; }
     std::string get_description() const override {
-        return "Scaffold .filo project config (/init [--with-prompt] [--force])";
+        return "Scaffold .filo project config (/init [provider] [--with-prompt] [--force])";
     }
     bool accepts_arguments() const override { return true; }
 
@@ -1407,6 +1416,8 @@ public:
 
         bool with_prompt = false;
         bool force = false;
+        bool provider_set = false;
+        std::string default_provider = "grok";
         for (const auto token : split_ascii_whitespace(trailing_arguments(ctx.text))) {
             const std::string option = to_lower_ascii(token);
             if (option == "--with-prompt" || option == "--prompt") {
@@ -1419,16 +1430,35 @@ public:
             }
             if (option == "-h" || option == "--help") {
                 ctx.append_history_fn(
-                    "\nℹ  Usage: /init [--with-prompt] [--force]\n"
+                    "\nℹ  Usage: /init [provider] [--with-prompt] [--force]\n"
+                    "   provider       optional default provider (for example: grok, openai).\n"
                     "   --with-prompt  also create FILO.md in the project root.\n"
                     "   --force        overwrite existing scaffold files.\n");
                 return;
             }
+            if (option.starts_with('-')) {
+                ctx.append_history_fn(std::format(
+                    "\n✗  Unknown /init option '{}'. Use /init [provider] [--with-prompt] [--force].\n",
+                    std::string(token)));
+                return;
+            }
+            if (!is_valid_provider_token(option)) {
+                ctx.append_history_fn(std::format(
+                    "\n✗  Invalid provider '{}'. Use letters, numbers, '-' or '_'.\n",
+                    std::string(token)));
+                return;
+            }
+            if (provider_set) {
+                ctx.append_history_fn(std::format(
+                    "\n✗  Multiple providers given ('{}' and '{}'). Use only one provider.\n",
+                    default_provider,
+                    option));
+                return;
+            }
+            default_provider = option;
+            provider_set = true;
+            continue;
 
-            ctx.append_history_fn(std::format(
-                "\n✗  Unknown /init option '{}'. Use /init [--with-prompt] [--force].\n",
-                std::string(token)));
-            return;
         }
 
         const std::filesystem::path root = std::filesystem::current_path();
@@ -1446,14 +1476,14 @@ public:
             return;
         }
 
-        constexpr std::string_view kConfigTemplate = R"({
-    "default_provider": "grok",
+        const std::string config_template = std::format(R"({{
+    "default_provider": "{}",
     "default_model_selection": "manual",
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
     "auto_compact_threshold": 50000
-}
-)";
+}}
+)", default_provider);
 
         constexpr std::string_view kPromptTemplate = R"(# FILO.md
 
@@ -1490,7 +1520,7 @@ Project-specific instructions for Filo.
 
         std::vector<std::string> outcomes;
         std::string outcome;
-        if (!write_file(config_path, kConfigTemplate, outcome)) {
+        if (!write_file(config_path, config_template, outcome)) {
             ctx.append_history_fn(std::format("\n✗  {}\n", outcome));
             return;
         }
@@ -1506,6 +1536,7 @@ Project-specific instructions for Filo.
 
         std::ostringstream summary;
         summary << "\n✓  Project scaffold ready.\n";
+        summary << "   - default_provider: " << default_provider << "\n";
         for (const auto& line : outcomes) {
             summary << "   - " << line << "\n";
         }

@@ -71,13 +71,14 @@ public:
      *
      * Thread-safe (lock-free): the full RateLimitInfo snapshot — including
      * the variable-length unified_windows vector — is published as an immutable
-     * shared_ptr via std::atomic<shared_ptr>.  The render thread can call this
-     * at 60 fps with no contention.
+     * shared_ptr via atomic_load/atomic_store free functions. The render thread
+     * can call this at 60 fps with no contention.
      *
      * Returns a zero-initialised RateLimitInfo when no response has been received.
      */
     [[nodiscard]] virtual protocols::RateLimitInfo get_last_rate_limit_info() const noexcept {
-        auto snap = last_rate_limit_snapshot_.load(std::memory_order_acquire);
+        auto snap = std::atomic_load_explicit(
+            &last_rate_limit_snapshot_, std::memory_order_acquire);
         return snap ? *snap : protocols::RateLimitInfo{};
     }
 
@@ -101,9 +102,9 @@ protected:
      */
     void set_last_rate_limit_info(const protocols::RateLimitInfo& info) noexcept {
         try {
-            last_rate_limit_snapshot_.store(
-                std::make_shared<const protocols::RateLimitInfo>(info),
-                std::memory_order_release);
+            auto snapshot = std::make_shared<const protocols::RateLimitInfo>(info);
+            std::atomic_store_explicit(
+                &last_rate_limit_snapshot_, std::move(snapshot), std::memory_order_release);
         } catch (...) {
             // OOM: silently retain the previous snapshot.
         }
@@ -116,7 +117,7 @@ private:
     // Immutable snapshot of the last rate-limit response.  Written by the
     // streaming thread via set_last_rate_limit_info(); read lock-free by the
     // render thread via get_last_rate_limit_info().
-    std::atomic<std::shared_ptr<const protocols::RateLimitInfo>> last_rate_limit_snapshot_{
+    std::shared_ptr<const protocols::RateLimitInfo> last_rate_limit_snapshot_{
         std::make_shared<const protocols::RateLimitInfo>()};
 };
 

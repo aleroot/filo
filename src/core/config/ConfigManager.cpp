@@ -231,7 +231,7 @@ AppConfig make_default_config() {
         config.providers[name] = std::move(p);
     };
 
-    add_provider("openai",         "gpt-4o", {}, {}, {}, "responses");
+    add_provider("openai",         "gpt-5.4", {}, {}, {}, "responses");
     add_provider("mistral",        "devstral-small-latest");
     add_provider("grok",           "grok-code-fast-1");
     add_provider("grok-4",         "grok-4");
@@ -298,7 +298,7 @@ std::string default_config_json() {
         "grok-fast":      { "model": "grok-4.20-non-reasoning" },
         "grok-mini":      { "model": "grok-3-mini",      "reasoning_effort": "high" },
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
-        "openai":         { "model": "gpt-4o", "wire_api": "responses" },
+        "openai":         { "model": "gpt-5.4", "wire_api": "responses" },
         "mistral":        { "model": "devstral-small-latest" },
         "claude":         { "model": "claude-sonnet-4-6" },
         "claude-oauth":   { "model": "claude-haiku-4-5", "auth_type": "oauth_claude" },
@@ -346,7 +346,7 @@ std::string default_config_json() {
                 "defaults": [
                     { "provider": "grok", "model": "grok-code-fast-1", "weight": 5 },
                     { "provider": "grok-mini-fast", "model": "grok-3-mini-fast", "weight": 3 },
-                    { "provider": "openai", "model": "gpt-4o", "weight": 2 }
+                    { "provider": "openai", "model": "gpt-5.4", "weight": 2 }
                 ],
                 "rules": [
                     {
@@ -360,7 +360,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "claude", "model": "claude-sonnet-4-6", "retries": 1 },
                             { "provider": "grok-reasoning", "model": "grok-4.20-reasoning", "retries": 1 },
-                            { "provider": "openai", "model": "gpt-4o" }
+                            { "provider": "openai", "model": "gpt-5.4", "retries": 1 }
                         ]
                     },
                     {
@@ -371,7 +371,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "grok", "model": "grok-code-fast-1", "latency_bias_ms": 15 },
                             { "provider": "gemini", "model": "gemini-2.5-flash", "latency_bias_ms": 10 },
-                            { "provider": "openai", "model": "gpt-4o", "latency_bias_ms": 20 }
+                            { "provider": "openai", "model": "gpt-5.4", "latency_bias_ms": 20 }
                         ]
                     },
                     {

@@ -181,7 +181,8 @@ public:
         return {
             "Set \"auth_type\": \"oauth_openai_pkce\" on an OpenAI provider in "
             "~/.config/filo/config.json to use your ChatGPT Plus/Pro plan.",
-            "Make sure OPENAI_OAUTH_CLIENT_ID is set to your registered OAuth2 client.",
+            "PKCE login uses a built-in Codex-compatible client id by default "
+            "(you can override it with OPENAI_OAUTH_CLIENT_ID if needed).",
         };
     }
 };

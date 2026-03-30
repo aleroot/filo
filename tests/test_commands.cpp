@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <format>
 #include <cstdlib>
+#include <fstream>
 
 using namespace core::commands;
 
@@ -396,8 +397,55 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(fs::exists(temp_dir / ".filo" / "config.json"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Project scaffold ready"));
+        std::ifstream in(temp_dir / ".filo" / "config.json");
+        REQUIRE(in.good());
+        std::stringstream cfg;
+        cfg << in.rdbuf();
+        REQUIRE_THAT(cfg.str(), Catch::Matchers::ContainsSubstring("\"default_provider\": \"grok\""));
 
         fs::remove_all(temp_dir, ec);
+    }
+
+    SECTION("/init accepts an optional provider argument") {
+        namespace fs = std::filesystem;
+        struct CwdGuard {
+            fs::path old;
+            ~CwdGuard() {
+                std::error_code ec;
+                fs::current_path(old, ec);
+            }
+        } guard{fs::current_path()};
+
+        const fs::path temp_dir =
+            fs::temp_directory_path() / std::format("filo-test-init-provider-{}", std::rand());
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+        fs::create_directories(temp_dir, ec);
+        REQUIRE_FALSE(ec);
+
+        fs::current_path(temp_dir);
+        *mock_history = "";
+        ctx.text = "/init openAi";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(fs::exists(temp_dir / ".filo" / "config.json"));
+        std::ifstream in(temp_dir / ".filo" / "config.json");
+        REQUIRE(in.good());
+        std::stringstream cfg;
+        cfg << in.rdbuf();
+        REQUIRE_THAT(cfg.str(), Catch::Matchers::ContainsSubstring("\"default_provider\": \"openai\""));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("default_provider: openai"));
+
+        fs::remove_all(temp_dir, ec);
+    }
+
+    SECTION("/init rejects invalid provider tokens") {
+        *mock_history = "";
+        ctx.text = "/init openai!";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Invalid provider"));
     }
 
     SECTION("Command registry exposes slash commands for autocomplete") {

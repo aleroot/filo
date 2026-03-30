@@ -23,6 +23,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("claude-3-5-haiku") == 200000);
     
     // OpenAI (via new registry)
+    REQUIRE(get_max_context_size("gpt-5.4") == 200000);
     REQUIRE(get_max_context_size("gpt-4o") == 128000);
     REQUIRE(get_max_context_size("gpt-4o-mini") == 128000);
     REQUIRE(get_max_context_size("o1") == 200000);
@@ -61,6 +62,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.size() > 0);
     
     // Check some known models were loaded
+    REQUIRE(registry.has_model("gpt-5.4"));
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-3-7-sonnet"));
     REQUIRE(registry.has_model("kimi-k2.5"));
@@ -118,6 +120,7 @@ TEST_CASE("ModelRegistry::get_tier - returns correct tier classification", "[llm
     REQUIRE(registry.get_tier("claude-3-opus") == ModelTier::Powerful);
     
     // Reasoning tier models
+    REQUIRE(registry.get_tier("gpt-5.4") == ModelTier::Reasoning);
     REQUIRE(registry.get_tier("o1") == ModelTier::Reasoning);
     REQUIRE(registry.get_tier("o3-mini") == ModelTier::Reasoning);
     
@@ -147,6 +150,7 @@ TEST_CASE("ModelRegistry::supports - checks capability flags", "[llm][registry]"
     
     // Reasoning models have special flag
     REQUIRE(registry.supports("o1", ModelCapability::Reasoning));
+    REQUIRE(registry.supports("gpt-5.4", ModelCapability::Reasoning));
     REQUIRE_FALSE(registry.supports("gpt-4o", ModelCapability::Reasoning));
     
     // Unknown model returns false

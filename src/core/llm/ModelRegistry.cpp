@@ -109,6 +109,8 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // OpenAI GPT Models
     // -----------------------------------------------------------------------
+    { "gpt-5.4",           200000 },
+    { "gpt-5",             200000 },
     { "gpt-4o",            128000 },
     { "gpt-4-turbo",       128000 },
     { "gpt-4-32k",         32000 },
@@ -261,7 +263,24 @@ std::vector<ModelInfo> build_anthropic_catalog() {
 // OpenAI models (updated March 2026)
 std::vector<ModelInfo> build_openai_catalog() {
     return {
-        // GPT-4o (latest)
+        // GPT-5.4 (recommended Codex default model)
+        {
+            .canonical_id = "gpt-5.4",
+            .aliases = {"gpt-5.4-latest", "gpt-5", "gpt5"},
+            .display_name = "GPT-5.4",
+            .provider = "openai",
+            .context_window = 200000,
+            .max_output_tokens = 100000,
+            .max_reasoning_tokens = 25000,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::Logprobs),
+            .tier = ModelTier::Reasoning,
+            .pricing = {2.50, 10.0, 1.25, -1.0},
+            .knowledge_cutoff = "2024-06",
+            .constraints = kStandardConstraints,
+        },
+        // GPT-4o
         {
             .canonical_id = "gpt-4o-2024-08-06",
             .aliases = {"gpt-4o", "4o"},

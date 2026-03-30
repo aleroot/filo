@@ -250,6 +250,10 @@ TEST_CASE("TokenUsage — has_data() returns correct results", "[tier1][models]"
 // ============================================================================
 
 TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budget]") {
+    auto r_gpt54 = rates_for_model("gpt-5.4");
+    REQUIRE(r_gpt54.input_per_m  == Catch::Approx(2.50));
+    REQUIRE(r_gpt54.output_per_m == Catch::Approx(10.00));
+
     auto r_code = rates_for_model("grok-code-fast-1");
     REQUIRE(r_code.input_per_m  == Catch::Approx(0.20));
     REQUIRE(r_code.output_per_m == Catch::Approx(1.50));

@@ -176,26 +176,28 @@ static int64_t now_unix_seconds() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// Public OAuth client id used by the official Codex login flow.
+constexpr std::string_view kCodexDefaultClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
+
+std::string resolve_client_id() {
+    if (const char* env = std::getenv("OPENAI_OAUTH_CLIENT_ID"); env && env[0] != '\0') {
+        return std::string(env);
+    }
+    return std::string(kCodexDefaultClientId);
+}
+
 } // namespace
 
 // ── OpenAIOAuthFlow ───────────────────────────────────────────────────────────
 
 OpenAIOAuthFlow::OpenAIOAuthFlow()
     : OpenAIOAuthFlow(
-        [] {
-            const char* env = std::getenv("OPENAI_OAUTH_CLIENT_ID");
-            if (!env || env[0] == '\0')
-                throw std::runtime_error(
-                    "OPENAI_OAUTH_CLIENT_ID is not set. "
-                    "Register an OAuth2 application at platform.openai.com and "
-                    "export OPENAI_OAUTH_CLIENT_ID=<your-client-id>.");
-            return std::string(env);
-        }(),
+        resolve_client_id(),
         "https://auth.openai.com/authorize",
         "https://auth.openai.com/oauth/token",
-        {"openid", "email", "profile"},
-        54321,
-        54400)
+        {"openid", "email", "profile", "offline_access"},
+        1455,
+        1455)
 {}
 
 OpenAIOAuthFlow::OpenAIOAuthFlow(std::string client_id,
@@ -252,7 +254,9 @@ std::string OpenAIOAuthFlow::build_auth_url(std::string_view client_id,
         + "&scope="                 + url_encode(scope_str)
         + "&state="                 + url_encode(state)
         + "&code_challenge="        + std::string(code_challenge)
-        + "&code_challenge_method=S256";
+        + "&code_challenge_method=S256"
+        + "&id_token_add_organizations=true"
+        + "&codex_cli_simplified_flow=true";
 }
 
 // static
@@ -323,7 +327,7 @@ OAuthToken OpenAIOAuthFlow::login() {
     if (port < 0)
         throw std::runtime_error("No free port available for OpenAI OAuth callback");
 
-    const std::string redirect_uri = "http://127.0.0.1:" + std::to_string(port) + "/callback";
+    const std::string redirect_uri = "http://localhost:" + std::to_string(port) + "/auth/callback";
     const std::string state         = generate_random_state();
     const std::string code_verifier = generate_code_verifier();
     const std::string challenge      = compute_code_challenge(code_verifier);
@@ -348,7 +352,7 @@ OAuthToken OpenAIOAuthFlow::login() {
 
     httplib::Server svr;
 
-    svr.Get("/callback", [&](const httplib::Request& req, httplib::Response& res) {
+    const auto callback_handler = [&](const httplib::Request& req, httplib::Response& res) {
         std::string code  = req.get_param_value("code");
         std::string st    = req.get_param_value("state");
         std::string err   = req.get_param_value("error");
@@ -373,7 +377,10 @@ OAuthToken OpenAIOAuthFlow::login() {
         received_state = std::move(st);
         done = true;
         cv.notify_one();
-    });
+    };
+    // Keep legacy /callback for backward compatibility with older redirects.
+    svr.Get("/callback", callback_handler);
+    svr.Get("/auth/callback", callback_handler);
 
     std::thread server_thread([&svr, port]() {
         svr.listen("127.0.0.1", port);

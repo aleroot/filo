@@ -536,6 +536,12 @@ TEST_CASE("OpenAIAuthFlow::refresh throws (API keys are rotated manually)", "[Op
 
 // ── OpenAIOAuthFlow — static pure functions ───────────────────────────────────
 
+TEST_CASE("OpenAIOAuthFlow default constructor works without OPENAI_OAUTH_CLIENT_ID",
+          "[OpenAIOAuthFlow]") {
+    ScopedEnvVar client_id("OPENAI_OAUTH_CLIENT_ID", "");
+    REQUIRE_NOTHROW(OpenAIOAuthFlow{});
+}
+
 TEST_CASE("OpenAIOAuthFlow::generate_code_verifier — correct length and charset", "[OpenAIOAuthFlow]") {
     const auto v = OpenAIOAuthFlow::generate_code_verifier();
     REQUIRE(v.size() >= 43u);
@@ -578,6 +584,8 @@ TEST_CASE("OpenAIOAuthFlow::build_auth_url — contains PKCE parameters", "[Open
     REQUIRE(url.find("code_challenge_method")  != std::string::npos);
     REQUIRE(url.find("state123")               != std::string::npos);
     REQUIRE(url.find("response_type=code")     != std::string::npos);
+    REQUIRE(url.find("id_token_add_organizations=true") != std::string::npos);
+    REQUIRE(url.find("codex_cli_simplified_flow=true")  != std::string::npos);
 }
 
 TEST_CASE("OpenAIOAuthFlow::build_auth_url — redirect_uri is percent-encoded", "[OpenAIOAuthFlow]") {

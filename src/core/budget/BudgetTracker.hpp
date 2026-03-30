@@ -46,7 +46,9 @@ namespace core::budget {
     if (model.find("claude-3")         != std::string_view::npos) return   200'000;
     // Generic claude fallback
     if (model.find("claude")           != std::string_view::npos) return   200'000;
-    // OpenAI — gpt-4o and gpt-4-turbo before plain gpt-4
+    // OpenAI — gpt-5 before gpt-4 variants
+    if (model.find("gpt-5.4")          != std::string_view::npos) return   200'000;
+    if (model.find("gpt-5")            != std::string_view::npos) return   200'000;
     if (model.find("gpt-4o")           != std::string_view::npos) return   128'000;
     if (model.find("gpt-4-turbo")      != std::string_view::npos) return   128'000;
     if (model.find("gpt-4")            != std::string_view::npos) return     8'192;
@@ -99,6 +101,8 @@ struct ModelRates {
     if (model.find("sonnet")      != std::string_view::npos) return { 3.00, 15.00 };
     if (model.find("haiku")       != std::string_view::npos) return { 0.80,  4.00 };
     // OpenAI GPT
+    if (model.find("gpt-5.4")      != std::string_view::npos) return { 2.50, 10.00 };
+    if (model.find("gpt-5")        != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-4o")      != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-4")       != std::string_view::npos) return {30.00, 60.00 };
     if (model.find("gpt-3.5")     != std::string_view::npos) return { 0.50,  1.50 };
