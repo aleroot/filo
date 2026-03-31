@@ -48,6 +48,16 @@ public:
     [[nodiscard]] virtual bool uses_subscription_billing() const noexcept {
         return false;
     }
+
+    /**
+     * @brief Attempt to recover from an authentication failure (e.g., HTTP 401).
+     *
+     * Implementations may refresh tokens and update their internal cache.
+     * Returns true when a retry should be attempted with newly-fetched auth.
+     */
+    virtual bool refresh_on_auth_failure() {
+        return false;
+    }
 };
 
 } // namespace core::auth

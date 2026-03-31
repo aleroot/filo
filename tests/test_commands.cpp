@@ -243,6 +243,14 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to grok-mini"));
     }
 
+    SECTION("/model forwards provider plus model selectors") {
+        ctx.text = "/model claude opus";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*switch_target == "claude opus");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to claude opus"));
+    }
+
     SECTION("/settings opens picker when callback handles it") {
         *settings_picker_opened = false;
         ctx.open_settings_picker_fn = [settings_picker_opened]() {

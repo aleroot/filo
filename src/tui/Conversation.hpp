@@ -23,11 +23,27 @@ struct ToolActivity {
         Cancelled     // Cancelled by user/system
     };
 
+    struct Result {
+        std::string summary;                // Tool output/result
+        std::optional<int> exit_code;       // Terminal command exit status (when available)
+        bool truncated = false;             // True when output was truncated upstream
+
+        [[nodiscard]] bool empty() const noexcept {
+            return summary.empty();
+        }
+
+        void clear() {
+            summary.clear();
+            exit_code.reset();
+            truncated = false;
+        }
+    };
+
     std::string id;                      // Unique tool call ID
     std::string name;                    // Tool name (e.g., "read_file")
     std::string args;                    // JSON arguments
     std::string description;             // Human-readable summary
-    std::string result_summary;          // Tool output/result
+    Result result;                       // Structured tool output metadata
     ToolDiffPreview diff_preview;        // Diff preview for file operations
     Status status = Status::Pending;
     
@@ -188,6 +204,7 @@ auto current_time_str() -> std::string;
 
 std::string summarize_tool_arguments(std::string_view tool_name, std::string_view tool_args);
 std::string format_tool_description(std::string_view tool_name, std::string_view tool_args);
+void apply_tool_result(ToolActivity& tool, std::string_view result_payload);
 
 // Tool result summary (for backward compat in tests)
 struct ToolResultSummary {

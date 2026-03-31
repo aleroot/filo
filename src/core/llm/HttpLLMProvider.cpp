@@ -5,6 +5,7 @@
 #include <cpr/cpr.h>
 #include <thread>
 #include <chrono>
+#include <exception>
 #include <format>
 #include <random>
 
@@ -166,6 +167,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         constexpr int max_retries = 3;
         int retry_attempt = 0;
         int retry_after_seconds = 0;
+        bool attempted_auth_recovery = false;
         
         while (true) {
             std::string buffer;
@@ -229,6 +231,28 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             const protocols::HttpResponse http_resp{
                 static_cast<int>(r.status_code), r.text, r.header};
             protocol->on_response(http_resp);
+
+            // Attempt one forced credential refresh on auth failures (OAuth providers).
+            const bool oauth_revoked_403 =
+                (r.status_code == 403
+                 && r.text.find("OAuth token has been revoked") != std::string::npos);
+            if ((r.status_code == 401 || oauth_revoked_403)
+                && !attempted_auth_recovery
+                && self->cred_source_) {
+                attempted_auth_recovery = true;
+                if (self->cred_source_->refresh_on_auth_failure()) {
+                    try {
+                        auto refreshed_auth = self->cred_source_->get_auth();
+                        headers = protocol->build_headers(refreshed_auth);
+                        headers["Accept"] = "text/event-stream";
+                        callback(StreamChunk::make_error(
+                            "\n[Authentication expired. Retrying with refreshed credentials...]"));
+                        continue;
+                    } catch (const std::exception& e) {
+                        core::logging::warn("Credential refresh retry failed: {}", e.what());
+                    }
+                }
+            }
 
             // Check if we should retry (429 rate limit or 529 overloaded)
             if (r.status_code == 429 || r.status_code == 529) {

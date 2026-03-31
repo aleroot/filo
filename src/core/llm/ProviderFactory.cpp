@@ -105,7 +105,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         if (base_url.empty())            base_url  = builtin->base_url;
         auth_style     = builtin->auth_style;
         env_var        = builtin->env_var;
-        canonical_type = builtin->prefix;    // e.g. "claude" for "claude-oauth"
+        canonical_type = builtin->prefix;    // e.g. "grok" for "grok-reasoning"
         if (wire_api.empty()) wire_api = builtin->default_wire_api;
     } else {
         // User-defined provider: api_type and base_url must be explicit.

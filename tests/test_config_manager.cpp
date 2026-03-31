@@ -404,6 +404,8 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
     REQUIRE(config.providers.contains("grok-reasoning"));
     REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.20-reasoning");
+    REQUIRE(config.providers.contains("claude"));
+    REQUIRE_FALSE(config.providers.contains("claude-oauth"));
     REQUIRE(config.subagents.contains("general"));
     REQUIRE(config.subagents.contains("explore"));
     REQUIRE(config.subagents.at("general").max_steps.has_value());
@@ -446,6 +448,52 @@ TEST_CASE("ConfigManager persists /model defaults across reloads", "[config]") {
     REQUIRE(config.default_provider == "grok");
     REQUIRE(config.default_model_selection == "manual");
     REQUIRE(fs::exists(xdg_home / "filo" / "model_defaults.json"));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persists login profiles and selects the authenticated provider",
+          "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_login_profile");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+    const fs::path auth_overlay = xdg_home / "filo" / "auth_defaults.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "grok",
+        "default_model_selection": "manual",
+        "providers": {
+            "openai": { "type": "openai", "model": "gpt-5.4" },
+            "claude": { "type": "claude", "model": "claude-sonnet-4-6" },
+            "grok":   { "type": "grok",   "model": "grok-code-fast-1" }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    REQUIRE(manager.persist_login_profile("claude", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "claude");
+    REQUIRE(manager.get_config().default_model_selection == "manual");
+    REQUIRE(manager.get_config().providers.at("claude").auth_type == "oauth_claude");
+
+    REQUIRE(manager.persist_login_profile("openai-pkce", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "openai");
+    REQUIRE(manager.get_config().default_model_selection == "manual");
+    REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
+
+    manager.load(project_dir);
+    const auto& reloaded = manager.get_config();
+    REQUIRE(fs::exists(auth_overlay));
+    REQUIRE(reloaded.default_provider == "openai");
+    REQUIRE(reloaded.providers.at("openai").auth_type == "oauth_openai_pkce");
+    REQUIRE(reloaded.providers.at("claude").auth_type == "oauth_claude");
 
     fs::remove_all(sandbox);
 }

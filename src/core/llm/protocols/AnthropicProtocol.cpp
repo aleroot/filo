@@ -2,15 +2,24 @@
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <utility>
 
 namespace core::llm::protocols {
 
 namespace {
     constexpr std::string_view ANTHROPIC_VERSION       = "2023-06-01";
+    constexpr std::string_view ANTHROPIC_BETA_CLAUDE_CODE = "claude-code-20250219";
     constexpr std::string_view ANTHROPIC_BETA_THINKING = "interleaved-thinking-2025-05-14";
+    constexpr std::string_view ANTHROPIC_BETA_CONTEXT_1M = "context-1m-2025-08-07";
+    constexpr std::string_view ANTHROPIC_BETA_OAUTH    = "oauth-2025-04-20";
     constexpr std::string_view ANTHROPIC_BILLING_HEADER = "cc_version=2.1.78.13b; cc_entrypoint=cli; cch=0;";
+
+    constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-4-6";
+    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-6";
+    constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
     // Helper to safely convert string header to int32_t
     int32_t safe_stoi32(std::string_view sv, int32_t default_val = 0) {
@@ -32,14 +41,99 @@ namespace {
         }
     }
     
-    // Helper to safely convert string header to float
-    float safe_stof(std::string_view sv, float default_val = 0.0f) {
-        if (sv.empty()) return default_val;
+    bool try_parse_float(std::string_view sv, float& out) {
+        if (sv.empty()) return false;
         try {
-            return std::stof(std::string(sv));
+            std::size_t parsed = 0;
+            const std::string raw(sv);
+            const float value = std::stof(raw, &parsed);
+            while (parsed < raw.size()
+                   && std::isspace(static_cast<unsigned char>(raw[parsed]))) {
+                ++parsed;
+            }
+            if (parsed != raw.size()) return false;
+            out = value;
+            return true;
         } catch (...) {
-            return default_val;
+            return false;
         }
+    }
+
+    bool safe_parse_bool(std::string_view sv, bool default_val = false) {
+        if (sv.empty()) return default_val;
+        std::string lowered;
+        lowered.reserve(sv.size());
+        for (char ch : sv) {
+            lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        if (lowered == "1" || lowered == "true" || lowered == "yes") return true;
+        if (lowered == "0" || lowered == "false" || lowered == "no") return false;
+        return default_val;
+    }
+
+    std::string trim_copy(std::string_view sv) {
+        std::size_t begin = 0;
+        while (begin < sv.size()
+            && std::isspace(static_cast<unsigned char>(sv[begin]))) {
+            ++begin;
+        }
+
+        std::size_t end = sv.size();
+        while (end > begin
+            && std::isspace(static_cast<unsigned char>(sv[end - 1]))) {
+            --end;
+        }
+        return std::string(sv.substr(begin, end - begin));
+    }
+
+    std::string lower_copy(std::string_view sv) {
+        std::string out;
+        out.reserve(sv.size());
+        for (const char ch : sv) {
+            out.push_back(
+                static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        return out;
+    }
+
+    bool ends_with_1m_suffix(std::string_view model) {
+        if (model.size() < 4) return false;
+        const std::size_t tail = model.size() - 4;
+        return model[tail] == '['
+            && model[tail + 1] == '1'
+            && (model[tail + 2] == 'm' || model[tail + 2] == 'M')
+            && model[tail + 3] == ']';
+    }
+
+    struct ModelNormalization {
+        std::string model;
+        bool use_context_1m = false;
+    };
+
+    ModelNormalization normalize_requested_claude_model(std::string_view raw_model) {
+        ModelNormalization out{
+            .model = trim_copy(raw_model),
+            .use_context_1m = false,
+        };
+        if (out.model.empty()) return out;
+
+        if (ends_with_1m_suffix(out.model)) {
+            out.model = trim_copy(std::string_view(out.model).substr(0, out.model.size() - 4));
+            out.use_context_1m = true;
+        }
+
+        const std::string lowered = lower_copy(out.model);
+        if (lowered == "sonnet") {
+            out.model = std::string(CLAUDE_DEFAULT_SONNET);
+        } else if (lowered == "opus") {
+            out.model = std::string(CLAUDE_DEFAULT_OPUS);
+        } else if (lowered == "haiku") {
+            out.model = std::string(CLAUDE_DEFAULT_HAIKU);
+        } else if (lowered == "best" || lowered == "opusplan") {
+            out.model = std::string(CLAUDE_DEFAULT_SONNET);
+        }
+
+        return out;
     }
     
     // Parse ISO 8601 timestamp to unix seconds (Anthropic format: "2025-01-15T12:00:30Z").
@@ -107,23 +201,43 @@ namespace {
         // Anthropic returns two windows: a 5-hour rolling window and a 7-day window.
         // The representative-claim header indicates which is currently authoritative.
         // Add new labels here if Anthropic introduces additional windows.
-        for (const std::string_view window : {"5h", "7d"}) {
+        for (const auto& [window, label] : {
+                 std::pair{"5h", "5h"},
+                 std::pair{"7d", "7d"},
+                 std::pair{"overage", "overage"},
+             }) {
             const std::string header_name =
                 "anthropic-ratelimit-unified-" + std::string(window) + "-utilization";
             if (auto it = headers.find(header_name); it != headers.end()) {
-                if (const float val = safe_stof(it->second); val > 0.0f) {
-                    info.usage_windows.push_back({std::string(window), val});
+                float val = 0.0f;
+                if (try_parse_float(it->second, val) && val >= 0.0f) {
+                    info.usage_windows.push_back({std::string(label), val});
                 }
             }
         }
         if (auto it = headers.find("anthropic-ratelimit-unified-status"); it != headers.end()) {
             info.unified_status = it->second;
-            if (it->second == "rate_limited") {
+            if (it->second == "rate_limited" || it->second == "rejected") {
                 info.is_rate_limited = true;
             }
         }
         if (auto it = headers.find("anthropic-ratelimit-unified-representative-claim"); it != headers.end()) {
             info.unified_representative_claim = it->second;
+        }
+        if (auto it = headers.find("anthropic-ratelimit-unified-overage-status"); it != headers.end()) {
+            info.unified_overage_status = it->second;
+        }
+        if (auto it = headers.find("anthropic-ratelimit-unified-overage-reset"); it != headers.end()) {
+            info.unified_overage_reset = safe_stoi64(it->second);
+        }
+        if (auto it = headers.find("anthropic-ratelimit-unified-overage-disabled-reason"); it != headers.end()) {
+            info.unified_overage_disabled_reason = it->second;
+        }
+        if (auto it = headers.find("anthropic-ratelimit-unified-fallback"); it != headers.end()) {
+            info.unified_fallback_available = (it->second == "available");
+        }
+        if (auto it = headers.find("anthropic-ratelimit-unified-fallback-available"); it != headers.end()) {
+            info.unified_fallback_available = safe_parse_bool(it->second);
         }
 
         return info;
@@ -427,6 +541,17 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 // AnthropicProtocol
 // ─────────────────────────────────────────────────────────────────────────────
 
+void AnthropicProtocol::prepare_request(ChatRequest& request) {
+    request_uses_context_1m_ = false;
+    if (request.model.empty()) return;
+
+    ModelNormalization normalized = normalize_requested_claude_model(request.model);
+    if (!normalized.model.empty()) {
+        request.model = std::move(normalized.model);
+    }
+    request_uses_context_1m_ = normalized.use_context_1m;
+}
+
 std::string AnthropicProtocol::serialize(const ChatRequest& req) const {
     return AnthropicSerializer::serialize(req, default_max_tokens_, thinking_);
 }
@@ -438,12 +563,57 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
         {"Accept",                     "text/event-stream"},
         {"x-anthropic-billing-header", std::string(ANTHROPIC_BILLING_HEADER)},
     };
-    if (thinking_.enabled) {
-        headers["anthropic-beta"] = std::string(ANTHROPIC_BETA_THINKING);
+
+    std::string anthropic_beta;
+    const auto append_beta_unique = [&](std::string_view beta) {
+        if (beta.empty()) return;
+
+        const std::string candidate = trim_copy(beta);
+        if (candidate.empty()) return;
+
+        std::size_t start = 0;
+        while (start < anthropic_beta.size()) {
+            std::size_t comma = anthropic_beta.find(',', start);
+            if (comma == std::string::npos) comma = anthropic_beta.size();
+            const std::string existing = trim_copy(
+                std::string_view(anthropic_beta).substr(start, comma - start));
+            if (existing == candidate) return;
+            if (comma == anthropic_beta.size()) break;
+            start = comma + 1;
+        }
+
+        if (!anthropic_beta.empty()) anthropic_beta += ",";
+        anthropic_beta += candidate;
+    };
+
+    append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
+    if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
+    if (thinking_.enabled) append_beta_unique(ANTHROPIC_BETA_THINKING);
+    if (auto it = auth.properties.find("oauth");
+        it != auth.properties.end() && it->second == "1") {
+        append_beta_unique(ANTHROPIC_BETA_OAUTH);
     }
-    for (const auto& [k, v] : auth.headers) {
-        headers[k] = v;
+
+    for (const auto& [k, raw_v] : auth.headers) {
+        if (k == "anthropic-beta" && !raw_v.empty()) {
+            std::size_t start = 0;
+            while (start < raw_v.size()) {
+                std::size_t comma = raw_v.find(',', start);
+                if (comma == std::string::npos) comma = raw_v.size();
+                append_beta_unique(
+                    std::string_view(raw_v).substr(start, comma - start));
+                if (comma == raw_v.size()) break;
+                start = comma + 1;
+            }
+        } else {
+            headers[k] = raw_v;
+        }
     }
+
+    if (!anthropic_beta.empty()) {
+        headers["anthropic-beta"] = anthropic_beta;
+    }
+
     return headers;
 }
 

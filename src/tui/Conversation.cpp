@@ -11,7 +11,9 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <format>
+#include <limits>
 #include <optional>
 #include <random>
 
@@ -84,6 +86,33 @@ std::optional<std::string> first_string_field(const simdjson::dom::object& objec
         }
     }
     return std::nullopt;
+}
+
+std::optional<int> extract_int_field(const simdjson::dom::object& object, std::string_view key) {
+    int64_t signed_value = 0;
+    if (object[key].get(signed_value) == simdjson::SUCCESS) {
+        if (signed_value > std::numeric_limits<int>::max()) {
+            return std::numeric_limits<int>::max();
+        }
+        if (signed_value < std::numeric_limits<int>::min()) {
+            return std::numeric_limits<int>::min();
+        }
+        return static_cast<int>(signed_value);
+    }
+
+    uint64_t unsigned_value = 0;
+    if (object[key].get(unsigned_value) == simdjson::SUCCESS) {
+        if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            return std::numeric_limits<int>::max();
+        }
+        return static_cast<int>(unsigned_value);
+    }
+
+    return std::nullopt;
+}
+
+bool has_output_truncation_marker(std::string_view output) {
+    return output.find("[OUTPUT TRUNCATED AT") != std::string_view::npos;
 }
 
 std::string extract_patch_preview(std::string_view patch) {
@@ -162,8 +191,18 @@ Element render_text_lines_preserving_newlines(std::string_view content, Color te
             continue;
         }
 
-        if (line.front() == ' ' || line.front() == '\t') {
-            rows.push_back(ftxui::text(line) | ftxui::color(text_color) | xflex);
+        std::size_t indent_len = 0;
+        while (indent_len < line.size()
+               && (line[indent_len] == ' ' || line[indent_len] == '\t')) {
+            ++indent_len;
+        }
+
+        if (indent_len > 0 && indent_len < line.size()) {
+            rows.push_back(
+                hbox({
+                    ftxui::text(line.substr(0, indent_len)) | ftxui::color(text_color),
+                    paragraph(line.substr(indent_len)) | ftxui::color(text_color) | xflex
+                }) | xflex);
         } else {
             rows.push_back(paragraph(line) | ftxui::color(text_color) | xflex);
         }
@@ -265,9 +304,11 @@ Element render_tool_header(const ToolActivity& tool,
     if (tool.status != ToolActivity::Status::Pending && 
         tool.status != ToolActivity::Status::Executing) {
         header_items.push_back(filler());
-        header_items.push_back(
-            ftxui::text(std::string(tui::tool_status_label(tool.status))) | 
-            ftxui::color(status_color));
+        std::string status_label = std::string(tui::tool_status_label(tool.status));
+        if (tool.name == "run_terminal_command" && tool.result.exit_code.has_value()) {
+            status_label += std::format(" · exit {}", *tool.result.exit_code);
+        }
+        header_items.push_back(ftxui::text(std::move(status_label)) | ftxui::color(status_color));
     }
     
     return hbox(std::move(header_items)) | xflex;
@@ -297,15 +338,38 @@ Element render_tool_progress(const ToolActivity& tool) {
 Element render_tool_result(const ToolActivity& tool, 
                            int /*available_height*/,
                            int /*terminal_width*/) {
-    if (tool.result_summary.empty()) {
+    if (tool.result.empty()) {
         return emptyElement();
     }
     
     const bool is_error = tool.status == ToolActivity::Status::Failed ||
                           tool.status == ToolActivity::Status::Denied;
     const Color text_color = is_error ? ColorToolFail : Color::GrayLight;
-    
-    return render_text_lines_preserving_newlines(tool.result_summary, text_color);
+
+    const bool is_terminal_output = tool.name == "run_terminal_command";
+    std::vector<Element> rows;
+    if (is_terminal_output) {
+        std::string label = "Terminal output";
+        if (tool.result.exit_code.has_value()) {
+            label += std::format(" (exit {})", *tool.result.exit_code);
+        }
+        rows.push_back(ftxui::text(std::move(label)) | ftxui::color(ColorYellowDark) | bold);
+    }
+
+    rows.push_back(render_text_lines_preserving_newlines(tool.result.summary, text_color));
+
+    if (tool.result.truncated) {
+        rows.push_back(
+            ftxui::text("Output was truncated after reaching the terminal output limit.")
+            | ftxui::color(ColorWarn)
+            | dim);
+    }
+
+    Element content = vbox(std::move(rows)) | xflex;
+    if (is_terminal_output) {
+        content = content | UiBorder(Color::GrayDark);
+    }
+    return content;
 }
 
 Element render_tool_diff_preview(const ToolDiffPreview& preview) {
@@ -377,7 +441,7 @@ Element render_tool_item(const ToolActivity& tool,
         tool_elements.push_back(render_tool_progress(tool));
     }
     
-    if (!tool.result_summary.empty()) {
+    if (!tool.result.empty()) {
         tool_elements.push_back(separator() | ftxui::color(Color::GrayDark));
         tool_elements.push_back(render_tool_result(tool, 10, terminal_width));
     }
@@ -516,6 +580,85 @@ ToolActivity make_tool_activity(std::string id,
     tool.description = std::move(description);
     tool.status = ToolActivity::Status::Pending;
     return tool;
+}
+
+void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
+    tool.result.clear();
+    auto set_result_summary = [&](std::string summary) {
+        tool.result.summary = std::move(summary);
+        tool.result.truncated = has_output_truncation_marker(tool.result.summary);
+    };
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    if (parser.parse(result_payload).get(document) != simdjson::SUCCESS) {
+        tool.status = ToolActivity::Status::Succeeded;
+        set_result_summary(std::string(result_payload));
+        return;
+    }
+
+    simdjson::dom::object object;
+    if (document.get(object) != simdjson::SUCCESS) {
+        tool.status = ToolActivity::Status::Succeeded;
+        set_result_summary(std::string(result_payload));
+        return;
+    }
+
+    if (const auto error = extract_string_field(object, {"error"})) {
+        tool.status = ToolActivity::Status::Failed;
+        set_result_summary(*error);
+        return;
+    }
+
+    if (tool.name == "run_terminal_command") {
+        if (const auto exit_code = extract_int_field(object, "exit_code")) {
+            tool.result.exit_code = *exit_code;
+            tool.status = (*exit_code == 0)
+                ? ToolActivity::Status::Succeeded
+                : ToolActivity::Status::Failed;
+        } else {
+            tool.status = ToolActivity::Status::Succeeded;
+        }
+
+        if (const auto output = extract_string_field(object, {"output"})) {
+            set_result_summary(*output);
+        } else if (tool.result.exit_code.has_value()) {
+            set_result_summary((*tool.result.exit_code == 0)
+                ? "Command completed with no output."
+                : std::format("Command exited with status {}.", *tool.result.exit_code));
+        } else {
+            set_result_summary("Done");
+        }
+        return;
+    }
+
+    if (const auto output = extract_string_field(object, {"output"})) {
+        tool.status = ToolActivity::Status::Succeeded;
+        set_result_summary(output->empty() ? std::string("Done") : *output);
+        return;
+    }
+
+    if (const auto content = extract_string_field(object, {"content"})) {
+        tool.status = ToolActivity::Status::Succeeded;
+        set_result_summary(content->empty() ? std::string("Done") : *content);
+        return;
+    }
+
+    if (const auto matches = extract_string_field(object, {"matches"})) {
+        tool.status = ToolActivity::Status::Succeeded;
+        set_result_summary(matches->empty() ? "no matches" : *matches);
+        return;
+    }
+
+    bool success = false;
+    if (object["success"].get(success) == simdjson::SUCCESS) {
+        tool.status = success ? ToolActivity::Status::Succeeded : ToolActivity::Status::Failed;
+        set_result_summary(success ? "Done" : "Tool reported failure.");
+        return;
+    }
+
+    tool.status = ToolActivity::Status::Succeeded;
+    set_result_summary(std::string(result_payload));
 }
 
 // ============================================================================

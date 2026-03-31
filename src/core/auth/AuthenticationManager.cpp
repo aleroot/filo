@@ -105,9 +105,8 @@ public:
     std::vector<std::string> post_login_hints() const override {
         return {
             "Set \"auth_type\": \"oauth_claude\" on a Claude provider in "
-            "~/.config/filo/config.json to use the stored bearer token.",
-            "If you need Sonnet/Opus for production SDK usage, configure an "
-            "ANTHROPIC_API_KEY-based provider."
+            "~/.config/filo/config.json to use the stored Claude OAuth token.",
+            "OAuth mode supports Claude subscription billing (Pro/Max/Team/Enterprise)."
         };
     }
 };

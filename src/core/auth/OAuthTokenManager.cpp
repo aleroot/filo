@@ -1,4 +1,5 @@
 #include "OAuthTokenManager.hpp"
+#include <stdexcept>
 
 namespace core::auth {
 
@@ -38,6 +39,21 @@ OAuthToken OAuthTokenManager::get_valid_token() {
     store_->save(provider_id_, token);
     cached_token_ = token;
     return *cached_token_;
+}
+
+void OAuthTokenManager::force_refresh() {
+    std::unique_lock lock(mutex_);
+
+    auto stored = store_->load(provider_id_);
+    if (stored && stored->has_refresh_token()) {
+        OAuthToken refreshed = flow_->refresh(stored->refresh_token);
+        store_->save(provider_id_, refreshed);
+        cached_token_ = refreshed;
+        return;
+    }
+
+    throw std::runtime_error(
+        "No refresh token available for provider '" + provider_id_ + "'.");
 }
 
 void OAuthTokenManager::login() {

@@ -2,6 +2,7 @@
 
 #include "../llm/Models.hpp"
 #include <atomic>
+#include <cctype>
 #include <string>
 #include <string_view>
 #include <format>
@@ -9,10 +10,27 @@
 
 namespace core::budget {
 
+[[nodiscard]] inline bool has_1m_context_suffix(std::string_view model) noexcept {
+    std::size_t end = model.size();
+    while (end > 0
+           && std::isspace(static_cast<unsigned char>(model[end - 1]))) {
+        --end;
+    }
+    if (end < 4) return false;
+    const std::size_t base = end - 4;
+    return model[base] == '['
+        && model[base + 1] == '1'
+        && (model[base + 2] == 'm' || model[base + 2] == 'M')
+        && model[base + 3] == ']';
+}
+
 // ---------------------------------------------------------------------------
 // Context window sizes in tokens, keyed by model name substring.
 // ---------------------------------------------------------------------------
 [[nodiscard]] inline int64_t context_window_for_model(std::string_view model) noexcept {
+    // Claude-style explicit [1m] opt-in.
+    if (has_1m_context_suffix(model)) return 1'000'000;
+
     // xAI Grok — check specific variants before generic prefixes
     if (model.find("grok-code-fast-1") != std::string_view::npos) return   131'072;
     if (model.find("grok-4.1")         != std::string_view::npos) return 2'097'152;

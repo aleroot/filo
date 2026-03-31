@@ -211,6 +211,9 @@ public:
                                 std::string_view default_model_selection,
                                 std::string* error = nullptr);
 
+    bool persist_login_profile(std::string_view login_provider,
+                               std::string* error = nullptr);
+
     bool persist_local_provider(std::string_view model_path,
                                 std::string_view model_label,
                                 std::string* error = nullptr);

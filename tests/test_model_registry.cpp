@@ -21,6 +21,9 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("claude-3-opus") == 200000);
     REQUIRE(get_max_context_size("claude-3-7-sonnet") == 200000);
     REQUIRE(get_max_context_size("claude-3-5-haiku") == 200000);
+    REQUIRE(get_max_context_size("claude-sonnet-4-6[1m]") == 1000000);
+    REQUIRE(get_max_context_size("sonnet[1m]") == 1000000);
+    REQUIRE(get_max_context_size("opus") == 1000000);
     
     // OpenAI (via new registry)
     REQUIRE(get_max_context_size("gpt-5.4") == 200000);

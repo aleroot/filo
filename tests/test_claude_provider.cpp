@@ -374,6 +374,116 @@ TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AnthropicProtocol headers — OAuth beta and merge behavior
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("AnthropicProtocol::build_headers adds oauth beta when oauth auth property is set", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.properties["oauth"] = "1";
+    auth.headers["Authorization"] = "Bearer oauth-token";
+
+    auto headers = protocol.build_headers(auth);
+
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
+    REQUIRE(headers.at("Authorization") == "Bearer oauth-token");
+}
+
+TEST_CASE("AnthropicProtocol::build_headers always includes claude-code beta header", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    core::auth::AuthInfo auth;
+
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("claude-code-20250219"));
+}
+
+TEST_CASE("AnthropicProtocol::build_headers merges caller anthropic-beta with internal betas", "[claude][headers]") {
+    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 10000});
+    core::auth::AuthInfo auth;
+    auth.properties["oauth"] = "1";
+    auth.headers["anthropic-beta"] = "custom-beta-1";
+
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+
+    const auto& merged = headers.at("anthropic-beta");
+    REQUIRE_THAT(merged, Catch::Matchers::ContainsSubstring("interleaved-thinking-2025-05-14"));
+    REQUIRE_THAT(merged, Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
+    REQUIRE_THAT(merged, Catch::Matchers::ContainsSubstring("custom-beta-1"));
+}
+
+TEST_CASE("AnthropicProtocol::build_headers de-duplicates repeated beta names", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.properties["oauth"] = "1";
+    auth.headers["anthropic-beta"] = "oauth-2025-04-20, oauth-2025-04-20";
+
+    auto headers = protocol.build_headers(auth);
+    const std::string merged = headers.at("anthropic-beta");
+
+    std::size_t hits = 0;
+    std::size_t pos = 0;
+    const std::string needle = "oauth-2025-04-20";
+    while ((pos = merged.find(needle, pos)) != std::string::npos) {
+        ++hits;
+        pos += needle.size();
+    }
+    REQUIRE(hits == 1);
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request strips [1m] suffix and adds context beta", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("claude-sonnet-4-6[1m]");
+    protocol.prepare_request(req);
+
+    REQUIRE(req.model == "claude-sonnet-4-6");
+
+    core::auth::AuthInfo auth;
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request resolves Claude alias + [1m]", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("sonnet[1m]");
+    protocol.prepare_request(req);
+
+    REQUIRE(req.model == "claude-sonnet-4-6");
+
+    core::auth::AuthInfo auth;
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("MyAzureDeployment[1M]");
+    protocol.prepare_request(req);
+    REQUIRE(req.model == "MyAzureDeployment");
+
+    core::auth::AuthInfo auth;
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request does not add context beta without [1m]", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("sonnet");
+    protocol.prepare_request(req);
+    REQUIRE(req.model == "claude-sonnet-4-6");
+
+    core::auth::AuthInfo auth;
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"), !Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AnthropicSSEParser — text events
 // ─────────────────────────────────────────────────────────────────────────────
 

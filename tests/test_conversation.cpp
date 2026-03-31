@@ -232,6 +232,37 @@ TEST_CASE("summarize_tool_result — empty matches", "[tui][conversation][result
     REQUIRE(summary.preview == "no matches");
 }
 
+TEST_CASE("apply_tool_result — terminal command success captures exit code",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity("t1", "run_terminal_command", "{}", "pwd");
+    apply_tool_result(tool, R"({"output":"ok\n","exit_code":0})");
+    REQUIRE(tool.status == ToolActivity::Status::Succeeded);
+    REQUIRE(tool.result.exit_code.has_value());
+    REQUIRE(*tool.result.exit_code == 0);
+    REQUIRE(tool.result.summary == "ok\n");
+    REQUIRE(tool.result.truncated == false);
+}
+
+TEST_CASE("apply_tool_result — terminal command failure is surfaced",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity("t2", "run_terminal_command", "{}", "npm test");
+    apply_tool_result(tool, R"({"output":"failed\n","exit_code":2})");
+    REQUIRE(tool.status == ToolActivity::Status::Failed);
+    REQUIRE(tool.result.exit_code.has_value());
+    REQUIRE(*tool.result.exit_code == 2);
+    REQUIRE(tool.result.summary == "failed\n");
+}
+
+TEST_CASE("apply_tool_result — output truncation marker is detected",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity("t3", "run_terminal_command", "{}", "cat big.log");
+    apply_tool_result(
+        tool,
+        R"({"output":"line 1\n... [OUTPUT TRUNCATED AT 4MB] ...\n","exit_code":-1})");
+    REQUIRE(tool.status == ToolActivity::Status::Failed);
+    REQUIRE(tool.result.truncated == true);
+}
+
 // ============================================================================
 // Animation Helpers
 // ============================================================================

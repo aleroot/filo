@@ -125,6 +125,18 @@ int main(int argc, char** argv) {
         try {
             const auto result = auth_manager.login(login_provider);
             core::logging::info("Successfully authenticated with {}.", result.provider);
+            std::string persist_error;
+            if (!core::config::ConfigManager::get_instance().persist_login_profile(
+                    login_provider, &persist_error)) {
+                core::logging::warn(
+                    "Authenticated, but could not persist login profile: {}",
+                    persist_error);
+            } else {
+                const auto& config = core::config::ConfigManager::get_instance().get_config();
+                core::logging::info(
+                    "Updated default provider to '{}' with OAuth enabled.",
+                    config.default_provider);
+            }
             for (const auto& hint : result.hints) {
                 core::logging::info("{}", hint);
             }

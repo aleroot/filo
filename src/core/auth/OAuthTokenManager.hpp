@@ -29,6 +29,7 @@ public:
                       std::shared_ptr<ITokenStore> store);
 
     OAuthToken get_valid_token();
+    void force_refresh();
     void login();
     void logout();
 

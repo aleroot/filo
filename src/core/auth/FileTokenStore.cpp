@@ -37,6 +37,14 @@ std::optional<OAuthToken> FileTokenStore::load(std::string_view provider_id) {
             token.expires_at = v;
         if (doc["device_id"].get_string().get(sv) == simdjson::SUCCESS)
             token.device_id = std::string(sv);
+        simdjson::dom::array scopes;
+        if (doc["scopes"].get(scopes) == simdjson::SUCCESS) {
+            for (auto entry : scopes) {
+                if (entry.get_string().get(sv) == simdjson::SUCCESS) {
+                    token.scopes.emplace_back(sv);
+                }
+            }
+        }
 
         if (token.access_token.empty()) return std::nullopt;
         return token;
@@ -60,7 +68,15 @@ void FileTokenStore::save(std::string_view provider_id, const OAuthToken& token)
             << "  \"refresh_token\": \"" << core::utils::escape_json_string(token.refresh_token) << "\",\n"
             << "  \"token_type\":    \"" << core::utils::escape_json_string(token.token_type)    << "\",\n"
             << "  \"expires_at\":    "   << token.expires_at    << ",\n"
-            << "  \"device_id\":     \"" << core::utils::escape_json_string(token.device_id)     << "\"\n"
+            << "  \"device_id\":     \"" << core::utils::escape_json_string(token.device_id)     << "\",\n"
+            << "  \"scopes\":        [";
+
+        for (std::size_t i = 0; i < token.scopes.size(); ++i) {
+            if (i > 0) out << ", ";
+            out << "\"" << core::utils::escape_json_string(token.scopes[i]) << "\"";
+        }
+
+        out << "]\n"
             << "}\n";
     }
 

@@ -3,7 +3,6 @@
 #include "Constants.hpp"
 #include "PickerState.hpp"
 #include "Conversation.hpp"
-#include <simdjson.h>
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
 #include "TuiTheme.hpp"
@@ -483,9 +482,9 @@ std::string search_text_for_message(const UiMessage& msg) {
             text += " ";
             text += tool.description;
         }
-        if (!tool.result_summary.empty()) {
+        if (!tool.result.empty()) {
             text += "\n";
-            text += tool.result_summary;
+            text += tool.result.summary;
         }
     }
 
@@ -1166,30 +1165,7 @@ RunResult run(RunOptions opts) {
                         auto* tool = find_tool_activity(
                             ui_messages[current_asst_idx], msg.tool_call_id);
                         if (tool) {
-                            // Parse result JSON
-                            simdjson::dom::parser parser;
-                            simdjson::dom::element document;
-                            if (parser.parse(msg.content).get(document) == simdjson::SUCCESS) {
-                                simdjson::dom::object object;
-                                if (document.get(object) == simdjson::SUCCESS) {
-                                    std::string_view error;
-                                    if (object["error"].get(error) == simdjson::SUCCESS) {
-                                        tool->status = ToolActivity::Status::Failed;
-                                        tool->result_summary = std::string(error);
-                                    } else {
-                                        tool->status = ToolActivity::Status::Succeeded;
-                                        std::string_view output;
-                                        if (object["output"].get(output) == simdjson::SUCCESS) {
-                                            tool->result_summary = std::string(output);
-                                        } else {
-                                            tool->result_summary = "Done";
-                                        }
-                                    }
-                                }
-                            } else {
-                                tool->status = ToolActivity::Status::Succeeded;
-                                tool->result_summary = msg.content;
-                            }
+                            apply_tool_result(*tool, msg.content);
                         }
                     }
                 }
@@ -1483,29 +1459,7 @@ RunResult run(RunOptions opts) {
                     auto* tool = find_tool_activity(
                         ui_messages[current_asst_idx], msg.tool_call_id);
                     if (tool) {
-                        simdjson::dom::parser parser;
-                        simdjson::dom::element document;
-                        if (parser.parse(msg.content).get(document) == simdjson::SUCCESS) {
-                            simdjson::dom::object object;
-                            if (document.get(object) == simdjson::SUCCESS) {
-                                std::string_view error;
-                                if (object["error"].get(error) == simdjson::SUCCESS) {
-                                    tool->status = ToolActivity::Status::Failed;
-                                    tool->result_summary = std::string(error);
-                                } else {
-                                    tool->status = ToolActivity::Status::Succeeded;
-                                    std::string_view output;
-                                    if (object["output"].get(output) == simdjson::SUCCESS) {
-                                        tool->result_summary = std::string(output);
-                                    } else {
-                                        tool->result_summary = "Done";
-                                    }
-                                }
-                            }
-                        } else {
-                            tool->status = ToolActivity::Status::Succeeded;
-                            tool->result_summary = msg.content;
-                        }
+                        apply_tool_result(*tool, msg.content);
                     }
                 }
             }
@@ -1901,6 +1855,24 @@ RunResult run(RunOptions opts) {
             }
             active_router_policy = policy_name;
             return finalize(activate_router_mode());
+        }
+
+        // Allow explicit provider + model overrides in a single command:
+        //   /model claude sonnet
+        //   /model claude opus
+        //   /model claude claude-opus-4-6
+        if (const auto split = trimmed.find_first_of(" \t");
+            split != std::string_view::npos) {
+            const std::string_view provider_name = trim_ascii(trimmed.substr(0, split));
+            const std::string_view model_name = trim_ascii(trimmed.substr(split + 1));
+            if (!provider_name.empty() && !model_name.empty()) {
+                const auto provider_it = config.providers.find(std::string(provider_name));
+                if (provider_it != config.providers.end()) {
+                    manual_provider_name = provider_it->first;
+                    manual_model_name = std::string(model_name);
+                    return finalize(activate_manual_mode());
+                }
+            }
         }
 
         const auto it = config.providers.find(std::string(trimmed));
@@ -2578,31 +2550,7 @@ RunResult run(RunOptions opts) {
                                     tool = &message.tools.back();
                                 }
 
-                                // Parse result and update tool status
-                                simdjson::dom::parser parser;
-                                simdjson::dom::element document;
-                                if (parser.parse(result.content).get(document) == simdjson::SUCCESS) {
-                                    simdjson::dom::object object;
-                                    if (document.get(object) == simdjson::SUCCESS) {
-                                        std::string_view error;
-                                        if (object["error"].get(error) == simdjson::SUCCESS) {
-                                            tool->status = ToolActivity::Status::Failed;
-                                            tool->result_summary = std::string(error);
-                                        } else {
-                                            tool->status = ToolActivity::Status::Succeeded;
-                                            // Try to extract meaningful output
-                                            std::string_view output;
-                                            if (object["output"].get(output) == simdjson::SUCCESS) {
-                                                tool->result_summary = std::string(output);
-                                            } else {
-                                                tool->result_summary = "Done";
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    tool->status = ToolActivity::Status::Succeeded;
-                                    tool->result_summary = result.content;
-                                }
+                                apply_tool_result(*tool, result.content);
 
                                 // Check if all tools are now done but we're still waiting
                                 // for the model's response. Re-activate thinking indicator

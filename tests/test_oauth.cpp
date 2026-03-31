@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fstream>
 #include <optional>
+#include <vector>
 
 using namespace core::auth;
 
@@ -192,6 +193,19 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     REQUIRE(loaded->refresh_token == "refresh123");
     REQUIRE(loaded->token_type    == "Bearer");
     REQUIRE(loaded->expires_at    == original.expires_at);
+}
+
+TEST_CASE("FileTokenStore — save/load round-trips OAuth scopes", "[FileTokenStore]") {
+    TempDir tmp;
+    FileTokenStore store(tmp.path);
+
+    OAuthToken original = make_token(3600, "refresh123", "access456");
+    original.scopes = {"user:profile", "user:inference", "user:file_upload"};
+    store.save("claude", original);
+
+    auto loaded = store.load("claude");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->scopes == original.scopes);
 }
 
 TEST_CASE("FileTokenStore — load returns nullopt for unknown provider", "[FileTokenStore]") {
@@ -424,6 +438,30 @@ TEST_CASE("OAuthTokenManager — logout() clears store and forces next get to lo
     REQUIRE(flow->login_calls == 1);
 }
 
+TEST_CASE("OAuthTokenManager — force_refresh() refreshes stored token", "[OAuthTokenManager]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(-3600, "refresh-me", "expired-at");
+    flow->refresh_result = make_token(3600, "new-rt", "new-at");
+
+    OAuthTokenManager mgr("claude", flow, store);
+    mgr.force_refresh();
+
+    REQUIRE(flow->refresh_calls == 1);
+    REQUIRE(store->stored.has_value());
+    REQUIRE(store->stored->access_token == "new-at");
+}
+
+TEST_CASE("OAuthTokenManager — force_refresh() throws without refresh token", "[OAuthTokenManager]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(-3600, "", "expired-at");
+
+    OAuthTokenManager mgr("claude", flow, store);
+    REQUIRE_THROWS_AS(mgr.force_refresh(), std::runtime_error);
+    REQUIRE(flow->refresh_calls == 0);
+}
+
 // ── OAuthCredentialSource ─────────────────────────────────────────────────────
 
 TEST_CASE("OAuthCredentialSource — returns Bearer header from manager's token", "[OAuthCredentialSource]") {
@@ -440,6 +478,50 @@ TEST_CASE("OAuthCredentialSource — returns Bearer header from manager's token"
     REQUIRE(auth.query_params.empty());
 }
 
+TEST_CASE("OAuthCredentialSource — session key uses Cookie auth and org UUID header", "[OAuthCredentialSource]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(3600, "rt", "sk-ant-sid01-session-token");
+    ScopedEnvVar org_uuid("CLAUDE_CODE_ORGANIZATION_UUID", "org-test-uuid");
+
+    auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
+    OAuthCredentialSource src(manager);
+
+    auto auth = src.get_auth();
+    REQUIRE(auth.headers.count("Cookie") == 1);
+    REQUIRE(auth.headers.at("Cookie") == "sessionKey=sk-ant-sid01-session-token");
+    REQUIRE(auth.headers.count("X-Organization-Uuid") == 1);
+    REQUIRE(auth.headers.at("X-Organization-Uuid") == "org-test-uuid");
+    REQUIRE(auth.headers.count("Authorization") == 0);
+    REQUIRE(auth.properties.at("oauth") == "1");
+    REQUIRE(auth.properties.at("auth_mode") == "session_cookie");
+}
+
+TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns true when refresh succeeds", "[OAuthCredentialSource]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(-3600, "refresh-me", "expired-at");
+    flow->refresh_result = make_token(3600, "new-rt", "new-at");
+
+    auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
+    OAuthCredentialSource src(manager);
+
+    REQUIRE(src.refresh_on_auth_failure());
+    REQUIRE(flow->refresh_calls == 1);
+}
+
+TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns false without refresh token", "[OAuthCredentialSource]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(-3600, "", "expired-at");
+
+    auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
+    OAuthCredentialSource src(manager);
+
+    REQUIRE_FALSE(src.refresh_on_auth_failure());
+    REQUIRE(flow->refresh_calls == 0);
+}
+
 // ── ClaudeOAuthFlow / AuthenticationManager ──────────────────────────────────
 
 TEST_CASE("ClaudeOAuthFlow::login uses ANTHROPIC_AUTH_TOKEN", "[ClaudeOAuthFlow]") {
@@ -450,6 +532,18 @@ TEST_CASE("ClaudeOAuthFlow::login uses ANTHROPIC_AUTH_TOKEN", "[ClaudeOAuthFlow]
     REQUIRE(oauth.access_token == "test-claude-token");
     REQUIRE(oauth.token_type == "Bearer");
     REQUIRE(oauth.is_valid());
+}
+
+TEST_CASE("ClaudeOAuthFlow::login uses CLAUDE_CODE_OAUTH_TOKEN with optional scopes/refresh token", "[ClaudeOAuthFlow]") {
+    ScopedEnvVar oauth_token("CLAUDE_CODE_OAUTH_TOKEN", "oauth-access-token");
+    ScopedEnvVar oauth_scopes("CLAUDE_CODE_OAUTH_SCOPES", "user:profile user:inference");
+    ScopedEnvVar oauth_refresh("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "oauth-refresh-token");
+    ClaudeOAuthFlow flow;
+    const auto oauth = flow.login();
+
+    REQUIRE(oauth.access_token == "oauth-access-token");
+    REQUIRE(oauth.refresh_token == "oauth-refresh-token");
+    REQUIRE(oauth.scopes == std::vector<std::string>{"user:profile", "user:inference"});
 }
 
 TEST_CASE("ClaudeOAuthFlow::login throws when token is missing", "[ClaudeOAuthFlow]") {

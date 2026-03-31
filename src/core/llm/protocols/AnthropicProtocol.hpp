@@ -146,6 +146,7 @@ public:
         : thinking_(thinking)
         , default_max_tokens_(default_max_tokens) {}
 
+    void prepare_request(ChatRequest& request) override;
     [[nodiscard]] std::string  serialize(const ChatRequest& req) const override;
     [[nodiscard]] cpr::Header  build_headers(const core::auth::AuthInfo& auth) const override;
     [[nodiscard]] std::string  build_url(std::string_view base_url,
@@ -207,6 +208,7 @@ public:
 private:
     AnthropicThinkingConfig thinking_;
     int                     default_max_tokens_;
+    bool                    request_uses_context_1m_ = false; ///< Set in prepare_request() from `[1m]` suffix.
     AnthropicSSEParser      sse_parser_;          ///< Stateful; reset on clone().
     int32_t                 accumulated_input_  = 0;
     int32_t                 accumulated_output_ = 0;

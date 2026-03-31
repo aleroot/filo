@@ -487,17 +487,22 @@ std::optional<std::string> choose_auth_provider_menu(const std::vector<std::stri
 void run_provider_auth(const std::string& provider,
                        const std::string& config_dir,
                        const std::function<void(std::function<void()>)>& suspend_fn,
-                       const std::function<void(const std::string&)>& append_fn) {
+                       const std::function<void(const std::string&)>& append_fn,
+                       const std::function<std::string(std::string_view)>& switch_model_fn = {}) {
     struct AuthState {
         bool success = false;
         bool completed = false;
         std::string provider;
         std::vector<std::string> hints;
+        bool profile_persisted = false;
+        std::string selected_provider;
+        std::string profile_error;
+        std::string model_switch_message;
         std::string error;
     };
 
     auto state = std::make_shared<AuthState>();
-    suspend_fn([provider, config_dir, state]() {
+    suspend_fn([provider, config_dir, state, switch_model_fn]() {
         try {
             auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
             const auto result = auth_manager.login(provider);
@@ -505,6 +510,26 @@ void run_provider_auth(const std::string& provider,
             std::cout << "\nAuthentication successful!\n";
             std::cout << "Provider: " << result.provider << "\n";
             std::cout << "Credentials saved in: " << config_dir << "\n";
+
+            std::string persist_error;
+            if (core::config::ConfigManager::get_instance().persist_login_profile(
+                    provider, &persist_error)) {
+                const auto& config =
+                    core::config::ConfigManager::get_instance().get_config();
+                state->profile_persisted = true;
+                state->selected_provider = config.default_provider;
+                std::cout << "Default provider switched to: "
+                          << state->selected_provider << " (OAuth enabled)\n";
+            } else {
+                state->profile_error = std::move(persist_error);
+                std::cout << "Warning: authenticated, but couldn't update default profile: "
+                          << state->profile_error << "\n";
+            }
+
+            if (state->profile_persisted && switch_model_fn) {
+                state->model_switch_message = switch_model_fn(state->selected_provider);
+            }
+
             for (const auto& hint : result.hints) {
                 std::cout << "Hint: " << hint << "\n";
             }
@@ -540,8 +565,20 @@ void run_provider_auth(const std::string& provider,
     append_fn(std::format(
         "\n\xe2\x9c\x93  Authenticated with {}. Credentials are now saved for reuse.\n",
         state->provider.empty() ? provider : state->provider));
+    if (state->profile_persisted) {
+        append_fn(std::format(
+            "\xe2\x9c\x93  Selected provider is now {} with OAuth enabled.\n",
+            state->selected_provider));
+    } else if (!state->profile_error.empty()) {
+        append_fn(std::format(
+            "\xe2\x9a\xa0  Auth succeeded, but profile update failed: {}\n",
+            state->profile_error));
+    }
     for (const auto& hint : state->hints) {
         append_fn(std::format("\xe2\x84\xb9  {}\n", hint));
+    }
+    if (!state->model_switch_message.empty()) {
+        append_fn(std::format("\xe2\x84\xb9  {}\n", state->model_switch_message));
     }
 }
 
@@ -662,12 +699,17 @@ public:
             if (ctx.open_provider_picker_fn) {
                 auto append_fn  = ctx.append_history_fn;
                 auto suspend_fn = ctx.suspend_tui_fn;
-                ctx.open_provider_picker_fn(available, [append_fn, suspend_fn, config_dir](std::optional<std::string> chosen) {
+                auto switch_model_fn = ctx.switch_model_fn;
+                ctx.open_provider_picker_fn(available, [append_fn, suspend_fn, config_dir, switch_model_fn](std::optional<std::string> chosen) {
                     if (!chosen.has_value()) {
                         append_fn("\n\xe2\x84\xb9  Authentication cancelled.\n");
                         return;
                     }
-                    run_provider_auth(chosen.value(), config_dir, suspend_fn, append_fn);
+                    run_provider_auth(chosen.value(),
+                                      config_dir,
+                                      suspend_fn,
+                                      append_fn,
+                                      switch_model_fn);
                 });
                 return;
             }
@@ -681,7 +723,11 @@ public:
                 ctx.append_history_fn("\n\xe2\x84\xb9  Authentication cancelled.\n");
                 return;
             }
-            run_provider_auth(chosen_provider->value(), config_dir, ctx.suspend_tui_fn, ctx.append_history_fn);
+            run_provider_auth(chosen_provider->value(),
+                              config_dir,
+                              ctx.suspend_tui_fn,
+                              ctx.append_history_fn,
+                              ctx.switch_model_fn);
             return;
         }
 
@@ -692,7 +738,11 @@ public:
             return;
         }
 
-        run_provider_auth(std::string(*arg), config_dir, ctx.suspend_tui_fn, ctx.append_history_fn);
+        run_provider_auth(std::string(*arg),
+                          config_dir,
+                          ctx.suspend_tui_fn,
+                          ctx.append_history_fn,
+                          ctx.switch_model_fn);
     }
 };
 
@@ -773,7 +823,7 @@ public:
             "  /compact            Summarise and compress the conversation history\n"
             "  /undo               Remove the last user message from history\n"
             "  /retry              Re-send the last user message\n"
-            "  /model [name]       Open model picker or switch manual/router/provider target\n"
+            "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /copy               Copy the latest assistant response to clipboard\n"
@@ -889,7 +939,9 @@ public:
 class ModelCommand : public Command {
 public:
     std::string get_name() const override { return "/model"; }
-    std::string get_description() const override { return "Open model picker or switch manual/router/provider target"; }
+    std::string get_description() const override {
+        return "Open model picker or switch manual/router/provider/model target";
+    }
     bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
@@ -902,7 +954,7 @@ public:
             }
             const std::string body = ctx.model_status_fn
                 ? ctx.model_status_fn()
-                : "Use /model manual, /model router, or /model <provider-name>.";
+                : "Use /model manual, /model router, /model <provider-name>, or /model <provider-name> <model>.";
             // body may be multi-line ("Active: ...\n        Available: ...")
             // emit each non-empty segment as a separate info notification
             std::string remaining = body;

@@ -131,6 +131,10 @@ struct UsageWindow {
  *   - usage_windows            : 5-hour and 7-day utilization (0.0–1.0)
  *   - unified_status           : "allowed" or "rate_limited"
  *   - unified_representative_claim : which window is currently authoritative
+ *   - unified_overage_status   : overage state ("allowed", "allowed_warning", "rejected")
+ *   - unified_overage_reset    : unix timestamp when overage window resets
+ *   - unified_overage_disabled_reason : provider-specific disable reason string
+ *   - unified_fallback_available      : whether provider-side model fallback is available
  *
  * Gemini does not return rate-limit response headers.
  */
@@ -155,6 +159,10 @@ struct RateLimitInfo {
     std::vector<UsageWindow> usage_windows;
     std::string unified_status;               ///< "allowed" or "rate_limited"
     std::string unified_representative_claim; ///< Provider hint, e.g. "five_hour"
+    std::string unified_overage_status;       ///< "allowed", "allowed_warning", "rejected"
+    int64_t     unified_overage_reset = 0;    ///< Unix timestamp when overage resets
+    std::string unified_overage_disabled_reason; ///< Overage disable reason from provider
+    bool        unified_fallback_available = false; ///< Provider fallback availability flag
 
     /// Returns the highest utilization across all subscription windows, or 0 if none.
     [[nodiscard]] float max_window_utilization() const noexcept {
@@ -168,7 +176,11 @@ struct RateLimitInfo {
             || tokens_limit > 0
             || retry_after > 0
             || !usage_windows.empty()
-            || !unified_status.empty();
+            || !unified_status.empty()
+            || !unified_overage_status.empty()
+            || unified_overage_reset > 0
+            || !unified_overage_disabled_reason.empty()
+            || unified_fallback_available;
     }
 
     /// Returns true if quota is below 10% remaining

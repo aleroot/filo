@@ -18,6 +18,7 @@ public:
     explicit OAuthCredentialSource(std::shared_ptr<OAuthTokenManager> manager);
     AuthInfo get_auth() override;
     [[nodiscard]] bool uses_subscription_billing() const noexcept override { return true; }
+    bool refresh_on_auth_failure() override;
 
 private:
     std::shared_ptr<OAuthTokenManager> manager_;

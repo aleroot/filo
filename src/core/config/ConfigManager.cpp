@@ -25,6 +25,10 @@ fs::path model_defaults_overlay_path(const fs::path& config_dir) {
     return config_dir / "model_defaults.json";
 }
 
+fs::path auth_defaults_overlay_path(const fs::path& config_dir) {
+    return config_dir / "auth_defaults.json";
+}
+
 fs::path user_settings_path(const fs::path& config_dir) {
     return config_dir / "settings.json";
 }
@@ -164,6 +168,119 @@ ProviderConfig merge_provider(std::string_view name, const ProviderConfig& base,
     return merged;
 }
 
+struct LoginProfileMapping {
+    std::string provider_name;
+    std::string auth_type;
+    std::string default_model;
+};
+
+std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_provider) {
+    std::string normalized;
+    normalized.reserve(login_provider.size());
+    for (const unsigned char ch : login_provider) {
+        if (std::isspace(ch)) continue;
+        normalized.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    if (normalized == "claude") {
+        return LoginProfileMapping{
+            .provider_name = "claude",
+            .auth_type = "oauth_claude",
+            .default_model = "claude-sonnet-4-6",
+        };
+    }
+    if (normalized == "openai") {
+        return LoginProfileMapping{
+            .provider_name = "openai",
+            .auth_type = "oauth_openai",
+            .default_model = "gpt-5.4",
+        };
+    }
+    if (normalized == "openai-pkce"
+        || normalized == "openai_pkce"
+        || normalized == "openaipkce") {
+        return LoginProfileMapping{
+            .provider_name = "openai",
+            .auth_type = "oauth_openai_pkce",
+            .default_model = "gpt-5.4",
+        };
+    }
+    if (normalized == "google") {
+        return LoginProfileMapping{
+            .provider_name = "gemini",
+            .auth_type = "oauth_google",
+            .default_model = "gemini-2.5-flash",
+        };
+    }
+    if (normalized == "kimi") {
+        return LoginProfileMapping{
+            .provider_name = "kimi",
+            .auth_type = "oauth_kimi",
+            .default_model = "moonshot-v1-8k",
+        };
+    }
+    if (normalized == "qwen") {
+        return LoginProfileMapping{
+            .provider_name = "qwen",
+            .auth_type = "oauth_qwen",
+            .default_model = "coder-model",
+        };
+    }
+
+    return std::nullopt;
+}
+
+std::string serialize_login_profile_overlay(const AppConfig& overlay) {
+    core::utils::JsonWriter writer(512);
+    {
+        auto object = writer.object();
+        writer.kv_str("default_provider", overlay.default_provider);
+        writer.comma();
+        writer.kv_str("default_model_selection", overlay.default_model_selection);
+
+        std::vector<std::string> provider_names;
+        provider_names.reserve(overlay.providers.size());
+        for (const auto& [name, provider] : overlay.providers) {
+            if (!provider.auth_type.empty() || !provider.model.empty()) {
+                provider_names.push_back(name);
+            }
+        }
+        std::sort(provider_names.begin(), provider_names.end());
+
+        if (!provider_names.empty()) {
+            writer.comma();
+            writer.key("providers");
+            auto providers_object = writer.object();
+            for (std::size_t i = 0; i < provider_names.size(); ++i) {
+                const std::string& name = provider_names[i];
+                const auto provider_it = overlay.providers.find(name);
+                if (provider_it == overlay.providers.end()) {
+                    continue;
+                }
+                const ProviderConfig& provider = provider_it->second;
+
+                if (i > 0) writer.comma();
+                writer.key(name);
+                auto provider_object = writer.object();
+
+                bool has_field = false;
+                if (!provider.model.empty()) {
+                    writer.kv_str("model", provider.model);
+                    has_field = true;
+                }
+                if (!provider.auth_type.empty()) {
+                    if (has_field) writer.comma();
+                    writer.kv_str("auth_type", provider.auth_type);
+                }
+            }
+        }
+    }
+
+    std::string payload = std::move(writer).take();
+    payload.push_back('\n');
+    return payload;
+}
+
 std::string normalize_subagent_name(std::string_view name) {
     std::string normalized;
     normalized.reserve(name.size());
@@ -241,7 +358,6 @@ AppConfig make_default_config() {
     add_provider("grok-mini",      "grok-3-mini",      "high");
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
     add_provider("claude",         "claude-sonnet-4-6");
-    add_provider("claude-oauth",   "claude-haiku-4-5", {}, "oauth_claude");
     add_provider("gemini",         "gemini-2.5-flash");
     add_provider("kimi",           "moonshot-v1-8k");
     add_provider("kimi-32k",       "moonshot-v1-32k");
@@ -301,7 +417,6 @@ std::string default_config_json() {
         "openai":         { "model": "gpt-5.4", "wire_api": "responses" },
         "mistral":        { "model": "devstral-small-latest" },
         "claude":         { "model": "claude-sonnet-4-6" },
-        "claude-oauth":   { "model": "claude-haiku-4-5", "auth_type": "oauth_claude" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
@@ -944,6 +1059,7 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     const fs::path config_dir = get_config_dir();
     const fs::path global_config_path = config_dir / "config.json";
     const fs::path model_overlay_path = model_defaults_overlay_path(config_dir);
+    const fs::path auth_overlay_path = auth_defaults_overlay_path(config_dir);
     const fs::path cwd = working_dir.value_or(fs::current_path());
     last_working_dir_ = cwd;
     const fs::path user_settings_file = user_settings_path(config_dir);
@@ -961,6 +1077,7 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
 
     load_optional_config(global_config_path, config_);
     load_optional_config(model_overlay_path, config_);
+    load_optional_config(auth_overlay_path, config_);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
     load_optional_config(project_config_path, config_);
     workspace_settings_ = load_optional_managed_settings(workspace_settings_file, config_);
@@ -1039,6 +1156,70 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
 
     config_.default_provider = provider_str;
     config_.default_model_selection = selection_str;
+    return true;
+}
+
+bool ConfigManager::persist_login_profile(std::string_view login_provider,
+                                          std::string* error) {
+    if (login_provider.empty()) {
+        if (error) *error = "login provider cannot be empty";
+        return false;
+    }
+
+    const auto mapping = resolve_login_profile(login_provider);
+    if (!mapping.has_value()) {
+        if (error) {
+            *error = std::format(
+                "unsupported login provider '{}'",
+                std::string(login_provider));
+        }
+        return false;
+    }
+
+    const fs::path overlay_path = auth_defaults_overlay_path(get_config_dir());
+    AppConfig overlay;
+    if (fs::exists(overlay_path)) {
+        try {
+            overlay = parse_config_file(overlay_path);
+        } catch (const std::exception& e) {
+            core::logging::warn(
+                "Failed to parse {}: {}. Rewriting auth login overlay.",
+                overlay_path.string(),
+                e.what());
+        }
+    }
+
+    overlay.default_provider = mapping->provider_name;
+    overlay.default_model_selection = "manual";
+
+    ProviderConfig& provider_overlay = overlay.providers[mapping->provider_name];
+    provider_overlay.auth_type = mapping->auth_type;
+    if (provider_overlay.model.empty()) {
+        if (const auto it = config_.providers.find(mapping->provider_name);
+            it != config_.providers.end() && !it->second.model.empty()) {
+            provider_overlay.model = it->second.model;
+        } else {
+            provider_overlay.model = mapping->default_model;
+        }
+    }
+
+    std::string write_error;
+    if (!write_text_atomic(overlay_path,
+                           serialize_login_profile_overlay(overlay),
+                           write_error)) {
+        if (error) *error = write_error;
+        return false;
+    }
+
+    config_.default_provider = mapping->provider_name;
+    config_.default_model_selection = "manual";
+    ProviderConfig& provider = config_.providers[mapping->provider_name];
+    provider.auth_type = mapping->auth_type;
+    if (provider.model.empty()) {
+        provider.model = provider_overlay.model;
+    }
+
+    if (error) error->clear();
     return true;
 }
 

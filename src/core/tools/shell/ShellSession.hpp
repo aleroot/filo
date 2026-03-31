@@ -52,7 +52,7 @@ public:
     // 10-minute default — covers compilation, npm install, docker build, etc.
     // Callers can override per-command via the timeout argument to run().
     static constexpr std::chrono::milliseconds kDefaultTimeout{600'000};
-    static constexpr std::size_t               kMaxOutput{512 * 1024};
+    static constexpr std::size_t               kMaxOutput{4 * 1024 * 1024};
 
     struct Result {
         std::string output;
@@ -371,7 +371,7 @@ private:
             const auto chunk = static_cast<std::size_t>(n);
             if (raw.size() + chunk > kMaxOutput) {
                 raw.append(buf.data(), kMaxOutput - raw.size());
-                raw += "\n... [OUTPUT TRUNCATED AT 512KB] ...";
+                raw += "\n... [OUTPUT TRUNCATED AT 4MB] ...";
                 // Drain the remaining output up to the sentinel so the session
                 // stays synchronised for the next command.
                 drain_sentinel();

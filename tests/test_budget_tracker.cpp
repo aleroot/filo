@@ -22,6 +22,8 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
         // Claude 4.6 models support 1M token context (beta)
         CHECK(context_window_for_model("claude-opus-4-6")        == 1'000'000);
         CHECK(context_window_for_model("claude-sonnet-4-6")      == 1'000'000);
+        CHECK(context_window_for_model("sonnet[1m]")             == 1'000'000);
+        CHECK(context_window_for_model("claude-haiku-4-5[1M]")   == 1'000'000);
         // Claude 4.5 and earlier have 200K context
         CHECK(context_window_for_model("claude-opus-4-5")        ==   200'000);
         CHECK(context_window_for_model("claude-sonnet-4-5")      ==   200'000);
@@ -107,6 +109,16 @@ TEST_CASE("BudgetTracker context_remaining_pct", "[BudgetTracker]") {
         tracker.record(usage, "claude-sonnet-4-6");
 
         const int32_t pct = tracker.context_remaining_pct("claude-sonnet-4-6");
+        CHECK(pct == 95);
+    }
+
+    SECTION("95% remaining when 5% used on [1m] model suffix") {
+        core::llm::TokenUsage usage;
+        usage.prompt_tokens     = 50'000;   // 5% of 1M
+        usage.completion_tokens = 500;
+        tracker.record(usage, "sonnet[1m]");
+
+        const int32_t pct = tracker.context_remaining_pct("sonnet[1m]");
         CHECK(pct == 95);
     }
 

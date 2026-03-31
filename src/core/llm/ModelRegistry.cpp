@@ -100,6 +100,13 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Anthropic Claude Models (Updated March 2026)
     // -----------------------------------------------------------------------
+    { "claude-opus-4-6",   1000000 },
+    { "claude-sonnet-4-6", 1000000 },
+    { "claude-opus-4-5",    200000 },
+    { "claude-sonnet-4-5",  200000 },
+    { "claude-haiku-4-5",   200000 },
+    { "claude-opus-4",      200000 },
+    { "claude-sonnet-4",    200000 },
     { "claude-3-opus",     200000 },
     { "claude-3-sonnet",   200000 },
     { "claude-3-5-sonnet", 200000 },
@@ -1073,15 +1080,103 @@ std::string ModelRegistry::export_to_json() const {
 // Free Functions (Backward Compatible API)
 // ============================================================================
 
+namespace {
+
+std::string trim_ascii(std::string_view input) {
+    std::size_t begin = 0;
+    while (begin < input.size()
+           && std::isspace(static_cast<unsigned char>(input[begin]))) {
+        ++begin;
+    }
+
+    std::size_t end = input.size();
+    while (end > begin
+           && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+        --end;
+    }
+
+    return std::string(input.substr(begin, end - begin));
+}
+
+std::string to_lower_ascii(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+    for (const char ch : input) {
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return out;
+}
+
+bool has_1m_context_suffix(std::string_view model_id) {
+    const std::string trimmed = trim_ascii(model_id);
+    if (trimmed.size() < 4) return false;
+
+    const std::size_t tail = trimmed.size() - 4;
+    return trimmed[tail] == '['
+        && trimmed[tail + 1] == '1'
+        && (trimmed[tail + 2] == 'm' || trimmed[tail + 2] == 'M')
+        && trimmed[tail + 3] == ']';
+}
+
+std::string normalize_context_lookup_model(std::string_view model_id) {
+    std::string normalized = trim_ascii(model_id);
+    if (normalized.empty()) return normalized;
+
+    if (has_1m_context_suffix(normalized)) {
+        normalized = trim_ascii(
+            std::string_view(normalized).substr(0, normalized.size() - 4));
+    }
+
+    const std::string lowered = to_lower_ascii(normalized);
+    if (lowered == "sonnet" || lowered == "best" || lowered == "opusplan") {
+        return "claude-sonnet-4-6";
+    }
+    if (lowered == "opus") {
+        return "claude-opus-4-6";
+    }
+    if (lowered == "haiku") {
+        return "claude-haiku-4-5";
+    }
+    return normalized;
+}
+
+} // namespace
+
 int get_max_context_size(std::string_view model_id) {
+    if (model_id.empty()) return 0;
+    if (has_1m_context_suffix(model_id)) {
+        return 1'000'000;
+    }
+
+    const std::string original = trim_ascii(model_id);
+    const std::string normalized = normalize_context_lookup_model(model_id);
+
     // Try new registry first
     auto& registry = ModelRegistry::instance();
-    int size = registry.get_max_context_size(model_id);
+    int size = registry.get_max_context_size(normalized);
     if (size > 0) {
         return size;
     }
-    
-    // Fall back to legacy heuristic matching
+
+    // Fall back to legacy heuristic matching on the normalized model.
+    size = ModelRegistry::get_max_context_size_legacy(normalized);
+    if (size > 0) {
+        return size;
+    }
+
+    // If normalization changed the model (aliases like "sonnet"/"opus"), stop here.
+    // This prevents older alias registrations from overriding newer Claude mappings.
+    if (normalized != original) {
+        return 0;
+    }
+
+    // Try the original model string too (in case external code passed a
+    // canonical model we do not normalize specially).
+    size = registry.get_max_context_size(model_id);
+    if (size > 0) {
+        return size;
+    }
+
     return ModelRegistry::get_max_context_size_legacy(model_id);
 }
 

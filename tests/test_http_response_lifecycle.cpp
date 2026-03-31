@@ -158,6 +158,65 @@ TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from unified-st
     REQUIRE(protocol.last_rate_limit().unified_status  == "rate_limited");
 }
 
+TEST_CASE("AnthropicProtocol::on_response - treats unified-status rejected as rate-limited", "[lifecycle][anthropic]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers = make_headers({
+        {"anthropic-ratelimit-unified-status", "rejected"},
+    });
+    const HttpResponse resp{200, "", headers};
+
+    protocol.on_response(resp);
+
+    REQUIRE(protocol.last_rate_limit().is_rate_limited == true);
+    REQUIRE(protocol.last_rate_limit().unified_status  == "rejected");
+}
+
+TEST_CASE("AnthropicProtocol::on_response - parses overage and fallback headers", "[lifecycle][anthropic]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers = make_headers({
+        {"anthropic-ratelimit-unified-overage-status", "allowed_warning"},
+        {"anthropic-ratelimit-unified-overage-reset", "1743590400"},
+        {"anthropic-ratelimit-unified-overage-disabled-reason", "out_of_credits"},
+        {"anthropic-ratelimit-unified-fallback", "available"},
+    });
+    const HttpResponse resp{200, "", headers};
+
+    protocol.on_response(resp);
+    const RateLimitInfo& info = protocol.last_rate_limit();
+
+    REQUIRE(info.unified_overage_status == "allowed_warning");
+    REQUIRE(info.unified_overage_reset == 1743590400);
+    REQUIRE(info.unified_overage_disabled_reason == "out_of_credits");
+    REQUIRE(info.unified_fallback_available == true);
+}
+
+TEST_CASE("AnthropicProtocol::on_response - keeps zero utilization windows and parses overage utilization", "[lifecycle][anthropic]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers = make_headers({
+        {"anthropic-ratelimit-unified-5h-utilization", "0"},
+        {"anthropic-ratelimit-unified-7d-utilization", "0.72"},
+        {"anthropic-ratelimit-unified-overage-utilization", "0.33"},
+    });
+    const HttpResponse resp{200, "", headers};
+
+    protocol.on_response(resp);
+    const RateLimitInfo& info = protocol.last_rate_limit();
+
+    auto has_window = [&](std::string_view label) {
+        for (const auto& window : info.usage_windows) {
+            if (window.label == label) return true;
+        }
+        return false;
+    };
+
+    REQUIRE(has_window("5h"));
+    REQUIRE(has_window("7d"));
+    REQUIRE(has_window("overage"));
+    REQUIRE(find_window(info, "5h") == Catch::Approx(0.0f));
+    REQUIRE(find_window(info, "7d") == Catch::Approx(0.72f));
+    REQUIRE(find_window(info, "overage") == Catch::Approx(0.33f));
+}
+
 TEST_CASE("AnthropicProtocol::on_response - empty headers yield zeroed RateLimitInfo", "[lifecycle][anthropic]") {
     AnthropicProtocol protocol;
     const cpr::Header headers;
