@@ -698,7 +698,9 @@ static std::vector<Block> parse_blocks(std::string_view text)
 
 static Element render_heading(const Block& block)
 {
-    const std::string_view content = block.lines.empty() ? "" : block.lines[0];
+    const std::string_view content = block.lines.empty()
+        ? std::string_view{}
+        : std::string_view{block.lines.front()};
     auto spans = parse_inline(content);
 
     auto make_inline = [&](Color fg, bool do_bold, bool do_underline,

@@ -128,7 +128,6 @@ private:
     std::shared_ptr<PromptHistoryStore> store_;
     int idx_ = -1;                     // -1 = viewing current (unsaved) input
     std::string saved_input_;          // snapshot of current input when browsing starts
-    bool needs_save_ = false;          // deferred save flag
 };
 
 } // namespace core::history

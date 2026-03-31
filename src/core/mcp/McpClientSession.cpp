@@ -14,6 +14,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <format>
+#include <array>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -104,6 +105,22 @@ namespace {
 // Build the initialize params JSON.
 [[nodiscard]] std::string make_initialize_params() {
     return R"({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"filo","version":"0.1.0"}})";
+}
+
+[[nodiscard]] bool write_all_fd(int fd, std::string_view data) {
+    const char* ptr = data.data();
+    std::size_t remaining = data.size();
+    while (remaining > 0) {
+        const ssize_t written = ::write(fd, ptr, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (written == 0) return false;
+        ptr += written;
+        remaining -= static_cast<std::size_t>(written);
+    }
+    return true;
 }
 
 } // namespace
@@ -310,38 +327,52 @@ void StdioMcpSession::shutdown() noexcept {
 // Reader loop — runs on its own thread.
 // Reads newline-delimited JSON-RPC responses and resolves pending promises.
 void StdioMcpSession::reader_loop() {
-    std::string line_buf;
-    char ch;
+    auto dispatch_line = [this](std::string_view line) {
+        thread_local simdjson::dom::parser parser;
+        simdjson::padded_string ps(line);
+        simdjson::dom::element doc;
+        if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return;
+
+        int64_t id_v = -1;
+        if (doc["id"].get(id_v) != simdjson::SUCCESS) return;
+
+        std::lock_guard lock(pending_mutex_);
+        auto it = pending_.find(static_cast<int>(id_v));
+        if (it != pending_.end()) {
+            it->second.set_value(std::string(line));
+            pending_.erase(it);
+        }
+        // Notifications (no id) are silently ignored.
+    };
+
+    std::string buffered;
+    buffered.reserve(8192);
+    std::array<char, 4096> chunk{};
 
     while (running_.load(std::memory_order_acquire)) {
-        ssize_t n = read(read_fd_, &ch, 1);
-        if (n <= 0) break;  // EOF or error → session is ending
+        ssize_t n = ::read(read_fd_, chunk.data(), chunk.size());
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;  // EOF → session is ending
 
-        if (ch == '\n') {
-            if (line_buf.empty()) continue;
+        buffered.append(chunk.data(), static_cast<std::size_t>(n));
+        std::size_t line_start = 0;
+        while (true) {
+            const std::size_t newline = buffered.find('\n', line_start);
+            if (newline == std::string::npos) break;
 
-            // Parse the JSON-RPC id and dispatch to the waiting promise
-            {
-                thread_local simdjson::dom::parser parser;
-                simdjson::padded_string ps(line_buf);
-                simdjson::dom::element doc;
-                if (parser.parse(ps).get(doc) == simdjson::SUCCESS) {
-                    int64_t id_v = -1;
-                    if (doc["id"].get(id_v) == simdjson::SUCCESS) {
-                        std::lock_guard lock(pending_mutex_);
-                        auto it = pending_.find(static_cast<int>(id_v));
-                        if (it != pending_.end()) {
-                            it->second.set_value(line_buf);
-                            pending_.erase(it);
-                        }
-                    }
-                    // Notifications (no id) are silently ignored.
-                }
+            std::string_view line{buffered.data() + line_start, newline - line_start};
+            if (!line.empty() && line.back() == '\r') {
+                line.remove_suffix(1);
             }
+            if (!line.empty()) dispatch_line(line);
+            line_start = newline + 1;
+        }
 
-            line_buf.clear();
-        } else {
-            line_buf += ch;
+        if (line_start > 0) {
+            buffered.erase(0, line_start);
         }
     }
 
@@ -371,18 +402,11 @@ std::string StdioMcpSession::send_request(std::string_view method,
 
     {
         std::lock_guard wlock(write_mutex_);
-        const char* p = msg.data();
-        size_t remaining = msg.size();
-        while (remaining > 0) {
-            ssize_t written = write(write_fd_, p, remaining);
-            if (written <= 0) {
-                // Remove the pending promise to avoid leaking
-                std::lock_guard lock(pending_mutex_);
-                pending_.erase(id);
-                throw std::runtime_error("MCP: write() to child stdin failed");
-            }
-            p         += written;
-            remaining -= static_cast<size_t>(written);
+        if (!write_all_fd(write_fd_, msg)) {
+            // Remove the pending promise to avoid leaking
+            std::lock_guard lock(pending_mutex_);
+            pending_.erase(id);
+            throw std::runtime_error("MCP: write() to child stdin failed");
         }
     }
 
@@ -395,14 +419,7 @@ void StdioMcpSession::send_notification(std::string_view method,
                                          std::string_view params_json) {
     std::string msg = make_jsonrpc_notification(method, params_json);
     std::lock_guard wlock(write_mutex_);
-    const char* p = msg.data();
-    size_t remaining = msg.size();
-    while (remaining > 0) {
-        ssize_t written = write(write_fd_, p, remaining);
-        if (written <= 0) break;
-        p         += written;
-        remaining -= static_cast<size_t>(written);
-    }
+    [[maybe_unused]] const bool ok = write_all_fd(write_fd_, msg);
 }
 
 std::vector<McpToolDef> StdioMcpSession::initialize() {

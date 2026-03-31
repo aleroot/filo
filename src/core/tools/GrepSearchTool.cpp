@@ -180,7 +180,9 @@ std::string GrepSearchTool::execute(const std::string& json_args) {
         dir_path, std::filesystem::directory_options::skip_permission_denied, ec
     );
     if (!ec) {
-        for (auto& entry : it) {
+        const auto end = std::filesystem::recursive_directory_iterator{};
+        for (; it != end; ++it) {
+            const auto& entry = *it;
             ec.clear();
             if (entry.is_directory(ec)) {
                 if (should_skip_dir(entry.path()))

@@ -14,11 +14,8 @@
 #include <format>
 #include <iostream>
 #include <cstdio>
-#if defined(_WIN32)
-#include <io.h>
-#else
+#include <signal.h>
 #include <unistd.h>
-#endif
 
 namespace {
 
@@ -38,6 +35,7 @@ namespace {
  * @author Alessio Pollero
  */
 int main(int argc, char** argv) {
+    ::signal(SIGPIPE, SIG_IGN);
     CLI::App app{"Filo - AI Coding Assistant"};
 
     bool        mcp_mode    = false;
@@ -183,9 +181,7 @@ int main(int argc, char** argv) {
 
     std::thread daemon_thread;
     if (daemon_mode) {
-        core::logging::info("Filo daemon listening on {}:{}.", host, port);
-        core::logging::info("MCP endpoint : http://{}:{}/mcp", host, port);
-        core::logging::info("Health check : http://{}:{}/ping", host, port);
+        core::logging::info("Starting Filo daemon on {}:{}...", host, port);
         daemon_thread = std::thread([port, host]() {
             exec::daemon::run_server(port, host);
         });

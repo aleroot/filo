@@ -2,11 +2,112 @@
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <format>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace core::tools {
+
+namespace {
+
+thread_local std::string g_mcp_session_id;
+
+struct SessionShellState {
+    std::unique_ptr<shell::IShellExecutor> executor{shell::make_shell_executor()};
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
+
+    ~SessionShellState() {
+        if (!executor || !executor->is_alive()) return;
+        [[maybe_unused]] const auto ignored =
+            executor->run("exit 0", {}, std::chrono::seconds{2});
+    }
+};
+
+std::mutex g_session_shells_mutex;
+std::unordered_map<std::string, std::shared_ptr<SessionShellState>> g_session_shells;
+constexpr std::size_t kMaxSessionShells = 64;
+
+void mark_session_shell_used(const std::shared_ptr<SessionShellState>& state) {
+    std::lock_guard<std::mutex> lock(g_session_shells_mutex);
+    state->last_used = std::chrono::steady_clock::now();
+}
+
+[[nodiscard]] std::shared_ptr<SessionShellState>
+get_or_create_session_shell(const std::string& session_id) {
+    std::shared_ptr<SessionShellState> evicted;
+    std::lock_guard<std::mutex> lock(g_session_shells_mutex);
+    if (auto it = g_session_shells.find(session_id); it != g_session_shells.end()) {
+        it->second->last_used = std::chrono::steady_clock::now();
+        return it->second;
+    }
+
+    auto state = std::make_shared<SessionShellState>();
+    state->last_used = std::chrono::steady_clock::now();
+    g_session_shells[session_id] = state;
+    if (g_session_shells.size() > kMaxSessionShells) {
+        auto oldest_it = g_session_shells.begin();
+        for (auto it = std::next(g_session_shells.begin()); it != g_session_shells.end(); ++it) {
+            if (it->second->last_used < oldest_it->second->last_used) oldest_it = it;
+        }
+        evicted = oldest_it->second;
+        g_session_shells.erase(oldest_it);
+    }
+    (void)evicted; // keep until after erase; destruction may block but happens outside map use
+    return state;
+}
+
+} // namespace
+
+ShellTool::ScopedMcpSessionContext::ScopedMcpSessionContext(std::string session_id) {
+    previous_ = std::move(g_mcp_session_id);
+    g_mcp_session_id = std::move(session_id);
+    active_ = true;
+}
+
+ShellTool::ScopedMcpSessionContext::~ScopedMcpSessionContext() {
+    if (!active_) return;
+    g_mcp_session_id = std::move(previous_);
+}
+
+ShellTool::ScopedMcpSessionContext::ScopedMcpSessionContext(
+    ScopedMcpSessionContext&& other) noexcept
+    : active_(other.active_),
+      previous_(std::move(other.previous_)) {
+    other.active_ = false;
+}
+
+ShellTool::ScopedMcpSessionContext& ShellTool::ScopedMcpSessionContext::operator=(
+    ScopedMcpSessionContext&& other) noexcept {
+    if (this == &other) return *this;
+    if (active_) g_mcp_session_id = std::move(previous_);
+    active_ = other.active_;
+    previous_ = std::move(other.previous_);
+    other.active_ = false;
+    return *this;
+}
+
+ShellTool::ScopedMcpSessionContext ShellTool::scoped_mcp_session(std::string session_id) {
+    return ScopedMcpSessionContext(std::move(session_id));
+}
+
+void ShellTool::clear_mcp_session(std::string_view session_id) {
+    if (session_id.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
+        auto it = g_session_shells.find(std::string(session_id));
+        if (it == g_session_shells.end()) return;
+        g_session_shells.erase(it);
+    }
+}
+
+std::string_view ShellTool::current_mcp_session_id() noexcept {
+    return g_mcp_session_id;
+}
 
 ToolDefinition ShellTool::get_definition() const {
     return {
@@ -81,9 +182,18 @@ std::string ShellTool::execute(const std::string& json_args) {
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
     shell::IShellExecutor::Result result;
-    {
+    const std::string session_id(current_mcp_session_id());
+    if (session_id.empty()) {
         std::lock_guard<std::mutex> lock(executor_mutex_);
         result = executor_->run(command_view, working_dir, timeout);
+    } else {
+        const auto state = get_or_create_session_shell(session_id);
+        mark_session_shell_used(state);
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            result = state->executor->run(command_view, working_dir, timeout);
+        }
+        mark_session_shell_used(state);
     }
 
     const std::string escaped = core::utils::escape_json_string(result.output);

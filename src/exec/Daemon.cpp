@@ -1,4 +1,5 @@
 #include "Daemon.hpp"
+#include "RequestReplayCache.hpp"
 #include <httplib.h>
 #include <format>
 #include "../core/config/ConfigManager.hpp"
@@ -7,17 +8,31 @@
 #include "../core/llm/ProviderFactory.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/tools/ToolManager.hpp"
+#include "../core/tools/ShellTool.hpp"
 #include "../core/utils/JsonUtils.hpp"
+#include "../core/logging/Logger.hpp"
 #include <simdjson.h>
 #include <cctype>
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 
 namespace exec::daemon {
 
-static httplib::Server* g_svr = nullptr;
+namespace {
+std::mutex g_server_mutex;
+std::shared_ptr<httplib::Server> g_svr;
+} // namespace
 
 void stop_server() {
-    if (g_svr) g_svr->stop();
+    std::shared_ptr<httplib::Server> server;
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        server = g_svr;
+    }
+    if (server) server->stop();
 }
 
 static void init_providers() {
@@ -36,6 +51,11 @@ constexpr std::string_view kJsonRpcParseErrorPrefix{
     R"({"jsonrpc":"2.0","error":{"code":-32700)"};
 constexpr std::string_view kJsonRpcInvalidRequestPrefix{
     R"({"jsonrpc":"2.0","error":{"code":-32600)"};
+
+[[nodiscard]] detail::RequestReplayCache& replay_cache() {
+    static detail::RequestReplayCache cache;
+    return cache;
+}
 
 [[nodiscard]] std::string to_lower_ascii(std::string_view value) {
     std::string out;
@@ -113,12 +133,69 @@ constexpr std::string_view kJsonRpcInvalidRequestPrefix{
     return false;
 }
 
+[[nodiscard]] std::optional<std::string>
+extract_request_id_for_replay(std::string_view json_body) {
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(json_body);
+    simdjson::ondemand::document doc;
+    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::object root;
+    if (doc.get_object().get(root) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::value id_value;
+    if (root["id"].get(id_value) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::json_type id_type;
+    if (id_value.type().get(id_type) != simdjson::SUCCESS) return std::nullopt;
+
+    if (id_type == simdjson::ondemand::json_type::number) {
+        int64_t id_num = 0;
+        if (id_value.get_int64().get(id_num) != simdjson::SUCCESS) return std::nullopt;
+        return std::format("i:{}", id_num);
+    }
+    if (id_type == simdjson::ondemand::json_type::string) {
+        std::string_view id_str;
+        if (id_value.get_string().get(id_str) != simdjson::SUCCESS) return std::nullopt;
+        return std::string("s:") + std::string(id_str);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] uint64_t fnv1a64(std::string_view value) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char ch : value) {
+        hash ^= static_cast<uint64_t>(ch);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+[[nodiscard]] std::optional<std::string> build_replay_key(const httplib::Request& req) {
+    const auto request_id = extract_request_id_for_replay(req.body);
+    if (!request_id.has_value()) return std::nullopt;
+
+    if (!req.has_header("MCP-Session-Id")) return std::nullopt;
+    const std::string session_id = req.get_header_value("MCP-Session-Id");
+    if (session_id.empty()) return std::nullopt;
+
+    const std::string session_key = detail::RequestReplayCache::session_token(session_id);
+
+    const uint64_t h1 = fnv1a64(req.body);
+    const uint64_t h2 = static_cast<uint64_t>(std::hash<std::string_view>{}(req.body));
+    return std::format(
+        "{}|{}|{:016x}{:016x}|{:08x}",
+        session_key,
+        *request_id,
+        h1,
+        h2,
+        static_cast<unsigned>(req.body.size()));
+}
+
 [[nodiscard]] bool has_required_accept_header(const httplib::Request& req) {
     if (!req.has_header("Accept")) return false;
 
     const std::string accept = to_lower_ascii(req.get_header_value("Accept"));
-    if (accept.find("*/*") != std::string::npos) return true;
-
     return accept.find("application/json") != std::string::npos
         && accept.find("text/event-stream") != std::string::npos;
 }
@@ -127,6 +204,27 @@ constexpr std::string_view kJsonRpcInvalidRequestPrefix{
     if (!req.has_header("MCP-Protocol-Version")) return true;
     const std::string version = req.get_header_value("MCP-Protocol-Version");
     return version == "2024-11-05" || version == "2025-11-25";
+}
+
+[[nodiscard]] detail::McpDispatchResult dispatch_mcp_payload(const std::string& body) {
+    detail::McpDispatchResult result;
+    result.body = core::mcp::McpDispatcher::get_instance().dispatch(body);
+    if (result.body.empty()) {
+        result.status = 202;
+        return result;
+    }
+    if (result.body.starts_with(kJsonRpcParseErrorPrefix)
+        || result.body.starts_with(kJsonRpcInvalidRequestPrefix)) {
+        result.status = 400;
+    }
+    return result;
+}
+
+void write_mcp_result(httplib::Response& res, const detail::McpDispatchResult& result) {
+    res.status = result.status;
+    if (!result.body.empty()) {
+        res.set_content(result.body, "application/json");
+    }
 }
 
 void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
@@ -152,11 +250,203 @@ void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
     return false;
 }
 
+void handle_daemon_exception(const httplib::Request& /*req*/,
+                             httplib::Response& res,
+                             std::exception_ptr ep) {
+    std::string message = "Unknown internal server error";
+    try {
+        if (ep) std::rethrow_exception(ep);
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    core::logging::error("Daemon request handler exception: {}", message);
+    res.status = 500;
+    res.set_content(
+        std::format(
+            R"({{"error":"Internal server error: {}"}})",
+            core::utils::escape_json_string(message)),
+        "application/json");
+}
+
+void handle_ping(const httplib::Request&, httplib::Response& res) {
+    res.set_content(R"({"status":"ok","message":"Filo daemon is running."})",
+                    "application/json");
+}
+
+void handle_mcp_options(const std::string& host,
+                        const httplib::Request& req,
+                        httplib::Response& res) {
+    if (!enforce_origin_policy(req, res, host)) return;
+    set_cors_headers(req, res);
+    res.status = 204;
+}
+
+void handle_mcp_get(const std::string& host,
+                    const httplib::Request& req,
+                    httplib::Response& res) {
+    if (!enforce_origin_policy(req, res, host)) return;
+    set_cors_headers(req, res);
+    res.status = 405;
+    res.set_header("Allow", "POST, GET, OPTIONS, DELETE");
+    res.set_content(R"({"error":"Method Not Allowed — use POST /mcp"})",
+                    "application/json");
+}
+
+void handle_mcp_delete(const std::string& host,
+                       const httplib::Request& req,
+                       httplib::Response& res) {
+    if (!enforce_origin_policy(req, res, host)) return;
+    set_cors_headers(req, res);
+
+    if (!req.has_header("MCP-Session-Id")) {
+        res.status = 400;
+        res.set_content(
+            R"({"error":"Missing MCP-Session-Id header"})",
+            "application/json");
+        return;
+    }
+
+    const std::string session_id = req.get_header_value("MCP-Session-Id");
+    if (session_id.empty()) {
+        res.status = 400;
+        res.set_content(
+            R"({"error":"Empty MCP-Session-Id header"})",
+            "application/json");
+        return;
+    }
+
+    replay_cache().clear_session(session_id);
+    core::tools::ShellTool::clear_mcp_session(session_id);
+    res.status = 204;
+}
+
+void handle_mcp_post(const std::string& host,
+                     const httplib::Request& req,
+                     httplib::Response& res) {
+    if (!enforce_origin_policy(req, res, host)) return;
+    set_cors_headers(req, res);
+
+    if (req.body.empty()) {
+        res.status = 400;
+        res.set_content(R"({"error":"Empty request body"})", "application/json");
+        return;
+    }
+
+    if (!has_required_accept_header(req)) {
+        res.status = 406;
+        res.set_content(
+            R"({"error":"Invalid Accept header. MCP clients must advertise both application/json and text/event-stream."})",
+            "application/json");
+        return;
+    }
+
+    if (!has_supported_protocol_header(req)) {
+        res.status = 400;
+        res.set_content(
+            R"({"error":"Unsupported MCP-Protocol-Version header. Supported: 2025-11-25, 2024-11-05."})",
+            "application/json");
+        return;
+    }
+
+    const auto replay_key = build_replay_key(req);
+    if (!replay_key.has_value()) {
+        write_mcp_result(res, dispatch_mcp_payload(req.body));
+        return;
+    }
+
+    auto decision = replay_cache().begin(*replay_key);
+    if (decision.kind == detail::RequestReplayCache::DecisionKind::replay_completed) {
+        write_mcp_result(res, decision.replay_result);
+        return;
+    }
+    if (decision.kind == detail::RequestReplayCache::DecisionKind::wait_inflight) {
+        write_mcp_result(res, replay_cache().wait_for(decision.inflight));
+        return;
+    }
+
+    detail::McpDispatchResult execution_result;
+    try {
+        std::optional<core::tools::ShellTool::ScopedMcpSessionContext> session_scope;
+        if (req.has_header("MCP-Session-Id")) {
+            std::string session_id = req.get_header_value("MCP-Session-Id");
+            if (!session_id.empty()) {
+                session_scope.emplace(core::tools::ShellTool::scoped_mcp_session(
+                    std::move(session_id)));
+            }
+        }
+        execution_result = dispatch_mcp_payload(req.body);
+    } catch (const std::exception& e) {
+        execution_result.status = 500;
+        execution_result.body = std::format(
+            R"({{"error":"Internal server error: {}"}})",
+            core::utils::escape_json_string(e.what()));
+    } catch (...) {
+        execution_result.status = 500;
+        execution_result.body = R"({"error":"Internal server error"})";
+    }
+
+    const bool cache_result = execution_result.status == 200 || execution_result.status == 202;
+    replay_cache().finish(*replay_key, decision.inflight, execution_result, cache_result);
+    write_mcp_result(res, execution_result);
+}
+
+void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded_body(req.body);
+    simdjson::ondemand::document doc;
+
+    if (parser.iterate(padded_body).get(doc) != simdjson::SUCCESS) {
+        res.status = 400;
+        res.set_content(R"({"error":"Invalid JSON"})", "application/json");
+        return;
+    }
+
+    std::string_view prompt;
+    if (doc["prompt"].get_string().get(prompt) != simdjson::SUCCESS) {
+        res.status = 400;
+        res.set_content(R"({"error":"Missing 'prompt' field"})", "application/json");
+        return;
+    }
+
+    auto& config_manager = core::config::ConfigManager::get_instance();
+    const auto& config = config_manager.get_config();
+    auto& provider_manager = core::llm::ProviderManager::get_instance();
+
+    std::shared_ptr<core::llm::LLMProvider> llm_provider;
+    try {
+        llm_provider = provider_manager.get_provider(config.default_provider);
+    } catch (const std::exception& e) {
+        res.status = 500;
+        std::string body = std::format(
+            R"({{"error":"Failed to initialize default provider: {}"}})",
+            core::utils::escape_json_string(e.what()));
+        res.set_content(body, "application/json");
+        return;
+    }
+
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(llm_provider, tool_manager);
+
+    std::string final_response;
+    agent->send_message(
+        std::string(prompt),
+        [&final_response](const std::string& text) { final_response += text; },
+        [](const std::string& /*name*/, const std::string& /*args*/) {},
+        []() {});
+
+    res.set_content(
+        std::format(R"({{"response":"{}"}})", core::utils::escape_json_string(final_response)),
+        "application/json");
+}
+
 } // namespace
 
 void run_server(int port, const std::string& host) {
-    httplib::Server svr;
-    g_svr = &svr;
+    auto svr = std::make_shared<httplib::Server>();
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        g_svr = svr;
+    }
 
     init_providers();
 
@@ -166,13 +456,20 @@ void run_server(int port, const std::string& host) {
     auto& dispatcher = core::mcp::McpDispatcher::get_instance();
     (void)dispatcher;   // suppress unused-variable warning
 
+    // Local command proxy is expected to be stable under transient disconnects.
+    svr->set_tcp_nodelay(true);
+    svr->set_read_timeout(std::chrono::seconds{30});
+    svr->set_write_timeout(std::chrono::seconds{120});
+    svr->set_keep_alive_timeout(20);
+    svr->set_keep_alive_max_count(200);
+    svr->set_payload_max_length(4 * 1024 * 1024);
+
+    svr->set_exception_handler(handle_daemon_exception);
+
     // -------------------------------------------------------------------------
     // Health check
     // -------------------------------------------------------------------------
-    svr.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(R"({"status":"ok","message":"Filo daemon is running."})",
-                        "application/json");
-    });
+    svr->Get("/ping", handle_ping);
 
     // -------------------------------------------------------------------------
     // MCP Streamable-HTTP transport
@@ -180,122 +477,35 @@ void run_server(int port, const std::string& host) {
     // Spec §Transport: servers MUST return HTTP 405 for wrong method on /mcp.
     // -------------------------------------------------------------------------
 
-    // OPTIONS /mcp — CORS preflight
-    svr.Options("/mcp", [host](const httplib::Request& req, httplib::Response& res) {
-        if (!enforce_origin_policy(req, res, host)) return;
-        set_cors_headers(req, res);
-        res.status = 204;
-    });
+    const auto host_copy = std::string(host);
+    svr->Options("/mcp", std::bind_front(handle_mcp_options, host_copy));
+    svr->Get("/mcp", std::bind_front(handle_mcp_get, host_copy));
+    svr->Post("/mcp", std::bind_front(handle_mcp_post, host_copy));
+    svr->Delete("/mcp", std::bind_front(handle_mcp_delete, host_copy));
+    svr->Post("/api/chat", handle_api_chat);
 
-    // GET /mcp — spec requires 405 (not 404)
-    svr.Get("/mcp", [host](const httplib::Request& req, httplib::Response& res) {
-        if (!enforce_origin_policy(req, res, host)) return;
-        set_cors_headers(req, res);
-        res.status = 405;
-        res.set_header("Allow", "POST, GET, OPTIONS");
-        res.set_content(R"({"error":"Method Not Allowed — use POST /mcp"})",
-                        "application/json");
-    });
+    if (!svr->bind_to_port(host, port)) {
+        core::logging::error("Filo daemon failed to bind to {}:{}.", host, port);
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        if (g_svr == svr) g_svr.reset();
+        return;
+    }
 
-    // POST /mcp — main MCP endpoint
-    //
-    //   200 application/json  – for requests (messages that carry an "id")
-    //   202 Accepted          – for notifications / responses (no reply body)
-    //   400 application/json  – body is empty or not valid JSON
-    svr.Post("/mcp", [host](const httplib::Request& req, httplib::Response& res) {
-        if (!enforce_origin_policy(req, res, host)) return;
-        set_cors_headers(req, res);
+    core::logging::info("Filo daemon listening on {}:{}.", host, port);
+    core::logging::info("MCP endpoint : http://{}:{}/mcp", host, port);
+    core::logging::info("Health check : http://{}:{}/ping", host, port);
 
-        if (req.body.empty()) {
-            res.status = 400;
-            res.set_content(R"({"error":"Empty request body"})", "application/json");
-            return;
-        }
+    const bool listen_ok = svr->listen_after_bind();
+    if (!listen_ok) {
+        core::logging::error("Filo daemon stopped with a listen error on {}:{}.", host, port);
+    } else {
+        core::logging::info("Filo daemon stopped.");
+    }
 
-        if (!has_required_accept_header(req)) {
-            res.status = 406;
-            res.set_content(
-                R"({"error":"Invalid Accept header. MCP clients must advertise both application/json and text/event-stream."})",
-                "application/json");
-            return;
-        }
-
-        if (!has_supported_protocol_header(req)) {
-            res.status = 400;
-            res.set_content(
-                R"({"error":"Unsupported MCP-Protocol-Version header. Supported: 2025-11-25, 2024-11-05."})",
-                "application/json");
-            return;
-        }
-
-        std::string response = core::mcp::McpDispatcher::get_instance().dispatch(req.body);
-
-        if (response.empty()) {
-            // JSON-RPC notification / response payload.
-            res.status = 202;
-        } else {
-            if (response.starts_with(kJsonRpcParseErrorPrefix)
-                || response.starts_with(kJsonRpcInvalidRequestPrefix)) {
-                res.status = 400;
-            }
-            res.set_content(response, "application/json");
-        }
-    });
-
-    // -------------------------------------------------------------------------
-    // REST chat endpoint (To be implemented)
-    // -------------------------------------------------------------------------
-    svr.Post("/api/chat", [](const httplib::Request& req, httplib::Response& res) {
-        simdjson::ondemand::parser parser;
-        simdjson::padded_string padded_body(req.body);
-        simdjson::ondemand::document doc;
-
-        if (parser.iterate(padded_body).get(doc) != simdjson::SUCCESS) {
-            res.status = 400;
-            res.set_content(R"({"error":"Invalid JSON"})", "application/json");
-            return;
-        }
-
-        std::string_view prompt;
-        if (doc["prompt"].get_string().get(prompt) != simdjson::SUCCESS) {
-            res.status = 400;
-            res.set_content(R"({"error":"Missing 'prompt' field"})", "application/json");
-            return;
-        }
-
-        auto& config_manager = core::config::ConfigManager::get_instance();
-        const auto& config = config_manager.get_config();
-        auto& provider_manager = core::llm::ProviderManager::get_instance();
-
-        std::shared_ptr<core::llm::LLMProvider> llm_provider;
-        try {
-            llm_provider = provider_manager.get_provider(config.default_provider);
-        } catch (const std::exception& e) {
-            res.status = 500;
-            std::string body = std::format(
-                R"({{"error":"Failed to initialize default provider: {}"}}))",
-                core::utils::escape_json_string(e.what()));
-            res.set_content(body, "application/json");
-            return;
-        }
-
-        auto& tool_manager = core::tools::ToolManager::get_instance();
-        auto agent = std::make_shared<core::agent::Agent>(llm_provider, tool_manager);
-
-        std::string final_response;
-        agent->send_message(
-            std::string(prompt),
-            [&final_response](const std::string& text) { final_response += text; },
-            [](const std::string& /*name*/, const std::string& /*args*/) {},
-            []() {});
-
-        res.set_content(
-            std::format(R"({{"response":"{}"}})", core::utils::escape_json_string(final_response)),
-            "application/json");
-    });
-
-    svr.listen(host, port);
-    g_svr = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_server_mutex);
+        if (g_svr == svr) g_svr.reset();
+    }
 }
 
 } // namespace exec::daemon

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <format>
@@ -89,7 +90,7 @@ public:
         full += sentinel_;
         full += ":%d\\n' $?\n";
 
-        if (::write(stdin_fd_, full.data(), full.size()) < 0) {
+        if (!write_all(stdin_fd_, full)) {
             stop();
             return {"[ShellSession] Write to bash stdin failed.\n", -1};
         }
@@ -112,6 +113,22 @@ private:
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
+
+    static bool write_all(int fd, std::string_view data) {
+        const char* ptr = data.data();
+        std::size_t remaining = data.size();
+        while (remaining > 0) {
+            const ssize_t written = ::write(fd, ptr, remaining);
+            if (written < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            if (written == 0) return false;
+            ptr += written;
+            remaining -= static_cast<std::size_t>(written);
+        }
+        return true;
+    }
 
     static std::string make_sentinel() {
         std::mt19937_64 rng{std::random_device{}()};
@@ -179,7 +196,10 @@ private:
         // the process terminates, giving us the correct exit code.
         std::string trap_cmd = "trap 'printf \"\\n" + sentinel_ +
                                ":%d\\n\" \"$?\"' EXIT\n";
-        (void)::write(stdin_fd_, trap_cmd.data(), trap_cmd.size());
+        if (!write_all(stdin_fd_, trap_cmd)) {
+            stop();
+            return;
+        }
     }
 
     // Graceful shutdown (SIGTERM → wait → SIGKILL if still alive).

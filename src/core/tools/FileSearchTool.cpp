@@ -64,8 +64,10 @@ std::string FileSearchTool::execute(const std::string& json_args) {
                 ec
             );
             if (!ec) {
-                for (auto& entry : it) {
+                const auto end = std::filesystem::recursive_directory_iterator{};
+                for (; it != end; ++it) {
                     if (count >= kMaxResults) break;
+                    const auto& entry = *it;
                     ec.clear();
                     if (entry.is_directory(ec)) {
                         if (should_skip_dir(entry.path()))

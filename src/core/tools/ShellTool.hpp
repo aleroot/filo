@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace core::tools {
 
@@ -53,6 +54,22 @@ namespace core::tools {
  */
 class ShellTool : public Tool {
 public:
+    class ScopedMcpSessionContext {
+    public:
+        explicit ScopedMcpSessionContext(std::string session_id);
+        ~ScopedMcpSessionContext();
+
+        ScopedMcpSessionContext(const ScopedMcpSessionContext&) = delete;
+        ScopedMcpSessionContext& operator=(const ScopedMcpSessionContext&) = delete;
+
+        ScopedMcpSessionContext(ScopedMcpSessionContext&& other) noexcept;
+        ScopedMcpSessionContext& operator=(ScopedMcpSessionContext&& other) noexcept;
+
+    private:
+        bool active_{false};
+        std::string previous_;
+    };
+
     // Constructs with the platform-appropriate executor (selected at compile time).
     ShellTool() : executor_(shell::make_shell_executor()) {}
 
@@ -60,10 +77,15 @@ public:
     explicit ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
         : executor_(std::move(executor)) {}
 
+    [[nodiscard]] static ScopedMcpSessionContext scoped_mcp_session(std::string session_id);
+    static void clear_mcp_session(std::string_view session_id);
+
     ToolDefinition get_definition() const override;
     std::string    execute(const std::string& json_args) override;
 
 private:
+    [[nodiscard]] static std::string_view current_mcp_session_id() noexcept;
+
     std::unique_ptr<shell::IShellExecutor> executor_;
     std::mutex                             executor_mutex_;
 };

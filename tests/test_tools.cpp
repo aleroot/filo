@@ -262,6 +262,66 @@ TEST_CASE("ShellTool session persists exported environment variable", "[tools]")
     REQUIRE_THAT(res2, Catch::Matchers::ContainsSubstring("hello_world_42"));
 }
 
+TEST_CASE("ShellTool isolates persistent state across MCP session contexts", "[tools]") {
+    ShellTool tool;
+
+    {
+        auto session_a = ShellTool::scoped_mcp_session("session-a");
+        auto res = tool.execute(R"({"command":"cd /tmp"})");
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    }
+    {
+        auto session_b = ShellTool::scoped_mcp_session("session-b");
+        auto res = tool.execute(R"({"command":"cd /var"})");
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    }
+    {
+        auto session_a = ShellTool::scoped_mcp_session("session-a");
+        auto res = tool.execute(R"({"command":"pwd"})");
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/tmp"));
+    }
+    {
+        auto session_b = ShellTool::scoped_mcp_session("session-b");
+        auto res = tool.execute(R"({"command":"pwd"})");
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/var"));
+    }
+}
+
+TEST_CASE("ShellTool clear_mcp_session resets that session shell state", "[tools]") {
+    ShellTool tool;
+    constexpr std::string_view kSession = "session-clear";
+    constexpr std::string_view kToken = "filo_session_token_42";
+
+    {
+        auto session = ShellTool::scoped_mcp_session(std::string(kSession));
+        auto set_res = tool.execute(
+            R"({"command":"export FILO_SESSION_CLEAR_VAR=filo_session_token_42"})");
+        REQUIRE_THAT(set_res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+
+        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})");
+        REQUIRE_THAT(echo_res, Catch::Matchers::ContainsSubstring(std::string(kToken)));
+    }
+
+    ShellTool::clear_mcp_session(kSession);
+
+    {
+        auto session = ShellTool::scoped_mcp_session(std::string(kSession));
+        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})");
+        REQUIRE_THAT(echo_res, !Catch::Matchers::ContainsSubstring(std::string(kToken)));
+    }
+}
+
+TEST_CASE("ShellTool handles MCP session LRU eviction without crashing", "[tools]") {
+    ShellTool tool;
+
+    for (int i = 0; i < 70; ++i) {
+        auto session = ShellTool::scoped_mcp_session("session-evict-" + std::to_string(i));
+        auto res = tool.execute(R"({"command":"echo alive"})");
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("alive"));
+    }
+}
+
 TEST_CASE("ShellTool working_dir runs in subshell and does not affect session cwd", "[tools]") {
     ShellTool tool;
 
@@ -333,6 +393,18 @@ TEST_CASE("ShellTool timeout_seconds defaults to 600 when not provided", "[tools
         if (p.name == "timeout_seconds") { found = true; break; }
     }
     REQUIRE(found);
+}
+
+TEST_CASE("ShellTool writes large command payloads without truncation", "[tools]") {
+    ShellTool tool;
+
+    const std::string payload(150000, 'x');
+    const std::string command = "printf '" + payload + "' | wc -c";
+    const std::string args = "{\"command\":\"" + command + "\"}";
+
+    auto res = tool.execute(args);
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("150000"));
 }
 
 TEST_CASE("ShellTool session restarts transparently after exit", "[tools]") {

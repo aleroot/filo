@@ -342,6 +342,9 @@ add_executable(filo_tests
     tests/test_concurrent_queue.cpp
     tests/test_main_exit.cpp
     tests/test_prompter_mode.cpp
+    tests/test_mcp_client_session.cpp
+    tests/test_daemon_reliability.cpp
+    tests/test_request_replay_cache.cpp
 )
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
@@ -394,7 +397,7 @@ source_group(
         tests/test_openai_provider.cpp
         tests/test_openai_responses_protocol.cpp
         tests/test_grok_provider.cpp
-    tests/test_grok_enhanced.cpp
+        tests/test_grok_enhanced.cpp
         tests/test_gemini_provider.cpp
         tests/test_claude_provider.cpp
         tests/test_mistral_provider.cpp
@@ -425,4 +428,7 @@ source_group(
         tests/test_permission_system.cpp
         tests/test_main_exit.cpp
         tests/test_prompter_mode.cpp
+        tests/test_mcp_client_session.cpp
+        tests/test_daemon_reliability.cpp
+        tests/test_request_replay_cache.cpp
 )
