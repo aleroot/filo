@@ -1,6 +1,5 @@
 #include "ConfigManager.hpp"
 #include <simdjson.h>
-#include <cstdlib>
 #include <pwd.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -11,7 +10,6 @@
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include <algorithm>
-#include <cctype>
 #include <format>
 #include <stdexcept>
 
@@ -1076,11 +1074,11 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     }
 
     load_optional_config(global_config_path, config_);
-    load_optional_config(model_overlay_path, config_);
     load_optional_config(auth_overlay_path, config_);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
     load_optional_config(project_config_path, config_);
     workspace_settings_ = load_optional_managed_settings(workspace_settings_file, config_);
+    load_optional_config(model_overlay_path, config_);
 }
 
 bool ConfigManager::persist_managed_setting(SettingsScope scope,
@@ -1126,6 +1124,7 @@ bool ConfigManager::persist_managed_setting(SettingsScope scope,
 
 bool ConfigManager::persist_model_defaults(std::string_view default_provider,
                                            std::string_view default_model_selection,
+                                           std::string_view specific_model,
                                            std::string* error) {
     if (default_provider.empty()) {
         if (error) *error = "default provider cannot be empty";
@@ -1140,13 +1139,32 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
     const std::string selection_str(default_model_selection);
     const fs::path overlay_path = model_defaults_overlay_path(get_config_dir());
 
-    const std::string payload = std::format(
-        "{{\n"
-        "    \"default_provider\": \"{}\",\n"
-        "    \"default_model_selection\": \"{}\"\n"
-        "}}\n",
-        core::utils::escape_json_string(provider_str),
-        core::utils::escape_json_string(selection_str));
+    // Build the JSON payload, including specific model override if provided
+    std::string payload;
+    if (!specific_model.empty()) {
+        payload = std::format(
+            "{{\n"
+            "    \"default_provider\": \"{}\",\n"
+            "    \"default_model_selection\": \"{}\",\n"
+            "    \"providers\": {{\n"
+            "        \"{}\": {{\n"
+            "            \"model\": \"{}\"\n"
+            "        }}\n"
+            "    }}\n"
+            "}}\n",
+            core::utils::escape_json_string(provider_str),
+            core::utils::escape_json_string(selection_str),
+            core::utils::escape_json_string(provider_str),
+            core::utils::escape_json_string(std::string(specific_model)));
+    } else {
+        payload = std::format(
+            "{{\n"
+            "    \"default_provider\": \"{}\",\n"
+            "    \"default_model_selection\": \"{}\"\n"
+            "}}\n",
+            core::utils::escape_json_string(provider_str),
+            core::utils::escape_json_string(selection_str));
+    }
 
     std::string write_error;
     if (!write_text_atomic(overlay_path, payload, write_error)) {
@@ -1156,6 +1174,9 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
 
     config_.default_provider = provider_str;
     config_.default_model_selection = selection_str;
+    if (!specific_model.empty()) {
+        config_.providers[provider_str].model = std::string(specific_model);
+    }
     return true;
 }
 

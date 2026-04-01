@@ -209,6 +209,7 @@ public:
 
     bool persist_model_defaults(std::string_view default_provider,
                                 std::string_view default_model_selection,
+                                std::string_view specific_model = {},
                                 std::string* error = nullptr);
 
     bool persist_login_profile(std::string_view login_provider,

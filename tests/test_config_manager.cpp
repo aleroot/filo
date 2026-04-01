@@ -3,7 +3,6 @@
 
 #include "core/config/ConfigManager.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -440,7 +439,7 @@ TEST_CASE("ConfigManager persists /model defaults across reloads", "[config]") {
     manager.load(project_dir);
 
     std::string error;
-    REQUIRE(manager.persist_model_defaults("grok", "manual", &error));
+    REQUIRE(manager.persist_model_defaults("grok", "manual", {}, &error));
     REQUIRE(error.empty());
 
     manager.load(project_dir);
@@ -541,7 +540,7 @@ TEST_CASE("ConfigManager persists local provider overlay using api_type=llamacpp
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager keeps project-level model defaults higher priority than persisted overlay",
+TEST_CASE("ConfigManager persists model overlay preferences over project-level defaults",
           "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_model_overlay_priority");
     const fs::path xdg_home = sandbox / "xdg";
@@ -572,13 +571,66 @@ TEST_CASE("ConfigManager keeps project-level model defaults higher priority than
     manager.load(project_dir);
 
     std::string error;
-    REQUIRE(manager.persist_model_defaults("grok", "manual", &error));
+    // User explicitly switches to grok/manual - this should persist
+    REQUIRE(manager.persist_model_defaults("grok", "manual", {}, &error));
     REQUIRE(error.empty());
 
     manager.load(project_dir);
     const auto& config = manager.get_config();
-    REQUIRE(config.default_provider == "openai");
-    REQUIRE(config.default_model_selection == "router");
+    // User's model choice should take precedence over project defaults
+    REQUIRE(config.default_provider == "grok");
+    REQUIRE(config.default_model_selection == "manual");
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persists specific model flavour across reloads", "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_model_flavour_persist");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "kimi",
+        "default_model_selection": "manual",
+        "providers": {
+            "kimi": { "api_type": "kimi", "api_key": "test-key", "model": "kimi-default" }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    // Verify initial model is the default
+    {
+        const auto config = manager.get_config();
+        REQUIRE(config.default_provider == "kimi");
+        REQUIRE(config.providers.at("kimi").model == "kimi-default");
+    }
+
+    // User switches to a specific model flavour using /model kimi kimi-for-coding
+    std::string error;
+    REQUIRE(manager.persist_model_defaults("kimi", "manual", "kimi-for-coding", &error));
+    REQUIRE(error.empty());
+
+    // Verify in-memory config is updated
+    {
+        const auto config = manager.get_config();
+        REQUIRE(config.providers.at("kimi").model == "kimi-for-coding");
+    }
+
+    // Simulate application restart by reloading config
+    manager.load(project_dir);
+
+    // Verify the specific model flavour is persisted
+    {
+        const auto config = manager.get_config();
+        REQUIRE(config.default_provider == "kimi");
+        REQUIRE(config.default_model_selection == "manual");
+        REQUIRE(config.providers.at("kimi").model == "kimi-for-coding");
+    }
 
     fs::remove_all(sandbox);
 }

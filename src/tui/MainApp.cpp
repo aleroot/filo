@@ -53,7 +53,6 @@
 #include <format>
 #include <chrono>
 #include <thread>
-#include <cstdlib>
 #include <charconv>
 #include <filesystem>
 #include <fstream>
@@ -65,7 +64,6 @@
 #include <future>
 #include <algorithm>
 #include <ranges>
-#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <system_error>
@@ -1791,7 +1789,11 @@ RunResult run(RunOptions opts) {
             model_selection_mode == ModelSelectionMode::Router ? "router" :
             model_selection_mode == ModelSelectionMode::Auto   ? "auto"   : "manual";
         std::string error;
-        if (!config_manager.persist_model_defaults(manual_provider_name, mode, &error)) {
+        const std::string specific_model =
+            (model_selection_mode == ModelSelectionMode::Manual && !manual_model_name.empty())
+                ? manual_model_name
+                : "";
+        if (!config_manager.persist_model_defaults(manual_provider_name, mode, specific_model, &error)) {
             return std::format("Could not persist model defaults: {}", error);
         }
         return std::nullopt;
