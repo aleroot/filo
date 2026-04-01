@@ -211,6 +211,39 @@ Element render_text_lines_preserving_newlines(std::string_view content, Color te
     return vbox(std::move(rows)) | xflex;
 }
 
+struct LimitedTextResult {
+    std::string text;
+    std::size_t hidden_lines = 0;
+};
+
+LimitedTextResult clamp_tool_result_lines(std::string_view content, std::size_t max_lines) {
+    const std::vector<std::string> lines = split_lines(std::string(content));
+    if (lines.size() <= max_lines || max_lines == 0) {
+        return {
+            .text = std::string(content),
+            .hidden_lines = 0,
+        };
+    }
+
+    std::string clamped;
+    std::size_t used_lines = 0;
+    for (const auto& line : lines) {
+        if (used_lines >= max_lines) {
+            break;
+        }
+        if (!clamped.empty()) {
+            clamped.push_back('\n');
+        }
+        clamped += line;
+        ++used_lines;
+    }
+
+    return {
+        .text = std::move(clamped),
+        .hidden_lines = lines.size() - max_lines,
+    };
+}
+
 Element render_lightbulb_prefix(bool show) {
     if (!show) {
         return ftxui::text("    ");
@@ -294,6 +327,12 @@ Element render_tool_header(const ToolActivity& tool,
     header_items.push_back(std::move(status_el));
     header_items.push_back(ftxui::text(" "));
     header_items.push_back(std::move(name_el));
+
+    if (tool.auto_approved) {
+        header_items.push_back(ftxui::text("  "));
+        header_items.push_back(
+            ftxui::text("auto-approved") | ftxui::color(ColorYellowDark) | dim);
+    }
     
     if (!tool.description.empty()) {
         header_items.push_back(ftxui::text("  "));
@@ -335,7 +374,8 @@ Element render_tool_progress(const ToolActivity& tool) {
     return ftxui::text(bar) | ftxui::color(ColorYellowDark);
 }
 
-Element render_tool_result(const ToolActivity& tool, 
+Element render_tool_result(const ToolActivity& tool,
+                           const ConversationRenderOptions& options,
                            int /*available_height*/,
                            int /*terminal_width*/) {
     if (tool.result.empty()) {
@@ -356,7 +396,25 @@ Element render_tool_result(const ToolActivity& tool,
         rows.push_back(ftxui::text(std::move(label)) | ftxui::color(ColorYellowDark) | bold);
     }
 
-    rows.push_back(render_text_lines_preserving_newlines(tool.result.summary, text_color));
+    const std::size_t preview_lines = options.tool_result_preview_max_lines == 0
+        ? kToolResultPreviewMaxLines
+        : options.tool_result_preview_max_lines;
+    const LimitedTextResult display_result = options.expand_tool_results
+        ? LimitedTextResult{
+            .text = tool.result.summary,
+            .hidden_lines = 0,
+        }
+        : clamp_tool_result_lines(tool.result.summary, preview_lines);
+    rows.push_back(render_text_lines_preserving_newlines(display_result.text, text_color));
+
+    if (display_result.hidden_lines > 0) {
+        rows.push_back(
+            ftxui::text(std::format(
+                "... {} more lines hidden to keep the conversation readable.",
+                display_result.hidden_lines))
+            | ftxui::color(Color::GrayDark)
+            | dim);
+    }
 
     if (tool.result.truncated) {
         rows.push_back(
@@ -443,7 +501,7 @@ Element render_tool_item(const ToolActivity& tool,
     
     if (!tool.result.empty()) {
         tool_elements.push_back(separator() | ftxui::color(Color::GrayDark));
-        tool_elements.push_back(render_tool_result(tool, 10, terminal_width));
+        tool_elements.push_back(render_tool_result(tool, options, 10, terminal_width));
     }
     
     if (!tool.diff_preview.empty()) {

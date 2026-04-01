@@ -839,6 +839,7 @@ public:
             "  Ctrl+F   Search the conversation history\n"
             "  F2       Cycle agent mode (BUILD → DEBUG → RESEARCH → EXECUTE)\n"
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
+            "  Ctrl+O   Toggle tool output view (compact/full)\n"
             "  Ctrl+X   Open current input in external editor ($VISUAL/$EDITOR)\n"
             "  Ctrl+D   Delete char right; when input is empty press twice to quit\n"
             "  Ctrl+L   Clear the screen\n"

@@ -29,6 +29,10 @@ inline constexpr std::size_t kToolPreviewMaxLen = 88;
 /// Maximum number of diff lines rendered in the conversation tool activity.
 inline constexpr std::size_t kToolDiffPreviewMaxLines = 10;
 
+/// Maximum number of tool-result lines shown inline in conversation cards.
+/// Additional lines are collapsed to keep long transcripts scrollable.
+inline constexpr std::size_t kToolResultPreviewMaxLines = 12;
+
 /// Maximum number of diff lines rendered in the permission overlay.
 inline constexpr std::size_t kPermissionDiffPreviewMaxLines = 28;
 

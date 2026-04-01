@@ -135,6 +135,26 @@ namespace {
 
         return out;
     }
+
+    std::string compose_anthropic_system_prompt(const ChatRequest& req) {
+        std::string base_system =
+            "x-anthropic-billing-header: " + std::string(ANTHROPIC_BILLING_HEADER);
+
+        for (const auto& msg : req.messages) {
+            if (msg.role != "system" || msg.content.empty()) continue;
+
+            // Avoid duplicating the billing marker if callers already provide it.
+            if (msg.content.find("x-anthropic-billing-header:") != std::string::npos) {
+                return msg.content;
+            }
+
+            base_system += "\n\n";
+            base_system += msg.content;
+            return base_system;
+        }
+
+        return base_system;
+    }
     
     // Parse ISO 8601 timestamp to unix seconds (Anthropic format: "2025-01-15T12:00:30Z").
     int64_t parse_iso8601_timestamp(std::string_view sv) {
@@ -243,7 +263,18 @@ namespace {
         return info;
     }
 
-    std::string impl_format_error_message(int status_code, std::string_view body) {
+    bool is_sonnet_or_opus_model(std::string_view model) {
+        if (model.empty()) return false;
+        const std::string lowered = lower_copy(model);
+        return lowered.find("claude-sonnet") != std::string::npos
+            || lowered.find("claude-opus") != std::string::npos
+            || lowered == "sonnet"
+            || lowered == "opus";
+    }
+
+    std::string impl_format_error_message(int status_code,
+                                          std::string_view body,
+                                          std::string_view requested_model) {
         switch (status_code) {
             case 400:
                 return "[Anthropic API Error 400: Invalid request. The request body is malformed or contains invalid parameters.]";
@@ -256,10 +287,15 @@ namespace {
             case 429: {
                 std::string msg = "[Anthropic API Error 429: Rate limit exceeded. ";
                 if (!body.empty()) {
-                    msg += "Please wait before retrying. Consider reducing request frequency or context size.]";
+                    msg += "Please wait before retrying. Consider reducing request frequency or context size.";
                 } else {
-                    msg += "Please wait before retrying.]";
+                    msg += "Please wait before retrying.";
                 }
+                if (is_sonnet_or_opus_model(requested_model)) {
+                    msg += " If this is a Claude subscription limit on Sonnet/Opus, "
+                           "try '/model claude haiku' while waiting for reset.";
+                }
+                msg += ']';
                 return msg;
             }
             case 500:
@@ -325,15 +361,11 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         payload += '}';
     }
 
-    // Extract the first system message — Claude places it at the top level.
-    for (const auto& msg : req.messages) {
-        if (msg.role == "system" && !msg.content.empty()) {
-            payload += R"(,"system":")";
-            payload += core::utils::escape_json_string(msg.content);
-            payload += '"';
-            break;
-        }
-    }
+    // Claude Code-style attribution is carried in the top-level system field.
+    // We always send it because Sonnet/Opus subscription quotas depend on it.
+    payload += R"(,"system":")";
+    payload += core::utils::escape_json_string(compose_anthropic_system_prompt(req));
+    payload += '"';
 
     // Tools (Anthropic uses "input_schema" instead of "parameters").
     if (!req.tools.empty()) {
@@ -543,6 +575,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 
 void AnthropicProtocol::prepare_request(ChatRequest& request) {
     request_uses_context_1m_ = false;
+    last_requested_model_.clear();
     if (request.model.empty()) return;
 
     ModelNormalization normalized = normalize_requested_claude_model(request.model);
@@ -550,6 +583,7 @@ void AnthropicProtocol::prepare_request(ChatRequest& request) {
         request.model = std::move(normalized.model);
     }
     request_uses_context_1m_ = normalized.use_context_1m;
+    last_requested_model_ = request.model;
 }
 
 std::string AnthropicProtocol::serialize(const ChatRequest& req) const {
@@ -668,7 +702,10 @@ void AnthropicProtocol::on_response(const HttpResponse& response) {
 }
 
 std::string AnthropicProtocol::format_error_message(const HttpResponse& response) const {
-    return impl_format_error_message(response.status_code, response.body);
+    return impl_format_error_message(
+        response.status_code,
+        response.body,
+        last_requested_model_);
 }
 
 bool AnthropicProtocol::is_retryable(const HttpResponse& response) const noexcept {

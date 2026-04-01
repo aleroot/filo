@@ -209,6 +209,7 @@ private:
     AnthropicThinkingConfig thinking_;
     int                     default_max_tokens_;
     bool                    request_uses_context_1m_ = false; ///< Set in prepare_request() from `[1m]` suffix.
+    std::string             last_requested_model_;    ///< Normalized in prepare_request(); used for better 429 hints.
     AnthropicSSEParser      sse_parser_;          ///< Stateful; reset on clone().
     int32_t                 accumulated_input_  = 0;
     int32_t                 accumulated_output_ = 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DiffPreview.hpp"
+#include "Constants.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <optional>
 #include <string>
@@ -45,6 +46,7 @@ struct ToolActivity {
     std::string description;             // Human-readable summary
     Result result;                       // Structured tool output metadata
     ToolDiffPreview diff_preview;        // Diff preview for file operations
+    bool auto_approved = false;          // True when bypassed via YOLO/allow-list
     Status status = Status::Pending;
     
     // Progress tracking for long-running tools
@@ -159,9 +161,11 @@ struct ConversationState {
 // ============================================================================
 
 struct ConversationRenderOptions {
-    bool  show_timestamps = true;
-    bool  show_spinner    = true;
-    float scroll_pos      = 1.0f;  // 0.0 = top, 1.0 = bottom
+    bool        show_timestamps = true;
+    bool        show_spinner = true;
+    bool        expand_tool_results = false;
+    std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
+    float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
 };
 
 // ============================================================================

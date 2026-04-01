@@ -101,6 +101,7 @@ TEST_CASE("make_tool_activity — basic creation", "[tui][conversation][tool]") 
     REQUIRE(tool.id == "tc-123");
     REQUIRE(tool.name == "read_file");
     REQUIRE(tool.description == "main.cpp");
+    REQUIRE(tool.auto_approved == false);
     REQUIRE(tool.status == ToolActivity::Status::Pending);
 }
 
@@ -339,6 +340,50 @@ TEST_CASE("render_history_panel — assistant with tools", "[tui][conversation][
     msg.tools.push_back(make_tool_activity("t1", "list_directory", "{}", "."));
     messages.push_back(std::move(msg));
     REQUIRE_NOTHROW(render_history_panel(messages, 0));
+}
+
+TEST_CASE("render_history_panel — assistant tool with auto-approved badge",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Running tools", "", true);
+    auto tool = make_tool_activity("t1", "run_terminal_command", R"({"command":"pwd"})", "cmd: pwd");
+    tool.auto_approved = true;
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+    REQUIRE_NOTHROW(render_history_panel(messages, 0));
+}
+
+TEST_CASE("render_history_panel — large tool output remains renderable",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Summarized answer", "", false);
+    auto tool = make_tool_activity("t2", "run_terminal_command", R"({"command":"cat big.log"})", "cmd: cat big.log");
+    tool.result.summary =
+        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n"
+        "line 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\n";
+    tool.status = ToolActivity::Status::Succeeded;
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+    REQUIRE_NOTHROW(render_history_panel(messages, 0));
+}
+
+TEST_CASE("render_history_panel — expanded tool output mode",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Expanded logs", "", false);
+    auto tool = make_tool_activity("t3", "run_terminal_command", R"({"command":"tail -n 50 app.log"})", "cmd: tail -n 50 app.log");
+    tool.result.summary = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\n";
+    tool.status = ToolActivity::Status::Succeeded;
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    REQUIRE_NOTHROW(render_history_panel(
+        messages,
+        0,
+        ConversationRenderOptions{
+            .expand_tool_results = true,
+            .tool_result_preview_max_lines = 3,
+        }));
 }
 
 TEST_CASE("render_history_panel — timestamps hidden", "[tui][conversation][render]") {

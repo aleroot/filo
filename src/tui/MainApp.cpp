@@ -309,6 +309,10 @@ bool is_ctrl_x_event(const Event& event) {
     return is_ctrl_letter_event(event, 'x');
 }
 
+bool is_ctrl_o_event(const Event& event) {
+    return is_ctrl_letter_event(event, 'o');
+}
+
 bool is_ctrl_y_event(const Event& event) {
     return is_ctrl_letter_event(event, 'y');
 }
@@ -511,6 +515,145 @@ std::string build_search_snippet(std::string_view text,
     return snippet;
 }
 
+int estimate_wrapped_line_count(std::string_view text) {
+    if (text.empty()) {
+        return 1;
+    }
+
+    int total_lines = 0;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto newline = text.find('\n', start);
+        const std::size_t len = newline == std::string_view::npos
+            ? text.size() - start
+            : newline - start;
+        const int wrapped = std::max(
+            1,
+            static_cast<int>((len + static_cast<std::size_t>(kEstimatedLineWidthChars) - 1)
+                             / static_cast<std::size_t>(kEstimatedLineWidthChars)));
+        total_lines += wrapped;
+
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        start = newline + 1;
+    }
+
+    return std::max(total_lines, 1);
+}
+
+int estimate_tool_line_cost(const ToolActivity& tool) {
+    int lines = 1; // Header row
+
+    if (!tool.description.empty()) {
+        lines += estimate_wrapped_line_count(tool.description);
+    }
+    if (!tool.result.empty()) {
+        lines += 1; // Separator / label row
+        lines += estimate_wrapped_line_count(tool.result.summary);
+        if (tool.result.truncated) {
+            lines += 1;
+        }
+    }
+    if (!tool.diff_preview.empty()) {
+        lines += 1; // Diff header
+        lines += static_cast<int>(tool.diff_preview.lines.size());
+        if (tool.diff_preview.hidden_line_count > 0) {
+            lines += 1;
+        }
+    }
+
+    return std::max(lines, 1);
+}
+
+int estimate_message_line_cost(const UiMessage& msg) {
+    int lines = std::max(0, msg.margin_top);
+
+    switch (msg.type) {
+        case MessageType::User: {
+            if (!msg.timestamp.empty()) {
+                lines += 1;
+            }
+            lines += estimate_wrapped_line_count(msg.text);
+            lines += 1; // Spacer after user bubble
+            break;
+        }
+        case MessageType::Assistant: {
+            bool has_executing_tools = false;
+            bool has_completed_tools = false;
+            for (const auto& tool : msg.tools) {
+                if (tool.status == ToolActivity::Status::Executing) {
+                    has_executing_tools = true;
+                } else if (tool.status == ToolActivity::Status::Succeeded
+                           || tool.status == ToolActivity::Status::Failed) {
+                    has_completed_tools = true;
+                }
+            }
+            const bool show_thinking = msg.thinking
+                || (msg.pending && has_completed_tools && !has_executing_tools);
+
+            if (msg.text.empty() && msg.tools.empty() && !msg.thinking) {
+                lines += 1;
+            }
+
+            if (!msg.tools.empty()) {
+                lines += 2; // Tool-group border top/bottom
+                for (std::size_t i = 0; i < msg.tools.size(); ++i) {
+                    lines += estimate_tool_line_cost(msg.tools[i]);
+                    if (i + 1 < msg.tools.size()) {
+                        lines += 1; // Separator between tool rows
+                    }
+                }
+            }
+
+            if (!msg.text.empty()) {
+                if (!msg.tools.empty()) {
+                    lines += 1; // Spacer between tools and markdown response
+                }
+                lines += estimate_wrapped_line_count(msg.text);
+            }
+
+            if (show_thinking) {
+                lines += 1;
+            }
+
+            lines += 1; // Spacer after assistant message
+            break;
+        }
+        case MessageType::Info:
+        case MessageType::Warning:
+        case MessageType::Error:
+        case MessageType::System: {
+            lines += estimate_wrapped_line_count(msg.text);
+            if (!msg.secondary_text.empty()) {
+                lines += estimate_wrapped_line_count(msg.secondary_text);
+            }
+            break;
+        }
+        case MessageType::ToolGroup: {
+            lines += 2; // Tool-group border top/bottom
+            for (std::size_t i = 0; i < msg.tools.size(); ++i) {
+                lines += estimate_tool_line_cost(msg.tools[i]);
+                if (i + 1 < msg.tools.size()) {
+                    lines += 1; // Separator between tool rows
+                }
+            }
+            lines += 1; // Spacer after tool group message
+            break;
+        }
+    }
+
+    return std::max(lines, 1);
+}
+
+int estimate_history_line_cost(const std::vector<UiMessage>& messages) {
+    int total = 0;
+    for (const auto& msg : messages) {
+        total += estimate_message_line_cost(msg);
+    }
+    return std::max(total, 1);
+}
+
 // ── History Component ────────────────────────────────────────────────────────
 // Handles rendering and scrolling of the conversation history.
 class HistoryComponent : public ComponentBase {
@@ -526,6 +669,11 @@ public:
     Element OnRender() override {
         // Auto-scroll to bottom if new messages appeared
         const auto messages = get_messages_();
+        const std::size_t layout_fingerprint = history_layout_fingerprint(messages);
+        if (layout_fingerprint != last_layout_fingerprint_) {
+            estimated_content_lines_ = estimate_history_line_cost(messages);
+            last_layout_fingerprint_ = layout_fingerprint;
+        }
         if (messages.size() > last_message_count_) {
             scroll_pos_ = 1.0f;
             last_message_count_ = messages.size();
@@ -549,10 +697,10 @@ public:
         }
 
         if (Focused()) {
-            if (event == Event::ArrowUp)   { ScrollUp(kScrollStep);  return true; }
-            if (event == Event::ArrowDown) { ScrollDown(kScrollStep); return true; }
-            if (event == Event::PageUp)    { ScrollUp(kPageStep);    return true; }
-            if (event == Event::PageDown)  { ScrollDown(kPageStep);  return true; }
+            if (event == Event::ArrowUp)   { ScrollUp(arrow_step_ratio()); return true; }
+            if (event == Event::ArrowDown) { ScrollDown(arrow_step_ratio()); return true; }
+            if (event == Event::PageUp)    { ScrollUp(page_step_ratio()); return true; }
+            if (event == Event::PageDown)  { ScrollDown(page_step_ratio()); return true; }
             if (event == Event::Home)      { scroll_pos_ = 0.0f;     return true; }
             if (event == Event::End)       { scroll_pos_ = 1.0f;     return true; }
             // Escape or Enter returns focus to the input.
@@ -571,6 +719,14 @@ public:
         scroll_pos_ = std::min(1.0f, scroll_pos_ + amount);
     }
 
+    void ScrollPageUp() {
+        ScrollUp(page_step_ratio());
+    }
+
+    void ScrollPageDown() {
+        ScrollDown(page_step_ratio());
+    }
+
     void JumpToMessage(std::size_t message_index, std::size_t message_count) {
         if (message_count <= 1) {
             scroll_pos_ = 1.0f;
@@ -585,11 +741,11 @@ public:
     bool HandleWheel(Event event) {
         if (!event.is_mouse()) return false;
         if (event.mouse().button == Mouse::WheelUp) {
-            ScrollUp(kWheelStep);
+            ScrollUp(wheel_step_ratio());
             return true;
         }
         if (event.mouse().button == Mouse::WheelDown) {
-            ScrollDown(kWheelStep);
+            ScrollDown(wheel_step_ratio());
             return true;
         }
         return false;
@@ -599,14 +755,73 @@ private:
     bool OnMouseEvent(Event event) {
         // Only handle wheel events; never steal focus from clicks.
         if (event.mouse().button == Mouse::WheelUp) {
-            ScrollUp(kWheelStep);
+            ScrollUp(wheel_step_ratio());
             return true;
         }
         if (event.mouse().button == Mouse::WheelDown) {
-            ScrollDown(kWheelStep);
+            ScrollDown(wheel_step_ratio());
             return true;
         }
         return false;
+    }
+
+    static std::size_t combine_hash(std::size_t seed, std::size_t value) {
+        // 64-bit mix constant (works fine on 32-bit std::size_t as well).
+        constexpr std::size_t kMix = static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
+        seed ^= value + kMix + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+
+    static std::size_t history_layout_fingerprint(const std::vector<UiMessage>& messages) {
+        std::size_t seed = messages.size();
+        for (const auto& msg : messages) {
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.type));
+            seed = combine_hash(seed, msg.text.size());
+            seed = combine_hash(seed, msg.secondary_text.size());
+            seed = combine_hash(seed, msg.timestamp.size());
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_top));
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_bottom));
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.pending));
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.thinking));
+            seed = combine_hash(seed, static_cast<std::size_t>(msg.show_lightbulb));
+            seed = combine_hash(seed, msg.tools.size());
+            for (const auto& tool : msg.tools) {
+                seed = combine_hash(seed, tool.name.size());
+                seed = combine_hash(seed, tool.description.size());
+                seed = combine_hash(seed, tool.result.summary.size());
+                seed = combine_hash(seed, static_cast<std::size_t>(tool.result.truncated));
+                seed = combine_hash(seed, static_cast<std::size_t>(tool.auto_approved));
+                seed = combine_hash(seed, static_cast<std::size_t>(tool.status));
+                if (tool.result.exit_code.has_value()) {
+                    seed = combine_hash(seed, static_cast<std::size_t>(*tool.result.exit_code));
+                }
+                seed = combine_hash(seed, tool.diff_preview.lines.size());
+                seed = combine_hash(
+                    seed,
+                    static_cast<std::size_t>(tool.diff_preview.hidden_line_count));
+            }
+        }
+        return seed;
+    }
+
+    float line_based_ratio(float lines, float min_ratio, float max_ratio) const {
+        const float denominator = std::max(1.0f, static_cast<float>(estimated_content_lines_));
+        return std::clamp(lines / denominator, min_ratio, max_ratio);
+    }
+
+    float wheel_step_ratio() const {
+        // Aim for ~3 visual lines per wheel notch, regardless of transcript size.
+        return line_based_ratio(3.0f, 0.0015f, 0.04f);
+    }
+
+    float arrow_step_ratio() const {
+        // Keyboard arrows should be more precise than wheel scrolling.
+        return line_based_ratio(2.0f, 0.001f, 0.03f);
+    }
+
+    float page_step_ratio() const {
+        // Page navigation targets a viewport-sized jump without skipping huge chunks.
+        return line_based_ratio(18.0f, 0.03f, 0.30f);
     }
 
     std::function<std::vector<UiMessage>()> get_messages_;
@@ -615,10 +830,8 @@ private:
 
     float scroll_pos_ = 1.0f;
     size_t last_message_count_ = 0;
-
-    static constexpr float kWheelStep  = 0.05f;
-    static constexpr float kScrollStep = 0.1f;   // arrow key step
-    static constexpr float kPageStep   = 0.5f;   // Page Up/Down step
+    int estimated_content_lines_ = 1;
+    std::size_t last_layout_fingerprint_ = 0;
 };
 
 } // namespace
@@ -754,6 +967,7 @@ RunResult run(RunOptions opts) {
     bool ui_show_context_usage = visibility_setting_enabled(config.ui_context_usage, true);
     bool ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
     bool ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
+    bool tool_output_expanded = false;
 
     // ── Tool registration ───────────────────────────────────────────────────
     auto& tool_manager = core::tools::ToolManager::get_instance();
@@ -2244,11 +2458,33 @@ RunResult run(RunOptions opts) {
             yolo_enabled = approval_mode == ApprovalMode::Yolo;
         }
         if (yolo_enabled) {
-            const std::string summary = summarize_tool_arguments(tool_name, args);
-            append_history(std::format(
-                "\n\xe2\x9a\xa0  YOLO auto-approved {}{}.\n",
-                tool_name,
-                summary.empty() ? std::string{} : std::format(" ({})", summary)));
+            {
+                std::lock_guard lock(ui_mutex);
+                // Keep YOLO approvals inside the current tool card instead of
+                // flooding the system-history stream.
+                for (auto msg_it = ui_messages.rbegin(); msg_it != ui_messages.rend(); ++msg_it) {
+                    if (msg_it->type != MessageType::Assistant || !msg_it->pending) {
+                        continue;
+                    }
+
+                    bool marked = false;
+                    for (auto tool_it = msg_it->tools.rbegin();
+                         tool_it != msg_it->tools.rend();
+                         ++tool_it) {
+                        if (tool_it->name == tool_name
+                            && tool_it->args == args
+                            && !tool_it->auto_approved) {
+                            tool_it->auto_approved = true;
+                            marked = true;
+                            break;
+                        }
+                    }
+                    if (marked) {
+                        break;
+                    }
+                }
+            }
+            screen.PostEvent(Event::Custom);
             return true;
         }
 
@@ -2803,6 +3039,8 @@ RunResult run(RunOptions opts) {
             return ConversationRenderOptions{
                 .show_timestamps = ui_show_timestamps,
                 .show_spinner    = ui_show_spinner,
+                .expand_tool_results = tool_output_expanded,
+                .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
             };
         }
@@ -3492,6 +3730,13 @@ RunResult run(RunOptions opts) {
                 : "\n\xe2\x84\xb9  Approval mode set to PROMPT: sensitive tools require confirmation.\n");
             return true;
         }
+        if (is_ctrl_o_event(event)) {  // Ctrl+O — toggle tool output expansion
+            tool_output_expanded = !tool_output_expanded;
+            append_history(tool_output_expanded
+                ? "\n\xe2\x84\xb9  Tool output view set to EXPANDED: full command output is visible.\n"
+                : "\n\xe2\x84\xb9  Tool output view set to COMPACT: long command output is collapsed.\n");
+            return true;
+        }
 
         // ── History navigation (Gemini CLI compat) ───────────────────────────
         // Ctrl+P → previous history entry
@@ -3539,11 +3784,11 @@ RunResult run(RunOptions opts) {
 
         // Page Up / Page Down also scroll history (large step).
         if (event == Event::PageUp) {
-            history_component->ScrollUp(0.5f);
+            history_component->ScrollPageUp();
             return true;
         }
         if (event == Event::PageDown) {
-            history_component->ScrollDown(0.5f);
+            history_component->ScrollPageDown();
             return true;
         }
 
@@ -3862,6 +4107,10 @@ RunResult run(RunOptions opts) {
                      + " ")
                     | bgcolor(ColorYellowDark) | color(Color::Black));
         }
+        left_items.push_back(
+            text(tool_output_expanded ? " tools:full " : " tools:compact ")
+                | bgcolor(tool_output_expanded ? Color::Blue : Color::GrayDark)
+                | color(Color::White));
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
         left_items.push_back(guardrail_el);

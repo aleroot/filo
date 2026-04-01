@@ -99,8 +99,13 @@ TEST_CASE("ClaudeSerializer - system message becomes top-level field", "[claude]
     req.model = "claude-sonnet-4-6";
     req.messages.push_back(Message{.role = "system", .content = "You are helpful."});
     req.messages.push_back(Message{.role = "user",   .content = "Hi"});
-    auto payload = AnthropicSerializer::serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("system":"You are helpful.")"));
+    const auto payload = AnthropicSerializer::serialize(req);
+
+    const auto system_pos = payload.find(R"("system":")");
+    REQUIRE(system_pos != std::string::npos);
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("system":"x-anthropic-billing-header:)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("You are helpful."));
 }
 
 TEST_CASE("ClaudeSerializer - system message is NOT in messages array", "[claude][serializer][system]") {
@@ -119,9 +124,26 @@ TEST_CASE("ClaudeSerializer - system message is NOT in messages array", "[claude
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"system")"));
 }
 
-TEST_CASE("ClaudeSerializer - no system field when no system message", "[claude][serializer][system]") {
-    REQUIRE_THAT(AnthropicSerializer::serialize(make_simple_request()),
-                 !Catch::Matchers::ContainsSubstring(R"("system":)"));
+TEST_CASE("ClaudeSerializer - system field always present with attribution marker", "[claude][serializer][system]") {
+    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("system":"x-anthropic-billing-header:)"));
+}
+
+TEST_CASE("ClaudeSerializer - existing attribution in system message is not duplicated", "[claude][serializer][system]") {
+    ChatRequest req;
+    req.model = "claude-sonnet-4-6";
+    req.messages.push_back(Message{
+        .role = "system",
+        .content = "x-anthropic-billing-header: prefilled;\n\nYou are helpful.",
+    });
+    req.messages.push_back(Message{.role = "user", .content = "Hi"});
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("system":"x-anthropic-billing-header: prefilled;)"));
+
+    const auto marker = payload.find("x-anthropic-billing-header:");
+    REQUIRE(marker != std::string::npos);
+    REQUIRE(payload.find("x-anthropic-billing-header:", marker + 1) == std::string::npos);
 }
 
 TEST_CASE("ClaudeSerializer - system message with special chars is escaped", "[claude][serializer][system]") {
