@@ -1,5 +1,6 @@
 #include "ClaudeOAuthFlow.hpp"
 #include "OpenAIOAuthFlow.hpp"
+#include "core/utils/JsonUtils.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
 #include <simdjson.h>
@@ -55,6 +56,32 @@ std::vector<std::string> default_scopes() {
     };
 }
 
+std::string base64url_encode(const unsigned char* data, std::size_t len) {
+    static constexpr char tbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((len + 2u) / 3u) * 4u);
+
+    for (std::size_t i = 0; i < len; i += 3u) {
+        const unsigned int octet_a = data[i];
+        const unsigned int octet_b = (i + 1u < len) ? data[i + 1u] : 0u;
+        const unsigned int octet_c = (i + 2u < len) ? data[i + 2u] : 0u;
+
+        const unsigned int triple = (octet_a << 16u) | (octet_b << 8u) | octet_c;
+        out.push_back(tbl[(triple >> 18u) & 0x3Fu]);
+        out.push_back(tbl[(triple >> 12u) & 0x3Fu]);
+        out.push_back((i + 1u < len) ? tbl[(triple >> 6u) & 0x3Fu] : '=');
+        out.push_back((i + 2u < len) ? tbl[triple & 0x3Fu] : '=');
+    }
+
+    for (char& ch : out) {
+        if (ch == '+') ch = '-';
+        else if (ch == '/') ch = '_';
+    }
+    while (!out.empty() && out.back() == '=') out.pop_back();
+    return out;
+}
+
 std::string url_encode(std::string_view s) {
     static constexpr char hex[] = "0123456789ABCDEF";
     std::string out;
@@ -74,13 +101,25 @@ std::string url_encode(std::string_view s) {
 std::string generate_random_state() {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dist(0, 61);
-    static constexpr char chars[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    std::string state;
-    state.reserve(32u);
-    for (int i = 0; i < 32; ++i) state += chars[dist(gen)];
-    return state;
+    std::uniform_int_distribution<int> dist(0, 255);
+
+    std::array<unsigned char, 32> bytes{};
+    for (auto& b : bytes) {
+        b = static_cast<unsigned char>(dist(gen));
+    }
+    return base64url_encode(bytes.data(), bytes.size());
+}
+
+std::string generate_code_verifier() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dist(0, 255);
+
+    std::array<unsigned char, 32> bytes{};
+    for (auto& b : bytes) {
+        b = static_cast<unsigned char>(dist(gen));
+    }
+    return base64url_encode(bytes.data(), bytes.size());
 }
 
 void open_browser(const std::string& url) {
@@ -174,6 +213,24 @@ std::string trim_copy(std::string_view in) {
         --end;
     }
     return std::string(in.substr(begin, end - begin));
+}
+
+std::string append_rate_limit_headers(const cpr::Response& r) {
+    std::string extra;
+    auto append_header = [&](std::string_view key) {
+        const auto it = r.header.find(std::string(key));
+        if (it == r.header.end() || it->second.empty()) return;
+        if (!extra.empty()) extra += ", ";
+        extra += std::string(key) + "=" + it->second;
+    };
+
+    append_header("Retry-After");
+    append_header("retry-after");
+    append_header("anthropic-ratelimit-unified-reset");
+    append_header("anthropic-ratelimit-unified-remaining");
+    append_header("anthropic-ratelimit-unified-requests-limit");
+
+    return extra;
 }
 
 int hex_value(unsigned char ch) {
@@ -364,20 +421,34 @@ OAuthToken ClaudeOAuthFlow::exchange_code(const std::string& code,
                                           const std::string& state) {
     const int64_t request_time = now_unix_seconds();
 
+    const std::string request_body = std::string("{")
+        + "\"grant_type\":\"authorization_code\","
+        + "\"code\":\"" + core::utils::escape_json_string(code) + "\","
+        + "\"redirect_uri\":\"" + core::utils::escape_json_string(redirect_uri) + "\","
+        + "\"client_id\":\"" + core::utils::escape_json_string(client_id_) + "\","
+        + "\"code_verifier\":\"" + core::utils::escape_json_string(code_verifier) + "\","
+        + "\"state\":\"" + core::utils::escape_json_string(state) + "\""
+        + "}";
+
     cpr::Response r = cpr::Post(
         cpr::Url{token_url_},
-        cpr::Payload{
-            {"grant_type", "authorization_code"},
-            {"code", code},
-            {"redirect_uri", redirect_uri},
-            {"client_id", client_id_},
-            {"code_verifier", code_verifier},
-            {"state", state},
-        });
+        cpr::Header{
+            {"Content-Type", "application/json"},
+            {"Accept", "application/json, text/plain, */*"},
+            {"User-Agent", "axios/1.6.8"},
+        },
+        cpr::Body{request_body},
+        cpr::Timeout{15000});
 
     if (r.status_code != 200) {
-        throw std::runtime_error("Claude token exchange failed ("
-                                 + std::to_string(r.status_code) + "): " + r.text);
+        std::string message = "Claude token exchange failed ("
+                             + std::to_string(r.status_code) + "): " + r.text;
+        if (r.status_code == 429) {
+            if (const std::string headers = append_rate_limit_headers(r); !headers.empty()) {
+                message += " [headers: " + headers + "]";
+            }
+        }
+        throw std::runtime_error(std::move(message));
     }
 
     return parse_token_response(r.text, request_time);
@@ -402,7 +473,7 @@ OAuthToken ClaudeOAuthFlow::login() {
 
     const std::string redirect_uri = "http://localhost:" + std::to_string(port) + "/callback";
     const std::string state = generate_random_state();
-    const std::string code_verifier = OpenAIOAuthFlow::generate_code_verifier();
+    const std::string code_verifier = generate_code_verifier();
     const std::string code_challenge = OpenAIOAuthFlow::compute_code_challenge(code_verifier);
     const std::string auth_url = build_auth_url(
         client_id_, redirect_uri, scopes_, state, code_challenge, auth_url_);
@@ -503,18 +574,32 @@ OAuthToken ClaudeOAuthFlow::refresh(std::string_view refresh_token) {
     }
 
     const int64_t request_time = now_unix_seconds();
+    const std::string request_body = std::string("{")
+        + "\"grant_type\":\"refresh_token\","
+        + "\"refresh_token\":\"" + core::utils::escape_json_string(refresh_token) + "\","
+        + "\"client_id\":\"" + core::utils::escape_json_string(client_id_) + "\","
+        + "\"scope\":\"" + core::utils::escape_json_string(join_scopes(scopes_)) + "\""
+        + "}";
+
     cpr::Response r = cpr::Post(
         cpr::Url{token_url_},
-        cpr::Payload{
-            {"grant_type", "refresh_token"},
-            {"refresh_token", std::string(refresh_token)},
-            {"client_id", client_id_},
-            {"scope", join_scopes(scopes_)},
-        });
+        cpr::Header{
+            {"Content-Type", "application/json"},
+            {"Accept", "application/json, text/plain, */*"},
+            {"User-Agent", "axios/1.6.8"},
+        },
+        cpr::Body{request_body},
+        cpr::Timeout{15000});
 
     if (r.status_code != 200) {
-        throw std::runtime_error("Claude token refresh failed ("
-                                 + std::to_string(r.status_code) + "): " + r.text);
+        std::string message = "Claude token refresh failed ("
+                             + std::to_string(r.status_code) + "): " + r.text;
+        if (r.status_code == 429) {
+            if (const std::string headers = append_rate_limit_headers(r); !headers.empty()) {
+                message += " [headers: " + headers + "]";
+            }
+        }
+        throw std::runtime_error(std::move(message));
     }
 
     OAuthToken token = parse_token_response(r.text, request_time);

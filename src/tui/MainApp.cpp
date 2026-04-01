@@ -2355,7 +2355,7 @@ RunResult run(RunOptions opts) {
 
     // ── Status message tracking ──────────────────────────────────────────────
     // Tracks whether an assistant turn is active (for UI state management).
-    bool assistant_turn_active = false;
+    std::atomic_bool assistant_turn_active{false};
 
     // ── Loop-break callback ──────────────────────────────────────────────────
     agent->set_loop_break_fn([&](int rounds) {
@@ -2412,6 +2412,7 @@ RunResult run(RunOptions opts) {
             agent->send_message(final_text,
                 [assistant_index,
                  &update_assistant_message,
+                 &assistant_turn_active,
                  &stream_chunk_timing_mutex,
                  &stream_chunk_last_at](const std::string& chunk) {
                     const auto now = std::chrono::steady_clock::now();
@@ -2429,7 +2430,9 @@ RunResult run(RunOptions opts) {
                     }
 
                     update_assistant_message(assistant_index, [&](UiMessage& message) {
-                        message.pending = true;
+                        if (assistant_turn_active.load(std::memory_order_relaxed)) {
+                            message.pending = true;
+                        }
                         if (message.thinking) {
                             message.thinking = false;
                             message.show_lightbulb = true;
@@ -2462,6 +2465,7 @@ RunResult run(RunOptions opts) {
                         std::lock_guard lock(stream_chunk_timing_mutex);
                         stream_chunk_last_at.erase(assistant_index);
                     }
+                    assistant_turn_active.store(false, std::memory_order_relaxed);
                     update_assistant_message(assistant_index, [&](UiMessage& message) {
                         message.pending = false;
                         message.thinking = false;
@@ -2469,8 +2473,6 @@ RunResult run(RunOptions opts) {
                             message.show_lightbulb = true;
                         }
                     });
-                    // Mark turn as complete
-                    assistant_turn_active = false;
                     // Snapshot agent state now (before the save thread runs) to
                     // avoid a race where the user types a new message and
                     // send_message() appends it to history_ before get_history()
@@ -2511,7 +2513,7 @@ RunResult run(RunOptions opts) {
                 },
                 core::agent::Agent::TurnCallbacks{
                     .on_step_begin = [assistant_index, &update_assistant_message, &assistant_turn_active]() {
-                        assistant_turn_active = true;
+                        assistant_turn_active.store(true, std::memory_order_relaxed);
                         update_assistant_message(assistant_index, [&](UiMessage& message) {
                             message.pending = true;
                             message.thinking = true;
