@@ -422,6 +422,24 @@ public:
     virtual void on_response([[maybe_unused]] const HttpResponse& response) {}
 
     /**
+     * @brief Optional protocol hook to enrich/adjust cached rate-limit state.
+     *
+     * Called after `on_response()` and before `last_rate_limit()` is consumed
+     * by `HttpLLMProvider`. Protocols can use this for provider-specific
+     * follow-up reads (for example a secondary usage endpoint) without leaking
+     * vendor logic into the generic HTTP provider.
+     *
+     * The default implementation is a no-op.
+     *
+     * @param base_url         Provider base URL configured for this protocol.
+     * @param request_headers  Headers used for the primary request (includes auth).
+     * @param response         The completed HTTP response for the primary request.
+     */
+    virtual void enrich_rate_limit([[maybe_unused]] std::string_view base_url,
+                                   [[maybe_unused]] const cpr::Header& request_headers,
+                                   [[maybe_unused]] const HttpResponse& response) {}
+
+    /**
      * @brief Format a human-readable error string for a non-2xx HTTP response.
      *
      * Called by `HttpLLMProvider` when `status_code != 200`.  The returned

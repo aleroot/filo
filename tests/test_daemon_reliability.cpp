@@ -12,11 +12,32 @@
 #include <future>
 #include <string>
 #include <thread>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
+[[nodiscard]] int current_process_id() {
+#if defined(_WIN32)
+    return static_cast<int>(_getpid());
+#else
+    return static_cast<int>(getpid());
+#endif
+}
+
 [[nodiscard]] int next_test_port() {
-    static std::atomic<int> port{19080};
+    // CTest executes each Catch2 case in a separate process.
+    // Allocate a per-process port block so concurrent daemon tests do not
+    // all start from the same base port and race on bind().
+    constexpr int kBasePort = 19080;
+    constexpr int kPortsPerProcess = 16;
+    constexpr int kProcessBuckets = 2500;
+    static const int start_port =
+        kBasePort + (current_process_id() % kProcessBuckets) * kPortsPerProcess;
+    static std::atomic<int> port{start_port};
     return port.fetch_add(1, std::memory_order_relaxed);
 }
 

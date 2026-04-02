@@ -282,7 +282,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
     auto reasoning_accum      = std::make_shared<std::string>();  // For Kimi thinking mode
 
-    provider->stream_response(request,
+    auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
          text_callback, tool_callback, done_callback, turn_callbacks](
              const core::llm::StreamChunk& chunk) {
@@ -361,6 +361,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // ── Execute tool calls ───────────────────────────────────────────
         std::thread([self, tool_calls_accum, text_callback, tool_callback, done_callback, turn_callbacks]() {
+            try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
             enum class DeniedReason {
@@ -518,9 +519,30 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // of a multi-step execution. Compaction should only happen at natural
             // conversation boundaries (pure text response, not during tool loops).
             self->step(text_callback, tool_callback, done_callback, turn_callbacks);
+            } catch (const std::exception& e) {
+                core::logging::error("Agent tool loop crashed: {}", e.what());
+                text_callback(std::string("\n[Internal tool execution error: ") + e.what() + "]");
+                done_callback();
+            } catch (...) {
+                core::logging::error("Agent tool loop crashed: unknown exception");
+                text_callback("\n[Internal tool execution error: unknown exception]");
+                done_callback();
+            }
 
         }).detach();
-    });
+    };
+
+    try {
+        provider->stream_response(request, on_stream_chunk);
+    } catch (const std::exception& e) {
+        core::logging::error("Provider threw before streaming started: {}", e.what());
+        on_stream_chunk(core::llm::StreamChunk::make_error(
+            std::string("\n[Provider startup error: ") + e.what() + "]"));
+    } catch (...) {
+        core::logging::error("Provider threw before streaming started: unknown exception");
+        on_stream_chunk(core::llm::StreamChunk::make_error(
+            "\n[Provider startup error: unknown exception]"));
+    }
 }
 
 // ---------------------------------------------------------------------------

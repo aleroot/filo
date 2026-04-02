@@ -574,22 +574,36 @@ OAuthToken ClaudeOAuthFlow::refresh(std::string_view refresh_token) {
     }
 
     const int64_t request_time = now_unix_seconds();
-    const std::string request_body = std::string("{")
-        + "\"grant_type\":\"refresh_token\","
-        + "\"refresh_token\":\"" + core::utils::escape_json_string(refresh_token) + "\","
-        + "\"client_id\":\"" + core::utils::escape_json_string(client_id_) + "\","
-        + "\"scope\":\"" + core::utils::escape_json_string(join_scopes(scopes_)) + "\""
-        + "}";
+    auto post_refresh = [&](bool include_scope) {
+        std::string request_body = std::string("{")
+            + "\"grant_type\":\"refresh_token\","
+            + "\"refresh_token\":\"" + core::utils::escape_json_string(refresh_token) + "\","
+            + "\"client_id\":\"" + core::utils::escape_json_string(client_id_) + "\"";
+        if (include_scope) {
+            request_body += ",\"scope\":\""
+                + core::utils::escape_json_string(join_scopes(scopes_)) + "\"";
+        }
+        request_body += "}";
 
-    cpr::Response r = cpr::Post(
-        cpr::Url{token_url_},
-        cpr::Header{
-            {"Content-Type", "application/json"},
-            {"Accept", "application/json, text/plain, */*"},
-            {"User-Agent", "axios/1.6.8"},
-        },
-        cpr::Body{request_body},
-        cpr::Timeout{15000});
+        return cpr::Post(
+            cpr::Url{token_url_},
+            cpr::Header{
+                {"Content-Type", "application/json"},
+                {"Accept", "application/json, text/plain, */*"},
+                {"User-Agent", "axios/1.6.8"},
+            },
+            cpr::Body{request_body},
+            cpr::Timeout{15000});
+    };
+
+    cpr::Response r = post_refresh(true);
+    if (r.status_code == 400
+        && r.text.find("invalid_scope") != std::string::npos) {
+        // OAuth 2.0 allows omitting scope on refresh; the server then reuses
+        // the originally granted scopes. This avoids hard failures when one of
+        // our default scopes is no longer accepted by the provider.
+        r = post_refresh(false);
+    }
 
     if (r.status_code != 200) {
         std::string message = "Claude token refresh failed ("

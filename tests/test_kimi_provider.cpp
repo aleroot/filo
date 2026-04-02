@@ -645,6 +645,30 @@ TEST_CASE("KimiProtocol on_response - extracts unified utilization and retry-aft
     REQUIRE(info.is_rate_limited);
 }
 
+TEST_CASE("KimiProtocol on_response - keeps zero-utilization unified windows", "[kimi][rate_limit]") {
+    KimiProtocol protocol;
+    cpr::Header headers;
+    headers["x-ratelimit-unified-5h-utilization"] = "0";
+    headers["x-ratelimit-unified-7d-utilization"] = "0.00";
+
+    protocol.on_response(HttpResponse{200, "{}", headers});
+    const auto info = protocol.last_rate_limit();
+
+    auto find_window = [&](std::string_view label) -> std::optional<float> {
+        for (const auto& w : info.usage_windows) {
+            if (w.label == label) return w.utilization;
+        }
+        return std::nullopt;
+    };
+
+    const auto five_hour = find_window("5h");
+    const auto seven_day = find_window("7d");
+    REQUIRE(five_hour.has_value());
+    REQUIRE(seven_day.has_value());
+    REQUIRE(*five_hour == Catch::Approx(0.0f));
+    REQUIRE(*seven_day == Catch::Approx(0.0f));
+}
+
 TEST_CASE("KimiProtocol on_response - parses case-insensitive headers and defaults missing remaining", "[kimi][rate_limit]") {
     KimiProtocol protocol;
     cpr::Header headers;

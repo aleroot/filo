@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,16 @@ private:
     std::atomic<int> calls_{0};
 };
 
+class ThrowingProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)>) override {
+        throw std::runtime_error(
+            "Claude token refresh failed (400): {\"error\":\"invalid_scope\"}");
+    }
+};
+
 } // namespace
 
 TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][permission]") {
@@ -102,4 +113,42 @@ TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][per
     REQUIRE(history[3].role == "tool");
     REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
     REQUIRE_THAT(history[3].content, Catch::Matchers::ContainsSubstring("skipped after a previous denial"));
+}
+
+TEST_CASE("Agent turns provider startup exceptions into terminal assistant errors",
+          "[agent][error]") {
+    auto provider = std::make_shared<ThrowingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    std::string streamed_text;
+
+    REQUIRE_NOTHROW(agent->send_message(
+        "Hello",
+        [&](const std::string& chunk) { streamed_text += chunk; },
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        }));
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&]() { return done; }));
+    }
+
+    REQUIRE_THAT(streamed_text, Catch::Matchers::ContainsSubstring("Provider startup error"));
+    REQUIRE_THAT(streamed_text, Catch::Matchers::ContainsSubstring("invalid_scope"));
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 2);
+    REQUIRE(history[0].role == "user");
+    REQUIRE(history[1].role == "assistant");
+    REQUIRE_THAT(history[1].content, Catch::Matchers::ContainsSubstring("invalid_scope"));
 }

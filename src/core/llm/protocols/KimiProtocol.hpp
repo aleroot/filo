@@ -142,6 +142,17 @@ public:
     void on_response(const HttpResponse& response) override;
 
     /**
+     * @brief Optionally enrich rate-limit state via Kimi Code `/usages`.
+     *
+     * Mirrors kimi-cli behavior: when running against Kimi Code managed
+     * endpoints (`.../coding/...`), fetches package window usage data when
+     * header-derived quota info is incomplete.
+     */
+    void enrich_rate_limit(std::string_view base_url,
+                           const cpr::Header& request_headers,
+                           const HttpResponse& response) override;
+
+    /**
      * @brief Returns the rate-limit info captured by the most recent response.
      */
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override {

@@ -3,15 +3,58 @@
 #include "protocols/ApiProtocol.hpp"
 #include "../logging/Logger.hpp"
 #include <cpr/cpr.h>
-#include <thread>
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <format>
 #include <random>
+#include <thread>
 
 namespace core::llm {
 
 namespace {
+    struct PreparedHttpStreamRequest {
+        std::unique_ptr<protocols::ApiProtocolBase> protocol;
+        std::string                                  payload;
+        std::string                                  delimiter;
+        std::string                                  url;
+        cpr::Header                                  headers;
+    };
+
+    [[nodiscard]] PreparedHttpStreamRequest prepare_stream_request(
+        const ChatRequest& request,
+        std::string_view default_model,
+        std::string_view base_url,
+        const std::shared_ptr<core::auth::ICredentialSource>& cred_source,
+        const protocols::ApiProtocolBase& protocol_template) {
+        PreparedHttpStreamRequest prepared;
+        prepared.protocol = protocol_template.clone();
+
+        core::auth::AuthInfo auth;
+        if (cred_source) {
+            auth = cred_source->get_auth();
+        }
+
+        ChatRequest req = request;
+        if (req.model.empty()) {
+            req.model = std::string(default_model);
+        }
+        prepared.protocol->prepare_request(req);
+        prepared.payload = prepared.protocol->serialize(req);
+        prepared.delimiter = std::string(prepared.protocol->event_delimiter());
+        prepared.url = prepared.protocol->build_url(base_url, req.model);
+        bool first = (prepared.url.find('?') == std::string::npos);
+        for (const auto& [k, v] : auth.query_params) {
+            prepared.url += (first ? '?' : '&');
+            prepared.url += k + '=' + v;
+            first = false;
+        }
+
+        prepared.headers = prepared.protocol->build_headers(auth);
+        prepared.headers["Accept"] = "text/event-stream";
+        return prepared;
+    }
+
     // Exponential backoff with jitter for rate limit retries.
     // Uses retry_after from the API when available (429/529 responses).
     void backoff_sleep_with_retry_after(int attempt, int retry_after_seconds) {
@@ -128,175 +171,183 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         return;
     }
 
-    // Resolve per-call state upfront (may block for token refresh).
-    auto protocol = protocol_->clone();
-    auto auth     = cred_source_->get_auth();
+    PreparedHttpStreamRequest prepared;
 
-    ChatRequest req = request;
-    if (req.model.empty()) {
-        req.model = default_model_;
+    try {
+        prepared = prepare_stream_request(request, default_model_, base_url_, cred_source_, *protocol_);
+    } catch (const std::exception& e) {
+        core::logging::error("[HTTP] Failed to start request: {}", e.what());
+        callback(StreamChunk::make_error(std::string("\n[Failed to start request: ") + e.what() + "]"));
+        return;
+    } catch (...) {
+        core::logging::error("[HTTP] Failed to start request: unknown exception");
+        callback(StreamChunk::make_error("\n[Failed to start request: unknown exception]"));
+        return;
     }
-    protocol->prepare_request(req);
-
-    std::string payload   = protocol->serialize(req);
-    std::string delimiter = std::string(protocol->event_delimiter());
-
-    // Build URL; append AuthInfo::query_params (e.g. Gemini ?key=…).
-    std::string url = protocol->build_url(base_url_, req.model);
-    {
-        bool first = (url.find('?') == std::string::npos);
-        for (const auto& [k, v] : auth.query_params) {
-            url += (first ? '?' : '&');
-            url += k + '=' + v;
-            first = false;
-        }
-    }
-
-    cpr::Header headers = protocol->build_headers(auth);
-    headers["Accept"]   = "text/event-stream";
 
     std::thread([self      = std::move(keepalive),
-                 url       = std::move(url),
-                 headers   = std::move(headers),
-                 payload   = std::move(payload),
-                 delimiter = std::move(delimiter),
-                 protocol  = std::move(protocol),
+                 url       = std::move(prepared.url),
+                 headers   = std::move(prepared.headers),
+                 payload   = std::move(prepared.payload),
+                 delimiter = std::move(prepared.delimiter),
+                 protocol  = std::move(prepared.protocol),
                  callback] () mutable {
 
-        // Retry configuration for 429/529 errors
-        constexpr int max_retries = 3;
-        int retry_attempt = 0;
-        int retry_after_seconds = 0;
-        bool attempted_auth_recovery = false;
-        
-        while (true) {
-            std::string buffer;
-            bool        done_signalled = false;
+        try {
+            // Retry configuration for 429/529 errors
+            constexpr int max_retries = 3;
+            int retry_attempt = 0;
+            int retry_after_seconds = 0;
+            bool attempted_auth_recovery = false;
 
-            // Prevent stale usage from previous requests if this request does not
-            // emit a usage chunk.
-            self->set_last_usage(0, 0);
+            while (true) {
+                std::string buffer;
+                bool        done_signalled = false;
 
-            cpr::Session session;
-            session.SetUrl(cpr::Url{url});
-            session.SetHeader(headers);
-            session.SetBody(cpr::Body{payload});
+                // Prevent stale usage from previous requests if this request does not
+                // emit a usage chunk.
+                self->set_last_usage(0, 0);
 
-            session.SetWriteCallback(cpr::WriteCallback([self, &buffer, &done_signalled, &delimiter, &protocol, callback] (std::string_view data, intptr_t /*userdata*/) -> bool {
-                buffer.append(data);
+                cpr::Session session;
+                session.SetUrl(cpr::Url{url});
+                session.SetHeader(headers);
+                session.SetBody(cpr::Body{payload});
 
-                std::size_t pos = 0;
-                while ((pos = buffer.find(delimiter)) != std::string::npos) {
-                    std::string event = buffer.substr(0, pos);
-                    buffer.erase(0, pos + delimiter.size());
+                session.SetWriteCallback(cpr::WriteCallback([self, &buffer, &done_signalled, &delimiter, &protocol, callback] (std::string_view data, intptr_t /*userdata*/) -> bool {
+                    buffer.append(data);
 
-                    if (event.empty()) continue;
-                    protocols::ParseResult result = protocol->parse_event(event);
+                    std::size_t pos = 0;
+                    while ((pos = buffer.find(delimiter)) != std::string::npos) {
+                        std::string event = buffer.substr(0, pos);
+                        buffer.erase(0, pos + delimiter.size());
 
-                    // Forward all content/tool chunks produced by this event.
-                    bool has_terminal_chunk = false;
-                    for (auto& chunk : result.chunks) {
-                        callback(chunk);
-                        if (chunk.is_final) has_terminal_chunk = true;
+                        if (event.empty()) continue;
+                        protocols::ParseResult result = protocol->parse_event(event);
+
+                        // Forward all content/tool chunks produced by this event.
+                        bool has_terminal_chunk = false;
+                        for (auto& chunk : result.chunks) {
+                            callback(chunk);
+                            if (chunk.is_final) has_terminal_chunk = true;
+                        }
+
+                        if (has_terminal_chunk) {
+                            done_signalled = true;
+                            return true;
+                        }
+
+                        // Report token usage before emitting the final chunk so that
+                        // get_last_usage() is populated before callers observe is_final.
+                        if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
+                            self->set_last_usage(result.prompt_tokens, result.completion_tokens);
+                        }
+
+                        if (result.done) {
+                            done_signalled = true;
+                            callback(StreamChunk::make_final());
+                            return true;
+                        }
                     }
+                    return true;
+                }));
 
-                    if (has_terminal_chunk) {
-                        done_signalled = true;
-                        return true;
-                    }
+                cpr::Response r = session.Post();
+                if (r.status_code != 200) {
+                    core::logging::debug("[HTTP] Response status={}, body={}", r.status_code, r.text.substr(0, 500));
+                }
 
-                    // Report token usage before emitting the final chunk so that
-                    // get_last_usage() is populated before callers observe is_final.
-                    if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
-                        self->set_last_usage(result.prompt_tokens, result.completion_tokens);
-                    }
+                // Fire the response lifecycle hook.  Protocols use this to extract
+                // rate-limit headers, update metrics, or prepare any per-response state.
+                // The hook is a no-op for protocols that do not override it.
+                const protocols::HttpResponse http_resp{
+                    static_cast<int>(r.status_code), r.text, r.header};
+                protocol->on_response(http_resp);
 
-                    if (result.done) {
-                        done_signalled = true;
-                        callback(StreamChunk::make_final());
-                        return true;
+                // Attempt one forced credential refresh on auth failures (OAuth providers).
+                const bool oauth_revoked_403 =
+                    (r.status_code == 403
+                     && r.text.find("OAuth token has been revoked") != std::string::npos);
+                if ((r.status_code == 401 || oauth_revoked_403)
+                    && !attempted_auth_recovery
+                    && self->cred_source_) {
+                    attempted_auth_recovery = true;
+                    if (self->cred_source_->refresh_on_auth_failure()) {
+                        try {
+                            auto refreshed_auth = self->cred_source_->get_auth();
+                            headers = protocol->build_headers(refreshed_auth);
+                            headers["Accept"] = "text/event-stream";
+                            callback(StreamChunk::make_error(
+                                "\n[Authentication expired. Retrying with refreshed credentials...]"));
+                            continue;
+                        } catch (const std::exception& e) {
+                            core::logging::warn("Credential refresh retry failed: {}", e.what());
+                        }
                     }
                 }
-                return true;
-            }));
 
-            cpr::Response r = session.Post();
-            if (r.status_code != 200) {
-                core::logging::debug("[HTTP] Response status={}, body={}", r.status_code, r.text.substr(0, 500));
-            }
+                // Check if we should retry (429 rate limit or 529 overloaded)
+                if (r.status_code == 429 || r.status_code == 529) {
+                    if (retry_attempt < max_retries) {
+                        retry_attempt++;
 
-            // Fire the response lifecycle hook.  Protocols use this to extract
-            // rate-limit headers, update metrics, or prepare any per-response state.
-            // The hook is a no-op for protocols that do not override it.
-            const protocols::HttpResponse http_resp{
-                static_cast<int>(r.status_code), r.text, r.header};
-            protocol->on_response(http_resp);
+                        // Extract retry_after from the protocol's rate limit info
+                        // For Anthropic, this comes from the retry-after header
+                        auto rate_limit_info = protocol->last_rate_limit();
+                        retry_after_seconds = rate_limit_info.retry_after;
 
-            // Attempt one forced credential refresh on auth failures (OAuth providers).
-            const bool oauth_revoked_403 =
-                (r.status_code == 403
-                 && r.text.find("OAuth token has been revoked") != std::string::npos);
-            if ((r.status_code == 401 || oauth_revoked_403)
-                && !attempted_auth_recovery
-                && self->cred_source_) {
-                attempted_auth_recovery = true;
-                if (self->cred_source_->refresh_on_auth_failure()) {
-                    try {
-                        auto refreshed_auth = self->cred_source_->get_auth();
-                        headers = protocol->build_headers(refreshed_auth);
-                        headers["Accept"] = "text/event-stream";
-                        callback(StreamChunk::make_error(
-                            "\n[Authentication expired. Retrying with refreshed credentials...]"));
-                        continue;
-                    } catch (const std::exception& e) {
-                        core::logging::warn("Credential refresh retry failed: {}", e.what());
+                        // Notify user of retry
+                        if (retry_after_seconds > 0) {
+                            callback(StreamChunk::make_error(
+                                std::format("\n[Rate limited ({}). Retrying in {}s (attempt {}/{})...]",
+                                           r.status_code, retry_after_seconds, retry_attempt, max_retries)));
+                        } else {
+                            callback(StreamChunk::make_error(
+                                std::format("\n[Server overloaded ({}). Retrying with backoff (attempt {}/{})...]",
+                                           r.status_code, retry_attempt, max_retries)));
+                        }
+
+                        backoff_sleep_with_retry_after(retry_attempt, retry_after_seconds);
+                        continue;  // Retry the request
                     }
                 }
-            }
 
-            // Check if we should retry (429 rate limit or 529 overloaded)
-            if (r.status_code == 429 || r.status_code == 529) {
-                if (retry_attempt < max_retries) {
-                    retry_attempt++;
-                    
-                    // Extract retry_after from the protocol's rate limit info
-                    // For Anthropic, this comes from the retry-after header
-                    auto rate_limit_info = protocol->last_rate_limit();
-                    retry_after_seconds = rate_limit_info.retry_after;
-                    
-                    // Notify user of retry
-                    if (retry_after_seconds > 0) {
-                        callback(StreamChunk::make_error(
-                            std::format("\n[Rate limited ({}). Retrying in {}s (attempt {}/{})...]",
-                                       r.status_code, retry_after_seconds, retry_attempt, max_retries)));
-                    } else {
-                        callback(StreamChunk::make_error(
-                            std::format("\n[Server overloaded ({}). Retrying with backoff (attempt {}/{})...]",
-                                       r.status_code, retry_attempt, max_retries)));
-                    }
-                    
-                    backoff_sleep_with_retry_after(retry_attempt, retry_after_seconds);
-                    continue;  // Retry the request
+                try {
+                    protocol->enrich_rate_limit(self->base_url_, headers, http_resp);
+                } catch (const std::exception& e) {
+                    core::logging::warn(
+                        "Protocol '{}' rate-limit enrichment failed: {}",
+                        protocol->name(),
+                        e.what());
+                } catch (...) {
+                    core::logging::warn(
+                        "Protocol '{}' rate-limit enrichment failed: unknown exception",
+                        protocol->name());
                 }
-            }
 
-            // Update cached rate limit info for status bar display
-            // This works for any protocol that implements on_response() to populate rate limits
-            auto rate_limit_info = protocol->last_rate_limit();
-            self->set_last_rate_limit_info(rate_limit_info);
+                auto rate_limit_info = protocol->last_rate_limit();
 
-            if (r.error.code != cpr::ErrorCode::OK) {
-                core::logging::error("[HTTP] Connection error: {}", r.error.message);
-                callback(StreamChunk::make_error(
-                    "\n[Error connecting to " + url + ": " + r.error.message + "]"));
-            } else if (r.status_code != 200) {
-                core::logging::error("[HTTP] Error status={}", r.status_code);
-                callback(StreamChunk::make_error(
-                    "\n" + protocol->format_error_message(http_resp)));
-            } else if (!done_signalled) {
-                callback(StreamChunk::make_final());
+                // Update cached rate limit info for status bar display.
+                self->set_last_rate_limit_info(rate_limit_info);
+
+                if (r.error.code != cpr::ErrorCode::OK) {
+                    core::logging::error("[HTTP] Connection error: {}", r.error.message);
+                    callback(StreamChunk::make_error(
+                        "\n[Error connecting to " + url + ": " + r.error.message + "]"));
+                } else if (r.status_code != 200) {
+                    core::logging::error("[HTTP] Error status={}", r.status_code);
+                    callback(StreamChunk::make_error(
+                        "\n" + protocol->format_error_message(http_resp)));
+                } else if (!done_signalled) {
+                    callback(StreamChunk::make_final());
+                }
+                break;  // Exit retry loop on non-retryable response
             }
-            break;  // Exit retry loop on non-retryable response
+        } catch (const std::exception& e) {
+            core::logging::error("[HTTP] Unhandled streaming exception: {}", e.what());
+            callback(StreamChunk::make_error(std::string("\n[Internal streaming error: ") + e.what() + "]"));
+        } catch (...) {
+            core::logging::error("[HTTP] Unhandled streaming exception: unknown exception");
+            callback(StreamChunk::make_error("\n[Internal streaming error: unknown exception]"));
         }
     }).detach();
 }
