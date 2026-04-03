@@ -1,4 +1,5 @@
 #include "FileSearchTool.hpp"
+#include "ToolArgumentUtils.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -20,7 +21,7 @@ ToolDefinition FileSearchTool::get_definition() const {
             "Returns up to 100 matching file paths.",
         .parameters = {
             {"pattern", "string", "Filename glob pattern to match (e.g. '*.cpp', 'CMakeLists.txt').", true},
-            {"dir",     "string", "Root directory to search. Defaults to '.'.", false}
+            {"path",    "string", "Root directory to search. Defaults to '.'.", false}
         },
         .annotations = {
             .read_only_hint  = true,
@@ -35,18 +36,23 @@ std::string FileSearchTool::execute(const std::string& json_args) {
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS)
         return R"({"error":"Invalid JSON arguments provided to file_search."})";
 
+    if (const auto validation_error =
+            detail::validate_object_arguments(doc, "file_search", {"pattern", "path"})) {
+        return *validation_error;
+    }
+
     std::string_view pattern_view;
     if (doc["pattern"].get(pattern_view) != simdjson::SUCCESS)
         return R"({"error":"Missing 'pattern' argument."})";
 
     std::string dir = ".";
     std::string_view dir_view;
-    if (doc["dir"].get(dir_view) == simdjson::SUCCESS)
+    if (doc["path"].get(dir_view) == simdjson::SUCCESS)
         dir = std::string(dir_view);
 
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec))
-        return R"({"error":"'dir' does not exist or is not a directory."})";
+        return R"({"error":"'path' does not exist or is not a directory."})";
 
     constexpr size_t kMaxResults = 100;
     core::utils::JsonWriter w(512);

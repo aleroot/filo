@@ -97,7 +97,7 @@ TEST_CASE("make_tool_group_message — with tools", "[tui][conversation][factory
 // ============================================================================
 
 TEST_CASE("make_tool_activity — basic creation", "[tui][conversation][tool]") {
-    auto tool = make_tool_activity("tc-123", "read_file", R"({"file_path":"main.cpp"})", "main.cpp");
+    auto tool = make_tool_activity("tc-123", "read_file", R"({"path":"main.cpp"})", "main.cpp");
     REQUIRE(tool.id == "tc-123");
     REQUIRE(tool.name == "read_file");
     REQUIRE(tool.description == "main.cpp");
@@ -179,14 +179,14 @@ TEST_CASE("summarize_tool_arguments — move_file", "[tui][conversation][args]")
 
 TEST_CASE("summarize_tool_arguments — grep_search", "[tui][conversation][args]") {
     const auto result = summarize_tool_arguments(
-        "grep_search", R"({"pattern":"foo","dir_path":"/src"})");
+        "grep_search", R"({"pattern":"foo","path":"/src"})");
     REQUIRE_THAT(result, ContainsSubstring("foo"));
     REQUIRE_THAT(result, ContainsSubstring("/src"));
 }
 
 TEST_CASE("summarize_tool_arguments — read_file", "[tui][conversation][args]") {
     const auto result = summarize_tool_arguments(
-        "read_file", R"({"file_path":"/home/user/README.md"})");
+        "read_file", R"({"path":"/home/user/README.md"})");
     REQUIRE_THAT(result, ContainsSubstring("README.md"));
 }
 
@@ -279,6 +279,37 @@ TEST_CASE("thinking_pulse_frame — cycles through all frames", "[tui][conversat
     REQUIRE(thinking_pulse_frame(0) == thinking_pulse_frame(6));
     REQUIRE(thinking_pulse_frame(1) == thinking_pulse_frame(7));
     REQUIRE_FALSE(thinking_pulse_frame(3).empty());
+}
+
+TEST_CASE("message_uses_animation — assistant thinking requires spinner", "[tui][conversation][animation]") {
+    auto message = make_assistant_message("", "", true);
+    REQUIRE(message_uses_animation(message, true));
+    REQUIRE_FALSE(message_uses_animation(message, false));
+}
+
+TEST_CASE("message_uses_animation — executing tool animates", "[tui][conversation][animation]") {
+    UiMessage message = make_tool_group_message({});
+    auto tool = make_tool_activity("id", "grep_search", "{}", "search");
+    tool.status = ToolActivity::Status::Executing;
+    message.tools.push_back(std::move(tool));
+    REQUIRE(message_uses_animation(message, true));
+}
+
+TEST_CASE("message_uses_animation — completed tool without pending assistant is static", "[tui][conversation][animation]") {
+    auto message = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("id", "read_file", "{}", "file");
+    tool.status = ToolActivity::Status::Succeeded;
+    message.tools.push_back(std::move(tool));
+    REQUIRE_FALSE(message_uses_animation(message, true));
+}
+
+TEST_CASE("conversation_uses_animation — any animated message enables ticker", "[tui][conversation][animation]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_system_message("idle"));
+    auto assistant = make_assistant_message("", "", true);
+    messages.push_back(std::move(assistant));
+    REQUIRE(conversation_uses_animation(messages, true));
+    REQUIRE_FALSE(conversation_uses_animation(messages, false));
 }
 
 // ============================================================================
@@ -540,7 +571,7 @@ TEST_CASE("make_allow_key — run_terminal_command extracts program", "[tui][con
 }
 
 TEST_CASE("make_allow_key — other tools use name", "[tui][conversation][allow]") {
-    auto key = make_allow_key("read_file", R"({"file_path":"test.cpp"})");
+    auto key = make_allow_key("read_file", R"({"path":"test.cpp"})");
     REQUIRE(key == "read_file");
 }
 

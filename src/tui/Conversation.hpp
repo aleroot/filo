@@ -236,6 +236,8 @@ const ToolActivity* find_tool_activity(const UiMessage& message, std::string_vie
 // Animation frames
 std::string_view thinking_pulse_frame(std::size_t tick);
 std::string_view spinner_frame(std::size_t tick);
+bool message_uses_animation(const UiMessage& message, bool show_spinner);
+bool conversation_uses_animation(const std::vector<UiMessage>& messages, bool show_spinner);
 
 // ============================================================================
 // Rendering Functions

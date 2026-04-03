@@ -1074,6 +1074,8 @@ RunResult run(RunOptions opts) {
     });
     TerminalInputModeGuard terminal_input_mode_guard;
     std::atomic<std::size_t> animation_tick = 0;
+    std::mutex animation_mutex;
+    std::condition_variable animation_cv;
     core::commands::CommandExecutor cmd_executor;
     // Load layered prompt skills (global → project-local) before describe_commands()
     // so skill commands appear in the autocomplete index.
@@ -1414,6 +1416,7 @@ RunResult run(RunOptions opts) {
                 ui_messages.push_back(make_system_message(message));
             }
         }
+        animation_cv.notify_one();
         agent->clear_history();
         core::budget::BudgetTracker::get_instance().reset_session();
         core::session::SessionStats::get_instance().reset();
@@ -1431,6 +1434,11 @@ RunResult run(RunOptions opts) {
             ui_messages.back().text += str;
         }
         screen.PostEvent(Event::Custom);
+    };
+
+    auto has_active_animation = [&]() -> bool {
+        std::lock_guard lock(ui_mutex);
+        return conversation_uses_animation(ui_messages, ui_show_spinner);
     };
 
     auto refresh_conversation_search_locked = [&]() {
@@ -1690,6 +1698,7 @@ RunResult run(RunOptions opts) {
             }
             refresh_status_labels();
         }
+        animation_cv.notify_one();
         screen.PostEvent(Event::Custom);
     };
 
@@ -2336,6 +2345,7 @@ RunResult run(RunOptions opts) {
         ui_show_context_usage = visibility_setting_enabled(after.ui_context_usage, true);
         ui_show_timestamps = visibility_setting_enabled(after.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(after.ui_spinner, true);
+        animation_cv.notify_one();
 
         return std::nullopt;
     };
@@ -2614,6 +2624,7 @@ RunResult run(RunOptions opts) {
 
             updater(message);
         }
+        animation_cv.notify_one();
         screen.PostEvent(Event::Custom);
     };
 
@@ -2629,6 +2640,7 @@ RunResult run(RunOptions opts) {
             ui_messages.push_back(make_assistant_message("", "", true));
             assistant_index = ui_messages.size() - 1;
         }
+        animation_cv.notify_one();
 
         std::string final_text =
             core::context::expand_mentions(text, std::filesystem::current_path());
@@ -4143,7 +4155,20 @@ RunResult run(RunOptions opts) {
     std::atomic<bool> animation_running = true;
     std::thread animation_thread([&]() {
         while (animation_running.load(std::memory_order_relaxed)) {
+            {
+                std::unique_lock lock(animation_mutex);
+                animation_cv.wait(lock, [&]() {
+                    return !animation_running.load(std::memory_order_relaxed)
+                        || has_active_animation();
+                });
+            }
+            if (!animation_running.load(std::memory_order_relaxed)) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(kAnimationIntervalMs));
+            if (!has_active_animation()) {
+                continue;
+            }
             animation_tick.fetch_add(1, std::memory_order_relaxed);
             screen.PostEvent(Event::Custom);
         }
@@ -4152,6 +4177,7 @@ RunResult run(RunOptions opts) {
     screen.Loop(renderer);
 
     animation_running.store(false, std::memory_order_relaxed);
+    animation_cv.notify_one();
     if (animation_thread.joinable()) {
         animation_thread.join();
     }

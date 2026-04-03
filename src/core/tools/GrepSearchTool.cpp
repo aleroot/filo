@@ -1,4 +1,5 @@
 #include "GrepSearchTool.hpp"
+#include "ToolArgumentUtils.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -10,7 +11,6 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
-#include <cstring>
 
 // POSIX mmap for zero-copy file reading
 #include <sys/mman.h>
@@ -127,7 +127,7 @@ ToolDefinition GrepSearchTool::get_definition() const {
             "Returns up to 100 matching lines, each with 'path', 'line' (1-based), and 'text'.",
         .parameters = {
             {"pattern",         "string", "ECMAScript regex pattern to search for.", true},
-            {"dir_path",        "string", "Root directory to search. Defaults to '.'.", false},
+            {"path",            "string", "Root directory to search. Defaults to '.'.", false},
             {"include_pattern", "string", "Glob pattern to restrict searched files by name (e.g. '*.cpp').", false}
         },
         .annotations = {
@@ -143,13 +143,18 @@ std::string GrepSearchTool::execute(const std::string& json_args) {
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS)
         return R"({"error":"Invalid JSON arguments provided to grep_search."})";
 
+    if (const auto validation_error =
+            detail::validate_object_arguments(doc, "grep_search", {"pattern", "path", "include_pattern"})) {
+        return *validation_error;
+    }
+
     std::string_view pattern;
     if (doc["pattern"].get(pattern) != simdjson::SUCCESS)
         return R"({"error":"Missing 'pattern' argument."})";
 
     std::string dir_path = ".";
     std::string_view dir_v;
-    if (doc["dir_path"].get(dir_v) == simdjson::SUCCESS)
+    if (doc["path"].get(dir_v) == simdjson::SUCCESS)
         dir_path = std::string(dir_v);
 
     std::string_view include_v;
@@ -157,7 +162,7 @@ std::string GrepSearchTool::execute(const std::string& json_args) {
 
     std::error_code ec;
     if (!std::filesystem::is_directory(dir_path, ec))
-        return R"({"error":"'dir_path' does not exist or is not a directory."})";
+        return R"({"error":"'path' does not exist or is not a directory."})";
 
     // ── Regex or literal? ───────────────────────────────────────────────────
     const bool literal_mode = is_literal_pattern(pattern);

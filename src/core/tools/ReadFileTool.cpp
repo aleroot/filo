@@ -1,4 +1,5 @@
 #include "ReadFileTool.hpp"
+#include "ToolArgumentUtils.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
@@ -18,7 +19,7 @@ ToolDefinition ReadFileTool::get_definition() const {
             "Returns the file text in the 'content' field. "
             "Files larger than 1 MB are automatically truncated.",
         .parameters = {
-            {"file_path",   "string",  "The absolute or relative path to the file to read.", true},
+            {"path",        "string",  "The absolute or relative path to the file to read.", true},
             {"offset_line", "integer", "First line to return (1-based). Defaults to 1.",      false},
             {"limit_lines", "integer", "Maximum number of lines to return. Defaults to all.", false}
         },
@@ -38,9 +39,14 @@ std::string ReadFileTool::execute(const std::string& json_args) {
         return "{\"error\": \"Invalid JSON arguments provided to read_file.\"}";
     }
 
+    if (const auto validation_error =
+            detail::validate_object_arguments(doc, "read_file", {"path", "offset_line", "limit_lines"})) {
+        return *validation_error;
+    }
+
     std::string_view file_path;
-    if (doc["file_path"].get(file_path)) {
-        return "{\"error\": \"Missing 'file_path' argument.\"}";
+    if (doc["path"].get(file_path)) {
+        return "{\"error\": \"Missing or invalid 'path' argument.\"}";
     }
 
     int64_t offset_line = 1;

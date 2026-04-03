@@ -1,4 +1,5 @@
 #include "ListDirectoryTool.hpp"
+#include "ToolArgumentUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -15,7 +16,7 @@ ToolDefinition ListDirectoryTool::get_definition() const {
             "Lists the immediate contents of a directory. "
             "Returns a JSON array of objects with 'type' ('file' or 'dir') and 'name' fields.",
         .parameters = {
-            {"dir_path", "string", "Absolute or relative path to the directory to list.", true}
+            {"path", "string", "Absolute or relative path to the directory to list.", true}
         },
         .annotations = {
             .read_only_hint  = true,
@@ -33,9 +34,14 @@ std::string ListDirectoryTool::execute(const std::string& json_args) {
         return "{\"error\": \"Invalid JSON arguments provided to list_directory.\"}";
     }
 
+    if (const auto validation_error =
+            detail::validate_object_arguments(doc, "list_directory", {"path"})) {
+        return *validation_error;
+    }
+
     std::string_view dir_path;
-    if (doc["dir_path"].get(dir_path)) {
-        return "{\"error\": \"Missing 'dir_path' argument.\"}";
+    if (doc["path"].get(dir_path)) {
+        return "{\"error\": \"Missing or invalid 'path' argument.\"}";
     }
 
     std::string path_str(dir_path);

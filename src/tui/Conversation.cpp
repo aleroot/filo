@@ -9,9 +9,7 @@
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <chrono>
-#include <cstdint>
 #include <format>
 #include <limits>
 #include <optional>
@@ -482,6 +480,28 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview) {
     return vbox(std::move(rows)) | border;
 }
 
+struct AssistantActivityState {
+    bool has_executing_tools = false;
+    bool has_completed_tools = false;
+    bool show_thinking = false;
+};
+
+AssistantActivityState compute_assistant_activity_state(const UiMessage& msg) {
+    AssistantActivityState state;
+    for (const auto& tool : msg.tools) {
+        if (tool.status == ToolActivity::Status::Executing) {
+            state.has_executing_tools = true;
+        } else if (tool.status == ToolActivity::Status::Succeeded ||
+                   tool.status == ToolActivity::Status::Failed) {
+            state.has_completed_tools = true;
+        }
+    }
+
+    state.show_thinking = msg.thinking ||
+        (msg.pending && state.has_completed_tools && !state.has_executing_tools);
+    return state;
+}
+
 Element render_tool_item(const ToolActivity& tool,
                          std::size_t tick,
                          const ConversationRenderOptions& options,
@@ -737,20 +757,7 @@ Element render_assistant_message(const UiMessage& msg,
                                  std::size_t tick,
                                  const ConversationRenderOptions& options) {
     std::vector<Element> elements;
-
-    bool has_executing_tools = false;
-    bool has_completed_tools = false;
-    for (const auto& tool : msg.tools) {
-        if (tool.status == ToolActivity::Status::Executing) {
-            has_executing_tools = true;
-        } else if (tool.status == ToolActivity::Status::Succeeded ||
-                   tool.status == ToolActivity::Status::Failed) {
-            has_completed_tools = true;
-        }
-    }
-    
-    bool show_thinking = msg.thinking ||
-                         (msg.pending && has_completed_tools && !has_executing_tools);
+    const auto activity = compute_assistant_activity_state(msg);
 
     // Show waiting state when empty and not thinking
     if (msg.text.empty() && msg.tools.empty() && !msg.thinking) {
@@ -780,9 +787,9 @@ Element render_assistant_message(const UiMessage& msg,
 
     // Render thinking indicator at the BOTTOM (current activity)
     // This ensures users see what's happening NOW when looking at the bottom
-    if (show_thinking) {
+    if (activity.show_thinking) {
         std::string label;
-        if (has_completed_tools && !has_executing_tools && !msg.thinking) {
+        if (activity.has_completed_tools && !activity.has_executing_tools && !msg.thinking) {
             label = options.show_spinner
                 ? std::string("Analyzing") + std::string(thinking_pulse_frame(tick))
                 : std::string("Analyzing...");
@@ -1029,6 +1036,30 @@ std::string_view spinner_frame(std::size_t tick) {
     return frames[tick % frames.size()];
 }
 
+bool message_uses_animation(const UiMessage& message, bool show_spinner) {
+    if (!show_spinner) {
+        return false;
+    }
+
+    for (const auto& tool : message.tools) {
+        if (tool.status == ToolActivity::Status::Executing) {
+            return true;
+        }
+    }
+
+    if (message.type == MessageType::Assistant) {
+        return compute_assistant_activity_state(message).show_thinking;
+    }
+
+    return false;
+}
+
+bool conversation_uses_animation(const std::vector<UiMessage>& messages, bool show_spinner) {
+    return std::any_of(messages.begin(), messages.end(), [show_spinner](const UiMessage& message) {
+        return message_uses_animation(message, show_spinner);
+    });
+}
+
 // ============================================================================
 // Tool Summary Functions
 // ============================================================================
@@ -1055,7 +1086,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
 
     if (tool_name == "grep_search") {
         const auto pattern = extract_string_field(object, {"pattern"});
-        const auto dir = extract_string_field(object, {"dir_path"});
+        const auto dir = extract_string_field(object, {"path"});
         if (pattern && dir) {
             return truncate_preview(*pattern + " in " + *dir);
         }

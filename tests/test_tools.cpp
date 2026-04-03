@@ -44,7 +44,7 @@ TEST_CASE("WriteFileTool and ReadFileTool", "[tools]") {
     REQUIRE(std::filesystem::exists(test_file));
 
     ReadFileTool read_tool;
-    std::string read_args = "{\"file_path\": \"" + test_file + "\"}";
+    std::string read_args = "{\"path\": \"" + test_file + "\"}";
     std::string read_res = read_tool.execute(read_args);
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Hello, Filo!\\nThis is a test."));
 
@@ -59,7 +59,7 @@ TEST_CASE("ReadFileTool offset_line and limit_lines", "[tools]") {
     }
 
     ReadFileTool tool;
-    auto res = tool.execute("{\"file_path\": \"" + path + "\", \"offset_line\": 3, \"limit_lines\": 3}");
+    auto res = tool.execute("{\"path\": \"" + path + "\", \"offset_line\": 3, \"limit_lines\": 3}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("line3"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("line5"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("line2"));
@@ -70,7 +70,13 @@ TEST_CASE("ReadFileTool offset_line and limit_lines", "[tools]") {
 
 TEST_CASE("ReadFileTool returns error for missing file", "[tools]") {
     ReadFileTool tool;
-    auto res = tool.execute("{\"file_path\": \"nonexistent_xyz_99999.txt\"}");
+    auto res = tool.execute("{\"path\": \"nonexistent_xyz_99999.txt\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+}
+
+TEST_CASE("ReadFileTool returns error for unexpected arguments", "[tools]") {
+    ReadFileTool tool;
+    auto res = tool.execute(R"({"file_path":"legacy.txt"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -136,11 +142,17 @@ TEST_CASE("ListDirectoryTool lists files", "[tools]") {
     std::ofstream(test_dir + "/file2.txt") << "test";
 
     ListDirectoryTool tool;
-    auto res = tool.execute("{\"dir_path\": \"" + test_dir + "\"}");
+    auto res = tool.execute("{\"path\": \"" + test_dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("file1.txt"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("file2.txt"));
 
     std::filesystem::remove_all(test_dir);
+}
+
+TEST_CASE("ListDirectoryTool returns error for unexpected arguments", "[tools]") {
+    ListDirectoryTool tool;
+    auto res = tool.execute(R"({"dir_path":"."})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +444,7 @@ TEST_CASE("FileSearchTool finds files by glob pattern", "[tools]") {
     { std::ofstream(dir + "/bar.cpp") << "x"; }
 
     FileSearchTool tool;
-    auto res = tool.execute("{\"pattern\": \"*.txt\", \"dir\": \"" + dir + "\"}");
+    auto res = tool.execute("{\"pattern\": \"*.txt\", \"path\": \"" + dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("foo.txt"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("bar.cpp"));
 
@@ -442,6 +454,12 @@ TEST_CASE("FileSearchTool finds files by glob pattern", "[tools]") {
 TEST_CASE("FileSearchTool returns error for missing pattern", "[tools]") {
     FileSearchTool tool;
     auto res = tool.execute(R"({})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+}
+
+TEST_CASE("FileSearchTool returns error for unexpected arguments", "[tools]") {
+    FileSearchTool tool;
+    auto res = tool.execute(R"({"pattern":"*.txt","dir":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -456,7 +474,7 @@ TEST_CASE("GrepSearchTool finds pattern in files", "[tools]") {
     { std::ofstream(dir + "/b.txt") << "other content\n"; }
 
     GrepSearchTool tool;
-    auto res = tool.execute("{\"pattern\": \"hello\", \"dir_path\": \"" + dir + "\"}");
+    auto res = tool.execute("{\"pattern\": \"hello\", \"path\": \"" + dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("hello"));
 
     std::filesystem::remove_all(dir);
@@ -468,7 +486,7 @@ TEST_CASE("GrepSearchTool returns empty matches for no match", "[tools]") {
     { std::ofstream(dir + "/a.txt") << "nothing here\n"; }
 
     GrepSearchTool tool;
-    auto res = tool.execute("{\"pattern\": \"xyznotfound9999\", \"dir_path\": \"" + dir + "\"}");
+    auto res = tool.execute("{\"pattern\": \"xyznotfound9999\", \"path\": \"" + dir + "\"}");
     // Should return success (empty matches), not error
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("matches"));
 
@@ -581,7 +599,7 @@ TEST_CASE("FileSearchTool finds nested files", "[tools]") {
     { std::ofstream(dir + "/other.cpp") << "x"; }
 
     FileSearchTool tool;
-    auto res = tool.execute("{\"pattern\": \"*.txt\", \"dir\": \"" + dir + "\"}");
+    auto res = tool.execute("{\"pattern\": \"*.txt\", \"path\": \"" + dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("top.txt"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("deep.txt"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("other.cpp"));
@@ -596,7 +614,7 @@ TEST_CASE("FileSearchTool skips .git directory", "[tools]") {
     { std::ofstream(dir + "/.git/hidden.txt") << "x"; }
 
     FileSearchTool tool;
-    auto res = tool.execute("{\"pattern\": \"*.txt\", \"dir\": \"" + dir + "\"}");
+    auto res = tool.execute("{\"pattern\": \"*.txt\", \"path\": \"" + dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("real.txt"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("hidden.txt"));
 
@@ -605,7 +623,7 @@ TEST_CASE("FileSearchTool skips .git directory", "[tools]") {
 
 TEST_CASE("FileSearchTool returns error for bad dir", "[tools]") {
     FileSearchTool tool;
-    auto res = tool.execute(R"({"pattern":"*.txt","dir":"/nonexistent_filo_xyz_99"})");
+    auto res = tool.execute(R"({"pattern":"*.txt","path":"/nonexistent_filo_xyz_99"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -621,7 +639,7 @@ TEST_CASE("GrepSearchTool finds pattern with include filter", "[tools]") {
 
     GrepSearchTool tool;
     auto res = tool.execute(
-        "{\"pattern\": \"hello\", \"dir_path\": \"" + dir + "\","
+        "{\"pattern\": \"hello\", \"path\": \"" + dir + "\","
         "\"include_pattern\": \"*.cpp\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("a.cpp"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("b.txt"));
@@ -631,7 +649,7 @@ TEST_CASE("GrepSearchTool finds pattern with include filter", "[tools]") {
 
 TEST_CASE("GrepSearchTool returns error for invalid regex", "[tools]") {
     GrepSearchTool tool;
-    auto res = tool.execute(R"({"pattern":"[invalid","dir_path":"."})");
+    auto res = tool.execute(R"({"pattern":"[invalid","path":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -643,7 +661,7 @@ TEST_CASE("GrepSearchTool returns error for invalid regex", "[tools]") {
 static std::string grep_args(const std::string& pattern,
                               const std::string& dir,
                               const std::string& include = "") {
-    std::string s = "{\"pattern\":\"" + pattern + "\",\"dir_path\":\"" + dir + "\"";
+    std::string s = "{\"pattern\":\"" + pattern + "\",\"path\":\"" + dir + "\"";
     if (!include.empty()) s += ",\"include_pattern\":\"" + include + "\"";
     s += "}";
     return s;
@@ -805,7 +823,7 @@ TEST_CASE("GrepSearchTool ECMAScript does not support inline (?i) flag", "[tools
     // std::regex with ECMAScript dialect does not recognise (?i) — it returns
     // an error rather than silently matching wrong results.
     GrepSearchTool tool;
-    auto res = tool.execute(R"({"pattern":"(?i)hello","dir_path":"."})");
+    auto res = tool.execute(R"({"pattern":"(?i)hello","path":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -990,7 +1008,7 @@ TEST_CASE("GrepSearchTool on empty file does not crash", "[tools][grep]") {
 
 TEST_CASE("GrepSearchTool returns error for missing pattern argument", "[tools][grep]") {
     GrepSearchTool tool;
-    auto res = tool.execute(R"({"dir_path":"."})");
+    auto res = tool.execute(R"({"path":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
@@ -1000,9 +1018,15 @@ TEST_CASE("GrepSearchTool returns error for invalid JSON", "[tools][grep]") {
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
-TEST_CASE("GrepSearchTool returns error for non-existent dir_path", "[tools][grep]") {
+TEST_CASE("GrepSearchTool returns error for non-existent path", "[tools][grep]") {
     GrepSearchTool tool;
-    auto res = tool.execute(R"({"pattern":"x","dir_path":"/nonexistent_filo_grep_xyz_99"})");
+    auto res = tool.execute(R"({"pattern":"x","path":"/nonexistent_filo_grep_xyz_99"})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+}
+
+TEST_CASE("GrepSearchTool returns error for unexpected arguments", "[tools][grep]") {
+    GrepSearchTool tool;
+    auto res = tool.execute(R"({"pattern":"x","dir_path":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 

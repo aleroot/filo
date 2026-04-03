@@ -221,7 +221,7 @@ TEST_CASE("GrokSerializer - assistant message with tool_calls uses null content"
     tc.id = "call_xyz";
     tc.type = "function";
     tc.function.name = "read_file";
-    tc.function.arguments = R"({"file_path": "/etc/hosts"})";
+    tc.function.arguments = R"({"path": "/etc/hosts"})";
     assistant_msg.tool_calls = {tc};
     req.messages.push_back(assistant_msg);
 
@@ -270,7 +270,7 @@ TEST_CASE("GrokSerializer - optional parameters excluded from required array", "
     def.description = "Search for a pattern";
     def.parameters = {
         {.name = "pattern",  .type = "string", .description = "Regex", .required = true},
-        {.name = "dir_path", .type = "string", .description = "Root", .required = false}
+        {.name = "path", .type = "string", .description = "Root", .required = false}
     };
     Tool tool;
     tool.type = "function";
@@ -280,8 +280,8 @@ TEST_CASE("GrokSerializer - optional parameters excluded from required array", "
     auto payload = GrokProtocol{}.serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("required":["pattern"])"));
     // Optional param is in properties but NOT in required
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("dir_path"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("required":["pattern","dir_path"])"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("path"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("required":["pattern","path"])"));
 }
 
 TEST_CASE("GrokSerializer - multiple tools serialized without trailing comma", "[grok][serializer][tools]") {
@@ -290,7 +290,7 @@ TEST_CASE("GrokSerializer - multiple tools serialized without trailing comma", "
         core::tools::ToolDefinition def;
         def.name = name;
         def.description = "A file tool";
-        def.parameters.push_back({.name = "file_path", .type = "string", .description = "Path", .required = true});
+        def.parameters.push_back({.name = "path", .type = "string", .description = "Path", .required = true});
         Tool tool;
         tool.type = "function";
         tool.function = def;

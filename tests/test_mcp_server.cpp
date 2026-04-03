@@ -280,7 +280,7 @@ TEST_CASE("MCP tools/call run_terminal_command returns exit_code", "[mcp]") {
 
 TEST_CASE("MCP tools/call list_directory on current directory succeeds", "[mcp]") {
     auto resp = disp().dispatch(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_directory","arguments":{"dir_path":"."}},"id":11})");
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_directory","arguments":{"path":"."}},"id":11})");
 
     REQUIRE_THAT(resp, ContainsSubstring(R"("id":11)"));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
@@ -292,7 +292,7 @@ TEST_CASE("MCP tools/call read_file returns file contents", "[mcp]") {
     { std::ofstream ofs(path); ofs << "hello from lampo"; }
 
     std::string req =
-        std::string(R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"file_path":")") +
+        std::string(R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":")") +
         path + R"("}},"id":12})";
     auto resp = disp().dispatch(req);
 
@@ -557,7 +557,7 @@ TEST_CASE("MCP tools/call read_file with offset_line and limit_lines", "[mcp]") 
         ofs << "line1\nline2\nline3\nline4\nline5\n";
     }
 
-    std::string req = R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"file_path":")" + path + R"(","offset_line":2,"limit_lines":2}},"id":70})";
+    std::string req = R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":")" + path + R"(","offset_line":2,"limit_lines":2}},"id":70})";
     auto resp = disp().dispatch(req);
 
     REQUIRE_THAT(resp, ContainsSubstring("line2"));
@@ -575,7 +575,7 @@ TEST_CASE("MCP tools/call read_file with offset_line and limit_lines", "[mcp]") 
 
 TEST_CASE("MCP tools/call grep_search with single-quote in pattern is safe", "[mcp]") {
     auto resp = disp().dispatch(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_search","arguments":{"pattern":"it's","dir_path":"."}},"id":80})");
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_search","arguments":{"pattern":"it's","path":"."}},"id":80})");
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
