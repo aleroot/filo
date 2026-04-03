@@ -203,6 +203,8 @@ public:
 
     // Human-readable summary for the status bar.
     // Format: "↑12.3k ↓4.5k  $0.018"
+    // ↑ = prompt tokens going UP to the LLM (input/sent)
+    // ↓ = completion tokens coming DOWN from the LLM (output/received)
     [[nodiscard]] std::string status_string() const {
         auto total = session_total();
         if (!total.has_data()) return "";

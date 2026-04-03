@@ -331,6 +331,14 @@ bool is_ctrl_v_event(const Event& event) {
     return is_ctrl_letter_event(event, 'v');
 }
 
+bool is_ctrl_l_event(const Event& event) {
+    return is_ctrl_letter_event(event, 'l');
+}
+
+bool is_ctrl_c_event(const Event& event) {
+    return is_ctrl_letter_event(event, 'c');
+}
+
 bool command_exists_in_path(std::string_view command) {
     if (command.empty()) {
         return false;
@@ -1259,8 +1267,7 @@ RunResult run(RunOptions opts) {
             return std::string{};
         }
         return std::format(
-            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}\n{}"
-            "Type a message, press F2 to switch modes, or /help.\n",
+            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}\n{}",
             active_provider_name,
             active_model_name.empty() ? "<provider default>" : active_model_name,
             core::mcp::McpConnectionManager::get_instance().connected_count(),
@@ -2948,9 +2955,11 @@ RunResult run(RunOptions opts) {
                         stream_chunk_last_at.erase(assistant_index);
                     }
                     assistant_turn_active.store(false, std::memory_order_relaxed);
+                    const bool was_stopped = agent->is_stop_requested();
                     update_assistant_message(assistant_index, [&](UiMessage& message) {
                         message.pending = false;
                         message.thinking = false;
+                        message.stopped = was_stopped;
                         if (!message.text.empty() || !message.tools.empty()) {
                             message.show_lightbulb = true;
                         }
@@ -3961,7 +3970,7 @@ RunResult run(RunOptions opts) {
             agent->set_mode(modes[current_mode_idx].first);
             return true;
         }
-        if (event == Event::Character('\x0C')) {  // Ctrl+L — clear screen
+        if (is_ctrl_l_event(event)) {  // Ctrl+L — clear screen (same as /clear)
             clear_screen();
             return true;
         }
@@ -4008,6 +4017,10 @@ RunResult run(RunOptions opts) {
             append_history(tool_output_expanded
                 ? "\n\xe2\x84\xb9  Tool output view set to EXPANDED: full command output is visible.\n"
                 : "\n\xe2\x84\xb9  Tool output view set to COMPACT: long command output is collapsed.\n");
+            return true;
+        }
+        if (is_ctrl_c_event(event)) {  // Ctrl+C — stop current LLM generation
+            agent->request_stop();
             return true;
         }
 
@@ -4285,11 +4298,48 @@ RunResult run(RunOptions opts) {
             return !rate_limit_info.usage_windows.empty();
         }();
 
-        auto right_el = ctrl_d_warning_active()
-            ? text(" Press Ctrl+D again to quit ") | color(Color::GrayDark)
-            : ((ui_show_context_usage && ctx_pct >= 0)
-                ? text(std::format(" {}% Context Left ", ctx_pct)) | color(ctx_color)
-                : text(""));
+        // Format current working directory for display
+        auto format_cwd = []() -> std::string {
+            try {
+                auto cwd = std::filesystem::current_path();
+                const char* home = std::getenv("HOME");
+                if (home != nullptr) {
+                    std::string cwd_str = cwd.string();
+                    std::string home_str(home);
+                    if (cwd_str == home_str) {
+                        return "~";
+                    }
+                    if (cwd_str.starts_with(home_str + "/")) {
+                        return "~" + cwd_str.substr(home_str.length());
+                    }
+                }
+                return cwd.string();
+            } catch (...) {
+                return "";
+            }
+        };
+
+        // Build right side of status bar: current folder + context left
+        Element right_el;
+        if (ctrl_d_warning_active()) {
+            right_el = text(" Press Ctrl+D again to quit ") | color(Color::GrayDark);
+        } else {
+            Elements right_items;
+            // Current working directory
+            std::string cwd_str = format_cwd();
+            if (!cwd_str.empty()) {
+                right_items.push_back(text(" " + cwd_str + " ") | color(Color::GrayLight));
+            }
+            // Context left percentage
+            if (ui_show_context_usage && ctx_pct >= 0) {
+                right_items.push_back(text(std::format(" {}% Context Left ", ctx_pct)) | color(ctx_color));
+            }
+            if (right_items.empty()) {
+                right_el = text("");
+            } else {
+                right_el = hbox(std::move(right_items));
+            }
+        }
 
         // For subscription users: show token counts but hide the dollar cost
         // (window utilization replaces it in rate_limit_el).
@@ -4302,6 +4352,7 @@ RunResult run(RunOptions opts) {
                         if (n >= 1000) return std::format("{:.1f}k", n / 1000.0);
                         return std::to_string(n);
                     };
+                    // ↑ = prompt tokens going UP to the LLM, ↓ = completion tokens coming DOWN from LLM
                     budget_el = text("  \xe2\x86\x91" + fmt_k(total.prompt_tokens)
                                      + " \xe2\x86\x93" + fmt_k(total.completion_tokens))
                                 | color(Color::GrayLight);

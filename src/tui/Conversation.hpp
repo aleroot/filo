@@ -93,6 +93,7 @@ struct UiMessage {
     bool pending = false;                // Still streaming/receiving
     bool thinking = false;               // Show thinking indicator
     bool show_lightbulb = false;         // Show 💡 prefix
+    bool stopped = false;                // Generation was stopped by user
     
     // ToolGroup-specific
     bool tool_group_border_top = true;

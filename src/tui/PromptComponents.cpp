@@ -645,11 +645,6 @@ Element render_startup_banner_panel(std::string_view provider_name,
         rows.push_back(paragraph(line) | color(Color::GrayLight) | xflex);
     }
 
-    rows.push_back(
-        paragraph("Type a message, press F2 to switch modes, or /help.")
-            | color(Color::GrayLight)
-            | xflex);
-
     return vbox(std::move(rows)) | UiBorder(ColorYellowDark);
 }
 
@@ -657,10 +652,7 @@ Element render_default_prompt_panel(Element input_line,
                                     std::string_view) {
     return vbox({
         separator(),
-        hbox({
-            make_prompt_box(std::move(input_line), ColorYellowBright) | xflex,
-            text("  @ files  / commands") | color(Color::GrayDark)
-        })
+        make_prompt_box(std::move(input_line), ColorYellowBright) | xflex
     });
 }
 

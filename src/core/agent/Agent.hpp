@@ -25,6 +25,19 @@ public:
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
           core::tools::ToolManager& skill_manager);
 
+    // -----------------------------------------------------------------------
+    // Cancellation support — stop the current LLM response generation.
+    // -----------------------------------------------------------------------
+
+    /// Request cancellation of the current streaming response.
+    void request_stop();
+
+    /// Check if a stop has been requested.
+    [[nodiscard]] bool is_stop_requested() const;
+
+    /// Clear the stop flag (call before starting a new turn).
+    void clear_stop_request();
+
     void set_mode(const std::string& mode);
 
     // Set the permission profile (Interactive, Standard, Autonomous).
@@ -125,6 +138,9 @@ private:
     // Model name for budget tracking
     std::string active_model_;
     std::string context_summary_;
+
+    // Cancellation support
+    std::atomic<bool> stop_requested_{false};
 };
 
 } // namespace core::agent

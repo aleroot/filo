@@ -190,10 +190,13 @@ TEST_CASE("BudgetTracker — status_string is human-readable", "[tier1][budget]"
     // Empty → empty string
     REQUIRE(bt.status_string().empty());
 
+    // Record: 1500 prompt tokens (sent TO LLM), 750 completion tokens (received FROM LLM)
     bt.record({ .prompt_tokens = 1500, .completion_tokens = 750 });
     std::string s = bt.status_string();
-    REQUIRE_THAT(s, Catch::Matchers::ContainsSubstring("↑"));
-    REQUIRE_THAT(s, Catch::Matchers::ContainsSubstring("↓"));
+    // ↑ = prompt tokens going UP to the cloud/LLM
+    // ↓ = completion tokens coming DOWN from the cloud/LLM
+    REQUIRE_THAT(s, Catch::Matchers::ContainsSubstring("↑1.5k"));
+    REQUIRE_THAT(s, Catch::Matchers::ContainsSubstring("↓750"));
 
     bt.reset_session();
 }

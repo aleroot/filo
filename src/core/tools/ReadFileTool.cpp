@@ -6,6 +6,47 @@
 #include <sstream>
 #include <format>
 #include <filesystem>
+#include <cerrno>
+#include <system_error>
+
+namespace {
+
+[[nodiscard]] std::string resolve_for_display(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto abs = std::filesystem::absolute(path, ec);
+    if (ec) return path.string();
+    return abs.lexically_normal().string();
+}
+
+[[nodiscard]] std::string file_type_name(std::filesystem::file_type type) {
+    switch (type) {
+        case std::filesystem::file_type::none:       return "none";
+        case std::filesystem::file_type::not_found:  return "not_found";
+        case std::filesystem::file_type::regular:    return "regular";
+        case std::filesystem::file_type::directory:  return "directory";
+        case std::filesystem::file_type::symlink:    return "symlink";
+        case std::filesystem::file_type::block:      return "block_device";
+        case std::filesystem::file_type::character:  return "character_device";
+        case std::filesystem::file_type::fifo:       return "fifo";
+        case std::filesystem::file_type::socket:     return "socket";
+        case std::filesystem::file_type::unknown:    return "unknown";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string format_read_error(
+    std::string_view requested_path,
+    std::string_view resolved_path,
+    std::string_view reason)
+{
+    return std::format(
+        "{{\"error\":\"Cannot read path '{}': {} (resolved: '{}')\"}}",
+        core::utils::escape_json_string(requested_path),
+        core::utils::escape_json_string(reason),
+        core::utils::escape_json_string(resolved_path));
+}
+
+} // namespace
 
 namespace core::tools {
 
@@ -57,16 +98,37 @@ std::string ReadFileTool::execute(const std::string& json_args) {
     if (!doc["limit_lines"].get(tmp) && tmp >= 1) limit_lines = tmp;
 
     std::string path_str(file_path);
-    std::error_code ec;
-    if (!std::filesystem::exists(path_str, ec) || !std::filesystem::is_regular_file(path_str, ec)) {
-        return std::format("{{\"error\": \"File not found or is not a regular file: {}\"}}",
-                           core::utils::escape_json_string(path_str));
+    const std::filesystem::path requested_path(path_str);
+    const std::string resolved_path = resolve_for_display(requested_path);
+
+    std::error_code status_ec;
+    const auto status = std::filesystem::status(requested_path, status_ec);
+    if (status_ec) {
+        if (status_ec == std::errc::no_such_file_or_directory
+            || status_ec == std::errc::not_a_directory) {
+            return format_read_error(path_str, resolved_path, "path does not exist");
+        }
+        return format_read_error(path_str, resolved_path,
+                                 std::format("failed to inspect path ({})", status_ec.message()));
+    }
+    if (status.type() == std::filesystem::file_type::not_found) {
+        return format_read_error(path_str, resolved_path, "path does not exist");
+    }
+    if (status.type() != std::filesystem::file_type::regular) {
+        return format_read_error(path_str, resolved_path,
+                                 std::format("path is not a regular file (type={})",
+                                             file_type_name(status.type())));
     }
 
+    errno = 0;
     std::ifstream ifs(path_str);
+    const int open_errno = errno;
     if (!ifs) {
-        return std::format("{{\"error\": \"Failed to open file for reading: {}\"}}",
-                           core::utils::escape_json_string(path_str));
+        const std::string reason = open_errno != 0
+            ? std::error_code(open_errno, std::generic_category()).message()
+            : std::string("unknown reason");
+        return format_read_error(path_str, resolved_path,
+                                 std::format("failed to open file for reading ({})", reason));
     }
 
     std::string content;

@@ -805,6 +805,15 @@ Element render_assistant_message(const UiMessage& msg,
             }));
     }
 
+    // Show stopped indicator if generation was interrupted
+    if (msg.stopped) {
+        elements.push_back(
+            hbox({
+                ftxui::text("⏹ ") | ftxui::color(Color::Red),
+                ftxui::text("Stopped") | ftxui::color(Color::Red) | dim
+            }));
+    }
+
     return vbox(std::move(elements));
 }
 

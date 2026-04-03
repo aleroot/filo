@@ -72,6 +72,8 @@ TEST_CASE("ReadFileTool returns error for missing file", "[tools]") {
     ReadFileTool tool;
     auto res = tool.execute("{\"path\": \"nonexistent_xyz_99999.txt\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("path does not exist"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("resolved"));
 }
 
 TEST_CASE("ReadFileTool returns error for unexpected arguments", "[tools]") {
@@ -79,6 +81,132 @@ TEST_CASE("ReadFileTool returns error for unexpected arguments", "[tools]") {
     auto res = tool.execute(R"({"file_path":"legacy.txt"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
+
+TEST_CASE("ReadFileTool reports directory path as non-regular file", "[tools]") {
+    const std::string dir = "test_artifact_read_dir";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    ReadFileTool tool;
+    const auto res = tool.execute("{\"path\": \"" + dir + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("not a regular file"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("type=directory"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("ReadFileTool reads files that contain spaces in their path", "[tools]") {
+    const std::string path = "test artifact read with spaces.txt";
+    {
+        std::ofstream ofs(path);
+        ofs << "space_path_ok";
+    }
+
+    ReadFileTool tool;
+    const auto res = tool.execute("{\"path\": \"" + path + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("space_path_ok"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("ReadFileTool handles dot-segment paths", "[tools]") {
+    const std::string root = "test_artifact_read_segments";
+    const std::string file = root + "/nested/value.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root + "/nested");
+    {
+        std::ofstream ofs(file);
+        ofs << "dot_segments_ok";
+    }
+
+    ReadFileTool tool;
+    const std::string path_with_segments = root + "/nested/../nested/./value.txt";
+    const auto res = tool.execute("{\"path\": \"" + path_with_segments + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("dot_segments_ok"));
+
+    std::filesystem::remove_all(root);
+}
+
+#ifndef _WIN32
+TEST_CASE("ReadFileTool reports open failure details for unreadable file", "[tools]") {
+    if (getuid() == 0) {
+        SKIP("Running as root - permission checks don't apply");
+    }
+
+    const std::string path = "test_artifact_read_no_perms.txt";
+    {
+        std::ofstream ofs(path);
+        ofs << "secret";
+    }
+
+    std::error_code ec;
+    std::filesystem::permissions(path, std::filesystem::perms::none,
+                                 std::filesystem::perm_options::replace, ec);
+    if (ec) {
+        std::filesystem::remove(path);
+        SKIP("Permission changes are unavailable in this environment");
+    }
+
+    ReadFileTool tool;
+    const auto res = tool.execute("{\"path\": \"" + path + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("failed to open file for reading"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("resolved"));
+
+    std::filesystem::permissions(path,
+                                 std::filesystem::perms::owner_read
+                                   | std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, ec);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("ReadFileTool follows symlink to regular file", "[tools]") {
+    const std::string target = "test_artifact_read_target.txt";
+    const std::string link = "test_artifact_read_link.txt";
+    std::filesystem::remove(target);
+    std::filesystem::remove(link);
+    {
+        std::ofstream ofs(target);
+        ofs << "symlink_ok";
+    }
+
+    std::error_code ec;
+    std::filesystem::create_symlink(target, link, ec);
+    if (ec) {
+        std::filesystem::remove(target);
+        std::filesystem::remove(link);
+        SKIP("Symlink creation is unavailable in this environment");
+    }
+
+    ReadFileTool tool;
+    const auto res = tool.execute("{\"path\": \"" + link + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("symlink_ok"));
+
+    std::filesystem::remove(link);
+    std::filesystem::remove(target);
+}
+
+TEST_CASE("ReadFileTool reports missing target for dangling symlink", "[tools]") {
+    const std::string link = "test_artifact_read_dangling_link.txt";
+    std::filesystem::remove(link);
+
+    std::error_code ec;
+    std::filesystem::create_symlink("missing_target_for_filo_read_tool.txt", link, ec);
+    if (ec) {
+        std::filesystem::remove(link);
+        SKIP("Symlink creation is unavailable in this environment");
+    }
+
+    ReadFileTool tool;
+    const auto res = tool.execute("{\"path\": \"" + link + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("path does not exist"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("resolved"));
+
+    std::filesystem::remove(link);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // ReplaceTool

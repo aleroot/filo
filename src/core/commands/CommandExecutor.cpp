@@ -843,7 +843,7 @@ public:
             "  Ctrl+X   Open current input in external editor ($VISUAL/$EDITOR)\n"
             "  Ctrl+D   Delete char right; when input is empty press twice to quit\n"
             "  Ctrl+L   Clear the screen\n"
-            "  Ctrl+C   Interrupt / quit\n"
+            "  Ctrl+C   Stop / quit\n"
         );
     }
 };

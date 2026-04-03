@@ -254,6 +254,8 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
 
     // ── Totals ───────────────────────────────────────────────────────────────
     hr(kML, kMR);
+    // ↑ (\xe2\x86\x91) = prompt tokens going UP to the LLM (input/sent)
+    // ↓ (\xe2\x86\x93) = completion tokens coming DOWN from the LLM (output/received)
     row("Total tokens",
         std::format("\xe2\x86\x91{}  \xe2\x86\x93{}  total {}",
             fmt_tokens(total.prompt_tokens),

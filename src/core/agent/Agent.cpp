@@ -50,6 +50,22 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
 }
 
 // ---------------------------------------------------------------------------
+// Cancellation support
+// ---------------------------------------------------------------------------
+
+void Agent::request_stop() {
+    stop_requested_.store(true, std::memory_order_release);
+}
+
+bool Agent::is_stop_requested() const {
+    return stop_requested_.load(std::memory_order_acquire);
+}
+
+void Agent::clear_stop_request() {
+    stop_requested_.store(false, std::memory_order_release);
+}
+
+// ---------------------------------------------------------------------------
 // Mode management
 // ---------------------------------------------------------------------------
 
@@ -224,6 +240,7 @@ void Agent::send_message(const std::string& user_message,
                          std::function<void(const std::string&, const std::string&)> tool_callback,
                          std::function<void()> done_callback,
                          TurnCallbacks turn_callbacks) {
+    clear_stop_request();  // Reset cancellation flag for new turn
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
@@ -286,6 +303,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
          text_callback, tool_callback, done_callback, turn_callbacks](
              const core::llm::StreamChunk& chunk) {
+
+        // Check for cancellation request
+        if (self->is_stop_requested() && !chunk.is_final) {
+            // Emit a final chunk to signal completion
+            text_callback("\n\n[Generation stopped by user]\n");
+            done_callback();
+            return;
+        }
 
         // Accumulate actual response content
         if (!chunk.content.empty()) {
@@ -350,6 +375,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         {
             std::lock_guard lock(self->history_mutex_);
             self->history_.push_back(asst_msg);
+        }
+
+        // Check if we were stopped - if so, don't proceed to tool execution
+        if (self->is_stop_requested()) {
+            done_callback();
+            return;
         }
 
         if (tool_calls_accum->empty()) {

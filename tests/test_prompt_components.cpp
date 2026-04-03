@@ -95,7 +95,6 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("provider: local-qwen"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("model: qwen2.5-coder-7b-instruct-q4_k_m"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MCP servers: 0"));
-    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Type a message, press F2 to switch modes, or /help."));
 }
 
 // ============================================================================
