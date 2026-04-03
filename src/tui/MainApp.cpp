@@ -67,6 +67,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <system_error>
+#include <cstdint>
+#include <cstdio>
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
@@ -323,6 +325,238 @@ bool is_ctrl_d_event(const Event& event) {
 
 bool is_ctrl_f_event(const Event& event) {
     return is_ctrl_letter_event(event, 'f');
+}
+
+bool is_ctrl_v_event(const Event& event) {
+    return is_ctrl_letter_event(event, 'v');
+}
+
+bool command_exists_in_path(std::string_view command) {
+    if (command.empty()) {
+        return false;
+    }
+#if defined(_WIN32)
+    (void)command;
+    return false;
+#else
+    const std::string probe =
+        "command -v " + shell_single_quote(command) + " >/dev/null 2>&1";
+    return std::system(probe.c_str()) == 0;
+#endif
+}
+
+std::optional<std::string> run_command_capture(std::string_view command) {
+#if defined(_WIN32)
+    (void)command;
+    return std::nullopt;
+#else
+    std::array<char, 4096> buffer{};
+    std::string output;
+    const std::string command_str(command);
+    FILE* pipe = ::popen(command_str.c_str(), "r");
+    if (pipe == nullptr) {
+        return std::nullopt;
+    }
+
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output += buffer.data();
+    }
+
+    const int status = ::pclose(pipe);
+    if (status != 0) {
+        return std::nullopt;
+    }
+    return output;
+#endif
+}
+
+bool file_has_content(const std::filesystem::path& path) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return false;
+    }
+    return std::filesystem::file_size(path, ec) > 0;
+}
+
+void remove_file_if_exists(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+std::filesystem::path make_clipboard_output_path(std::string_view extension) {
+    static std::atomic<std::uint64_t> counter{0};
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::uint64_t seq = counter.fetch_add(1, std::memory_order_relaxed);
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "filo" / "clipboard";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir / std::format("clipboard-{}-{}.{}", now_ms, seq, extension);
+}
+
+bool write_clipboard_image_with_command(const std::string& command,
+                                        const std::filesystem::path& out_path) {
+#if defined(_WIN32)
+    (void)command;
+    (void)out_path;
+    return false;
+#else
+    const int status = std::system(command.c_str());
+    if (status != 0) {
+        remove_file_if_exists(out_path);
+        return false;
+    }
+    if (!file_has_content(out_path)) {
+        remove_file_if_exists(out_path);
+        return false;
+    }
+    return true;
+#endif
+}
+
+std::optional<std::filesystem::path> read_clipboard_image_to_temp() {
+#if defined(__APPLE__)
+    {
+        const auto path = make_clipboard_output_path("png");
+        if (command_exists_in_path("pngpaste")) {
+            const std::string cmd =
+                "pngpaste " + shell_single_quote(path.string()) + " >/dev/null 2>&1";
+            if (write_clipboard_image_with_command(cmd, path)) {
+                return path;
+            }
+        }
+    }
+    {
+        const auto path = make_clipboard_output_path("png");
+        if (command_exists_in_path("osascript")) {
+            const std::string cmd =
+                "osascript "
+                "-e " + shell_single_quote("set png_data to the clipboard as «class PNGf»") + " "
+                "-e " + shell_single_quote(
+                    std::string("set file_ref to open for access POSIX file \"")
+                    + path.string() + "\" with write permission") + " "
+                "-e " + shell_single_quote("set eof file_ref to 0") + " "
+                "-e " + shell_single_quote("write png_data to file_ref") + " "
+                "-e " + shell_single_quote("close access file_ref")
+                + " >/dev/null 2>&1";
+            if (write_clipboard_image_with_command(cmd, path)) {
+                return path;
+            }
+        }
+    }
+#endif
+
+#if defined(__linux__)
+    if (command_exists_in_path("wl-paste")) {
+        const auto types = run_command_capture("wl-paste --list-types 2>/dev/null");
+        if (types.has_value()) {
+            if (types->find("image/png") != std::string::npos) {
+                const auto path = make_clipboard_output_path("png");
+                const std::string cmd =
+                    "wl-paste --type image/png > " + shell_single_quote(path.string()) + " 2>/dev/null";
+                if (write_clipboard_image_with_command(cmd, path)) {
+                    return path;
+                }
+            }
+            if (types->find("image/jpeg") != std::string::npos) {
+                const auto path = make_clipboard_output_path("jpg");
+                const std::string cmd =
+                    "wl-paste --type image/jpeg > " + shell_single_quote(path.string()) + " 2>/dev/null";
+                if (write_clipboard_image_with_command(cmd, path)) {
+                    return path;
+                }
+            }
+        }
+    }
+
+    if (command_exists_in_path("xclip")) {
+        const auto targets =
+            run_command_capture("xclip -selection clipboard -t TARGETS -o 2>/dev/null");
+        if (targets.has_value()) {
+            if (targets->find("image/png") != std::string::npos) {
+                const auto path = make_clipboard_output_path("png");
+                const std::string cmd =
+                    "xclip -selection clipboard -t image/png -o > "
+                    + shell_single_quote(path.string()) + " 2>/dev/null";
+                if (write_clipboard_image_with_command(cmd, path)) {
+                    return path;
+                }
+            }
+            if (targets->find("image/jpeg") != std::string::npos) {
+                const auto path = make_clipboard_output_path("jpg");
+                const std::string cmd =
+                    "xclip -selection clipboard -t image/jpeg -o > "
+                    + shell_single_quote(path.string()) + " 2>/dev/null";
+                if (write_clipboard_image_with_command(cmd, path)) {
+                    return path;
+                }
+            }
+        }
+    }
+#endif
+
+    return std::nullopt;
+}
+
+std::optional<std::string> read_clipboard_text() {
+#if defined(__APPLE__)
+    if (command_exists_in_path("pbpaste")) {
+        if (auto out = run_command_capture("pbpaste 2>/dev/null"); out.has_value()) {
+            return out;
+        }
+    }
+#endif
+
+#if defined(__linux__)
+    if (command_exists_in_path("wl-paste")) {
+        if (auto out = run_command_capture("wl-paste --no-newline --type text/plain 2>/dev/null");
+            out.has_value()) {
+            return out;
+        }
+    }
+    if (command_exists_in_path("xclip")) {
+        if (auto out = run_command_capture("xclip -selection clipboard -o 2>/dev/null");
+            out.has_value()) {
+            return out;
+        }
+    }
+    if (command_exists_in_path("xsel")) {
+        if (auto out = run_command_capture("xsel --clipboard --output 2>/dev/null");
+            out.has_value()) {
+            return out;
+        }
+    }
+#endif
+
+    return std::nullopt;
+}
+
+void insert_text_at_cursor(std::string& text, int& cursor, std::string_view chunk) {
+    cursor = std::clamp(cursor, 0, static_cast<int>(text.size()));
+    text.insert(static_cast<std::size_t>(cursor), chunk);
+    cursor += static_cast<int>(chunk.size());
+}
+
+void insert_token_with_spacing(std::string& text, int& cursor, std::string_view token) {
+    cursor = std::clamp(cursor, 0, static_cast<int>(text.size()));
+    const bool need_leading_space =
+        cursor > 0 && !std::isspace(static_cast<unsigned char>(text[static_cast<std::size_t>(cursor - 1)]));
+    const bool need_trailing_space =
+        cursor == static_cast<int>(text.size())
+        || !std::isspace(static_cast<unsigned char>(text[static_cast<std::size_t>(cursor)]));
+
+    std::string chunk;
+    chunk.reserve(token.size() + 2);
+    if (need_leading_space) {
+        chunk.push_back(' ');
+    }
+    chunk.append(token);
+    if (need_trailing_space) {
+        chunk.push_back(' ');
+    }
+
+    insert_text_at_cursor(text, cursor, chunk);
 }
 
 bool is_gui_editor_command(std::string_view lowered_command) {
@@ -3734,6 +3968,33 @@ RunResult run(RunOptions opts) {
         if (is_ctrl_x_event(event)) {  // Ctrl+X — open external editor
             return open_external_editor();
         }
+        if (is_ctrl_v_event(event)) {  // Ctrl+V — paste clipboard content / image
+            if (const auto image_path = read_clipboard_image_to_temp(); image_path.has_value()) {
+                const std::string mention = std::format(
+                    "@\"{}\"",
+                    image_path->string());
+                insert_token_with_spacing(input_text, input_cursor_position, mention);
+                append_history(std::format(
+                    "\n\xe2\x84\xb9  Pasted clipboard image as context: {}\n",
+                    image_path->string()));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
+            if (const auto text = read_clipboard_text(); text.has_value() && !text->empty()) {
+                insert_text_at_cursor(
+                    input_text,
+                    input_cursor_position,
+                    normalize_newlines(*text));
+                screen.PostEvent(Event::Custom);
+                return true;
+            }
+
+            append_history(
+                "\n\xe2\x9c\x97  Clipboard paste is unavailable (no compatible clipboard provider found).\n");
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
         if (is_ctrl_y_event(event)) {  // Ctrl+Y — toggle YOLO approvals
             const bool enable_yolo = !is_yolo_mode_enabled();
             set_yolo_mode_enabled(enable_yolo);
@@ -4119,10 +4380,6 @@ RunResult run(RunOptions opts) {
                      + " ")
                     | bgcolor(ColorYellowDark) | color(Color::Black));
         }
-        left_items.push_back(
-            text(tool_output_expanded ? " tools:full " : " tools:compact ")
-                | bgcolor(tool_output_expanded ? Color::Blue : Color::GrayDark)
-                | color(Color::White));
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
         left_items.push_back(guardrail_el);

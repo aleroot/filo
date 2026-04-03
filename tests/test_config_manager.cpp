@@ -481,10 +481,14 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(manager.get_config().default_model_selection == "manual");
     REQUIRE(manager.get_config().providers.at("claude").auth_type == "oauth_claude");
 
-    REQUIRE(manager.persist_login_profile("openai-pkce", &error));
+    REQUIRE(manager.persist_login_profile("openai", &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().default_provider == "openai");
     REQUIRE(manager.get_config().default_model_selection == "manual");
+    REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
+
+    REQUIRE(manager.persist_login_profile("openai-pkce", &error));
+    REQUIRE(error.empty());
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
 
     manager.load(project_dir);

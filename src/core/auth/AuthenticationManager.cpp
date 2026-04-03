@@ -4,7 +4,6 @@
 #include "GoogleOAuthFlow.hpp"
 #include "KimiOAuthFlow.hpp"
 #include "QwenOAuthFlow.hpp"
-#include "OpenAIAuthFlow.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include "OAuthCredentialSource.hpp"
 #include "OAuthTokenManager.hpp"
@@ -111,46 +110,9 @@ public:
     }
 };
 
-class OpenAIKeyStrategy final : public IAuthStrategy {
-public:
-    std::string_view login_provider() const noexcept override { return "openai"; }
-    std::string_view display_name() const noexcept override { return "OpenAI"; }
-
-    bool supports(std::string_view provider_type,
-                  std::string_view auth_type) const noexcept override {
-        return provider_type == "openai" && auth_type == "oauth_openai";
-    }
-
-    std::shared_ptr<ICredentialSource> create_credential_source(
-        const core::config::ProviderConfig& /*provider_config*/,
-        std::string_view config_dir) const override {
-        auto flow    = std::make_shared<OpenAIAuthFlow>(nullptr);
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
-        auto manager = std::make_shared<OAuthTokenManager>(
-            "openai", std::move(flow), std::move(store));
-        return std::make_shared<OAuthCredentialSource>(std::move(manager));
-    }
-
-    void login(std::string_view config_dir) const override {
-        auto flow    = std::make_shared<OpenAIAuthFlow>(std::make_shared<ui::ConsoleAuthUI>());
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
-        auto manager = std::make_shared<OAuthTokenManager>(
-            "openai", std::move(flow), std::move(store));
-        manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
-        return {
-            "Set \"auth_type\": \"oauth_openai\" on an OpenAI provider in "
-            "~/.config/filo/config.json to use the stored API key.",
-            "You can also export OPENAI_API_KEY for one-time / CI use without storing.",
-        };
-    }
-};
-
 class OpenAIPkceStrategy final : public IAuthStrategy {
 public:
-    std::string_view login_provider() const noexcept override { return "openai-pkce"; }
+    std::string_view login_provider() const noexcept override { return "openai"; }
     std::string_view display_name() const noexcept override { return "OpenAI (ChatGPT login)"; }
 
     bool supports(std::string_view provider_type,
@@ -270,7 +232,6 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     AuthenticationManager manager(std::move(config_dir));
     manager.register_strategy(std::make_shared<GoogleOAuthStrategy>());
     manager.register_strategy(std::make_shared<ClaudeOAuthStrategy>());
-    manager.register_strategy(std::make_shared<OpenAIKeyStrategy>());
     manager.register_strategy(std::make_shared<OpenAIPkceStrategy>());
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
@@ -285,7 +246,13 @@ void AuthenticationManager::register_strategy(std::shared_ptr<IAuthStrategy> str
 }
 
 LoginResult AuthenticationManager::login(std::string_view provider) const {
-    const std::string requested = normalize(provider);
+    std::string requested = normalize(provider);
+
+    // Backward-compatible aliases.
+    if (requested == "openai-pkce" || requested == "openai_pkce" || requested == "openaipkce") {
+        requested = "openai";
+    }
+
     for (const auto& strategy : strategies_) {
         if (normalize(strategy->login_provider()) == requested) {
             strategy->login(config_dir_);
@@ -324,7 +291,10 @@ std::vector<std::string> AuthenticationManager::available_login_providers() cons
     std::vector<std::string> providers;
     providers.reserve(strategies_.size());
     for (const auto& strategy : strategies_) {
-        providers.push_back(std::string(strategy->login_provider()));
+        const std::string provider = std::string(strategy->login_provider());
+        if (!provider.empty()) {
+            providers.push_back(provider);
+        }
     }
     std::sort(providers.begin(), providers.end());
     providers.erase(std::unique(providers.begin(), providers.end()), providers.end());

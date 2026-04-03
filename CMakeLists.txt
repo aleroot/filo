@@ -131,7 +131,6 @@ set(FILO_CORE_SOURCES
     src/core/auth/FileTokenStore.cpp
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
-    src/core/auth/OpenAIAuthFlow.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp
     src/core/auth/QwenOAuthFlow.cpp

@@ -190,7 +190,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
     if (normalized == "openai") {
         return LoginProfileMapping{
             .provider_name = "openai",
-            .auth_type = "oauth_openai",
+            .auth_type = "oauth_openai_pkce",
             .default_model = "gpt-5.4",
         };
     }

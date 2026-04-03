@@ -23,6 +23,83 @@ bool is_trailing_mention_suffix(char ch) {
         || ch == '?' || ch == ')' || ch == ']' || ch == '}';
 }
 
+struct ParsedUnquotedMention {
+    std::string raw_path;
+    std::string trailing_suffix;
+    std::vector<std::size_t> source_ends;
+    std::vector<bool> escaped;
+    std::size_t token_end = 0;
+};
+
+bool is_shell_escaped_character(char ch) {
+    const unsigned char uch = static_cast<unsigned char>(ch);
+    if (std::isspace(uch)) {
+        return true;
+    }
+    switch (ch) {
+        case '\\':
+        case '"':
+        case '\'':
+        case '(':
+        case ')':
+        case '[':
+        case ']':
+        case '{':
+        case '}':
+        case ',':
+        case '.':
+        case ';':
+        case ':':
+        case '!':
+        case '?':
+            return true;
+        default:
+            return false;
+    }
+}
+
+ParsedUnquotedMention parse_unquoted_mention(std::string_view input, std::size_t start) {
+    ParsedUnquotedMention parsed;
+    parsed.raw_path.reserve(input.size() - start);
+    parsed.source_ends.reserve(input.size() - start);
+    parsed.escaped.reserve(input.size() - start);
+
+    std::size_t cursor = start;
+    while (cursor < input.size()) {
+        const unsigned char ch = static_cast<unsigned char>(input[cursor]);
+        if (ch == '\\'
+            && cursor + 1 < input.size()
+            && is_shell_escaped_character(input[cursor + 1])) {
+            parsed.raw_path.push_back(input[cursor + 1]);
+            parsed.source_ends.push_back(cursor + 2);
+            parsed.escaped.push_back(true);
+            cursor += 2;
+            continue;
+        }
+        if (std::isspace(ch)) {
+            break;
+        }
+        parsed.raw_path.push_back(static_cast<char>(ch));
+        parsed.source_ends.push_back(cursor + 1);
+        parsed.escaped.push_back(false);
+        ++cursor;
+    }
+
+    parsed.token_end = cursor;
+
+    while (!parsed.raw_path.empty()
+           && !parsed.escaped.empty()
+           && !parsed.escaped.back()
+           && is_trailing_mention_suffix(parsed.raw_path.back())) {
+        parsed.trailing_suffix.insert(parsed.trailing_suffix.begin(), parsed.raw_path.back());
+        parsed.raw_path.pop_back();
+        parsed.source_ends.pop_back();
+        parsed.escaped.pop_back();
+    }
+
+    return parsed;
+}
+
 std::string normalize_subagent_tag(std::string_view tag) {
     std::string normalized;
     normalized.reserve(tag.size());
@@ -179,15 +256,15 @@ std::optional<ActiveMention> find_active_mention(std::string_view input,
             };
         }
 
-        std::size_t path_end = path_start;
-        while (path_end < input.size() &&
-               !std::isspace(static_cast<unsigned char>(input[path_end]))) {
-            ++path_end;
-        }
+        const auto parsed = parse_unquoted_mention(input, path_start);
+        const std::size_t path_end = parsed.token_end;
+        const std::size_t replace_end = parsed.source_ends.empty()
+            ? path_start
+            : parsed.source_ends.back();
 
-        std::size_t replace_end = path_end;
-        while (replace_end > path_start && is_trailing_mention_suffix(input[replace_end - 1])) {
-            --replace_end;
+        if (parsed.raw_path.empty()) {
+            i = path_end;
+            continue;
         }
 
         if (cursor < path_start || cursor > replace_end) {
@@ -198,7 +275,7 @@ std::optional<ActiveMention> find_active_mention(std::string_view input,
         return ActiveMention{
             .replace_begin = i,
             .replace_end = replace_end,
-            .raw_path = std::string(input.substr(path_start, replace_end - path_start)),
+            .raw_path = parsed.raw_path,
             .quoted = false,
         };
     }
@@ -289,21 +366,10 @@ std::string expand_mentions(std::string_view input,
             raw_path = std::string(input.substr(start, cursor - start));
             ++cursor;
         } else {
-            const std::size_t start = cursor;
-            while (cursor < input.size() && !std::isspace(static_cast<unsigned char>(input[cursor]))) {
-                ++cursor;
-            }
-            raw_path = std::string(input.substr(start, cursor - start));
-            while (!raw_path.empty()) {
-                const char ch = raw_path.back();
-                if (ch == ',' || ch == '.' || ch == ';' || ch == ':' || ch == '!' || ch == '?'
-                    || ch == ')' || ch == ']' || ch == '}') {
-                    trailing_suffix.insert(trailing_suffix.begin(), ch);
-                    raw_path.pop_back();
-                    continue;
-                }
-                break;
-            }
+            const auto parsed = parse_unquoted_mention(input, cursor);
+            raw_path = parsed.raw_path;
+            trailing_suffix = parsed.trailing_suffix;
+            cursor = parsed.token_end;
         }
 
         if (raw_path.empty()) {

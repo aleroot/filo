@@ -41,7 +41,8 @@ Filo focuses on speed, control, and local-first workflows without giving up mult
 
 - C++26 core with streaming-first provider protocols
 - TUI built with FTXUI
-- Context mentions (`@file` and quoted paths)
+- Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
+- `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
 - Session persistence and resume
 - Global + workspace config layering
 - MCP dispatcher shared across stdio and HTTP transports
@@ -110,7 +111,7 @@ Minimal local provider example:
 | MCP over HTTP daemon | `filo --daemon --headless --port 8080` |
 
 Useful CLI flags:
-- `--login <provider>` authenticate and exit
+- `--login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
 - `--list-sessions` list resumable sessions
 - `--resume [id|index]` resume a saved session
 - `--prompter` force non-interactive mode

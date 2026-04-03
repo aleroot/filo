@@ -72,7 +72,8 @@ int main(int argc, char** argv) {
                    "Listen address for the HTTP daemon (default: 127.0.0.1 — localhost only). "
                    "Use 0.0.0.0 to accept connections from any network interface."
     )->capture_default_str();
-    app.add_option("--login", login_provider, "Authenticate with a provider and exit (e.g. --login google, --login claude)");
+    app.add_option("--login", login_provider,
+                   "Authenticate with a provider and exit (e.g. --login openai, --login claude)");
     auto* resume_opt = app.add_option(
         "--resume", resume_session,
         "Resume a session by ID or 1-based index (see --list-sessions). "

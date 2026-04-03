@@ -25,6 +25,24 @@ void write_text(const fs::path& path, const std::string& text) {
     out << text;
 }
 
+std::string shell_escape_dragged_path(std::string_view path) {
+    std::string escaped;
+    escaped.reserve(path.size() * 2);
+    for (const char ch : path) {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (ch == '\\'
+            || std::isspace(uch)
+            || ch == '(' || ch == ')' || ch == '[' || ch == ']'
+            || ch == '{' || ch == '}'
+            || ch == ',' || ch == '.' || ch == ';' || ch == ':' || ch == '!'
+            || ch == '?') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(ch);
+    }
+    return escaped;
+}
+
 } // namespace
 
 TEST_CASE("Context mentions expand file contents with line numbers", "[context]") {
@@ -51,6 +69,24 @@ TEST_CASE("Context mentions support quoted paths and ignore email addresses", "[
 
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("test@example.com"));
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("[Context for notes/debug log.txt]"));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Context mentions expand shell-escaped absolute paths from drag-drop", "[context]") {
+    const fs::path sandbox = make_temp_dir("filo_context_drag");
+    const fs::path external_file = sandbox / "external folder" / "report (v1).txt";
+    write_text(external_file, "dragdrop line\n");
+
+    const std::string escaped = shell_escape_dragged_path(external_file.string());
+    const std::string expanded = core::context::expand_mentions(
+        "Inspect @" + escaped + " please",
+        fs::current_path());
+
+    REQUIRE_THAT(
+        expanded,
+        Catch::Matchers::ContainsSubstring("[Context for " + external_file.string() + "]"));
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("1 | dragdrop line"));
 
     fs::remove_all(sandbox);
 }
@@ -92,6 +128,26 @@ TEST_CASE("Context mentions detect quoted mentions while typing", "[context]") {
     REQUIRE(mention.has_value());
     REQUIRE(mention->raw_path == "notes/debug l");
     REQUIRE(mention->quoted);
+}
+
+TEST_CASE("Context mentions detect shell-escaped mentions while typing", "[context]") {
+    const std::string input = R"(Inspect @/tmp/external\ file.txt please)";
+    const auto mention = core::context::find_active_mention(
+        input,
+        input.find(" please"));
+    REQUIRE(mention.has_value());
+    REQUIRE(mention->raw_path == "/tmp/external file.txt");
+    REQUIRE_FALSE(mention->quoted);
+}
+
+TEST_CASE("Context mentions keep literal backslashes in unquoted mentions", "[context]") {
+    const std::string input = R"(Inspect @C:\Users\alice\file.txt now)";
+    const auto mention = core::context::find_active_mention(
+        input,
+        input.find(" now"));
+    REQUIRE(mention.has_value());
+    REQUIRE(mention->raw_path == R"(C:\Users\alice\file.txt)");
+    REQUIRE_FALSE(mention->quoted);
 }
 
 TEST_CASE("Context mentions keep reserved subagent tags untouched", "[context]") {

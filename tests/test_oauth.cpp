@@ -5,7 +5,7 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/FileTokenStore.hpp"
 #include "core/auth/GoogleOAuthFlow.hpp"
-#include "core/auth/OpenAIAuthFlow.hpp"
+
 #include "core/auth/OpenAIOAuthFlow.hpp"
 #include "core/auth/OAuthTokenManager.hpp"
 #include "core/auth/OAuthCredentialSource.hpp"
@@ -15,6 +15,7 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -655,43 +656,6 @@ TEST_CASE("AuthenticationManager login reports unknown providers", "[Authenticat
     REQUIRE_THROWS_AS(manager.login("unknown-provider"), std::runtime_error);
 }
 
-// ── OpenAIAuthFlow ────────────────────────────────────────────────────────────
-
-TEST_CASE("OpenAIAuthFlow::login uses OPENAI_API_KEY", "[OpenAIAuthFlow]") {
-    ScopedEnvVar key("OPENAI_API_KEY", "sk-test-openai-key");
-    OpenAIAuthFlow flow;
-    const auto token = flow.login();
-
-    REQUIRE(token.access_token == "sk-test-openai-key");
-    REQUIRE(token.token_type == "Bearer");
-    REQUIRE(token.is_valid());
-}
-
-TEST_CASE("OpenAIAuthFlow::login sets a ~1-year expiry for API keys", "[OpenAIAuthFlow]") {
-    ScopedEnvVar key("OPENAI_API_KEY", "sk-test");
-    OpenAIAuthFlow flow;
-    const auto token = flow.login();
-
-    const int64_t one_year_secs = 60LL * 60 * 24 * 365;
-    const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
-    // expires_at should be approximately now + 1 year (within a 10-second window)
-    REQUIRE(token.expires_at >= now + one_year_secs - 10);
-    REQUIRE(token.expires_at <= now + one_year_secs + 10);
-}
-
-TEST_CASE("OpenAIAuthFlow::login throws when key is missing and no UI", "[OpenAIAuthFlow]") {
-    ScopedEnvVar key("OPENAI_API_KEY", "");
-    OpenAIAuthFlow flow; // no UI
-    REQUIRE_THROWS_AS(flow.login(), std::runtime_error);
-}
-
-TEST_CASE("OpenAIAuthFlow::refresh throws (API keys are rotated manually)", "[OpenAIAuthFlow]") {
-    OpenAIAuthFlow flow;
-    REQUIRE_THROWS_AS(flow.refresh("any-token"), std::runtime_error);
-}
-
 // ── OpenAIOAuthFlow — static pure functions ───────────────────────────────────
 
 TEST_CASE("OpenAIOAuthFlow default constructor works without OPENAI_OAUTH_CLIENT_ID",
@@ -777,73 +741,41 @@ TEST_CASE("OpenAIOAuthFlow::parse_token_response — throws when access_token ab
 }
 
 // ── AuthenticationManager — OpenAI integration ───────────────────────────────
-
-TEST_CASE("AuthenticationManager login(openai) stores key and returns hints", "[AuthenticationManager]") {
+TEST_CASE("AuthenticationManager resolves oauth_openai_pkce credential source", "[AuthenticationManager]") {
     TempDir tmp;
-    ScopedEnvVar key("OPENAI_API_KEY", "sk-stored-test-key");
-
-    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
-    auto result  = manager.login("openai");
-
-    REQUIRE(result.provider == "OpenAI");
-    REQUIRE_FALSE(result.hints.empty());
 
     FileTokenStore store(tmp.path);
-    auto saved = store.load("openai");
-    REQUIRE(saved.has_value());
-    REQUIRE(saved->access_token == "sk-stored-test-key");
-}
-
-TEST_CASE("AuthenticationManager resolves oauth_openai credential source", "[AuthenticationManager]") {
-    TempDir tmp;
-    ScopedEnvVar key("OPENAI_API_KEY", "sk-resolved-key");
+    store.save("openai-pkce", make_token(3600, "openai-rt", "sess-openai-token"));
 
     auto manager = AuthenticationManager::create_with_defaults(tmp.path);
-    manager.login("openai");
-
     core::config::ProviderConfig provider;
-    provider.auth_type = "oauth_openai";
+    provider.auth_type = "oauth_openai_pkce";
+
     auto cred = manager.create_credential_source("openai", provider);
-
     REQUIRE(cred != nullptr);
-    auto auth = cred->get_auth();
+
+    const auto auth = cred->get_auth();
     REQUIRE(auth.headers.count("Authorization") == 1);
-    REQUIRE(auth.headers.at("Authorization") == "Bearer sk-resolved-key");
+    REQUIRE(auth.headers.at("Authorization") == "Bearer sess-openai-token");
 }
 
-TEST_CASE("AuthenticationManager openai login survives restart via token store", "[AuthenticationManager]") {
-    // Simulates app restart: second manager reads from disk, no env var needed
+TEST_CASE("AuthenticationManager rejects legacy oauth_openai auth type", "[AuthenticationManager]") {
     TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
 
-    {
-        ScopedEnvVar key("OPENAI_API_KEY", "sk-persistent-key");
-        auto manager = AuthenticationManager::create_with_defaults(tmp.path);
-        manager.login("openai");
-    }
-
-    // Second manager — no env var set
-    auto manager2 = AuthenticationManager::create_with_defaults(tmp.path);
     core::config::ProviderConfig provider;
     provider.auth_type = "oauth_openai";
-    auto cred = manager2.create_credential_source("openai", provider);
 
-    REQUIRE(cred != nullptr);
-    auto auth = cred->get_auth();
-    REQUIRE(auth.headers.at("Authorization") == "Bearer sk-persistent-key");
+    auto cred = manager.create_credential_source("openai", provider);
+    REQUIRE(cred == nullptr);
 }
 
-TEST_CASE("AuthenticationManager openai logout clears stored key", "[AuthenticationManager]") {
+TEST_CASE("AuthenticationManager exposes openai login provider without legacy aliases", "[AuthenticationManager]") {
     TempDir tmp;
-    ScopedEnvVar key("OPENAI_API_KEY", "sk-to-delete");
-
     auto manager = AuthenticationManager::create_with_defaults(tmp.path);
-    manager.login("openai");
 
-    FileTokenStore store(tmp.path);
-    REQUIRE(store.load("openai").has_value());
-
-    // Logout via OAuthTokenManager directly (AuthenticationManager doesn't
-    // expose logout yet, so we test via the store)
-    store.clear("openai");
-    REQUIRE_FALSE(store.load("openai").has_value());
+    const auto providers = manager.available_login_providers();
+    REQUIRE(std::find(providers.begin(), providers.end(), "openai") != providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "openai-pkce") == providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "openai-api-key") == providers.end());
 }
