@@ -1,5 +1,6 @@
 #include "CreateDirectoryTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <format>
@@ -35,17 +36,21 @@ std::string CreateDirectoryTool::execute(const std::string& json_args) {
         return R"({"error":"Missing required argument 'dir_path'."})";
     }
 
-    std::filesystem::path p(path_v);
+    const std::string path_str(path_v);
+    std::filesystem::path p(path_str);
+    if (const auto access_error = detail::check_workspace_access(p, path_str)) {
+        return *access_error;
+    }
     std::error_code ec;
     std::filesystem::create_directories(p, ec);
     if (ec) {
         return std::format(R"({{"error":"Failed to create directory '{}': {}"}})",
-                           core::utils::escape_json_string(std::string(path_v)),
+                           core::utils::escape_json_string(path_str),
                            core::utils::escape_json_string(ec.message()));
     }
 
     return std::format(R"({{"success":true,"path":"{}"}})",
-                       core::utils::escape_json_string(std::string(path_v)));
+                       core::utils::escape_json_string(path_str));
 }
 
 } // namespace core::tools

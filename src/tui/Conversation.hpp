@@ -94,6 +94,7 @@ struct UiMessage {
     bool thinking = false;               // Show thinking indicator
     bool show_lightbulb = false;         // Show 💡 prefix
     bool stopped = false;                // Generation was stopped by user
+    std::string activity_elapsed;        // Elapsed timer for active thinking/analyzing state
     
     // ToolGroup-specific
     bool tool_group_border_top = true;

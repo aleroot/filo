@@ -1,5 +1,6 @@
 #include "ReplaceTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
 #include <sstream>
@@ -43,6 +44,7 @@ std::string ReplaceTool::execute(const std::string& json_args) {
         return R"({"error":"Missing 'new_string' argument."})";
 
     const std::string path_str(file_path);
+    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
     std::error_code ec;
     if (!std::filesystem::exists(path_str, ec) || !std::filesystem::is_regular_file(path_str, ec)) {
         return std::format(R"({{"error":"File not found: '{}'."}})",

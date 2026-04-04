@@ -99,6 +99,7 @@ std::string ReadFileTool::execute(const std::string& json_args) {
 
     std::string path_str(file_path);
     const std::filesystem::path requested_path(path_str);
+    if (const auto access_error = detail::check_workspace_access(requested_path, path_str)) return *access_error;
     const std::string resolved_path = resolve_for_display(requested_path);
 
     std::error_code status_ec;

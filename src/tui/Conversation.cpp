@@ -798,11 +798,18 @@ Element render_assistant_message(const UiMessage& msg,
                 ? std::string("Thinking") + std::string(thinking_pulse_frame(tick))
                 : std::string("Thinking...");
         }
+        Elements indicator_row = {
+            render_lightbulb_prefix(true),
+            ftxui::text(label) | ftxui::color(ColorYellowDark) | dim
+        };
+        if (!msg.activity_elapsed.empty()) {
+            indicator_row.push_back(
+                ftxui::text(std::format(" ({})", msg.activity_elapsed))
+                | ftxui::color(Color::GrayDark)
+                | dim);
+        }
         elements.push_back(
-            hbox({
-                render_lightbulb_prefix(true),
-                ftxui::text(label) | ftxui::color(ColorYellowDark) | dim
-            }));
+            hbox(std::move(indicator_row)));
     }
 
     // Show stopped indicator if generation was interrupted

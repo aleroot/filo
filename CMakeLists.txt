@@ -104,6 +104,7 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp
     src/core/mcp/McpConnectionManager.cpp
+    src/tui/ActivityTimer.cpp
     src/tui/Autocomplete.cpp
     src/tui/Conversation.cpp
     src/tui/DiffPreview.cpp
@@ -143,6 +144,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitProvider.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/FileSystemUtils.cpp
+    src/core/workspace/Workspace.cpp
     src/core/context/ContextMentions.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/ApplyPatchTool.cpp
@@ -300,6 +302,7 @@ unset(_filo_saved_folder)
 
 add_executable(filo_tests
     tests/test_tools.cpp
+    tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_history.cpp
     tests/test_config_manager.cpp
@@ -333,6 +336,7 @@ add_executable(filo_tests
     tests/test_subagent_orchestrator.cpp
     tests/test_skill_loader.cpp
     tests/test_skill_commands.cpp
+    tests/test_activity_timer.cpp
     tests/test_conversation.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
@@ -419,10 +423,12 @@ source_group(
         tests/test_safety_policy.cpp
         tests/test_subagent_orchestrator.cpp
         tests/test_skill_loader.cpp
+        tests/test_activity_timer.cpp
         tests/test_conversation.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
         tests/test_agent_freeze.cpp
+        tests/test_workspace.cpp
         tests/test_tui_freeze.cpp
         tests/test_permission_system.cpp
         tests/test_main_exit.cpp

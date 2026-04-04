@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../utils/JsonUtils.hpp"
+#include "../workspace/Workspace.hpp"
 #include <simdjson.h>
 
 #include <algorithm>
@@ -9,8 +10,18 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <filesystem>
 
 namespace core::tools::detail {
+
+inline std::optional<std::string> check_workspace_access(const std::filesystem::path& path, const std::string& path_str) {
+    if (!core::workspace::Workspace::get_instance().is_path_allowed(path)) {
+        return std::format(
+            R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
+            core::utils::escape_json_string(path_str));
+    }
+    return std::nullopt;
+}
 
 inline std::string join_allowed_keys(std::initializer_list<std::string_view> allowed) {
     std::string joined;

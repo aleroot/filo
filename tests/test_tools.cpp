@@ -15,6 +15,7 @@
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/workspace/Workspace.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
 #endif
@@ -28,6 +29,21 @@
 #endif
 
 using namespace core::tools;
+
+namespace {
+
+class ScopedWorkspaceEnforcement {
+public:
+    explicit ScopedWorkspaceEnforcement(const std::filesystem::path& primary) {
+        core::workspace::Workspace::get_instance().initialize(primary, {}, true);
+    }
+
+    ~ScopedWorkspaceEnforcement() {
+        core::workspace::Workspace::get_instance().initialize("", {}, false);
+    }
+};
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // WriteFileTool / ReadFileTool
@@ -310,6 +326,24 @@ TEST_CASE("CreateDirectoryTool is idempotent when directory exists", "[tools]") 
     std::filesystem::remove_all(path);
 }
 
+TEST_CASE("CreateDirectoryTool denies out-of-scope path when workspace is enforced", "[tools][workspace]") {
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_workspace_create_" + std::to_string(getpid()));
+    const auto outside_path = std::filesystem::temp_directory_path()
+        / ("filo_outside_create_" + std::to_string(getpid()));
+    std::filesystem::remove_all(workspace_root);
+    std::filesystem::remove_all(outside_path);
+    std::filesystem::create_directories(workspace_root);
+
+    ScopedWorkspaceEnforcement scope(workspace_root);
+    CreateDirectoryTool tool;
+    auto res = tool.execute("{\"dir_path\": \"" + outside_path.string() + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Access denied"));
+    REQUIRE_FALSE(std::filesystem::exists(outside_path));
+
+    std::filesystem::remove_all(workspace_root);
+}
+
 // ---------------------------------------------------------------------------
 // DeleteFileTool
 // ---------------------------------------------------------------------------
@@ -330,6 +364,26 @@ TEST_CASE("DeleteFileTool returns error for nonexistent path", "[tools]") {
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
+TEST_CASE("DeleteFileTool denies out-of-scope path when workspace is enforced", "[tools][workspace]") {
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_workspace_delete_" + std::to_string(getpid()));
+    const auto outside_file = std::filesystem::temp_directory_path()
+        / ("filo_outside_delete_" + std::to_string(getpid()) + ".txt");
+    std::filesystem::remove_all(workspace_root);
+    std::filesystem::remove(outside_file);
+    std::filesystem::create_directories(workspace_root);
+    { std::ofstream ofs(outside_file); ofs << "outside"; }
+
+    ScopedWorkspaceEnforcement scope(workspace_root);
+    DeleteFileTool tool;
+    auto res = tool.execute("{\"file_path\": \"" + outside_file.string() + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Access denied"));
+    REQUIRE(std::filesystem::exists(outside_file));
+
+    std::filesystem::remove(outside_file);
+    std::filesystem::remove_all(workspace_root);
+}
+
 // ---------------------------------------------------------------------------
 // MoveFileTool
 // ---------------------------------------------------------------------------
@@ -347,6 +401,27 @@ TEST_CASE("MoveFileTool renames a file", "[tools]") {
     REQUIRE(std::filesystem::exists(dst));
 
     std::filesystem::remove(dst);
+}
+
+TEST_CASE("MoveFileTool denies destination outside workspace when enforced", "[tools][workspace]") {
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_workspace_move_" + std::to_string(getpid()));
+    const auto src = workspace_root / "source.txt";
+    const auto outside_dst = std::filesystem::temp_directory_path()
+        / ("filo_outside_move_" + std::to_string(getpid()) + ".txt");
+    std::filesystem::remove_all(workspace_root);
+    std::filesystem::remove(outside_dst);
+    std::filesystem::create_directories(workspace_root);
+    { std::ofstream ofs(src); ofs << "data"; }
+
+    ScopedWorkspaceEnforcement scope(workspace_root);
+    MoveFileTool tool;
+    auto res = tool.execute("{\"source\": \"" + src.string() + "\", \"destination\": \"" + outside_dst.string() + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Access denied"));
+    REQUIRE(std::filesystem::exists(src));
+    REQUIRE_FALSE(std::filesystem::exists(outside_dst));
+
+    std::filesystem::remove_all(workspace_root);
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +735,45 @@ TEST_CASE("ApplyPatchTool applies a unified diff patch", "[tools]") {
     REQUIRE_THAT(content, Catch::Matchers::ContainsSubstring("patched"));
 
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("ApplyPatchTool denies out-of-scope patch targets when workspace is enforced", "[tools][workspace]") {
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_workspace_patch_" + std::to_string(getpid()));
+    const auto outside_file = std::filesystem::temp_directory_path()
+        / ("filo_outside_patch_" + std::to_string(getpid()) + ".txt");
+    std::filesystem::remove_all(workspace_root);
+    std::filesystem::remove(outside_file);
+    std::filesystem::create_directories(workspace_root);
+    { std::ofstream ofs(outside_file); ofs << "outside\n"; }
+
+    const std::string patch =
+        std::string("--- ") + outside_file.string() + "\n" +
+        "+++ " + outside_file.string() + "\n" +
+        "@@ -1 +1 @@\n" +
+        "-outside\n" +
+        "+patched\n";
+
+    ApplyPatchTool tool;
+    ScopedWorkspaceEnforcement scope(workspace_root);
+    auto res = tool.execute("{\"patch\": " + [&]{
+        std::string escaped;
+        for (char c : patch) {
+            if (c == '\n') escaped += "\\n";
+            else if (c == '"') escaped += "\\\"";
+            else escaped += c;
+        }
+        return "\"" + escaped + "\"";
+    }() + ", \"working_dir\": \"" + workspace_root.string() + "\"}");
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Access denied"));
+    std::ifstream ifs(outside_file);
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    REQUIRE_THAT(content, Catch::Matchers::ContainsSubstring("outside"));
+    REQUIRE_THAT(content, !Catch::Matchers::ContainsSubstring("patched"));
+
+    std::filesystem::remove(outside_file);
+    std::filesystem::remove_all(workspace_root);
 }
 
 // ---------------------------------------------------------------------------

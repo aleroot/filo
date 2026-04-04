@@ -1,5 +1,6 @@
 #include "MoveFileTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <format>
@@ -40,13 +41,21 @@ std::string MoveFileTool::execute(const std::string& json_args) {
         return R"({"error":"Missing required argument 'destination'."})";
     }
 
-    std::filesystem::path src(src_v);
-    std::filesystem::path dst(dst_v);
+    const std::string src_str(src_v);
+    const std::string dst_str(dst_v);
+    std::filesystem::path src(src_str);
+    std::filesystem::path dst(dst_str);
+    if (const auto access_error = detail::check_workspace_access(src, src_str)) {
+        return *access_error;
+    }
+    if (const auto access_error = detail::check_workspace_access(dst, dst_str)) {
+        return *access_error;
+    }
     std::error_code ec;
 
     if (!std::filesystem::exists(src, ec)) {
         return std::format(R"({{"error":"Source does not exist: {}"}})",
-                           core::utils::escape_json_string(std::string(src_v)));
+                           core::utils::escape_json_string(src_str));
     }
 
     // Create destination parent directories if needed
@@ -66,16 +75,16 @@ std::string MoveFileTool::execute(const std::string& json_args) {
           | std::filesystem::copy_options::overwrite_existing, ec);
         if (ec) {
             return std::format(R"({{"error":"Failed to move '{}' to '{}': {}"}})",
-                               core::utils::escape_json_string(std::string(src_v)),
-                               core::utils::escape_json_string(std::string(dst_v)),
+                               core::utils::escape_json_string(src_str),
+                               core::utils::escape_json_string(dst_str),
                                core::utils::escape_json_string(ec.message()));
         }
         std::filesystem::remove_all(src, ec);
     }
 
     return std::format(R"({{"success":true,"from":"{}","to":"{}"}})",
-                       core::utils::escape_json_string(std::string(src_v)),
-                       core::utils::escape_json_string(std::string(dst_v)));
+                       core::utils::escape_json_string(src_str),
+                       core::utils::escape_json_string(dst_str));
 }
 
 } // namespace core::tools

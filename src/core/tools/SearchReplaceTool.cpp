@@ -1,5 +1,6 @@
 #include "SearchReplaceTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <fstream>
@@ -237,6 +238,7 @@ std::string SearchReplaceTool::execute(const std::string& json_args) {
         return R"({"error":"'edits' array is empty. Provide at least one {\"old_string\", \"new_string\"} edit."})";
 
     const std::string path_str(file_path_v);
+    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path_str, ec))
         return std::format(R"({{"error":"File not found: {}"}})",

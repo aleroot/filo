@@ -1,5 +1,6 @@
 #include "WriteFileTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
 #include <sstream>
@@ -45,6 +46,7 @@ std::string WriteFileTool::execute(const std::string& json_args) {
 
     const std::string path_str(file_path);
     std::filesystem::path p(path_str);
+    if (const auto access_error = detail::check_workspace_access(p, path_str)) return *access_error;
 
     // -------------------------------------------------------------------------
     // Read previous content BEFORE overwriting so the client can render a diff.

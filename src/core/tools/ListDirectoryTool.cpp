@@ -45,6 +45,7 @@ std::string ListDirectoryTool::execute(const std::string& json_args) {
     }
 
     std::string path_str(dir_path);
+    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
     std::error_code ec;
     if (!std::filesystem::exists(path_str, ec) || !std::filesystem::is_directory(path_str, ec)) {
         return std::format("{{\"error\": \"Directory not found: {}\"}}", core::utils::escape_json_string(path_str));

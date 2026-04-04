@@ -1,5 +1,6 @@
 #include "MainApp.hpp"
 #include "Autocomplete.hpp"
+#include "ActivityTimer.hpp"
 #include "Constants.hpp"
 #include "PickerState.hpp"
 #include "Conversation.hpp"
@@ -92,6 +93,47 @@ constexpr std::string_view kDisableTerminalInputModes =
 constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
 constexpr auto kStreamChunkPauseBreakThreshold = std::chrono::milliseconds(1500);
 constexpr std::string_view kStreamChunkResumeMarker = "💡";
+
+struct PromptActivitySnapshot {
+    std::string message_id;
+    std::string label;
+};
+
+std::optional<PromptActivitySnapshot> active_prompt_activity(
+    const std::vector<UiMessage>& messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        const auto& message = *it;
+        if (message.type != MessageType::Assistant || !message.pending) {
+            continue;
+        }
+
+        bool has_executing_tools = false;
+        bool has_completed_tools = false;
+        for (const auto& tool : message.tools) {
+            if (tool.status == ToolActivity::Status::Executing) {
+                has_executing_tools = true;
+            } else if (tool.status == ToolActivity::Status::Succeeded
+                       || tool.status == ToolActivity::Status::Failed) {
+                has_completed_tools = true;
+            }
+        }
+
+        const bool show_thinking = message.thinking
+            || (message.pending && has_completed_tools && !has_executing_tools);
+        if (!show_thinking) {
+            return std::nullopt;
+        }
+
+        const bool show_analyzing = has_completed_tools
+            && !has_executing_tools
+            && !message.thinking;
+        return PromptActivitySnapshot{
+            .message_id = message.id,
+            .label = show_analyzing ? "Analyzing..." : "Thinking...",
+        };
+    }
+    return std::nullopt;
+}
 
 class TerminalInputModeGuard {
 public:
@@ -1287,6 +1329,8 @@ RunResult run(RunOptions opts) {
     std::mutex  ui_mutex;
     std::mutex stream_chunk_timing_mutex;
     std::unordered_map<std::size_t, std::chrono::steady_clock::time_point> stream_chunk_last_at;
+    std::atomic_bool assistant_turn_active{false};
+    ActivityTimerRegistry turn_activity_timers;
     
     // Rate limit tracking for status bar and notifications
     struct RateLimitState {
@@ -1650,6 +1694,8 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(stream_chunk_timing_mutex);
             stream_chunk_last_at.clear();
         }
+        turn_activity_timers.clear();
+        assistant_turn_active.store(false, std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.clear();
@@ -1678,6 +1724,9 @@ RunResult run(RunOptions opts) {
     };
 
     auto has_active_animation = [&]() -> bool {
+        if (assistant_turn_active.load(std::memory_order_relaxed)) {
+            return true;
+        }
         std::lock_guard lock(ui_mutex);
         return conversation_uses_animation(ui_messages, ui_show_spinner);
     };
@@ -1871,6 +1920,12 @@ RunResult run(RunOptions opts) {
     };
 
     auto resume_session = [&](const core::session::SessionData& data) {
+        {
+            std::lock_guard lock(stream_chunk_timing_mutex);
+            stream_chunk_last_at.clear();
+        }
+        turn_activity_timers.clear();
+        assistant_turn_active.store(false, std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
@@ -2840,10 +2895,6 @@ RunResult run(RunOptions opts) {
 
     agent->set_permission_fn(permission_fn);
 
-    // ── Status message tracking ──────────────────────────────────────────────
-    // Tracks whether an assistant turn is active (for UI state management).
-    std::atomic_bool assistant_turn_active{false};
-
     // ── Loop-break callback ──────────────────────────────────────────────────
     agent->set_loop_break_fn([&](int rounds) {
         append_history(std::format(
@@ -2875,12 +2926,15 @@ RunResult run(RunOptions opts) {
     auto submit_agent_turn = [&](const std::string& text) {
         std::string timestamp = current_time_str();
         std::size_t assistant_index = 0;
+        std::string assistant_message_id;
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.push_back(make_user_message(text, timestamp));
             ui_messages.push_back(make_assistant_message("", "", true));
             assistant_index = ui_messages.size() - 1;
+            assistant_message_id = ui_messages.back().id;
         }
+        turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
 
         std::string final_text =
@@ -2896,8 +2950,10 @@ RunResult run(RunOptions opts) {
                      model_name    = active_model_name,
                      &update_assistant_message,
                      &assistant_turn_active,
+                     &turn_activity_timers,
                      &stream_chunk_timing_mutex,
-                     &stream_chunk_last_at]() {
+                     &stream_chunk_last_at,
+                     assistant_message_id = std::move(assistant_message_id)]() {
             agent->send_message(final_text,
                 [assistant_index,
                  &update_assistant_message,
@@ -2948,12 +3004,15 @@ RunResult run(RunOptions opts) {
                 [assistant_index, agent, session_store, sid, created_at,
                  provider_name, model_name, &update_assistant_message,
                  &assistant_turn_active,
+                 &turn_activity_timers,
                  &stream_chunk_timing_mutex,
-                 &stream_chunk_last_at]() {
+                 &stream_chunk_last_at,
+                 assistant_message_id]() {
                     {
                         std::lock_guard lock(stream_chunk_timing_mutex);
                         stream_chunk_last_at.erase(assistant_index);
                     }
+                    turn_activity_timers.stop(assistant_message_id);
                     assistant_turn_active.store(false, std::memory_order_relaxed);
                     const bool was_stopped = agent->is_stop_requested();
                     update_assistant_message(assistant_index, [&](UiMessage& message) {
@@ -3286,8 +3345,26 @@ RunResult run(RunOptions opts) {
 
     auto history_component = Make<HistoryComponent>(
         [&]() {
-            std::lock_guard lock(ui_mutex);
-            return ui_messages;
+            std::vector<UiMessage> messages;
+            {
+                std::lock_guard lock(ui_mutex);
+                messages = ui_messages;
+            }
+
+            if (const auto activity = active_prompt_activity(messages);
+                activity.has_value()) {
+                const auto elapsed = turn_activity_timers
+                    .elapsed(activity->message_id)
+                    .value_or(std::chrono::seconds::zero());
+                for (auto& message : messages) {
+                    if (message.id == activity->message_id) {
+                        message.activity_elapsed = format_elapsed_compact(elapsed);
+                        break;
+                    }
+                }
+            }
+
+            return messages;
         },
         std::cref(animation_tick),
         [&]() {
@@ -3913,6 +3990,12 @@ RunResult run(RunOptions opts) {
                 refresh_conversation_search_locked();
             }
             screen.PostEvent(Event::Custom);
+            return true;
+        }
+
+        if (event == Event::Escape
+            && assistant_turn_active.load(std::memory_order_relaxed)) {
+            agent->request_stop();
             return true;
         }
 

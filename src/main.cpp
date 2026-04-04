@@ -1,6 +1,7 @@
 #include <thread>
 #include <CLI/CLI.hpp>
 #include "core/config/ConfigManager.hpp"
+#include "core/workspace/Workspace.hpp"
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/budget/BudgetTracker.hpp"
@@ -52,6 +53,8 @@ int main(int argc, char** argv) {
     bool        continue_last = false;
     std::string resume_session;      // --resume [id|index]; empty means most recent
     bool        list_sessions = false;  // --list-sessions
+    std::string work_dir;
+    std::vector<std::string> add_dirs;
 
     app.add_flag("--mcp",     mcp_mode,    "Run as an MCP server");
     app.add_flag("--daemon",  daemon_mode, "Run as an HTTP daemon exposing the MCP endpoint over TCP");
@@ -67,6 +70,10 @@ int main(int argc, char** argv) {
                  "Include content-delta events in stream-json prompter output");
     app.add_flag("--continue", continue_last,
                  "Prompter mode: continue the most recent session scoped to the current project");
+    app.add_option("-w,--work-dir", work_dir,
+                   "Working directory for the agent. Default: current directory.");
+    app.add_option("--add-dir", add_dirs,
+                   "Add an additional directory to the workspace scope. Can be specified multiple times.");
     app.add_option("--port",  port,        "TCP port for the HTTP daemon (default: 8080)")->capture_default_str();
     app.add_option("--host",  host,
                    "Listen address for the HTTP daemon (default: 127.0.0.1 — localhost only). "
@@ -84,6 +91,22 @@ int main(int argc, char** argv) {
     CLI11_PARSE(app, argc, argv);
 
     core::logging::Logger::get_instance().configure_from_env();
+
+    if (!work_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::current_path(work_dir, ec);
+        if (ec) {
+            core::logging::error("Failed to change working directory to '{}': {}", work_dir, ec.message());
+            return 1;
+        }
+    }
+
+    std::vector<std::filesystem::path> parsed_add_dirs;
+    for (const auto& dir : add_dirs) {
+        parsed_add_dirs.emplace_back(dir);
+    }
+    const bool enforce_workspace = !work_dir.empty() || !add_dirs.empty();
+    core::workspace::Workspace::get_instance().initialize(std::filesystem::current_path(), parsed_add_dirs, enforce_workspace);
 
     // --list-sessions: print available sessions and exit.
     if (list_sessions) {
