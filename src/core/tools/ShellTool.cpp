@@ -1,5 +1,6 @@
 #include "ShellTool.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../workspace/Workspace.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <chrono>
@@ -163,6 +164,11 @@ std::string ShellTool::execute(const std::string& json_args) {
         if (!std::filesystem::is_directory(std::string(wd_view), ec)) {
             return std::format(
                 R"({{"error":"working_dir does not exist or is not a directory: '{}'"}})",
+                core::utils::escape_json_string(std::string(wd_view)));
+        }
+        if (!core::workspace::Workspace::get_instance().is_path_allowed(std::filesystem::path(wd_view))) {
+            return std::format(
+                R"({{"error":"Access denied: Path '{}' is outside the allowed workspace scope."}})",
                 core::utils::escape_json_string(std::string(wd_view)));
         }
         working_dir = std::string(wd_view);

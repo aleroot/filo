@@ -15,10 +15,12 @@
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/shell/ShellSession.hpp"
 #include "core/workspace/Workspace.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
 #endif
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -608,6 +610,65 @@ TEST_CASE("ShellTool timeout_seconds defaults to 600 when not provided", "[tools
         if (p.name == "timeout_seconds") { found = true; break; }
     }
     REQUIRE(found);
+}
+
+TEST_CASE("ShellSession write_all_classified reports no-progress failure", "[tools][shell]") {
+    int calls = 0;
+    const auto status = core::tools::detail::write_all_classified(
+        "payload",
+        [&](const char*, std::size_t) -> ssize_t {
+            ++calls;
+            errno = EPIPE;
+            return -1;
+        });
+
+    REQUIRE(status == core::tools::detail::WriteAllResult::failed_no_progress);
+    REQUIRE(calls == 1);
+}
+
+TEST_CASE("ShellSession write_all_classified reports partial-progress failure", "[tools][shell]") {
+    int calls = 0;
+    const auto status = core::tools::detail::write_all_classified(
+        "payload",
+        [&](const char*, std::size_t remaining) -> ssize_t {
+            ++calls;
+            if (calls == 1) {
+                const std::size_t chunk = remaining > 3 ? 3 : remaining;
+                return static_cast<ssize_t>(chunk);
+            }
+            errno = EPIPE;
+            return -1;
+        });
+
+    REQUIRE(status == core::tools::detail::WriteAllResult::failed_partial_progress);
+    REQUIRE(calls == 2);
+}
+
+TEST_CASE("ShellSession write_all_classified reports success when all bytes are written", "[tools][shell]") {
+    const std::string payload = "abcdefghijklmnop";
+    std::size_t consumed = 0;
+    int calls = 0;
+    const auto status = core::tools::detail::write_all_classified(
+        payload,
+        [&](const char*, std::size_t remaining) -> ssize_t {
+            ++calls;
+            const std::size_t chunk = remaining > 4 ? 4 : remaining;
+            consumed += chunk;
+            return static_cast<ssize_t>(chunk);
+        });
+
+    REQUIRE(status == core::tools::detail::WriteAllResult::success);
+    REQUIRE(consumed == payload.size());
+    REQUIRE(calls >= 1);
+}
+
+TEST_CASE("ShellSession retries only when stdin write made no progress", "[tools][shell]") {
+    using core::tools::detail::WriteAllResult;
+    using core::tools::detail::should_retry_stdin_write;
+
+    REQUIRE(should_retry_stdin_write(WriteAllResult::failed_no_progress));
+    REQUIRE_FALSE(should_retry_stdin_write(WriteAllResult::failed_partial_progress));
+    REQUIRE_FALSE(should_retry_stdin_write(WriteAllResult::success));
 }
 
 TEST_CASE("ShellTool writes large command payloads without truncation", "[tools]") {

@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/mcp/McpDispatcher.hpp"
+#include "core/workspace/Workspace.hpp"
 #include <fstream>
 #include <filesystem>
 #include <optional>
@@ -48,6 +49,19 @@ static std::string trim_trailing_newlines(std::string s) {
     }
     return s;
 }
+
+struct WorkspaceResetToDefault {
+    ~WorkspaceResetToDefault() {
+        std::error_code ec;
+        const auto cwd = std::filesystem::current_path(ec);
+        auto& ws = core::workspace::Workspace::get_instance();
+        if (ec) {
+            ws.initialize("", {}, false);
+            return;
+        }
+        ws.initialize(cwd, {}, false);
+    }
+};
 
 /// A minimal valid initialize request (client identifies as Lampo).
 static const char* kInitRequest =
@@ -98,6 +112,30 @@ TEST_CASE("MCP initialize with 2025-11-25 echoes it back", "[mcp]") {
         R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}},"id":99})");
     REQUIRE_THAT(resp, ContainsSubstring(R"("protocolVersion":"2025-11-25")"));
     REQUIRE(is_valid_json(resp));
+}
+
+TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
+    auto resp = disp().dispatch(kInitRequest);
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool tools_list_changed = true;
+    REQUIRE(doc["result"]["capabilities"]["tools"]["listChanged"].get(tools_list_changed) == simdjson::SUCCESS);
+    REQUIRE_FALSE(tools_list_changed);
+
+    bool resources_subscribe = true;
+    bool resources_list_changed = true;
+    REQUIRE(doc["result"]["capabilities"]["resources"]["subscribe"].get(resources_subscribe) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["resources"]["listChanged"].get(resources_list_changed) == simdjson::SUCCESS);
+    REQUIRE_FALSE(resources_subscribe);
+    REQUIRE_FALSE(resources_list_changed);
+
+    simdjson::dom::element ignored;
+    REQUIRE(doc["result"]["capabilities"]["roots"].get(ignored) != simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["prompts"].get(ignored) != simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["logging"].get(ignored) != simdjson::SUCCESS);
 }
 
 TEST_CASE("MCP response id escapes string IDs correctly", "[mcp]") {
@@ -176,7 +214,7 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
     for (const char* name : {
             "run_terminal_command", "read_file", "write_file", "list_directory",
             "replace", "file_search", "grep_search", "apply_patch", "search_replace",
-            "delete_file", "move_file", "create_directory"
+            "delete_file", "move_file", "create_directory", "get_workspace_config"
         }) {
         REQUIRE_THAT(resp, ContainsSubstring(name));
     }
@@ -302,6 +340,48 @@ TEST_CASE("MCP tools/call read_file returns file contents", "[mcp]") {
     std::filesystem::remove(path);
 }
 
+TEST_CASE("MCP tools/call get_workspace_config returns structured workspace state", "[mcp]") {
+    WorkspaceResetToDefault workspace_reset;
+    auto& ws = core::workspace::Workspace::get_instance();
+    const auto primary = std::filesystem::current_path();
+    const auto additional = primary / "mcp_workspace_config_additional";
+    std::error_code ec;
+    std::filesystem::create_directories(additional, ec);
+    REQUIRE_FALSE(ec);
+    ws.initialize(primary, {additional}, true);
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_config","arguments":{}},"id":13})");
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    std::string_view primary_directory;
+    bool enforcement_enabled = false;
+    simdjson::dom::array additional_directories;
+    REQUIRE(doc["result"]["structuredContent"]["primary_directory"].get(primary_directory) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["structuredContent"]["enforcement_enabled"].get(enforcement_enabled) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["structuredContent"]["additional_directories"].get(additional_directories) == simdjson::SUCCESS);
+
+    REQUIRE(enforcement_enabled);
+    REQUIRE_FALSE(primary_directory.empty());
+
+    bool saw_additional = false;
+    for (auto dir : additional_directories) {
+        std::string_view dir_sv;
+        REQUIRE(dir.get(dir_sv) == simdjson::SUCCESS);
+        if (dir_sv.find(additional.filename().string()) != std::string_view::npos) {
+            saw_additional = true;
+        }
+    }
+    REQUIRE(saw_additional);
+
+    std::filesystem::remove_all(additional, ec);
+}
+
 // ---------------------------------------------------------------------------
 // write_file — rich response (previous_content, created, bytes_written)
 // ---------------------------------------------------------------------------
@@ -422,6 +502,22 @@ TEST_CASE("MCP tools/call missing name field returns -32602", "[mcp]") {
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"command":"echo x"}},"id":22})");
 
     REQUIRE_THAT(resp, ContainsSubstring("-32602"));
+}
+
+TEST_CASE("MCP tools/call missing params object returns -32602", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","id":23})");
+
+    REQUIRE_THAT(resp, ContainsSubstring(R"("code":-32602)"));
+    REQUIRE_THAT(resp, ContainsSubstring("missing 'params' object"));
+}
+
+TEST_CASE("MCP tools/call arguments must be an object", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":"echo x"},"id":24})");
+
+    REQUIRE_THAT(resp, ContainsSubstring(R"("code":-32602)"));
+    REQUIRE_THAT(resp, ContainsSubstring("'arguments' must be an object"));
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +720,38 @@ TEST_CASE("MCP tools/call run_terminal_command with invalid working_dir returns 
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":true)"));
+}
+
+TEST_CASE("MCP tools/call run_terminal_command enforces workspace when configured", "[mcp]") {
+    WorkspaceResetToDefault workspace_reset;
+    auto& ws = core::workspace::Workspace::get_instance();
+    const auto primary = std::filesystem::current_path();
+    ws.initialize(primary, {}, true);
+
+    const auto outside = std::filesystem::temp_directory_path() / "filo_mcp_outside_scope_test";
+    std::error_code ec;
+    std::filesystem::create_directories(outside, ec);
+    REQUIRE_FALSE(ec);
+
+    const auto normalized_primary = std::filesystem::weakly_canonical(primary, ec);
+    REQUIRE_FALSE(ec);
+    const auto normalized_outside = std::filesystem::weakly_canonical(outside, ec);
+    REQUIRE_FALSE(ec);
+    if (normalized_outside.string().starts_with(normalized_primary.string())) {
+        std::filesystem::remove_all(outside, ec);
+        SKIP("Temp directory unexpectedly inside workspace; cannot validate out-of-scope guard.");
+    }
+
+    std::string req =
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"pwd","working_dir":")"
+        + outside.string() + R"("}},"id":92})";
+    auto resp = disp().dispatch(req);
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":true)"));
+    REQUIRE_THAT(resp, ContainsSubstring("Access denied"));
+
+    std::filesystem::remove_all(outside, ec);
 }
 
 // ---------------------------------------------------------------------------

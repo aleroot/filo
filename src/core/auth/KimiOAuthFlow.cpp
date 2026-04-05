@@ -1,4 +1,5 @@
 #include "KimiOAuthFlow.hpp"
+#include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
 #include <chrono>
@@ -75,63 +76,17 @@ std::string extractDeviceIdFromJwt(const std::string& jwt) {
     size_t second_dot = jwt.find('.', first_dot + 1);
     if (second_dot == std::string::npos) return {};
     
-    // Extract payload (between first and second dot)
-    std::string payload_b64 = jwt.substr(first_dot + 1, second_dot - first_dot - 1);
-    
-    // Base64url decode (simple implementation)
-    // Replace base64url chars with standard base64 chars
-    for (char& c : payload_b64) {
-        if (c == '-') c = '+';
-        else if (c == '_') c = '/';
-    }
-    
-    // Add padding if needed
-    while (payload_b64.size() % 4 != 0) {
-        payload_b64 += '=';
-    }
-    
-    // Simple base64 decode
-    static const std::string base64_chars = 
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    
-    std::string payload;
-    int i = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-    
-    for (char c : payload_b64) {
-        if (c == '=') break;
-        
-        size_t pos = base64_chars.find(c);
-        if (pos == std::string::npos) continue;
-        
-        char_array_4[i++] = static_cast<unsigned char>(pos);
-        if (i == 4) {
-            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x3) << 6) + char_array_4[3];
-            
-            for (i = 0; i < 3; i++) {
-                payload += char_array_3[i];
-            }
-            i = 0;
-        }
-    }
-    
-    if (i > 0) {
-        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        if (i > 2) {
-            char_array_3[1] = ((char_array_4[1] & 0xf) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        }
-        for (int j = 0; j < i - 1; j++) {
-            payload += char_array_3[j];
-        }
+    const std::string payload_b64 = jwt.substr(first_dot + 1, second_dot - first_dot - 1);
+    const auto payload = core::utils::Base64::decode_url(payload_b64);
+    if (!payload.has_value()) {
+        return {};
     }
     
     // Parse JSON to extract device_id
     // Use simdjson for robust parsing
     try {
         simdjson::dom::parser parser;
-        simdjson::padded_string ps(payload);
+        simdjson::padded_string ps(*payload);
         simdjson::dom::element doc = parser.parse(ps);
         
         std::string_view device_id;

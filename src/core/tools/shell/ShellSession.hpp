@@ -16,6 +16,41 @@
 
 namespace core::tools::detail {
 
+enum class WriteAllResult {
+    success,
+    failed_no_progress,
+    failed_partial_progress,
+};
+
+template <typename WriteFn>
+[[nodiscard]] inline WriteAllResult write_all_classified(std::string_view data, WriteFn&& write_fn) {
+    const char* ptr = data.data();
+    std::size_t remaining = data.size();
+    bool wrote_any = false;
+    while (remaining > 0) {
+        const ssize_t written = write_fn(ptr, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            return wrote_any
+                ? WriteAllResult::failed_partial_progress
+                : WriteAllResult::failed_no_progress;
+        }
+        if (written == 0) {
+            return wrote_any
+                ? WriteAllResult::failed_partial_progress
+                : WriteAllResult::failed_no_progress;
+        }
+        wrote_any = true;
+        ptr += written;
+        remaining -= static_cast<std::size_t>(written);
+    }
+    return WriteAllResult::success;
+}
+
+[[nodiscard]] constexpr bool should_retry_stdin_write(WriteAllResult result) noexcept {
+    return result == WriteAllResult::failed_no_progress;
+}
+
 /**
  * @brief Persistent bash subprocess with pipe-based I/O.
  *
@@ -90,7 +125,20 @@ public:
         full += sentinel_;
         full += ":%d\\n' $?\n";
 
-        if (!write_all(stdin_fd_, full)) {
+        // A stale zombie process can pass kill(pid, 0) briefly while stdin is
+        // already closed. In that case, restart once and retry transparently.
+        const auto send_command = [&]() {
+            const WriteAllResult first_attempt = write_all(stdin_fd_, full);
+            if (first_attempt == WriteAllResult::success) return true;
+            if (!should_retry_stdin_write(first_attempt)) return false;
+
+            stop();
+            start();
+            if (!is_alive()) return false;
+            return write_all(stdin_fd_, full) == WriteAllResult::success;
+        };
+
+        if (!send_command()) {
             stop();
             return {"[ShellSession] Write to bash stdin failed.\n", -1};
         }
@@ -114,20 +162,10 @@ private:
     // Internals
     // -----------------------------------------------------------------------
 
-    static bool write_all(int fd, std::string_view data) {
-        const char* ptr = data.data();
-        std::size_t remaining = data.size();
-        while (remaining > 0) {
-            const ssize_t written = ::write(fd, ptr, remaining);
-            if (written < 0) {
-                if (errno == EINTR) continue;
-                return false;
-            }
-            if (written == 0) return false;
-            ptr += written;
-            remaining -= static_cast<std::size_t>(written);
-        }
-        return true;
+    static WriteAllResult write_all(int fd, std::string_view data) {
+        return write_all_classified(data, [fd](const char* ptr, std::size_t remaining) {
+            return ::write(fd, ptr, remaining);
+        });
     }
 
     static std::string make_sentinel() {
@@ -196,7 +234,7 @@ private:
         // the process terminates, giving us the correct exit code.
         std::string trap_cmd = "trap 'printf \"\\n" + sentinel_ +
                                ":%d\\n\" \"$?\"' EXIT\n";
-        if (!write_all(stdin_fd_, trap_cmd)) {
+        if (write_all(stdin_fd_, trap_cmd) != WriteAllResult::success) {
             stop();
             return;
         }

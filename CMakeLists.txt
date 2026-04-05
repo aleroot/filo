@@ -143,6 +143,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/SubagentOrchestrator.cpp
     src/core/scm/GitProvider.cpp
     src/core/scm/ScmFactory.cpp
+    src/core/utils/Base64.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/workspace/Workspace.cpp
     src/core/context/ContextMentions.cpp
@@ -302,6 +303,10 @@ unset(_filo_saved_folder)
 
 add_executable(filo_tests
     tests/test_tools.cpp
+    tests/test_ascii_utils.cpp
+    tests/test_base64_utils.cpp
+    tests/test_mime_utils.cpp
+    tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
@@ -350,6 +355,7 @@ add_executable(filo_tests
     tests/test_daemon_reliability.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
+    tests/test_mcp_resources.cpp
 )
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
@@ -395,6 +401,10 @@ source_group(
     PREFIX "Test Files"
     FILES
         tests/test_tools.cpp
+        tests/test_ascii_utils.cpp
+        tests/test_base64_utils.cpp
+        tests/test_mime_utils.cpp
+        tests/test_uri_utils.cpp
         tests/test_json_writer.cpp
         tests/test_commands.cpp
         tests/test_history.cpp
@@ -439,4 +449,5 @@ source_group(
         tests/test_mcp_client_session.cpp
         tests/test_daemon_reliability.cpp
         tests/test_request_replay_cache.cpp
+        tests/test_mcp_resources.cpp
 )

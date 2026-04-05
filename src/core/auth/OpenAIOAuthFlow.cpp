@@ -1,4 +1,5 @@
 #include "OpenAIOAuthFlow.hpp"
+#include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
 #include <simdjson.h>
@@ -100,26 +101,6 @@ static std::array<uint8_t, 32> sha256(std::string_view msg) {
         digest[i*4u + 3] = static_cast<uint8_t>( h[i]         & 0xFFu);
     }
     return digest;
-}
-
-// ── Base64URL (no padding, RFC 4648 §5) ──────────────────────────────────────
-
-static std::string base64url_encode(const uint8_t* data, size_t len) {
-    static constexpr char alphabet[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    std::string out;
-    out.reserve(((len + 2u) / 3u) * 4u);
-    for (size_t i = 0; i < len; i += 3u) {
-        uint32_t n = uint32_t(data[i]) << 16u;
-        if (i + 1u < len) n |= uint32_t(data[i + 1u]) << 8u;
-        if (i + 2u < len) n |= uint32_t(data[i + 2u]);
-        out += alphabet[(n >> 18u) & 63u];
-        out += alphabet[(n >> 12u) & 63u];
-        if (i + 1u < len) out += alphabet[(n >>  6u) & 63u];
-        if (i + 2u < len) out += alphabet[ n         & 63u];
-    }
-    // No '=' padding per RFC 7636 §4.2
-    return out;
 }
 
 // ── URL encoding ─────────────────────────────────────────────────────────────
@@ -231,7 +212,8 @@ std::string OpenAIOAuthFlow::generate_code_verifier() {
 // static
 std::string OpenAIOAuthFlow::compute_code_challenge(std::string_view verifier) {
     auto hash = sha256(verifier);
-    return base64url_encode(hash.data(), hash.size());
+    // RFC 7636 §4.2 requires Base64URL without '=' padding.
+    return core::utils::Base64::encode_url(hash);
 }
 
 // static

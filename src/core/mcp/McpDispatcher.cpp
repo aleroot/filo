@@ -12,17 +12,34 @@
 #include "../tools/DeleteFileTool.hpp"
 #include "../tools/MoveFileTool.hpp"
 #include "../tools/CreateDirectoryTool.hpp"
+#include "../tools/GetWorkspaceConfigTool.hpp"
+#include "../workspace/Workspace.hpp"
+#include "../utils/AsciiUtils.hpp"
+#include "../utils/Base64.hpp"
+#include "../utils/MimeUtils.hpp"
+#include "../utils/UriUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
+#include <algorithm>
+#include <cstdint>
+#include <expected>
+#include <filesystem>
+#include <fstream>
 #include <string_view>
 #include <array>
 #include <format>
 #include <optional>
 #include <ranges>
+#include <system_error>
+#include <vector>
 
 namespace core::mcp {
 
 using core::utils::JsonWriter;
+using core::utils::Base64;
+namespace ascii = core::utils::ascii;
+namespace mime = core::utils::mime;
+namespace uri = core::utils::uri;
 
 // ---------------------------------------------------------------------------
 // Protocol constants
@@ -261,6 +278,119 @@ void write_response_id(JsonWriter& w, const RequestId& id) {
     return std::nullopt;
 }
 
+constexpr std::size_t kMaxResourceBytes = 1024 * 1024; // 1 MiB
+constexpr std::size_t kMaxDirectoryListingBytes = 256 * 1024; // 256 KiB
+constexpr std::size_t kMaxDirectoryEntries = 4096;
+constexpr int kResourceNotFoundCode = -32002;
+constexpr int kResourceInternalErrorCode = -32603;
+
+[[nodiscard]] std::string path_to_file_uri(const std::filesystem::path& path) {
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(path, ec);
+    auto normalized = (ec ? path : abs).lexically_normal();
+    std::string generic = normalized.generic_string();
+    if (generic.empty() || generic.front() != '/') generic.insert(generic.begin(), '/');
+    return "file://" + uri::percent_encode_uri_path(generic);
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> parse_file_uri(std::string_view uri,
+                                                                  std::string& error_out) {
+    if (!ascii::istarts_with(uri, "file://")) {
+        error_out = "Invalid params: only file:// URIs are supported";
+        return std::nullopt;
+    }
+
+    std::string_view rest = uri.substr(7);
+    std::string_view encoded_path;
+    if (rest.starts_with('/')) {
+        encoded_path = rest;
+    } else {
+        const auto slash = rest.find('/');
+        const std::string_view authority =
+            slash == std::string_view::npos ? rest : rest.substr(0, slash);
+        if (!authority.empty() && !ascii::iequals(authority, "localhost")) {
+            error_out = "Invalid params: unsupported file URI authority";
+            return std::nullopt;
+        }
+        encoded_path = slash == std::string_view::npos ? std::string_view{"/"} : rest.substr(slash);
+    }
+
+    // file:// URIs for local filesystem paths must not include query/fragment.
+    if (encoded_path.find('?') != std::string_view::npos
+        || encoded_path.find('#') != std::string_view::npos) {
+        error_out = "Invalid params: file URI must not include query or fragment";
+        return std::nullopt;
+    }
+
+    std::string decoded_path;
+    if (!uri::percent_decode(encoded_path, decoded_path)) {
+        error_out = "Invalid params: malformed percent-encoding in URI";
+        return std::nullopt;
+    }
+    if (decoded_path.empty()) {
+        error_out = "Invalid params: URI path is empty";
+        return std::nullopt;
+    }
+    if (decoded_path.find('\0') != std::string::npos) {
+        error_out = "Invalid params: URI path contains NUL byte";
+        return std::nullopt;
+    }
+    return std::filesystem::path(decoded_path);
+}
+
+[[nodiscard]] bool is_likely_binary(std::string_view data) {
+    if (data.empty()) return false;
+    std::size_t control_count = 0;
+    for (const unsigned char ch : data) {
+        if (ch == 0) return true;
+        const bool is_control = ch < 0x20 && ch != '\n' && ch != '\r' && ch != '\t' && ch != '\f';
+        if (is_control) ++control_count;
+    }
+    return (control_count * 100) / data.size() > 5;
+}
+
+struct ResourceFileReadResult {
+    std::string data;
+    bool truncated = false;
+};
+
+[[nodiscard]] std::optional<ResourceFileReadResult> read_resource_file_limited(
+    const std::filesystem::path& path,
+    std::string& error_out)
+{
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs.is_open()) {
+        error_out = std::format("Failed to open file: {}", path.string());
+        return std::nullopt;
+    }
+
+    ResourceFileReadResult result;
+    result.data.reserve(kMaxResourceBytes + 1);
+    std::array<char, 4096> chunk{};
+
+    while (ifs) {
+        ifs.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        const auto n = ifs.gcount();
+        if (n <= 0) break;
+
+        const auto available = kMaxResourceBytes - result.data.size();
+        const auto count = static_cast<std::size_t>(n);
+        if (count > available) {
+            result.data.append(chunk.data(), available);
+            result.truncated = true;
+            break;
+        }
+        result.data.append(chunk.data(), count);
+    }
+
+    if (ifs.bad()) {
+        error_out = std::format("Failed to read file: {}", path.string());
+        return std::nullopt;
+    }
+
+    return result;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -458,170 +588,499 @@ void McpDispatcher::register_tools() {
     sm.register_tool(std::make_shared<core::tools::DeleteFileTool>());
     sm.register_tool(std::make_shared<core::tools::MoveFileTool>());
     sm.register_tool(std::make_shared<core::tools::CreateDirectoryTool>());
+    sm.register_tool(std::make_shared<core::tools::GetWorkspaceConfigTool>());
 }
+
+namespace {
+
+struct RpcError {
+    int code = -32603;
+    std::string message;
+};
+
+template <typename T>
+using RpcExpected = std::expected<T, RpcError>;
+
+struct ParsedToolCallRequest {
+    std::string name;
+    std::string arguments_json{"{}"};
+};
+
+[[nodiscard]] std::string make_rpc_error(const RequestId& id, const RpcError& error) {
+    return make_error(id, error.code, error.message);
+}
+
+[[nodiscard]] std::expected<void, RpcError> parse_params_object(
+    simdjson::ondemand::object& root,
+    simdjson::ondemand::object& params_out)
+{
+    if (root["params"].get_object().get(params_out) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'params' object"});
+    }
+    return {};
+}
+
+[[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root) {
+    JsonWriter rw(1024);
+    {
+        auto _res = rw.object();
+
+        rw.kv_str("protocolVersion", negotiate_protocol_version(root)).comma()
+            .key("capabilities");
+        {
+            auto _cap = rw.object();
+            rw.key("tools");
+            {
+                auto _tools = rw.object();
+                rw.kv_bool("listChanged", false);
+            }
+            rw.comma().key("resources");
+            {
+                auto _res_obj = rw.object();
+                rw.kv_bool("subscribe", false).comma()
+                    .kv_bool("listChanged", false);
+            }
+        }
+
+        rw.comma().key("serverInfo");
+        {
+            auto _si = rw.object();
+            rw.kv_str("name", "filo-mcp").comma()
+                .kv_str("version", "0.1.0");
+        }
+
+        auto& ws = core::workspace::Workspace::get_instance();
+        std::string dynamic_instructions = std::string(kServerInstructions);
+
+        if (ws.is_enforced()) {
+            dynamic_instructions += "\n\nALLOWED WORKSPACE FOLDERS (strict enforcement enabled):\n";
+            dynamic_instructions += "- Primary: " + ws.get_primary().string() + "\n";
+            for (const auto& add : ws.get_additional()) {
+                dynamic_instructions += "- Additional: " + add.string() + "\n";
+            }
+            dynamic_instructions += "\nUse filesystem tools for strict path-bounded operations. "
+                                    "run_terminal_command remains open-world and can access paths "
+                                    "outside these folders if the invoked command does so.";
+        } else {
+            dynamic_instructions += "\n\nWORKSPACE: Working directory is " + ws.get_primary().string()
+                + " (enforcement disabled; system-wide path access is allowed).";
+        }
+        rw.comma().kv_str("instructions", dynamic_instructions);
+    }
+    return std::move(rw).take();
+}
+
+[[nodiscard]] std::string build_resources_templates_list_result() {
+    JsonWriter rw(128);
+    {
+        auto _res = rw.object();
+        rw.key("resourceTemplates");
+        {
+            auto _arr = rw.array();
+        }
+    }
+    return std::move(rw).take();
+}
+
+[[nodiscard]] std::string build_resources_list_result() {
+    auto& ws = core::workspace::Workspace::get_instance();
+    JsonWriter rw(2048);
+    {
+        auto _res = rw.object();
+        rw.key("resources");
+        {
+            auto _arr = rw.array();
+
+            auto add_resource = [&](const std::filesystem::path& path,
+                                    std::string_view name,
+                                    std::string_view desc) {
+                auto _item = rw.object();
+                rw.kv_str("uri", path_to_file_uri(path)).comma()
+                    .kv_str("name", name).comma()
+                    .kv_str("description", desc).comma()
+                    .kv_str("mimeType", "application/x-directory");
+            };
+
+            bool first = true;
+            if (!ws.get_primary().empty()) {
+                add_resource(
+                    ws.get_primary(),
+                    "Primary Workspace",
+                    "The main working directory for this session.");
+                first = false;
+            }
+
+            for (std::size_t i = 0; i < ws.get_additional().size(); ++i) {
+                if (!first) rw.comma();
+                first = false;
+                add_resource(
+                    ws.get_additional()[i],
+                    std::format("Additional Workspace {}", i + 1),
+                    "An additional directory allowed for this session.");
+            }
+        }
+    }
+    return std::move(rw).take();
+}
+
+[[nodiscard]] RpcExpected<std::filesystem::path> parse_resources_read_path(
+    simdjson::ondemand::object& root)
+{
+    simdjson::ondemand::object params;
+    if (auto params_result = parse_params_object(root, params); !params_result) {
+        return std::unexpected(params_result.error());
+    }
+
+    std::string_view uri_sv;
+    if (params["uri"].get_string().get(uri_sv) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'uri'"});
+    }
+
+    std::string uri_parse_error;
+    auto path_opt = parse_file_uri(uri_sv, uri_parse_error);
+    if (!path_opt.has_value()) {
+        return std::unexpected(RpcError{-32602, std::move(uri_parse_error)});
+    }
+    return *path_opt;
+}
+
+[[nodiscard]] RpcExpected<std::string> build_directory_listing(
+    const std::filesystem::path& path)
+{
+    std::error_code it_ec;
+    std::vector<std::string> lines;
+    lines.reserve(128);
+    std::size_t listing_bytes = 0;
+    bool listing_truncated = false;
+
+    for (std::filesystem::directory_iterator it(
+             path,
+             std::filesystem::directory_options::skip_permission_denied,
+             it_ec),
+         end;
+         it != end;
+         it.increment(it_ec))
+    {
+        if (it_ec) break;
+
+        std::error_code type_ec;
+        const bool is_directory = it->is_directory(type_ec);
+        if (type_ec) continue;
+
+        std::uintmax_t size = 0;
+        if (!is_directory) {
+            std::error_code size_ec;
+            if (it->is_regular_file(size_ec) && !size_ec) {
+                size = it->file_size(size_ec);
+                if (size_ec) size = 0;
+            }
+        }
+
+        std::string line = std::format(
+            "{}\t{}\t{}",
+            is_directory ? "dir" : "file",
+            it->path().filename().string(),
+            size);
+        if (lines.size() >= kMaxDirectoryEntries
+            || listing_bytes + line.size() + 1 > kMaxDirectoryListingBytes) {
+            listing_truncated = true;
+            break;
+        }
+
+        listing_bytes += line.size() + 1;
+        lines.push_back(std::move(line));
+    }
+
+    if (it_ec) {
+        return std::unexpected(
+            RpcError{
+                kResourceInternalErrorCode,
+                std::format("Failed to list directory '{}': {}", path.string(), it_ec.message())});
+    }
+
+    std::ranges::sort(lines);
+    std::string listing;
+    listing.reserve(std::min(listing_bytes + 64, kMaxDirectoryListingBytes + 64));
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        listing += lines[i];
+        if (i + 1 < lines.size()) listing.push_back('\n');
+    }
+    if (listing_truncated) {
+        if (!listing.empty()) listing += '\n';
+        listing += "... [TRUNCATED DIRECTORY LISTING] ...";
+    }
+    return listing;
+}
+
+[[nodiscard]] RpcExpected<std::string> build_resources_read_result(
+    const std::filesystem::path& path)
+{
+    auto& ws = core::workspace::Workspace::get_instance();
+    if (!ws.is_path_allowed(path)) {
+        return std::unexpected(
+            RpcError{-32001, "Access denied: path is outside the allowed workspace"});
+    }
+
+    std::error_code status_ec;
+    const auto status = std::filesystem::status(path, status_ec);
+    if (status_ec || status.type() == std::filesystem::file_type::not_found) {
+        return std::unexpected(
+            RpcError{kResourceNotFoundCode, std::format("Resource not found: {}", path.string())});
+    }
+
+    JsonWriter rw(4096);
+    {
+        auto _res = rw.object();
+        rw.key("contents");
+        {
+            auto _arr = rw.array();
+            auto _item = rw.object();
+            rw.kv_str("uri", path_to_file_uri(path)).comma();
+
+            if (status.type() == std::filesystem::file_type::directory) {
+                rw.kv_str("mimeType", "application/x-directory").comma();
+                auto listing = build_directory_listing(path);
+                if (!listing) return std::unexpected(listing.error());
+                rw.kv_str("text", *listing);
+            } else if (status.type() == std::filesystem::file_type::regular) {
+                std::string read_error;
+                auto read_result = read_resource_file_limited(path, read_error);
+                if (!read_result.has_value()) {
+                    return std::unexpected(
+                        RpcError{kResourceInternalErrorCode, std::move(read_error)});
+                }
+
+                const bool binary = is_likely_binary(read_result->data);
+                rw.kv_str("mimeType", mime::guess_type(path, binary)).comma();
+
+                if (binary) {
+                    if (read_result->truncated) {
+                        return std::unexpected(RpcError{
+                            kResourceInternalErrorCode,
+                            std::format("Binary resource too large: {} (max {} bytes)",
+                                        path.string(),
+                                        kMaxResourceBytes)});
+                    }
+                    rw.kv_str("blob", Base64::encode(read_result->data));
+                } else {
+                    if (read_result->truncated) {
+                        read_result->data += "\n\n... [TRUNCATED DUE TO SIZE] ...";
+                    }
+                    rw.kv_str("text", read_result->data);
+                }
+            } else {
+                return std::unexpected(
+                    RpcError{kResourceInternalErrorCode,
+                             std::format("Unsupported resource type for '{}'", path.string())});
+            }
+        }
+    }
+    return std::move(rw).take();
+}
+
+[[nodiscard]] RpcExpected<ParsedToolCallRequest> parse_tool_call_request(
+    simdjson::ondemand::object& root)
+{
+    simdjson::ondemand::object params;
+    if (auto params_result = parse_params_object(root, params); !params_result) {
+        return std::unexpected(params_result.error());
+    }
+
+    std::string_view name;
+    if (params["name"].get_string().get(name) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'name'"});
+    }
+
+    ParsedToolCallRequest parsed;
+    parsed.name = std::string(name);
+
+    simdjson::ondemand::value arguments_value;
+    if (params["arguments"].get(arguments_value) == simdjson::SUCCESS) {
+        simdjson::ondemand::json_type arg_type;
+        if (arguments_value.type().get(arg_type) != simdjson::SUCCESS
+            || arg_type != simdjson::ondemand::json_type::object) {
+            return std::unexpected(
+                RpcError{-32602, "Invalid params: 'arguments' must be an object"});
+        }
+
+        simdjson::ondemand::object arguments;
+        std::string_view raw_json;
+        if (arguments_value.get_object().get(arguments) != simdjson::SUCCESS
+            || arguments.raw_json().get(raw_json) != simdjson::SUCCESS) {
+            return std::unexpected(
+                RpcError{-32602, "Invalid params: could not parse 'arguments'"});
+        }
+        parsed.arguments_json = std::string(raw_json);
+    }
+
+    return parsed;
+}
+
+[[nodiscard]] RpcExpected<std::string> build_tool_call_result(
+    const ParsedToolCallRequest& request)
+{
+    auto& sm = core::tools::ToolManager::get_instance();
+    auto tool_def = sm.get_tool_definition(request.name);
+    if (!tool_def.has_value()) {
+        return std::unexpected(
+            RpcError{-32602, std::format("Unknown tool: {}", request.name)});
+    }
+
+    if (auto validation_error = validate_tool_arguments(*tool_def, request.arguments_json)) {
+        return std::unexpected(RpcError{-32602, *validation_error});
+    }
+
+    std::string tool_result = sm.execute_tool(request.name, request.arguments_json);
+    const bool is_error = tool_result.starts_with(R"({"error")")
+        || tool_result.starts_with(R"({ "error")");
+
+    JsonWriter rw(tool_result.size() + 128);
+    {
+        auto _res = rw.object();
+        rw.key("content");
+        {
+            auto _arr = rw.array();
+            auto _item = rw.object();
+            rw.kv_str("type", "text").comma()
+                .kv_str("text", tool_result);
+        }
+        rw.comma().kv_bool("isError", is_error);
+        rw.comma().kv_raw("structuredContent", tool_result);
+    }
+    return std::move(rw).take();
+}
+
+using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::object&);
+
+[[nodiscard]] std::string handle_initialize(
+    const RequestId& id,
+    simdjson::ondemand::object& root)
+{
+    return make_response(id, build_initialize_result(root));
+}
+
+[[nodiscard]] std::string handle_resources_templates_list(
+    const RequestId& id,
+    simdjson::ondemand::object&)
+{
+    return make_response(id, build_resources_templates_list_result());
+}
+
+[[nodiscard]] std::string handle_resources_list(
+    const RequestId& id,
+    simdjson::ondemand::object&)
+{
+    return make_response(id, build_resources_list_result());
+}
+
+[[nodiscard]] std::string handle_resources_read(
+    const RequestId& id,
+    simdjson::ondemand::object& root)
+{
+    auto path = parse_resources_read_path(root);
+    if (!path) return make_rpc_error(id, path.error());
+
+    auto result = build_resources_read_result(*path);
+    if (!result) return make_rpc_error(id, result.error());
+
+    return make_response(id, *result);
+}
+
+[[nodiscard]] std::string handle_tools_list(
+    const RequestId& id,
+    simdjson::ondemand::object&)
+{
+    return make_response(id, tools_list_result());
+}
+
+[[nodiscard]] std::string handle_tools_call(
+    const RequestId& id,
+    simdjson::ondemand::object& root)
+{
+    auto request = parse_tool_call_request(root);
+    if (!request) return make_rpc_error(id, request.error());
+
+    auto result = build_tool_call_result(*request);
+    if (!result) return make_rpc_error(id, result.error());
+
+    return make_response(id, *result);
+}
+
+[[nodiscard]] std::string handle_ping(
+    const RequestId& id,
+    simdjson::ondemand::object&)
+{
+    return make_response(id, "{}");
+}
+
+struct MethodRoute {
+    std::string_view name;
+    MethodHandler handler;
+};
+
+constexpr std::array<MethodRoute, 7> kMethodRoutes{{
+    {"initialize", &handle_initialize},
+    {"resources/templates/list", &handle_resources_templates_list},
+    {"resources/list", &handle_resources_list},
+    {"resources/read", &handle_resources_read},
+    {"tools/list", &handle_tools_list},
+    {"tools/call", &handle_tools_call},
+    {"ping", &handle_ping},
+}};
+
+[[nodiscard]] std::string route_method(
+    std::string_view method,
+    const RequestId& id,
+    simdjson::ondemand::object& root)
+{
+    const auto it = std::ranges::find(kMethodRoutes, method, &MethodRoute::name);
+    if (it == kMethodRoutes.end()) {
+        return make_error(id, -32601, "Method not found");
+    }
+    return it->handler(id, root);
+}
+
+} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
 std::string McpDispatcher::dispatch(const std::string& json_request) {
-    if (json_request.empty())
-        return std::string(kParseError);
+    if (json_request.empty()) return std::string(kParseError);
 
-    // Each call owns its own parser — ondemand parsers are not thread-safe and
-    // must not be shared across concurrent HTTP handler threads.
     simdjson::ondemand::parser parser;
-    simdjson::padded_string    padded(json_request);
-    simdjson::ondemand::document req;
-
-    if (parser.iterate(padded).get(req) != simdjson::SUCCESS)
+    simdjson::padded_string padded(json_request);
+    simdjson::ondemand::document request_doc;
+    if (parser.iterate(padded).get(request_doc) != simdjson::SUCCESS) {
         return std::string(kParseError);
-
-    // Force real validation: ondemand::iterate() is lazy and returns SUCCESS
-    // even for non-JSON text; get_object() triggers the actual parse.
-    simdjson::ondemand::object root;
-    if (req.get_object().get(root) != simdjson::SUCCESS)
-        return std::string(kParseError);
-
-    // --- id ---
-    // Parse before jsonrpc/method so error responses always echo the id back.
-    const RequestId id = parse_request_id(root);
-    if (id.kind == RequestId::Kind::invalid)
-        return std::string(kInvalidRequest);
-
-    // --- jsonrpc ---
-    std::string_view jsonrpc;
-    if (root["jsonrpc"].get_string().get(jsonrpc) != simdjson::SUCCESS || jsonrpc != "2.0")
-        return make_error(id, -32600, "Invalid Request");
-
-    // --- method ---
-    std::string_view method;
-    if (root["method"].get_string().get(method) != simdjson::SUCCESS)
-        return make_error(id, -32600, "Invalid Request");
-
-    // Notifications (no id) must not receive a response.
-    // This covers: notifications/initialized, notifications/cancelled, and any
-    // future notifications the client may send (unknown ones are silently ignored).
-    if (id.kind == RequestId::Kind::none) return {};
-
-    // -----------------------------------------------------------------------
-    // Method dispatch
-    // -----------------------------------------------------------------------
-
-    // --- initialize ---
-    if (method == "initialize") {
-        JsonWriter rw(512);
-        {
-            auto _res = rw.object();
-
-            rw.kv_str("protocolVersion", negotiate_protocol_version(root)).comma()
-              .key("capabilities");
-            {
-                auto _cap = rw.object();
-                rw.key("tools");
-                {
-                    auto _tools = rw.object();
-                    // listChanged: false — tool list is static; clients need not poll.
-                    rw.kv_bool("listChanged", false);
-                }
-            }
-
-            rw.comma().key("serverInfo");
-            {
-                auto _si = rw.object();
-                rw.kv_str("name", "filo-mcp").comma()
-                  .kv_str("version", "0.1.0");
-            }
-
-            // instructions (MCP 2025-11-25, optional) — guidance for the local model
-            // on how to use this server effectively.
-            rw.comma().kv_str("instructions", kServerInstructions);
-        }
-        return make_response(id, rw.view());
-
-    // --- tools/list ---
-    } else if (method == "tools/list") {
-        // tools_list_result() is cached — built once, returned by const ref.
-        // The cursor/pagination fields are not needed: our tool list is static
-        // and fits comfortably in a single response.
-        return make_response(id, tools_list_result());
-
-    // --- tools/call ---
-    } else if (method == "tools/call") {
-        simdjson::ondemand::object params;
-        if (root["params"].get_object().get(params) != simdjson::SUCCESS)
-            return make_error(id, -32602, "Invalid params: missing 'params' object");
-
-        std::string_view name;
-        if (params["name"].get_string().get(name) != simdjson::SUCCESS)
-            return make_error(id, -32602, "Invalid params: missing 'name'");
-
-        // 'arguments' is optional per MCP spec — absent is treated as {}.
-        std::string args_json = "{}";
-        simdjson::ondemand::value arguments_value;
-        if (params["arguments"].get(arguments_value) == simdjson::SUCCESS) {
-            simdjson::ondemand::json_type arg_type;
-            if (arguments_value.type().get(arg_type) != simdjson::SUCCESS
-                || arg_type != simdjson::ondemand::json_type::object) {
-                return make_error(id, -32602, "Invalid params: 'arguments' must be an object");
-            }
-            simdjson::ondemand::object arguments;
-            std::string_view raw_json;
-            if (arguments_value.get_object().get(arguments) != simdjson::SUCCESS
-                || arguments.raw_json().get(raw_json) != simdjson::SUCCESS) {
-                return make_error(id, -32602, "Invalid params: could not parse 'arguments'");
-            }
-            args_json = std::string(raw_json);
-        }
-
-        auto& sm = core::tools::ToolManager::get_instance();
-        auto tool_def = sm.get_tool_definition(std::string(name));
-        if (!tool_def.has_value())
-            return make_error(id, -32602, std::format("Unknown tool: {}", name));
-
-        if (auto validation_error = validate_tool_arguments(*tool_def, args_json))
-            return make_error(id, -32602, *validation_error);
-
-        std::string result = sm.execute_tool(std::string(name), args_json);
-
-        // Detect error responses via a cheap prefix check.
-        // CONTRACT: every tool that signals failure must return a JSON object
-        // whose FIRST key is "error" — {"error": "..."}.  Success responses
-        // must start with any other key.  This prefix check is O(1) and avoids
-        // a full re-parse of potentially large file-content results.
-        const bool is_error = result.starts_with(R"({"error")") ||
-                              result.starts_with(R"({ "error")");
-
-        JsonWriter rw(result.size() + 128);
-        {
-            auto _res = rw.object();
-            rw.key("content");
-            {
-                auto _arr = rw.array();
-                {
-                    auto _item = rw.object();
-                    rw.kv_str("type", "text").comma()
-                      .kv_str("text", result);  // properly escaped via JsonWriter
-                }
-            }
-            rw.comma().kv_bool("isError", is_error);
-            // structuredContent (MCP 2025-11-25): embed the raw tool JSON alongside
-            // the escaped text block so clients can access structured fields directly
-            // without re-parsing the escaped string.  Lampo should prefer this field
-            // over parsing content[0].text.
-            rw.comma().kv_raw("structuredContent", result);
-        }
-        return make_response(id, rw.view());
-
-    // --- ping ---
-    } else if (method == "ping") {
-        // Either party may ping the other; receiver must respond with empty result.
-        return make_response(id, "{}");
-
-    // --- unknown method ---
-    } else {
-        return make_error(id, -32601, "Method not found");
     }
+
+    simdjson::ondemand::object root;
+    if (request_doc.get_object().get(root) != simdjson::SUCCESS) {
+        return std::string(kParseError);
+    }
+
+    const RequestId id = parse_request_id(root);
+    if (id.kind == RequestId::Kind::invalid) {
+        return std::string(kInvalidRequest);
+    }
+
+    std::string_view jsonrpc;
+    if (root["jsonrpc"].get_string().get(jsonrpc) != simdjson::SUCCESS || jsonrpc != "2.0") {
+        return make_error(id, -32600, "Invalid Request");
+    }
+
+    std::string_view method;
+    if (root["method"].get_string().get(method) != simdjson::SUCCESS) {
+        return make_error(id, -32600, "Invalid Request");
+    }
+
+    if (id.kind == RequestId::Kind::none) {
+        return {};
+    }
+
+    return route_method(method, id, root);
 }
 
 } // namespace core::mcp

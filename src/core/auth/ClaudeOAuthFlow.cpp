@@ -1,6 +1,7 @@
 #include "ClaudeOAuthFlow.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
 #include <simdjson.h>
@@ -56,32 +57,6 @@ std::vector<std::string> default_scopes() {
     };
 }
 
-std::string base64url_encode(const unsigned char* data, std::size_t len) {
-    static constexpr char tbl[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((len + 2u) / 3u) * 4u);
-
-    for (std::size_t i = 0; i < len; i += 3u) {
-        const unsigned int octet_a = data[i];
-        const unsigned int octet_b = (i + 1u < len) ? data[i + 1u] : 0u;
-        const unsigned int octet_c = (i + 2u < len) ? data[i + 2u] : 0u;
-
-        const unsigned int triple = (octet_a << 16u) | (octet_b << 8u) | octet_c;
-        out.push_back(tbl[(triple >> 18u) & 0x3Fu]);
-        out.push_back(tbl[(triple >> 12u) & 0x3Fu]);
-        out.push_back((i + 1u < len) ? tbl[(triple >> 6u) & 0x3Fu] : '=');
-        out.push_back((i + 2u < len) ? tbl[triple & 0x3Fu] : '=');
-    }
-
-    for (char& ch : out) {
-        if (ch == '+') ch = '-';
-        else if (ch == '/') ch = '_';
-    }
-    while (!out.empty() && out.back() == '=') out.pop_back();
-    return out;
-}
-
 std::string url_encode(std::string_view s) {
     static constexpr char hex[] = "0123456789ABCDEF";
     std::string out;
@@ -107,7 +82,7 @@ std::string generate_random_state() {
     for (auto& b : bytes) {
         b = static_cast<unsigned char>(dist(gen));
     }
-    return base64url_encode(bytes.data(), bytes.size());
+    return core::utils::Base64::encode_url(bytes);
 }
 
 std::string generate_code_verifier() {
@@ -119,7 +94,7 @@ std::string generate_code_verifier() {
     for (auto& b : bytes) {
         b = static_cast<unsigned char>(dist(gen));
     }
-    return base64url_encode(bytes.data(), bytes.size());
+    return core::utils::Base64::encode_url(bytes);
 }
 
 void open_browser(const std::string& url) {

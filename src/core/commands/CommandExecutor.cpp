@@ -24,6 +24,7 @@
 #endif
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/utils/Base64.hpp"
 
 namespace core::commands {
 
@@ -368,51 +369,13 @@ bool command_exists(std::string_view command) {
     return false;
 }
 
-std::string base64_encode(std::string_view input) {
-    static constexpr std::string_view kAlphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    std::string out;
-    out.reserve(((input.size() + 2) / 3) * 4);
-
-    std::size_t i = 0;
-    while (i + 2 < input.size()) {
-        const auto b0 = static_cast<unsigned char>(input[i++]);
-        const auto b1 = static_cast<unsigned char>(input[i++]);
-        const auto b2 = static_cast<unsigned char>(input[i++]);
-
-        out.push_back(kAlphabet[(b0 >> 2) & 0x3F]);
-        out.push_back(kAlphabet[((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F)]);
-        out.push_back(kAlphabet[((b1 & 0x0F) << 2) | ((b2 >> 6) & 0x03)]);
-        out.push_back(kAlphabet[b2 & 0x3F]);
-    }
-
-    const std::size_t remaining = input.size() - i;
-    if (remaining == 1) {
-        const auto b0 = static_cast<unsigned char>(input[i]);
-        out.push_back(kAlphabet[(b0 >> 2) & 0x3F]);
-        out.push_back(kAlphabet[(b0 & 0x03) << 4]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (remaining == 2) {
-        const auto b0 = static_cast<unsigned char>(input[i]);
-        const auto b1 = static_cast<unsigned char>(input[i + 1]);
-        out.push_back(kAlphabet[(b0 >> 2) & 0x3F]);
-        out.push_back(kAlphabet[((b0 & 0x03) << 4) | ((b1 >> 4) & 0x0F)]);
-        out.push_back(kAlphabet[(b1 & 0x0F) << 2]);
-        out.push_back('=');
-    }
-
-    return out;
-}
-
 std::optional<std::string> copy_via_osc52(std::string_view text) {
     std::ofstream tty("/dev/tty", std::ios::binary | std::ios::out);
     if (!tty) {
         return std::string("failed to open /dev/tty for OSC52 copy");
     }
 
-    const std::string payload = base64_encode(text);
+    const std::string payload = core::utils::Base64::encode(text);
     const bool inside_tmux = std::getenv("TMUX") != nullptr;
     if (inside_tmux) {
         tty << "\x1bPtmux;\x1b\x1b]52;c;" << payload << "\x07\x1b\\";
