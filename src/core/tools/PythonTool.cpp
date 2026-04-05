@@ -63,7 +63,7 @@ ToolDefinition PythonTool::get_definition() const {
     return definition_;
 }
 
-std::string PythonTool::execute(const std::string& json_args) {
+std::string PythonTool::execute(const std::string& json_args, [[maybe_unused]] const core::context::SessionContext& context) {
     try {
         py::gil_scoped_acquire acquire;
 

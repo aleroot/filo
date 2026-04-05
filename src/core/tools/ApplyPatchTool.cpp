@@ -89,7 +89,8 @@ static std::optional<std::string> extract_patch_path(std::string_view line) {
 
 static std::optional<std::string> validate_patch_paths(
     std::string_view patch_text,
-    const std::filesystem::path& base_dir)
+    const std::filesystem::path& base_dir,
+    const core::context::SessionContext& context)
 {
     std::istringstream lines{std::string(patch_text)};
     std::string line;
@@ -107,7 +108,8 @@ static std::optional<std::string> validate_patch_paths(
         const std::filesystem::path resolved =
             requested.is_absolute() ? requested : (base_dir / requested);
 
-        if (const auto access_error = detail::check_workspace_access(resolved, *patch_path)) {
+        if (const auto access_error =
+                detail::check_workspace_access(resolved, *patch_path, context)) {
             return access_error;
         }
     }
@@ -123,13 +125,14 @@ ToolDefinition ApplyPatchTool::get_definition() const {
             "Applies a unified diff patch to the filesystem. "
             "Requires the 'patch' utility (available by default on macOS and most Linux systems). "
             "Provide 'working_dir' so the patch is applied relative to your project root; "
-            "defaults to filo's current working directory if omitted. "
+            "relative paths resolve against the effective workspace root for this MCP session, "
+            "and the active workspace root is used when omitted. "
             "On success returns the list of patched files in 'output'.",
         .parameters = {
             {"patch",       "string", "The unified diff patch content to apply (unified diff format).", true},
             {"working_dir", "string",
-             "Absolute path to the directory where 'patch -p1' should run "
-             "(typically the project root). Defaults to filo's CWD.", false}
+             "Absolute or relative path to the directory where 'patch -p1' should run "
+             "(typically the project root). Defaults to the active workspace root.", false}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the patch applied successfully."},"output":{"type":"string","description":"Combined stdout and stderr from the patch command."}},"required":["success","output"],"additionalProperties":false})",
@@ -139,7 +142,7 @@ ToolDefinition ApplyPatchTool::get_definition() const {
     };
 }
 
-std::string ApplyPatchTool::execute(const std::string& json_args) {
+std::string ApplyPatchTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     if (kPatchBin.empty()) {
         return R"({"error":"'patch' binary not found. On macOS it is at /usr/bin/patch (always present). On Linux install it with: apt install patch  or  dnf install patch"})";
     }
@@ -160,30 +163,31 @@ std::string ApplyPatchTool::execute(const std::string& json_args) {
     std::string_view wd_view;
     if (doc["working_dir"].get(wd_view) == simdjson::SUCCESS && !wd_view.empty()) {
         working_dir = std::string(wd_view);
-        std::error_code ec;
-        if (!std::filesystem::is_directory(working_dir, ec)) {
-            return std::format(R"({{"error":"working_dir does not exist or is not a directory: '{}'"}})",
-                               core::utils::escape_json_string(working_dir));
-        }
     }
 
     std::error_code ec;
-    const std::filesystem::path patch_base_dir = [&]() {
+    const std::filesystem::path requested_patch_base_dir = [&]() {
         if (!working_dir.empty()) {
             return std::filesystem::path(working_dir);
         }
-        return std::filesystem::current_path(ec);
+        return std::filesystem::path(".");
     }();
-    if (ec) {
-        return std::format(R"({{"error":"Unable to resolve current directory: {}"}})",
-                           core::utils::escape_json_string(ec.message()));
-    }
 
-    if (const auto access_error =
-            detail::check_workspace_access(patch_base_dir, patch_base_dir.string())) {
+    std::filesystem::path patch_base_dir;
+    if (const auto access_error = detail::check_workspace_access(
+            requested_patch_base_dir,
+            working_dir.empty() ? std::string(".") : working_dir,
+            context,
+            &patch_base_dir)) {
         return *access_error;
     }
-    if (const auto access_error = validate_patch_paths(patch_view, patch_base_dir)) {
+
+    if (!std::filesystem::is_directory(patch_base_dir, ec)) {
+        return std::format(R"({{"error":"working_dir does not exist or is not a directory: '{}'"}})",
+                           core::utils::escape_json_string(
+                               working_dir.empty() ? patch_base_dir.string() : working_dir));
+    }
+    if (const auto access_error = validate_patch_paths(patch_view, patch_base_dir, context)) {
         return *access_error;
     }
 
@@ -199,8 +203,8 @@ std::string ApplyPatchTool::execute(const std::string& json_args) {
 
     // Build command: patch [-d working_dir] -p1 < tmpfile
     std::string command = kPatchBin;
-    if (!working_dir.empty()) {
-        command += " -d '" + shell_single_quote(working_dir) + "'";
+    if (!patch_base_dir.empty()) {
+        command += " -d '" + shell_single_quote(patch_base_dir.string()) + "'";
     }
     command += " -p1 < '" + shell_single_quote(tmp_patch_file) + "' 2>&1";
 

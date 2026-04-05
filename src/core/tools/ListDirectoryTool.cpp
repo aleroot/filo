@@ -27,7 +27,7 @@ ToolDefinition ListDirectoryTool::get_definition() const {
     };
 }
 
-std::string ListDirectoryTool::execute(const std::string& json_args) {
+std::string ListDirectoryTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     auto error = parser.parse(json_args).get(doc);
@@ -47,9 +47,14 @@ std::string ListDirectoryTool::execute(const std::string& json_args) {
     }
 
     std::string path_str(dir_path);
-    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+        return *access_error;
+    }
     std::error_code ec;
-    if (!std::filesystem::exists(path_str, ec) || !std::filesystem::is_directory(path_str, ec)) {
+    if (!std::filesystem::exists(resolved_path, ec)
+        || !std::filesystem::is_directory(resolved_path, ec)) {
         return std::format("{{\"error\": \"Directory not found: {}\"}}", core::utils::escape_json_string(path_str));
     }
 
@@ -60,7 +65,7 @@ std::string ListDirectoryTool::execute(const std::string& json_args) {
         {
             auto _arr = w.array();
             bool first = true;
-            for (const auto& entry : std::filesystem::directory_iterator(path_str, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(resolved_path, ec)) {
                 if (!first) w.comma();
                 first = false;
                 auto _item = w.object();

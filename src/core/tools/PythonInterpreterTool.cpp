@@ -29,7 +29,7 @@ ToolDefinition PythonInterpreterTool::get_definition() const {
     };
 }
 
-std::string PythonInterpreterTool::execute(const std::string& json_args) {
+std::string PythonInterpreterTool::execute(const std::string& json_args, [[maybe_unused]] const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {

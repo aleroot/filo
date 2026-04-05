@@ -214,7 +214,7 @@ ToolDefinition SearchReplaceTool::get_definition() const {
     };
 }
 
-std::string SearchReplaceTool::execute(const std::string& json_args) {
+std::string SearchReplaceTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS)
@@ -247,16 +247,20 @@ std::string SearchReplaceTool::execute(const std::string& json_args) {
         return R"({"error":"'edits' array is empty. Provide at least one {\"old_string\", \"new_string\"} edit."})";
 
     const std::string path_str(file_path_v);
-    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+        return *access_error;
+    }
     std::error_code ec;
-    if (!std::filesystem::is_regular_file(path_str, ec))
+    if (!std::filesystem::is_regular_file(resolved_path, ec))
         return std::format(R"({{"error":"File not found: {}"}})",
                            core::utils::escape_json_string(path_str));
 
     // Read file.
     std::string file_content;
     {
-        std::ifstream ifs(path_str, std::ios::binary);
+        std::ifstream ifs(resolved_path, std::ios::binary);
         if (!ifs)
             return std::format(R"({{"error":"Cannot open file for reading: {}"}})",
                                core::utils::escape_json_string(path_str));
@@ -282,7 +286,7 @@ std::string SearchReplaceTool::execute(const std::string& json_args) {
 
     // Write back only if content changed.
     if (result.content != file_content) {
-        std::ofstream ofs(path_str, std::ios::binary | std::ios::trunc);
+        std::ofstream ofs(resolved_path, std::ios::binary | std::ios::trunc);
         if (!ofs)
             return std::format(R"({{"error":"Cannot open file for writing: {}"}})",
                                core::utils::escape_json_string(path_str));

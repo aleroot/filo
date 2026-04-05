@@ -28,7 +28,7 @@ ToolDefinition MoveFileTool::get_definition() const {
     };
 }
 
-std::string MoveFileTool::execute(const std::string& json_args) {
+std::string MoveFileTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -45,12 +45,16 @@ std::string MoveFileTool::execute(const std::string& json_args) {
 
     const std::string src_str(src_v);
     const std::string dst_str(dst_v);
-    std::filesystem::path src(src_str);
-    std::filesystem::path dst(dst_str);
-    if (const auto access_error = detail::check_workspace_access(src, src_str)) {
+    const std::filesystem::path requested_src(src_str);
+    const std::filesystem::path requested_dst(dst_str);
+    std::filesystem::path src;
+    std::filesystem::path dst;
+    if (const auto access_error =
+            detail::check_workspace_access(requested_src, src_str, context, &src)) {
         return *access_error;
     }
-    if (const auto access_error = detail::check_workspace_access(dst, dst_str)) {
+    if (const auto access_error =
+            detail::check_workspace_access(requested_dst, dst_str, context, &dst)) {
         return *access_error;
     }
     std::error_code ec;
@@ -85,8 +89,8 @@ std::string MoveFileTool::execute(const std::string& json_args) {
     }
 
     return std::format(R"({{"success":true,"from":"{}","to":"{}"}})",
-                       core::utils::escape_json_string(src_str),
-                       core::utils::escape_json_string(dst_str));
+                       core::utils::escape_json_string(src.string()),
+                       core::utils::escape_json_string(dst.string()));
 }
 
 } // namespace core::tools

@@ -674,7 +674,13 @@ RunDiagnostics run_for_test(const RunOptions& options,
     auto& tool_manager = core::tools::ToolManager::get_instance();
     register_default_tools(tool_manager);
 
-    auto agent = std::make_shared<core::agent::Agent>(runtime.provider, tool_manager);
+    auto agent_session_context = core::context::make_session_context(
+        core::workspace::Workspace::get_instance().snapshot(),
+        core::context::SessionTransport::cli);
+    auto agent = std::make_shared<core::agent::Agent>(
+        runtime.provider,
+        tool_manager,
+        agent_session_context);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);
     }

@@ -645,8 +645,11 @@ SubagentOrchestrator::LoopResult SubagentOrchestrator::run_task_loop(
 
             futures.push_back(std::async(
                 std::launch::async,
-                [this, tc]() {
-                    std::string output = tool_manager_.execute_tool(tc.function.name, tc.function.arguments);
+                [this, tc, &context]() {
+                    std::string output = tool_manager_.execute_tool(
+                        tc.function.name,
+                        tc.function.arguments,
+                        context.session_context);
                     output = tool_output_history::clamp_for_history(tc.function.name, output);
                     return core::llm::Message{
                         .role = "tool",

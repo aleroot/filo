@@ -2,10 +2,12 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/Agent.hpp"
+#include "core/context/SessionContext.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -72,7 +74,9 @@ public:
         };
     }
 
-    [[nodiscard]] std::string execute(const std::string&) override {
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
         return R"({"ok":true})";
     }
 };
@@ -160,7 +164,10 @@ TEST_CASE("Agent enforces a per-turn model step bound", "[agent][loop]") {
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<NoopLoopTool>());
 
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
     agent->set_loop_limits({.max_steps_per_turn = 3});
 
     std::mutex output_mutex;
@@ -220,7 +227,19 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
 
     auto provider = std::make_shared<CapturingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = tmp.path(),
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "prompt-cache-session");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        session_context);
 
     send_and_wait(agent, "first");
 
@@ -244,4 +263,48 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
     CHECK(first_system_prompt == second_system_prompt);
     CHECK(first_system_prompt.find("alpha.txt") != std::string::npos);
     CHECK(second_system_prompt.find("beta.txt") == std::string::npos);
+}
+
+TEST_CASE("Agent project context follows the explicit SessionContext workspace",
+          "[agent][prompt][workspace]") {
+    const auto base = std::filesystem::temp_directory_path()
+        / std::format("filo_agent_session_workspace_{}",
+                      std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir workspace_dir(base / "workspace");
+    TempDir cwd_dir(base / "cwd");
+
+    {
+        std::ofstream workspace_file(workspace_dir.path() / "workspace_marker.txt");
+        workspace_file << "workspace\n";
+    }
+    {
+        std::ofstream cwd_file(cwd_dir.path() / "cwd_marker.txt");
+        cwd_file << "cwd\n";
+    }
+
+    ScopedCurrentPath scoped_cwd(cwd_dir.path());
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_dir.path(),
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "agent-workspace-session");
+    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager, session_context);
+
+    send_and_wait(agent, "hello");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    REQUIRE_FALSE(requests[0].messages.empty());
+    REQUIRE(requests[0].messages[0].role == "system");
+
+    const auto& system_prompt = requests[0].messages[0].content;
+    CHECK(system_prompt.find("workspace_marker.txt") != std::string::npos);
+    CHECK(system_prompt.find("cwd_marker.txt") == std::string::npos);
 }

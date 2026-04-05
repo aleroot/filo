@@ -28,7 +28,7 @@ ToolDefinition DeleteFileTool::get_definition() const {
     };
 }
 
-std::string DeleteFileTool::execute(const std::string& json_args) {
+std::string DeleteFileTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -41,18 +41,20 @@ std::string DeleteFileTool::execute(const std::string& json_args) {
     }
 
     const std::string path_str(path_v);
-    std::filesystem::path p(path_str);
-    if (const auto access_error = detail::check_workspace_access(p, path_str)) {
+    const std::filesystem::path requested_path(path_str);
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
         return *access_error;
     }
     std::error_code ec;
 
-    if (!std::filesystem::exists(p, ec)) {
+    if (!std::filesystem::exists(resolved_path, ec)) {
         return std::format(R"({{"error":"Path does not exist: {}"}})",
                            core::utils::escape_json_string(path_str));
     }
 
-    std::filesystem::remove(p, ec);
+    std::filesystem::remove(resolved_path, ec);
     if (ec) {
         return std::format(R"({{"error":"Failed to delete '{}': {}"}})",
                            core::utils::escape_json_string(path_str),
@@ -60,7 +62,7 @@ std::string DeleteFileTool::execute(const std::string& json_args) {
     }
 
     return std::format(R"({{"success":true,"deleted":"{}"}})",
-                       core::utils::escape_json_string(path_str));
+                       core::utils::escape_json_string(resolved_path.string()));
 }
 
 } // namespace core::tools

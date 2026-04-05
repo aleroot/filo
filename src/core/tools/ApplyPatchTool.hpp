@@ -34,7 +34,9 @@ namespace core::tools {
 class ApplyPatchTool : public Tool {
 public:
     ToolDefinition get_definition() const override;
-    std::string    execute(const std::string& json_args) override;
+    std::string execute(
+        const std::string& json_args,
+        const core::context::SessionContext& context) override;
 };
 
 } // namespace core::tools

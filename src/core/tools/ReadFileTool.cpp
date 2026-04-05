@@ -11,13 +11,6 @@
 
 namespace {
 
-[[nodiscard]] std::string resolve_for_display(const std::filesystem::path& path) {
-    std::error_code ec;
-    const auto abs = std::filesystem::absolute(path, ec);
-    if (ec) return path.string();
-    return abs.lexically_normal().string();
-}
-
 [[nodiscard]] std::string file_type_name(std::filesystem::file_type type) {
     switch (type) {
         case std::filesystem::file_type::none:       return "none";
@@ -73,7 +66,7 @@ ToolDefinition ReadFileTool::get_definition() const {
     };
 }
 
-std::string ReadFileTool::execute(const std::string& json_args) {
+std::string ReadFileTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     auto error = parser.parse(json_args).get(doc);
@@ -101,36 +94,40 @@ std::string ReadFileTool::execute(const std::string& json_args) {
 
     std::string path_str(file_path);
     const std::filesystem::path requested_path(path_str);
-    if (const auto access_error = detail::check_workspace_access(requested_path, path_str)) return *access_error;
-    const std::string resolved_path = resolve_for_display(requested_path);
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+        return *access_error;
+    }
+    const std::string resolved_path_string = resolved_path.string();
 
     std::error_code status_ec;
-    const auto status = std::filesystem::status(requested_path, status_ec);
+    const auto status = std::filesystem::status(resolved_path, status_ec);
     if (status_ec) {
         if (status_ec == std::errc::no_such_file_or_directory
             || status_ec == std::errc::not_a_directory) {
-            return format_read_error(path_str, resolved_path, "path does not exist");
+            return format_read_error(path_str, resolved_path_string, "path does not exist");
         }
-        return format_read_error(path_str, resolved_path,
+        return format_read_error(path_str, resolved_path_string,
                                  std::format("failed to inspect path ({})", status_ec.message()));
     }
     if (status.type() == std::filesystem::file_type::not_found) {
-        return format_read_error(path_str, resolved_path, "path does not exist");
+        return format_read_error(path_str, resolved_path_string, "path does not exist");
     }
     if (status.type() != std::filesystem::file_type::regular) {
-        return format_read_error(path_str, resolved_path,
+        return format_read_error(path_str, resolved_path_string,
                                  std::format("path is not a regular file (type={})",
                                              file_type_name(status.type())));
     }
 
     errno = 0;
-    std::ifstream ifs(path_str);
+    std::ifstream ifs(resolved_path, std::ios::binary);
     const int open_errno = errno;
     if (!ifs) {
         const std::string reason = open_errno != 0
             ? std::error_code(open_errno, std::generic_category()).message()
             : std::string("unknown reason");
-        return format_read_error(path_str, resolved_path,
+        return format_read_error(path_str, resolved_path_string,
                                  std::format("failed to open file for reading ({})", reason));
     }
 

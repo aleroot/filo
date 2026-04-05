@@ -139,7 +139,7 @@ ToolDefinition GrepSearchTool::get_definition() const {
     };
 }
 
-std::string GrepSearchTool::execute(const std::string& json_args) {
+std::string GrepSearchTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS)
@@ -162,8 +162,14 @@ std::string GrepSearchTool::execute(const std::string& json_args) {
     std::string_view include_v;
     const bool has_include = (doc["include_pattern"].get(include_v) == simdjson::SUCCESS);
 
+    std::filesystem::path resolved_dir;
+    if (const auto access_error =
+            detail::check_workspace_access(dir_path, dir_path, context, &resolved_dir)) {
+        return *access_error;
+    }
+
     std::error_code ec;
-    if (!std::filesystem::is_directory(dir_path, ec))
+    if (!std::filesystem::is_directory(resolved_dir, ec))
         return R"({"error":"'path' does not exist or is not a directory."})";
 
     // ── Regex or literal? ───────────────────────────────────────────────────
@@ -184,7 +190,7 @@ std::string GrepSearchTool::execute(const std::string& json_args) {
     files.reserve(512);
 
     std::filesystem::recursive_directory_iterator it(
-        dir_path, std::filesystem::directory_options::skip_permission_denied, ec
+        resolved_dir, std::filesystem::directory_options::skip_permission_denied, ec
     );
     if (!ec) {
         const auto end = std::filesystem::recursive_directory_iterator{};

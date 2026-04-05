@@ -1,6 +1,8 @@
 #include "Server.hpp"
+#include "../core/context/SessionContext.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/utils/JsonWriter.hpp"
+#include "../core/workspace/Workspace.hpp"
 #include <simdjson.h>
 #include <cstdint>
 #include <cstdio>
@@ -158,6 +160,9 @@ void run_server() {
     // Trigger skill registration on the dispatcher singleton before the loop so
     // the first tools/list response is not delayed by one-time initialisation.
     auto& dispatcher = core::mcp::McpDispatcher::get_instance();
+    auto session_context = core::context::make_session_context(
+        core::workspace::Workspace::get_instance().snapshot(),
+        core::context::SessionTransport::mcp_stdio);
     SessionPhase phase = SessionPhase::awaiting_initialize;
 
     std::string line;
@@ -182,7 +187,7 @@ void run_server() {
                     continue;
                 }
 
-                std::string response = dispatcher.dispatch(line);
+                std::string response = dispatcher.dispatch(line, session_context);
                 if (!response.empty()) {
                     phase = SessionPhase::awaiting_initialized;
                     emit_response(response);
@@ -193,7 +198,7 @@ void run_server() {
             if (phase == SessionPhase::awaiting_initialized) {
                 if (parsed->kind == ParsedJsonRpcMessage::Kind::notification
                     && parsed->method == "notifications/initialized") {
-                    dispatcher.dispatch(line);
+                    dispatcher.dispatch(line, session_context);
                     phase = SessionPhase::running;
                     continue;
                 }
@@ -204,7 +209,7 @@ void run_server() {
                         ? "Initialize has already completed for this stdio MCP session."
                         : "Session not ready. Send notifications/initialized first.";
                     if (parsed->method == "ping") {
-                        emit_response(dispatcher.dispatch(line));
+                        emit_response(dispatcher.dispatch(line, session_context));
                     } else {
                         emit_response(make_jsonrpc_error_body(parsed->id, error_code, message));
                     }
@@ -222,7 +227,7 @@ void run_server() {
             }
         }
 
-        emit_response(dispatcher.dispatch(line));
+        emit_response(dispatcher.dispatch(line, session_context));
     }
 }
 

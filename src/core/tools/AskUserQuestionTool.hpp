@@ -53,7 +53,7 @@ public:
     ~AskUserQuestionTool() override = default;
     
     [[nodiscard]] ToolDefinition get_definition() const override;
-    [[nodiscard]] std::string execute(const std::string& args_json) override;
+    [[nodiscard]] std::string execute(const std::string& args_json, const core::context::SessionContext& context) override;
     
     /**
      * @brief Set the callback for when a question needs to be displayed.

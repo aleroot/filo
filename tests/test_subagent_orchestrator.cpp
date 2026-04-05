@@ -13,6 +13,7 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/ShellTool.hpp"
+#include "TestSessionContext.hpp"
 
 #include <simdjson.h>
 
@@ -80,6 +81,7 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"investigate startup","prompt":"inspect startup sequence","subagent_type":"general"})",
@@ -87,6 +89,7 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
         {
             .active_model = "gpt-4o",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -100,6 +103,7 @@ TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", 
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto first = orchestrator.execute_task(
         R"({"description":"trace auth","prompt":"find auth flow","subagent_type":"general"})",
@@ -107,6 +111,7 @@ TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", 
         {
             .active_model = "gpt-4o",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -121,6 +126,7 @@ TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", 
         {
             .active_model = "gpt-4o",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -155,6 +161,7 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"scan repo","prompt":"find route handlers","subagent_type":"explore"})",
@@ -162,6 +169,7 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
         {
             .active_model = "gpt-4o",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -185,6 +193,7 @@ TEST_CASE("SubagentOrchestrator rejects unknown subagent_type", "[agent][orchest
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"bad","prompt":"noop","subagent_type":"unknown_worker"})",
@@ -192,6 +201,7 @@ TEST_CASE("SubagentOrchestrator rejects unknown subagent_type", "[agent][orchest
         {
             .active_model = "gpt-4o",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -209,6 +219,7 @@ TEST_CASE("SubagentOrchestrator applies model override from subagent profile con
     config.subagents["general"] = std::move(general);
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"profile model","prompt":"run task","subagent_type":"general"})",
@@ -216,6 +227,7 @@ TEST_CASE("SubagentOrchestrator applies model override from subagent profile con
         {
             .active_model = "parent-model",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -240,6 +252,7 @@ TEST_CASE("SubagentOrchestrator routes through provider override when configured
     config.subagents["general"] = std::move(general);
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"provider override","prompt":"run task","subagent_type":"general"})",
@@ -247,6 +260,7 @@ TEST_CASE("SubagentOrchestrator routes through provider override when configured
         {
             .active_model = "parent-model",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 
@@ -265,6 +279,7 @@ TEST_CASE("SubagentOrchestrator fails clearly when provider override is unavaila
     config.subagents["general"] = std::move(general);
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
 
     const auto result = orchestrator.execute_task(
         R"({"description":"missing provider","prompt":"run task","subagent_type":"general"})",
@@ -272,6 +287,7 @@ TEST_CASE("SubagentOrchestrator fails clearly when provider override is unavaila
         {
             .active_model = "parent-model",
             .parent_mode = "BUILD",
+            .session_context = session_context,
             .permission_check = {},
         });
 

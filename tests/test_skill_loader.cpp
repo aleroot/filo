@@ -3,6 +3,7 @@
 
 #include "core/tools/SkillLoader.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -282,7 +283,10 @@ def execute(json_args):
     REQUIRE(count == 1);
     REQUIRE(tm.has_tool("echo_skill"));
 
-    const std::string result = tm.execute_tool("echo_skill", R"({"input": "hello"})");
+    const std::string result = tm.execute_tool(
+        "echo_skill",
+        R"({"input": "hello"})",
+        test_support::make_workspace_session_context());
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("echo:hello"));
 
     fs::remove_all(root);

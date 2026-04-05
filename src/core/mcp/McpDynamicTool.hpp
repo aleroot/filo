@@ -40,7 +40,9 @@ public:
 
     core::tools::ToolDefinition get_definition() const override { return def_; }
 
-    std::string execute(const std::string& json_args) override {
+    std::string execute(
+        const std::string& json_args,
+        const core::context::SessionContext& /*context*/) override {
         try {
             return session_->call_tool(def_.name, json_args);
         } catch (const std::exception& e) {

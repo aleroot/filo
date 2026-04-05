@@ -37,6 +37,12 @@ namespace {
     return value.substr(start, end - start + 1);
 }
 
+[[nodiscard]] std::filesystem::path resolve_agent_project_root(
+    const core::context::SessionContext& session_context)
+{
+    return session_context.workspace_view().primary();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -44,9 +50,11 @@ namespace {
 // ---------------------------------------------------------------------------
 
 Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
-             core::tools::ToolManager& skill_manager)
+             core::tools::ToolManager& skill_manager,
+             core::context::SessionContext session_context)
     : provider_(std::move(provider))
     , skill_manager_(skill_manager)
+    , session_context_(std::move(session_context))
     , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config()) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
@@ -135,8 +143,13 @@ std::string Agent::build_stable_prompt_prefix() const {
 
     // ─── Project Context Injection ──────────────────────────────────────────
     try {
+        const auto project_root = resolve_agent_project_root(session_context_);
+        if (project_root.empty()) {
+            return prompt;
+        }
+
         // Detect SCM (Git, etc.) or fallback to NoOp
-        auto scm = core::scm::ScmFactory::create(std::filesystem::current_path());
+        auto scm = core::scm::ScmFactory::create(project_root);
         
         std::string context_section = "\n\n[Project Context]\n";
         bool has_context = false;
@@ -150,7 +163,7 @@ std::string Agent::build_stable_prompt_prefix() const {
 
         // 2. File Tree
         // Limit depth to 2 levels to avoid token bloat, but give high-level map
-        std::string tree = core::utils::get_file_tree(std::filesystem::current_path(), *scm, 2);
+        std::string tree = core::utils::get_file_tree(project_root, *scm, 2);
         if (!tree.empty()) {
             context_section += "Structure:\n" + tree + "\n";
             has_context = true;
@@ -524,6 +537,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             SubagentOrchestrator::RunContext run_context{
                                 .active_model = active_model_for_task,
                                 .parent_mode = parent_mode_for_task,
+                                .session_context = self->session_context(),
                                 .permission_check = [self](const std::string& tool_name,
                                                            const std::string& args) {
                                     return self->check_permission(tool_name, args);
@@ -537,7 +551,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         } else {
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,
-                                tc.function.arguments);
+                                tc.function.arguments,
+                                self->session_context());
                         }
                         result = tool_output_history::clamp_for_history(tc.function.name, result);
                         return core::llm::Message{

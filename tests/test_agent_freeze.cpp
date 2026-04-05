@@ -11,6 +11,7 @@
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
 #include "core/tools/GrepSearchTool.hpp"
+#include "TestSessionContext.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonTool.hpp"
 #endif
@@ -38,7 +39,10 @@ int main() {
     sm.register_tool(std::make_shared<core::tools::PythonTool>("src/core/tools/sample_skill.py", "sample_skill"));
     #endif
 
-    auto agent = std::make_shared<core::agent::Agent>(provider, sm);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        sm,
+        test_support::make_workspace_session_context());
 
     std::println(stdout, "Sending message...");
     bool done = false;

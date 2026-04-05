@@ -31,7 +31,7 @@ ToolDefinition WriteFileTool::get_definition() const {
     };
 }
 
-std::string WriteFileTool::execute(const std::string& json_args) {
+std::string WriteFileTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -47,19 +47,23 @@ std::string WriteFileTool::execute(const std::string& json_args) {
     }
 
     const std::string path_str(file_path);
-    std::filesystem::path p(path_str);
-    if (const auto access_error = detail::check_workspace_access(p, path_str)) return *access_error;
+    const std::filesystem::path requested_path(path_str);
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+        return *access_error;
+    }
 
     // -------------------------------------------------------------------------
     // Read previous content BEFORE overwriting so the client can render a diff.
     // We cap at 512 KB to keep the MCP response size reasonable.
     // -------------------------------------------------------------------------
     std::error_code ec;
-    const bool file_existed = std::filesystem::exists(p, ec);
+    const bool file_existed = std::filesystem::exists(resolved_path, ec);
 
     std::string previous_content;
     if (file_existed) {
-        std::ifstream prev_ifs(path_str, std::ios::binary);
+        std::ifstream prev_ifs(resolved_path, std::ios::binary);
         if (prev_ifs) {
             constexpr std::size_t kMaxPrev = 512 * 1024;
             std::string buf(kMaxPrev, '\0');
@@ -73,8 +77,8 @@ std::string WriteFileTool::execute(const std::string& json_args) {
     // -------------------------------------------------------------------------
     // Create parent directories if needed.
     // -------------------------------------------------------------------------
-    if (p.has_parent_path()) {
-        std::filesystem::create_directories(p.parent_path(), ec);
+    if (resolved_path.has_parent_path()) {
+        std::filesystem::create_directories(resolved_path.parent_path(), ec);
         // Ignore ec: if create_directories fails the open below will also fail
         // and we'll report that error instead.
     }
@@ -82,7 +86,7 @@ std::string WriteFileTool::execute(const std::string& json_args) {
     // -------------------------------------------------------------------------
     // Write the new content.
     // -------------------------------------------------------------------------
-    std::ofstream ofs(path_str, std::ios::binary | std::ios::trunc);
+    std::ofstream ofs(resolved_path, std::ios::binary | std::ios::trunc);
     if (!ofs) {
         return std::format(R"({{"error":"Failed to open file for writing: '{}'."}})",
                            core::utils::escape_json_string(path_str));
@@ -95,7 +99,7 @@ std::string WriteFileTool::execute(const std::string& json_args) {
     // -------------------------------------------------------------------------
     return std::format(
         R"({{"success":true,"file_path":"{}","created":{},"bytes_written":{},"previous_content":"{}"}})",
-        core::utils::escape_json_string(path_str),
+        core::utils::escape_json_string(resolved_path.string()),
         file_existed ? "false" : "true",
         content.size(),
         core::utils::escape_json_string(previous_content));

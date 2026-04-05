@@ -1,4 +1,5 @@
 #include "McpDispatcher.hpp"
+#include "../context/SessionContext.hpp"
 #include "../tools/ToolManager.hpp"
 #include "../tools/ShellTool.hpp"
 #include "../tools/ApplyPatchTool.hpp"
@@ -696,7 +697,8 @@ struct ParsedPromptGetRequest {
     return {};
 }
 
-[[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root) {
+[[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root,
+                                                  const core::context::SessionContext& context) {
     const bool has_prompts = !discover_prompt_templates().empty();
     JsonWriter rw(1024);
     {
@@ -733,20 +735,20 @@ struct ParsedPromptGetRequest {
                 .kv_str("version", "0.1.0");
         }
 
-        auto& ws = core::workspace::Workspace::get_instance();
+        const auto& workspace = context.workspace_view();
         std::string dynamic_instructions = std::string(kServerInstructions);
 
-        if (ws.is_enforced()) {
+        if (workspace.enforce()) {
             dynamic_instructions += "\n\nALLOWED WORKSPACE FOLDERS (strict enforcement enabled):\n";
-            dynamic_instructions += "- Primary: " + ws.get_primary().string() + "\n";
-            for (const auto& add : ws.get_additional()) {
+            dynamic_instructions += "- Primary: " + workspace.primary().string() + "\n";
+            for (const auto& add : workspace.additional()) {
                 dynamic_instructions += "- Additional: " + add.string() + "\n";
             }
             dynamic_instructions += "\nUse filesystem tools for strict path-bounded operations. "
                                     "run_terminal_command remains open-world and can access paths "
                                     "outside these folders if the invoked command does so.";
         } else {
-            dynamic_instructions += "\n\nWORKSPACE: Working directory is " + ws.get_primary().string()
+            dynamic_instructions += "\n\nWORKSPACE: Working directory is " + workspace.primary().string()
                 + " (enforcement disabled; system-wide path access is allowed).";
         }
         rw.comma().kv_str("instructions", dynamic_instructions);
@@ -803,8 +805,9 @@ struct ParsedPromptGetRequest {
     return std::move(rw).take();
 }
 
-[[nodiscard]] std::string build_resources_list_result() {
-    auto& ws = core::workspace::Workspace::get_instance();
+[[nodiscard]] std::string build_resources_list_result(
+    const core::context::SessionContext& context) {
+    const auto& workspace = context.workspace_view();
     JsonWriter rw(2048);
     {
         auto _res = rw.object();
@@ -823,19 +826,19 @@ struct ParsedPromptGetRequest {
             };
 
             bool first = true;
-            if (!ws.get_primary().empty()) {
+            if (!workspace.primary().empty()) {
                 add_resource(
-                    ws.get_primary(),
+                    workspace.primary(),
                     "Primary Workspace",
                     "The main working directory for this session.");
                 first = false;
             }
 
-            for (std::size_t i = 0; i < ws.get_additional().size(); ++i) {
+            for (std::size_t i = 0; i < workspace.additional().size(); ++i) {
                 if (!first) rw.comma();
                 first = false;
                 add_resource(
-                    ws.get_additional()[i],
+                    workspace.additional()[i],
                     std::format("Additional Workspace {}", i + 1),
                     "An additional directory allowed for this session.");
             }
@@ -934,10 +937,10 @@ struct ParsedPromptGetRequest {
 }
 
 [[nodiscard]] RpcExpected<std::string> build_resources_read_result(
-    const std::filesystem::path& path)
+    const std::filesystem::path& path,
+    const core::context::SessionContext& context)
 {
-    auto& ws = core::workspace::Workspace::get_instance();
-    if (!ws.is_path_allowed(path)) {
+    if (!context.is_path_allowed(path)) {
         return std::unexpected(
             RpcError{-32001, "Access denied: path is outside the allowed workspace"});
     }
@@ -1084,7 +1087,8 @@ struct ParsedPromptGetRequest {
 }
 
 [[nodiscard]] RpcExpected<std::string> build_tool_call_result(
-    const ParsedToolCallRequest& request)
+    const ParsedToolCallRequest& request,
+    const core::context::SessionContext& context)
 {
     auto& sm = core::tools::ToolManager::get_instance();
     auto tool_def = sm.get_tool_definition(request.name);
@@ -1097,7 +1101,10 @@ struct ParsedPromptGetRequest {
         return std::unexpected(RpcError{-32602, *validation_error});
     }
 
-    std::string tool_result = sm.execute_tool(request.name, request.arguments_json);
+    std::string tool_result = sm.execute_tool(
+        request.name,
+        request.arguments_json,
+        context);
     const bool is_error = tool_result.starts_with(R"({"error")")
         || tool_result.starts_with(R"({ "error")");
 
@@ -1154,32 +1161,39 @@ struct ParsedPromptGetRequest {
     return std::move(rw).take();
 }
 
-using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::object&);
+using MethodHandler = std::string (*)(
+    const RequestId&,
+    simdjson::ondemand::object&,
+    const core::context::SessionContext&);
 
 [[nodiscard]] std::string handle_initialize(
     const RequestId& id,
-    simdjson::ondemand::object& root)
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context)
 {
-    return make_response(id, build_initialize_result(root));
+    return make_response(id, build_initialize_result(root, context));
 }
 
 [[nodiscard]] std::string handle_resources_templates_list(
     const RequestId& id,
-    simdjson::ondemand::object&)
+    simdjson::ondemand::object&,
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
     return make_response(id, build_resources_templates_list_result());
 }
 
 [[nodiscard]] std::string handle_prompts_list(
     const RequestId& id,
-    simdjson::ondemand::object&)
+    simdjson::ondemand::object&,
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
     return make_response(id, build_prompts_list_result(discover_prompt_templates()));
 }
 
 [[nodiscard]] std::string handle_prompts_get(
     const RequestId& id,
-    simdjson::ondemand::object& root)
+    simdjson::ondemand::object& root,
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
     auto request = parse_prompt_get_request(root);
     if (!request) return make_rpc_error(id, request.error());
@@ -1192,19 +1206,21 @@ using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::obje
 
 [[nodiscard]] std::string handle_resources_list(
     const RequestId& id,
-    simdjson::ondemand::object&)
+    simdjson::ondemand::object&,
+    const core::context::SessionContext& context)
 {
-    return make_response(id, build_resources_list_result());
+    return make_response(id, build_resources_list_result(context));
 }
 
 [[nodiscard]] std::string handle_resources_read(
     const RequestId& id,
-    simdjson::ondemand::object& root)
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context)
 {
     auto path = parse_resources_read_path(root);
     if (!path) return make_rpc_error(id, path.error());
 
-    auto result = build_resources_read_result(*path);
+    auto result = build_resources_read_result(*path, context);
     if (!result) return make_rpc_error(id, result.error());
 
     return make_response(id, *result);
@@ -1212,19 +1228,21 @@ using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::obje
 
 [[nodiscard]] std::string handle_tools_list(
     const RequestId& id,
-    simdjson::ondemand::object&)
+    simdjson::ondemand::object&,
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
     return make_response(id, tools_list_result());
 }
 
 [[nodiscard]] std::string handle_tools_call(
     const RequestId& id,
-    simdjson::ondemand::object& root)
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context)
 {
     auto request = parse_tool_call_request(root);
     if (!request) return make_rpc_error(id, request.error());
 
-    auto result = build_tool_call_result(*request);
+    auto result = build_tool_call_result(*request, context);
     if (!result) return make_rpc_error(id, result.error());
 
     return make_response(id, *result);
@@ -1232,7 +1250,8 @@ using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::obje
 
 [[nodiscard]] std::string handle_ping(
     const RequestId& id,
-    simdjson::ondemand::object&)
+    simdjson::ondemand::object&,
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
     return make_response(id, "{}");
 }
@@ -1257,13 +1276,14 @@ constexpr std::array<MethodRoute, 9> kMethodRoutes{{
 [[nodiscard]] std::string route_method(
     std::string_view method,
     const RequestId& id,
-    simdjson::ondemand::object& root)
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context)
 {
     const auto it = std::ranges::find(kMethodRoutes, method, &MethodRoute::name);
     if (it == kMethodRoutes.end()) {
         return make_error(id, -32601, "Method not found");
     }
-    return it->handler(id, root);
+    return it->handler(id, root, context);
 }
 
 } // anonymous namespace
@@ -1272,7 +1292,8 @@ constexpr std::array<MethodRoute, 9> kMethodRoutes{{
 // Dispatch
 // ---------------------------------------------------------------------------
 
-std::string McpDispatcher::dispatch(const std::string& json_request) {
+std::string McpDispatcher::dispatch(const std::string& json_request,
+                                   const core::context::SessionContext& context) {
     if (json_request.empty()) return std::string(kParseError);
 
     simdjson::ondemand::parser parser;
@@ -1306,7 +1327,7 @@ std::string McpDispatcher::dispatch(const std::string& json_request) {
         return {};
     }
 
-    return route_method(method, id, root);
+    return route_method(method, id, root, context);
 }
 
 } // namespace core::mcp

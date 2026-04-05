@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../context/SessionContext.hpp"
+
 #include <string>
 #include <vector>
 
@@ -96,8 +98,9 @@ struct ToolDefinition {
  *  - @c get_definition() — returns a @c ToolDefinition that the MCP dispatcher
  *    serialises into the @c tools/list response.
  *
- *  - @c execute() — performs the actual work and returns a JSON string result
- *    that is embedded in the @c tools/call response.
+ *  - @c execute() — performs the actual work for the supplied
+ *    @c SessionContext and returns a JSON string result that is embedded in
+ *    the @c tools/call response.
  *
  * ### Tool result contract
  *
@@ -133,17 +136,20 @@ public:
     virtual ToolDefinition get_definition() const = 0;
 
     /**
-     * @brief Executes the tool with the supplied arguments.
+     * @brief Executes the tool with the supplied arguments and session context.
      *
      * @param json_args  A JSON object string containing the arguments passed
      *                   by the LLM/client in the @c tools/call request.
      *                   May be @c "{}" if the client omitted @c arguments.
+     * @param context    Per-call execution context. The caller is responsible
+     *                   for choosing the authoritative workspace and session
+     *                   identity up front and passing it explicitly.
      *
      * @return A JSON object string.  On success the first key must @em not be
      *         @c "error".  On failure the first key must be @c "error".
      *         See the class-level documentation for the full contract.
      */
-    virtual std::string execute(const std::string& json_args) = 0;
+    virtual std::string execute(const std::string& json_args, const core::context::SessionContext& context) = 0;
 };
 
 } // namespace core::tools

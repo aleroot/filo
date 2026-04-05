@@ -7,6 +7,7 @@
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -35,7 +36,9 @@ public:
         };
     }
 
-    [[nodiscard]] std::string execute(const std::string&) override {
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
         return std::string(R"({"output":")") + std::string(120 * 1024, 'x') + R"("})";
     }
 };
@@ -55,7 +58,9 @@ public:
         };
     }
 
-    [[nodiscard]] std::string execute(const std::string&) override {
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
         return std::string(R"({"error":")") + std::string(120 * 1024, 'e') + R"("})";
     }
 };
@@ -148,7 +153,10 @@ TEST_CASE("Agent stores oversized tool output in compact history format", "[agen
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<LargeOutputTool>());
 
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
     send_and_wait(agent, "Run large output tool");
 
     const auto history = agent->get_history();
@@ -169,7 +177,10 @@ TEST_CASE("Agent keeps error marker when compacting oversized error payloads", "
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<LargeErrorTool>());
 
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
     send_and_wait(agent, "Run large error tool");
 
     const auto history = agent->get_history();
@@ -183,4 +194,3 @@ TEST_CASE("Agent keeps error marker when compacting oversized error payloads", "
     }
     REQUIRE(found);
 }
-

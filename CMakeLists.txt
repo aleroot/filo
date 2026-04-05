@@ -152,6 +152,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/FileSystemUtils.cpp
     src/core/workspace/Workspace.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/SessionContext.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/FileSearchTool.cpp

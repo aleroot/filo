@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "../context/SessionContext.hpp"
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -44,7 +45,11 @@ public:
     // Thread-safe: locks only for the map lookup, then releases before executing
     // the tool (execution can be slow — shell commands, file I/O — and must not
     // hold the mutex while it runs).
-    std::string execute_tool(const std::string& name, const std::string& json_args) {
+    std::string execute_tool(
+        const std::string& name,
+        const std::string& json_args,
+        const core::context::SessionContext& context)
+    {
         std::shared_ptr<Tool> tool;
         {
             std::lock_guard lock(mutex_);
@@ -54,7 +59,7 @@ public:
             tool = it->second;
         }
         try {
-            return tool->execute(json_args);
+            return tool->execute(json_args, context);
         } catch (const std::exception& e) {
             return "{\"error\": \"Exception executing tool: " + std::string(e.what()) + "\"}";
         }

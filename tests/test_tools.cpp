@@ -16,7 +16,9 @@
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/shell/ShellSession.hpp"
+#include "core/context/SessionContext.hpp"
 #include "core/workspace/Workspace.hpp"
+#include "TestSessionContext.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
 #endif
@@ -45,7 +47,15 @@ public:
     }
 };
 
+[[nodiscard]] core::context::SessionContext make_tool_test_context(std::string session_id = {}) {
+    return test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli,
+        std::move(session_id));
+}
+
 } // namespace
+
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 
 // ---------------------------------------------------------------------------
 // WriteFileTool / ReadFileTool
@@ -67,6 +77,55 @@ TEST_CASE("WriteFileTool and ReadFileTool", "[tools]") {
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Hello, Filo!\\nThis is a test."));
 
     std::filesystem::remove(test_file);
+}
+
+TEST_CASE("WriteFileTool resolves relative paths against scoped workspace overrides",
+          "[tools][workspace]") {
+    auto& ws = core::workspace::Workspace::get_instance();
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_scoped_workspace_" + std::to_string(getpid()));
+    const auto requested_relative = std::filesystem::path("nested") / "scoped_write.txt";
+    const auto expected_path = workspace_root / requested_relative;
+
+    std::error_code ec;
+    std::filesystem::remove_all(workspace_root, ec);
+    std::filesystem::remove(expected_path, ec);
+    std::filesystem::create_directories(workspace_root, ec);
+    ws.initialize(std::filesystem::current_path(), {}, false);
+
+    {
+        const auto session_context = test_support::make_session_context(
+            core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 11,
+            },
+            core::context::SessionTransport::cli,
+            "scoped-workspace-write");
+
+#undef execute
+        WriteFileTool write_tool;
+        const auto write_res = write_tool.execute(
+            std::string(R"({"file_path":")")
+            + requested_relative.generic_string()
+            + R"(","content":"scoped workspace content"})",
+            session_context);
+        REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(expected_path.string()));
+        REQUIRE(std::filesystem::exists(expected_path));
+
+        ReadFileTool read_tool;
+        const auto read_res = read_tool.execute(
+            std::string(R"({"path":")")
+            + requested_relative.generic_string()
+            + R"("})",
+            session_context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+        REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("scoped workspace content"));
+    }
+
+    std::filesystem::remove_all(workspace_root, ec);
+    ws.initialize("", {}, false);
 }
 
 TEST_CASE("ReadFileTool offset_line and limit_lines", "[tools]") {
@@ -481,69 +540,73 @@ TEST_CASE("ShellTool session persists exported environment variable", "[tools]")
 
 TEST_CASE("ShellTool isolates persistent state across MCP session contexts", "[tools]") {
     ShellTool tool;
+    const auto session_a = make_tool_test_context("session-a");
+    const auto session_b = make_tool_test_context("session-b");
 
+#undef execute
     {
-        auto session_a = ShellTool::scoped_mcp_session("session-a");
-        auto res = tool.execute(R"({"command":"cd /tmp"})");
+        auto res = tool.execute(R"({"command":"cd /tmp"})", session_a);
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
     }
     {
-        auto session_b = ShellTool::scoped_mcp_session("session-b");
-        auto res = tool.execute(R"({"command":"cd /var"})");
+        auto res = tool.execute(R"({"command":"cd /var"})", session_b);
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
     }
     {
-        auto session_a = ShellTool::scoped_mcp_session("session-a");
-        auto res = tool.execute(R"({"command":"pwd"})");
+        auto res = tool.execute(R"({"command":"pwd"})", session_a);
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/tmp"));
     }
     {
-        auto session_b = ShellTool::scoped_mcp_session("session-b");
-        auto res = tool.execute(R"({"command":"pwd"})");
+        auto res = tool.execute(R"({"command":"pwd"})", session_b);
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/var"));
     }
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
 TEST_CASE("ShellTool clear_mcp_session resets that session shell state", "[tools]") {
     ShellTool tool;
     constexpr std::string_view kSession = "session-clear";
     constexpr std::string_view kToken = "filo_session_token_42";
+    const auto session = make_tool_test_context(std::string(kSession));
 
+#undef execute
     {
-        auto session = ShellTool::scoped_mcp_session(std::string(kSession));
         auto set_res = tool.execute(
-            R"({"command":"export FILO_SESSION_CLEAR_VAR=filo_session_token_42"})");
+            R"({"command":"export FILO_SESSION_CLEAR_VAR=filo_session_token_42"})",
+            session);
         REQUIRE_THAT(set_res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 
-        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})");
+        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})", session);
         REQUIRE_THAT(echo_res, Catch::Matchers::ContainsSubstring(std::string(kToken)));
     }
 
     ShellTool::clear_mcp_session(kSession);
 
     {
-        auto session = ShellTool::scoped_mcp_session(std::string(kSession));
-        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})");
+        auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})", session);
         REQUIRE_THAT(echo_res, !Catch::Matchers::ContainsSubstring(std::string(kToken)));
     }
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
 TEST_CASE("ShellTool handles MCP session LRU eviction without crashing", "[tools]") {
     ShellTool tool;
 
+#undef execute
     for (int i = 0; i < 70; ++i) {
-        auto session = ShellTool::scoped_mcp_session("session-evict-" + std::to_string(i));
-        auto res = tool.execute(R"({"command":"echo alive"})");
+        const auto session = make_tool_test_context("session-evict-" + std::to_string(i));
+        auto res = tool.execute(R"({"command":"echo alive"})", session);
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
         REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("alive"));
     }
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
 TEST_CASE("ShellTool working_dir runs in subshell and does not affect session cwd", "[tools]") {
     ShellTool tool;
 
     // Set session cwd to /tmp
-    tool.execute(R"({"command":"cd /tmp"})");
+    [[maybe_unused]] const auto initial_cd = tool.execute(R"({"command":"cd /tmp"})");
 
     // Run with working_dir=/var — should not change session cwd
     auto res1 = tool.execute(R"({"command":"pwd","working_dir":"/var"})");
@@ -573,7 +636,8 @@ TEST_CASE("ShellTool returns timeout message when command exceeds limit", "[tool
 TEST_CASE("ShellTool session recovers cleanly after a timeout", "[tools]") {
     ShellTool tool;
     // Trigger a timeout.
-    tool.execute(R"({"command":"sleep 60","timeout_seconds":1})");
+    [[maybe_unused]] const auto timeout_res =
+        tool.execute(R"({"command":"sleep 60","timeout_seconds":1})");
     // The next command must work — session was reset after the timeout.
     auto res = tool.execute(R"({"command":"echo recovered"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("recovered"));
@@ -591,7 +655,8 @@ TEST_CASE("ShellTool kills child processes spawned by timed-out command", "[tool
 
     const std::string cmd =
         "(sleep 2 && touch " + marker + ") & sleep 60";
-    tool.execute("{\"command\":\"" + cmd + "\",\"timeout_seconds\":1}");
+    [[maybe_unused]] const auto timeout_res =
+        tool.execute("{\"command\":\"" + cmd + "\",\"timeout_seconds\":1}");
 
     // Wait longer than the background job would have taken if not killed (2 s).
     ::sleep(3);
@@ -687,7 +752,8 @@ TEST_CASE("ShellTool session restarts transparently after exit", "[tools]") {
     ShellTool tool;
 
     // Export a variable, then exit — session should die
-    tool.execute(R"({"command":"export FILO_PERSIST=yes"})");
+    [[maybe_unused]] const auto export_res =
+        tool.execute(R"({"command":"export FILO_PERSIST=yes"})");
     auto exit_res = tool.execute(R"({"command":"exit 7"})");
     REQUIRE_THAT(exit_res, Catch::Matchers::ContainsSubstring("\"exit_code\":7"));
 
@@ -862,15 +928,50 @@ TEST_CASE("ToolManager registers and executes a tool", "[tools]") {
 
     const std::string path = "test_artifact_mgr.txt";
     auto res = mgr.execute_tool("write_file",
-        "{\"file_path\": \"" + path + "\", \"content\": \"manager test\"}");
+        "{\"file_path\": \"" + path + "\", \"content\": \"manager test\"}",
+        make_tool_test_context());
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
     REQUIRE(std::filesystem::exists(path));
     std::filesystem::remove(path);
 }
 
+TEST_CASE("ToolManager executes tools against an explicit SessionContext workspace",
+          "[tools][workspace]") {
+    auto& mgr = ToolManager::get_instance();
+    mgr.register_tool(std::make_shared<WriteFileTool>());
+
+    std::error_code ec;
+    const auto workspace_root = std::filesystem::current_path()
+        / ("test_artifact_mgr_session_ctx_" + std::to_string(getpid()));
+    const auto expected_path = workspace_root / "nested" / "managed.txt";
+    std::filesystem::remove_all(workspace_root, ec);
+    std::filesystem::create_directories(workspace_root, ec);
+
+    core::workspace::Workspace::get_instance().initialize(std::filesystem::current_path(), {}, false);
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 31,
+        },
+        core::context::SessionTransport::mcp_http,
+        "tool-manager-session");
+
+    const auto res = mgr.execute_tool(
+        "write_file",
+        R"({"file_path":"nested/managed.txt","content":"session-context write"})",
+        session_context);
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(expected_path.string()));
+    REQUIRE(std::filesystem::exists(expected_path));
+
+    std::filesystem::remove_all(workspace_root, ec);
+    core::workspace::Workspace::get_instance().initialize("", {}, false);
+}
+
 TEST_CASE("ToolManager returns error for unknown tool", "[tools]") {
     auto& mgr = ToolManager::get_instance();
-    auto res = mgr.execute_tool("nonexistent_tool_xyz", "{}");
+    auto res = mgr.execute_tool("nonexistent_tool_xyz", "{}", make_tool_test_context());
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("not found"));
 }
@@ -1524,6 +1625,7 @@ TEST_CASE("SearchReplaceTool returns error for missing old_string key", "[tools]
 // ---------------------------------------------------------------------------
 
 #ifdef FILO_ENABLE_PYTHON
+#undef execute
 TEST_CASE("PythonManager execute works correctly", "[tools][python]") {
     // Basic test of Python execution functionality
     auto& pm = core::tools::PythonManager::get_instance();

@@ -1,8 +1,16 @@
 #pragma once
 #include <filesystem>
+#include <cstdint>
 #include <vector>
 
 namespace core::workspace {
+
+struct WorkspaceSnapshot {
+    std::filesystem::path primary;
+    std::vector<std::filesystem::path> additional;
+    bool enforce{false};
+    std::uint64_t version{0};
+};
 
 class Workspace {
 public:
@@ -17,6 +25,8 @@ public:
     [[nodiscard]] const std::filesystem::path& get_primary() const noexcept { return primary_; }
     [[nodiscard]] const std::vector<std::filesystem::path>& get_additional() const noexcept { return additional_; }
     [[nodiscard]] bool is_enforced() const noexcept { return enforce_; }
+    [[nodiscard]] WorkspaceSnapshot snapshot() const;
+    [[nodiscard]] std::filesystem::path resolve_path(const std::filesystem::path& target_path) const;
 
     // Check if the target path is strictly within the primary or additional directories
     [[nodiscard]] bool is_path_allowed(const std::filesystem::path& target_path) const;

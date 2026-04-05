@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../context/SessionContext.hpp"
+
 #include <string>
 
 namespace core::mcp {
@@ -74,7 +76,8 @@ public:
      *         notifications (messages without an @c id field).  Callers must
      *         @em not send an empty response to the client — silently drop it.
      */
-    std::string dispatch(const std::string& json_request);
+    std::string dispatch(const std::string& json_request,
+                         const core::context::SessionContext& context);
 
 private:
     McpDispatcher();

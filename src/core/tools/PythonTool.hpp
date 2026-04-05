@@ -16,7 +16,7 @@ public:
     PythonTool(const std::string& script_path, const std::string& module_name);
     
     ToolDefinition get_definition() const override;
-    std::string execute(const std::string& json_args) override;
+    std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
 
 private:
     std::string script_path_;

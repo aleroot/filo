@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../context/SessionContext.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../tools/ToolManager.hpp"
 #include "SubagentOrchestrator.hpp"
@@ -10,7 +11,6 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
-#include <optional>
 
 namespace core::agent {
 
@@ -31,7 +31,8 @@ public:
     };
 
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
-          core::tools::ToolManager& skill_manager);
+          core::tools::ToolManager& skill_manager,
+          core::context::SessionContext session_context);
 
     // -----------------------------------------------------------------------
     // Cancellation support — stop the current LLM response generation.
@@ -148,9 +149,13 @@ private:
                                         const std::string& args);
 
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
+    [[nodiscard]] const core::context::SessionContext& session_context() const noexcept {
+        return session_context_;
+    }
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
     core::tools::ToolManager& skill_manager_;
+    core::context::SessionContext session_context_;
     SubagentOrchestrator orchestrator_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;

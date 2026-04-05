@@ -17,7 +17,7 @@ public:
         };
     }
 
-    std::string execute([[maybe_unused]] const std::string& json_args) override {
+    std::string execute([[maybe_unused]] const std::string& json_args, [[maybe_unused]] const core::context::SessionContext& context) override {
         auto now = std::chrono::system_clock::now();
         std::string time_str = std::format("{:%H:%M:%S}", now);
         return "{\"time\": \"" + time_str + "\"}";

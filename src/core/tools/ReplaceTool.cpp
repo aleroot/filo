@@ -30,7 +30,7 @@ ToolDefinition ReplaceTool::get_definition() const {
     };
 }
 
-std::string ReplaceTool::execute(const std::string& json_args) {
+std::string ReplaceTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -46,9 +46,14 @@ std::string ReplaceTool::execute(const std::string& json_args) {
         return R"({"error":"Missing 'new_string' argument."})";
 
     const std::string path_str(file_path);
-    if (const auto access_error = detail::check_workspace_access(path_str, path_str)) return *access_error;
+    std::filesystem::path resolved_path;
+    if (const auto access_error =
+            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+        return *access_error;
+    }
     std::error_code ec;
-    if (!std::filesystem::exists(path_str, ec) || !std::filesystem::is_regular_file(path_str, ec)) {
+    if (!std::filesystem::exists(resolved_path, ec)
+        || !std::filesystem::is_regular_file(resolved_path, ec)) {
         return std::format(R"({{"error":"File not found: '{}'."}})",
                            core::utils::escape_json_string(path_str));
     }
@@ -56,7 +61,7 @@ std::string ReplaceTool::execute(const std::string& json_args) {
     // Read entire file.
     std::string content;
     {
-        std::ifstream ifs(path_str, std::ios::binary);
+        std::ifstream ifs(resolved_path, std::ios::binary);
         if (!ifs) {
             return std::format(R"({{"error":"Failed to open file for reading: '{}'."}})",
                                core::utils::escape_json_string(path_str));
@@ -86,7 +91,7 @@ std::string ReplaceTool::execute(const std::string& json_args) {
     content.replace(pos, old_str.size(), new_string);
 
     // Write back.
-    std::ofstream ofs(path_str, std::ios::binary | std::ios::trunc);
+    std::ofstream ofs(resolved_path, std::ios::binary | std::ios::trunc);
     if (!ofs) {
         return std::format(R"({{"error":"Failed to open file for writing: '{}'."}})",
                            core::utils::escape_json_string(path_str));
@@ -95,7 +100,7 @@ std::string ReplaceTool::execute(const std::string& json_args) {
     ofs.close();
 
     return std::format(R"({{"success":true,"file_path":"{}","replaced_at_line":{}}})",
-                       core::utils::escape_json_string(path_str),
+                       core::utils::escape_json_string(resolved_path.string()),
                        replaced_at_line);
 }
 

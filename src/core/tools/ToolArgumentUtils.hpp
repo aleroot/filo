@@ -1,7 +1,7 @@
 #pragma once
 
+#include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
-#include "../workspace/Workspace.hpp"
 #include <simdjson.h>
 
 #include <algorithm>
@@ -14,8 +14,25 @@
 
 namespace core::tools::detail {
 
-inline std::optional<std::string> check_workspace_access(const std::filesystem::path& path, const std::string& path_str) {
-    if (!core::workspace::Workspace::get_instance().is_path_allowed(path)) {
+inline std::filesystem::path resolve_workspace_path(
+    const std::filesystem::path& path,
+    const core::context::SessionContext& context)
+{
+    return context.resolve_path(path);
+}
+
+inline std::optional<std::string> check_workspace_access(
+    const std::filesystem::path& path,
+    const std::string& path_str,
+    const core::context::SessionContext& context,
+    std::filesystem::path* resolved_out = nullptr)
+{
+    const auto resolved = context.resolve_path(path);
+    if (resolved_out) {
+        *resolved_out = resolved;
+    }
+
+    if (!context.is_path_allowed(resolved)) {
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));

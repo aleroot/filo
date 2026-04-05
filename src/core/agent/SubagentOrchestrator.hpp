@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../context/SessionContext.hpp"
 #include "../llm/LLMProvider.hpp"
 #include "../llm/Models.hpp"
 #include "../tools/ToolManager.hpp"
@@ -27,6 +28,7 @@ public:
     struct RunContext {
         std::string active_model;
         std::string parent_mode;
+        const core::context::SessionContext& session_context;
         std::function<bool(const std::string&, const std::string&)> permission_check;
     };
 

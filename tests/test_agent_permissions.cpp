@@ -5,6 +5,7 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -73,7 +74,10 @@ public:
 TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][permission]") {
     auto provider = std::make_shared<ToolCallThenTextProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
 
     std::atomic<int> permission_checks{0};
     agent->set_permission_fn([&](std::string_view, std::string_view) {
@@ -119,7 +123,10 @@ TEST_CASE("Agent turns provider startup exceptions into terminal assistant error
           "[agent][error]") {
     auto provider = std::make_shared<ThrowingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
 
     std::mutex done_mutex;
     std::condition_variable done_cv;

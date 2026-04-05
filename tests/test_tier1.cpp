@@ -18,6 +18,7 @@
 #include "core/agent/PermissionGate.hpp"
 #include "core/mcp/McpClientSession.hpp"
 #include "core/llm/Models.hpp"
+#include "TestSessionContext.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,8 @@ using namespace core::agent;
 using namespace core::mcp;
 
 namespace fs = std::filesystem;
+
+#define execute(...) execute(__VA_ARGS__, test_support::make_workspace_session_context())
 
 // ============================================================================
 // Helpers

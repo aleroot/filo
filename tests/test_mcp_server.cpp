@@ -3,6 +3,7 @@
 
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/workspace/Workspace.hpp"
+#include "TestSessionContext.hpp"
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -20,6 +21,14 @@ using namespace Catch::Matchers;
 static core::mcp::McpDispatcher& disp() {
     return core::mcp::McpDispatcher::get_instance();
 }
+
+static core::context::SessionContext make_mcp_test_context() {
+    return test_support::make_workspace_session_context(
+        core::context::SessionTransport::mcp_http,
+        "mcp-test-session");
+}
+
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
 
 /// Returns true if @p s is a well-formed JSON document.
 static bool is_valid_json(const std::string& s) {
@@ -702,6 +711,51 @@ TEST_CASE("MCP tools/call get_workspace_config returns structured workspace stat
     REQUIRE(saw_additional);
 
     std::filesystem::remove_all(additional, ec);
+}
+
+TEST_CASE("MCP tools/call get_workspace_config reflects the effective scoped workspace",
+          "[mcp]") {
+    WorkspaceResetToDefault workspace_reset;
+    auto& ws = core::workspace::Workspace::get_instance();
+    const auto primary = std::filesystem::current_path();
+    const auto scoped_root = primary / "mcp_scoped_workspace_config_root";
+    std::error_code ec;
+    std::filesystem::create_directories(scoped_root, ec);
+    REQUIRE_FALSE(ec);
+    ws.initialize(primary, {}, true);
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = scoped_root,
+            .additional = {},
+            .enforce = true,
+            .version = 9,
+        },
+        core::context::SessionTransport::mcp_http,
+        "mcp-scoped-workspace");
+
+#undef dispatch
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_workspace_config","arguments":{}},"id":14})",
+        session_context);
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    std::string_view primary_directory;
+    uint64_t workspace_version = 0;
+    REQUIRE(doc["result"]["structuredContent"]["primary_directory"].get(primary_directory)
+            == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["structuredContent"]["workspace_version"].get(workspace_version)
+            == simdjson::SUCCESS);
+
+    REQUIRE(primary_directory.find(scoped_root.filename().string()) != std::string_view::npos);
+    REQUIRE(workspace_version == 9);
+
+    std::filesystem::remove_all(scoped_root, ec);
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 #include "core/agent/Agent.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 #include <atomic>
 #include <string>
 #include <vector>
@@ -30,7 +31,10 @@ public:
 TEST_CASE("Agent stop request causes repeated stop messages", "[agent][stop]") {
     auto provider = std::make_shared<MultiChunkProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
 
     std::vector<std::string> outputs;
     int done_calls = 0;

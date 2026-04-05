@@ -1,4 +1,7 @@
 #include "ShellTool.hpp"
+#include "ToolArgumentUtils.hpp"
+#include "shell/ShellUtils.hpp"
+#include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../workspace/Workspace.hpp"
 #include <simdjson.h>
@@ -14,7 +17,7 @@ namespace core::tools {
 
 namespace {
 
-thread_local std::string g_mcp_session_id;
+using detail::shell_single_quote;
 
 struct SessionShellState {
     std::unique_ptr<shell::IShellExecutor> executor{shell::make_shell_executor()};
@@ -38,7 +41,7 @@ void mark_session_shell_used(const std::shared_ptr<SessionShellState>& state) {
 }
 
 [[nodiscard]] std::shared_ptr<SessionShellState>
-get_or_create_session_shell(const std::string& session_id) {
+get_or_create_session_shell(const std::string& session_id, const std::filesystem::path& initial_working_dir) {
     std::shared_ptr<SessionShellState> evicted;
     std::lock_guard<std::mutex> lock(g_session_shells_mutex);
     if (auto it = g_session_shells.find(session_id); it != g_session_shells.end()) {
@@ -47,6 +50,12 @@ get_or_create_session_shell(const std::string& session_id) {
     }
 
     auto state = std::make_shared<SessionShellState>();
+    if (!initial_working_dir.empty()) {
+        [[maybe_unused]] const auto ignored = state->executor->run(
+            std::format("cd '{}'", shell_single_quote(initial_working_dir.string())),
+            {},
+            std::chrono::seconds{5});
+    }
     state->last_used = std::chrono::steady_clock::now();
     g_session_shells[session_id] = state;
     if (g_session_shells.size() > kMaxSessionShells) {
@@ -63,38 +72,6 @@ get_or_create_session_shell(const std::string& session_id) {
 
 } // namespace
 
-ShellTool::ScopedMcpSessionContext::ScopedMcpSessionContext(std::string session_id) {
-    previous_ = std::move(g_mcp_session_id);
-    g_mcp_session_id = std::move(session_id);
-    active_ = true;
-}
-
-ShellTool::ScopedMcpSessionContext::~ScopedMcpSessionContext() {
-    if (!active_) return;
-    g_mcp_session_id = std::move(previous_);
-}
-
-ShellTool::ScopedMcpSessionContext::ScopedMcpSessionContext(
-    ScopedMcpSessionContext&& other) noexcept
-    : active_(other.active_),
-      previous_(std::move(other.previous_)) {
-    other.active_ = false;
-}
-
-ShellTool::ScopedMcpSessionContext& ShellTool::ScopedMcpSessionContext::operator=(
-    ScopedMcpSessionContext&& other) noexcept {
-    if (this == &other) return *this;
-    if (active_) g_mcp_session_id = std::move(previous_);
-    active_ = other.active_;
-    previous_ = std::move(other.previous_);
-    other.active_ = false;
-    return *this;
-}
-
-ShellTool::ScopedMcpSessionContext ShellTool::scoped_mcp_session(std::string session_id) {
-    return ScopedMcpSessionContext(std::move(session_id));
-}
-
 void ShellTool::clear_mcp_session(std::string_view session_id) {
     if (session_id.empty()) return;
 
@@ -104,10 +81,6 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
         if (it == g_session_shells.end()) return;
         g_session_shells.erase(it);
     }
-}
-
-std::string_view ShellTool::current_mcp_session_id() noexcept {
-    return g_mcp_session_id;
 }
 
 ToolDefinition ShellTool::get_definition() const {
@@ -130,8 +103,9 @@ ToolDefinition ShellTool::get_definition() const {
             {"command",          "string",
              "The bash command to execute.", true},
             {"working_dir",      "string",
-             "Absolute path to run this command in. Runs in a subshell so the "
-             "session's working directory is unaffected. "
+             "Absolute or relative path to run this command in. Relative paths resolve "
+             "against the effective workspace root for this MCP session. Runs in a "
+             "subshell so the session's working directory is unaffected. "
              "Optional; defaults to the session's current directory.", false},
             {"timeout_seconds",  "integer",
              "Maximum seconds to wait for the command to finish. "
@@ -147,7 +121,10 @@ ToolDefinition ShellTool::get_definition() const {
     };
 }
 
-std::string ShellTool::execute(const std::string& json_args) {
+std::string ShellTool::execute(
+    const std::string& json_args,
+    const core::context::SessionContext& context)
+{
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -162,18 +139,21 @@ std::string ShellTool::execute(const std::string& json_args) {
     std::string working_dir;
     std::string_view wd_view;
     if (doc["working_dir"].get(wd_view) == simdjson::SUCCESS && !wd_view.empty()) {
+        std::filesystem::path resolved_path;
+        if (const auto access_error = detail::check_workspace_access(
+                std::filesystem::path(wd_view),
+                std::string(wd_view),
+                context,
+                &resolved_path)) {
+            return *access_error;
+        }
         std::error_code ec;
-        if (!std::filesystem::is_directory(std::string(wd_view), ec)) {
+        if (!std::filesystem::is_directory(resolved_path, ec)) {
             return std::format(
                 R"({{"error":"working_dir does not exist or is not a directory: '{}'"}})",
                 core::utils::escape_json_string(std::string(wd_view)));
         }
-        if (!core::workspace::Workspace::get_instance().is_path_allowed(std::filesystem::path(wd_view))) {
-            return std::format(
-                R"({{"error":"Access denied: Path '{}' is outside the allowed workspace scope."}})",
-                core::utils::escape_json_string(std::string(wd_view)));
-        }
-        working_dir = std::string(wd_view);
+        working_dir = resolved_path.string();
     }
 
     // Optional per-command timeout.
@@ -190,12 +170,14 @@ std::string ShellTool::execute(const std::string& json_args) {
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
     shell::IShellExecutor::Result result;
-    const std::string session_id(current_mcp_session_id());
+    const std::string_view session_id = context.session_id;
     if (session_id.empty()) {
         std::lock_guard<std::mutex> lock(executor_mutex_);
         result = executor_->run(command_view, working_dir, timeout);
     } else {
-        const auto state = get_or_create_session_shell(session_id);
+        const auto state = get_or_create_session_shell(
+            std::string(session_id),
+            context.workspace_view().primary());
         mark_session_shell_used(state);
         {
             std::lock_guard<std::mutex> lock(state->mutex);

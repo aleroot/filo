@@ -6,6 +6,7 @@
 #include "core/llm/Models.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "TestSessionContext.hpp"
 #include <filesystem>
 #include <future>
 #include <thread>
@@ -52,7 +53,10 @@ struct TempDir {
 TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][session]") {
     auto provider = std::make_shared<MockProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
 
     // 1. Configure agent with low threshold
     agent->set_auto_compact_threshold(50); // very low threshold (chars * 4)
@@ -137,7 +141,10 @@ TEST_CASE("SessionStore list/delete operations", "[session][store]") {
 TEST_CASE("Agent resumes from SessionData", "[agent][session]") {
     auto provider = std::make_shared<MockProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
 
     std::vector<core::llm::Message> history = {
         {"user", "User msg 1", "", "", {}},

@@ -3,6 +3,7 @@
 
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/workspace/Workspace.hpp"
+#include "TestSessionContext.hpp"
 #include <filesystem>
 #include <fstream>
 #include <simdjson.h>
@@ -13,6 +14,14 @@ using namespace Catch::Matchers;
 static core::mcp::McpDispatcher& disp() {
     return core::mcp::McpDispatcher::get_instance();
 }
+
+static core::context::SessionContext make_mcp_test_context() {
+    return test_support::make_workspace_session_context(
+        core::context::SessionTransport::mcp_http,
+        "mcp-resource-test-session");
+}
+
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
 
 struct ScopedPathCleanup {
     std::filesystem::path path;
@@ -154,6 +163,51 @@ TEST_CASE("MCP resources/list URI is percent-encoded", "[mcp][resources]") {
         }
     }
     REQUIRE(found_encoded_uri);
+}
+
+TEST_CASE("MCP resources/list uses the effective scoped workspace", "[mcp][resources]") {
+    WorkspaceResetToDefault workspace_reset;
+    auto& ws = core::workspace::Workspace::get_instance();
+    const auto primary = std::filesystem::current_path();
+    const auto scoped_root = primary / "mcp_scoped_resource_root";
+    std::filesystem::create_directories(scoped_root);
+    ScopedPathCleanup cleanup{scoped_root};
+
+    ws.initialize(primary, {}, true);
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = scoped_root,
+            .additional = {},
+            .enforce = true,
+            .version = 5,
+        },
+        core::context::SessionTransport::mcp_http,
+        "mcp-resource-scoped-session");
+
+#undef dispatch
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"resources/list","params":{},"id":22})",
+        session_context);
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
+    simdjson::dom::parser parser;
+    auto root = parse_json_or_require(resp, parser);
+
+    simdjson::dom::array resources;
+    REQUIRE(root["result"]["resources"].get(resources) == simdjson::SUCCESS);
+
+    bool saw_scoped_root = false;
+    std::size_t resource_count = 0;
+    for (auto item : resources) {
+        ++resource_count;
+        std::string_view uri;
+        REQUIRE(item["uri"].get(uri) == simdjson::SUCCESS);
+        if (uri.find(scoped_root.filename().string()) != std::string_view::npos) {
+            saw_scoped_root = true;
+        }
+    }
+
+    REQUIRE(saw_scoped_root);
+    REQUIRE(resource_count == 1);
 }
 
 // ---------------------------------------------------------------------------

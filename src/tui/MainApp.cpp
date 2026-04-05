@@ -628,7 +628,13 @@ RunResult run(RunOptions opts) {
     core::mcp::McpConnectionManager::get_instance().connect_all(config, tool_manager);
 
     // ── Agent ────────────────────────────────────────────────────────────────
-    auto agent = std::make_shared<core::agent::Agent>(llm_provider, tool_manager);
+    auto agent_session_context = core::context::make_session_context(
+        core::workspace::Workspace::get_instance().snapshot(),
+        core::context::SessionTransport::cli);
+    auto agent = std::make_shared<core::agent::Agent>(
+        llm_provider,
+        tool_manager,
+        agent_session_context);
     agent->set_auto_compact_threshold(config.auto_compact_threshold);
 
     // Set the active model for budget tracking
