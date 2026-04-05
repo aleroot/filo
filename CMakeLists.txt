@@ -108,8 +108,12 @@ set(FILO_CORE_SOURCES
     src/tui/Autocomplete.cpp
     src/tui/Conversation.cpp
     src/tui/DiffPreview.cpp
+    src/tui/HistoryComponent.cpp
     src/tui/MarkdownRenderer.cpp
     src/tui/MainApp.cpp
+    src/tui/KeyInput.cpp
+    src/tui/SessionReplay.cpp
+    src/tui/Text.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
     src/core/config/ConfigManager.cpp
@@ -347,6 +351,10 @@ add_executable(filo_tests
     tests/test_conversation.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
+    tests/test_history_component.cpp
+    tests/test_key_input.cpp
+    tests/test_session_replay.cpp
+    tests/test_text.cpp
     tests/test_permission_system.cpp
     tests/test_permission_gate_deadlock.cpp
     tests/test_concurrent_queue.cpp
@@ -443,6 +451,10 @@ source_group(
         tests/test_conversation.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
+        tests/test_history_component.cpp
+        tests/test_key_input.cpp
+        tests/test_session_replay.cpp
+        tests/test_text.cpp
         tests/test_agent_freeze.cpp
         tests/test_workspace.cpp
         tests/test_tui_freeze.cpp
