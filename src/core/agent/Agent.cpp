@@ -310,7 +310,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
 
-    if (turn_state->steps_taken >= turn_state->max_steps) {
+    if (turn_state->max_steps > 0 && turn_state->steps_taken >= turn_state->max_steps) {
         const std::string message = std::format(
             "Stopped after reaching the per-turn step limit ({} model steps) without a final response.",
             turn_state->max_steps);

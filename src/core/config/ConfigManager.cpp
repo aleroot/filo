@@ -795,7 +795,6 @@ AppConfig parse_config_file(const fs::path& config_path) {
     if (!doc["auto_compact_threshold"].get(threshold)) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
     }
-
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
         for (auto field : providers_obj) {
@@ -897,7 +896,6 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;
     }
-
     for (const auto& [name, provider] : overlay.providers) {
         auto it = base.providers.find(name);
         if (it == base.providers.end()) {

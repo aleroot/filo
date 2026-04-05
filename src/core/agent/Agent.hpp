@@ -17,9 +17,9 @@ namespace core::agent {
 class Agent : public std::enable_shared_from_this<Agent> {
 public:
     struct LoopLimits {
-        static constexpr int kDefaultMaxStepsPerTurn = 24;
-        static constexpr int kMinMaxStepsPerTurn = 1;
-        static constexpr int kMaxMaxStepsPerTurn = 256;
+        static constexpr int kDefaultMaxStepsPerTurn = 0;
+        static constexpr int kMinMaxStepsPerTurn = 0;
+        static constexpr int kMaxMaxStepsPerTurn = 4096;
 
         int max_steps_per_turn = kDefaultMaxStepsPerTurn;
     };
