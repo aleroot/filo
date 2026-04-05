@@ -13,6 +13,7 @@
 #include "../tools/MoveFileTool.hpp"
 #include "../tools/CreateDirectoryTool.hpp"
 #include "../tools/GetWorkspaceConfigTool.hpp"
+#include "../tools/SkillLoader.hpp"
 #include "../workspace/Workspace.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/Base64.hpp"
@@ -354,6 +355,13 @@ struct ResourceFileReadResult {
     bool truncated = false;
 };
 
+struct PromptTemplate {
+    std::string name;
+    std::string description;
+    std::string body;
+    bool accepts_arguments = false;
+};
+
 [[nodiscard]] std::optional<ResourceFileReadResult> read_resource_file_limited(
     const std::filesystem::path& path,
     std::string& error_out)
@@ -389,6 +397,55 @@ struct ResourceFileReadResult {
     }
 
     return result;
+}
+
+[[nodiscard]] std::string expand_prompt_arguments(std::string_view body,
+                                                 std::string_view arguments) {
+    constexpr std::string_view kPlaceholder = "$ARGUMENTS";
+    std::string result(body);
+    std::size_t pos = 0;
+    while ((pos = result.find(kPlaceholder, pos)) != std::string::npos) {
+        result.replace(pos, kPlaceholder.size(), arguments);
+        pos += arguments.size();
+    }
+    return result;
+}
+
+[[nodiscard]] std::vector<PromptTemplate> discover_prompt_templates() {
+    std::vector<PromptTemplate> prompts;
+
+    for (const auto& root : core::tools::SkillLoader::default_search_paths()) {
+        if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
+            continue;
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_directory()) continue;
+
+            auto manifest = core::tools::SkillLoader::parse_manifest(entry.path());
+            if (!manifest.has_value()) continue;
+            if (!manifest->enabled || manifest->type != core::tools::SkillType::Prompt) {
+                continue;
+            }
+
+            PromptTemplate prompt{
+                .name = manifest->name,
+                .description = manifest->description,
+                .body = manifest->body,
+                .accepts_arguments = manifest->body.find("$ARGUMENTS") != std::string::npos,
+            };
+
+            const auto existing = std::ranges::find(prompts, prompt.name, &PromptTemplate::name);
+            if (existing != prompts.end()) {
+                *existing = std::move(prompt);
+            } else {
+                prompts.push_back(std::move(prompt));
+            }
+        }
+    }
+
+    std::ranges::sort(prompts, {}, &PromptTemplate::name);
+    return prompts;
 }
 
 } // anonymous namespace
@@ -620,6 +677,11 @@ struct ParsedToolCallRequest {
     std::string arguments_json{"{}"};
 };
 
+struct ParsedPromptGetRequest {
+    std::string name;
+    std::string arguments;
+};
+
 [[nodiscard]] std::string make_rpc_error(const RequestId& id, const RpcError& error) {
     return make_error(id, error.code, error.message);
 }
@@ -635,6 +697,7 @@ struct ParsedToolCallRequest {
 }
 
 [[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root) {
+    const bool has_prompts = !discover_prompt_templates().empty();
     JsonWriter rw(1024);
     {
         auto _res = rw.object();
@@ -653,6 +716,13 @@ struct ParsedToolCallRequest {
                 auto _res_obj = rw.object();
                 rw.kv_bool("subscribe", false).comma()
                     .kv_bool("listChanged", false);
+            }
+            if (has_prompts) {
+                rw.comma().key("prompts");
+                {
+                    auto _prompts = rw.object();
+                    rw.kv_bool("listChanged", false);
+                }
             }
         }
 
@@ -691,6 +761,43 @@ struct ParsedToolCallRequest {
         rw.key("resourceTemplates");
         {
             auto _arr = rw.array();
+        }
+    }
+    return std::move(rw).take();
+}
+
+[[nodiscard]] std::string build_prompts_list_result(
+    const std::vector<PromptTemplate>& prompts)
+{
+    JsonWriter rw(512 + prompts.size() * 256);
+    {
+        auto _res = rw.object();
+        rw.key("prompts");
+        {
+            auto _arr = rw.array();
+            bool first_prompt = true;
+            for (const auto& prompt : prompts) {
+                if (!first_prompt) rw.comma();
+                first_prompt = false;
+
+                auto _prompt = rw.object();
+                rw.kv_str("name", prompt.name);
+                if (!prompt.description.empty()) {
+                    rw.comma().kv_str("description", prompt.description);
+                }
+                if (prompt.accepts_arguments) {
+                    rw.comma().key("arguments");
+                    {
+                        auto _args = rw.array();
+                        auto _arg = rw.object();
+                        rw.kv_str("name", "arguments").comma()
+                            .kv_str("description",
+                                    "Text substituted for $ARGUMENTS in the prompt body.")
+                            .comma()
+                            .kv_bool("required", false);
+                    }
+                }
+            }
         }
     }
     return std::move(rw).take();
@@ -930,6 +1037,52 @@ struct ParsedToolCallRequest {
     return parsed;
 }
 
+[[nodiscard]] RpcExpected<ParsedPromptGetRequest> parse_prompt_get_request(
+    simdjson::ondemand::object& root)
+{
+    simdjson::ondemand::object params;
+    if (auto params_result = parse_params_object(root, params); !params_result) {
+        return std::unexpected(params_result.error());
+    }
+
+    std::string_view name;
+    if (params["name"].get_string().get(name) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'name'"});
+    }
+
+    ParsedPromptGetRequest parsed{.name = std::string(name)};
+
+    simdjson::ondemand::value arguments_value;
+    if (params["arguments"].get(arguments_value) == simdjson::SUCCESS) {
+        simdjson::ondemand::json_type arguments_type;
+        if (arguments_value.type().get(arguments_type) != simdjson::SUCCESS
+            || arguments_type != simdjson::ondemand::json_type::object) {
+            return std::unexpected(
+                RpcError{-32602, "Invalid params: 'arguments' must be an object"});
+        }
+
+        simdjson::ondemand::object arguments;
+        if (arguments_value.get_object().get(arguments) != simdjson::SUCCESS) {
+            return std::unexpected(
+                RpcError{-32602, "Invalid params: could not parse 'arguments'"});
+        }
+
+        std::string_view replacement_text;
+        if (arguments["arguments"].get_string().get(replacement_text) == simdjson::SUCCESS) {
+            parsed.arguments = std::string(replacement_text);
+        } else {
+            simdjson::ondemand::value maybe_argument_value;
+            if (arguments["arguments"].get(maybe_argument_value) == simdjson::SUCCESS) {
+                return std::unexpected(
+                    RpcError{-32602,
+                             "Invalid params: prompt argument 'arguments' must be a string"});
+            }
+        }
+    }
+
+    return parsed;
+}
+
 [[nodiscard]] RpcExpected<std::string> build_tool_call_result(
     const ParsedToolCallRequest& request)
 {
@@ -966,6 +1119,41 @@ struct ParsedToolCallRequest {
     return std::move(rw).take();
 }
 
+[[nodiscard]] RpcExpected<std::string> build_prompt_get_result(
+    const ParsedPromptGetRequest& request)
+{
+    const auto prompts = discover_prompt_templates();
+    const auto it = std::ranges::find(prompts, request.name, &PromptTemplate::name);
+    if (it == prompts.end()) {
+        return std::unexpected(
+            RpcError{-32602, std::format("Unknown prompt: {}", request.name)});
+    }
+
+    const std::string expanded_body =
+        it->accepts_arguments ? expand_prompt_arguments(it->body, request.arguments)
+                              : it->body;
+
+    JsonWriter rw(256 + expanded_body.size() + it->description.size());
+    {
+        auto _res = rw.object();
+        if (!it->description.empty()) {
+            rw.kv_str("description", it->description).comma();
+        }
+        rw.key("messages");
+        {
+            auto _messages = rw.array();
+            auto _message = rw.object();
+            rw.kv_str("role", "user").comma().key("content");
+            {
+                auto _content = rw.object();
+                rw.kv_str("type", "text").comma()
+                    .kv_str("text", expanded_body);
+            }
+        }
+    }
+    return std::move(rw).take();
+}
+
 using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::object&);
 
 [[nodiscard]] std::string handle_initialize(
@@ -980,6 +1168,26 @@ using MethodHandler = std::string (*)(const RequestId&, simdjson::ondemand::obje
     simdjson::ondemand::object&)
 {
     return make_response(id, build_resources_templates_list_result());
+}
+
+[[nodiscard]] std::string handle_prompts_list(
+    const RequestId& id,
+    simdjson::ondemand::object&)
+{
+    return make_response(id, build_prompts_list_result(discover_prompt_templates()));
+}
+
+[[nodiscard]] std::string handle_prompts_get(
+    const RequestId& id,
+    simdjson::ondemand::object& root)
+{
+    auto request = parse_prompt_get_request(root);
+    if (!request) return make_rpc_error(id, request.error());
+
+    auto result = build_prompt_get_result(*request);
+    if (!result) return make_rpc_error(id, result.error());
+
+    return make_response(id, *result);
 }
 
 [[nodiscard]] std::string handle_resources_list(
@@ -1034,8 +1242,10 @@ struct MethodRoute {
     MethodHandler handler;
 };
 
-constexpr std::array<MethodRoute, 7> kMethodRoutes{{
+constexpr std::array<MethodRoute, 9> kMethodRoutes{{
     {"initialize", &handle_initialize},
+    {"prompts/list", &handle_prompts_list},
+    {"prompts/get", &handle_prompts_get},
     {"resources/templates/list", &handle_resources_templates_list},
     {"resources/list", &handle_resources_list},
     {"resources/read", &handle_resources_read},

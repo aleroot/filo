@@ -18,6 +18,8 @@ namespace core::mcp {
  * | Method                        | Role        | Notes                                              |
  * |-------------------------------|-------------|----------------------------------------------------|
  * | @c initialize                 | Request     | Negotiates protocol version; returns capabilities  |
+ * | @c prompts/list               | Request     | Returns discovered prompt skills                   |
+ * | @c prompts/get                | Request     | Expands one prompt skill into MCP prompt messages  |
  * | @c tools/list                 | Request     | Returns all registered tools (cached, no cursor)   |
  * | @c tools/call                 | Request     | Validates args, executes tool, wraps result        |
  * | @c ping                       | Request     | Returns @c {}                                      |

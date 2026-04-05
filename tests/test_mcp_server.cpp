@@ -3,6 +3,7 @@
 
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/workspace/Workspace.hpp"
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <optional>
@@ -49,6 +50,55 @@ static std::string trim_trailing_newlines(std::string s) {
     }
     return s;
 }
+
+static std::filesystem::path make_temp_dir(std::string_view tag) {
+    const auto dir = std::filesystem::temp_directory_path()
+        / ("filo_mcp_test_" + std::string(tag));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+static void write_test_file(const std::filesystem::path& path, std::string_view content) {
+    std::ofstream ofs(path);
+    ofs << content;
+}
+
+struct ScopedEnvVar {
+    std::string name;
+    std::optional<std::string> old_value;
+
+    ScopedEnvVar(std::string name_in, std::string value)
+        : name(std::move(name_in)) {
+        if (const char* current = std::getenv(name.c_str())) {
+            old_value = std::string(current);
+        }
+        ::setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value.has_value()) {
+            ::setenv(name.c_str(), old_value->c_str(), 1);
+        } else {
+            ::unsetenv(name.c_str());
+        }
+    }
+};
+
+struct ScopedCurrentPath {
+    std::filesystem::path old_path;
+
+    explicit ScopedCurrentPath(const std::filesystem::path& new_path)
+        : old_path(std::filesystem::current_path()) {
+        std::filesystem::current_path(new_path);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code ec;
+        std::filesystem::current_path(old_path, ec);
+    }
+};
 
 struct WorkspaceResetToDefault {
     ~WorkspaceResetToDefault() {
@@ -115,6 +165,14 @@ TEST_CASE("MCP initialize with 2025-11-25 echoes it back", "[mcp]") {
 }
 
 TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
+    const auto sandbox = make_temp_dir("mcp_init_capabilities");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    std::filesystem::create_directories(fake_home / ".config" / "filo" / "skills");
+    std::filesystem::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    ScopedCurrentPath cwd(project);
+
     auto resp = disp().dispatch(kInitRequest);
 
     simdjson::dom::parser parser;
@@ -136,6 +194,34 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     REQUIRE(doc["result"]["capabilities"]["roots"].get(ignored) != simdjson::SUCCESS);
     REQUIRE(doc["result"]["capabilities"]["prompts"].get(ignored) != simdjson::SUCCESS);
     REQUIRE(doc["result"]["capabilities"]["logging"].get(ignored) != simdjson::SUCCESS);
+}
+
+TEST_CASE("MCP initialize advertises prompts capability when prompt skills exist", "[mcp][prompts]") {
+    const auto sandbox = make_temp_dir("mcp_init_prompts");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    const auto prompt_dir = project / ".filo" / "skills" / "explain";
+    std::filesystem::create_directories(fake_home / ".config" / "filo" / "skills");
+    std::filesystem::create_directories(prompt_dir);
+    write_test_file(prompt_dir / "SKILL.md", R"(---
+name: explain
+description: Explain the supplied concept simply.
+---
+Explain "$ARGUMENTS" in beginner-friendly terms.
+)");
+    ScopedEnvVar home("HOME", fake_home.string());
+    ScopedCurrentPath cwd(project);
+
+    auto resp = disp().dispatch(kInitRequest);
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool prompts_list_changed = true;
+    REQUIRE(doc["result"]["capabilities"]["prompts"]["listChanged"].get(prompts_list_changed)
+            == simdjson::SUCCESS);
+    REQUIRE_FALSE(prompts_list_changed);
 }
 
 TEST_CASE("MCP response id escapes string IDs correctly", "[mcp]") {
@@ -348,6 +434,146 @@ TEST_CASE("MCP tools/list read_file has readOnly + idempotent hints true", "[mcp
     REQUIRE(is_valid_json(resp));
     // At minimum the hint keys must be present.
     REQUIRE_THAT(resp, ContainsSubstring(R"("readOnlyHint")"));
+}
+
+// ---------------------------------------------------------------------------
+// prompts/list and prompts/get
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MCP prompts/list returns discovered prompt skills", "[mcp][prompts]") {
+    const auto sandbox = make_temp_dir("mcp_prompts_list");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    const auto prompt_dir = project / ".filo" / "skills" / "review_pr";
+    const auto disabled_dir = project / ".filo" / "skills" / "disabled";
+    const auto tool_dir = project / ".filo" / "skills" / "tool_skill";
+    std::filesystem::create_directories(fake_home / ".config" / "filo" / "skills");
+    std::filesystem::create_directories(prompt_dir);
+    std::filesystem::create_directories(disabled_dir);
+    std::filesystem::create_directories(tool_dir);
+    write_test_file(prompt_dir / "SKILL.md", R"(---
+name: review-pr
+description: Review a pull request.
+---
+Review PR #$ARGUMENTS for correctness.
+)");
+    write_test_file(disabled_dir / "SKILL.md", R"(---
+name: hidden
+description: Hidden prompt.
+enabled: false
+---
+This should not appear.
+)");
+    write_test_file(tool_dir / "SKILL.md", R"(---
+name: weather
+description: Tool skill, not a prompt.
+entry_point: weather.py
+---
+)");
+    ScopedEnvVar home("HOME", fake_home.string());
+    ScopedCurrentPath cwd(project);
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"prompts/list","params":{},"id":14})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    simdjson::dom::array prompts;
+    REQUIRE(doc["result"]["prompts"].get(prompts) == simdjson::SUCCESS);
+
+    bool found_review_prompt = false;
+    for (auto prompt : prompts) {
+        std::string_view name;
+        REQUIRE(prompt["name"].get(name) == simdjson::SUCCESS);
+        if (name != "review-pr") continue;
+
+        found_review_prompt = true;
+
+        std::string_view description;
+        REQUIRE(prompt["description"].get(description) == simdjson::SUCCESS);
+        REQUIRE(description == "Review a pull request.");
+
+        simdjson::dom::array arguments;
+        REQUIRE(prompt["arguments"].get(arguments) == simdjson::SUCCESS);
+
+        bool found_argument = false;
+        for (auto arg : arguments) {
+            std::string_view arg_name;
+            REQUIRE(arg["name"].get(arg_name) == simdjson::SUCCESS);
+            if (arg_name != "arguments") continue;
+
+            found_argument = true;
+            bool required = true;
+            REQUIRE(arg["required"].get(required) == simdjson::SUCCESS);
+            REQUIRE_FALSE(required);
+        }
+        REQUIRE(found_argument);
+    }
+
+    REQUIRE(found_review_prompt);
+    REQUIRE(resp.find("hidden") == std::string::npos);
+    REQUIRE(resp.find("weather") == std::string::npos);
+}
+
+TEST_CASE("MCP prompts/get expands $ARGUMENTS from the arguments map", "[mcp][prompts]") {
+    const auto sandbox = make_temp_dir("mcp_prompts_get");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    const auto prompt_dir = project / ".filo" / "skills" / "explain";
+    std::filesystem::create_directories(fake_home / ".config" / "filo" / "skills");
+    std::filesystem::create_directories(prompt_dir);
+    write_test_file(prompt_dir / "SKILL.md", R"(---
+name: explain
+description: Explain a concept simply.
+---
+Explain "$ARGUMENTS" in beginner-friendly terms.
+)");
+    ScopedEnvVar home("HOME", fake_home.string());
+    ScopedCurrentPath cwd(project);
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"prompts/get","params":{"name":"explain","arguments":{"arguments":"recursion"}},"id":15})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    std::string_view description;
+    REQUIRE(doc["result"]["description"].get(description) == simdjson::SUCCESS);
+    REQUIRE(description == "Explain a concept simply.");
+
+    simdjson::dom::array messages;
+    REQUIRE(doc["result"]["messages"].get(messages) == simdjson::SUCCESS);
+    REQUIRE(messages.begin() != messages.end());
+    const auto first_message = *messages.begin();
+
+    std::string_view role;
+    std::string_view content_type;
+    std::string_view text;
+    REQUIRE(first_message["role"].get(role) == simdjson::SUCCESS);
+    REQUIRE(first_message["content"]["type"].get(content_type) == simdjson::SUCCESS);
+    REQUIRE(first_message["content"]["text"].get(text) == simdjson::SUCCESS);
+    REQUIRE(role == "user");
+    REQUIRE(content_type == "text");
+    REQUIRE(text.find("recursion") != std::string_view::npos);
+}
+
+TEST_CASE("MCP prompts/get returns -32602 for unknown prompt", "[mcp][prompts]") {
+    const auto sandbox = make_temp_dir("mcp_prompts_missing");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    std::filesystem::create_directories(fake_home / ".config" / "filo" / "skills");
+    std::filesystem::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    ScopedCurrentPath cwd(project);
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"prompts/get","params":{"name":"does-not-exist"},"id":16})");
+
+    REQUIRE_THAT(resp, ContainsSubstring(R"("code":-32602)"));
+    REQUIRE_THAT(resp, ContainsSubstring("Unknown prompt"));
 }
 
 // ---------------------------------------------------------------------------
