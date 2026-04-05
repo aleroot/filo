@@ -302,6 +302,7 @@ unset(_filo_saved_folder)
 
 add_executable(filo_tests
     tests/test_tools.cpp
+    tests/test_json_writer.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_history.cpp
@@ -348,6 +349,7 @@ add_executable(filo_tests
     tests/test_mcp_client_session.cpp
     tests/test_daemon_reliability.cpp
     tests/test_request_replay_cache.cpp
+    tests/test_agent_stop.cpp
 )
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
@@ -393,6 +395,7 @@ source_group(
     PREFIX "Test Files"
     FILES
         tests/test_tools.cpp
+        tests/test_json_writer.cpp
         tests/test_commands.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp

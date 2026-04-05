@@ -139,11 +139,21 @@ struct Serializer {
         payload += R"(","stream":)";
         payload += req.stream ? "true" : "false";
         
+        // C++26 optimization: Use std::to_chars when available (faster than std::to_string).
         if (req.temperature.has_value()) {
-            payload += R"(,"temperature":)" + std::to_string(req.temperature.value());
+            payload += R"(,"temperature":)";
+            // Note: C++26 adds floating-point to_chars; use snprintf as high-performance fallback
+            char tmp[32];
+            int n = std::snprintf(tmp, sizeof(tmp), "%.6g", req.temperature.value());
+            if (n > 0 && n < static_cast<int>(sizeof(tmp))) {
+                payload.append(tmp, n);
+            }
         }
         if (req.max_tokens.has_value()) {
-            payload += R"(,"max_tokens":)" + std::to_string(req.max_tokens.value());
+            payload += R"(,"max_tokens":)";
+            char tmp[32];
+            auto [ptr, _] = std::to_chars(tmp, tmp + sizeof(tmp), req.max_tokens.value());
+            payload.append(tmp, ptr);
         }
         
         // Response format (JSON mode / structured outputs)

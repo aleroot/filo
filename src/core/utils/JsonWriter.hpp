@@ -54,6 +54,25 @@ public:
         return *this;
     }
 
+    JsonWriter& number(double v) {
+        char tmp[64];
+        int n = std::snprintf(tmp, sizeof(tmp), "%.6g", v);
+        if (n > 0 && n < static_cast<int>(sizeof(tmp))) {
+            buf_.append(tmp, n);
+        }
+        return *this;
+    }
+
+    // Floating-point with specified precision.
+    JsonWriter& number(double v, int precision) {
+        char tmp[64];
+        int n = std::snprintf(tmp, sizeof(tmp), "%.*g", precision, v);
+        if (n > 0 && n < static_cast<int>(sizeof(tmp))) {
+            buf_.append(tmp, n);
+        }
+        return *this;
+    }
+
     // Escaped string value — wraps the content in quotes and calls
     // append_escaped, which auto-vectorises with -O3 -march=native.
     JsonWriter& str(std::string_view v) {
@@ -80,6 +99,26 @@ public:
     JsonWriter& kv_bool(std::string_view k, bool v)                { return key(k).boolean(v); }
     JsonWriter& kv_num(std::string_view k, std::integral auto v)   { return key(k).number(v);  }
     JsonWriter& kv_null(std::string_view k)                        { return key(k).null_val(); }
+
+    // Floating-point key-value helpers (optimized, no locale overhead).
+    JsonWriter& kv_float(std::string_view k, double v) {
+        key(k);
+        char tmp[64];
+        int n = std::snprintf(tmp, sizeof(tmp), "%.6g", v);
+        if (n > 0 && n < static_cast<int>(sizeof(tmp))) {
+            buf_.append(tmp, n);
+        }
+        return *this;
+    }
+    JsonWriter& kv_float(std::string_view k, double v, int precision) {
+        key(k);
+        char tmp[64];
+        int n = std::snprintf(tmp, sizeof(tmp), "%.*g", precision, v);
+        if (n > 0 && n < static_cast<int>(sizeof(tmp))) {
+            buf_.append(tmp, n);
+        }
+        return *this;
+    }
 
     // -----------------------------------------------------------------------
     // RAII scope guard

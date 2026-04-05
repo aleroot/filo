@@ -298,14 +298,20 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto assistant_response   = std::make_shared<std::string>();
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
     auto reasoning_accum      = std::make_shared<std::string>();  // For Kimi thinking mode
+    auto already_stopped      = std::make_shared<std::atomic<bool>>(false);
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
-         text_callback, tool_callback, done_callback, turn_callbacks](
+         text_callback, tool_callback, done_callback, turn_callbacks, already_stopped](
              const core::llm::StreamChunk& chunk) {
+
+        if (already_stopped->load(std::memory_order_acquire)) {
+            return;
+        }
 
         // Check for cancellation request
         if (self->is_stop_requested() && !chunk.is_final) {
+            already_stopped->store(true, std::memory_order_release);
             // Emit a final chunk to signal completion
             text_callback("\n\n[Generation stopped by user]\n");
             done_callback();
