@@ -537,7 +537,6 @@ TEST_CASE("JsonUtils: escape_json_string escapes quotes", "[json_writer]") {
 }
 
 TEST_CASE("JsonUtils: escape_json_string escapes backslash", "[json_writer]") {
-    // A single backslash gets escaped to \\
     CHECK(escape_json_string("\\") == "\\\\");
 }
 

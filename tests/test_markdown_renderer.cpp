@@ -284,6 +284,36 @@ TEST_CASE("render_markdown — backslash escapes backtick", "[md][inline]")
 }
 
 // ============================================================================
+// Ordered lists
+// ============================================================================
+
+TEST_CASE("render_markdown — ordered list", "[md][list]")
+{
+    smoke("1. first\n2. second\n3. third");
+}
+
+TEST_CASE("render_markdown — ordered list with inline", "[md][list]")
+{
+    smoke("1. **Step one**\n2. Run `make`\n3. Done");
+}
+
+TEST_CASE("render_markdown — ordered list loose (blank lines)", "[md][list]")
+{
+    // Items separated by blank lines should stay in the same list and increment
+    smoke("1. item one\n\n2. item two\n\n3. item three");
+}
+
+TEST_CASE("render_markdown — ordered list with continuation lines", "[md][list]")
+{
+    smoke("1. item one\n   more text for one\n2. item two");
+}
+
+TEST_CASE("render_markdown — ordered list restarts after non-list block", "[md][list]")
+{
+    smoke("1. item one\n\nParagraph\n\n1. new list");
+}
+
+// ============================================================================
 // Unordered lists
 // ============================================================================
 
@@ -307,23 +337,19 @@ TEST_CASE("render_markdown — unordered list nested indent", "[md][list]")
     smoke("- parent\n  - child\n    - grandchild");
 }
 
+TEST_CASE("render_markdown — unordered list loose", "[md][list]")
+{
+    smoke("- item one\n\n- item two");
+}
+
+TEST_CASE("render_markdown — unordered list with continuation", "[md][list]")
+{
+    smoke("- item one\n  continuation line\n- item two");
+}
+
 TEST_CASE("render_markdown — list items with inline markup", "[md][list]")
 {
     smoke("- **bold item**\n- *italic item*\n- `code item`");
-}
-
-// ============================================================================
-// Ordered lists
-// ============================================================================
-
-TEST_CASE("render_markdown — ordered list", "[md][list]")
-{
-    smoke("1. first\n2. second\n3. third");
-}
-
-TEST_CASE("render_markdown — ordered list with inline", "[md][list]")
-{
-    smoke("1. **Step one**\n2. Run `make`\n3. Done");
 }
 
 // ============================================================================

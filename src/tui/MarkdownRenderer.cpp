@@ -508,6 +508,31 @@ static bool is_table_separator(std::string_view s)
     return pipe && dash;
 }
 
+static int list_leading_spaces(std::string_view s)
+{
+    int sp = 0;
+    while (sp < static_cast<int>(s.size()) && s[sp] == ' ') ++sp;
+    return sp;
+}
+
+static std::string list_item_content(std::string_view s)
+{
+    const auto p = s.find_first_not_of(' ');
+    if (p == std::string_view::npos) return {};
+
+    if (is_ol(s)) {
+        std::size_t j = p;
+        while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+        // j is at '.', j+1 is at ' '
+        return std::string(s.substr(j + 2));
+    }
+    if (is_ul(s)) {
+        return std::string(s.substr(p + 2));
+    }
+
+    return std::string(s.substr(p));
+}
+
 // Tells us if a line starts a new block (used to terminate paragraphs early)
 static bool is_block_start(std::string_view s)
 {
@@ -656,7 +681,17 @@ static std::vector<Block> parse_blocks(std::string_view text)
         if (is_ul(line)) {
             Block b;
             b.kind = BlockKind::UnorderedList;
-            while (i < total && !is_blank(lines[i])) {
+            while (i < total) {
+                if (is_blank(lines[i])) {
+                    size_t next = i + 1;
+                    while (next < total && is_blank(lines[next])) ++next;
+                    if (next < total && (is_ul(lines[next]) || list_leading_spaces(lines[next]) >= 2)) {
+                        for (size_t k = i; k < next; ++k) b.lines.emplace_back("");
+                        i = next;
+                        continue;
+                    }
+                    break;
+                }
                 b.lines.emplace_back(lines[i]);
                 ++i;
             }
@@ -668,7 +703,17 @@ static std::vector<Block> parse_blocks(std::string_view text)
         if (is_ol(line)) {
             Block b;
             b.kind = BlockKind::OrderedList;
-            while (i < total && !is_blank(lines[i])) {
+            while (i < total) {
+                if (is_blank(lines[i])) {
+                    size_t next = i + 1;
+                    while (next < total && is_blank(lines[next])) ++next;
+                    if (next < total && (is_ol(lines[next]) || list_leading_spaces(lines[next]) >= 2)) {
+                        for (size_t k = i; k < next; ++k) b.lines.emplace_back("");
+                        i = next;
+                        continue;
+                    }
+                    break;
+                }
                 b.lines.emplace_back(lines[i]);
                 ++i;
             }
@@ -848,27 +893,6 @@ static Element render_blockquote(const Block& block, Color /*base*/)
     return vbox(std::move(rows));
 }
 
-static int list_leading_spaces(std::string_view s)
-{
-    int sp = 0;
-    while (sp < static_cast<int>(s.size()) && s[sp] == ' ') ++sp;
-    return sp;
-}
-
-static std::string list_item_content(std::string_view s)
-{
-    const auto p = s.find_first_not_of(' ');
-    if (p == std::string_view::npos) return {};
-
-    std::size_t skip = p + 1; // past the bullet/digit
-    if (std::isdigit(static_cast<unsigned char>(s[p]))) {
-        // Ordered: skip digits and '.'
-        while (skip < s.size() && s[skip] != ' ') ++skip;
-    }
-    if (skip < s.size() && s[skip] == ' ') ++skip;
-    return std::string(s.substr(skip));
-}
-
 static Element render_unordered_list(const Block& block, Color base)
 {
     static constexpr std::array<const char*, 3> bullets = {"• ", "◦ ", "▸ "};
@@ -876,17 +900,30 @@ static Element render_unordered_list(const Block& block, Color base)
     std::vector<Element> rows;
     rows.reserve(block.lines.size());
     for (const auto& l : block.lines) {
-        if (is_blank(l)) continue;
+        if (is_blank(l)) {
+            rows.push_back(ftxui::text(""));
+            continue;
+        }
         const int spaces = list_leading_spaces(l);
-        const int level  = std::min(spaces / 2, 2);
-        const std::string indent(static_cast<std::size_t>(level * 2), ' ');
-        rows.push_back(
-            hbox({
-                ftxui::text(indent),
-                ftxui::text(bullets[level]) | ftxui::color(kMdBulletFg),
-                render_inline_line(list_item_content(l), base),
-            }) | xflex
-        );
+        if (is_ul(l)) {
+            const int level  = std::min(spaces / 2, 2);
+            const std::string indent(static_cast<std::size_t>(level * 2), ' ');
+            rows.push_back(
+                hbox({
+                    ftxui::text(indent),
+                    ftxui::text(bullets[level]) | ftxui::color(kMdBulletFg),
+                    render_inline_line(list_item_content(l), base),
+                }) | xflex
+            );
+        } else {
+            // Continuation line
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::string(static_cast<size_t>(spaces), ' ')),
+                    render_inline_line(l.substr(static_cast<size_t>(spaces)), base),
+                }) | xflex
+            );
+        }
     }
     return vbox(std::move(rows));
 }
@@ -897,17 +934,30 @@ static Element render_ordered_list(const Block& block, Color base)
     rows.reserve(block.lines.size());
     int num = 1;
     for (const auto& l : block.lines) {
-        if (is_blank(l)) continue;
+        if (is_blank(l)) {
+            rows.push_back(ftxui::text(""));
+            continue;
+        }
         const int spaces = list_leading_spaces(l);
-        const std::string indent(static_cast<std::size_t>(spaces), ' ');
-        const std::string marker = std::format("{}. ", num++);
-        rows.push_back(
-            hbox({
-                ftxui::text(indent),
-                ftxui::text(marker) | ftxui::color(kMdNumFg),
-                render_inline_line(list_item_content(l), base),
-            }) | xflex
-        );
+        if (is_ol(l)) {
+            const std::string indent(static_cast<std::size_t>(spaces), ' ');
+            const std::string marker = std::format("{}. ", num++);
+            rows.push_back(
+                hbox({
+                    ftxui::text(indent),
+                    ftxui::text(marker) | ftxui::color(kMdNumFg),
+                    render_inline_line(list_item_content(l), base),
+                }) | xflex
+            );
+        } else {
+            // Continuation line
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::string(static_cast<size_t>(spaces), ' ')),
+                    render_inline_line(l.substr(static_cast<size_t>(spaces)), base),
+                }) | xflex
+            );
+        }
     }
     return vbox(std::move(rows));
 }
