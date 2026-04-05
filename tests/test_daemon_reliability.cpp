@@ -10,6 +10,8 @@
 #include <fstream>
 #include <format>
 #include <future>
+#include <optional>
+#include <simdjson.h>
 #include <string>
 #include <thread>
 #if defined(_WIN32)
@@ -63,6 +65,73 @@ namespace {
         {"MCP-Protocol-Version", "2025-11-25"},
         {"MCP-Session-Id", std::string(session_id)},
     };
+}
+
+struct InitializedSession {
+    std::string session_id;
+    std::string protocol_version;
+};
+
+[[nodiscard]] httplib::Result post_mcp_request(int port,
+                                               const std::string& payload,
+                                               httplib::Headers headers);
+
+[[nodiscard]] httplib::Headers session_headers(const InitializedSession& session) {
+    return httplib::Headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", session.protocol_version},
+        {"MCP-Session-Id", session.session_id},
+    };
+}
+
+[[nodiscard]] std::optional<std::string>
+extract_negotiated_protocol_version(std::string_view response_body) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(response_body).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    std::string_view protocol_version;
+    if (doc["result"]["protocolVersion"].get(protocol_version) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return std::string(protocol_version);
+}
+
+[[nodiscard]] std::optional<InitializedSession> initialize_mcp_session(
+    int port,
+    std::string_view requested_protocol = "2025-11-25")
+{
+    httplib::Headers init_headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+    };
+    const std::string init_payload = std::format(
+        R"({{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","capabilities":{{}},"clientInfo":{{"name":"daemon-test","version":"1.0"}}}}}})",
+        requested_protocol);
+
+    auto init_res = post_mcp_request(port, init_payload, std::move(init_headers));
+    if (!init_res || init_res->status != 200) return std::nullopt;
+
+    auto session_header_it = init_res->headers.find("MCP-Session-Id");
+    if (session_header_it == init_res->headers.end() || session_header_it->second.empty()) {
+        return std::nullopt;
+    }
+
+    auto negotiated_version = extract_negotiated_protocol_version(init_res->body);
+    if (!negotiated_version.has_value()) return std::nullopt;
+
+    InitializedSession session{
+        .session_id = session_header_it->second,
+        .protocol_version = *negotiated_version,
+    };
+
+    const std::string initialized_payload =
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})";
+    auto initialized_res = post_mcp_request(port, initialized_payload, session_headers(session));
+    if (!initialized_res || initialized_res->status != 202) return std::nullopt;
+
+    return session;
 }
 
 [[nodiscard]] httplib::Result post_mcp_request(int port,
@@ -128,6 +197,9 @@ TEST_CASE("Daemon replays duplicate completed requests instead of re-running too
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
+
     const auto out_file = temp_file_path("filo_daemon_replay_completed");
     std::filesystem::remove(out_file);
 
@@ -137,11 +209,11 @@ TEST_CASE("Daemon replays duplicate completed requests instead of re-running too
         std::string(R"({"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":")")
         + command + R"("}}})";
 
-    auto first = post_mcp_request(port, payload, default_mcp_headers("test-session-a"));
+    auto first = post_mcp_request(port, payload, session_headers(*session));
     REQUIRE(first);
     REQUIRE(first->status == 200);
 
-    auto second = post_mcp_request(port, payload, default_mcp_headers("test-session-a"));
+    auto second = post_mcp_request(port, payload, session_headers(*session));
     REQUIRE(second);
     REQUIRE(second->status == 200);
 
@@ -158,6 +230,9 @@ TEST_CASE("Daemon collapses in-flight duplicate requests to a single execution",
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
+
     const auto out_file = temp_file_path("filo_daemon_replay_inflight");
     std::filesystem::remove(out_file);
 
@@ -168,10 +243,10 @@ TEST_CASE("Daemon collapses in-flight duplicate requests to a single execution",
         + command + R"("}}})";
 
     auto f1 = std::async(std::launch::async, [&]() {
-        return post_mcp_request(port, payload, default_mcp_headers("test-session-b"));
+        return post_mcp_request(port, payload, session_headers(*session));
     });
     auto f2 = std::async(std::launch::async, [&]() {
-        return post_mcp_request(port, payload, default_mcp_headers("test-session-b"));
+        return post_mcp_request(port, payload, session_headers(*session));
     });
 
     auto r1 = f1.get();
@@ -195,6 +270,11 @@ TEST_CASE("Daemon does not replay across different MCP sessions",
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
+    const auto session_one = initialize_mcp_session(port);
+    const auto session_two = initialize_mcp_session(port);
+    REQUIRE(session_one.has_value());
+    REQUIRE(session_two.has_value());
+
     const auto out_file = temp_file_path("filo_daemon_replay_sessions");
     std::filesystem::remove(out_file);
 
@@ -204,8 +284,8 @@ TEST_CASE("Daemon does not replay across different MCP sessions",
         std::string(R"({"jsonrpc":"2.0","id":"same-id","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":")")
         + command + R"("}}})";
 
-    auto s1 = post_mcp_request(port, payload, default_mcp_headers("session-one"));
-    auto s2 = post_mcp_request(port, payload, default_mcp_headers("session-two"));
+    auto s1 = post_mcp_request(port, payload, session_headers(*session_one));
+    auto s2 = post_mcp_request(port, payload, session_headers(*session_two));
 
     REQUIRE(s1);
     REQUIRE(s2);
@@ -217,7 +297,7 @@ TEST_CASE("Daemon does not replay across different MCP sessions",
     std::filesystem::remove(out_file);
 }
 
-TEST_CASE("Daemon does not replay duplicate requests when MCP session header is missing",
+TEST_CASE("Daemon rejects requests without MCP session header after initialization",
           "[daemon][reliability]") {
     const int port = next_test_port();
     DaemonRunner daemon(port);
@@ -225,29 +305,23 @@ TEST_CASE("Daemon does not replay duplicate requests when MCP session header is 
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
-    const auto out_file = temp_file_path("filo_daemon_replay_no_session");
-    std::filesystem::remove(out_file);
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
 
-    const std::string command =
-        "echo replay_without_session_header >> '" + out_file.string() + "'";
-    const std::string payload =
-        std::string(R"({"jsonrpc":"2.0","id":"same-id","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":")")
-        + command + R"("}}})";
+    httplib::Headers headers_without_session{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", session->protocol_version},
+    };
 
-    auto headers_without_session = default_mcp_headers("unused-session");
-    headers_without_session.erase("MCP-Session-Id");
+    auto res = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":"same-id","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"echo missing_session"}}})",
+        std::move(headers_without_session));
 
-    auto first = post_mcp_request(port, payload, headers_without_session);
-    auto second = post_mcp_request(port, payload, headers_without_session);
-
-    REQUIRE(first);
-    REQUIRE(second);
-    REQUIRE(first->status == 200);
-    REQUIRE(second->status == 200);
-
-    REQUIRE(std::filesystem::exists(out_file));
-    REQUIRE(count_lines(out_file) == 2);
-    std::filesystem::remove(out_file);
+    REQUIRE(res);
+    REQUIRE(res->status == 400);
+    REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring("MCP-Session-Id"));
 }
 
 TEST_CASE("Daemon rejects missing Accept header on /mcp",
@@ -278,7 +352,10 @@ TEST_CASE("Daemon rejects unsupported MCP protocol version",
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
-    auto headers = default_mcp_headers("bad-proto");
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
+
+    auto headers = session_headers(*session);
     headers.erase("MCP-Protocol-Version");
     headers.emplace("MCP-Protocol-Version", "2099-01-01");
 
@@ -299,24 +376,31 @@ TEST_CASE("Daemon enforces same-host or loopback origin policy",
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
-    auto blocked_headers = default_mcp_headers("origin-blocked");
+    auto blocked_headers = httplib::Headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+    };
     blocked_headers.emplace("Origin", "https://example.com");
     auto blocked = post_mcp_request(
         port,
-        R"({"jsonrpc":"2.0","id":3,"method":"ping"})",
+        R"({"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"origin-test","version":"1.0"}}})",
         std::move(blocked_headers));
     REQUIRE(blocked);
     REQUIRE(blocked->status == 403);
 
-    auto allowed_headers = default_mcp_headers("origin-allowed");
+    auto allowed_headers = httplib::Headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+    };
     allowed_headers.emplace("Origin", "http://localhost:3000");
     auto allowed = post_mcp_request(
         port,
-        R"({"jsonrpc":"2.0","id":4,"method":"ping"})",
+        R"({"jsonrpc":"2.0","id":4,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"origin-test","version":"1.0"}}})",
         std::move(allowed_headers));
     REQUIRE(allowed);
     REQUIRE(allowed->status == 200);
     REQUIRE_THAT(allowed->body, Catch::Matchers::ContainsSubstring(R"("jsonrpc":"2.0")"));
+    REQUIRE(allowed->has_header("MCP-Session-Id"));
 }
 
 TEST_CASE("Daemon DELETE /mcp requires MCP-Session-Id header",
@@ -342,6 +426,9 @@ TEST_CASE("Daemon DELETE /mcp clears replay cache for that session",
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
+
     const auto out_file = temp_file_path("filo_daemon_delete_session");
     std::filesystem::remove(out_file);
 
@@ -351,8 +438,8 @@ TEST_CASE("Daemon DELETE /mcp clears replay cache for that session",
         std::string(R"({"jsonrpc":"2.0","id":"same-id","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":")")
         + command + R"("}}})";
 
-    auto first = post_mcp_request(port, payload, default_mcp_headers("delete-session"));
-    auto replayed = post_mcp_request(port, payload, default_mcp_headers("delete-session"));
+    auto first = post_mcp_request(port, payload, session_headers(*session));
+    auto replayed = post_mcp_request(port, payload, session_headers(*session));
     REQUIRE(first);
     REQUIRE(replayed);
     REQUIRE(first->status == 200);
@@ -362,14 +449,14 @@ TEST_CASE("Daemon DELETE /mcp clears replay cache for that session",
 
     auto deleted = delete_mcp_request(
         port,
-        httplib::Headers{{"MCP-Session-Id", "delete-session"}});
+        httplib::Headers{{"MCP-Session-Id", session->session_id}});
     REQUIRE(deleted);
     REQUIRE(deleted->status == 204);
 
-    auto after_delete = post_mcp_request(port, payload, default_mcp_headers("delete-session"));
+    auto after_delete = post_mcp_request(port, payload, session_headers(*session));
     REQUIRE(after_delete);
-    REQUIRE(after_delete->status == 200);
-    REQUIRE(count_lines(out_file) == 2);
+    REQUIRE(after_delete->status == 404);
+    REQUIRE(count_lines(out_file) == 1);
     std::filesystem::remove(out_file);
 }
 
@@ -381,6 +468,9 @@ TEST_CASE("Daemon DELETE /mcp resets run_terminal_command shell state for that s
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
+    const auto session = initialize_mcp_session(port);
+    REQUIRE(session.has_value());
+
     constexpr std::string_view token = "daemon_session_token_97";
 
     const std::string set_payload =
@@ -390,8 +480,8 @@ TEST_CASE("Daemon DELETE /mcp resets run_terminal_command shell state for that s
     const std::string get_payload_after =
         R"({"jsonrpc":"2.0","id":"get-env-after","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"echo $FILO_DAEMON_VAR"}}})";
 
-    auto set_res = post_mcp_request(port, set_payload, default_mcp_headers("session-reset"));
-    auto get_res_before = post_mcp_request(port, get_payload_before, default_mcp_headers("session-reset"));
+    auto set_res = post_mcp_request(port, set_payload, session_headers(*session));
+    auto get_res_before = post_mcp_request(port, get_payload_before, session_headers(*session));
     REQUIRE(set_res);
     REQUIRE(get_res_before);
     REQUIRE(set_res->status == 200);
@@ -400,12 +490,11 @@ TEST_CASE("Daemon DELETE /mcp resets run_terminal_command shell state for that s
 
     auto deleted = delete_mcp_request(
         port,
-        httplib::Headers{{"MCP-Session-Id", "session-reset"}});
+        httplib::Headers{{"MCP-Session-Id", session->session_id}});
     REQUIRE(deleted);
     REQUIRE(deleted->status == 204);
 
-    auto get_res_after = post_mcp_request(port, get_payload_after, default_mcp_headers("session-reset"));
+    auto get_res_after = post_mcp_request(port, get_payload_after, session_headers(*session));
     REQUIRE(get_res_after);
-    REQUIRE(get_res_after->status == 200);
-    REQUIRE_THAT(get_res_after->body, !Catch::Matchers::ContainsSubstring(std::string(token)));
+    REQUIRE(get_res_after->status == 404);
 }

@@ -22,6 +22,8 @@ ToolDefinition ReplaceTool::get_definition() const {
             {"old_string", "string", "The exact literal text to find and replace.",             true},
             {"new_string", "string", "The exact literal text to insert in place of old_string.", true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the replacement completed successfully."},"file_path":{"type":"string","description":"The modified file path."},"replaced_at_line":{"type":"integer","description":"1-based line number where the replacement began."}},"required":["success","file_path","replaced_at_line"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies file content on disk
         },

@@ -18,6 +18,8 @@ ToolDefinition CreateDirectoryTool::get_definition() const {
         .parameters = {
             {"dir_path", "string", "Absolute or relative path of the directory to create.", true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the directory exists after the call."},"path":{"type":"string","description":"The created directory path."}},"required":["success","path"],"additionalProperties":false})",
         .annotations = {
             .idempotent_hint = true,  // creating an existing directory is a no-op
         },

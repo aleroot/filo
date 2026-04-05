@@ -10,14 +10,20 @@
 #include "../core/tools/ToolManager.hpp"
 #include "../core/tools/ShellTool.hpp"
 #include "../core/utils/JsonUtils.hpp"
+#include "../core/utils/JsonWriter.hpp"
 #include "../core/logging/Logger.hpp"
 #include <simdjson.h>
+#include <array>
 #include <cctype>
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
+#include <string_view>
+#include <unordered_map>
 
 namespace exec::daemon {
 
@@ -55,6 +61,154 @@ constexpr std::string_view kJsonRpcInvalidRequestPrefix{
 [[nodiscard]] detail::RequestReplayCache& replay_cache() {
     static detail::RequestReplayCache cache;
     return cache;
+}
+
+using core::utils::JsonWriter;
+
+struct ResponseId {
+    enum class Kind {
+        none,
+        integer,
+        string,
+    };
+
+    Kind kind = Kind::none;
+    int64_t integer_value = 0;
+    std::string string_value;
+};
+
+struct ParsedJsonRpcMessage {
+    enum class Kind {
+        request,
+        notification,
+        response,
+    };
+
+    Kind kind = Kind::request;
+    ResponseId id;
+    std::string method;
+};
+
+struct HttpSessionState {
+    std::string protocol_version;
+    bool client_ready = false;
+    std::deque<std::chrono::steady_clock::time_point> recent_tool_calls;
+    std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
+    std::mutex mutex;
+};
+
+std::mutex g_http_sessions_mutex;
+std::unordered_map<std::string, std::shared_ptr<HttpSessionState>> g_http_sessions;
+
+constexpr std::size_t kMaxToolCallsPerWindow = 512;
+constexpr auto kToolRateWindow = std::chrono::minutes{1};
+
+void write_response_id(JsonWriter& w, const ResponseId& id) {
+    w.key("id");
+    switch (id.kind) {
+        case ResponseId::Kind::integer:
+            w.number(id.integer_value);
+            break;
+        case ResponseId::Kind::string:
+            w.str(id.string_value);
+            break;
+        case ResponseId::Kind::none:
+            w.null_val();
+            break;
+    }
+}
+
+[[nodiscard]] std::string make_jsonrpc_error_body(const ResponseId& id,
+                                                  int code,
+                                                  std::string_view message) {
+    JsonWriter w(128 + message.size());
+    {
+        auto _obj = w.object();
+        w.kv_str("jsonrpc", "2.0").comma();
+        write_response_id(w, id);
+        w.comma().key("error");
+        {
+            auto _err = w.object();
+            w.kv_num("code", code).comma().kv_str("message", message);
+        }
+    }
+    return std::move(w).take();
+}
+
+[[nodiscard]] std::optional<ParsedJsonRpcMessage>
+parse_jsonrpc_message(std::string_view json_body) {
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(json_body);
+    simdjson::ondemand::document doc;
+    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::object root;
+    if (doc.get_object().get(root) != simdjson::SUCCESS) return std::nullopt;
+
+    std::string_view jsonrpc;
+    if (root["jsonrpc"].get_string().get(jsonrpc) != simdjson::SUCCESS || jsonrpc != "2.0") {
+        return std::nullopt;
+    }
+
+    ParsedJsonRpcMessage parsed;
+
+    simdjson::ondemand::value id_value;
+    if (root["id"].get(id_value) == simdjson::SUCCESS) {
+        simdjson::ondemand::json_type id_type;
+        if (id_value.type().get(id_type) != simdjson::SUCCESS) return std::nullopt;
+
+        if (id_type == simdjson::ondemand::json_type::number) {
+            int64_t id_num = 0;
+            if (id_value.get_int64().get(id_num) != simdjson::SUCCESS) return std::nullopt;
+            parsed.id.kind = ResponseId::Kind::integer;
+            parsed.id.integer_value = id_num;
+        } else if (id_type == simdjson::ondemand::json_type::string) {
+            std::string_view id_str;
+            if (id_value.get_string().get(id_str) != simdjson::SUCCESS) return std::nullopt;
+            parsed.id.kind = ResponseId::Kind::string;
+            parsed.id.string_value.assign(id_str);
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    std::string_view method;
+    if (root["method"].get_string().get(method) == simdjson::SUCCESS) {
+        parsed.method.assign(method);
+        parsed.kind = parsed.id.kind == ResponseId::Kind::none
+            ? ParsedJsonRpcMessage::Kind::notification
+            : ParsedJsonRpcMessage::Kind::request;
+        return parsed;
+    }
+
+    simdjson::ondemand::value ignored;
+    if (root["result"].get(ignored) == simdjson::SUCCESS
+        || root["error"].get(ignored) == simdjson::SUCCESS) {
+        parsed.kind = ParsedJsonRpcMessage::Kind::response;
+        return parsed;
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string>
+extract_initialize_protocol_version(std::string_view response_body) {
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(response_body);
+    simdjson::ondemand::document doc;
+    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::object root;
+    if (doc.get_object().get(root) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::ondemand::object result;
+    if (root["result"].get_object().get(result) != simdjson::SUCCESS) return std::nullopt;
+
+    std::string_view version;
+    if (result["protocolVersion"].get_string().get(version) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return std::string(version);
 }
 
 [[nodiscard]] std::string to_lower_ascii(std::string_view value) {
@@ -206,6 +360,64 @@ extract_request_id_for_replay(std::string_view json_body) {
     return version == "2024-11-05" || version == "2025-11-25";
 }
 
+[[nodiscard]] std::pair<std::string, std::shared_ptr<HttpSessionState>>
+create_http_session(std::string protocol_version) {
+    static std::random_device rd;
+    static constexpr std::string_view kHex = "0123456789abcdef";
+
+    std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+    for (;;) {
+        std::array<unsigned char, 16> bytes{};
+        for (auto& byte : bytes) {
+            byte = static_cast<unsigned char>(rd());
+        }
+
+        std::string session_id;
+        session_id.reserve(bytes.size() * 2);
+        for (const unsigned char byte : bytes) {
+            session_id.push_back(kHex[byte >> 4]);
+            session_id.push_back(kHex[byte & 0x0f]);
+        }
+
+        if (g_http_sessions.contains(session_id)) continue;
+
+        auto state = std::make_shared<HttpSessionState>();
+        state->protocol_version = std::move(protocol_version);
+        g_http_sessions.emplace(session_id, state);
+        return {session_id, std::move(state)};
+    }
+}
+
+[[nodiscard]] std::shared_ptr<HttpSessionState> find_http_session(std::string_view session_id) {
+    std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+    auto it = g_http_sessions.find(std::string(session_id));
+    if (it == g_http_sessions.end()) return {};
+    return it->second;
+}
+
+[[nodiscard]] bool erase_http_session(std::string_view session_id) {
+    std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+    return g_http_sessions.erase(std::string(session_id)) > 0;
+}
+
+void clear_http_sessions() {
+    std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+    g_http_sessions.clear();
+}
+
+[[nodiscard]] bool consume_tool_call_budget(HttpSessionState& session) {
+    const auto now = std::chrono::steady_clock::now();
+    while (!session.recent_tool_calls.empty()
+           && now - session.recent_tool_calls.front() > kToolRateWindow) {
+        session.recent_tool_calls.pop_front();
+    }
+    if (session.recent_tool_calls.size() >= kMaxToolCallsPerWindow) {
+        return false;
+    }
+    session.recent_tool_calls.push_back(now);
+    return true;
+}
+
 [[nodiscard]] detail::McpDispatchResult dispatch_mcp_payload(const std::string& body) {
     detail::McpDispatchResult result;
     result.body = core::mcp::McpDispatcher::get_instance().dispatch(body);
@@ -231,6 +443,7 @@ void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
     res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE");
     res.set_header("Access-Control-Allow-Headers",
                    "Content-Type, Accept, Authorization, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID");
+    res.set_header("Access-Control-Expose-Headers", "MCP-Session-Id");
     res.set_header("Access-Control-Max-Age", "86400");
     res.set_header("Vary", "Origin");
     if (req.has_header("Origin")) {
@@ -315,6 +528,14 @@ void handle_mcp_delete(const std::string& host,
         return;
     }
 
+    if (!erase_http_session(session_id)) {
+        res.status = 404;
+        res.set_content(
+            R"({"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"},"id":null})",
+            "application/json");
+        return;
+    }
+
     replay_cache().clear_session(session_id);
     core::tools::ShellTool::clear_mcp_session(session_id);
     res.status = 204;
@@ -346,6 +567,117 @@ void handle_mcp_post(const std::string& host,
             R"({"error":"Unsupported MCP-Protocol-Version header. Supported: 2025-11-25, 2024-11-05."})",
             "application/json");
         return;
+    }
+
+    const auto parsed = parse_jsonrpc_message(req.body);
+    if (parsed.has_value()) {
+        if (parsed->kind == ParsedJsonRpcMessage::Kind::response) {
+            res.status = 400;
+            res.set_content(
+                make_jsonrpc_error_body(ResponseId{}, -32002,
+                                        "This server does not accept JSON-RPC responses"),
+                "application/json");
+            return;
+        }
+
+        const bool has_session_header = req.has_header("MCP-Session-Id");
+        if (!has_session_header) {
+            if (parsed->kind != ParsedJsonRpcMessage::Kind::request
+                || parsed->method != "initialize") {
+                res.status = 400;
+                res.set_content(
+                    make_jsonrpc_error_body(parsed->id, -32002,
+                                            "Missing MCP-Session-Id header. Send initialize first."),
+                    "application/json");
+                return;
+            }
+
+            auto init_result = dispatch_mcp_payload(req.body);
+            if (init_result.status == 200 && !init_result.body.empty()) {
+                if (auto version = extract_initialize_protocol_version(init_result.body)) {
+                    auto [session_id, _session] = create_http_session(std::move(*version));
+                    res.set_header("MCP-Session-Id", session_id);
+                }
+            }
+            write_mcp_result(res, init_result);
+            return;
+        }
+
+        const std::string session_id = req.get_header_value("MCP-Session-Id");
+        if (session_id.empty()) {
+            res.status = 400;
+            res.set_content(
+                make_jsonrpc_error_body(parsed->id, -32002, "Empty MCP-Session-Id header"),
+                "application/json");
+            return;
+        }
+
+        auto session = find_http_session(session_id);
+        if (!session) {
+            res.status = 404;
+            res.set_content(
+                make_jsonrpc_error_body(parsed->id, -32001, "Session not found"),
+                "application/json");
+            return;
+        }
+
+        if (parsed->kind == ParsedJsonRpcMessage::Kind::request
+            && parsed->method == "initialize") {
+            res.status = 400;
+            res.set_content(
+                make_jsonrpc_error_body(parsed->id, -32600,
+                                        "Initialize requests must not include MCP-Session-Id"),
+                "application/json");
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(session->mutex);
+            session->last_used = std::chrono::steady_clock::now();
+
+            if (req.has_header("MCP-Protocol-Version")) {
+                const std::string version = req.get_header_value("MCP-Protocol-Version");
+                if (version != session->protocol_version) {
+                    res.status = 400;
+                    res.set_content(
+                        make_jsonrpc_error_body(
+                            parsed->id,
+                            -32002,
+                            std::format("MCP-Protocol-Version mismatch. Expected {}.",
+                                        session->protocol_version)),
+                        "application/json");
+                    return;
+                }
+            }
+
+            if (!session->client_ready) {
+                if (parsed->kind == ParsedJsonRpcMessage::Kind::notification
+                    && parsed->method == "notifications/initialized") {
+                    session->client_ready = true;
+                } else if (!(parsed->kind == ParsedJsonRpcMessage::Kind::request
+                             && parsed->method == "ping")) {
+                    res.status = 400;
+                    res.set_content(
+                        make_jsonrpc_error_body(
+                            parsed->id,
+                            -32002,
+                            "Session not ready. Send notifications/initialized first."),
+                        "application/json");
+                    return;
+                }
+            }
+
+            if (parsed->kind == ParsedJsonRpcMessage::Kind::request
+                && parsed->method == "tools/call"
+                && !consume_tool_call_budget(*session)) {
+                res.status = 429;
+                res.set_content(
+                    make_jsonrpc_error_body(parsed->id, -32002,
+                                            "Tool invocation rate limit exceeded"),
+                    "application/json");
+                return;
+            }
+        }
     }
 
     const auto replay_key = build_replay_key(req);
@@ -449,6 +781,7 @@ void run_server(int port, const std::string& host) {
     }
 
     init_providers();
+    clear_http_sessions();
 
     // Pre-construct the McpDispatcher singleton so tools are registered once,
     // at startup, before any request arrives.  Concurrent HTTP handler threads

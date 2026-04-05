@@ -31,7 +31,7 @@ namespace core::mcp {
  * {
  *   "content": [{"type": "text", "text": "<escaped tool JSON>"}],
  *   "isError": false,
- *   "structuredContent": { <raw tool JSON — Lampo should prefer this field> }
+ *   "structuredContent": { <raw tool JSON — present on successful results> }
  * }
  * @endcode
  *

@@ -22,6 +22,8 @@ ToolDefinition WriteFileTool::get_definition() const {
             {"file_path", "string", "Absolute or relative path to the file to write.", true},
             {"content",   "string", "The complete new content to write to the file.",  true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the write completed successfully."},"file_path":{"type":"string","description":"The path that was written."},"created":{"type":"boolean","description":"True if the file did not exist before this write."},"bytes_written":{"type":"integer","description":"Number of bytes written to disk."},"previous_content":{"type":"string","description":"The prior file content, capped for diff display."}},"required":["success","file_path","created","bytes_written","previous_content"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // overwrites existing file content
             .idempotent_hint  = true,  // writing the same content twice is a no-op in effect

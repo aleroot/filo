@@ -253,6 +253,86 @@ TEST_CASE("MCP tools/list includes annotations for all tools", "[mcp]") {
     REQUIRE_THAT(resp, ContainsSubstring(R"("openWorldHint")"));
 }
 
+TEST_CASE("MCP tools/list search_replace includes array items schema", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":51})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    simdjson::dom::array tools;
+    REQUIRE(doc["result"]["tools"].get(tools) == simdjson::SUCCESS);
+
+    bool found = false;
+    for (auto tool : tools) {
+        std::string_view name;
+        if (tool["name"].get(name) != simdjson::SUCCESS || name != "search_replace") {
+            continue;
+        }
+
+        found = true;
+
+        std::string_view edits_type;
+        std::string_view old_string_type;
+        std::string_view new_string_type;
+        REQUIRE(tool["inputSchema"]["properties"]["edits"]["type"].get(edits_type) == simdjson::SUCCESS);
+        REQUIRE(tool["inputSchema"]["properties"]["edits"]["items"]["properties"]["old_string"]["type"]
+                    .get(old_string_type) == simdjson::SUCCESS);
+        REQUIRE(tool["inputSchema"]["properties"]["edits"]["items"]["properties"]["new_string"]["type"]
+                    .get(new_string_type) == simdjson::SUCCESS);
+
+        REQUIRE(edits_type == "array");
+        REQUIRE(old_string_type == "string");
+        REQUIRE(new_string_type == "string");
+        break;
+    }
+
+    REQUIRE(found);
+}
+
+TEST_CASE("MCP tools/list includes outputSchema for structured tool results", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":52})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    simdjson::dom::array tools;
+    REQUIRE(doc["result"]["tools"].get(tools) == simdjson::SUCCESS);
+
+    bool saw_shell = false;
+    bool saw_workspace = false;
+    for (auto tool : tools) {
+        std::string_view name;
+        if (tool["name"].get(name) != simdjson::SUCCESS) continue;
+
+        if (name == "run_terminal_command") {
+            saw_shell = true;
+            std::string_view output_type;
+            std::string_view exit_code_type;
+            REQUIRE(tool["outputSchema"]["properties"]["output"]["type"].get(output_type) == simdjson::SUCCESS);
+            REQUIRE(tool["outputSchema"]["properties"]["exit_code"]["type"].get(exit_code_type) == simdjson::SUCCESS);
+            REQUIRE(output_type == "string");
+            REQUIRE(exit_code_type == "integer");
+        } else if (name == "get_workspace_config") {
+            saw_workspace = true;
+            std::string_view additional_type;
+            std::string_view item_type;
+            REQUIRE(tool["outputSchema"]["properties"]["additional_directories"]["type"].get(additional_type)
+                    == simdjson::SUCCESS);
+            REQUIRE(tool["outputSchema"]["properties"]["additional_directories"]["items"]["type"].get(item_type)
+                    == simdjson::SUCCESS);
+            REQUIRE(additional_type == "array");
+            REQUIRE(item_type == "string");
+        }
+    }
+
+    REQUIRE(saw_shell);
+    REQUIRE(saw_workspace);
+}
+
 TEST_CASE("MCP tools/list run_terminal_command has destructive+openWorld hints", "[mcp]") {
     // run_terminal_command can do anything — both destructive and open-world must be true.
     auto resp = disp().dispatch(
@@ -314,6 +394,22 @@ TEST_CASE("MCP tools/call run_terminal_command returns exit_code", "[mcp]") {
     auto resp_fail = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"bash -c \"exit 42\""}},"id":51})");
     REQUIRE_THAT(resp_fail, ContainsSubstring(R"(\"exit_code\":42)"));
+}
+
+TEST_CASE("MCP tools/call omits structuredContent for tool execution errors", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"echo should_not_run","working_dir":"/definitely/not/a/real/directory"}},"id":53})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool is_error = false;
+    REQUIRE(doc["result"]["isError"].get(is_error) == simdjson::SUCCESS);
+    REQUIRE(is_error);
+
+    simdjson::dom::element structured;
+    REQUIRE(doc["result"]["structuredContent"].get(structured) != simdjson::SUCCESS);
 }
 
 TEST_CASE("MCP tools/call list_directory on current directory succeeds", "[mcp]") {

@@ -138,6 +138,8 @@ ToolDefinition ShellTool::get_definition() const {
              "Defaults to 600 (10 minutes). Increase for very long builds. "
              "On expiry the process group is killed and the session restarted.", false},
         },
+        .output_schema =
+            R"({"type":"object","properties":{"output":{"type":"string","description":"Combined stdout and stderr from the command."},"exit_code":{"type":"integer","description":"The command's process exit status."}},"required":["output","exit_code"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // can modify filesystem, kill processes, etc.
             .open_world_hint  = true,  // can make network calls, spawn arbitrary processes

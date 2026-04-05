@@ -11,7 +11,9 @@
 #include <functional>
 #include <stdexcept>
 #include <optional>
+#include <cpr/cpr.h>
 #include "../config/ConfigManager.hpp"
+#include "../tools/Tool.hpp"
 
 namespace core::mcp {
 
@@ -23,12 +25,18 @@ struct McpToolParameter {
     std::string type;
     std::string description;
     bool required = false;
+    std::string schema;
+    std::string items_schema;
 };
 
 struct McpToolDef {
     std::string name;
+    std::string title;
     std::string description;
     std::vector<McpToolParameter> parameters;
+    std::string input_schema;
+    std::string output_schema;
+    core::tools::ToolAnnotations annotations = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -94,21 +102,29 @@ private:
 class HttpMcpSession : public IMcpClientSession {
 public:
     explicit HttpMcpSession(const core::config::McpServerConfig& config);
+    ~HttpMcpSession() override;
 
     [[nodiscard]] std::vector<McpToolDef> initialize() override;
     [[nodiscard]] std::string call_tool(const std::string& tool_name,
                                         const std::string& arguments_json) override;
-    void shutdown() noexcept override {}
+    void shutdown() noexcept override;
 
 private:
-    [[nodiscard]] std::string post_json(const std::string& body,
-                                        bool include_protocol_header = true);
+    struct HttpJsonResponse {
+        long status_code = 0;
+        std::string body;
+        cpr::Header headers;
+    };
+
+    [[nodiscard]] HttpJsonResponse post_json(const std::string& body,
+                                             bool include_protocol_header = true);
     [[nodiscard]] std::string send_request(std::string_view method,
                                            std::string_view params_json);
     void update_negotiated_protocol_version(std::string_view initialize_result);
 
     std::string url_;
     std::string protocol_version_{"2025-11-25"};
+    std::string session_id_;
     std::atomic<int> next_id_{1};
     std::mutex request_mutex_;
 };

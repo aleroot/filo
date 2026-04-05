@@ -21,13 +21,19 @@ public:
         , server_name_(std::move(server_name)) {
         // Build ToolDefinition from the McpToolDef
         def_.name        = tool_def.name;
+        def_.title       = tool_def.title.empty() ? tool_def.name : tool_def.title;
         def_.description = "[MCP:" + server_name_ + "] " + tool_def.description;
+        def_.input_schema = tool_def.input_schema;
+        def_.output_schema = tool_def.output_schema;
+        def_.annotations = tool_def.annotations;
         for (const auto& p : tool_def.parameters) {
             def_.parameters.push_back({
                 .name        = p.name,
                 .type        = p.type.empty() ? "string" : p.type,
                 .description = p.description,
-                .required    = p.required
+                .required    = p.required,
+                .schema      = p.schema,
+                .items_schema = p.items_schema,
             });
         }
     }

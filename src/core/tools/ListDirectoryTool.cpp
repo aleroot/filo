@@ -18,6 +18,8 @@ ToolDefinition ListDirectoryTool::get_definition() const {
         .parameters = {
             {"path", "string", "Absolute or relative path to the directory to list.", true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"entries":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string","enum":["file","dir"]},"name":{"type":"string"}},"required":["type","name"],"additionalProperties":false},"description":"Immediate entries in the directory."}},"required":["entries"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint  = true,
             .idempotent_hint = true,

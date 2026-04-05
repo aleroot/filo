@@ -131,6 +131,8 @@ ToolDefinition ApplyPatchTool::get_definition() const {
              "Absolute path to the directory where 'patch -p1' should run "
              "(typically the project root). Defaults to filo's CWD.", false}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the patch applied successfully."},"output":{"type":"string","description":"Combined stdout and stderr from the patch command."}},"required":["success","output"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies files on disk
         },

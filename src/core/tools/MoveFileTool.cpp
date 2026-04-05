@@ -20,6 +20,8 @@ ToolDefinition MoveFileTool::get_definition() const {
             {"source",      "string", "Current absolute or relative path of the file or directory.", true},
             {"destination", "string", "Target path — the new name or location.",                     true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the move completed successfully."},"from":{"type":"string","description":"The original source path."},"to":{"type":"string","description":"The final destination path."}},"required":["success","from","to"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // removes the source path
         },

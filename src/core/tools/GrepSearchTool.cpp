@@ -130,6 +130,8 @@ ToolDefinition GrepSearchTool::get_definition() const {
             {"path",            "string", "Root directory to search. Defaults to '.'.", false},
             {"include_pattern", "string", "Glob pattern to restrict searched files by name (e.g. '*.cpp').", false}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"matches":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"},"text":{"type":"string"}},"required":["path","line","text"],"additionalProperties":false},"description":"Matching lines with file path and 1-based line number."}},"required":["matches"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint  = true,
             .idempotent_hint = true,

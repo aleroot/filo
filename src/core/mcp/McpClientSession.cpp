@@ -11,6 +11,7 @@
 #include <signal.h>
 
 #include <cerrno>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
 #include <format>
@@ -123,6 +124,28 @@ namespace {
     return true;
 }
 
+[[nodiscard]] std::string to_lower_ascii(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const unsigned char ch : value) {
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+[[nodiscard]] std::optional<std::string> find_header_case_insensitive(
+    const cpr::Header& headers,
+    std::string_view key)
+{
+    const std::string lowered_key = to_lower_ascii(key);
+    for (const auto& [header_name, header_value] : headers) {
+        if (to_lower_ascii(header_name) == lowered_key) {
+            return header_value;
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 // ===========================================================================
@@ -147,6 +170,11 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
         if (t["name"].get(name_v) != simdjson::SUCCESS) continue;
         def.name = std::string(name_v);
 
+        std::string_view title_v;
+        if (t["title"].get(title_v) == simdjson::SUCCESS) {
+            def.title = std::string(title_v);
+        }
+
         std::string_view desc_v;
         if (t["description"].get(desc_v) == simdjson::SUCCESS) {
             def.description = std::string(desc_v);
@@ -155,6 +183,8 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
         // Parse inputSchema (JSON Schema format)
         simdjson::dom::object schema;
         if (t["inputSchema"].get(schema) == simdjson::SUCCESS) {
+            def.input_schema = simdjson::to_string(schema);
+
             simdjson::dom::object props;
             if (schema["properties"].get(props) == simdjson::SUCCESS) {
                 // Collect required field names
@@ -172,6 +202,7 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
                 for (auto [key, val] : props) {
                     McpToolParameter param;
                     param.name = std::string(key);
+                    param.schema = simdjson::to_string(val);
 
                     std::string_view type_v;
                     if (val["type"].get(type_v) == simdjson::SUCCESS)
@@ -183,11 +214,33 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
                     if (val["description"].get(pdesc_v) == simdjson::SUCCESS)
                         param.description = std::string(pdesc_v);
 
+                    simdjson::dom::element items;
+                    if (val["items"].get(items) == simdjson::SUCCESS) {
+                        param.items_schema = simdjson::to_string(items);
+                    }
+
                     param.required = std::ranges::find(required_names, param.name)
                                      != required_names.end();
                     def.parameters.push_back(std::move(param));
                 }
             }
+        }
+
+        simdjson::dom::element output_schema;
+        if (t["outputSchema"].get(output_schema) == simdjson::SUCCESS) {
+            def.output_schema = simdjson::to_string(output_schema);
+        }
+
+        simdjson::dom::object annotations;
+        if (t["annotations"].get(annotations) == simdjson::SUCCESS) {
+            [[maybe_unused]] const auto read_only_result =
+                annotations["readOnlyHint"].get(def.annotations.read_only_hint);
+            [[maybe_unused]] const auto destructive_result =
+                annotations["destructiveHint"].get(def.annotations.destructive_hint);
+            [[maybe_unused]] const auto idempotent_result =
+                annotations["idempotentHint"].get(def.annotations.idempotent_hint);
+            [[maybe_unused]] const auto open_world_result =
+                annotations["openWorldHint"].get(def.annotations.open_world_hint);
         }
 
         tools.push_back(std::move(def));
@@ -483,14 +536,21 @@ HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config)
     }
 }
 
-std::string HttpMcpSession::post_json(const std::string& body,
-                                       bool include_protocol_header) {
+HttpMcpSession::~HttpMcpSession() {
+    shutdown();
+}
+
+HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& body,
+                                                           bool include_protocol_header) {
     cpr::Header headers{
         {"Content-Type", "application/json"},
         {"Accept",       "application/json, text/event-stream"}
     };
     if (include_protocol_header && !protocol_version_.empty()) {
         headers["MCP-Protocol-Version"] = protocol_version_;
+    }
+    if (!session_id_.empty()) {
+        headers["MCP-Session-Id"] = session_id_;
     }
 
     cpr::Response r = cpr::Post(
@@ -505,7 +565,11 @@ std::string HttpMcpSession::post_json(const std::string& body,
         throw std::runtime_error(
             std::format("MCP HTTP {}: {}", r.status_code, r.text));
     }
-    return r.text;
+    return HttpJsonResponse{
+        .status_code = r.status_code,
+        .body = r.text,
+        .headers = std::move(r.header),
+    };
 }
 
 void HttpMcpSession::update_negotiated_protocol_version(std::string_view initialize_result) {
@@ -531,13 +595,30 @@ std::string HttpMcpSession::send_request(std::string_view method,
     std::string raw;
     {
         std::lock_guard lock(request_mutex_);
-        raw = post_json(body);
+        raw = post_json(body).body;
     }
     return extract_result(raw);
 }
 
 std::vector<McpToolDef> HttpMcpSession::initialize() {
-    const auto init_result = send_request("initialize", make_initialize_params());
+    std::string init_body = make_jsonrpc_request(
+        next_id_.fetch_add(1, std::memory_order_relaxed),
+        "initialize",
+        make_initialize_params());
+    if (!init_body.empty() && init_body.back() == '\n') init_body.pop_back();
+
+    HttpJsonResponse init_response;
+    {
+        std::lock_guard lock(request_mutex_);
+        session_id_.clear();
+        init_response = post_json(init_body, /*include_protocol_header=*/false);
+        if (const auto session_header =
+                find_header_case_insensitive(init_response.headers, "MCP-Session-Id")) {
+            session_id_ = *session_header;
+        }
+    }
+
+    const auto init_result = extract_result(init_response.body);
     update_negotiated_protocol_version(init_result);
 
     // HTTP transport: send initialized notification as a fire-and-forget POST
@@ -550,6 +631,18 @@ std::vector<McpToolDef> HttpMcpSession::initialize() {
 
     std::string tools_result = send_request("tools/list", "");
     return parse_tools_list(tools_result);
+}
+
+void HttpMcpSession::shutdown() noexcept {
+    std::lock_guard lock(request_mutex_);
+    if (session_id_.empty()) return;
+
+    try {
+        cpr::Header headers{{"MCP-Session-Id", session_id_}};
+        [[maybe_unused]] const auto response = cpr::Delete(cpr::Url{url_}, headers);
+    } catch (...) {}
+
+    session_id_.clear();
 }
 
 std::string HttpMcpSession::call_tool(const std::string& tool_name,

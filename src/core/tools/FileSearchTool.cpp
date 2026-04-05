@@ -23,6 +23,8 @@ ToolDefinition FileSearchTool::get_definition() const {
             {"pattern", "string", "Filename glob pattern to match (e.g. '*.cpp', 'CMakeLists.txt').", true},
             {"path",    "string", "Root directory to search. Defaults to '.'.", false}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"files":{"type":"array","items":{"type":"string"},"description":"Matching file paths."}},"required":["files"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint  = true,
             .idempotent_hint = true,

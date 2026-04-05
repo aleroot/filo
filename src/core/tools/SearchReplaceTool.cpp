@@ -190,15 +190,24 @@ ToolDefinition SearchReplaceTool::get_definition() const {
             "Edits are applied sequentially, so later edits see the result of earlier ones. "
             "Fails if any old_string is not found in the file.",
         .parameters = {
-            {"file_path", "string",
-             "Absolute or relative path to the file to modify.",
-             /*required=*/true},
-            {"edits", "array",
-             "Array of edit objects, each with 'old_string' (verbatim text to find) "
-             "and 'new_string' (replacement text). Applied sequentially in order.",
-             /*required=*/true,
-             /*items_schema=*/std::string{kEditsItemsSchema}},
+            {
+                .name = "file_path",
+                .type = "string",
+                .description = "Absolute or relative path to the file to modify.",
+                .required = true,
+            },
+            {
+                .name = "edits",
+                .type = "array",
+                .description =
+                    "Array of edit objects, each with 'old_string' (verbatim text to find) "
+                    "and 'new_string' (replacement text). Applied sequentially in order.",
+                .required = true,
+                .items_schema = std::string{kEditsItemsSchema},
+            },
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether all edits were applied successfully."},"blocks_applied":{"type":"integer","description":"Number of search-and-replace blocks applied."},"lines_changed":{"type":"integer","description":"Net line-count change after applying the edits."},"warnings":{"type":"array","items":{"type":"string"},"description":"Optional non-fatal warnings about ambiguous or repeated matches."}},"required":["success","blocks_applied","lines_changed"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies file content on disk
         },

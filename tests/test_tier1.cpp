@@ -424,6 +424,7 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
         "tools": [
             {
                 "name": "read_file",
+                "title": "Read File",
                 "description": "Read a file from the filesystem.",
                 "inputSchema": {
                     "type": "object",
@@ -434,6 +435,17 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
                         }
                     },
                     "required": ["path"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"}
+                    },
+                    "required": ["content"]
+                },
+                "annotations": {
+                    "readOnlyHint": true,
+                    "idempotentHint": true
                 }
             },
             {
@@ -455,10 +467,16 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
     REQUIRE(tools.size() == 2);
 
     REQUIRE(tools[0].name == "read_file");
+    REQUIRE(tools[0].title == "Read File");
     REQUIRE_THAT(tools[0].description, Catch::Matchers::ContainsSubstring("Read a file"));
+    REQUIRE_THAT(tools[0].input_schema, Catch::Matchers::ContainsSubstring(R"("properties")"));
+    REQUIRE_THAT(tools[0].output_schema, Catch::Matchers::ContainsSubstring(R"("content")"));
+    REQUIRE(tools[0].annotations.read_only_hint == true);
+    REQUIRE(tools[0].annotations.idempotent_hint == true);
     REQUIRE(tools[0].parameters.size() == 1);
     REQUIRE(tools[0].parameters[0].name == "path");
     REQUIRE(tools[0].parameters[0].required == true);
+    REQUIRE_THAT(tools[0].parameters[0].schema, Catch::Matchers::ContainsSubstring(R"("type":"string")"));
 
     REQUIRE(tools[1].name == "list_directory");
     REQUIRE(tools[1].parameters.size() == 2);
@@ -470,6 +488,42 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
     REQUIRE(rec_it  != params.end());
     REQUIRE(path_it->required == true);
     REQUIRE(rec_it->required  == false);
+}
+
+TEST_CASE("parse_tools_list preserves array item schemas", "[tier1][mcp]") {
+    constexpr std::string_view json = R"({
+        "tools": [
+            {
+                "name": "search_replace",
+                "description": "Apply multiple edits.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "oldText": {"type": "string"},
+                                    "newText": {"type": "string"}
+                                },
+                                "required": ["oldText", "newText"]
+                            }
+                        }
+                    },
+                    "required": ["edits"]
+                }
+            }
+        ]
+    })";
+
+    auto tools = parse_tools_list(json);
+    REQUIRE(tools.size() == 1);
+    REQUIRE(tools[0].parameters.size() == 1);
+    REQUIRE(tools[0].parameters[0].name == "edits");
+    REQUIRE(tools[0].parameters[0].type == "array");
+    REQUIRE_THAT(tools[0].parameters[0].items_schema, Catch::Matchers::ContainsSubstring("oldText"));
+    REQUIRE_THAT(tools[0].parameters[0].schema, Catch::Matchers::ContainsSubstring(R"("items")"));
 }
 
 TEST_CASE("parse_tools_list — returns empty vector on malformed JSON", "[tier1][mcp]") {

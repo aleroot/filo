@@ -19,6 +19,8 @@ ToolDefinition DeleteFileTool::get_definition() const {
             {"file_path", "string",
              "Absolute or relative path to the file or empty directory to delete.", true}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the deletion completed successfully."},"deleted":{"type":"string","description":"The path that was removed."}},"required":["success","deleted"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // permanently removes data
             .idempotent_hint  = true,  // deleting an already-deleted path is effectively the same end state

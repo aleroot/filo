@@ -450,6 +450,59 @@ static constexpr std::string_view kInvalidRequest{
 // tools/list result (built once, cached as a static)
 // ---------------------------------------------------------------------------
 
+[[nodiscard]] std::string build_parameter_schema_json(const core::tools::ToolParameter& parameter) {
+    if (!parameter.schema.empty()) {
+        return parameter.schema;
+    }
+
+    JsonWriter w(128 + parameter.description.size() + parameter.items_schema.size());
+    {
+        auto _schema = w.object();
+        w.kv_str("type", parameter.type);
+        if (!parameter.description.empty()) {
+            w.comma().kv_str("description", parameter.description);
+        }
+        if (parameter.type == "array" && !parameter.items_schema.empty()) {
+            w.comma().kv_raw("items", parameter.items_schema);
+        }
+    }
+    return std::move(w).take();
+}
+
+[[nodiscard]] std::string build_input_schema_json(const core::tools::ToolDefinition& def) {
+    if (!def.input_schema.empty()) {
+        return def.input_schema;
+    }
+
+    JsonWriter w(512 + def.parameters.size() * 128);
+    {
+        auto _schema = w.object();
+        w.kv_str("type", "object").comma().key("properties");
+        {
+            auto _props = w.object();
+            bool first_prop = true;
+            for (const auto& parameter : def.parameters) {
+                if (!first_prop) w.comma();
+                first_prop = false;
+                w.kv_raw(parameter.name, build_parameter_schema_json(parameter));
+            }
+        }
+
+        w.comma().key("required");
+        {
+            auto _req = w.array();
+            bool first_req = true;
+            for (const auto& parameter : def.parameters) {
+                if (!parameter.required) continue;
+                if (!first_req) w.comma();
+                first_req = false;
+                w.str(parameter.name);
+            }
+        }
+    }
+    return std::move(w).take();
+}
+
 /**
  * @brief Returns the cached JSON object for a @c tools/list result.
  *
@@ -492,49 +545,10 @@ static const std::string& tools_list_result() {
                         w.kv_str("name", def.name).comma()
                          .kv_str("title", def.title).comma()
                          .kv_str("description", def.description).comma()
-                         .key("inputSchema");
+                         .kv_raw("inputSchema", build_input_schema_json(def));
 
-                        // inputSchema — JSON Schema object
-                        {
-                            auto _schema = w.object();
-                            w.kv_str("type", "object").comma().key("properties");
-                            {
-                                auto _props = w.object();
-                                bool first_prop = true;
-                                for (const auto& p : def.parameters) {
-                                    if (!first_prop) w.comma();
-                                    first_prop = false;
-                                    w.key(p.name);
-                                    {
-                                        auto _p = w.object();
-                                        w.kv_str("type", p.type).comma()
-                                         .kv_str("description", p.description);
-                                    }
-                                }
-                            }
-
-                            // Collect required-parameter names.
-                            // Tools have at most ~5 params; capacity 8 is safe.
-                            struct {
-                                std::array<std::string_view, 8> buf{};
-                                std::size_t count = 0;
-                                void push_back(std::string_view sv) { if (count < 8) buf[count++] = sv; }
-                                auto begin() const { return buf.begin(); }
-                                auto end()   const { return buf.begin() + static_cast<std::ptrdiff_t>(count); }
-                            } required;
-                            for (const auto& p : def.parameters)
-                                if (p.required) required.push_back(p.name);
-
-                            w.comma().key("required");
-                            {
-                                auto _req = w.array();
-                                bool first_req = true;
-                                for (auto name : required) {
-                                    if (!first_req) w.comma();
-                                    first_req = false;
-                                    w.str(name);
-                                }
-                            }
+                        if (!def.output_schema.empty()) {
+                            w.comma().kv_raw("outputSchema", def.output_schema);
                         }
 
                         // annotations — behavioral hints for the MCP client (MCP 2025-11-25 §Tools)
@@ -945,7 +959,9 @@ struct ParsedToolCallRequest {
                 .kv_str("text", tool_result);
         }
         rw.comma().kv_bool("isError", is_error);
-        rw.comma().kv_raw("structuredContent", tool_result);
+        if (!is_error) {
+            rw.comma().kv_raw("structuredContent", tool_result);
+        }
     }
     return std::move(rw).take();
 }

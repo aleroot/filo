@@ -64,6 +64,8 @@ ToolDefinition ReadFileTool::get_definition() const {
             {"offset_line", "integer", "First line to return (1-based). Defaults to 1.",      false},
             {"limit_lines", "integer", "Maximum number of lines to return. Defaults to all.", false}
         },
+        .output_schema =
+            R"({"type":"object","properties":{"content":{"type":"string","description":"The requested file contents, possibly truncated."}},"required":["content"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint   = true,
             .idempotent_hint  = true,

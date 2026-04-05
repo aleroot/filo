@@ -23,6 +23,8 @@ public:
             .description = "Returns the current workspace configuration, including "
                            "primary and additional allowed directories and whether "
                            "path enforcement is enabled.",
+            .output_schema =
+                R"({"type":"object","properties":{"primary_directory":{"type":"string","description":"The primary workspace directory."},"enforcement_enabled":{"type":"boolean","description":"Whether path enforcement is enabled for filesystem tools."},"additional_directories":{"type":"array","items":{"type":"string"},"description":"Additional allowed workspace directories."}},"required":["primary_directory","enforcement_enabled","additional_directories"],"additionalProperties":false})",
             .annotations = { 
                 .read_only_hint = true, 
                 .idempotent_hint = true,

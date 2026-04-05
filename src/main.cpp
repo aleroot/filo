@@ -172,14 +172,16 @@ int main(int argc, char** argv) {
     }
 
     const bool has_stdin_input = stdin_has_data();
-    const bool run_prompter_mode = exec::prompter::should_run(
-        prompter_mode,
-        prompt_opt->count() > 0,
-        has_stdin_input,
-        output_format_opt->count() > 0,
-        input_format_opt->count() > 0,
-        include_partial_messages,
-        continue_last);
+    const bool run_prompter_mode = !mcp_mode
+        && !daemon_mode
+        && exec::prompter::should_run(
+            prompter_mode,
+            prompt_opt->count() > 0,
+            has_stdin_input,
+            output_format_opt->count() > 0,
+            input_format_opt->count() > 0,
+            include_partial_messages,
+            continue_last);
 
     if (run_prompter_mode) {
         if (mcp_mode || daemon_mode) {
