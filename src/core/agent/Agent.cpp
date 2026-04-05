@@ -1,5 +1,6 @@
 #include "Agent.hpp"
 #include "PermissionGate.hpp"
+#include "ToolOutputHistory.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../session/SessionStats.hpp"
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <algorithm>
 #include <future>
+#include <format>
 #include <ranges>
 
 namespace core::agent {
@@ -46,6 +48,7 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     : provider_(std::move(provider))
     , skill_manager_(skill_manager)
     , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config()) {
+    loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
 }
 
@@ -92,11 +95,19 @@ void Agent::set_mode(const std::string& mode) {
         if (!history_.empty() && history_[0].role == "system") {
             history_.erase(history_.begin());
         }
+        mark_stable_prompt_prefix_dirty();
         ensure_system_prompt();
     }
 }
 
-void Agent::ensure_system_prompt() {
+int Agent::sanitize_max_steps_per_turn(int value) noexcept {
+    return std::clamp(
+        value,
+        LoopLimits::kMinMaxStepsPerTurn,
+        LoopLimits::kMaxMaxStepsPerTurn);
+}
+
+std::string Agent::build_stable_prompt_prefix() const {
     std::string prompt =
         "You are Filo, an advanced AI coding assistant running in " + current_mode_ + " mode.\n\n";
     if (current_mode_ == "PLAN" || current_mode_ == "RESEARCH") {
@@ -155,10 +166,28 @@ void Agent::ensure_system_prompt() {
     }
     // ────────────────────────────────────────────────────────────────────────
 
-    if (!context_summary_.empty()) {
-        prompt += "\n\nSummary of earlier conversation context:\n";
-        prompt += context_summary_;
+    return prompt;
+}
+
+std::string Agent::build_dynamic_prompt_suffix() const {
+    if (context_summary_.empty()) {
+        return {};
     }
+    return "\n\nSummary of earlier conversation context:\n" + context_summary_;
+}
+
+void Agent::refresh_stable_prompt_prefix_unlocked() {
+    if (!stable_prompt_prefix_dirty_ && !stable_prompt_prefix_.empty()) {
+        return;
+    }
+    stable_prompt_prefix_ = build_stable_prompt_prefix();
+    stable_prompt_prefix_dirty_ = false;
+}
+
+void Agent::ensure_system_prompt() {
+    refresh_stable_prompt_prefix_unlocked();
+    std::string prompt = stable_prompt_prefix_;
+    prompt += build_dynamic_prompt_suffix();
 
     if (history_.empty() || history_[0].role != "system") {
         history_.insert(history_.begin(), {"system", prompt, "", "", {}});
@@ -241,13 +270,15 @@ void Agent::send_message(const std::string& user_message,
                          std::function<void()> done_callback,
                          TurnCallbacks turn_callbacks) {
     clear_stop_request();  // Reset cancellation flag for new turn
+    auto turn_state = std::make_shared<TurnState>();
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
         history_.push_back({"user", user_message, "", "", {}});
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
+        turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
-    step(text_callback, tool_callback, done_callback, std::move(turn_callbacks));
+    step(text_callback, tool_callback, done_callback, std::move(turn_callbacks), std::move(turn_state));
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +288,29 @@ void Agent::send_message(const std::string& user_message,
 void Agent::step(std::function<void(const std::string&)> text_callback,
                  std::function<void(const std::string&, const std::string&)> tool_callback,
                  std::function<void()> done_callback,
-                 TurnCallbacks turn_callbacks) {
+                 TurnCallbacks turn_callbacks,
+                 std::shared_ptr<TurnState> turn_state) {
+
+    if (!turn_state) {
+        turn_state = std::make_shared<TurnState>();
+        std::lock_guard lock(history_mutex_);
+        turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
+    }
+
+    if (turn_state->steps_taken >= turn_state->max_steps) {
+        const std::string message = std::format(
+            "Stopped after reaching the per-turn step limit ({} model steps) without a final response.",
+            turn_state->max_steps);
+        {
+            std::lock_guard lock(history_mutex_);
+            history_.push_back({"assistant", message, "", "", {}});
+        }
+        text_callback(message);
+        check_auto_compact(text_callback);
+        done_callback();
+        return;
+    }
+    ++turn_state->steps_taken;
 
     auto self = shared_from_this();
     core::llm::ChatRequest request;
@@ -302,7 +355,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
-         text_callback, tool_callback, done_callback, turn_callbacks, already_stopped](
+         text_callback, tool_callback, done_callback, turn_callbacks, already_stopped, turn_state](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -397,7 +450,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         // ── Execute tool calls ───────────────────────────────────────────
-        std::thread([self, tool_calls_accum, text_callback, tool_callback, done_callback, turn_callbacks]() {
+        std::thread([self, tool_calls_accum, text_callback, tool_callback, done_callback, turn_callbacks, turn_state]() {
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
@@ -486,6 +539,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 tc.function.name,
                                 tc.function.arguments);
                         }
+                        result = tool_output_history::clamp_for_history(tc.function.name, result);
                         return core::llm::Message{
                             .role         = "tool",
                             .content      = result,
@@ -555,7 +609,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // Note: We don't check auto-compact here because we're in the middle
             // of a multi-step execution. Compaction should only happen at natural
             // conversation boundaries (pure text response, not during tool loops).
-            self->step(text_callback, tool_callback, done_callback, turn_callbacks);
+            self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
             } catch (const std::exception& e) {
                 core::logging::error("Agent tool loop crashed: {}", e.what());
                 text_callback(std::string("\n[Internal tool execution error: ") + e.what() + "]");
@@ -613,6 +667,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     // Remove any stale system message — ensure_system_prompt() inserts a fresh one.
     std::erase_if(messages, [](const core::llm::Message& m){ return m.role == "system"; });
     history_ = std::move(messages);
+    mark_stable_prompt_prefix_dirty();
     ensure_system_prompt();
 }
 

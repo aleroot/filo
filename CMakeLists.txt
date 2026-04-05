@@ -140,6 +140,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/AuthenticationManager.cpp
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
+    src/core/agent/ToolOutputHistory.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/scm/GitProvider.cpp
     src/core/scm/ScmFactory.cpp
@@ -355,6 +356,8 @@ add_executable(filo_tests
     tests/test_daemon_reliability.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
+    tests/test_agent_loop_control.cpp
+    tests/test_tool_output_history.cpp
     tests/test_mcp_resources.cpp
 )
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
@@ -449,5 +452,7 @@ source_group(
         tests/test_mcp_client_session.cpp
         tests/test_daemon_reliability.cpp
         tests/test_request_replay_cache.cpp
+        tests/test_agent_loop_control.cpp
+        tests/test_tool_output_history.cpp
         tests/test_mcp_resources.cpp
 )

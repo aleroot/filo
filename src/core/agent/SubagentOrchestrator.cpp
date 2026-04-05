@@ -1,6 +1,7 @@
 #include "SubagentOrchestrator.hpp"
 
 #include "PermissionGate.hpp"
+#include "ToolOutputHistory.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderManager.hpp"
@@ -645,7 +646,8 @@ SubagentOrchestrator::LoopResult SubagentOrchestrator::run_task_loop(
             futures.push_back(std::async(
                 std::launch::async,
                 [this, tc]() {
-                    const std::string output = tool_manager_.execute_tool(tc.function.name, tc.function.arguments);
+                    std::string output = tool_manager_.execute_tool(tc.function.name, tc.function.arguments);
+                    output = tool_output_history::clamp_for_history(tc.function.name, output);
                     return core::llm::Message{
                         .role = "tool",
                         .content = output,

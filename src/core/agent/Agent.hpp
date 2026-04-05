@@ -16,6 +16,14 @@ namespace core::agent {
 
 class Agent : public std::enable_shared_from_this<Agent> {
 public:
+    struct LoopLimits {
+        static constexpr int kDefaultMaxStepsPerTurn = 24;
+        static constexpr int kMinMaxStepsPerTurn = 1;
+        static constexpr int kMaxMaxStepsPerTurn = 256;
+
+        int max_steps_per_turn = kDefaultMaxStepsPerTurn;
+    };
+
     struct TurnCallbacks {
         std::function<void()> on_step_begin;
         std::function<void(const core::llm::ToolCall&)> on_tool_start;
@@ -93,6 +101,16 @@ public:
         auto_compact_threshold_ = threshold;
     }
 
+    void set_loop_limits(LoopLimits limits) {
+        std::lock_guard lock(history_mutex_);
+        loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(limits.max_steps_per_turn);
+    }
+
+    [[nodiscard]] LoopLimits get_loop_limits() const {
+        std::lock_guard lock(history_mutex_);
+        return loop_limits_;
+    }
+
     // The active model name used for cost estimation.
     void set_active_model(std::string model) {
         std::lock_guard lock(history_mutex_);
@@ -105,18 +123,31 @@ public:
     }
 
 private:
+    struct TurnState {
+        int steps_taken = 0;
+        int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
+    };
+
     void step(std::function<void(const std::string&)> text_callback,
               std::function<void(const std::string&, const std::string&)> tool_callback,
               std::function<void()> done_callback,
-              TurnCallbacks turn_callbacks);
+              TurnCallbacks turn_callbacks,
+              std::shared_ptr<TurnState> turn_state);
 
     void check_auto_compact(std::function<void(const std::string&)> text_callback);
 
     void ensure_system_prompt();
 
+    [[nodiscard]] std::string build_stable_prompt_prefix() const;
+    [[nodiscard]] std::string build_dynamic_prompt_suffix() const;
+    void refresh_stable_prompt_prefix_unlocked();
+    void mark_stable_prompt_prefix_dirty() noexcept { stable_prompt_prefix_dirty_ = true; }
+
     // Returns true if the tool call was approved (or doesn't need permission).
     [[nodiscard]] bool check_permission(const std::string& tool_name,
                                         const std::string& args);
+
+    [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
     core::tools::ToolManager& skill_manager_;
@@ -130,6 +161,7 @@ private:
     static constexpr int kLoopBreakerThreshold = 3;
     int consecutive_failure_rounds_ = 0;
     int auto_compact_threshold_ = 0;
+    LoopLimits loop_limits_{};
 
     // Callbacks set by the TUI
     std::function<bool(std::string_view, std::string_view)> permission_fn_;
@@ -138,6 +170,8 @@ private:
     // Model name for budget tracking
     std::string active_model_;
     std::string context_summary_;
+    std::string stable_prompt_prefix_;
+    bool stable_prompt_prefix_dirty_ = true;
 
     // Cancellation support
     std::atomic<bool> stop_requested_{false};
