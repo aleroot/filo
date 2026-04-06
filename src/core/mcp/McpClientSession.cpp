@@ -20,6 +20,9 @@
 #include <sstream>
 #include <chrono>
 #include <thread>
+#include <iterator>
+#include <utility>
+#include <ranges>
 
 extern char** environ;  // POSIX: the current environment
 
@@ -103,9 +106,160 @@ namespace {
     return s;
 }
 
+// Build the resources/read params JSON.
+[[nodiscard]] std::string make_resource_read_params(const std::string& uri) {
+    return std::format(
+        R"({{"uri":"{}"}})",
+        core::utils::escape_json_string(uri));
+}
+
+// Build the prompts/get params JSON.
+[[nodiscard]] std::string make_prompt_get_params(const std::string& prompt_name,
+                                                 const std::string& arguments_json) {
+    std::string s;
+    s += R"({"name":")";
+    s += core::utils::escape_json_string(prompt_name);
+    s += '"';
+    if (!arguments_json.empty() && arguments_json != "{}") {
+        s += R"(,"arguments":)";
+        s += arguments_json;
+    }
+    s += '}';
+    return s;
+}
+
+[[nodiscard]] std::string make_list_params_with_cursor(
+    const std::optional<std::string>& cursor)
+{
+    if (!cursor.has_value() || cursor->empty()) return {};
+    return std::format(
+        R"({{"cursor":"{}"}})",
+        core::utils::escape_json_string(*cursor));
+}
+
 // Build the initialize params JSON.
-[[nodiscard]] std::string make_initialize_params() {
+[[nodiscard]] std::string make_initialize_params(bool enable_sampling) {
+    if (enable_sampling) {
+        return R"({"protocolVersion":"2025-11-25","capabilities":{"sampling":{"tools":{}}},"clientInfo":{"name":"filo","version":"0.1.0"}})";
+    }
     return R"({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"filo","version":"0.1.0"}})";
+}
+
+struct ParsedServerCapabilities {
+    bool has_tools = true;
+    bool tools_advertised = false;
+    bool has_resources = false;
+    bool has_prompts = false;
+};
+
+[[nodiscard]] ParsedServerCapabilities parse_server_capabilities(
+    std::string_view initialize_result)
+{
+    ParsedServerCapabilities out;
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(initialize_result);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return out;
+
+    simdjson::dom::object capabilities;
+    if (doc["capabilities"].get(capabilities) != simdjson::SUCCESS) return out;
+
+    simdjson::dom::element elem;
+    out.tools_advertised = capabilities["tools"].get(elem) == simdjson::SUCCESS;
+    out.has_resources = capabilities["resources"].get(elem) == simdjson::SUCCESS;
+    out.has_prompts = capabilities["prompts"].get(elem) == simdjson::SUCCESS;
+    if (out.tools_advertised) {
+        out.has_tools = true;
+    } else if (out.has_resources || out.has_prompts) {
+        // If newer capability metadata is present and tools is absent, default
+        // to "no tools" but allow a compatibility probe in initialize().
+        out.has_tools = false;
+    } else {
+        // Backward compatibility: older servers may return an empty capabilities
+        // object but still support tools/list.
+        out.has_tools = true;
+    }
+    return out;
+}
+
+[[nodiscard]] std::optional<std::string> parse_next_cursor(std::string_view json_result) {
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json_result);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    std::string_view cursor;
+    if (doc["nextCursor"].get(cursor) == simdjson::SUCCESS && !cursor.empty()) {
+        return std::string(cursor);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string make_jsonrpc_success_response(
+    std::string_view id_json,
+    std::string_view result_json)
+{
+    std::string s;
+    s.reserve(128 + result_json.size());
+    s += R"({"jsonrpc":"2.0","id":)";
+    s += id_json;
+    s += R"(,"result":)";
+    s += result_json;
+    s += "}\n";
+    return s;
+}
+
+[[nodiscard]] std::string make_jsonrpc_error_response(
+    std::string_view id_json,
+    int code,
+    std::string_view message)
+{
+    std::string s;
+    s.reserve(192 + message.size());
+    s += R"({"jsonrpc":"2.0","id":)";
+    s += id_json;
+    s += R"(,"error":{"code":)";
+    s += std::to_string(code);
+    s += R"(,"message":")";
+    s += core::utils::escape_json_string(message);
+    s += R"("}})";
+    s += '\n';
+    return s;
+}
+
+[[nodiscard]] std::string flatten_tool_result(std::string_view result_json) {
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(result_json);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
+        return std::string(result_json);
+    }
+
+    bool is_error = false;
+    [[maybe_unused]] const auto err = doc["isError"].get(is_error);
+
+    std::string text_out;
+    simdjson::dom::array content;
+    if (doc["content"].get(content) == simdjson::SUCCESS) {
+        for (simdjson::dom::element part : content) {
+            std::string_view ptype;
+            if (part["type"].get(ptype) != simdjson::SUCCESS) continue;
+            if (ptype == "text") {
+                std::string_view t;
+                if (part["text"].get(t) == simdjson::SUCCESS) {
+                    if (!text_out.empty()) text_out += '\n';
+                    text_out += t;
+                }
+            }
+        }
+    }
+
+    if (is_error) {
+        return std::format(R"({{"error":"{}"}})",
+                           core::utils::escape_json_string(text_out));
+    }
+    return std::format(R"({{"result":"{}"}})",
+                       core::utils::escape_json_string(text_out));
 }
 
 [[nodiscard]] bool write_all_fd(int fd, std::string_view data) {
@@ -248,14 +402,168 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
     return tools;
 }
 
+std::vector<McpResourceDef> parse_resources_list(std::string_view json_result) {
+    std::vector<McpResourceDef> resources;
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json_result);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return resources;
+
+    simdjson::dom::array resources_arr;
+    if (doc["resources"].get(resources_arr) != simdjson::SUCCESS) return resources;
+
+    for (simdjson::dom::element r : resources_arr) {
+        McpResourceDef def;
+
+        std::string_view uri_v;
+        if (r["uri"].get(uri_v) != simdjson::SUCCESS) continue;
+        def.uri = std::string(uri_v);
+
+        std::string_view name_v;
+        if (r["name"].get(name_v) == simdjson::SUCCESS) {
+            def.name = std::string(name_v);
+        }
+
+        std::string_view title_v;
+        if (r["title"].get(title_v) == simdjson::SUCCESS) {
+            def.title = std::string(title_v);
+        }
+
+        std::string_view desc_v;
+        if (r["description"].get(desc_v) == simdjson::SUCCESS) {
+            def.description = std::string(desc_v);
+        }
+
+        std::string_view mime_v;
+        if (r["mimeType"].get(mime_v) == simdjson::SUCCESS) {
+            def.mime_type = std::string(mime_v);
+        }
+
+        resources.push_back(std::move(def));
+    }
+
+    return resources;
+}
+
+std::vector<McpResourceTemplateDef> parse_resource_templates_list(
+    std::string_view json_result)
+{
+    std::vector<McpResourceTemplateDef> templates;
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json_result);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return templates;
+
+    simdjson::dom::array templates_arr;
+    if (doc["resourceTemplates"].get(templates_arr) != simdjson::SUCCESS) return templates;
+
+    for (simdjson::dom::element t : templates_arr) {
+        McpResourceTemplateDef def;
+
+        std::string_view uri_template_v;
+        if (t["uriTemplate"].get(uri_template_v) != simdjson::SUCCESS) continue;
+        def.uri_template = std::string(uri_template_v);
+
+        std::string_view name_v;
+        if (t["name"].get(name_v) == simdjson::SUCCESS) {
+            def.name = std::string(name_v);
+        }
+
+        std::string_view title_v;
+        if (t["title"].get(title_v) == simdjson::SUCCESS) {
+            def.title = std::string(title_v);
+        }
+
+        std::string_view desc_v;
+        if (t["description"].get(desc_v) == simdjson::SUCCESS) {
+            def.description = std::string(desc_v);
+        }
+
+        std::string_view mime_v;
+        if (t["mimeType"].get(mime_v) == simdjson::SUCCESS) {
+            def.mime_type = std::string(mime_v);
+        }
+
+        templates.push_back(std::move(def));
+    }
+
+    return templates;
+}
+
+std::vector<McpPromptDef> parse_prompts_list(std::string_view json_result) {
+    std::vector<McpPromptDef> prompts;
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json_result);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return prompts;
+
+    simdjson::dom::array prompts_arr;
+    if (doc["prompts"].get(prompts_arr) != simdjson::SUCCESS) return prompts;
+
+    for (simdjson::dom::element p : prompts_arr) {
+        McpPromptDef def;
+
+        std::string_view name_v;
+        if (p["name"].get(name_v) != simdjson::SUCCESS) continue;
+        def.name = std::string(name_v);
+
+        std::string_view title_v;
+        if (p["title"].get(title_v) == simdjson::SUCCESS) {
+            def.title = std::string(title_v);
+        }
+
+        std::string_view desc_v;
+        if (p["description"].get(desc_v) == simdjson::SUCCESS) {
+            def.description = std::string(desc_v);
+        }
+
+        simdjson::dom::array arguments_arr;
+        if (p["arguments"].get(arguments_arr) == simdjson::SUCCESS) {
+            for (simdjson::dom::element arg : arguments_arr) {
+                McpPromptArgumentDef arg_def;
+                std::string_view arg_name_v;
+                if (arg["name"].get(arg_name_v) != simdjson::SUCCESS) continue;
+                arg_def.name = std::string(arg_name_v);
+
+                std::string_view arg_title_v;
+                if (arg["title"].get(arg_title_v) == simdjson::SUCCESS) {
+                    arg_def.title = std::string(arg_title_v);
+                }
+
+                std::string_view arg_desc_v;
+                if (arg["description"].get(arg_desc_v) == simdjson::SUCCESS) {
+                    arg_def.description = std::string(arg_desc_v);
+                }
+
+                [[maybe_unused]] const auto required_result =
+                    arg["required"].get(arg_def.required);
+                def.arguments.push_back(std::move(arg_def));
+            }
+        }
+
+        prompts.push_back(std::move(def));
+    }
+
+    return prompts;
+}
+
 // ===========================================================================
 // StdioMcpSession
 // ===========================================================================
 
-StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config) {
+StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config,
+                                 McpSamplingCallback sampling_callback)
+    : server_name_(config.name)
+    , sampling_callback_(std::move(sampling_callback)) {
     if (config.command.empty()) {
         throw std::runtime_error("MCP stdio session: 'command' is empty");
     }
+    client_sampling_enabled_.store(
+        static_cast<bool>(sampling_callback_),
+        std::memory_order_release);
 
     // Create bidirectional pipes
     //   pipe_to_child : parent writes → child reads (child stdin)
@@ -380,11 +688,60 @@ void StdioMcpSession::shutdown() noexcept {
 // Reader loop — runs on its own thread.
 // Reads newline-delimited JSON-RPC responses and resolves pending promises.
 void StdioMcpSession::reader_loop() {
-    auto dispatch_line = [this](std::string_view line) {
+    auto write_response = [this](std::string&& payload) {
+        std::lock_guard wlock(write_mutex_);
+        if (write_fd_ == -1) return;
+        [[maybe_unused]] const bool ok = write_all_fd(write_fd_, payload);
+    };
+
+    auto dispatch_line = [this, &write_response](std::string_view line) {
         thread_local simdjson::dom::parser parser;
         simdjson::padded_string ps(line);
         simdjson::dom::element doc;
         if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return;
+
+        std::string_view method;
+        if (doc["method"].get(method) == simdjson::SUCCESS) {
+            simdjson::dom::element id_elem;
+            if (doc["id"].get(id_elem) != simdjson::SUCCESS) {
+                // Notification from the server: no response expected.
+                return;
+            }
+
+            const std::string id_json = simdjson::to_string(id_elem);
+            simdjson::dom::element params_elem;
+            std::string params_json{"{}"};
+            if (doc["params"].get(params_elem) == simdjson::SUCCESS) {
+                params_json = std::string(simdjson::to_string(params_elem));
+            }
+
+            if (method == "sampling/createMessage") {
+                if (!sampling_callback_) {
+                    write_response(make_jsonrpc_error_response(id_json, -32601, "Method not found"));
+                    return;
+                }
+
+                try {
+                    const std::string sampling_result =
+                        sampling_callback_(server_name_, params_json);
+                    write_response(make_jsonrpc_success_response(id_json, sampling_result));
+                } catch (const std::exception& e) {
+                    write_response(make_jsonrpc_error_response(
+                        id_json,
+                        -32603,
+                        std::string("sampling/createMessage failed: ") + e.what()));
+                } catch (...) {
+                    write_response(make_jsonrpc_error_response(
+                        id_json,
+                        -32603,
+                        "sampling/createMessage failed"));
+                }
+                return;
+            }
+
+            write_response(make_jsonrpc_error_response(id_json, -32601, "Method not found"));
+            return;
+        }
 
         int64_t id_v = -1;
         if (doc["id"].get(id_v) != simdjson::SUCCESS) return;
@@ -395,7 +752,6 @@ void StdioMcpSession::reader_loop() {
             it->second.set_value(std::string(line));
             pending_.erase(it);
         }
-        // Notifications (no id) are silently ignored.
     };
 
     std::string buffered;
@@ -475,12 +831,37 @@ void StdioMcpSession::send_notification(std::string_view method,
     [[maybe_unused]] const bool ok = write_all_fd(write_fd_, msg);
 }
 
+void StdioMcpSession::update_server_capabilities(std::string_view initialize_result) {
+    const auto parsed = parse_server_capabilities(initialize_result);
+    server_supports_tools_.store(parsed.has_tools, std::memory_order_release);
+    server_tools_advertised_.store(parsed.tools_advertised, std::memory_order_release);
+    server_supports_resources_.store(parsed.has_resources, std::memory_order_release);
+    server_supports_prompts_.store(parsed.has_prompts, std::memory_order_release);
+}
+
 std::vector<McpToolDef> StdioMcpSession::initialize() {
     // 1. initialize handshake
-    [[maybe_unused]] const auto init_result =
-        send_request("initialize", make_initialize_params());
+    const auto init_result =
+        send_request("initialize", make_initialize_params(supports_sampling()));
+    update_server_capabilities(init_result);
+
     // 2. notifications/initialized (no response expected)
     send_notification("notifications/initialized");
+    if (!server_supports_tools_.load(std::memory_order_acquire)) {
+        if (!server_tools_advertised_.load(std::memory_order_acquire)) {
+            try {
+                std::string tools_result = send_request("tools/list", "");
+                server_supports_tools_.store(true, std::memory_order_release);
+                return parse_tools_list(tools_result);
+            } catch (...) {
+                // Compatibility path: server omitted tools capability and also
+                // rejected tools/list. Keep tools disabled, continue with
+                // resources/prompts if available.
+            }
+        }
+        return {};
+    }
+
     // 3. tools/list
     std::string tools_result = send_request("tools/list", "");
     return parse_tools_list(tools_result);
@@ -488,49 +869,96 @@ std::vector<McpToolDef> StdioMcpSession::initialize() {
 
 std::string StdioMcpSession::call_tool(const std::string& tool_name,
                                         const std::string& arguments_json) {
+    if (!server_supports_tools_.load(std::memory_order_acquire)) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise tools capability", server_name_));
+    }
     std::string params = make_tools_call_params(tool_name, arguments_json);
     std::string result = send_request("tools/call", params);
+    return flatten_tool_result(result);
+}
 
-    // MCP result format: {"content":[{"type":"text","text":"..."}],"isError":false}
-    // Flatten it into a simple JSON string for the skill result.
-    thread_local simdjson::dom::parser parser;
-    simdjson::padded_string ps(result);
-    simdjson::dom::element doc;
-    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return result;
+std::vector<McpResourceDef> StdioMcpSession::list_resources() {
+    if (!supports_resources()) return {};
 
-    bool is_error = false;
-    [[maybe_unused]] const auto err = doc["isError"].get(is_error);
+    std::vector<McpResourceDef> resources;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result =
+            send_request("resources/list", make_list_params_with_cursor(cursor));
+        auto page = parse_resources_list(result);
+        resources.insert(resources.end(),
+                         std::make_move_iterator(page.begin()),
+                         std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
 
-    std::string text_out;
-    simdjson::dom::array content;
-    if (doc["content"].get(content) == simdjson::SUCCESS) {
-        for (simdjson::dom::element part : content) {
-            std::string_view ptype;
-            if (part["type"].get(ptype) != simdjson::SUCCESS) continue;
-            if (ptype == "text") {
-                std::string_view t;
-                if (part["text"].get(t) == simdjson::SUCCESS) {
-                    if (!text_out.empty()) text_out += '\n';
-                    text_out += t;
-                }
-            }
-        }
+    return resources;
+}
+
+std::vector<McpResourceTemplateDef> StdioMcpSession::list_resource_templates() {
+    if (!supports_resources()) return {};
+
+    std::vector<McpResourceTemplateDef> templates;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result = send_request(
+            "resources/templates/list",
+            make_list_params_with_cursor(cursor));
+        auto page = parse_resource_templates_list(result);
+        templates.insert(templates.end(),
+                         std::make_move_iterator(page.begin()),
+                         std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
+
+    return templates;
+}
+
+std::string StdioMcpSession::read_resource(const std::string& uri) {
+    if (!supports_resources()) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise resources capability", server_name_));
     }
+    return send_request("resources/read", make_resource_read_params(uri));
+}
 
-    if (is_error) {
-        return std::format(R"({{"error":"{}"}})",
-                           core::utils::escape_json_string(text_out));
+std::vector<McpPromptDef> StdioMcpSession::list_prompts() {
+    if (!supports_prompts()) return {};
+
+    std::vector<McpPromptDef> prompts;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result =
+            send_request("prompts/list", make_list_params_with_cursor(cursor));
+        auto page = parse_prompts_list(result);
+        prompts.insert(prompts.end(),
+                       std::make_move_iterator(page.begin()),
+                       std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
+
+    return prompts;
+}
+
+std::string StdioMcpSession::get_prompt(const std::string& prompt_name,
+                                         const std::string& arguments_json) {
+    if (!supports_prompts()) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise prompts capability", server_name_));
     }
-    return std::format(R"({{"result":"{}"}})",
-                       core::utils::escape_json_string(text_out));
+    return send_request("prompts/get", make_prompt_get_params(prompt_name, arguments_json));
 }
 
 // ===========================================================================
 // HttpMcpSession
 // ===========================================================================
 
-HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config)
-    : url_(config.url) {
+HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config,
+                               McpSamplingCallback sampling_callback)
+    : url_(config.url)
+    , server_name_(config.name)
+    , sampling_callback_(std::move(sampling_callback)) {
     if (url_.empty()) {
         throw std::runtime_error("MCP HTTP session: 'url' is empty");
     }
@@ -572,6 +1000,14 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& bo
     };
 }
 
+void HttpMcpSession::update_server_capabilities(std::string_view initialize_result) {
+    const auto parsed = parse_server_capabilities(initialize_result);
+    server_supports_tools_.store(parsed.has_tools, std::memory_order_release);
+    server_tools_advertised_.store(parsed.tools_advertised, std::memory_order_release);
+    server_supports_resources_.store(parsed.has_resources, std::memory_order_release);
+    server_supports_prompts_.store(parsed.has_prompts, std::memory_order_release);
+}
+
 void HttpMcpSession::update_negotiated_protocol_version(std::string_view initialize_result) {
     thread_local simdjson::dom::parser parser;
     simdjson::padded_string ps(initialize_result);
@@ -604,7 +1040,7 @@ std::vector<McpToolDef> HttpMcpSession::initialize() {
     std::string init_body = make_jsonrpc_request(
         next_id_.fetch_add(1, std::memory_order_relaxed),
         "initialize",
-        make_initialize_params());
+        make_initialize_params(false));
     if (!init_body.empty() && init_body.back() == '\n') init_body.pop_back();
 
     HttpJsonResponse init_response;
@@ -619,6 +1055,7 @@ std::vector<McpToolDef> HttpMcpSession::initialize() {
     }
 
     const auto init_result = extract_result(init_response.body);
+    update_server_capabilities(init_result);
     update_negotiated_protocol_version(init_result);
 
     // HTTP transport: send initialized notification as a fire-and-forget POST
@@ -629,7 +1066,22 @@ std::vector<McpToolDef> HttpMcpSession::initialize() {
         [[maybe_unused]] const auto notif_result = post_json(notif);
     } catch (...) {}  // notifications may not get a response — ignore errors
 
-    std::string tools_result = send_request("tools/list", "");
+    if (!server_supports_tools_.load(std::memory_order_acquire)) {
+        if (!server_tools_advertised_.load(std::memory_order_acquire)) {
+            try {
+                const std::string tools_result = send_request("tools/list", "");
+                server_supports_tools_.store(true, std::memory_order_release);
+                return parse_tools_list(tools_result);
+            } catch (...) {
+                // Compatibility path: server omitted tools capability and also
+                // rejected tools/list. Keep tools disabled, continue with
+                // resources/prompts if available.
+            }
+        }
+        return {};
+    }
+
+    const std::string tools_result = send_request("tools/list", "");
     return parse_tools_list(tools_result);
 }
 
@@ -647,40 +1099,86 @@ void HttpMcpSession::shutdown() noexcept {
 
 std::string HttpMcpSession::call_tool(const std::string& tool_name,
                                        const std::string& arguments_json) {
+    if (!server_supports_tools_.load(std::memory_order_acquire)) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise tools capability", server_name_));
+    }
+
     std::string params = make_tools_call_params(tool_name, arguments_json);
     std::string result = send_request("tools/call", params);
+    return flatten_tool_result(result);
+}
 
-    // Same content-block flattening as the stdio session
-    thread_local simdjson::dom::parser parser;
-    simdjson::padded_string ps(result);
-    simdjson::dom::element doc;
-    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return result;
+std::vector<McpResourceDef> HttpMcpSession::list_resources() {
+    if (!supports_resources()) return {};
 
-    bool is_error = false;
-    [[maybe_unused]] const auto err = doc["isError"].get(is_error);
+    std::vector<McpResourceDef> resources;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result =
+            send_request("resources/list", make_list_params_with_cursor(cursor));
+        auto page = parse_resources_list(result);
+        resources.insert(resources.end(),
+                         std::make_move_iterator(page.begin()),
+                         std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
 
-    std::string text_out;
-    simdjson::dom::array content;
-    if (doc["content"].get(content) == simdjson::SUCCESS) {
-        for (simdjson::dom::element part : content) {
-            std::string_view ptype;
-            if (part["type"].get(ptype) != simdjson::SUCCESS) continue;
-            if (ptype == "text") {
-                std::string_view t;
-                if (part["text"].get(t) == simdjson::SUCCESS) {
-                    if (!text_out.empty()) text_out += '\n';
-                    text_out += t;
-                }
-            }
-        }
+    return resources;
+}
+
+std::vector<McpResourceTemplateDef> HttpMcpSession::list_resource_templates() {
+    if (!supports_resources()) return {};
+
+    std::vector<McpResourceTemplateDef> templates;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result = send_request(
+            "resources/templates/list",
+            make_list_params_with_cursor(cursor));
+        auto page = parse_resource_templates_list(result);
+        templates.insert(templates.end(),
+                         std::make_move_iterator(page.begin()),
+                         std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
+
+    return templates;
+}
+
+std::string HttpMcpSession::read_resource(const std::string& uri) {
+    if (!supports_resources()) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise resources capability", server_name_));
     }
+    return send_request("resources/read", make_resource_read_params(uri));
+}
 
-    if (is_error) {
-        return std::format(R"({{"error":"{}"}})",
-                           core::utils::escape_json_string(text_out));
+std::vector<McpPromptDef> HttpMcpSession::list_prompts() {
+    if (!supports_prompts()) return {};
+
+    std::vector<McpPromptDef> prompts;
+    std::optional<std::string> cursor;
+    do {
+        const std::string result =
+            send_request("prompts/list", make_list_params_with_cursor(cursor));
+        auto page = parse_prompts_list(result);
+        prompts.insert(prompts.end(),
+                       std::make_move_iterator(page.begin()),
+                       std::make_move_iterator(page.end()));
+        cursor = parse_next_cursor(result);
+    } while (cursor.has_value());
+
+    return prompts;
+}
+
+std::string HttpMcpSession::get_prompt(const std::string& prompt_name,
+                                        const std::string& arguments_json) {
+    if (!supports_prompts()) {
+        throw std::runtime_error(
+            std::format("MCP server '{}' does not advertise prompts capability", server_name_));
     }
-    return std::format(R"({{"result":"{}"}})",
-                       core::utils::escape_json_string(text_out));
+    return send_request("prompts/get", make_prompt_get_params(prompt_name, arguments_json));
 }
 
 // ===========================================================================
@@ -688,11 +1186,16 @@ std::string HttpMcpSession::call_tool(const std::string& tool_name,
 // ===========================================================================
 
 std::unique_ptr<IMcpClientSession>
-make_mcp_session(const core::config::McpServerConfig& config) {
+make_mcp_session(const core::config::McpServerConfig& config,
+                 McpSamplingCallback sampling_callback) {
     if (config.transport == "http") {
-        return std::make_unique<HttpMcpSession>(config);
+        return std::make_unique<HttpMcpSession>(
+            config,
+            std::move(sampling_callback));
     }
-    return std::make_unique<StdioMcpSession>(config);
+    return std::make_unique<StdioMcpSession>(
+        config,
+        std::move(sampling_callback));
 }
 
 } // namespace core::mcp

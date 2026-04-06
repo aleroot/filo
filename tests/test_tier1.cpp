@@ -546,3 +546,86 @@ TEST_CASE("parse_tools_list — skips tools without a name", "[tier1][mcp]") {
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].name == "valid_tool");
 }
+
+TEST_CASE("parse_resources_list parses concrete resources", "[tier1][mcp]") {
+    constexpr std::string_view json = R"({
+        "resources": [
+            {
+                "uri": "file:///project/README.md",
+                "name": "README.md",
+                "title": "Project README",
+                "description": "Main project documentation",
+                "mimeType": "text/markdown"
+            },
+            {
+                "uri": "db://schema/users",
+                "name": "users",
+                "description": "User table schema"
+            }
+        ]
+    })";
+
+    auto resources = parse_resources_list(json);
+    REQUIRE(resources.size() == 2);
+    REQUIRE(resources[0].uri == "file:///project/README.md");
+    REQUIRE(resources[0].name == "README.md");
+    REQUIRE(resources[0].title == "Project README");
+    REQUIRE(resources[0].mime_type == "text/markdown");
+    REQUIRE(resources[1].uri == "db://schema/users");
+    REQUIRE(resources[1].name == "users");
+    REQUIRE(resources[1].mime_type.empty());
+}
+
+TEST_CASE("parse_resource_templates_list parses templates", "[tier1][mcp]") {
+    constexpr std::string_view json = R"({
+        "resourceTemplates": [
+            {
+                "uriTemplate": "file:///{path}",
+                "name": "Project Files",
+                "description": "Browse project files",
+                "mimeType": "application/octet-stream"
+            }
+        ]
+    })";
+
+    auto templates = parse_resource_templates_list(json);
+    REQUIRE(templates.size() == 1);
+    REQUIRE(templates[0].uri_template == "file:///{path}");
+    REQUIRE(templates[0].name == "Project Files");
+    REQUIRE(templates[0].description == "Browse project files");
+    REQUIRE(templates[0].mime_type == "application/octet-stream");
+}
+
+TEST_CASE("parse_prompts_list parses prompt metadata and arguments", "[tier1][mcp]") {
+    constexpr std::string_view json = R"({
+        "prompts": [
+            {
+                "name": "code_review",
+                "title": "Code Review",
+                "description": "Review source code",
+                "arguments": [
+                    {
+                        "name": "code",
+                        "title": "Code",
+                        "description": "Source to review",
+                        "required": true
+                    },
+                    {
+                        "name": "focus",
+                        "description": "Optional focus area"
+                    }
+                ]
+            }
+        ]
+    })";
+
+    auto prompts = parse_prompts_list(json);
+    REQUIRE(prompts.size() == 1);
+    REQUIRE(prompts[0].name == "code_review");
+    REQUIRE(prompts[0].title == "Code Review");
+    REQUIRE(prompts[0].arguments.size() == 2);
+    REQUIRE(prompts[0].arguments[0].name == "code");
+    REQUIRE(prompts[0].arguments[0].required);
+    REQUIRE(prompts[0].arguments[1].name == "focus");
+    REQUIRE_FALSE(prompts[0].arguments[1].required);
+}

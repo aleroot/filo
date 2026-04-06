@@ -625,7 +625,11 @@ RunResult run(RunOptions opts) {
 #endif
 
     // ── MCP client connections ───────────────────────────────────────────────
-    core::mcp::McpConnectionManager::get_instance().connect_all(config, tool_manager);
+    core::mcp::McpConnectionManager::get_instance().connect_all(
+        config,
+        tool_manager,
+        llm_provider,
+        model_selection_mode == ModelSelectionMode::Manual ? manual_model_name : std::string{});
 
     // ── Agent ────────────────────────────────────────────────────────────────
     auto agent_session_context = core::context::make_session_context(
@@ -1233,6 +1237,13 @@ RunResult run(RunOptions opts) {
         active_model_name = manual_model_name;
     };
 
+    auto sync_mcp_sampling_backend = [&](std::shared_ptr<core::llm::LLMProvider> provider,
+                                         std::string sampling_model) {
+        core::mcp::McpConnectionManager::get_instance().update_sampling_backend(
+            std::move(provider),
+            std::move(sampling_model));
+    };
+
     auto resume_session = [&](const core::session::SessionData& data) {
         {
             std::lock_guard lock(stream_chunk_timing_mutex);
@@ -1271,6 +1282,7 @@ RunResult run(RunOptions opts) {
                     agent->set_provider(p);
                     agent->set_active_model(data.model);
                     model_selection_mode = ModelSelectionMode::Manual;
+                    sync_mcp_sampling_backend(p, data.model);
                 } catch(...) {}
             }
             refresh_status_labels();
@@ -1357,6 +1369,7 @@ RunResult run(RunOptions opts) {
             agent->set_provider(provider);
             model_selection_mode = ModelSelectionMode::Manual;
             agent->set_active_model(manual_model_name);
+            sync_mcp_sampling_backend(provider, manual_model_name);
             refresh_status_labels();
 
             std::string message = std::format(
@@ -1388,6 +1401,7 @@ RunResult run(RunOptions opts) {
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
         agent->set_active_model(router_policy_label());
+        sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
 
         return std::format(
@@ -1407,6 +1421,7 @@ RunResult run(RunOptions opts) {
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
         agent->set_active_model("auto");
+        sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
 
         return std::format(

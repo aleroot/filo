@@ -104,6 +104,8 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp
     src/core/mcp/McpConnectionManager.cpp
+    src/core/mcp/McpDynamicFeatureTools.cpp
+    src/core/mcp/McpSamplingBridge.cpp
     src/tui/ActivityTimer.cpp
     src/tui/Autocomplete.cpp
     src/tui/Conversation.cpp

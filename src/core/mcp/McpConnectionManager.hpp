@@ -10,7 +10,13 @@
 #include <unordered_map>
 #include <mutex>
 
+namespace core::llm {
+class LLMProvider;
+}
+
 namespace core::mcp {
+
+class McpSamplingBridge;
 
 // ---------------------------------------------------------------------------
 // McpConnectionManager — initialises all configured MCP servers and registers
@@ -29,7 +35,13 @@ public:
     // session, discover their tools, and register them in tool_manager.
     // Errors for individual servers are logged and skipped gracefully.
     void connect_all(const core::config::AppConfig& config,
-                     core::tools::ToolManager& tool_manager);
+                     core::tools::ToolManager& tool_manager,
+                     std::shared_ptr<core::llm::LLMProvider> sampling_provider = nullptr,
+                     std::string sampling_model = {});
+
+    // Update the sampling backend used by already-connected MCP sessions.
+    void update_sampling_backend(std::shared_ptr<core::llm::LLMProvider> sampling_provider,
+                                 std::string sampling_model = {});
 
     // Shut down all active sessions cleanly.
     void shutdown_all() noexcept;
@@ -51,6 +63,7 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<ServerEntry> servers_;
+    std::shared_ptr<McpSamplingBridge> sampling_bridge_;
 };
 
 } // namespace core::mcp
