@@ -28,6 +28,18 @@ OAuthToken OAuthTokenManager::get_valid_token() {
         // 3. Expired but refresh token available
         if (stored->has_refresh_token()) {
             OAuthToken refreshed = flow_->refresh(stored->refresh_token);
+            if (refreshed.refresh_token.empty()) {
+                refreshed.refresh_token = stored->refresh_token;
+            }
+            if (refreshed.device_id.empty()) {
+                refreshed.device_id = stored->device_id;
+            }
+            if (refreshed.account_id.empty()) {
+                refreshed.account_id = stored->account_id;
+            }
+            if (refreshed.scopes.empty()) {
+                refreshed.scopes = stored->scopes;
+            }
             store_->save(provider_id_, refreshed);
             cached_token_ = refreshed;
             return *cached_token_;
@@ -47,6 +59,18 @@ void OAuthTokenManager::force_refresh() {
     auto stored = store_->load(provider_id_);
     if (stored && stored->has_refresh_token()) {
         OAuthToken refreshed = flow_->refresh(stored->refresh_token);
+        if (refreshed.refresh_token.empty()) {
+            refreshed.refresh_token = stored->refresh_token;
+        }
+        if (refreshed.device_id.empty()) {
+            refreshed.device_id = stored->device_id;
+        }
+        if (refreshed.account_id.empty()) {
+            refreshed.account_id = stored->account_id;
+        }
+        if (refreshed.scopes.empty()) {
+            refreshed.scopes = stored->scopes;
+        }
         store_->save(provider_id_, refreshed);
         cached_token_ = refreshed;
         return;

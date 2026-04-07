@@ -1,7 +1,9 @@
 #include "OpenAIProtocol.hpp"
 #include "../Models.hpp"
+#include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
 #include <simdjson.h>
+#include <cstdlib>
 
 namespace core::llm::protocols {
 
@@ -97,11 +99,29 @@ cpr::Header OpenAIProtocol::build_headers(const core::auth::AuthInfo& auth) cons
     for (const auto& [k, v] : auth.headers) {
         headers[k] = v;
     }
+
+    // OpenAI Codex backend account-scoped tokens require this header.
+    if (auto it = auth.properties.find("account_id");
+        it != auth.properties.end() && !it->second.empty()
+        && headers.count("chatgpt-account-id") == 0) {
+        headers["chatgpt-account-id"] = it->second;
+    }
+
     return headers;
 }
 
 std::string OpenAIProtocol::build_url(std::string_view base_url,
-                                       [[maybe_unused]] std::string_view model) const {
+                                      std::string_view model) const {
+    if (openai_endpoint::is_azure_openai_base_url(base_url)) {
+        const char* api_version_env = std::getenv("AZURE_OPENAI_API_VERSION");
+        const std::string api_version = (api_version_env && api_version_env[0] != '\0')
+            ? std::string(api_version_env)
+            : "2024-12-01-preview";
+        return openai_endpoint::build_azure_chat_completions_url(
+            base_url,
+            model,
+            api_version);
+    }
     return std::string(base_url) + "/chat/completions";
 }
 

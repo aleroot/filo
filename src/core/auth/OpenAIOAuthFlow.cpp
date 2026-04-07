@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <thread>
@@ -157,6 +158,46 @@ static int64_t now_unix_seconds() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+std::optional<std::string> parse_openai_account_id_claim(std::string_view jwt_token) {
+    const std::size_t first_dot = jwt_token.find('.');
+    if (first_dot == std::string_view::npos) return std::nullopt;
+    const std::size_t second_dot = jwt_token.find('.', first_dot + 1);
+    if (second_dot == std::string_view::npos || second_dot <= first_dot + 1) {
+        return std::nullopt;
+    }
+
+    const std::string_view payload_b64url =
+        jwt_token.substr(first_dot + 1, second_dot - first_dot - 1);
+
+    const auto payload_json = core::utils::Base64::decode_url(payload_b64url);
+    if (!payload_json.has_value()) return std::nullopt;
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(payload_json->data(), payload_json->size());
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    std::string_view account_id;
+    if (doc["https://api.openai.com/auth.chatgpt_account_id"]
+            .get_string()
+            .get(account_id) == simdjson::SUCCESS
+        && !account_id.empty()) {
+        return std::string(account_id);
+    }
+
+    if (doc["chatgpt_account_id"].get_string().get(account_id) == simdjson::SUCCESS
+        && !account_id.empty()) {
+        return std::string(account_id);
+    }
+
+    if (doc["account_id"].get_string().get(account_id) == simdjson::SUCCESS
+        && !account_id.empty()) {
+        return std::string(account_id);
+    }
+
+    return std::nullopt;
+}
+
 // Public OAuth client id used by the official Codex login flow.
 constexpr std::string_view kCodexDefaultClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
 
@@ -260,9 +301,29 @@ OAuthToken OpenAIOAuthFlow::parse_token_response(std::string_view json,
         token.token_type = std::string(sv);
     if (doc["expires_in"].get_int64().get(v) == simdjson::SUCCESS)
         token.expires_at = request_time_unix + v;
+    if (doc["account_id"].get_string().get(sv) == simdjson::SUCCESS) {
+        token.account_id = std::string(sv);
+    } else if (doc["chatgpt_account_id"].get_string().get(sv) == simdjson::SUCCESS) {
+        token.account_id = std::string(sv);
+    }
+
+    std::string id_token;
+    if (doc["id_token"].get_string().get(sv) == simdjson::SUCCESS) {
+        id_token = std::string(sv);
+    }
 
     if (token.access_token.empty())
         throw std::runtime_error("No access_token in response: " + std::string(json));
+
+    if (token.account_id.empty()) {
+        if (const auto claim = parse_openai_account_id_claim(id_token);
+            claim.has_value()) {
+            token.account_id = *claim;
+        } else if (const auto claim = parse_openai_account_id_claim(token.access_token);
+                   claim.has_value()) {
+            token.account_id = *claim;
+        }
+    }
 
     return token;
 }

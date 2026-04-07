@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
@@ -375,6 +376,52 @@ TEST_CASE("parse_openai_sse_chunk - pure whitespace returns empty result", "[ope
     auto [content, tools] = parse_openai_sse_chunk("   ");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAIProtocol — Azure URL compatibility
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("OpenAIProtocol::build_url uses Azure deployments path", "[openai][azure]") {
+    OpenAIProtocol protocol;
+
+    const std::string url = protocol.build_url(
+        "https://my-resource.openai.azure.com/v1",
+        "gpt-4o-mini");
+
+    REQUIRE(url == "https://my-resource.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2024-12-01-preview");
+}
+
+TEST_CASE("OpenAIProtocol::build_url preserves explicit Azure deployments base", "[openai][azure]") {
+    OpenAIProtocol protocol;
+
+    const std::string url = protocol.build_url(
+        "https://my-resource.services.ai.azure.com/openai/deployments/my-deployment",
+        "ignored-model");
+
+    REQUIRE(url == "https://my-resource.services.ai.azure.com/openai/deployments/my-deployment/chat/completions?api-version=2024-12-01-preview");
+}
+
+TEST_CASE("OpenAIProtocol::build_headers injects chatgpt-account-id from auth account_id",
+          "[openai][headers]") {
+    OpenAIProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.properties["account_id"] = "acct_123";
+
+    const auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("chatgpt-account-id") == 1);
+    REQUIRE(headers.at("chatgpt-account-id") == "acct_123");
+}
+
+TEST_CASE("OpenAIResponsesProtocol::build_headers injects chatgpt-account-id from auth account_id",
+          "[openai][responses][headers]") {
+    OpenAIResponsesProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.properties["account_id"] = "acct_456";
+
+    const auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("chatgpt-account-id") == 1);
+    REQUIRE(headers.at("chatgpt-account-id") == "acct_456");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

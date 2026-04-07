@@ -166,11 +166,24 @@ TEST_CASE("ApiKeyCredentialSource::as_query_param — custom param name", "[ApiK
     REQUIRE(auth.query_params.at("token") == "k");
 }
 
+TEST_CASE("ApiKeyCredentialSource::as_query_param omits empty values", "[ApiKeyCredentialSource]") {
+    auto src  = ApiKeyCredentialSource::as_query_param("");
+    auto auth = src->get_auth();
+    REQUIRE(auth.query_params.empty());
+}
+
 TEST_CASE("ApiKeyCredentialSource::as_bearer", "[ApiKeyCredentialSource]") {
     auto src  = ApiKeyCredentialSource::as_bearer("secret");
     auto auth = src->get_auth();
     REQUIRE(auth.headers.count("Authorization") == 1);
     REQUIRE(auth.headers.at("Authorization") == "Bearer secret");
+    REQUIRE(auth.query_params.empty());
+}
+
+TEST_CASE("ApiKeyCredentialSource::as_bearer omits empty Authorization header", "[ApiKeyCredentialSource]") {
+    auto src  = ApiKeyCredentialSource::as_bearer("");
+    auto auth = src->get_auth();
+    REQUIRE(auth.headers.count("Authorization") == 0);
     REQUIRE(auth.query_params.empty());
 }
 
@@ -182,6 +195,20 @@ TEST_CASE("ApiKeyCredentialSource::as_custom_header", "[ApiKeyCredentialSource]"
     REQUIRE(auth.query_params.empty());
 }
 
+TEST_CASE("ApiKeyCredentialSource::as_custom_header omits empty header values", "[ApiKeyCredentialSource]") {
+    auto src  = ApiKeyCredentialSource::as_custom_header("", "x-api-key");
+    auto auth = src->get_auth();
+    REQUIRE(auth.headers.count("x-api-key") == 0);
+    REQUIRE(auth.query_params.empty());
+}
+
+TEST_CASE("ApiKeyCredentialSource::none does not emit auth headers", "[ApiKeyCredentialSource]") {
+    auto src  = ApiKeyCredentialSource::none();
+    auto auth = src->get_auth();
+    REQUIRE(auth.headers.empty());
+    REQUIRE(auth.query_params.empty());
+}
+
 // ── FileTokenStore ────────────────────────────────────────────────────────────
 
 TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileTokenStore]") {
@@ -190,6 +217,8 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
 
     OAuthToken original = make_token(3600, "refresh123", "access456");
     original.token_type = "Bearer";
+    original.device_id = "device-123";
+    original.account_id = "acct_123";
     store.save("google", original);
 
     auto loaded = store.load("google");
@@ -198,6 +227,8 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     REQUIRE(loaded->refresh_token == "refresh123");
     REQUIRE(loaded->token_type    == "Bearer");
     REQUIRE(loaded->expires_at    == original.expires_at);
+    REQUIRE(loaded->device_id     == "device-123");
+    REQUIRE(loaded->account_id == "acct_123");
 }
 
 TEST_CASE("FileTokenStore — save/load round-trips OAuth scopes", "[FileTokenStore]") {
@@ -457,6 +488,21 @@ TEST_CASE("OAuthTokenManager — force_refresh() refreshes stored token", "[OAut
     REQUIRE(store->stored->access_token == "new-at");
 }
 
+TEST_CASE("OAuthTokenManager — refresh preserves account_id when omitted", "[OAuthTokenManager]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken stored = make_token(-3600, "refresh-me", "expired-at");
+    stored.account_id = "acct_789";
+    store->stored = stored;
+
+    flow->refresh_result = make_token(3600, "new-rt", "new-at");
+
+    OAuthTokenManager mgr("openai-pkce", flow, store);
+    auto token = mgr.get_valid_token();
+
+    REQUIRE(token.account_id == "acct_789");
+}
+
 TEST_CASE("OAuthTokenManager — force_refresh() throws without refresh token", "[OAuthTokenManager]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
@@ -481,6 +527,22 @@ TEST_CASE("OAuthCredentialSource — returns Bearer header from manager's token"
     REQUIRE(auth.headers.count("Authorization") == 1);
     REQUIRE(auth.headers.at("Authorization") == "Bearer my-access-token");
     REQUIRE(auth.query_params.empty());
+}
+
+TEST_CASE("OAuthCredentialSource — exposes account_id property when present", "[OAuthCredentialSource]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(3600, "rt", "my-openai-access-token");
+    token.account_id = "acct_456";
+    store->stored = token;
+
+    auto manager = std::make_shared<OAuthTokenManager>("openai-pkce", flow, store);
+    OAuthCredentialSource src(manager);
+
+    const auto auth = src.get_auth();
+    REQUIRE(auth.headers.count("chatgpt-account-id") == 0);
+    REQUIRE(auth.properties.count("account_id") == 1);
+    REQUIRE(auth.properties.at("account_id") == "acct_456");
 }
 
 TEST_CASE("OAuthCredentialSource — session key uses Cookie auth and org UUID header", "[OAuthCredentialSource]") {
@@ -731,6 +793,35 @@ TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts all fields", "[Ope
     REQUIRE(token.refresh_token == "rt-def456");
     REQUIRE(token.token_type    == "Bearer");
     REQUIRE(token.expires_at    == t + 3600);
+}
+
+TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts account_id from id_token claim", "[OpenAIOAuthFlow]") {
+    const std::string id_token =
+        "eyJhbGciOiJub25lIn0."
+        "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGguY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF9jbGFpbSJ9."
+        "sig";
+    const std::string json = std::string(R"({
+        "access_token": "opaque-token",
+        "id_token": ")") + id_token + R"(",
+        "expires_in": 3600
+    })";
+
+    const auto token = OpenAIOAuthFlow::parse_token_response(json, now_unix());
+    REQUIRE(token.account_id == "acct_claim");
+}
+
+TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts account_id from access token JWT", "[OpenAIOAuthFlow]") {
+    const std::string access_token =
+        "eyJhbGciOiJub25lIn0."
+        "eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0XzEyMyJ9."
+        "sig";
+    const std::string json = std::string(R"({
+        "access_token": ")") + access_token + R"(",
+        "expires_in": 3600
+    })";
+
+    const auto token = OpenAIOAuthFlow::parse_token_response(json, now_unix());
+    REQUIRE(token.account_id == "acct_123");
 }
 
 TEST_CASE("OpenAIOAuthFlow::parse_token_response — throws when access_token absent", "[OpenAIOAuthFlow]") {

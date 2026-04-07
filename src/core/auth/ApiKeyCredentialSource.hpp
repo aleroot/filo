@@ -22,22 +22,33 @@ public:
     static std::shared_ptr<ApiKeyCredentialSource>
     as_query_param(std::string key, std::string param_name = "key") {
         AuthInfo ai;
-        ai.query_params[std::move(param_name)] = std::move(key);
+        if (!key.empty()) {
+            ai.query_params[std::move(param_name)] = std::move(key);
+        }
         return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(std::move(ai)));
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
     as_bearer(std::string key) {
         AuthInfo ai;
-        ai.headers["Authorization"] = "Bearer " + std::move(key);
+        if (!key.empty()) {
+            ai.headers["Authorization"] = "Bearer " + std::move(key);
+        }
         return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(std::move(ai)));
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
     as_custom_header(std::string key, std::string header_name) {
         AuthInfo ai;
-        ai.headers[std::move(header_name)] = std::move(key);
+        if (!key.empty()) {
+            ai.headers[std::move(header_name)] = std::move(key);
+        }
         return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(std::move(ai)));
+    }
+
+    static std::shared_ptr<ApiKeyCredentialSource>
+    none() {
+        return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(AuthInfo{}));
     }
 
 private:

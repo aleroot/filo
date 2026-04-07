@@ -169,6 +169,24 @@ TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[confi
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("ConfigManager defaults leave openai wire_api unset", "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_defaults_wire_api");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+
+    fs::create_directories(project_dir);
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    const auto& config = manager.get_config();
+    REQUIRE(config.providers.contains("openai"));
+    REQUIRE(config.providers.at("openai").wire_api.empty());
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager parses provider wire_api overrides", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_wire_api");
     const fs::path xdg_home = sandbox / "xdg";

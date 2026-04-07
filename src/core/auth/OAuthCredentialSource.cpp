@@ -51,6 +51,12 @@ AuthInfo OAuthCredentialSource::get_auth() {
     if (!token.device_id.empty()) {
         auth.properties["device_id"] = token.device_id;
     }
+
+    // Provider protocols may translate this generic account identifier into
+    // provider-specific transport headers when required.
+    if (!token.account_id.empty()) {
+        auth.properties["account_id"] = token.account_id;
+    }
     
     return auth;
 }

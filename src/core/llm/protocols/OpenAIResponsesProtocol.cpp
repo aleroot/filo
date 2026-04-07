@@ -433,6 +433,14 @@ cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& a
     for (const auto& [k, v] : auth.headers) {
         headers[k] = v;
     }
+
+    // OpenAI Codex backend account-scoped tokens require this header.
+    if (auto it = auth.properties.find("account_id");
+        it != auth.properties.end() && !it->second.empty()
+        && headers.count("chatgpt-account-id") == 0) {
+        headers["chatgpt-account-id"] = it->second;
+    }
+
     return headers;
 }
 

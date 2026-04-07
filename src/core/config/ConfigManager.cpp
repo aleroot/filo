@@ -346,7 +346,7 @@ AppConfig make_default_config() {
         config.providers[name] = std::move(p);
     };
 
-    add_provider("openai",         "gpt-5.4", {}, {}, {}, "responses");
+    add_provider("openai",         "gpt-5.4");
     add_provider("mistral",        "devstral-small-latest");
     add_provider("grok",           "grok-code-fast-1");
     add_provider("grok-4",         "grok-4");
@@ -412,7 +412,7 @@ std::string default_config_json() {
         "grok-fast":      { "model": "grok-4.20-non-reasoning" },
         "grok-mini":      { "model": "grok-3-mini",      "reasoning_effort": "high" },
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
-        "openai":         { "model": "gpt-5.4", "wire_api": "responses" },
+        "openai":         { "model": "gpt-5.4" },
         "mistral":        { "model": "devstral-small-latest" },
         "claude":         { "model": "claude-sonnet-4-6" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },

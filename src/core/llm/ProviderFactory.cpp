@@ -11,11 +11,12 @@
 #include "protocols/AnthropicProtocol.hpp"
 #include "protocols/GeminiProtocol.hpp"
 #include "protocols/OllamaProtocol.hpp"
+#include "OpenAIEndpointUtils.hpp"
 #include "../auth/ApiKeyCredentialSource.hpp"
 #include "../auth/AuthenticationManager.hpp"
 #include "../logging/Logger.hpp"
+#include "../utils/StringUtils.hpp"
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 
 namespace core::llm {
@@ -64,18 +65,23 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
     return {};
 }
 
-[[nodiscard]] std::string to_lower_copy(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+[[nodiscard]] std::string infer_openai_wire_api(std::string configured_wire_api,
+                                                std::string_view canonical_type,
+                                                std::string_view base_url,
+                                                std::string_view builtin_default) {
+    if (!configured_wire_api.empty()) return configured_wire_api;
+
+    if (canonical_type == "openai"
+        && !openai_endpoint::is_native_openai_responses_base_url(base_url)) {
+        return "chat_completions";
     }
-    return out;
+
+    return std::string(builtin_default.empty() ? "chat_completions" : builtin_default);
 }
 
 [[nodiscard]] OpenAIWireApi parse_openai_wire_api(std::string_view configured,
                                                   std::string_view fallback) {
-    const std::string lowered = to_lower_copy(
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
         configured.empty() ? fallback : configured);
 
     if (lowered == "responses") return OpenAIWireApi::Responses;
@@ -106,7 +112,6 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         auth_style     = builtin->auth_style;
         env_var        = builtin->env_var;
         canonical_type = builtin->prefix;    // e.g. "grok" for "grok-reasoning"
-        if (wire_api.empty()) wire_api = builtin->default_wire_api;
     } else {
         // User-defined provider: api_type and base_url must be explicit.
         if (api_type == ApiType::Unknown) {
@@ -164,7 +169,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
 
     // For OpenAI ChatGPT PKCE auth, route to the ChatGPT Codex backend by default.
     if (cred && canonical_type == "openai"
-        && to_lower_copy(config.auth_type) == "oauth_openai_pkce"
+        && core::utils::str::to_lower_ascii_copy(config.auth_type) == "oauth_openai_pkce"
         && base_url == "https://api.openai.com/v1") {
         base_url = "https://chatgpt.com/backend-api/codex";
         core::logging::debug("Using OpenAI PKCE endpoint: {}", base_url);
@@ -174,7 +179,12 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         const std::string key = resolve_key(config.api_key, env_var);
         switch (auth_style) {
         case AuthStyle::Bearer:
-            cred = core::auth::ApiKeyCredentialSource::as_bearer(key);
+            if (api_type == ApiType::OpenAI
+                && openai_endpoint::is_azure_openai_base_url(base_url)) {
+                cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "api-key");
+            } else {
+                cred = core::auth::ApiKeyCredentialSource::as_bearer(key);
+            }
             break;
         case AuthStyle::QueryParam:
             cred = core::auth::ApiKeyCredentialSource::as_query_param(key);
@@ -183,7 +193,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "x-api-key");
             break;
         case AuthStyle::None:
-            cred = core::auth::ApiKeyCredentialSource::as_bearer("");
+            cred = core::auth::ApiKeyCredentialSource::none();
             break;
         }
     }
@@ -192,9 +202,15 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     std::unique_ptr<protocols::ApiProtocolBase> protocol;
     switch (api_type) {
     case ApiType::OpenAI: {
-        const OpenAIWireApi wire = parse_openai_wire_api(
+        const std::string inferred_wire_api = infer_openai_wire_api(
             wire_api,
+            canonical_type,
+            base_url,
             builtin ? builtin->default_wire_api : "chat_completions");
+
+        const OpenAIWireApi wire = parse_openai_wire_api(
+            inferred_wire_api,
+            "chat_completions");
 
         if (wire == OpenAIWireApi::Responses) {
             if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
