@@ -4,8 +4,22 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/Models.hpp"
 
+#include <filesystem>
+#include <fstream>
+
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+namespace {
+
+std::filesystem::path make_temp_image_file(std::string_view filename = "filo-responses-image.png") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
+}
+
+} // namespace
 
 TEST_CASE("OpenAIResponsesProtocol - build_url uses /responses endpoint",
           "[openai][responses][url]") {
@@ -40,6 +54,28 @@ TEST_CASE("OpenAIResponsesProtocol - serializer emits responses request fields",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_output_tokens":200)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("tool_choice":"auto")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("parallel_tool_calls":false)"));
+}
+
+TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
+          "[openai][responses][serializer][vision]") {
+    OpenAIResponsesProtocol protocol;
+    const auto image = make_temp_image_file();
+
+    ChatRequest req;
+    req.model = "gpt-5";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_image_attachment(image.string()),
+        .content_parts = {
+            ContentPart::make_text("Read the error in this screenshot."),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    const std::string payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"input_text","text":"Read the error in this screenshot.")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"input_image")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
 }
 
 TEST_CASE("OpenAIResponsesProtocol - serializer includes continuation/cache/tier fields",

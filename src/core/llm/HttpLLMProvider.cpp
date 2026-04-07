@@ -142,6 +142,10 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     if (request.response_format.is_structured() && !info->supports(ModelCapability::JsonMode)) {
         errors.push_back("model does not support structured outputs (JSON mode)");
     }
+
+    if (request_has_image_input(request) && !info->supports(ModelCapability::Vision)) {
+        errors.push_back("model does not support image input");
+    }
     
     return errors;
 }
@@ -178,9 +182,29 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
     }
 
     PreparedHttpStreamRequest prepared;
+    ChatRequest effective_request = request;
 
     try {
-        prepared = prepare_stream_request(request, default_model_, base_url_, cred_source_, *protocol_);
+        const std::string& model = effective_request.model.empty()
+            ? default_model_
+            : effective_request.model;
+        if (!ModelRegistry::instance().supports(model, ModelCapability::Vision)) {
+            degrade_historical_image_inputs(effective_request);
+        }
+
+        if (const auto errors = validate_request(effective_request); !errors.empty()) {
+            std::string message = "\n[Request validation error: ";
+            for (std::size_t i = 0; i < errors.size(); ++i) {
+                if (i > 0) message += "; ";
+                message += errors[i];
+            }
+            message += "]";
+            callback(StreamChunk::make_error(std::move(message)));
+            return;
+        }
+
+        prepared = prepare_stream_request(
+            effective_request, default_model_, base_url_, cred_source_, *protocol_);
     } catch (const std::exception& e) {
         core::logging::error("[HTTP] Failed to start request: {}", e.what());
         callback(StreamChunk::make_error(std::string("\n[Failed to start request: ") + e.what() + "]"));

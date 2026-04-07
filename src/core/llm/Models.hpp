@@ -5,8 +5,13 @@
 #include <optional>
 #include <sstream>
 #include <iomanip>
+#include <charconv>
+#include <filesystem>
+#include <fstream>
 #include "../tools/Tool.hpp"
+#include "../utils/Base64.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../utils/MimeUtils.hpp"
 
 namespace core::llm {
 
@@ -41,6 +46,137 @@ struct ToolCall {
         std::string arguments = {}; // JSON string
     } function;
 };
+
+enum class ContentPartType {
+    Text,
+    Image,
+};
+
+struct ContentPart {
+    ContentPartType type = ContentPartType::Text;
+    std::string text = {};
+    std::string path = {};
+    std::string mime_type = {};
+    std::string detail = "auto";
+
+    [[nodiscard]] static ContentPart make_text(std::string value) {
+        return ContentPart{
+            .type = ContentPartType::Text,
+            .text = std::move(value),
+        };
+    }
+
+    [[nodiscard]] static ContentPart make_image(std::string value,
+                                                std::string mime = {},
+                                                std::string level = "auto") {
+        return ContentPart{
+            .type = ContentPartType::Image,
+            .path = std::move(value),
+            .mime_type = std::move(mime),
+            .detail = std::move(level),
+        };
+    }
+};
+
+[[nodiscard]] inline std::string describe_image_attachment(std::string_view path) {
+    return "[Attached image: " + std::string(path) + "]";
+}
+
+[[nodiscard]] inline std::string unavailable_image_attachment_text(std::string_view path) {
+    return "[Attached image unavailable: " + std::string(path) + "]";
+}
+
+struct EncodedImagePart {
+    std::string path = {};
+    std::string mime_type = {};
+    std::string base64_data = {};
+    std::string detail = "auto";
+
+    [[nodiscard]] std::string data_url() const {
+        return "data:" + mime_type + ";base64," + base64_data;
+    }
+};
+
+[[nodiscard]] inline std::optional<EncodedImagePart> encode_image_part(
+    const ContentPart& part) {
+    if (part.type != ContentPartType::Image || part.path.empty()) {
+        return std::nullopt;
+    }
+
+    const std::filesystem::path path = part.path;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        return std::nullopt;
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return std::nullopt;
+    }
+
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0) {
+        return std::nullopt;
+    }
+    input.seekg(0, std::ios::beg);
+
+    std::string bytes(static_cast<std::size_t>(size), '\0');
+    if (size > 0) {
+        input.read(bytes.data(), static_cast<std::streamsize>(size));
+        if (!input) {
+            return std::nullopt;
+        }
+    }
+
+    std::string mime_type = part.mime_type.empty()
+        ? core::utils::mime::guess_type(path, false)
+        : part.mime_type;
+    if (!mime_type.starts_with("image/")) {
+        return std::nullopt;
+    }
+
+    return EncodedImagePart{
+        .path = part.path,
+        .mime_type = std::move(mime_type),
+        .base64_data = core::utils::Base64::encode(bytes),
+        .detail = part.detail.empty() ? "auto" : part.detail,
+    };
+}
+
+[[nodiscard]] inline bool message_has_image_input(const std::vector<ContentPart>& parts) noexcept {
+    for (const auto& part : parts) {
+        if (part.type == ContentPartType::Image) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::string render_content_parts_as_text(
+    const std::vector<ContentPart>& parts) {
+    std::string text;
+    for (const auto& part : parts) {
+        if (part.type == ContentPartType::Text) {
+            text += part.text;
+            continue;
+        }
+
+        text += describe_image_attachment(
+            part.path.empty() ? std::string_view{"<image>"} : std::string_view{part.path});
+    }
+    return text;
+}
+
+[[nodiscard]] inline std::string collapse_text_parts(const std::vector<ContentPart>& parts) {
+    std::string text;
+    for (const auto& part : parts) {
+        if (part.type == ContentPartType::Text) {
+            text += part.text;
+        }
+    }
+    return text;
+}
 
 // ---------------------------------------------------------------------------
 // StreamChunk — represents a single chunk from an LLM streaming response.
@@ -77,6 +213,7 @@ struct Message {
     std::string tool_call_id = {};         // Optional, for tool role
     std::vector<ToolCall> tool_calls = {}; // Optional, for assistant role
     std::string reasoning_content = {};    // Optional, for Kimi thinking mode
+    std::vector<ContentPart> content_parts = {}; // Optional, for multimodal user input
 };
 
 struct Tool {
@@ -118,6 +255,56 @@ struct ChatRequest {
     std::string prompt_cache_key = {};     ///< Responses API prompt cache key
     std::string service_tier = {};         ///< Responses API service_tier (e.g. "priority")
 };
+
+[[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {
+    return message_has_image_input(msg.content_parts);
+}
+
+[[nodiscard]] inline bool request_has_image_input(const ChatRequest& req) noexcept {
+    for (const auto& msg : req.messages) {
+        if (message_has_image_input(msg)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool latest_user_message_has_image_input(const ChatRequest& req) noexcept {
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == "user") {
+            return message_has_image_input(*it);
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::string message_text_for_display(const Message& msg) {
+    if (!msg.content.empty()) {
+        return msg.content;
+    }
+    return render_content_parts_as_text(msg.content_parts);
+}
+
+inline void degrade_message_to_text_only(Message& msg) {
+    if (msg.content.empty()) {
+        msg.content = render_content_parts_as_text(msg.content_parts);
+    }
+    msg.content_parts.clear();
+}
+
+inline void degrade_historical_image_inputs(ChatRequest& req) {
+    bool kept_latest_user = false;
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == "user" && !kept_latest_user) {
+            kept_latest_user = true;
+            continue;
+        }
+
+        if (message_has_image_input(*it)) {
+            degrade_message_to_text_only(*it);
+        }
+    }
+}
 
 struct Serializer {
     struct Options {
@@ -208,7 +395,44 @@ struct Serializer {
             if (!req.messages[i].tool_call_id.empty()) {
                 payload += R"(,"tool_call_id":")" + core::utils::escape_json_string(req.messages[i].tool_call_id) + "\"";
             }
-            if (!req.messages[i].content.empty()) {
+            if (!req.messages[i].content_parts.empty()) {
+                payload += R"(,"content":[)";
+                bool first_part = true;
+                for (const auto& part : req.messages[i].content_parts) {
+                    if (part.type == ContentPartType::Text) {
+                        if (part.text.empty()) continue;
+                        if (!first_part) payload += ",";
+                        payload += R"({"type":"text","text":")";
+                        payload += core::utils::escape_json_string(part.text);
+                        payload += R"("})";
+                        first_part = false;
+                        continue;
+                    }
+
+                    if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                        if (!first_part) payload += ",";
+                        payload += R"({"type":"image_url","image_url":{"url":")";
+                        payload += core::utils::escape_json_string(encoded->data_url());
+                        payload += R"(","detail":")";
+                        payload += core::utils::escape_json_string(encoded->detail);
+                        payload += R"("}})";
+                        first_part = false;
+                    } else {
+                        if (!first_part) payload += ",";
+                        payload += R"({"type":"text","text":")";
+                        payload += core::utils::escape_json_string(
+                            unavailable_image_attachment_text(part.path));
+                        payload += R"("})";
+                        first_part = false;
+                    }
+                }
+                if (first_part) {
+                    payload += R"({"type":"text","text":")";
+                    payload += core::utils::escape_json_string(req.messages[i].content);
+                    payload += R"("})";
+                }
+                payload += "]";
+            } else if (!req.messages[i].content.empty()) {
                 payload += R"(,"content":")" + core::utils::escape_json_string(req.messages[i].content) + "\"";
             } else if (req.messages[i].tool_calls.empty()) {
                 payload += R"(,"content":null)";

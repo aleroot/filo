@@ -10,9 +10,22 @@
 #include "core/llm/ProviderFactory.hpp"
 
 #include <memory>
+#include <filesystem>
+#include <fstream>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+namespace {
+
+std::filesystem::path make_temp_image_file(std::string_view filename = "filo-test-image.png") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -68,6 +81,26 @@ TEST_CASE("Serializer - user message content appears in payload", "[openai][seri
     auto payload = Serializer::serialize(make_simple_request("gpt-4o", "Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"user")"));
+}
+
+TEST_CASE("Serializer - user image content becomes image_url parts", "[openai][serializer][vision]") {
+    const auto image = make_temp_image_file();
+
+    ChatRequest req;
+    req.model = "gpt-4o";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_image_attachment(image.string()),
+        .content_parts = {
+            ContentPart::make_text("What does this screenshot show?"),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    const auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image_url")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"What does this screenshot show?")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
 }
 
 TEST_CASE("Serializer - empty messages produces valid JSON array", "[openai][serializer]") {

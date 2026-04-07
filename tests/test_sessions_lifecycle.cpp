@@ -162,3 +162,33 @@ TEST_CASE("Agent resumes from SessionData", "[agent][session]") {
     REQUIRE(loaded.size() == 2);
     CHECK(loaded[0].content == "User msg 1");
 }
+
+TEST_CASE("Agent preserves multimodal user turns for retry", "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::promise<void> done;
+    agent->send_message(
+        core::llm::Message{
+            .role = "user",
+            .content = "Please inspect [Attached image: /tmp/example.png]",
+            .content_parts = {
+                core::llm::ContentPart::make_text("Please inspect "),
+                core::llm::ContentPart::make_image("/tmp/example.png", "image/png"),
+            },
+        },
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() { done.set_value(); });
+
+    done.get_future().wait();
+
+    const auto last = agent->last_user_turn();
+    REQUIRE(last.has_value());
+    REQUIRE(last->content_parts.size() == 2);
+    REQUIRE(last->content_parts[1].type == core::llm::ContentPartType::Image);
+}

@@ -1,8 +1,8 @@
 #include "ContextMentions.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../utils/MimeUtils.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <format>
 #include <fstream>
 #include <sstream>
@@ -194,16 +194,21 @@ std::string render_missing_path(std::string_view display_path) {
     return std::format("\n[Context for {}]\nError: path not found.\n[/Context]\n", display_path);
 }
 
+std::filesystem::path resolve_mention_path(std::string_view raw_path,
+                                           const std::filesystem::path& base_dir) {
+    std::filesystem::path resolved = raw_path;
+    if (!resolved.is_absolute()) {
+        resolved = base_dir / resolved;
+    }
+    return resolved.lexically_normal();
+}
+
 std::string render_mention(std::string_view raw_path,
                            const std::filesystem::path& base_dir,
                            const MentionExpansionOptions& options) {
     if (raw_path.empty()) return "@";
 
-    std::filesystem::path resolved = raw_path;
-    if (!resolved.is_absolute()) {
-        resolved = base_dir / resolved;
-    }
-    resolved = resolved.lexically_normal();
+    const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
 
     std::error_code ec;
     if (std::filesystem::is_regular_file(resolved, ec)) {
@@ -213,6 +218,25 @@ std::string render_mention(std::string_view raw_path,
         return render_directory_listing(resolved, raw_path, options.max_directory_entries);
     }
     return render_missing_path(raw_path);
+}
+
+bool is_image_file(const std::filesystem::path& resolved) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(resolved, ec)) {
+        return false;
+    }
+    return core::utils::mime::guess_type(resolved, false).starts_with("image/");
+}
+
+void append_text_part(std::vector<core::llm::ContentPart>& parts, std::string_view text) {
+    if (text.empty()) return;
+
+    if (!parts.empty() && parts.back().type == core::llm::ContentPartType::Text) {
+        parts.back().text += text;
+        return;
+    }
+
+    parts.push_back(core::llm::ContentPart::make_text(std::string(text)));
 }
 
 } // namespace
@@ -329,22 +353,29 @@ MentionCompletion apply_mention_completion(std::string_view input,
     return out;
 }
 
-std::string expand_mentions(std::string_view input,
-                            const std::filesystem::path& base_dir,
-                            const MentionExpansionOptions& options) {
-    std::string output;
-    output.reserve(input.size() + 256);
+ExpandedPrompt expand_prompt(std::string_view input,
+                             const std::filesystem::path& base_dir,
+                             const MentionExpansionOptions& options) {
+    ExpandedPrompt output;
+    output.display_text.reserve(input.size() + 256);
+
+    const auto append_plain_text = [&](std::string_view text) {
+        output.display_text += text;
+        append_text_part(output.content_parts, text);
+    };
 
     std::size_t i = 0;
     while (i < input.size()) {
         if (input[i] != '@') {
-            output.push_back(input[i++]);
+            append_plain_text(input.substr(i, 1));
+            ++i;
             continue;
         }
 
         const bool at_boundary = (i == 0) || is_boundary_char(input[i - 1]);
         if (!at_boundary || i + 1 >= input.size()) {
-            output.push_back(input[i++]);
+            append_plain_text(input.substr(i, 1));
+            ++i;
             continue;
         }
 
@@ -360,7 +391,8 @@ std::string expand_mentions(std::string_view input,
                 ++cursor;
             }
             if (cursor >= input.size()) {
-                output.push_back(input[i++]);
+                append_plain_text(input.substr(i, 1));
+                ++i;
                 continue;
             }
             raw_path = std::string(input.substr(start, cursor - start));
@@ -373,14 +405,27 @@ std::string expand_mentions(std::string_view input,
         }
 
         if (raw_path.empty()) {
-            output.push_back(input[i++]);
+            append_plain_text(input.substr(i, 1));
+            ++i;
             continue;
         }
 
         if (!quoted && is_reserved_subagent_mention(raw_path)) {
-            output.push_back('@');
-            output += raw_path;
-            output += trailing_suffix;
+            append_plain_text("@");
+            append_plain_text(raw_path);
+            append_plain_text(trailing_suffix);
+            i = cursor;
+            continue;
+        }
+
+        const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
+        if (is_image_file(resolved)) {
+            output.display_text += core::llm::describe_image_attachment(raw_path);
+            output.display_text += trailing_suffix;
+            output.content_parts.push_back(core::llm::ContentPart::make_image(
+                resolved.string(),
+                core::utils::mime::guess_type(resolved, false)));
+            append_text_part(output.content_parts, trailing_suffix);
             i = cursor;
             continue;
         }
@@ -393,11 +438,19 @@ std::string expand_mentions(std::string_view input,
         } else {
             expansion += trailing_suffix;
         }
-        output += expansion;
+        output.display_text += expansion;
+        append_text_part(output.content_parts, expansion);
         i = cursor;
     }
 
     return output;
+}
+
+std::string expand_mentions(std::string_view input,
+                            const std::filesystem::path& base_dir,
+                            const MentionExpansionOptions& options) {
+    const auto expanded = expand_prompt(input, base_dir, options);
+    return core::llm::collapse_text_parts(expanded.content_parts);
 }
 
 } // namespace core::context

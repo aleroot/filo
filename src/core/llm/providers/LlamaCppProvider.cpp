@@ -111,7 +111,7 @@ std::string build_tool_parameters_schema_impl(const core::llm::Tool& tool) {
 common_chat_msg to_common_message(const core::llm::Message& message) {
     common_chat_msg converted;
     converted.role = message.role;
-    converted.content = message.content;
+    converted.content = message_text_for_display(message);
     converted.tool_name = message.name;
     converted.tool_call_id = message.tool_call_id;
 
@@ -413,6 +413,13 @@ void LlamaCppProvider::stream_response(
     ChatRequest req = request;
     if (req.model.empty()) {
         req.model = default_model_;
+    }
+
+    degrade_historical_image_inputs(req);
+    if (latest_user_message_has_image_input(req)) {
+        callback(StreamChunk::make_error(
+            "\n[llama.cpp error: image input is not supported by the embedded llama.cpp provider]"));
+        return;
     }
 
     // Capture a shared_ptr to ourselves so that the provider (and all its

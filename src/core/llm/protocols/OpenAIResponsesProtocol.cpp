@@ -150,15 +150,49 @@ void append_tool_schema(std::string& payload, const std::vector<Tool>& tools) {
 }
 
 void append_message_item(std::string& payload,
-                         std::string_view role,
-                         std::string_view content) {
+                         const Message& msg) {
     payload += R"({"type":"message","role":")";
-    payload += core::utils::escape_json_string(role);
-    payload += R"(","content":[{"type":")";
-    payload += (role == "assistant") ? "output_text" : "input_text";
-    payload += R"(","text":")";
-    payload += core::utils::escape_json_string(content);
-    payload += R"("}]})";
+    payload += core::utils::escape_json_string(msg.role);
+    payload += R"(","content":[)";
+
+    bool first_part = true;
+    const auto append_part_sep = [&]() {
+        if (!first_part) payload += ",";
+        first_part = false;
+    };
+
+    const auto append_text_part = [&](std::string_view text) {
+        append_part_sep();
+        payload += R"({"type":")";
+        payload += (msg.role == "assistant") ? "output_text" : "input_text";
+        payload += R"(","text":")";
+        payload += core::utils::escape_json_string(text);
+        payload += R"("})";
+    };
+
+    if (!msg.content_parts.empty()) {
+        for (const auto& part : msg.content_parts) {
+            if (part.type == ContentPartType::Text) {
+                if (!part.text.empty()) {
+                    append_text_part(part.text);
+                }
+                continue;
+            }
+
+            if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                append_part_sep();
+                payload += R"({"type":"input_image","image_url":")";
+                payload += core::utils::escape_json_string(encoded->data_url());
+                payload += R"("})";
+            } else {
+                append_text_part(unavailable_image_attachment_text(part.path));
+            }
+        }
+    } else if (!msg.content.empty()) {
+        append_text_part(msg.content);
+    }
+
+    payload += R"(]})";
 }
 
 void append_function_call_item(std::string& payload,
@@ -213,9 +247,9 @@ void append_input_items(std::string& payload, const std::vector<Message>& messag
             continue;
         }
 
-        if (!msg.content.empty()) {
+        if (!msg.content.empty() || !msg.content_parts.empty()) {
             append_sep();
-            append_message_item(payload, msg.role, msg.content);
+            append_message_item(payload, msg);
         }
 
         if (msg.role == "assistant" && !msg.tool_calls.empty()) {

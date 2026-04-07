@@ -458,9 +458,39 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         } else {
             payload += R"({"role":")";
             payload += core::utils::escape_json_string(msg.role);
-            payload += R"(","content":")";
-            payload += core::utils::escape_json_string(msg.content);
-            payload += "\"}";
+            if (!msg.content_parts.empty()) {
+                payload += R"(","content":[)";
+                bool first_block = true;
+                for (const auto& part : msg.content_parts) {
+                    if (!first_block) payload += ',';
+                    first_block = false;
+
+                    if (part.type == ContentPartType::Text) {
+                        payload += R"({"type":"text","text":")";
+                        payload += core::utils::escape_json_string(part.text);
+                        payload += R"("})";
+                        continue;
+                    }
+
+                    if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                        payload += R"({"type":"image","source":{"type":"base64","media_type":")";
+                        payload += core::utils::escape_json_string(encoded->mime_type);
+                        payload += R"(","data":")";
+                        payload += core::utils::escape_json_string(encoded->base64_data);
+                        payload += R"("}})";
+                    } else {
+                        payload += R"({"type":"text","text":")";
+                        payload += core::utils::escape_json_string(
+                            unavailable_image_attachment_text(part.path));
+                        payload += R"("})";
+                    }
+                }
+                payload += "]}";
+            } else {
+                payload += R"(","content":")";
+                payload += core::utils::escape_json_string(msg.content);
+                payload += "\"}";
+            }
         }
     }
     payload += "]}";

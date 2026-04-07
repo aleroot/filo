@@ -114,6 +114,32 @@ TEST_CASE("Context mentions expand directories, preserve punctuation, and trunca
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("Context mentions attach image files without inlining binary content", "[context]") {
+    const fs::path sandbox = make_temp_dir("filo_context_image");
+    const fs::path image = sandbox / "screenshots" / "error.png";
+    write_text(image, "png-bytes");
+
+    const auto expanded = core::context::expand_prompt(
+        R"(Please inspect @"screenshots/error.png".)",
+        sandbox);
+
+    REQUIRE_THAT(
+        expanded.display_text,
+        Catch::Matchers::ContainsSubstring("[Attached image: screenshots/error.png]."));
+    REQUIRE(expanded.content_parts.size() == 3);
+    REQUIRE(expanded.content_parts[0].type == core::llm::ContentPartType::Text);
+    REQUIRE(expanded.content_parts[1].type == core::llm::ContentPartType::Image);
+    REQUIRE(expanded.content_parts[1].path == image.string());
+    REQUIRE(expanded.content_parts[2].text == ".");
+
+    const std::string text_only = core::context::expand_mentions(
+        R"(Please inspect @"screenshots/error.png".)",
+        sandbox);
+    REQUIRE(text_only == "Please inspect .");
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("Context mentions detect the active unquoted mention under the cursor", "[context]") {
     const auto mention = core::context::find_active_mention("Inspect @src/ma please", 15);
     REQUIRE(mention.has_value());

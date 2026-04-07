@@ -35,7 +35,21 @@ std::vector<UiMessage> build_resumed_ui_messages(
     int current_asst_idx = -1;
     for (const auto& msg : data.messages) {
         if (msg.role == "user") {
-            ui_messages.push_back(make_user_message(msg.content, ""));
+            std::string user_text = msg.content;
+            if (user_text.empty()) {
+                for (const auto& part : msg.content_parts) {
+                    if (part.type == core::llm::ContentPartType::Text) {
+                        user_text += part.text;
+                    } else {
+                        if (!user_text.empty() && !user_text.ends_with('\n')) {
+                            user_text += '\n';
+                        }
+                        user_text += core::llm::describe_image_attachment(
+                            part.path.empty() ? "<image>" : part.path);
+                    }
+                }
+            }
+            ui_messages.push_back(make_user_message(user_text, ""));
             current_asst_idx = -1;
             continue;
         }

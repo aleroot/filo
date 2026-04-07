@@ -4,10 +4,23 @@
 #include "core/llm/Models.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include <filesystem>
+#include <fstream>
 #include <simdjson.h>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+namespace {
+
+std::filesystem::path make_temp_image_file(std::string_view filename = "filo-gemini-image.png") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
+}
+
+} // namespace
 
 TEST_CASE("GeminiProvider Serializes Valid JSON", "[GeminiProvider]") {
     ChatRequest req;
@@ -130,6 +143,25 @@ TEST_CASE("GeminiProvider Serializes Tool Calls and Responses", "[GeminiProvider
     int64_t temp;
     REQUIRE(resp_result["temperature"].get_int64().get(temp) == simdjson::SUCCESS);
     REQUIRE(temp == 22);
+}
+
+TEST_CASE("GeminiProvider serializes inlineData image parts", "[GeminiProvider][vision]") {
+    const auto image = make_temp_image_file();
+
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_image_attachment(image.string()),
+        .content_parts = {
+            ContentPart::make_text("Summarize the error shown here."),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    const std::string json_payload = serialize_gemini_request(req, "gemini-2.5-flash");
+    REQUIRE_THAT(json_payload, Catch::Matchers::ContainsSubstring(R"("inlineData":{"mimeType":"image/png")"));
+    REQUIRE_THAT(json_payload, Catch::Matchers::ContainsSubstring(R"("text":"Summarize the error shown here.")"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

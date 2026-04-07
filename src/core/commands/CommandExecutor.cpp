@@ -877,15 +877,17 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        std::string last = ctx.agent->last_user_message();
-        if (last.empty()) {
+        const auto last = ctx.agent->last_user_turn();
+        if (!last.has_value()) {
             ctx.append_history_fn("\n✗  No previous message to retry.\n");
             return;
         }
-        ctx.append_history_fn(std::format("\n»  Retrying: {}\n", last));
+        ctx.append_history_fn(std::format(
+            "\n»  Retrying: {}\n",
+            core::llm::message_text_for_display(*last)));
 
         auto append_fn = ctx.append_history_fn;
-        ctx.agent->send_message(last,
+        ctx.agent->send_message(*last,
             [append_fn](const std::string& chunk) {
                 append_fn(chunk);
             },

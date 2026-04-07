@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 namespace core::agent {
 
@@ -62,10 +63,17 @@ public:
                       std::function<void()> done_callback,
                       TurnCallbacks turn_callbacks = {});
 
+    void send_message(core::llm::Message user_message,
+                      std::function<void(const std::string&)> text_callback,
+                      std::function<void(const std::string&, const std::string&)> tool_callback,
+                      std::function<void()> done_callback,
+                      TurnCallbacks turn_callbacks = {});
+
     void clear_history();
     void compact_history(std::string summary);
     void undo_last();
     std::string last_user_message();
+    [[nodiscard]] std::optional<core::llm::Message> last_user_turn() const;
 
     // -----------------------------------------------------------------------
     // Session persistence helpers.

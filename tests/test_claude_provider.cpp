@@ -8,8 +8,22 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
 
+#include <filesystem>
+#include <fstream>
+
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+namespace {
+
+std::filesystem::path make_temp_image_file(std::string_view filename = "filo-claude-image.png") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -61,6 +75,25 @@ TEST_CASE("ClaudeSerializer - user message content appears in payload", "[claude
     auto payload = AnthropicSerializer::serialize(make_simple_request("claude-sonnet-4-6", "Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"user")"));
+}
+
+TEST_CASE("ClaudeSerializer - user image content becomes image blocks", "[claude][serializer][vision]") {
+    const auto image = make_temp_image_file();
+
+    ChatRequest req;
+    req.model = "claude-sonnet-4-6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_image_attachment(image.string()),
+        .content_parts = {
+            ContentPart::make_text("Describe this screenshot."),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image","source":{"type":"base64","media_type":"image/png")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"Describe this screenshot.")"));
 }
 
 TEST_CASE("ClaudeSerializer - max_tokens always present with default", "[claude][serializer]") {

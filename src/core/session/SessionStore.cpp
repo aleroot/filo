@@ -136,6 +136,37 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         }
         out += ']';
     }
+    if (!msg.content_parts.empty()) {
+        out += ",\"content_parts\":[";
+        for (std::size_t i = 0; i < msg.content_parts.size(); ++i) {
+            const auto& part = msg.content_parts[i];
+            if (i > 0) out += ',';
+            out += "{\"type\":\"";
+            out += part.type == core::llm::ContentPartType::Image ? "image" : "text";
+            out += '"';
+            if (part.type == core::llm::ContentPartType::Text) {
+                out += ",\"text\":\"";
+                core::utils::append_escaped(out, part.text);
+                out += '"';
+            } else {
+                out += ",\"path\":\"";
+                core::utils::append_escaped(out, part.path);
+                out += '"';
+                if (!part.mime_type.empty()) {
+                    out += ",\"mime_type\":\"";
+                    core::utils::append_escaped(out, part.mime_type);
+                    out += '"';
+                }
+                if (!part.detail.empty()) {
+                    out += ",\"detail\":\"";
+                    core::utils::append_escaped(out, part.detail);
+                    out += '"';
+                }
+            }
+            out += '}';
+        }
+        out += ']';
+    }
     out += '}';
 }
 
@@ -244,6 +275,30 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                                 tc.function.arguments = std::string(sv);
                         }
                         msg.tool_calls.push_back(std::move(tc));
+                    }
+                }
+
+                simdjson::dom::array parts_arr;
+                if (msg_el["content_parts"].get(parts_arr) == simdjson::SUCCESS) {
+                    for (simdjson::dom::element part_el : parts_arr) {
+                        core::llm::ContentPart part;
+                        if (part_el["type"].get(sv) == simdjson::SUCCESS
+                            && sv == "image") {
+                            part.type = core::llm::ContentPartType::Image;
+                        }
+                        if (part_el["text"].get(sv) == simdjson::SUCCESS) {
+                            part.text = std::string(sv);
+                        }
+                        if (part_el["path"].get(sv) == simdjson::SUCCESS) {
+                            part.path = std::string(sv);
+                        }
+                        if (part_el["mime_type"].get(sv) == simdjson::SUCCESS) {
+                            part.mime_type = std::string(sv);
+                        }
+                        if (part_el["detail"].get(sv) == simdjson::SUCCESS) {
+                            part.detail = std::string(sv);
+                        }
+                        msg.content_parts.push_back(std::move(part));
                     }
                 }
                 data.messages.push_back(std::move(msg));

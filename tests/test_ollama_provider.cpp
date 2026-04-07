@@ -7,14 +7,48 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <memory>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
 
+namespace {
+
+std::filesystem::path make_temp_image_file(std::string_view filename = "filo-ollama-image.png") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
+}
+
+} // namespace
+
 // ─────────────────────────────────────────────────────────────────────────────
 // parse_ollama_ndjson_line — text content
 // ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("OllamaProtocol - serialize emits images array for multimodal user input",
+          "[ollama][serializer][vision]") {
+    const auto image = make_temp_image_file();
+
+    ChatRequest req;
+    req.model = "gemma3";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_image_attachment(image.string()),
+        .content_parts = {
+            ContentPart::make_text("What is in this screenshot?"),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    OllamaProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("images":[")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("content":"What is in this screenshot?")"));
+}
 
 TEST_CASE("parse_ollama_ndjson_line - text content extracted with done=false", "[ollama][ndjson]") {
     auto r = parse_ollama_ndjson_line(

@@ -114,6 +114,34 @@ std::string serialize_gemini_request(const ChatRequest& req,
                 payload += "}}";
                 if (j < msg.tool_calls.size() - 1) payload += ',';
             }
+        } else if (!msg.content_parts.empty()) {
+            bool first_part = true;
+            for (const auto& part : msg.content_parts) {
+                if (part.type == ContentPartType::Text) {
+                    if (part.text.empty()) continue;
+                    if (!first_part) payload += ',';
+                    payload += R"({"text":")";
+                    payload += core::utils::escape_json_string(part.text);
+                    payload += R"("})";
+                    first_part = false;
+                    continue;
+                }
+
+                if (!first_part) payload += ',';
+                if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                    payload += R"({"inlineData":{"mimeType":")";
+                    payload += core::utils::escape_json_string(encoded->mime_type);
+                    payload += R"(","data":")";
+                    payload += core::utils::escape_json_string(encoded->base64_data);
+                    payload += R"("}})";
+                } else {
+                    payload += R"({"text":")";
+                    payload += core::utils::escape_json_string(
+                        unavailable_image_attachment_text(part.path));
+                    payload += R"("})";
+                }
+                first_part = false;
+            }
         } else {
             payload += R"({"text":")";
             payload += core::utils::escape_json_string(msg.content);

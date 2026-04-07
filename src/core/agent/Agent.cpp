@@ -247,11 +247,20 @@ void Agent::undo_last() {
 }
 
 std::string Agent::last_user_message() {
-    std::lock_guard lock(history_mutex_);
-    for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
-        if (it->role == "user") return it->content;
+    if (const auto last = last_user_turn(); last.has_value()) {
+        return core::llm::message_text_for_display(*last);
     }
     return {};
+}
+
+std::optional<core::llm::Message> Agent::last_user_turn() const {
+    std::lock_guard lock(history_mutex_);
+    for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+        if (it->role == "user") {
+            return *it;
+        }
+    }
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,12 +299,31 @@ void Agent::send_message(const std::string& user_message,
                          std::function<void(const std::string&, const std::string&)> tool_callback,
                          std::function<void()> done_callback,
                          TurnCallbacks turn_callbacks) {
+    send_message(
+        core::llm::Message{
+            .role = "user",
+            .content = user_message,
+        },
+        std::move(text_callback),
+        std::move(tool_callback),
+        std::move(done_callback),
+        std::move(turn_callbacks));
+}
+
+void Agent::send_message(core::llm::Message user_message,
+                         std::function<void(const std::string&)> text_callback,
+                         std::function<void(const std::string&, const std::string&)> tool_callback,
+                         std::function<void()> done_callback,
+                         TurnCallbacks turn_callbacks) {
     clear_stop_request();  // Reset cancellation flag for new turn
     auto turn_state = std::make_shared<TurnState>();
+    if (user_message.role.empty()) {
+        user_message.role = "user";
+    }
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
-        history_.push_back({"user", user_message, "", "", {}});
+        history_.push_back(std::move(user_message));
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }

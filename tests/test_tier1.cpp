@@ -225,6 +225,61 @@ TEST_CASE("BudgetTracker — thread-safe concurrent recording", "[tier1][budget]
     bt.reset_session();
 }
 
+TEST_CASE("Historical image turns degrade to text-only placeholders", "[tier1][multimodal]") {
+    core::llm::ChatRequest req;
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content_parts = {
+            core::llm::ContentPart::make_text("Look at "),
+            core::llm::ContentPart::make_image("/tmp/old.png", "image/png"),
+            core::llm::ContentPart::make_text(" please."),
+        },
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "assistant",
+        .content = "I see it.",
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "Now summarize the issue in text.",
+    });
+
+    core::llm::degrade_historical_image_inputs(req);
+
+    REQUIRE(req.messages[0].content_parts.empty());
+    REQUIRE(req.messages[0].content == "Look at [Attached image: /tmp/old.png] please.");
+    REQUIRE_FALSE(core::llm::request_has_image_input(req));
+}
+
+TEST_CASE("Latest user image turn is preserved during history degradation", "[tier1][multimodal]") {
+    core::llm::ChatRequest req;
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "[Attached image: /tmp/old.png]",
+        .content_parts = {
+            core::llm::ContentPart::make_image("/tmp/old.png", "image/png"),
+        },
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "assistant",
+        .content = "Older reply",
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "[Attached image: /tmp/new.png]",
+        .content_parts = {
+            core::llm::ContentPart::make_text("Compare this one."),
+            core::llm::ContentPart::make_image("/tmp/new.png", "image/png"),
+        },
+    });
+
+    core::llm::degrade_historical_image_inputs(req);
+
+    REQUIRE(req.messages[0].content_parts.empty());
+    REQUIRE(core::llm::message_has_image_input(req.messages.back()));
+    REQUIRE(core::llm::latest_user_message_has_image_input(req));
+}
+
 // ============================================================================
 // TokenUsage operators
 // ============================================================================

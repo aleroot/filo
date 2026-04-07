@@ -2310,10 +2310,17 @@ RunResult run(RunOptions opts) {
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
 
-        std::string final_text =
-            core::context::expand_mentions(text, std::filesystem::current_path());
+        const auto expanded_prompt =
+            core::context::expand_prompt(text, std::filesystem::current_path());
 
-        std::thread([final_text,
+        core::llm::Message user_message;
+        user_message.role = "user";
+        user_message.content = expanded_prompt.display_text;
+        if (core::llm::message_has_image_input(expanded_prompt.content_parts)) {
+            user_message.content_parts = expanded_prompt.content_parts;
+        }
+
+        std::thread([user_message = std::move(user_message),
                      agent,
                      assistant_index,
                      session_store,
@@ -2328,7 +2335,7 @@ RunResult run(RunOptions opts) {
                      &stream_chunk_timing_mutex,
                      &stream_chunk_last_at,
                      assistant_message_id = std::move(assistant_message_id)]() {
-            agent->send_message(final_text,
+            agent->send_message(user_message,
                 [assistant_index,
                  &update_assistant_message,
                  &assistant_turn_active,
