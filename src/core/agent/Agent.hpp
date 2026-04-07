@@ -2,6 +2,7 @@
 
 #include "../context/SessionContext.hpp"
 #include "../llm/ProviderManager.hpp"
+#include "../session/SessionEfficiencyController.hpp"
 #include "../tools/ToolManager.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "PermissionGate.hpp"
@@ -123,6 +124,12 @@ public:
         provider_ = std::move(provider);
     }
 
+    void set_efficiency_decision_fn(
+        std::function<void(const core::session::SessionEfficiencyDecision&)> fn) {
+        std::lock_guard lock(history_mutex_);
+        efficiency_decision_fn_ = std::move(fn);
+    }
+
 private:
     struct TurnState {
         int steps_taken = 0;
@@ -147,6 +154,9 @@ private:
     // Returns true if the tool call was approved (or doesn't need permission).
     [[nodiscard]] bool check_permission(const std::string& tool_name,
                                         const std::string& args);
+    [[nodiscard]] core::session::SessionEfficiencyDecision current_efficiency_decision_unlocked() const;
+    void reset_efficiency_tracking_unlocked();
+    void run_efficiency_rotation_if_needed();
 
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
     [[nodiscard]] const core::context::SessionContext& session_context() const noexcept {
@@ -177,6 +187,8 @@ private:
     std::string context_summary_;
     std::string stable_prompt_prefix_;
     bool stable_prompt_prefix_dirty_ = true;
+    core::session::SessionEfficiencyController efficiency_controller_;
+    std::function<void(const core::session::SessionEfficiencyDecision&)> efficiency_decision_fn_;
 
     // Cancellation support
     std::atomic<bool> stop_requested_{false};

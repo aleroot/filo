@@ -12,6 +12,7 @@
 #include "PromptComponents.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/history/PromptHistoryStore.hpp"
@@ -1344,6 +1345,7 @@ RunResult run(RunOptions opts) {
         data.stats.turn_count = stats_snapshot.turn_count;
         data.stats.tool_calls_total = stats_snapshot.tool_calls_total;
         data.stats.tool_calls_success = stats_snapshot.tool_calls_success;
+        data.handoff_summary = core::session::build_handoff_summary(data);
 
         std::string error;
         if (!session_store->save(data, &error)) {
@@ -1362,6 +1364,81 @@ RunResult run(RunOptions opts) {
         screen.PostEvent(Event::Custom);
         return std::format("Forked session {} into {}.", old_session_id, new_session_id);
     };
+
+    agent->set_efficiency_decision_fn(
+        [agent, session_store, &ui_mutex, &session_id, &session_created_at,
+         &session_file_path, &active_provider_name, &active_model_name,
+         &ui_messages, &screen](const core::session::SessionEfficiencyDecision& decision) {
+            auto snap_messages = agent->get_history();
+            auto snap_mode = agent->get_mode();
+            auto snap_context = agent->get_context_summary();
+
+            core::session::SessionData archived;
+            {
+                std::lock_guard lock(ui_mutex);
+                archived.session_id = session_id;
+                archived.created_at = session_created_at;
+                archived.provider = active_provider_name;
+                archived.model = active_model_name;
+            }
+            archived.last_active_at = core::session::SessionStore::now_iso8601();
+            archived.working_dir = std::filesystem::current_path().string();
+            archived.mode = snap_mode;
+            archived.context_summary = snap_context;
+            archived.messages = snap_messages;
+            archived.handoff_summary = core::session::build_handoff_summary(archived);
+
+            const auto& budget = core::budget::BudgetTracker::get_instance();
+            const auto total = budget.session_total();
+            archived.stats.prompt_tokens = total.prompt_tokens;
+            archived.stats.completion_tokens = total.completion_tokens;
+            archived.stats.cost_usd = budget.session_cost_usd();
+            const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
+            archived.stats.turn_count = stats_snapshot.turn_count;
+            archived.stats.tool_calls_total = stats_snapshot.tool_calls_total;
+            archived.stats.tool_calls_success = stats_snapshot.tool_calls_success;
+
+            std::string save_error;
+            if (!session_store->save(archived, &save_error)) {
+                core::logging::warn(
+                    "Skipping TUI session rotation for {} because archival save failed: {}",
+                    archived.session_id,
+                    save_error);
+                {
+                    std::lock_guard lock(ui_mutex);
+                    ui_messages.push_back(make_warning_message(std::format(
+                        "Filo skipped an internal session rotation because it could not archive the current segment.\nSession: {}\nReason: {}\nYour full context is still intact and no history was compacted.",
+                        archived.session_id,
+                        save_error.empty() ? std::string("unknown archival error.") : save_error)));
+                }
+                screen.PostEvent(ftxui::Event::Custom);
+                return;
+            }
+
+            agent->compact_history(archived.handoff_summary);
+            core::budget::BudgetTracker::get_instance().reset_session();
+            core::session::SessionStats::get_instance().reset();
+
+            const std::string old_session_id = archived.session_id;
+            const std::string new_session_id = core::session::SessionStore::generate_id();
+            const std::string new_created_at = core::session::SessionStore::now_iso8601();
+
+            {
+                std::lock_guard lock(ui_mutex);
+                core::session::SessionData new_segment;
+                new_segment.session_id = new_session_id;
+                new_segment.created_at = new_created_at;
+                session_id = new_session_id;
+                session_created_at = new_created_at;
+                session_file_path = session_store->compute_path(new_segment).string();
+                ui_messages.push_back(make_system_message(std::format(
+                    "Filo rotated the internal session to keep the working set lean.\nPrevious segment: {}  New segment: {}\nReason: {}\nContext was preserved through an internal handoff, so you can continue normally.",
+                    old_session_id,
+                    new_session_id,
+                    decision.reason.empty() ? std::string("session growth exceeded the efficiency budget.") : decision.reason)));
+            }
+            screen.PostEvent(ftxui::Event::Custom);
+        });
 
     auto activate_manual_mode = [&]() -> std::string {
         try {
@@ -2240,10 +2317,11 @@ RunResult run(RunOptions opts) {
                      agent,
                      assistant_index,
                      session_store,
-                     sid           = session_id,
-                     created_at    = session_created_at,
-                     provider_name = active_provider_name,
-                     model_name    = active_model_name,
+                     &ui_mutex,
+                     &session_id,
+                     &session_created_at,
+                     &active_provider_name,
+                     &active_model_name,
                      &update_assistant_message,
                      &assistant_turn_active,
                      &turn_activity_timers,
@@ -2297,8 +2375,10 @@ RunResult run(RunOptions opts) {
                 },
                 [](const std::string&, const std::string&) {},
                 // done_callback — update UI and auto-save session.
-                [assistant_index, agent, session_store, sid, created_at,
-                 provider_name, model_name, &update_assistant_message,
+                [assistant_index, agent, session_store,
+                 &ui_mutex, &session_id, &session_created_at,
+                 &active_provider_name, &active_model_name,
+                 &update_assistant_message,
                  &assistant_turn_active,
                  &turn_activity_timers,
                  &stream_chunk_timing_mutex,
@@ -2326,6 +2406,17 @@ RunResult run(RunOptions opts) {
                     auto snap_messages = agent->get_history();
                     auto snap_mode     = agent->get_mode();
                     auto snap_context  = agent->get_context_summary();
+                    std::string sid;
+                    std::string created_at;
+                    std::string provider_name;
+                    std::string model_name;
+                    {
+                        std::lock_guard lock(ui_mutex);
+                        sid = session_id;
+                        created_at = session_created_at;
+                        provider_name = active_provider_name;
+                        model_name = active_model_name;
+                    }
 
                     // Auto-save the session (detached; file I/O stays off the hot path).
                     std::thread([session_store, sid, created_at,
@@ -2353,6 +2444,7 @@ RunResult run(RunOptions opts) {
                         data.stats.turn_count         = snap.turn_count;
                         data.stats.tool_calls_total   = snap.tool_calls_total;
                         data.stats.tool_calls_success = snap.tool_calls_success;
+                        data.handoff_summary          = core::session::build_handoff_summary(data);
 
                         session_store->save(data);
                     }).detach();

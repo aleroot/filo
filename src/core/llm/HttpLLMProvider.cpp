@@ -158,6 +158,12 @@ bool HttpLLMProvider::should_estimate_cost() const {
     return !cred_source_ || !cred_source_->uses_subscription_billing();
 }
 
+void HttpLLMProvider::reset_conversation_state() {
+    if (protocol_) {
+        protocol_->reset_state();
+    }
+}
+
 void HttpLLMProvider::stream_response(const ChatRequest&                      request,
                                       std::function<void(const StreamChunk&)> callback) {
 

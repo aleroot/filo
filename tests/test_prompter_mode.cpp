@@ -6,12 +6,19 @@
 #include "core/session/SessionData.hpp"
 #include "core/session/SessionStore.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <format>
+#include <fstream>
 #include <future>
+#include <mutex>
 #include <optional>
+#include <simdjson.h>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace Catch::Matchers;
 
@@ -41,6 +48,62 @@ public:
     }
 };
 
+class RotatingPrompterProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest& request,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call <= 10) {
+            set_last_usage(call <= 4 ? 4'000 : 26'000, call <= 4 ? 400 : 800);
+
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = std::format("prompter-rotate-{}", call);
+            tool_call.type = "function";
+            tool_call.function.name = "get_current_time";
+            tool_call.function.arguments = "{}";
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        set_last_usage(3'000, 300);
+        callback(core::llm::StreamChunk::make_content("rotation complete"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    void reset_conversation_state() override {
+        reset_calls_.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] int reset_count() const noexcept {
+        return reset_calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+    std::atomic<int> reset_calls_{0};
+};
+
 struct TempDir {
     std::filesystem::path path;
 
@@ -57,7 +120,7 @@ struct TempDir {
     }
 };
 
-exec::prompter::RuntimeContext make_runtime(std::shared_ptr<MockProvider> provider) {
+exec::prompter::RuntimeContext make_runtime(std::shared_ptr<core::llm::LLMProvider> provider) {
     exec::prompter::RuntimeContext runtime;
     runtime.provider = std::move(provider);
     runtime.provider_name = "mock";
@@ -85,6 +148,27 @@ core::session::SessionData make_session(std::string id,
         core::llm::Message{.role = "assistant", .content = std::move(asst_msg)},
     };
     return data;
+}
+
+std::vector<std::string> extract_stream_event_session_ids(std::string_view output) {
+    std::vector<std::string> session_ids;
+    std::istringstream lines{std::string(output)};
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.empty()) {
+            continue;
+        }
+
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(line);
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(padded).get(doc) == simdjson::SUCCESS);
+
+        std::string_view session_id;
+        REQUIRE(doc["session_id"].get(session_id) == simdjson::SUCCESS);
+        session_ids.emplace_back(session_id);
+    }
+    return session_ids;
 }
 
 } // namespace
@@ -248,6 +332,80 @@ TEST_CASE("prompter stream-json emits partial events", "[prompter][stream-json]"
     REQUIRE_THAT(out.str(), ContainsSubstring("\"type\":\"result\""));
 }
 
+TEST_CASE("prompter stream-json keeps a stable public session id across rotation",
+          "[prompter][stream-json][rotation]") {
+    auto provider = std::make_shared<RotatingPrompterProvider>();
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = std::string(200'000, 'x');
+    opts.prompt_was_provided = true;
+    opts.output_format = "stream-json";
+    opts.output_format_was_provided = true;
+    opts.include_partial_messages = true;
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    TempDir tmp{"filo_prompter_rotation_stream_json_test"};
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE(err.str().empty());
+    REQUIRE(provider->call_count() == 11);
+    REQUIRE(provider->reset_count() == 1);
+
+    const auto session_ids = extract_stream_event_session_ids(out.str());
+    REQUIRE(session_ids.size() >= 4);
+    CHECK(std::all_of(
+        session_ids.begin(),
+        session_ids.end(),
+        [&](const std::string& value) { return value == session_ids.front(); }));
+    CHECK(diag.session_id != session_ids.front());
+}
+
+TEST_CASE("prompter skips rotation when archival save fails", "[prompter][rotation][save]") {
+    auto provider = std::make_shared<RotatingPrompterProvider>();
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = std::string(200'000, 'x');
+    opts.prompt_was_provided = true;
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    TempDir tmp{"filo_prompter_rotation_save_failure_test"};
+    const auto blocked_path = tmp.path / "sessions-blocked";
+    {
+        std::ofstream blocked(blocked_path);
+        REQUIRE(blocked.good());
+        blocked << "not a directory";
+    }
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, blocked_path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE(err.str().empty());
+    REQUIRE(provider->call_count() == 11);
+    REQUIRE(provider->reset_count() == 0);
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 11);
+
+    bool saw_original_user_prompt = false;
+    for (const auto& message : requests.back().messages) {
+        if (message.role == "user" && message.content == *opts.prompt) {
+            saw_original_user_prompt = true;
+            break;
+        }
+    }
+    CHECK(saw_original_user_prompt);
+}
+
 TEST_CASE("prompter validates incompatible partial-message flag", "[prompter][validation]") {
     auto provider = std::make_shared<MockProvider>();
 
@@ -286,7 +444,7 @@ TEST_CASE("prompter errors when no prompt and no stdin", "[prompter][validation]
     REQUIRE_THAT(err.str(), ContainsSubstring("requires a prompt"));
 }
 
-TEST_CASE("prompter --continue resumes project-scoped session", "[prompter][resume]") {
+TEST_CASE("prompter --continue starts a fresh segment from project handoff", "[prompter][resume]") {
     auto provider = std::make_shared<MockProvider>();
     provider->on_stream = [](const auto&, auto callback) {
         callback(core::llm::StreamChunk::make_content("continued"));
@@ -331,6 +489,61 @@ TEST_CASE("prompter --continue resumes project-scoped session", "[prompter][resu
     REQUIRE(diag.exit_code == 0);
     REQUIRE(diag.used_resumed_session);
     REQUIRE(diag.resumed_session_id == "right123");
+    REQUIRE(diag.session_id != "right123");
+
+    bool saw_old_user = false;
+    bool saw_new_user = false;
+    bool saw_old_task_in_handoff = false;
+    for (const auto& msg : provider->last_request.messages) {
+        if (msg.role == "user" && msg.content == "old user") {
+            saw_old_user = true;
+        }
+        if (msg.role == "user" && msg.content == "new task") {
+            saw_new_user = true;
+        }
+        if (msg.role == "system" && msg.content.find("old user") != std::string::npos) {
+            saw_old_task_in_handoff = true;
+        }
+    }
+    REQUIRE_FALSE(saw_old_user);
+    REQUIRE(saw_old_task_in_handoff);
+    REQUIRE(saw_new_user);
+}
+
+TEST_CASE("prompter --resume restores the raw transcript", "[prompter][resume]") {
+    auto provider = std::make_shared<MockProvider>();
+    provider->on_stream = [](const auto&, auto callback) {
+        callback(core::llm::StreamChunk::make_content("continued"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    TempDir tmp{"filo_prompter_resume_raw_test"};
+    core::session::SessionStore store(tmp.path);
+
+    auto data = make_session(
+        "resume123",
+        "2026-03-26T12:00:00Z",
+        std::filesystem::current_path().string(),
+        "old user",
+        "old answer",
+        "2026-03-26T12:00:00Z");
+    REQUIRE(store.save(data));
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "new task";
+    opts.prompt_was_provided = true;
+    opts.resume_session = "resume123";
+
+    exec::prompter::StreamInput input;
+    std::ostringstream out;
+    std::ostringstream err;
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE(diag.used_resumed_session);
+    REQUIRE(diag.session_id == "resume123");
 
     bool saw_old_user = false;
     bool saw_new_user = false;

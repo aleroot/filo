@@ -133,6 +133,46 @@ TEST_CASE("OpenAIResponsesProtocol - failed HTTP response does not advance conti
     REQUIRE(req2.previous_response_id.empty());
 }
 
+TEST_CASE("OpenAIResponsesProtocol - reset_state clears shared continuity",
+          "[openai][responses][continuity]") {
+    OpenAIResponsesProtocol owner;
+
+    auto stream1 = owner.clone();
+    ChatRequest req1;
+    req1.model = "gpt-5";
+    req1.messages.push_back(Message{
+        .role = "user",
+        .content = "First turn."
+    });
+
+    stream1->prepare_request(req1);
+    REQUIRE_FALSE(req1.prompt_cache_key.empty());
+    REQUIRE(req1.previous_response_id.empty());
+
+    const auto completed = stream1->parse_event(
+        "event: response.completed\n"
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_reset_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}");
+    REQUIRE(completed.done);
+
+    cpr::Header headers;
+    stream1->on_response(HttpResponse{200, "", headers});
+
+    owner.reset_state();
+
+    auto stream2 = owner.clone();
+    ChatRequest req2;
+    req2.model = "gpt-5";
+    req2.messages.push_back(Message{
+        .role = "user",
+        .content = "Second turn."
+    });
+
+    stream2->prepare_request(req2);
+    REQUIRE_FALSE(req2.prompt_cache_key.empty());
+    REQUIRE(req2.prompt_cache_key != req1.prompt_cache_key);
+    REQUIRE(req2.previous_response_id.empty());
+}
+
 TEST_CASE("OpenAIResponsesProtocol - serializer maps assistant tool calls and tool outputs",
           "[openai][responses][serializer][tools]") {
     OpenAIResponsesProtocol protocol;

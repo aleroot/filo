@@ -219,6 +219,10 @@ void Agent::clear_history() {
     context_summary_.clear();
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
+    reset_efficiency_tracking_unlocked();
+    if (provider_) {
+        provider_->reset_conversation_state();
+    }
     ensure_system_prompt();
 }
 
@@ -228,6 +232,10 @@ void Agent::compact_history(std::string summary) {
     history_.clear();
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
+    reset_efficiency_tracking_unlocked();
+    if (provider_) {
+        provider_->reset_conversation_state();
+    }
     ensure_system_prompt();
 }
 
@@ -434,6 +442,33 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             core::budget::BudgetTracker::get_instance().record(usage, model, should_estimate_cost);
             core::session::SessionStats::get_instance().record_turn(
                 model, usage, should_estimate_cost);
+
+            int max_context_size = provider ? provider->max_context_size() : 0;
+            if (max_context_size == 0 && !model.empty()) {
+                max_context_size = core::llm::get_max_context_size(model);
+            }
+
+            std::size_t total_chars = 0;
+            {
+                std::lock_guard lock(self->history_mutex_);
+                for (const auto& msg : self->history_) {
+                    total_chars += msg.content.size();
+                    for (const auto& tc : msg.tool_calls) {
+                        total_chars += tc.function.name.size() + tc.function.arguments.size();
+                    }
+                }
+                self->efficiency_controller_.record_turn({
+                    .prompt_tokens = usage.prompt_tokens,
+                    .completion_tokens = usage.completion_tokens,
+                    .estimated_history_tokens = total_chars / 4 + 1,
+                    .max_context_tokens = max_context_size,
+                    .provider_is_local = provider ? provider->capabilities().is_local : false,
+                    .provider_supports_prompt_caching =
+                        !model.empty() && core::llm::ModelRegistry::instance().supports(
+                            model,
+                            core::llm::ModelCapability::PromptCaching),
+                });
+            }
         }
 
         // Persist the assistant message (with accumulated tool calls)
@@ -457,6 +492,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         if (tool_calls_accum->empty()) {
             // Pure text response — we're done
+            self->run_efficiency_rotation_if_needed();
             self->check_auto_compact(text_callback);
             done_callback();
             return;
@@ -621,9 +657,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
 
             // 5. Continue the agentic loop
-            // Note: We don't check auto-compact here because we're in the middle
-            // of a multi-step execution. Compaction should only happen at natural
-            // conversation boundaries (pure text response, not during tool loops).
+            // A transparent rotation is safe here because the current step's
+            // tool results are already in history and the next request can
+            // continue from the handoff summary with a leaner working set.
+            self->run_efficiency_rotation_if_needed();
             self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
             } catch (const std::exception& e) {
                 core::logging::error("Agent tool loop crashed: {}", e.what());
@@ -678,6 +715,10 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     context_summary_ = context_summary;
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
+    reset_efficiency_tracking_unlocked();
+    if (provider_) {
+        provider_->reset_conversation_state();
+    }
 
     // Remove any stale system message — ensure_system_prompt() inserts a fresh one.
     std::erase_if(messages, [](const core::llm::Message& m){ return m.role == "system"; });
@@ -699,6 +740,28 @@ std::string Agent::get_context_summary() const {
 std::string Agent::get_active_model_name() const {
     std::lock_guard lock(history_mutex_);
     return active_model_;
+}
+
+core::session::SessionEfficiencyDecision Agent::current_efficiency_decision_unlocked() const {
+    return efficiency_controller_.current_decision();
+}
+
+void Agent::reset_efficiency_tracking_unlocked() {
+    efficiency_controller_.reset();
+}
+
+void Agent::run_efficiency_rotation_if_needed() {
+    std::function<void(const core::session::SessionEfficiencyDecision&)> efficiency_fn;
+    core::session::SessionEfficiencyDecision efficiency_decision;
+    {
+        std::lock_guard lock(history_mutex_);
+        efficiency_decision = current_efficiency_decision_unlocked();
+        efficiency_fn = efficiency_decision_fn_;
+    }
+    if (efficiency_decision.action == core::session::SessionEfficiencyDecision::Action::Rotate
+        && efficiency_fn) {
+        efficiency_fn(efficiency_decision);
+    }
 }
 
 void Agent::check_auto_compact(std::function<void(const std::string&)> text_callback) {

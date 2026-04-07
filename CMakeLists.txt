@@ -175,6 +175,8 @@ set(FILO_CORE_SOURCES
     src/core/tools/SkillLoader.cpp
     src/core/session/SessionStore.cpp
     src/core/session/SessionReport.cpp
+    src/core/session/SessionEfficiencyController.cpp
+    src/core/session/SessionHandoff.cpp
     src/core/history/PromptHistoryStore.cpp
     src/core/permissions/PermissionSystem.cpp
 )
@@ -343,6 +345,7 @@ add_executable(filo_tests
     tests/test_prompt_input.cpp
     tests/test_http_response_lifecycle.cpp
     tests/test_session.cpp
+    tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp
     tests/test_budget_tracker.cpp
     tests/test_agent_permissions.cpp
@@ -444,6 +447,7 @@ source_group(
         tests/test_auto_classifier.cpp
         tests/test_prompt_input.cpp
         tests/test_session.cpp
+        tests/test_session_efficiency.cpp
         tests/test_sessions_lifecycle.cpp
         tests/test_budget_tracker.cpp
         tests/test_agent_permissions.cpp

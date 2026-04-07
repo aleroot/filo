@@ -83,6 +83,7 @@ public:
      * display misleading per-token USD totals in session reports.
      */
     [[nodiscard]] bool should_estimate_cost() const override;
+    void reset_conversation_state() override;
 
     /**
      * @brief Return the maximum context size for the default model.

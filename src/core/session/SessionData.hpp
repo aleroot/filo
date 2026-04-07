@@ -23,6 +23,7 @@ struct SessionData {
     std::string model;          ///< active model name
     std::string mode = "BUILD"; ///< agent mode
     std::string context_summary;
+    std::string handoff_summary;
 
     /// Conversation messages — system message is excluded (regenerated on load).
     std::vector<core::llm::Message> messages;

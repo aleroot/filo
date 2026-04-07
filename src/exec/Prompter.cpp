@@ -7,6 +7,7 @@
 #include "core/llm/ProviderManager.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
@@ -718,14 +719,70 @@ RunDiagnostics run_for_test(const RunOptions& options,
     if (resumed_session.has_value()) {
         diagnostics.used_resumed_session = true;
         diagnostics.resumed_session_id = resumed_session->session_id;
-        session_id = resumed_session->session_id;
-        created_at = resumed_session->created_at;
-
-        agent->load_history(
-            resumed_session->messages,
-            resumed_session->context_summary,
-            resumed_session->mode);
+        if (options.continue_last) {
+            agent->load_history(
+                {},
+                core::session::build_handoff_summary(*resumed_session),
+                resumed_session->mode);
+        } else {
+            session_id = resumed_session->session_id;
+            created_at = resumed_session->created_at;
+            agent->load_history(
+                resumed_session->messages,
+                resumed_session->context_summary,
+                resumed_session->mode);
+        }
     }
+
+    // Keep one stable external session id for the entire prompter run even if
+    // the internal persisted session rotates between tool-loop steps.
+    const std::string emitted_session_id = session_id;
+
+    agent->set_efficiency_decision_fn(
+        [agent, &store, &session_id, &created_at, &runtime](
+            const core::session::SessionEfficiencyDecision&) {
+            auto snap_messages = agent->get_history();
+            auto snap_mode = agent->get_mode();
+            auto snap_context = agent->get_context_summary();
+
+            core::session::SessionData archived;
+            archived.session_id = session_id;
+            archived.created_at = created_at;
+            archived.last_active_at = core::session::SessionStore::now_iso8601();
+            archived.working_dir = std::filesystem::current_path().string();
+            archived.provider = runtime.provider_name;
+            archived.model = runtime.model_name;
+            archived.mode = snap_mode;
+            archived.context_summary = snap_context;
+            archived.messages = snap_messages;
+
+            const auto& budget = core::budget::BudgetTracker::get_instance();
+            const auto total = budget.session_total();
+            archived.stats.prompt_tokens = total.prompt_tokens;
+            archived.stats.completion_tokens = total.completion_tokens;
+            archived.stats.cost_usd = budget.session_cost_usd();
+            const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
+            archived.stats.turn_count = stats_snapshot.turn_count;
+            archived.stats.tool_calls_total = stats_snapshot.tool_calls_total;
+            archived.stats.tool_calls_success = stats_snapshot.tool_calls_success;
+            archived.handoff_summary = core::session::build_handoff_summary(archived);
+
+            std::string save_error;
+            if (!store.save(archived, &save_error)) {
+                core::logging::warn(
+                    "Skipping prompter session rotation for {} because archival save failed: {}",
+                    archived.session_id,
+                    save_error);
+                return;
+            }
+
+            agent->compact_history(archived.handoff_summary);
+            core::budget::BudgetTracker::get_instance().reset_session();
+            core::session::SessionStats::get_instance().reset();
+
+            session_id = core::session::SessionStore::generate_id();
+            created_at = core::session::SessionStore::now_iso8601();
+        });
 
     std::mutex emit_mutex;
     std::vector<std::string> buffered_events;
@@ -757,7 +814,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     if (output_format != OutputFormat::Text) {
         const std::string mode_name = agent->get_mode();
         emit_event(make_session_start_event(
-            session_id,
+            emitted_session_id,
             runtime.provider_name,
             runtime.model_name,
             mode_name,
@@ -789,7 +846,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
             } else if (output_format == OutputFormat::StreamJson
                        && options.include_partial_messages
                        && !chunk.empty()) {
-                emit_event(make_assistant_delta_event(session_id, chunk));
+                emit_event(make_assistant_delta_event(emitted_session_id, chunk));
             }
         },
         [&](const std::string& tool_name, const std::string& tool_payload) {
@@ -802,7 +859,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
             if (output_format == OutputFormat::StreamJson) {
                 emit_event(make_tool_event(
-                    session_id,
+                    emitted_session_id,
                     "start",
                     tool_name,
                     tool_payload,
@@ -835,7 +892,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
                 if (output_format == OutputFormat::StreamJson) {
                     emit_event(make_tool_event(
-                        session_id,
+                        emitted_session_id,
                         "finish",
                         tool_call.function.name,
                         result.content,
@@ -889,12 +946,12 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     if (output_format != OutputFormat::Text) {
         emit_event(make_assistant_message_event(
-            session_id,
+            emitted_session_id,
             runtime.model_name,
             diagnostics.final_text_response));
 
         emit_event(make_result_event(
-            session_id,
+            emitted_session_id,
             request_failed,
             duration_ms,
             diagnostics.final_text_response,
@@ -927,6 +984,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     data.stats.turn_count = snapshot.turn_count;
     data.stats.tool_calls_total = snapshot.tool_calls_total;
     data.stats.tool_calls_success = snapshot.tool_calls_success;
+    data.handoff_summary = core::session::build_handoff_summary(data);
 
     std::string save_error;
     if (!store.save(data, &save_error)) {

@@ -356,6 +356,15 @@ void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
     }
 }
 
+void OpenAIResponsesProtocol::reset_state() {
+    std::scoped_lock lock(shared_state_->mutex);
+    shared_state_->previous_response_id.clear();
+    shared_state_->prompt_cache_key.clear();
+    in_progress_response_id_.clear();
+    last_response_id_.clear();
+    saw_text_delta_ = false;
+}
+
 std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
     std::string payload;
     payload.reserve(8192);

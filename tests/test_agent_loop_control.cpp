@@ -135,6 +135,64 @@ private:
     std::vector<core::llm::ChatRequest> requests_;
 };
 
+class RotatingToolLoopProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call <= 10) {
+            set_last_usage(call <= 4 ? 4'000 : 26'000, call <= 4 ? 400 : 800);
+
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = std::format("rotate-{}", call);
+            tool_call.type = "function";
+            tool_call.function.name = std::string(kLoopToolName);
+            tool_call.function.arguments = "{}";
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        set_last_usage(3'000, 300);
+        callback(core::llm::StreamChunk::make_content("rotation complete"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    void reset_conversation_state() override {
+        reset_calls_.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] int reset_count() const noexcept {
+        return reset_calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+    std::atomic<int> reset_calls_{0};
+};
+
 void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
                    const std::string& prompt) {
     std::mutex done_mutex;
@@ -307,4 +365,45 @@ TEST_CASE("Agent project context follows the explicit SessionContext workspace",
     const auto& system_prompt = requests[0].messages[0].content;
     CHECK(system_prompt.find("workspace_marker.txt") != std::string::npos);
     CHECK(system_prompt.find("cwd_marker.txt") == std::string::npos);
+}
+
+TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {
+    auto provider = std::make_shared<RotatingToolLoopProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<NoopLoopTool>());
+
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    int rotations = 0;
+    bool saw_rotate_decision = false;
+    agent->set_efficiency_decision_fn(
+        [agent, &rotations, &saw_rotate_decision](const core::session::SessionEfficiencyDecision& decision) {
+            ++rotations;
+            saw_rotate_decision =
+                decision.action == core::session::SessionEfficiencyDecision::Action::Rotate;
+            agent->compact_history("Carry forward the loop rotation state.");
+        });
+
+    send_and_wait(agent, std::string(200'000, 'x'));
+
+    CHECK(rotations == 1);
+    CHECK(saw_rotate_decision);
+    CHECK(provider->call_count() == 11);
+    CHECK(provider->reset_count() == 1);
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 11);
+
+    bool third_request_has_user = false;
+    for (const auto& message : requests.back().messages) {
+        if (message.role == "user") {
+            third_request_has_user = true;
+            break;
+        }
+    }
+
+    CHECK_FALSE(third_request_has_user);
 }

@@ -34,6 +34,7 @@ public:
                                         std::string_view model) const override;
 
     void prepare_request(ChatRequest& request) override;
+    void reset_state() override;
 
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;

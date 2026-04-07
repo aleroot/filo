@@ -163,6 +163,8 @@ std::string SessionStore::to_json(const SessionData& data) {
     core::utils::append_escaped(out, data.mode);
     out += "\",\"context_summary\":\"";
     core::utils::append_escaped(out, data.context_summary);
+    out += "\",\"handoff_summary\":\"";
+    core::utils::append_escaped(out, data.handoff_summary);
     out += "\",\"messages\":[";
 
     for (std::size_t i = 0; i < data.messages.size(); ++i) {
@@ -216,6 +218,7 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
         get_str("model",           data.model);
         get_str("mode",            data.mode);
         get_str("context_summary", data.context_summary);
+        get_str("handoff_summary", data.handoff_summary);
 
         simdjson::dom::array messages_arr;
         if (doc["messages"].get(messages_arr) == simdjson::SUCCESS) {

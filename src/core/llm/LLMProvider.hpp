@@ -49,6 +49,16 @@ public:
     [[nodiscard]] virtual bool should_estimate_cost() const { return true; }
 
     /**
+     * @brief Reset provider-managed conversation continuity state.
+     *
+     * Some providers maintain opaque response-chain state or server-side prompt
+     * cache keys across turns. Filo calls this when it intentionally rotates or
+     * compacts a session so the backend starts from the new handoff summary
+     * rather than the old full transcript.
+     */
+    virtual void reset_conversation_state() {}
+
+    /**
      * @brief Return the maximum context size (in tokens) for the current model.
      *        Returns 0 if unknown. Used for auto-compaction decisions.
      *        HTTP-based providers should override this based on the model's specs.

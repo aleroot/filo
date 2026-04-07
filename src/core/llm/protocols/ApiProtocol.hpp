@@ -500,6 +500,14 @@ public:
     [[nodiscard]] virtual RateLimitInfo last_rate_limit() const noexcept {
         return RateLimitInfo{};
     }
+
+    /**
+     * @brief Reset protocol-managed continuity state.
+     *
+     * Stateful protocols can override this to forget prior response handles or
+     * prompt cache keys when Filo intentionally starts a fresh session segment.
+     */
+    virtual void reset_state() {}
 };
 
 } // namespace core::llm::protocols

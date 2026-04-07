@@ -1,5 +1,6 @@
 #include "RouterProvider.hpp"
 #include "../../budget/BudgetTracker.hpp"
+#include "../../logging/Logger.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -362,6 +363,19 @@ std::string RouterProvider::get_last_model() const {
 bool RouterProvider::should_estimate_cost() const {
     std::lock_guard lock(state_mutex_);
     return last_should_estimate_cost_;
+}
+
+void RouterProvider::reset_conversation_state() {
+    for (const auto& [provider_name, _] : provider_default_models_) {
+        try {
+            if (auto provider = provider_manager_.get_provider(provider_name)) {
+                provider->reset_conversation_state();
+            }
+        } catch (const std::exception& e) {
+            core::logging::warn("Failed to reset conversation state for provider {}: {}",
+                                provider_name, e.what());
+        }
+    }
 }
 
 std::string RouterProvider::active_policy() const {

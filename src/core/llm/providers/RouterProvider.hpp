@@ -22,6 +22,7 @@ public:
 
     [[nodiscard]] std::string get_last_model() const override;
     [[nodiscard]] bool should_estimate_cost() const override;
+    void reset_conversation_state() override;
 
     [[nodiscard]] std::string active_policy() const;
     [[nodiscard]] std::string last_route_summary() const;
