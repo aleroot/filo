@@ -3901,7 +3901,7 @@ RunResult run(RunOptions opts) {
         Elements left_items;
         left_items.push_back(
             text(std::string(" ") + modes[current_mode_idx].first + " ")
-                | bold | bgcolor(modes[current_mode_idx].second) | color(Color::White));
+                | ftxui::bold | bgcolor(modes[current_mode_idx].second) | color(Color::White));
         if (ui_show_model_info) {
             left_items.push_back(
                 text(" " + active_provider_name + " · "
@@ -3933,7 +3933,7 @@ RunResult run(RunOptions opts) {
         window_rows.push_back(std::move(status_el));
 
         return UiWindow(
-            text(std::format(" {} ", kAppVersion)) | color(ColorYellowBright) | bold,
+            text(std::format(" {} ", kAppVersion)) | color(ColorYellowBright) | ftxui::bold,
             vbox(std::move(window_rows))
         ) | color(ColorYellowBright);
     });

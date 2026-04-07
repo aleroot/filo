@@ -337,11 +337,11 @@ static Element render_span(const TextSpan& span, Color base)
         case SpanKind::Normal:
             return ftxui::text(span.text) | ftxui::color(base);
         case SpanKind::Bold:
-            return ftxui::text(span.text) | ftxui::color(base) | bold;
+            return ftxui::text(span.text) | ftxui::color(base) | ftxui::bold;
         case SpanKind::Italic:
             return ftxui::text(span.text) | ftxui::color(base) | italic;
         case SpanKind::BoldItalic:
-            return ftxui::text(span.text) | ftxui::color(base) | bold | italic;
+            return ftxui::text(span.text) | ftxui::color(base) | ftxui::bold | italic;
         case SpanKind::Strikethrough:
             return ftxui::text(span.text) | ftxui::color(base) | strikethrough;
         case SpanKind::Code:
@@ -380,11 +380,11 @@ static Element render_inline_line(std::string_view line, Color base)
             case SpanKind::Normal:
                 return paragraph(s.text) | ftxui::color(base) | xflex;
             case SpanKind::Bold:
-                return paragraph(s.text) | ftxui::color(base) | bold | xflex;
+                return paragraph(s.text) | ftxui::color(base) | ftxui::bold | xflex;
             case SpanKind::Italic:
                 return paragraph(s.text) | ftxui::color(base) | italic | xflex;
             case SpanKind::BoldItalic:
-                return paragraph(s.text) | ftxui::color(base) | bold | italic | xflex;
+                return paragraph(s.text) | ftxui::color(base) | ftxui::bold | italic | xflex;
             case SpanKind::Strikethrough:
                 return paragraph(s.text) | ftxui::color(base) | strikethrough | xflex;
             default: break;
@@ -754,7 +754,7 @@ static Element render_heading(const Block& block)
         Elements es;
         for (const auto& s : spans) {
             Element e = render_span(s, fg);
-            if (do_bold)            e = std::move(e) | bold;
+            if (do_bold)            e = std::move(e) | ftxui::bold;
             if (do_underline_double)e = std::move(e) | underlinedDouble;
             else if (do_underline)  e = std::move(e) | underlined;
             es.push_back(std::move(e));
@@ -807,7 +807,7 @@ static Element render_code_block(const Block& block)
     if (!block.language.empty()) {
         auto title = hbox({
             ftxui::text("  "),
-            ftxui::text(block.language) | ftxui::color(kMdCodeFg) | bold,
+            ftxui::text(block.language) | ftxui::color(kMdCodeFg) | ftxui::bold,
             ftxui::text("  "),
         });
         return UiWindow(std::move(title), std::move(content));
@@ -868,7 +868,7 @@ static Element render_table(const Block& block)
                 render_inline_line(cell, fg),
                 ftxui::text(" "),
             }) | xflex;
-            if (hdr) cell_el = std::move(cell_el) | bold;
+            if (hdr) cell_el = std::move(cell_el) | ftxui::bold;
             row_elems.push_back(std::move(cell_el));
         }
         grid.push_back(std::move(row_elems));

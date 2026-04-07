@@ -386,7 +386,7 @@ Element render_permission_diff_line(const DiffLinePreview& line, std::size_t num
 
     return hbox({
         text(std::format("{} {} ", old_col, new_col)) | color(Color::GrayDark),
-        text(marker + " ") | color(marker_color) | bold,
+        text(marker + " ") | color(marker_color) | ftxui::bold,
         text(line.content.empty() ? " " : line.content) | color(line_color) | xflex
     });
 }
@@ -427,7 +427,7 @@ Element render_permission_diff_preview(const ToolDiffPreview& preview) {
         panel_rows.push_back(
             paragraph(std::format("File: {}", preview.title))
                 | color(ColorYellowBright)
-                | bold
+                | ftxui::bold
                 | xflex);
         panel_rows.push_back(separator());
     }
@@ -445,7 +445,7 @@ Element make_panel_shell(std::string_view tag,
                          Color tag_text = Color::Black) {
     return vbox({
         hbox({
-            text(std::format(" {} ", tag)) | bold | color(tag_text) | bgcolor(accent),
+            text(std::format(" {} ", tag)) | ftxui::bold | color(tag_text) | bgcolor(accent),
             filler(),
             text(std::string(helper)) | color(Color::GrayDark)
         }),
@@ -456,7 +456,7 @@ Element make_panel_shell(std::string_view tag,
 
 Element make_prompt_line(Element input_line) {
     return hbox({
-        text(" > ") | bold | color(ColorYellowBright),
+        text(" > ") | ftxui::bold | color(ColorYellowBright),
         input_line | xflex
     }) | xflex;
 }
@@ -473,7 +473,7 @@ Element make_selection_row(std::string_view label,
                            bool selected,
                            Color accent) {
     auto row = vbox({
-        text(std::string(label)) | bold,
+        text(std::string(label)) | ftxui::bold,
         text(std::string(description)) | dim
     });
 
@@ -492,7 +492,7 @@ Element make_command_selection_row(const CommandSuggestion& suggestion,
         : suggestion.description;
 
     Elements title_chunks;
-    title_chunks.push_back(text(suggestion.display_name) | bold);
+    title_chunks.push_back(text(suggestion.display_name) | ftxui::bold);
     if (!suggestion.aliases_label.empty()) {
         title_chunks.push_back(
             text("  aliases: " + suggestion.aliases_label)
@@ -504,7 +504,7 @@ Element make_command_selection_row(const CommandSuggestion& suggestion,
         hbox({
             hbox(std::move(title_chunks)) | xflex,
             suggestion.accepts_arguments
-                ? (text("[args]") | color(badge_color) | bold)
+                ? (text("[args]") | color(badge_color) | ftxui::bold)
                 : emptyElement()
         }),
         text(description) | color(meta_color) | dim
@@ -536,7 +536,7 @@ Element render_search_snippet(std::string_view snippet,
 
     return hbox({
         paragraph(before) | color(base_color),
-        text(found) | bold | color(match_fg) | bgcolor(match_bg),
+        text(found) | ftxui::bold | color(match_fg) | bgcolor(match_bg),
         paragraph(after) | color(base_color) | xflex,
     });
 }
@@ -624,7 +624,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
     rows.reserve(kBannerLogoLines.size() + 6);
 
     for (const auto line : kBannerLogoLines) {
-        rows.push_back(text(std::string(line)) | color(ColorYellowBright) | bold);
+        rows.push_back(text(std::string(line)) | color(ColorYellowBright) | ftxui::bold);
     }
 
     rows.push_back(text(""));
@@ -736,14 +736,14 @@ Element render_permission_prompt_panel(std::string_view tool_name,
         ColorWarn);
 
     auto preview_box = vbox({
-        hbox({ text("Tool") | dim, filler(), text(std::string(tool_name)) | bold | color(ColorYellowBright) }),
+        hbox({ text("Tool") | dim, filler(), text(std::string(tool_name)) | ftxui::bold | color(ColorYellowBright) }),
         separator(),
         render_permission_fields(tool_name, args_preview)
     }) | UiBorder(ColorYellowDark);
 
     std::vector<Element> children = {
         hbox({
-            text("\xe2\x9a\xa0 WARNING ") | bold | color(ColorWarn),
+            text("\xe2\x9a\xa0 WARNING ") | ftxui::bold | color(ColorWarn),
             filler(),
             text("Up/Down: select  Enter: confirm  1/Y  2/A  3  4/N")
                 | color(Color::GrayDark)
@@ -808,7 +808,7 @@ Element render_model_selection_panel(int selected_index,
 
     return vbox({
         hbox({
-            text(" SELECT MODEL ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SELECT MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
             text("Up/Down: select  Enter: confirm  1/2/3: quick choose")
                 | color(Color::GrayDark)
@@ -835,7 +835,7 @@ Element render_provider_selection_panel(const std::vector<std::string>& provider
         const bool sel = (static_cast<int>(i) == selected_index);
         auto row = hbox({
             text(std::format(" [{}] ", i + 1)) | color(ColorYellowBright),
-            text(providers[i]) | bold
+            text(providers[i]) | ftxui::bold
         });
         rows.push_back(sel ? (row | bgcolor(ColorYellowDark) | color(Color::Black))
                            : (row | color(Color::White)));
@@ -843,7 +843,7 @@ Element render_provider_selection_panel(const std::vector<std::string>& provider
 
     return vbox({
         hbox({
-            text(" AUTH PROVIDER ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" AUTH PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
             text("Up/Down: select  Enter: confirm  Esc: cancel") | color(Color::GrayDark)
         }),
@@ -887,8 +887,8 @@ Element render_settings_panel(std::string_view scope_label,
 
     return vbox({
         hbox({
-            text(" SETTINGS ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
-            text("  " + std::string(scope_label)) | bold | color(ColorYellowBright),
+            text(" SETTINGS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text("  " + std::string(scope_label)) | ftxui::bold | color(ColorYellowBright),
             filler(),
             text("Tab: scope  Left/Right: change  Backspace: reset  Esc: close")
                 | color(Color::GrayDark)
@@ -948,7 +948,7 @@ Element render_local_model_picker_panel(std::string_view current_dir,
 
     return vbox({
         hbox({
-            text(" LOCAL MODEL ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" LOCAL MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
             text("\xe2\x86\x91\xe2\x86\x93  Enter: open/select  Esc: go up / close") | color(Color::GrayDark)
         }),
@@ -967,7 +967,7 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
     if (sessions.empty()) {
         return vbox({
             hbox({
-                text(" SESSIONS ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+                text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
                 filler(),
             }),
             separator(),
@@ -993,7 +993,7 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
 
         auto row = hbox({
             text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
-            text(std::format(" {} ", s.session_id)) | bold | color(is_selected ? ColorYellowBright : Color::White),
+            text(std::format(" {} ", s.session_id)) | ftxui::bold | color(is_selected ? ColorYellowBright : Color::White),
             text(std::format(" {}  ", ts)) | color(is_selected ? Color::White : Color::GrayDark),
             text(std::format("{}/{:18} ", s.provider, s.model)) | color(is_selected ? Color::White : Color::GrayLight),
             text(std::format(" {:3d} turns ", s.turn_count)) | color(is_selected ? Color::White : Color::GrayDark),
@@ -1018,7 +1018,7 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
 
     return vbox({
         hbox({
-            text(" SESSIONS ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
             text("\xe2\x86\x91\xe2\x86\x93  Enter: resume  Backspace/Del: delete  Esc: close") | color(Color::GrayDark)
         }),
@@ -1055,7 +1055,7 @@ Element render_conversation_search_panel(std::string_view query,
                 hbox({
                     text(selected ? " > " : "   ") | color(ColorYellowBright),
                     text(std::format("[{}] ", hit.message_index + 1)) | color(ColorYellowDark),
-                    text(hit.role) | bold | color(selected ? ColorYellowBright : Color::White),
+                    text(hit.role) | ftxui::bold | color(selected ? ColorYellowBright : Color::White),
                 }),
                 hbox({
                     text("   "),
@@ -1081,7 +1081,7 @@ Element render_conversation_search_panel(std::string_view query,
 
     return vbox({
         hbox({
-            text(" SEARCH ") | bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SEARCH ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
             text("Ctrl+F/Esc: close  Enter: jump  Backspace: edit  ↑↓: navigate")
                 | color(Color::GrayDark),
@@ -1091,7 +1091,7 @@ Element render_conversation_search_panel(std::string_view query,
             text(" Query: ") | color(ColorYellowBright),
             text(std::string(query.empty() ? "<empty>" : query))
                 | color(Color::White)
-                | bold
+                | ftxui::bold
                 | xflex
         }),
         separator(),
@@ -1250,7 +1250,7 @@ Element render_question_dialog_panel(const QuestionDialogState& state) {
     
     return vbox({
         hbox({
-            text(" ? QUESTION ") | bold | color(ColorQuestionCyan),
+            text(" ? QUESTION ") | ftxui::bold | color(ColorQuestionCyan),
             filler(),
             text("Up/Down: select  Enter: confirm  1-5: quick select  Esc: exit") | color(Color::GrayDark)
         }),

@@ -270,7 +270,7 @@ Element user_message_bubble(std::string_view content, std::string_view timestamp
 // ============================================================================
 
 Element render_info_badge(std::string_view icon, Color badge_color) {
-    return ftxui::text(std::string(icon)) | ftxui::color(badge_color) | bold;
+    return ftxui::text(std::string(icon)) | ftxui::color(badge_color) | ftxui::bold;
 }
 
 Element render_status_text(std::string_view text_content, Color text_color, std::size_t indent_width = 3) {
@@ -318,8 +318,8 @@ Element render_tool_header(const ToolActivity& tool,
                                    ? tui::tool_status_spinner(tick)
                                    : tui::tool_status_icon(tool.status));
     
-    Element status_el = ftxui::text(std::format(" {} ", icon)) | ftxui::color(status_color) | bold;
-    Element name_el = ftxui::text(tool.name) | bold | ftxui::color(ColorYellowBright);
+    Element status_el = ftxui::text(std::format(" {} ", icon)) | ftxui::color(status_color) | ftxui::bold;
+    Element name_el = ftxui::text(tool.name) | ftxui::bold | ftxui::color(ColorYellowBright);
     
     std::vector<Element> header_items;
     header_items.push_back(std::move(status_el));
@@ -391,7 +391,7 @@ Element render_tool_result(const ToolActivity& tool,
         if (tool.result.exit_code.has_value()) {
             label += std::format(" (exit {})", *tool.result.exit_code);
         }
-        rows.push_back(ftxui::text(std::move(label)) | ftxui::color(ColorYellowDark) | bold);
+        rows.push_back(ftxui::text(std::move(label)) | ftxui::color(ColorYellowDark) | ftxui::bold);
     }
 
     const std::size_t preview_lines = options.tool_result_preview_max_lines == 0
@@ -436,7 +436,7 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview) {
     std::vector<Element> rows;
     if (!preview.title.empty()) {
         rows.push_back(ftxui::text(std::format("Diff: {}", preview.title)) | 
-                      ftxui::color(ColorYellowDark) | bold);
+                      ftxui::color(ColorYellowDark) | ftxui::bold);
     }
     
     for (const auto& line : preview.lines) {
