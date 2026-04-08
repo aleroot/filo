@@ -3,9 +3,11 @@
 #include "DiffPreview.hpp"
 #include "Constants.hpp"
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/box.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace tui {
@@ -81,6 +83,7 @@ struct UiMessage {
     // Content (varies by type)
     std::string text;                    // Primary text content
     std::string secondary_text;          // Secondary/subtitle text
+    std::string disclosure_text;         // Optional expandable details (collapsed by default)
     std::string icon;                    // Custom icon override
     
     // Visual styling
@@ -165,7 +168,10 @@ struct ConversationState {
 struct ConversationRenderOptions {
     bool        show_timestamps = true;
     bool        show_spinner = true;
+    bool        expand_system_details = false;
     bool        expand_tool_results = false;
+    std::unordered_map<std::string, bool>* system_disclosure_expanded = nullptr;
+    std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
     float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
 };
@@ -195,6 +201,8 @@ UiMessage make_tool_group_message(std::vector<ToolActivity> tools,
 
 // System message
 UiMessage make_system_message(std::string text);
+UiMessage make_system_disclosure_message(std::string summary,
+                                         std::string details);
 
 // Tool activity factory
 ToolActivity make_tool_activity(std::string id,
@@ -262,6 +270,7 @@ ftxui::Element render_error_message(const UiMessage& msg);
 ftxui::Element render_tool_group(const UiMessage& msg,
                                  std::size_t tick,
                                  const ConversationRenderOptions& options);
-ftxui::Element render_system_message(const UiMessage& msg);
+ftxui::Element render_system_message(const UiMessage& msg,
+                                     const ConversationRenderOptions& options);
 
 } // namespace tui

@@ -647,6 +647,13 @@ UiMessage make_system_message(std::string text) {
     return msg;
 }
 
+UiMessage make_system_disclosure_message(std::string summary,
+                                         std::string details) {
+    UiMessage msg = make_system_message(std::move(summary));
+    msg.disclosure_text = std::move(details);
+    return msg;
+}
+
 ToolActivity make_tool_activity(std::string id,
                                  std::string name,
                                  std::string args,
@@ -903,7 +910,46 @@ Element render_tool_group(const UiMessage& msg,
     return render_tool_group_container(msg, tick, options, 100);
 }
 
-Element render_system_message(const UiMessage& msg) {
+Element render_system_message(const UiMessage& msg,
+                              const ConversationRenderOptions& options) {
+    if (!msg.disclosure_text.empty()) {
+        std::vector<Element> lines;
+        bool expanded = options.expand_system_details;
+        if (options.system_disclosure_expanded != nullptr) {
+            if (const auto it = options.system_disclosure_expanded->find(msg.id);
+                it != options.system_disclosure_expanded->end()) {
+                expanded = expanded || it->second;
+            }
+        }
+
+        std::string summary = std::string(expanded ? "▼ " : "▶ ") + msg.text;
+        if (!expanded) {
+            summary += "  (click or Ctrl+O for details)";
+        }
+
+        Element summary_el = ftxui::text(std::move(summary)) | ftxui::color(ColorYellowDark);
+        if (options.system_disclosure_hitboxes != nullptr) {
+            auto& box = (*options.system_disclosure_hitboxes)[msg.id];
+            summary_el = std::move(summary_el) | reflect(box);
+        }
+        lines.push_back(std::move(summary_el));
+
+        if (expanded) {
+            for (const auto& line : split_lines(msg.disclosure_text)) {
+                if (line.empty()) {
+                    lines.push_back(ftxui::text(""));
+                    continue;
+                }
+                lines.push_back(
+                    hbox({
+                        ftxui::text("  "),
+                        paragraph(line) | ftxui::color(Color::GrayDark) | xflex,
+                    }) | xflex);
+            }
+        }
+        return vbox(std::move(lines));
+    }
+
     std::vector<Element> lines;
     for (const auto& line : split_lines(msg.text)) {
         lines.push_back(ftxui::text(line) | ftxui::color(ColorYellowDark));
@@ -975,7 +1021,7 @@ Element render_history_panel(const std::vector<UiMessage>& messages,
                 msg_elements.push_back(ftxui::text(""));
                 break;
             case MessageType::System:
-                msg_elements.push_back(render_system_message(msg));
+                msg_elements.push_back(render_system_message(msg, options));
                 break;
         }
     }

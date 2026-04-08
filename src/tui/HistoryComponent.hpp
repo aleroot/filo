@@ -4,10 +4,12 @@
 
 #include <atomic>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
+#include <ftxui/screen/box.hpp>
 
 namespace tui {
 
@@ -48,6 +50,8 @@ private:
     size_t last_message_count_ = 0;
     int estimated_content_lines_ = 1;
     std::size_t last_layout_fingerprint_ = 0;
+    std::unordered_map<std::string, bool> disclosure_expanded_;
+    std::unordered_map<std::string, ftxui::Box> disclosure_hitboxes_;
 };
 
 } // namespace tui

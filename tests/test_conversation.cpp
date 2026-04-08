@@ -17,11 +17,37 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "tui/Conversation.hpp"
-#include "tui/DiffPreview.hpp"
 #include "tui/TuiTheme.hpp"
+
+#include <ftxui/screen/screen.hpp>
 
 using namespace tui;
 using Catch::Matchers::ContainsSubstring;
+
+namespace {
+std::string strip_ansi(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size();) {
+        if (input[i] == '\x1b' && i + 1 < input.size() && input[i + 1] == '[') {
+            i += 2;
+            while (i < input.size()) {
+                const char ch = input[i++];
+                if (ch >= '@' && ch <= '~') {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        out.push_back(input[i]);
+        ++i;
+    }
+
+    return out;
+}
+} // namespace
 
 // ============================================================================
 // Message Factory Tests
@@ -78,6 +104,15 @@ TEST_CASE("make_system_message — basic creation", "[tui][conversation][factory
     auto msg = make_system_message("System notification");
     REQUIRE(msg.type == MessageType::System);
     REQUIRE(msg.text == "System notification");
+}
+
+TEST_CASE("make_system_disclosure_message — basic creation", "[tui][conversation][factory]") {
+    auto msg = make_system_disclosure_message(
+        "Internal session rotated.",
+        "Previous segment: old\nNew segment: new");
+    REQUIRE(msg.type == MessageType::System);
+    REQUIRE(msg.text == "Internal session rotated.");
+    REQUIRE(msg.disclosure_text == "Previous segment: old\nNew segment: new");
 }
 
 TEST_CASE("make_tool_group_message — with tools", "[tui][conversation][factory]") {
@@ -354,6 +389,48 @@ TEST_CASE("render_history_panel — system message", "[tui][conversation][render
     std::vector<UiMessage> messages;
     messages.push_back(make_system_message("System notification"));
     REQUIRE_NOTHROW(render_history_panel(messages, 0));
+}
+
+TEST_CASE("render_history_panel — system disclosure is compact by default",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_system_disclosure_message(
+        "Internal session rotated to keep the working set lean (context preserved).",
+        "Previous segment: seg-a\nNew segment: seg-b\nReason: threshold"));
+
+    auto panel = render_history_panel(messages, 0);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, ContainsSubstring("Internal session rotated"));
+    REQUIRE_THAT(output, ContainsSubstring("click or Ctrl+O for details"));
+    REQUIRE_THAT(output, !ContainsSubstring("Previous segment: seg-a"));
+}
+
+TEST_CASE("render_history_panel — system disclosure expands with option",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_system_disclosure_message(
+        "Internal session rotated to keep the working set lean (context preserved).",
+        "Previous segment: seg-a\nNew segment: seg-b\nReason: threshold"));
+
+    auto panel = render_history_panel(
+        messages,
+        0,
+        ConversationRenderOptions{
+            .expand_system_details = true,
+        });
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, ContainsSubstring("Internal session rotated"));
+    REQUIRE_THAT(output, ContainsSubstring("Previous segment: seg-a"));
+    REQUIRE_THAT(output, ContainsSubstring("New segment: seg-b"));
+    REQUIRE_THAT(output, ContainsSubstring("Reason: threshold"));
 }
 
 TEST_CASE("render_history_panel — tool group", "[tui][conversation][render]") {

@@ -1011,6 +1011,36 @@ TEST_CASE("FileSearchTool finds nested files", "[tools]") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("FileSearchTool supports path-aware glob patterns", "[tools]") {
+    const std::string dir = "test_artifact_filesearch_path_glob";
+    std::filesystem::create_directories(dir + "/modules/mission/src/main/kotlin");
+    std::filesystem::create_directories(dir + "/modules/core/src/main/kotlin");
+    { std::ofstream(dir + "/modules/mission/src/main/kotlin/MissionController.kt") << "x"; }
+    { std::ofstream(dir + "/modules/core/src/main/kotlin/CoreController.kt") << "x"; }
+
+    FileSearchTool tool;
+    auto res = tool.execute("{\"pattern\":\"**/mission/**/*.kt\",\"path\":\"" + dir + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("MissionController.kt"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("CoreController.kt"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("FileSearchTool treats plain directory patterns as recursive filters", "[tools]") {
+    const std::string dir = "test_artifact_filesearch_dir_pattern";
+    std::filesystem::create_directories(dir + "/modules/mission/src");
+    std::filesystem::create_directories(dir + "/modules/core/src");
+    { std::ofstream(dir + "/modules/mission/src/MissionController.kt") << "x"; }
+    { std::ofstream(dir + "/modules/core/src/CoreController.kt") << "x"; }
+
+    FileSearchTool tool;
+    auto res = tool.execute("{\"pattern\":\"modules/mission\",\"path\":\"" + dir + "\"}");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("MissionController.kt"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("CoreController.kt"));
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("FileSearchTool skips .git directory", "[tools]") {
     const std::string dir = "test_artifact_filesearch_git";
     std::filesystem::create_directories(dir + "/.git");
@@ -1380,6 +1410,36 @@ TEST_CASE("GrepSearchTool include_pattern restricts to matching filenames", "[to
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("c.hpp"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("b.cpp"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("d.txt"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool include_pattern supports path-aware globs", "[tools][grep]") {
+    const std::string dir = "test_grep_include_path_glob";
+    std::filesystem::create_directories(dir + "/modules/mission/src/main/kotlin");
+    std::filesystem::create_directories(dir + "/modules/core/src/main/kotlin");
+    { std::ofstream(dir + "/modules/mission/src/main/kotlin/MissionController.kt") << "needle\n"; }
+    { std::ofstream(dir + "/modules/core/src/main/kotlin/CoreController.kt") << "needle\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("needle", dir, "**/mission/**/*.kt"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("MissionController.kt"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("CoreController.kt"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool include_pattern treats plain directory values as recursive filters", "[tools][grep]") {
+    const std::string dir = "test_grep_include_dir_pattern";
+    std::filesystem::create_directories(dir + "/modules/mission/src");
+    std::filesystem::create_directories(dir + "/modules/core/src");
+    { std::ofstream(dir + "/modules/mission/src/MissionController.kt") << "needle\n"; }
+    { std::ofstream(dir + "/modules/core/src/CoreController.kt") << "needle\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("needle", dir, "modules/mission"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("MissionController.kt"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("CoreController.kt"));
 
     std::filesystem::remove_all(dir);
 }

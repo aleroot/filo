@@ -13,6 +13,8 @@ namespace core::tools {
  * - Pure C++ (@c std::regex) — no external tools required, works everywhere.
  * - Skips binary files (heuristic: null byte in first 512 B).
  * - Skips common noise directories: @c .git, @c node_modules, @c build, etc.
+ * - Optional @c include_pattern accepts glob filters by filename or relative path.
+ * - Plain directory values in @c include_pattern include files beneath that directory.
  * - Returns up to 100 matches across all files.
  *
  * ### Result JSON

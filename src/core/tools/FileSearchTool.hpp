@@ -12,6 +12,8 @@ namespace core::tools {
  * ### Behaviour
  * - Pure C++ — no external tools required, works everywhere.
  * - Supports @c * (any chars) and @c ? (single char) wildcards.
+ * - Patterns with path separators match against relative paths from the search root.
+ * - Plain directory patterns (for example @c modules/core) return files under that directory.
  * - Skips @c .git, @c node_modules, @c build, and similar directories.
  * - Returns up to 100 matching file paths.
  *

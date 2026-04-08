@@ -11,6 +11,7 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include <optional>
 
 // POSIX mmap for zero-copy file reading
 #include <sys/mman.h>
@@ -30,6 +31,39 @@ struct MatchResult {
     int64_t     line{};
     std::string text;
 };
+
+[[nodiscard]] std::string normalize_glob_pattern(std::string_view pattern) {
+    std::string normalized(pattern);
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    return normalized;
+}
+
+[[nodiscard]] bool is_subpath(const std::filesystem::path& root,
+                              const std::filesystem::path& target) {
+    const auto normalized_root = root.lexically_normal();
+    const auto normalized_target = target.lexically_normal();
+
+    auto root_it = normalized_root.begin();
+    auto target_it = normalized_target.begin();
+    while (root_it != normalized_root.end() && target_it != normalized_target.end()) {
+        if (*root_it != *target_it) {
+            return false;
+        }
+        ++root_it;
+        ++target_it;
+    }
+    return root_it == normalized_root.end();
+}
+
+[[nodiscard]] std::string relative_generic_path(const std::filesystem::path& file,
+                                                const std::filesystem::path& root) {
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(file, root, ec);
+    if (!ec) {
+        return relative.generic_string();
+    }
+    return file.generic_string();
+}
 
 // Returns true when 'pattern' contains no ECMAScript metacharacters, making
 // it safe to treat as a literal string and search with string_view::find
@@ -128,7 +162,10 @@ ToolDefinition GrepSearchTool::get_definition() const {
         .parameters = {
             {"pattern",         "string", "ECMAScript regex pattern to search for.", true},
             {"path",            "string", "Root directory to search. Defaults to '.'.", false},
-            {"include_pattern", "string", "Glob pattern to restrict searched files by name (e.g. '*.cpp').", false}
+            {"include_pattern", "string",
+             "Glob pattern to restrict searched files (e.g. '*.cpp', '**/example/**/*.kt', 'modules/core'). "
+             "Patterns with path separators match against relative paths; plain directory patterns include files beneath that directory.",
+             false}
         },
         .output_schema =
             R"({"type":"object","properties":{"matches":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"},"text":{"type":"string"}},"required":["path","line","text"],"additionalProperties":false},"description":"Matching lines with file path and 1-based line number."}},"required":["matches"],"additionalProperties":false})",
@@ -161,6 +198,10 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
 
     std::string_view include_v;
     const bool has_include = (doc["include_pattern"].get(include_v) == simdjson::SUCCESS);
+    const std::string include_pattern = has_include ? normalize_glob_pattern(include_v) : std::string{};
+    const bool include_has_separator = has_include && include_pattern.find('/') != std::string::npos;
+    const bool include_has_wildcards =
+        has_include && include_pattern.find_first_of("*?") != std::string::npos;
 
     std::filesystem::path resolved_dir;
     if (const auto access_error =
@@ -171,6 +212,18 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     std::error_code ec;
     if (!std::filesystem::is_directory(resolved_dir, ec))
         return R"({"error":"'path' does not exist or is not a directory."})";
+
+    std::optional<std::filesystem::path> include_directory_filter;
+    if (has_include && !include_has_wildcards) {
+        std::filesystem::path candidate = std::filesystem::path(include_pattern);
+        if (!candidate.is_absolute()) {
+            candidate = resolved_dir / candidate;
+        }
+        if (std::filesystem::is_directory(candidate, ec)
+            && is_subpath(resolved_dir, candidate)) {
+            include_directory_filter = candidate.lexically_normal();
+        }
+    }
 
     // ── Regex or literal? ───────────────────────────────────────────────────
     const bool literal_mode = is_literal_pattern(pattern);
@@ -203,8 +256,19 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
                 continue;
             }
             if (!entry.is_regular_file(ec)) continue;
-            if (has_include && !glob_match(include_v, entry.path().filename().string()))
-                continue;
+            if (has_include) {
+                bool include_match = false;
+                if (include_directory_filter.has_value()) {
+                    include_match = is_subpath(*include_directory_filter, entry.path());
+                } else if (include_has_separator) {
+                    include_match = glob_match(
+                        include_pattern,
+                        relative_generic_path(entry.path(), resolved_dir));
+                } else {
+                    include_match = glob_match(include_pattern, entry.path().filename().string());
+                }
+                if (!include_match) continue;
+            }
             files.push_back(entry.path());
         }
     }

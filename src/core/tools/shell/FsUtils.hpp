@@ -5,8 +5,9 @@
 
 namespace core::tools::detail {
 
-// Simple glob matcher for filename patterns — supports * (any sequence) and ? (any one char).
-// Intentionally does not support path separators or brace expansion.
+// Simple glob matcher — supports * (any sequence) and ? (any one char).
+// Path separators are treated as regular characters (there is no special '**' handling).
+// Brace expansion is intentionally unsupported.
 inline bool glob_match(std::string_view pattern, std::string_view name) {
     if (pattern.empty()) return name.empty();
     if (pattern[0] == '*') {

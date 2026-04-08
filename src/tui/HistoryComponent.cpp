@@ -58,7 +58,10 @@ int estimate_tool_line_cost(const ToolActivity& tool) {
     return std::max(lines, 1);
 }
 
-int estimate_message_line_cost(const UiMessage& msg) {
+int estimate_message_line_cost(
+    const UiMessage& msg,
+    const std::unordered_map<std::string, bool>& disclosure_expanded,
+    bool expand_all_system_details) {
     int lines = std::max(0, msg.margin_top);
 
     switch (msg.type) {
@@ -120,6 +123,16 @@ int estimate_message_line_cost(const UiMessage& msg) {
             if (!msg.secondary_text.empty()) {
                 lines += estimate_wrapped_line_count(msg.secondary_text);
             }
+            if (!msg.disclosure_text.empty()) {
+                bool expanded = expand_all_system_details;
+                if (const auto it = disclosure_expanded.find(msg.id);
+                    it != disclosure_expanded.end()) {
+                    expanded = expanded || it->second;
+                }
+                if (expanded) {
+                    lines += estimate_wrapped_line_count(msg.disclosure_text);
+                }
+            }
             break;
         }
         case MessageType::ToolGroup: {
@@ -138,10 +151,16 @@ int estimate_message_line_cost(const UiMessage& msg) {
     return std::max(lines, 1);
 }
 
-int estimate_history_line_cost(const std::vector<UiMessage>& messages) {
+int estimate_history_line_cost(
+    const std::vector<UiMessage>& messages,
+    const std::unordered_map<std::string, bool>& disclosure_expanded,
+    bool expand_all_system_details) {
     int total = 0;
     for (const auto& msg : messages) {
-        total += estimate_message_line_cost(msg);
+        total += estimate_message_line_cost(
+            msg,
+            disclosure_expanded,
+            expand_all_system_details);
     }
     return std::max(total, 1);
 }
@@ -159,18 +178,42 @@ HistoryComponent::HistoryComponent(
 ftxui::Element HistoryComponent::OnRender() {
     // Auto-scroll to bottom if new messages appeared.
     const auto messages = get_messages_();
-    const std::size_t layout_fingerprint = history_layout_fingerprint(messages);
+    auto options = get_options_();
+    options.scroll_pos = scroll_pos_;
+    options.system_disclosure_expanded = &disclosure_expanded_;
+    disclosure_hitboxes_.clear();
+    options.system_disclosure_hitboxes = &disclosure_hitboxes_;
+
+    const std::size_t disclosure_hash = [&]() -> std::size_t {
+        std::size_t seed = 0;
+        for (const auto& [message_id, expanded] : disclosure_expanded_) {
+            if (!expanded) {
+                continue;
+            }
+            seed ^= std::hash<std::string>{}(message_id)
+                + static_cast<std::size_t>(0x9e3779b97f4a7c15ULL)
+                + (seed << 6)
+                + (seed >> 2);
+        }
+        return seed;
+    }();
+
+    std::size_t layout_fingerprint = history_layout_fingerprint(messages);
+    layout_fingerprint = combine_hash(
+        layout_fingerprint,
+        static_cast<std::size_t>(options.expand_system_details));
+    layout_fingerprint = combine_hash(layout_fingerprint, disclosure_hash);
     if (layout_fingerprint != last_layout_fingerprint_) {
-        estimated_content_lines_ = estimate_history_line_cost(messages);
+        estimated_content_lines_ = estimate_history_line_cost(
+            messages,
+            disclosure_expanded_,
+            options.expand_system_details);
         last_layout_fingerprint_ = layout_fingerprint;
     }
     if (messages.size() > last_message_count_) {
         scroll_pos_ = 1.0f;
         last_message_count_ = messages.size();
     }
-
-    auto options = get_options_();
-    options.scroll_pos = scroll_pos_;
 
     return render_history_panel(
         messages,
@@ -262,6 +305,17 @@ bool HistoryComponent::HandleWheel(ftxui::Event event) {
 }
 
 bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
+    if (event.mouse().button == ftxui::Mouse::Left
+        && event.mouse().motion == ftxui::Mouse::Pressed) {
+        for (const auto& [message_id, box] : disclosure_hitboxes_) {
+            if (box.Contain(event.mouse().x, event.mouse().y)) {
+                disclosure_expanded_[message_id] = !disclosure_expanded_[message_id];
+                last_layout_fingerprint_ = 0;  // force line-cost refresh next render
+                return true;
+            }
+        }
+    }
+
     // Only handle wheel events; never steal focus from clicks.
     if (event.mouse().button == ftxui::Mouse::WheelUp) {
         ScrollUp(wheel_step_ratio());
@@ -288,6 +342,7 @@ std::size_t HistoryComponent::history_layout_fingerprint(
         seed = combine_hash(seed, static_cast<std::size_t>(msg.type));
         seed = combine_hash(seed, msg.text.size());
         seed = combine_hash(seed, msg.secondary_text.size());
+        seed = combine_hash(seed, msg.disclosure_text.size());
         seed = combine_hash(seed, msg.timestamp.size());
         seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_top));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_bottom));

@@ -1431,11 +1431,16 @@ RunResult run(RunOptions opts) {
                 session_id = new_session_id;
                 session_created_at = new_created_at;
                 session_file_path = session_store->compute_path(new_segment).string();
-                ui_messages.push_back(make_system_message(std::format(
-                    "Filo rotated the internal session to keep the working set lean.\nPrevious segment: {}  New segment: {}\nReason: {}\nContext was preserved through an internal handoff, so you can continue normally.",
-                    old_session_id,
-                    new_session_id,
-                    decision.reason.empty() ? std::string("session growth exceeded the efficiency budget.") : decision.reason)));
+                const std::string reason = decision.reason.empty()
+                    ? std::string("session growth exceeded the efficiency budget.")
+                    : decision.reason;
+                ui_messages.push_back(make_system_disclosure_message(
+                    "Internal session rotated to keep the working set lean (context preserved).",
+                    std::format(
+                        "Previous segment: {}\nNew segment: {}\nReason: {}",
+                        old_session_id,
+                        new_session_id,
+                        reason)));
             }
             screen.PostEvent(ftxui::Event::Custom);
         });
@@ -2766,6 +2771,7 @@ RunResult run(RunOptions opts) {
             return ConversationRenderOptions{
                 .show_timestamps = ui_show_timestamps,
                 .show_spinner    = ui_show_spinner,
+                .expand_system_details = tool_output_expanded,
                 .expand_tool_results = tool_output_expanded,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
@@ -3490,11 +3496,11 @@ RunResult run(RunOptions opts) {
                 : "\n\xe2\x84\xb9  Approval mode set to PROMPT: sensitive tools require confirmation.\n");
             return true;
         }
-        if (is_ctrl_o_event(event)) {  // Ctrl+O — toggle tool output expansion
+        if (is_ctrl_o_event(event)) {  // Ctrl+O — toggle verbose output expansion
             tool_output_expanded = !tool_output_expanded;
             append_history(tool_output_expanded
-                ? "\n\xe2\x84\xb9  Tool output view set to EXPANDED: full command output is visible.\n"
-                : "\n\xe2\x84\xb9  Tool output view set to COMPACT: long command output is collapsed.\n");
+                ? "\n\xe2\x84\xb9  Verbose output view set to EXPANDED: full tool output and all disclosure details are visible.\n"
+                : "\n\xe2\x84\xb9  Verbose output view set to COMPACT: long output is collapsed (you can still click disclosure rows).\n");
             return true;
         }
         if (is_ctrl_c_event(event)) {  // Ctrl+C — stop current LLM generation

@@ -4,7 +4,11 @@
 #include "tui/HistoryComponent.hpp"
 #include "tui/Conversation.hpp"
 
+#include <ftxui/screen/screen.hpp>
+
 #include <atomic>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -17,6 +21,37 @@ std::vector<tui::UiMessage> mock_messages() {
 
 tui::ConversationRenderOptions mock_options() {
     return tui::ConversationRenderOptions{};
+}
+
+std::string strip_ansi(std::string_view input) {
+    std::string out;
+    out.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size();) {
+        if (input[i] == '\x1b' && i + 1 < input.size() && input[i + 1] == '[') {
+            i += 2;
+            while (i < input.size()) {
+                const char ch = input[i++];
+                if (ch >= '@' && ch <= '~') {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        out.push_back(input[i]);
+        ++i;
+    }
+
+    return out;
+}
+
+std::string render_history_text(tui::HistoryComponent& history, int width = 160) {
+    auto panel = history.OnRender();
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+    return strip_ansi(screen.ToString());
 }
 }
 
@@ -52,4 +87,34 @@ TEST_CASE("HistoryComponent scroll bounds", "[tui][history_component]") {
     
     history.ScrollDown(20.0f); // Way past 1
     // Should be clamped to 1.0f
+}
+
+TEST_CASE("HistoryComponent toggles system disclosure by mouse click",
+          "[tui][history_component]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    messages.push_back(tui::make_system_disclosure_message(
+        "Internal session rotated to keep the working set lean (context preserved).",
+        "Previous segment: seg-a\nNew segment: seg-b\nReason: threshold"));
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    const auto collapsed = render_history_text(history);
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("click or Ctrl+O for details"));
+    REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("Previous segment: seg-a"));
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = 1;
+    mouse.y = 0;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+
+    const auto expanded = render_history_text(history);
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("Previous segment: seg-a"));
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("New segment: seg-b"));
 }
