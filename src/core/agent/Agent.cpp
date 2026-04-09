@@ -12,6 +12,7 @@
 #include <thread>
 #include <mutex>
 #include <algorithm>
+#include <cctype>
 #include <future>
 #include <format>
 #include <ranges>
@@ -369,6 +370,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         std::lock_guard lock(history_mutex_);
         request.messages = history_;
         request.model = active_model_;
+        request.effort = effort_level_;
         provider = provider_;
         mode_snapshot = current_mode_;
     }
@@ -768,6 +770,22 @@ std::string Agent::get_context_summary() const {
 std::string Agent::get_active_model_name() const {
     std::lock_guard lock(history_mutex_);
     return active_model_;
+}
+
+void Agent::set_effort_level(std::string effort) {
+    std::lock_guard lock(history_mutex_);
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch);
+    });
+    std::ranges::transform(effort, effort.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    effort_level_ = std::move(effort);
+}
+
+std::string Agent::get_effort_level() const {
+    std::lock_guard lock(history_mutex_);
+    return effort_level_;
 }
 
 core::session::SessionEfficiencyDecision Agent::current_efficiency_decision_unlocked() const {

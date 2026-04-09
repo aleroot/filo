@@ -7,9 +7,9 @@
 namespace core::agent::tool_output_history {
 
 struct Limits {
-    std::size_t max_chars = 16 * 1024;
-    std::size_t head_chars = 10 * 1024;
-    std::size_t tail_chars = 6 * 1024;
+    std::size_t max_chars = 8 * 1024;
+    std::size_t head_chars = 5 * 1024;
+    std::size_t tail_chars = 3 * 1024;
 };
 
 [[nodiscard]] Limits limits_for_tool(std::string_view tool_name);
@@ -24,4 +24,3 @@ struct Limits {
     Limits limits);
 
 } // namespace core::agent::tool_output_history
-

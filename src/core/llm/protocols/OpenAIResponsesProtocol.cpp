@@ -264,6 +264,41 @@ void append_input_items(std::string& payload, const std::vector<Message>& messag
     payload += "]";
 }
 
+[[nodiscard]] std::string lower_ascii(std::string_view value) {
+    std::string lowered;
+    lowered.reserve(value.size());
+    for (const char ch : value) {
+        lowered.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return lowered;
+}
+
+[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort) {
+    std::string effort = lower_ascii(raw_effort);
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch);
+    });
+    if (effort == "auto" || effort == "unset" || effort == "default") {
+        return {};
+    }
+    if (effort == "low" || effort == "medium" || effort == "high") {
+        return effort;
+    }
+    if (effort == "max") {
+        return "high";
+    }
+    return {};
+}
+
+[[nodiscard]] bool model_supports_openai_reasoning_effort(std::string_view model) {
+    const std::string lowered = lower_ascii(model);
+    return lowered.starts_with("gpt-5")
+        || lowered.starts_with("o1")
+        || lowered.starts_with("o3")
+        || lowered.starts_with("o4");
+}
+
 void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& result) {
     simdjson::dom::object response_obj;
     if (doc["response"].get(response_obj) != simdjson::SUCCESS) return;
@@ -424,6 +459,14 @@ std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
     if (req.max_tokens.has_value()) {
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
+    }
+    if (model_supports_openai_reasoning_effort(req.model)) {
+        const std::string effort = normalize_openai_effort(req.effort);
+        if (!effort.empty()) {
+            payload += R"(,"reasoning":{"effort":")";
+            payload += core::utils::escape_json_string(effort);
+            payload += R"("})";
+        }
     }
 
     append_input_items(payload, req.messages);

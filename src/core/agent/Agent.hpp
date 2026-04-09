@@ -90,6 +90,8 @@ public:
     [[nodiscard]] std::string get_mode() const;
     [[nodiscard]] std::string get_context_summary() const;
     [[nodiscard]] std::string get_active_model_name() const;
+    void set_effort_level(std::string effort);
+    [[nodiscard]] std::string get_effort_level() const;
 
     // -----------------------------------------------------------------------
     // Permission gate — set by the TUI to approve/deny dangerous tool calls.
@@ -192,6 +194,7 @@ private:
 
     // Model name for budget tracking
     std::string active_model_;
+    std::string effort_level_;
     std::string context_summary_;
     std::string stable_prompt_prefix_;
     bool stable_prompt_prefix_dirty_ = true;

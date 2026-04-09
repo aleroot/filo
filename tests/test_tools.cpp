@@ -22,6 +22,7 @@
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
 #endif
+#include <algorithm>
 #include <cerrno>
 #include <filesystem>
 #include <fstream>
@@ -989,6 +990,13 @@ TEST_CASE("ToolManager get_all_tools returns registered tools", "[tools]") {
         if (!t.function.name.empty()) { found = true; break; }
     }
     REQUIRE(found);
+
+    std::vector<std::string> names;
+    names.reserve(tools.size());
+    for (const auto& t : tools) {
+        names.push_back(t.function.name);
+    }
+    REQUIRE(std::ranges::is_sorted(names));
 }
 
 // ---------------------------------------------------------------------------

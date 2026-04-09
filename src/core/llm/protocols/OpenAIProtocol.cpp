@@ -3,9 +3,53 @@
 #include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
 #include <simdjson.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 
 namespace core::llm::protocols {
+
+namespace {
+
+[[nodiscard]] std::string lower_ascii(std::string_view value) {
+    std::string lowered;
+    lowered.reserve(value.size());
+    for (const char ch : value) {
+        lowered.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch))));
+    }
+    return lowered;
+}
+
+[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort) {
+    std::string effort = lower_ascii(raw_effort);
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch);
+    });
+    if (effort == "auto" || effort == "unset" || effort == "default") {
+        return {};
+    }
+    if (effort == "low" || effort == "medium" || effort == "high") {
+        return effort;
+    }
+    if (effort == "max") {
+        // OpenAI uses high/xhigh style naming; map max to the safest common value.
+        return "high";
+    }
+    return {};
+}
+
+[[nodiscard]] bool model_supports_openai_reasoning_effort(std::string_view model) {
+    const std::string lowered = lower_ascii(model);
+    // Conservative allow-list to avoid sending vendor-specific fields to
+    // unrelated OpenAI-compatible providers/models.
+    return lowered.starts_with("gpt-5")
+        || lowered.starts_with("o1")
+        || lowered.starts_with("o3")
+        || lowered.starts_with("o4");
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // parse_openai_sse_chunk — shared pure parser for any OpenAI-compatible stream
@@ -81,6 +125,14 @@ std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
 
     if (payload.ends_with('}')) {
         payload.pop_back();
+        if (model_supports_openai_reasoning_effort(req.model)) {
+            const std::string effort = normalize_openai_effort(req.effort);
+            if (!effort.empty()) {
+                payload += R"(,"reasoning_effort":")";
+                payload += core::utils::escape_json_string(effort);
+                payload += '"';
+            }
+        }
         append_extra_fields(payload, req);
         if (stream_usage_ && req.stream) {
             payload += R"(,"stream_options":{"include_usage":true})";

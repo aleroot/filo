@@ -70,16 +70,16 @@ SessionEfficiencyDecision SessionEfficiencyController::current_decision() const 
     // Provider-native prompt caching can absorb some growth, so be slightly
     // less aggressive when the active backend already optimizes stable prefixes.
     const double waste_rotate_threshold =
-        latest.provider_supports_prompt_caching ? 7.0 : 5.0;
+        latest.provider_supports_prompt_caching ? 6.5 : 4.5;
     const double local_waste_rotate_threshold = 4.0;
     const double context_rotate_threshold =
-        latest.provider_is_local ? 0.72 : 0.82;
+        latest.provider_is_local ? 0.72 : 0.78;
     const int min_turns_before_rotation =
-        latest.provider_is_local ? 8 : 10;
+        latest.provider_is_local ? 8 : 7;
 
     const bool history_is_heavy = latest.provider_is_local
         ? latest.estimated_history_tokens >= 24'000
-        : latest.estimated_history_tokens >= 40'000;
+        : latest.estimated_history_tokens >= 30'000;
     const bool waste_is_high = decision.turn_count >= min_turns_before_rotation
         && decision.waste_factor >= (latest.provider_is_local
             ? local_waste_rotate_threshold

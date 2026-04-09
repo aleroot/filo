@@ -68,13 +68,13 @@ split_preview(std::string_view text, Limits limits) {
 Limits limits_for_tool(std::string_view tool_name) {
     using namespace std::literals;
     if (tool_name == "read_file"sv) {
-        return Limits{.max_chars = 32 * 1024, .head_chars = 24 * 1024, .tail_chars = 8 * 1024};
+        return Limits{.max_chars = 12 * 1024, .head_chars = 8 * 1024, .tail_chars = 4 * 1024};
     }
     if (tool_name == "run_terminal_command"sv
         || tool_name == "grep_search"sv
         || tool_name == "file_search"sv
         || tool_name == "list_directory"sv) {
-        return Limits{.max_chars = 24 * 1024, .head_chars = 16 * 1024, .tail_chars = 8 * 1024};
+        return Limits{.max_chars = 10 * 1024, .head_chars = 7 * 1024, .tail_chars = 3 * 1024};
     }
     return Limits{};
 }
@@ -124,4 +124,3 @@ std::string clamp_for_history(
 }
 
 } // namespace core::agent::tool_output_history
-

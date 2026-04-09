@@ -96,6 +96,36 @@ namespace {
         return out;
     }
 
+    bool anthropic_model_supports_effort(std::string_view model) {
+        const std::string lowered = lower_copy(model);
+        return lowered.find("mythos") != std::string::npos
+            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("sonnet-4-6") != std::string::npos
+            || lowered.find("opus-4-5") != std::string::npos;
+    }
+
+    bool anthropic_model_supports_max_effort(std::string_view model) {
+        const std::string lowered = lower_copy(model);
+        return lowered.find("mythos") != std::string::npos
+            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("sonnet-4-6") != std::string::npos;
+    }
+
+    std::string normalized_effort_or_empty(std::string_view raw) {
+        std::string normalized = lower_copy(trim_copy(raw));
+        std::erase_if(normalized, [](unsigned char ch) {
+            return std::isspace(ch);
+        });
+        if (normalized == "auto" || normalized == "unset" || normalized == "default") {
+            return {};
+        }
+        if (normalized == "low" || normalized == "medium"
+            || normalized == "high" || normalized == "max") {
+            return normalized;
+        }
+        return {};
+    }
+
     bool ends_with_1m_suffix(std::string_view model) {
         if (model.size() < 4) return false;
         const std::size_t tail = model.size() - 4;
@@ -344,6 +374,29 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
     // max_tokens is mandatory in the Anthropic API.
     payload += R"(,"max_tokens":)";
     payload += std::to_string(req.max_tokens.value_or(default_max_tokens));
+
+    // Automatic prompt caching materially reduces repeated-prefix cost for
+    // tool-heavy multi-step agent loops while remaining transparent to callers.
+    const bool should_enable_auto_cache =
+        !req.tools.empty() || req.messages.size() > 2;
+    if (should_enable_auto_cache) {
+        payload += R"(,"cache_control":{"type":"ephemeral"})";
+    }
+
+    // Effort can reduce output/token spend for tool-heavy sessions.
+    // Anthropic docs (Apr 2026): generally available, no beta header needed.
+    if (anthropic_model_supports_effort(req.model)) {
+        std::string effective_effort = normalized_effort_or_empty(req.effort);
+        if (effective_effort == "max"
+            && !anthropic_model_supports_max_effort(req.model)) {
+            effective_effort = "high";
+        }
+        if (!effective_effort.empty()) {
+            payload += R"(,"output_config":{"effort":")";
+            payload += core::utils::escape_json_string(effective_effort);
+            payload += R"("})";
+        }
+    }
 
     // Anthropic requires temperature=1 when extended thinking is enabled.
     // Emit the constraint unconditionally so the API never receives a conflicting value.

@@ -26,6 +26,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto input_cleared  = std::make_shared<bool>(false);
     auto quit_called    = std::make_shared<bool>(false);
     auto switch_target  = std::make_shared<std::string>();
+    auto effort_target  = std::make_shared<std::string>();
+    auto effort_value   = std::make_shared<std::string>("auto");
     auto picker_opened  = std::make_shared<bool>(false);
     auto settings_picker_opened = std::make_shared<bool>(false);
     auto yolo_enabled   = std::make_shared<bool>(false);
@@ -47,6 +49,14 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .switch_model_fn = [switch_target](std::string_view name) {
             *switch_target = std::string(name);
             return std::string("Switched to ") + std::string(name);
+        },
+        .effort_status_fn = [effort_value]() {
+            return std::string("Effort: ") + *effort_value + "\n        Supported: auto, low, medium, high, max";
+        },
+        .switch_effort_fn = [effort_target, effort_value](std::string_view level) {
+            *effort_target = std::string(level);
+            *effort_value = std::string(level);
+            return std::string("Set effort to ") + std::string(level);
         },
         .open_model_picker_fn = [picker_opened]() {
             *picker_opened = true;
@@ -249,6 +259,35 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*switch_target == "claude opus");
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to claude opus"));
+    }
+
+    SECTION("/effort command reports current effort") {
+        *mock_history = "";
+        *effort_value = "auto";
+        ctx.text = "/effort";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Effort: auto"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Supported: auto, low, medium, high, max"));
+    }
+
+    SECTION("/effort status alias reports current effort") {
+        *mock_history = "";
+        *effort_value = "medium";
+        ctx.text = "/effort status";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Effort: medium"));
+    }
+
+    SECTION("/effort sets effort level") {
+        *mock_history = "";
+        *effort_target = "";
+        ctx.text = "/effort low";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*effort_target == "low");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Set effort to low"));
     }
 
     SECTION("/settings opens picker when callback handles it") {

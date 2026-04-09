@@ -326,7 +326,7 @@ AppConfig make_default_config() {
     config.ui_context_usage = "show";
     config.ui_timestamps = "show";
     config.ui_spinner = "show";
-    config.auto_compact_threshold = 50000;
+    config.auto_compact_threshold = 25000;
     config.router = core::llm::routing::make_default_router_config();
 
     auto add_provider = [&](std::string name, std::string model,
@@ -403,7 +403,7 @@ std::string default_config_json() {
     "default_model_selection": "manual",
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
-    "auto_compact_threshold": 50000,
+    "auto_compact_threshold": 25000,
     "providers": {
         "grok":           { "model": "grok-code-fast-1" },
         "grok-4":         { "model": "grok-4" },

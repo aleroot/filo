@@ -148,6 +148,60 @@ TEST_CASE("Serializer - max_tokens is omitted when not set", "[openai][serialize
                  !Catch::Matchers::ContainsSubstring("max_tokens"));
 }
 
+TEST_CASE("OpenAIProtocol - reasoning_effort serialized for reasoning-capable models",
+          "[openai][serializer][effort]") {
+    auto req = make_simple_request("gpt-5");
+    req.effort = "low";
+    OpenAIProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+}
+
+TEST_CASE("OpenAIProtocol - max effort maps to high", "[openai][serializer][effort]") {
+    auto req = make_simple_request("gpt-5");
+    req.effort = "max";
+    OpenAIProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+}
+
+TEST_CASE("OpenAIProtocol - effort omitted on unsupported models", "[openai][serializer][effort]") {
+    auto req = make_simple_request("gpt-4o");
+    req.effort = "low";
+    OpenAIProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+}
+
+TEST_CASE("OpenAIResponsesProtocol - reasoning effort serialized as reasoning object",
+          "[openai][responses][effort]") {
+    auto req = make_simple_request("gpt-5");
+    req.effort = "medium";
+    OpenAIResponsesProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"medium"})"));
+}
+
+TEST_CASE("OpenAIResponsesProtocol - max effort maps to high",
+          "[openai][responses][effort]") {
+    auto req = make_simple_request("gpt-5");
+    req.effort = "max";
+    OpenAIResponsesProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"high"})"));
+}
+
+TEST_CASE("OpenAIResponsesProtocol - effort omitted on unsupported models",
+          "[openai][responses][effort]") {
+    auto req = make_simple_request("gpt-4o");
+    req.effort = "low";
+    OpenAIResponsesProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":)"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Serializer — tool definitions
 // ─────────────────────────────────────────────────────────────────────────────

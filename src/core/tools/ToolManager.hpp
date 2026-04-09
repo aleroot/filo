@@ -2,6 +2,7 @@
 
 #include "Tool.hpp"
 #include "../context/SessionContext.hpp"
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -39,6 +40,9 @@ public:
             entry.function = impl->get_definition();
             tools.push_back(entry);
         }
+        std::ranges::sort(tools, [](const core::llm::Tool& a, const core::llm::Tool& b) {
+            return a.function.name < b.function.name;
+        });
         return tools;
     }
 

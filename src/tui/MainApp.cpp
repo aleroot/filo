@@ -570,6 +570,7 @@ RunResult run(RunOptions opts) {
     std::string active_router_policy = router_engine->active_policy();
     std::string active_provider_name;
     std::string active_model_name;
+    std::string session_effort_value; // empty => auto/provider default
 
     std::shared_ptr<core::llm::LLMProvider> llm_provider;
     if (model_selection_mode == ModelSelectionMode::Router
@@ -641,6 +642,7 @@ RunResult run(RunOptions opts) {
         tool_manager,
         agent_session_context);
     agent->set_auto_compact_threshold(config.auto_compact_threshold);
+    agent->set_effort_level(session_effort_value);
 
     // Set the active model for budget tracking
     if (model_selection_mode == ModelSelectionMode::Router
@@ -1706,6 +1708,146 @@ RunResult run(RunOptions opts) {
         return message;
     };
 
+    auto lower_ascii_copy = [](std::string_view value) {
+        std::string lowered;
+        lowered.reserve(value.size());
+        for (const char ch : value) {
+            lowered.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch))));
+        }
+        return lowered;
+    };
+
+    auto model_supports_openai_effort = [&](std::string_view model_name) -> bool {
+        const std::string lowered = lower_ascii_copy(model_name);
+        return lowered.starts_with("gpt-5")
+            || lowered.starts_with("o1")
+            || lowered.starts_with("o3")
+            || lowered.starts_with("o4");
+    };
+
+    auto provider_supports_effort = [&](std::string_view provider_name,
+                                        std::string_view model_name_override = {}) -> bool {
+        const auto it = config.providers.find(std::string(provider_name));
+        if (it == config.providers.end()) {
+            return false;
+        }
+        const std::string_view model_name = model_name_override.empty()
+            ? std::string_view{it->second.model}
+            : model_name_override;
+        if (it->second.api_type == core::config::ApiType::Anthropic) {
+            return true;
+        }
+        if (it->second.api_type == core::config::ApiType::OpenAI) {
+            return model_supports_openai_effort(model_name);
+        }
+        if (it->second.api_type != core::config::ApiType::Unknown) {
+            return false;
+        }
+        const std::string lowered = lower_ascii_copy(provider_name);
+        if (lowered.starts_with("claude")
+            || lowered.find("anthropic") != std::string::npos) {
+            return true;
+        }
+        if (lowered.starts_with("openai")) {
+            return model_supports_openai_effort(model_name);
+        }
+        return false;
+    };
+
+    auto model_supports_max_effort = [&](std::string_view model_name) -> bool {
+        const std::string lowered = lower_ascii_copy(model_name);
+        return lowered.find("mythos") != std::string::npos
+            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("sonnet-4-6") != std::string::npos;
+    };
+
+    auto resolve_effective_effort = [&](std::string_view configured,
+                                        std::string_view model_name) -> std::string {
+        if (configured.empty()) return "high (auto default)";
+        if (configured == "max" && !model_supports_max_effort(model_name)) {
+            return "high (max unsupported on current model)";
+        }
+        return std::string(configured);
+    };
+
+    auto describe_effort = [&]() -> std::string {
+        const std::string configured = session_effort_value.empty()
+            ? "auto"
+            : session_effort_value;
+        const std::string model_for_status = active_model_name.empty()
+            ? manual_model_name
+            : active_model_name;
+        const std::string effective = resolve_effective_effort(
+            session_effort_value,
+            model_for_status);
+
+        std::string applies_note = "Applies on Anthropic and OpenAI reasoning-capable models.";
+        if (model_selection_mode == ModelSelectionMode::Manual
+            && !provider_supports_effort(manual_provider_name, model_for_status)) {
+            applies_note = std::format(
+                "Current manual provider '{}' does not support effort; switch to Claude or an OpenAI reasoning model to apply it.",
+                manual_provider_name);
+        } else if (model_selection_mode != ModelSelectionMode::Manual) {
+            applies_note = "Router/auto mode may choose providers that ignore effort; it applies only on supported Anthropic/OpenAI reasoning turns.";
+        }
+
+        return std::format(
+            "Configured effort: {}\n"
+            "        Effective for current model: {}\n"
+            "        Active provider: {}\n"
+            "        Active model: {}\n"
+            "        {}\n"
+            "        Levels: auto, low, medium, high, max",
+            configured,
+            effective,
+            active_provider_name,
+            model_for_status.empty() ? std::string("<provider default>") : model_for_status,
+            applies_note);
+    };
+
+    auto switch_effort = [&](std::string_view requested) -> std::string {
+        auto trim_ascii = [](std::string_view s) -> std::string_view {
+            const auto start = s.find_first_not_of(" \t\r\n");
+            if (start == std::string_view::npos) return {};
+            const auto end = s.find_last_not_of(" \t\r\n");
+            return s.substr(start, end - start + 1);
+        };
+
+        const std::string_view trimmed = trim_ascii(requested);
+        if (trimmed.empty()) {
+            return "Usage: /effort auto|low|medium|high|max";
+        }
+
+        std::string normalized;
+        normalized.reserve(trimmed.size());
+        for (const char ch : trimmed) {
+            if (ch == '-' || ch == '_' || std::isspace(static_cast<unsigned char>(ch))) continue;
+            normalized.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch))));
+        }
+
+        if (normalized == "auto" || normalized == "unset"
+            || normalized == "default" || normalized == "off") {
+            session_effort_value.clear();
+            agent->set_effort_level(session_effort_value);
+            return "Set effort to auto (provider default, typically high).";
+        }
+
+        if (normalized != "low" && normalized != "medium"
+            && normalized != "high" && normalized != "max") {
+            return "Unknown effort level. Use one of: auto, low, medium, high, max.";
+        }
+
+        session_effort_value = normalized;
+        agent->set_effort_level(session_effort_value);
+
+        if (normalized == "max") {
+            return "Set effort to max. Models without max support will automatically use high.";
+        }
+        return std::format("Set effort to {}.", normalized);
+    };
+
     auto apply_model_selector = [&](std::string_view requested,
                                     bool persist_selection) -> std::string {
         auto trim_ascii = [](std::string_view s) -> std::string_view {
@@ -2565,6 +2707,8 @@ RunResult run(RunOptions opts) {
             .quit_fn          = screen.ExitLoopClosure(),
             .model_status_fn  = describe_models,
             .switch_model_fn  = switch_provider,
+            .effort_status_fn = describe_effort,
+            .switch_effort_fn = switch_effort,
             .open_model_picker_fn = open_model_picker,
             .open_settings_picker_fn = open_settings_picker,
             .open_sessions_picker_fn = open_sessions_picker,

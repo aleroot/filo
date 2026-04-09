@@ -112,9 +112,65 @@ TEST_CASE("ClaudeSerializer - custom default_max_tokens respected", "[claude][se
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":4096)"));
 }
 
+TEST_CASE("ClaudeSerializer - automatic prompt caching stays off for simple one-shot requests",
+          "[claude][serializer][cache]") {
+    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("cache_control":)"));
+}
+
+TEST_CASE("ClaudeSerializer - automatic prompt caching enabled for tool-capable requests",
+          "[claude][serializer][cache]") {
+    ChatRequest req = make_simple_request();
+    Tool t;
+    t.function.name = "read_file";
+    req.tools.push_back(t);
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("cache_control":{"type":"ephemeral"})"));
+}
+
 TEST_CASE("ClaudeSerializer - temperature omitted when not set", "[claude][serializer]") {
     REQUIRE_THAT(AnthropicSerializer::serialize(make_simple_request()),
                  !Catch::Matchers::ContainsSubstring("temperature"));
+}
+
+TEST_CASE("ClaudeSerializer - effort omitted when not set", "[claude][serializer][effort]") {
+    const auto payload = AnthropicSerializer::serialize(make_simple_request());
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("output_config")"));
+}
+
+TEST_CASE("ClaudeSerializer - effort serialized via output_config", "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-sonnet-4-6");
+    req.effort = "medium";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"medium"})"));
+}
+
+TEST_CASE("ClaudeSerializer - effort auto/unset is treated as omitted", "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-sonnet-4-6");
+    req.effort = "auto";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("output_config")"));
+}
+
+TEST_CASE("ClaudeSerializer - max effort downgrades to high on models without max support",
+          "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-opus-4-5");
+    req.effort = "max";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"high"})"));
+}
+
+TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 4.6",
+          "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-sonnet-4-6");
+    req.effort = "max";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"max"})"));
 }
 
 TEST_CASE("ClaudeSerializer - temperature present when set", "[claude][serializer]") {

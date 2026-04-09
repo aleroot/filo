@@ -254,6 +254,7 @@ struct ChatRequest {
     std::string previous_response_id = {}; ///< Responses API incremental continuation id
     std::string prompt_cache_key = {};     ///< Responses API prompt cache key
     std::string service_tier = {};         ///< Responses API service_tier (e.g. "priority")
+    std::string effort = {};               ///< Optional effort hint ("low"/"medium"/"high"/"max")
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {
