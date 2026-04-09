@@ -16,15 +16,13 @@
 #include <filesystem>
 #include <chrono>
 #include <simdjson.h>
-#if !defined(_WIN32)
-#include <sys/wait.h>
-#endif
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <unistd.h>
 #endif
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/utils/Base64.hpp"
+#include "ReviewExecutor.hpp"
 
 namespace core::commands {
 
@@ -119,14 +117,6 @@ FILE* open_pipe_write(const char* command) {
 #endif
 }
 
-FILE* open_pipe_read(const char* command) {
-#if defined(_WIN32)
-    return _popen(command, "r");
-#else
-    return popen(command, "r");
-#endif
-}
-
 int close_pipe(FILE* pipe) {
 #if defined(_WIN32)
     return _pclose(pipe);
@@ -153,55 +143,6 @@ bool write_text_to_pipe(std::string_view command,
     }
     if (status != 0) {
         error = std::format("`{}` exited with status {}", command_str, status);
-        return false;
-    }
-    return true;
-}
-
-int normalize_pipe_exit_status(int status) {
-    if (status == -1) {
-        return -1;
-    }
-#if defined(_WIN32)
-    return status;
-#else
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
-    }
-    return status;
-#endif
-}
-
-bool run_command_capture(std::string_view command,
-                         std::string& output,
-                         std::string& error,
-                         int* exit_code = nullptr) {
-    output.clear();
-    error.clear();
-
-    const std::string command_str(command);
-    FILE* pipe = open_pipe_read(command_str.c_str());
-    if (!pipe) {
-        error = std::format("could not execute `{}`", command_str);
-        if (exit_code) *exit_code = -1;
-        return false;
-    }
-
-    std::array<char, 4096> buffer{};
-    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        output += buffer.data();
-    }
-
-    const int status = close_pipe(pipe);
-    const int normalized = normalize_pipe_exit_status(status);
-    if (exit_code) {
-        *exit_code = normalized;
-    }
-    if (normalized != 0) {
-        error = std::format("`{}` exited with status {}", command_str, normalized);
         return false;
     }
     return true;
@@ -791,7 +732,7 @@ public:
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /copy               Copy the latest assistant response to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
-            "  /review [--staged]  Run AI code review on git diff (HEAD or staged)\n"
+            "  /review [target]    Run Codex-style AI code review (uncommitted/base/commit/custom)\n"
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
@@ -1236,101 +1177,13 @@ class ReviewCommand : public Command {
 public:
     std::string get_name() const override { return "/review"; }
     std::string get_description() const override {
-        return "Review git diff with AI (/review [--staged|--cached])";
+        return "Run Codex-style review (/review [--uncommitted|--base|--commit|custom])";
     }
     bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-
-        if (!ctx.agent) {
-            ctx.append_history_fn("\n✗  Review requires an active agent session.\n");
-            return;
-        }
-
-        bool staged = false;
-        for (const auto token : split_ascii_whitespace(trailing_arguments(ctx.text))) {
-            const std::string option = to_lower_ascii(token);
-            if (option == "--staged" || option == "--cached") {
-                staged = true;
-                continue;
-            }
-            if (option == "-h" || option == "--help") {
-                ctx.append_history_fn(
-                    "\nℹ  Usage: /review [--staged|--cached]\n"
-                    "   /review           Review working tree changes against HEAD.\n"
-                    "   /review --staged  Review only staged changes.\n");
-                return;
-            }
-
-            ctx.append_history_fn(std::format(
-                "\n✗  Unknown /review option '{}'. Use /review [--staged|--cached].\n",
-                std::string(token)));
-            return;
-        }
-
-        const std::string command = staged
-            ? "git diff --staged 2>&1"
-            : "git diff HEAD 2>&1";
-
-        std::string diff_output;
-        std::string error;
-        int exit_code = 0;
-        if (!run_command_capture(command, diff_output, error, &exit_code)) {
-            std::string detail = trim_copy(diff_output);
-            if (detail.empty()) {
-                detail = error.empty() ? "unknown git error" : error;
-            }
-            ctx.append_history_fn(std::format(
-                "\n✗  Could not collect a git diff ({}).\n",
-                detail));
-            return;
-        }
-
-        if (trim(diff_output).empty()) {
-            ctx.append_history_fn(staged
-                ? "\nℹ  No staged changes to review.\n"
-                : "\nℹ  No local changes to review.\n");
-            return;
-        }
-
-        constexpr std::size_t kMaxDiffChars = 120000;
-        bool truncated = false;
-        if (diff_output.size() > kMaxDiffChars) {
-            diff_output.resize(kMaxDiffChars);
-            truncated = true;
-        }
-
-        std::string prompt;
-        prompt.reserve(diff_output.size() + 1024);
-        prompt += "You are doing a code review.\n";
-        prompt += staged
-            ? "Review the staged git diff below.\n"
-            : "Review the working-tree git diff below (vs HEAD).\n";
-        prompt += "Focus on bugs, regressions, security issues, and missing tests.\n";
-        prompt += "Output findings first, sorted by severity, with file/line pointers when possible.\n";
-        if (truncated) {
-            prompt += "Note: the diff is truncated; call out uncertainty for unseen parts.\n";
-        }
-        prompt += "\n";
-        prompt += markdown_fence(diff_output, "diff");
-
-        ctx.append_history_fn(std::format(
-            "\n»  Reviewing {} diff…\n",
-            staged ? "staged" : "working-tree"));
-
-        auto append_fn = ctx.append_history_fn;
-        ctx.agent->send_message(
-            prompt,
-            [append_fn](const std::string& chunk) {
-                append_fn(chunk);
-            },
-            [append_fn](const std::string& name, const std::string& args) {
-                append_fn(std::format("\n[Tool] {} {}\n", name, args));
-            },
-            [append_fn]() {
-                append_fn("\n");
-            });
+        ReviewExecutor::execute(ctx, trailing_arguments(ctx.text));
     }
 };
 

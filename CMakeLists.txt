@@ -171,6 +171,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp
+    src/core/commands/ReviewExecutor.cpp
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
     src/core/session/SessionStore.cpp

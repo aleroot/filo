@@ -360,6 +360,39 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("requires an active agent"));
     }
 
+    SECTION("/review --help shows usage without needing an agent") {
+        *mock_history = "";
+        ctx.agent = nullptr;
+        ctx.text = "/review --help";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /review"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("--base <branch>"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("--commit <sha>"));
+    }
+
+    SECTION("/review validates unknown option before agent execution") {
+        *mock_history = "";
+        ctx.agent = nullptr;
+        ctx.text = "/review --nope";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Unknown /review option"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /review"));
+    }
+
+    SECTION("/review validates missing option value before agent execution") {
+        *mock_history = "";
+        ctx.agent = nullptr;
+        ctx.text = "/review --base";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Missing value for --base"));
+    }
+
     SECTION("/export requires an active agent") {
         *mock_history = "";
         ctx.agent = nullptr;
