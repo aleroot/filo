@@ -107,10 +107,17 @@ Minimal local provider example:
 |---|---|
 | Interactive TUI | `filo` |
 | Prompter (single-shot) | `filo --prompt "Summarize this diff"` |
-| MCP over stdio | `filo --mcp --headless` |
-| MCP over HTTP daemon | `filo --daemon --headless --port 8080` |
+| MCP over stdio | `filo --mcp --headless` or `filo --mcp stdio --headless` |
+| MCP over TCP (HTTP `/mcp` endpoint) | `filo --mcp tcp --headless --port 8080` |
+
+MCP transport notes:
+- `--mcp` without a value defaults to `stdio`.
+- `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
+- `--daemon` is still accepted as a deprecated alias for `--mcp tcp`.
 
 Useful CLI flags:
+- `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
+- `--daemon` deprecated alias for `--mcp tcp`
 - `--login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
 - `--list-sessions` list resumable sessions
 - `--resume [id|index]` resume a saved session
@@ -161,20 +168,6 @@ export DASHSCOPE_API_KEY="..."
 
 For local Ollama, default endpoint is:
 - `http://localhost:11434`
-
-Claude OAuth (Pro/Max/Team/Enterprise) quick notes:
-
-```bash
-# Interactive login
-filo --login claude
-
-# Optional environment hints (for scripts/CI)
-export CLAUDE_CODE_LOGIN_HINT="you@company.com"
-export CLAUDE_CODE_LOGIN_METHOD="sso"   # or: CLAUDE_CODE_SSO=1
-
-# Optional: force a specific org when your account belongs to multiple orgs
-export CLAUDE_CODE_ORGANIZATION_UUID="org_..."
-```
 
 ## Configuration
 

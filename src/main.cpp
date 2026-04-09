@@ -8,6 +8,7 @@
 #include "core/session/SessionReport.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/utils/StringUtils.hpp"
 #include "tui/MainApp.hpp"
 #include "exec/Server.hpp"
 #include "exec/Daemon.hpp"
@@ -39,8 +40,8 @@ int main(int argc, char** argv) {
     ::signal(SIGPIPE, SIG_IGN);
     CLI::App app{"Filo - AI Coding Assistant"};
 
-    bool        mcp_mode    = false;
-    bool        daemon_mode = false;
+    std::string mcp_transport = "stdio";
+    bool        daemon_mode_legacy = false;
     bool        headless    = false;
     bool        prompter_mode = false;
     int         port        = 8080;
@@ -56,9 +57,15 @@ int main(int argc, char** argv) {
     std::string work_dir;
     std::vector<std::string> add_dirs;
 
-    app.add_flag("--mcp",     mcp_mode,    "Run as an MCP server");
-    app.add_flag("--daemon",  daemon_mode, "Run as an HTTP daemon exposing the MCP endpoint over TCP");
-    app.add_flag("--headless", headless,   "Suppress the Terminal UI (required for daemon/mcp-only usage)");
+    auto* mcp_opt = app.add_option(
+        "--mcp",
+        mcp_transport,
+        "Run as an MCP server. Optional transport: stdio (default) or tcp.");
+    mcp_opt->expected(0, 1);
+    mcp_opt->capture_default_str();
+    app.add_flag("--daemon",  daemon_mode_legacy,
+                 "Deprecated alias for --mcp tcp");
+    app.add_flag("--headless", headless,   "Suppress the Terminal UI (required for MCP-only usage)");
     app.add_flag("--prompter", prompter_mode, "Run a single non-interactive prompt (script/CI mode)");
     auto* prompt_opt = app.add_option("-p,--prompt", prompter_prompt,
                    "Prompt text for prompter mode. Can be combined with piped stdin input.");
@@ -74,9 +81,9 @@ int main(int argc, char** argv) {
                    "Working directory for the agent. Default: current directory.");
     app.add_option("--add-dir", add_dirs,
                    "Add an additional directory to the workspace scope. Can be specified multiple times.");
-    app.add_option("--port",  port,        "TCP port for the HTTP daemon (default: 8080)")->capture_default_str();
+    app.add_option("--port",  port,        "TCP port for the MCP HTTP daemon (default: 8080)")->capture_default_str();
     app.add_option("--host",  host,
-                   "Listen address for the HTTP daemon (default: 127.0.0.1 — localhost only). "
+                   "Listen address for the MCP HTTP daemon (default: 127.0.0.1 — localhost only). "
                    "Use 0.0.0.0 to accept connections from any network interface."
     )->capture_default_str();
     app.add_option("--login", login_provider,
@@ -91,6 +98,35 @@ int main(int argc, char** argv) {
     CLI11_PARSE(app, argc, argv);
 
     core::logging::Logger::get_instance().configure_from_env();
+
+    std::string normalized_mcp_transport = core::utils::str::to_lower_ascii_copy(mcp_transport);
+    const bool mcp_option_provided = mcp_opt->count() > 0;
+    if (mcp_option_provided && normalized_mcp_transport.empty()) {
+        normalized_mcp_transport = "stdio";
+    }
+    if (mcp_option_provided
+        && normalized_mcp_transport != "stdio"
+        && normalized_mcp_transport != "tcp") {
+        core::logging::error(
+            "Invalid --mcp transport '{}'. Supported transports: stdio, tcp.",
+            mcp_transport);
+        return 2;
+    }
+
+    if (daemon_mode_legacy) {
+        if (mcp_option_provided && normalized_mcp_transport != "tcp") {
+            core::logging::error(
+                "--daemon is equivalent to --mcp tcp and cannot be combined with --mcp {}.",
+                normalized_mcp_transport);
+            return 2;
+        }
+        normalized_mcp_transport = "tcp";
+        core::logging::warn("--daemon is deprecated; use --mcp tcp instead.");
+    }
+
+    const bool mcp_mode = mcp_option_provided || daemon_mode_legacy;
+    const bool mcp_stdio_mode = mcp_mode && normalized_mcp_transport == "stdio";
+    const bool mcp_tcp_mode = mcp_mode && normalized_mcp_transport == "tcp";
 
     if (!work_dir.empty()) {
         std::error_code ec;
@@ -173,7 +209,6 @@ int main(int argc, char** argv) {
 
     const bool has_stdin_input = stdin_has_data();
     const bool run_prompter_mode = !mcp_mode
-        && !daemon_mode
         && exec::prompter::should_run(
             prompter_mode,
             prompt_opt->count() > 0,
@@ -184,12 +219,6 @@ int main(int argc, char** argv) {
             continue_last);
 
     if (run_prompter_mode) {
-        if (mcp_mode || daemon_mode) {
-            core::logging::error(
-                "Prompter mode cannot be combined with --mcp or --daemon.");
-            return 2;
-        }
-
         exec::prompter::RunOptions opts;
         if (prompt_opt->count() > 0) {
             opts.prompt = prompter_prompt;
@@ -207,20 +236,20 @@ int main(int argc, char** argv) {
         return exec::prompter::run(opts);
     }
 
-    // --mcp uses stdin/stdout as the MCP transport.  Never print anything to
-    // stdout when this mode is active: every byte on stdout is part of the
+    // --mcp stdio uses stdin/stdout as the MCP transport. Never print anything
+    // to stdout when this mode is active: every byte on stdout is part of the
     // JSON-RPC stream and extra text will corrupt it.
-    std::thread mcp_thread;
-    if (mcp_mode) {
-        mcp_thread = std::thread([]() {
+    std::thread mcp_stdio_thread;
+    if (mcp_stdio_mode) {
+        mcp_stdio_thread = std::thread([]() {
             exec::mcp::run_server();
         });
     }
 
-    std::thread daemon_thread;
-    if (daemon_mode) {
-        core::logging::info("Starting Filo daemon on {}:{}...", host, port);
-        daemon_thread = std::thread([port, host]() {
+    std::thread mcp_tcp_thread;
+    if (mcp_tcp_mode) {
+        core::logging::info("Starting Filo MCP daemon on {}:{}...", host, port);
+        mcp_tcp_thread = std::thread([port, host]() {
             exec::daemon::run_server(port, host);
         });
     }
@@ -234,15 +263,15 @@ int main(int argc, char** argv) {
         }
         const auto run_result = tui::run(run_opts);
 
-        if (mcp_mode)    exec::mcp::stop_server();
-        if (daemon_mode) exec::daemon::stop_server();
+        if (mcp_stdio_mode) exec::mcp::stop_server();
+        if (mcp_tcp_mode)   exec::daemon::stop_server();
         
         // Close stdin to unblock the MCP server's std::getline, then join
-        if (mcp_thread.joinable()) {
+        if (mcp_stdio_thread.joinable()) {
             std::fclose(stdin);
-            mcp_thread.join();
+            mcp_stdio_thread.join();
         }
-        if (daemon_thread.joinable()) daemon_thread.join();
+        if (mcp_tcp_thread.joinable()) mcp_tcp_thread.join();
 
         // Print the end-of-session summary report.
         core::session::SessionReport::print(
@@ -252,8 +281,8 @@ int main(int argc, char** argv) {
             run_result.session_file_path);
     } else {
         // Headless: block until all servers stop.
-        if (mcp_thread.joinable())    mcp_thread.join();
-        if (daemon_thread.joinable()) daemon_thread.join();
+        if (mcp_stdio_thread.joinable()) mcp_stdio_thread.join();
+        if (mcp_tcp_thread.joinable())   mcp_tcp_thread.join();
     }
 
     return 0;
