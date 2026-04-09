@@ -20,6 +20,7 @@ struct OAuthToken {
     int64_t     expires_at = 0; // Unix timestamp (seconds)
     std::string device_id;      // Device ID extracted from token (for Kimi OAuth)
     std::string account_id;     // Optional provider account identifier
+    std::string organization_id; // Optional organization UUID (Claude Team/Enterprise)
     std::vector<std::string> scopes; // Optional OAuth scopes granted by provider
 
     bool is_valid() const noexcept {

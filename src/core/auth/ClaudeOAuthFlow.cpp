@@ -6,6 +6,7 @@
 #include <httplib.h>
 #include <simdjson.h>
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
@@ -132,6 +133,16 @@ std::vector<std::string> parse_scope_list(std::string_view scopes) {
     return out;
 }
 
+bool env_truthy(const char* key) {
+    const char* raw = std::getenv(key);
+    if (!raw || raw[0] == '\0') return false;
+
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 std::optional<OAuthToken> token_from_env() {
     if (const char* oauth = std::getenv("CLAUDE_CODE_OAUTH_TOKEN");
         oauth && oauth[0] != '\0') {
@@ -149,6 +160,10 @@ std::optional<OAuthToken> token_from_env() {
         if (const char* refresh_env = std::getenv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN");
             refresh_env && refresh_env[0] != '\0') {
             token.refresh_token = refresh_env;
+        }
+        if (const char* org_uuid = std::getenv("CLAUDE_CODE_ORGANIZATION_UUID");
+            org_uuid && org_uuid[0] != '\0') {
+            token.organization_id = org_uuid;
         }
         return token;
     }
@@ -354,6 +369,26 @@ std::string ClaudeOAuthFlow::build_auth_url(std::string_view client_id,
         url += url_encode(org_uuid);
     }
 
+    // Optional UX hints for enterprise SSO / company email prefill.
+    if (const char* login_hint = std::getenv("CLAUDE_CODE_LOGIN_HINT");
+        login_hint && login_hint[0] != '\0') {
+        url += "&login_hint=";
+        url += url_encode(login_hint);
+    } else if (const char* login_hint = std::getenv("CLAUDE_CODE_USER_EMAIL");
+               login_hint && login_hint[0] != '\0') {
+        // Compatibility fallback for environments already exporting this value.
+        url += "&login_hint=";
+        url += url_encode(login_hint);
+    }
+
+    if (const char* login_method = std::getenv("CLAUDE_CODE_LOGIN_METHOD");
+        login_method && login_method[0] != '\0') {
+        url += "&login_method=";
+        url += url_encode(login_method);
+    } else if (env_truthy("CLAUDE_CODE_SSO")) {
+        url += "&login_method=sso";
+    }
+
     return url;
 }
 
@@ -377,6 +412,34 @@ OAuthToken ClaudeOAuthFlow::parse_token_response(std::string_view json,
         token.scopes = parse_scope_list(sv);
     if (doc["expires_in"].get_int64().get(v) == simdjson::SUCCESS)
         token.expires_at = request_time_unix + v;
+    if (doc["account_id"].get_string().get(sv) == simdjson::SUCCESS)
+        token.account_id = std::string(sv);
+    if (doc["organization_id"].get_string().get(sv) == simdjson::SUCCESS) {
+        token.organization_id = std::string(sv);
+    } else if (doc["organization_uuid"].get_string().get(sv) == simdjson::SUCCESS) {
+        // Claude OAuth commonly returns this legacy top-level field.
+        token.organization_id = std::string(sv);
+    }
+
+    simdjson::dom::element account_obj;
+    if (token.account_id.empty()
+        && doc["account"].get(account_obj) == simdjson::SUCCESS) {
+        if (account_obj["uuid"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.account_id = std::string(sv);
+        } else if (account_obj["id"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.account_id = std::string(sv);
+        }
+    }
+
+    simdjson::dom::element org_obj;
+    if (token.organization_id.empty()
+        && doc["organization"].get(org_obj) == simdjson::SUCCESS) {
+        if (org_obj["uuid"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.organization_id = std::string(sv);
+        } else if (org_obj["id"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.organization_id = std::string(sv);
+        }
+    }
 
     if (token.access_token.empty()) {
         throw std::runtime_error("No access_token in Claude OAuth response");
@@ -539,6 +602,24 @@ OAuthToken ClaudeOAuthFlow::login() {
         callback_received ? redirect_uri : std::string(kManualRedirectUrl);
     OAuthToken token = exchange_code(
         received_code, token_exchange_redirect, code_verifier, state);
+
+    if (const char* forced_org = std::getenv("CLAUDE_CODE_ORGANIZATION_UUID");
+        forced_org && forced_org[0] != '\0') {
+        if (!token.organization_id.empty() && token.organization_id != forced_org) {
+            throw std::runtime_error(
+                "Claude OAuth returned organization UUID '" + token.organization_id
+                + "', but CLAUDE_CODE_ORGANIZATION_UUID is set to '" + std::string(forced_org)
+                + "'. Please re-run login with the intended organization.");
+        }
+        if (token.organization_id.empty()) {
+            // Fail closed: do not assume org identity when the token response omits it.
+            throw std::runtime_error(
+                "Claude OAuth response did not include an organization UUID, but "
+                "CLAUDE_CODE_ORGANIZATION_UUID is set to '" + std::string(forced_org)
+                + "'. Please re-run login and ensure the selected account belongs to this organization.");
+        }
+    }
+
     ui_->show_success("Claude authentication completed.");
     return token;
 }

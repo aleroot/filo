@@ -39,6 +39,12 @@ std::optional<OAuthToken> FileTokenStore::load(std::string_view provider_id) {
             token.device_id = std::string(sv);
         if (doc["account_id"].get_string().get(sv) == simdjson::SUCCESS)
             token.account_id = std::string(sv);
+        if (doc["organization_id"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.organization_id = std::string(sv);
+        } else if (doc["organization_uuid"].get_string().get(sv) == simdjson::SUCCESS) {
+            // Backward compatibility with tokens persisted before the rename.
+            token.organization_id = std::string(sv);
+        }
         simdjson::dom::array scopes;
         if (doc["scopes"].get(scopes) == simdjson::SUCCESS) {
             for (auto entry : scopes) {
@@ -72,6 +78,7 @@ void FileTokenStore::save(std::string_view provider_id, const OAuthToken& token)
             << "  \"expires_at\":    "   << token.expires_at    << ",\n"
             << "  \"device_id\":     \"" << core::utils::escape_json_string(token.device_id)     << "\",\n"
             << "  \"account_id\":    \"" << core::utils::escape_json_string(token.account_id)    << "\",\n"
+            << "  \"organization_id\": \"" << core::utils::escape_json_string(token.organization_id) << "\",\n"
             << "  \"scopes\":        [";
 
         for (std::size_t i = 0; i < token.scopes.size(); ++i) {

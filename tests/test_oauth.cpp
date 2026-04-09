@@ -219,6 +219,7 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     original.token_type = "Bearer";
     original.device_id = "device-123";
     original.account_id = "acct_123";
+    original.organization_id = "org_123";
     store.save("google", original);
 
     auto loaded = store.load("google");
@@ -229,6 +230,47 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     REQUIRE(loaded->expires_at    == original.expires_at);
     REQUIRE(loaded->device_id     == "device-123");
     REQUIRE(loaded->account_id == "acct_123");
+    REQUIRE(loaded->organization_id == "org_123");
+}
+
+TEST_CASE("FileTokenStore — load accepts legacy organization_uuid field", "[FileTokenStore]") {
+    TempDir tmp;
+    const std::string token_path = tmp.path + "/oauth_claude.json";
+
+    std::ofstream out(token_path, std::ios::trunc);
+    REQUIRE(out.good());
+    out << R"({
+  "access_token": "legacy-at",
+  "refresh_token": "legacy-rt",
+  "token_type": "Bearer",
+  "expires_at": 9999999999,
+  "organization_uuid": "org-legacy-uuid"
+})";
+    out.close();
+
+    FileTokenStore store(tmp.path);
+    auto loaded = store.load("claude");
+
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->access_token == "legacy-at");
+    REQUIRE(loaded->organization_id == "org-legacy-uuid");
+}
+
+TEST_CASE("FileTokenStore — save writes organization_id key", "[FileTokenStore]") {
+    TempDir tmp;
+    FileTokenStore store(tmp.path);
+
+    OAuthToken token = make_token(3600, "refresh123", "access456");
+    token.organization_id = "org-new-id";
+    store.save("claude", token);
+
+    std::ifstream in(tmp.path + "/oauth_claude.json");
+    REQUIRE(in.good());
+    const std::string raw((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+
+    REQUIRE(raw.find("\"organization_id\"") != std::string::npos);
+    REQUIRE(raw.find("\"organization_uuid\"") == std::string::npos);
 }
 
 TEST_CASE("FileTokenStore — save/load round-trips OAuth scopes", "[FileTokenStore]") {
@@ -503,6 +545,21 @@ TEST_CASE("OAuthTokenManager — refresh preserves account_id when omitted", "[O
     REQUIRE(token.account_id == "acct_789");
 }
 
+TEST_CASE("OAuthTokenManager — refresh preserves organization_id when omitted", "[OAuthTokenManager]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken stored = make_token(-3600, "refresh-me", "expired-at");
+    stored.organization_id = "org_abc";
+    store->stored = stored;
+
+    flow->refresh_result = make_token(3600, "new-rt", "new-at");
+
+    OAuthTokenManager mgr("claude", flow, store);
+    auto token = mgr.get_valid_token();
+
+    REQUIRE(token.organization_id == "org_abc");
+}
+
 TEST_CASE("OAuthTokenManager — force_refresh() throws without refresh token", "[OAuthTokenManager]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
@@ -564,6 +621,43 @@ TEST_CASE("OAuthCredentialSource — session key uses Cookie auth and org UUID h
     REQUIRE(auth.properties.at("auth_mode") == "session_cookie");
 }
 
+TEST_CASE("OAuthCredentialSource — session key uses token organization UUID fallback", "[OAuthCredentialSource]") {
+    ScopedEnvVar clear_env_org("CLAUDE_CODE_ORGANIZATION_UUID", "");
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(3600, "rt", "sk-ant-sid01-session-token");
+    token.organization_id = "org-from-token";
+    store->stored = token;
+
+    auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
+    OAuthCredentialSource src(manager);
+
+    auto auth = src.get_auth();
+    REQUIRE(auth.headers.count("Cookie") == 1);
+    REQUIRE(auth.headers.at("Cookie") == "sessionKey=sk-ant-sid01-session-token");
+    REQUIRE(auth.headers.count("X-Organization-Uuid") == 1);
+    REQUIRE(auth.headers.at("X-Organization-Uuid") == "org-from-token");
+    REQUIRE(auth.properties.at("organization_id") == "org-from-token");
+    REQUIRE(auth.properties.at("organization_uuid") == "org-from-token");
+}
+
+TEST_CASE("OAuthCredentialSource — environment organization UUID overrides token value", "[OAuthCredentialSource]") {
+    ScopedEnvVar org_uuid("CLAUDE_CODE_ORGANIZATION_UUID", "org-from-env");
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(3600, "rt", "sk-ant-sid01-session-token");
+    token.organization_id = "org-from-token";
+    store->stored = token;
+
+    auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
+    OAuthCredentialSource src(manager);
+
+    auto auth = src.get_auth();
+    REQUIRE(auth.headers.at("X-Organization-Uuid") == "org-from-env");
+    REQUIRE(auth.properties.at("organization_id") == "org-from-env");
+    REQUIRE(auth.properties.at("organization_uuid") == "org-from-env");
+}
+
 TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns true when refresh succeeds", "[OAuthCredentialSource]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
@@ -611,6 +705,16 @@ TEST_CASE("ClaudeOAuthFlow::login uses CLAUDE_CODE_OAUTH_TOKEN with optional sco
     REQUIRE(oauth.access_token == "oauth-access-token");
     REQUIRE(oauth.refresh_token == "oauth-refresh-token");
     REQUIRE(oauth.scopes == std::vector<std::string>{"user:profile", "user:inference"});
+}
+
+TEST_CASE("ClaudeOAuthFlow::login captures organization UUID from environment tokens", "[ClaudeOAuthFlow]") {
+    ScopedEnvVar oauth_token("CLAUDE_CODE_OAUTH_TOKEN", "oauth-access-token");
+    ScopedEnvVar oauth_org("CLAUDE_CODE_ORGANIZATION_UUID", "org-company-uuid");
+    ClaudeOAuthFlow flow;
+    const auto oauth = flow.login();
+
+    REQUIRE(oauth.access_token == "oauth-access-token");
+    REQUIRE(oauth.organization_id == "org-company-uuid");
 }
 
 TEST_CASE("ClaudeOAuthFlow::login throws when token is missing", "[ClaudeOAuthFlow]") {
@@ -677,6 +781,142 @@ TEST_CASE("ClaudeOAuthFlow::refresh retries without scope after invalid_scope", 
     REQUIRE(request_bodies.size() == 2);
     REQUIRE(request_bodies[0].find("\"scope\"") != std::string::npos);
     REQUIRE(request_bodies[1].find("\"scope\"") == std::string::npos);
+}
+
+TEST_CASE("ClaudeOAuthFlow::refresh parses top-level account/org identifiers", "[ClaudeOAuthFlow]") {
+    httplib::Server server;
+    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({
+                "access_token":"new-access-token",
+                "token_type":"Bearer",
+                "expires_in":3600,
+                "scope":"user:profile user:inference",
+                "account_id":"acct-top-level",
+                "organization_uuid":"org-top-level"
+            })",
+            "application/json");
+    });
+
+    int port = -1;
+    for (int candidate = 42100; candidate < 42200; ++candidate) {
+        if (server.bind_to_port("127.0.0.1", candidate)) {
+            port = candidate;
+            break;
+        }
+    }
+    if (port <= 0) {
+        SKIP("Loopback port binding unavailable in this test environment");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    ClaudeOAuthFlow flow(
+        "test-client-id",
+        base + "/oauth/authorize",
+        base + "/oauth/token",
+        {"user:profile", "user:inference"},
+        42100,
+        42101,
+        nullptr);
+
+    const auto token = flow.refresh("existing-refresh-token");
+    server.stop();
+
+    REQUIRE(token.access_token == "new-access-token");
+    REQUIRE(token.refresh_token == "existing-refresh-token");
+    REQUIRE(token.account_id == "acct-top-level");
+    REQUIRE(token.organization_id == "org-top-level");
+    REQUIRE(token.scopes == std::vector<std::string>{"user:profile", "user:inference"});
+}
+
+TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization uuid fields", "[ClaudeOAuthFlow]") {
+    httplib::Server server;
+    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({
+                "access_token":"new-access-token",
+                "token_type":"Bearer",
+                "expires_in":3600,
+                "account":{"uuid":"acct-nested-uuid"},
+                "organization":{"uuid":"org-nested-uuid"}
+            })",
+            "application/json");
+    });
+
+    int port = -1;
+    for (int candidate = 42200; candidate < 42300; ++candidate) {
+        if (server.bind_to_port("127.0.0.1", candidate)) {
+            port = candidate;
+            break;
+        }
+    }
+    if (port <= 0) {
+        SKIP("Loopback port binding unavailable in this test environment");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    ClaudeOAuthFlow flow(
+        "test-client-id",
+        base + "/oauth/authorize",
+        base + "/oauth/token",
+        {"user:inference"},
+        42200,
+        42201,
+        nullptr);
+
+    const auto token = flow.refresh("existing-refresh-token");
+    server.stop();
+
+    REQUIRE(token.account_id == "acct-nested-uuid");
+    REQUIRE(token.organization_id == "org-nested-uuid");
+}
+
+TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization id fallback", "[ClaudeOAuthFlow]") {
+    httplib::Server server;
+    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({
+                "access_token":"new-access-token",
+                "token_type":"Bearer",
+                "expires_in":3600,
+                "account":{"id":"acct-nested-id"},
+                "organization":{"id":"org-nested-id"}
+            })",
+            "application/json");
+    });
+
+    int port = -1;
+    for (int candidate = 42300; candidate < 42400; ++candidate) {
+        if (server.bind_to_port("127.0.0.1", candidate)) {
+            port = candidate;
+            break;
+        }
+    }
+    if (port <= 0) {
+        SKIP("Loopback port binding unavailable in this test environment");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    ClaudeOAuthFlow flow(
+        "test-client-id",
+        base + "/oauth/authorize",
+        base + "/oauth/token",
+        {"user:inference"},
+        42300,
+        42301,
+        nullptr);
+
+    const auto token = flow.refresh("existing-refresh-token");
+    server.stop();
+
+    REQUIRE(token.account_id == "acct-nested-id");
+    REQUIRE(token.organization_id == "org-nested-id");
 }
 
 TEST_CASE("AuthenticationManager login(claude) stores token and returns hints", "[AuthenticationManager]") {

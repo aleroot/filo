@@ -21,6 +21,10 @@ namespace core::auth {
  * For automation/backward-compatibility, login() also accepts
  * CLAUDE_CODE_OAUTH_TOKEN (optionally with CLAUDE_CODE_OAUTH_REFRESH_TOKEN)
  * or ANTHROPIC_AUTH_TOKEN from environment.
+ *
+ * Optional environment hints for enterprise SSO:
+ * - CLAUDE_CODE_LOGIN_HINT (or CLAUDE_CODE_USER_EMAIL)
+ * - CLAUDE_CODE_LOGIN_METHOD (e.g. "sso"), or CLAUDE_CODE_SSO=1
  */
 class ClaudeOAuthFlow : public IOAuthFlow {
 public:

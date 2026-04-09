@@ -28,9 +28,17 @@ AuthInfo OAuthCredentialSource::get_auth() {
 
     if (is_session_key) {
         auth.headers["Cookie"] = "sessionKey=" + token.access_token;
-        if (const char* org_uuid = std::getenv("CLAUDE_CODE_ORGANIZATION_UUID");
-            org_uuid && org_uuid[0] != '\0') {
-            auth.headers["X-Organization-Uuid"] = org_uuid;
+        std::string resolved_org_uuid = token.organization_id;
+        if (const char* org_uuid_env = std::getenv("CLAUDE_CODE_ORGANIZATION_UUID");
+            org_uuid_env && org_uuid_env[0] != '\0') {
+            // Environment variable takes precedence so users can force org routing.
+            resolved_org_uuid = org_uuid_env;
+        }
+        if (!resolved_org_uuid.empty()) {
+            auth.headers["X-Organization-Uuid"] = resolved_org_uuid;
+            auth.properties["organization_id"] = resolved_org_uuid;
+            // Keep legacy property key for any downstream integrations expecting it.
+            auth.properties["organization_uuid"] = resolved_org_uuid;
         }
         auth.properties["auth_mode"] = "session_cookie";
     } else {

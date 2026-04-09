@@ -162,6 +162,20 @@ export DASHSCOPE_API_KEY="..."
 For local Ollama, default endpoint is:
 - `http://localhost:11434`
 
+Claude OAuth (Pro/Max/Team/Enterprise) quick notes:
+
+```bash
+# Interactive login
+filo --login claude
+
+# Optional environment hints (for scripts/CI)
+export CLAUDE_CODE_LOGIN_HINT="you@company.com"
+export CLAUDE_CODE_LOGIN_METHOD="sso"   # or: CLAUDE_CODE_SSO=1
+
+# Optional: force a specific org when your account belongs to multiple orgs
+export CLAUDE_CODE_ORGANIZATION_UUID="org_..."
+```
+
 ## Configuration
 
 Config files are layered in this order:

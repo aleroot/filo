@@ -37,6 +37,9 @@ OAuthToken OAuthTokenManager::get_valid_token() {
             if (refreshed.account_id.empty()) {
                 refreshed.account_id = stored->account_id;
             }
+            if (refreshed.organization_id.empty()) {
+                refreshed.organization_id = stored->organization_id;
+            }
             if (refreshed.scopes.empty()) {
                 refreshed.scopes = stored->scopes;
             }
@@ -67,6 +70,9 @@ void OAuthTokenManager::force_refresh() {
         }
         if (refreshed.account_id.empty()) {
             refreshed.account_id = stored->account_id;
+        }
+        if (refreshed.organization_id.empty()) {
+            refreshed.organization_id = stored->organization_id;
         }
         if (refreshed.scopes.empty()) {
             refreshed.scopes = stored->scopes;
