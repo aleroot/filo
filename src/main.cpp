@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     std::string input_format = "text";
     bool        include_partial_messages = false;
     bool        continue_last = false;
+    bool        enable_api_gateway = false;
     std::string resume_session;      // --resume [id|index]; empty means most recent
     bool        list_sessions = false;  // --list-sessions
     std::string work_dir;
@@ -81,11 +82,22 @@ int main(int argc, char** argv) {
                    "Working directory for the agent. Default: current directory.");
     app.add_option("--add-dir", add_dirs,
                    "Add an additional directory to the workspace scope. Can be specified multiple times.");
-    app.add_option("--port",  port,        "TCP port for the MCP HTTP daemon (default: 8080)")->capture_default_str();
+    app.add_option(
+        "--port",
+        port,
+        "TCP port for the HTTP daemon used by --mcp tcp/--daemon and --api (default: 8080)")
+        ->capture_default_str();
     app.add_option("--host",  host,
-                   "Listen address for the MCP HTTP daemon (default: 127.0.0.1 — localhost only). "
+                   "Listen address for the HTTP daemon used by --mcp tcp/--daemon and --api "
+                   "(default: 127.0.0.1 — localhost only). "
                    "Use 0.0.0.0 to accept connections from any network interface."
     )->capture_default_str();
+    app.add_flag(
+        "--api",
+        enable_api_gateway,
+        "Enable optional OpenAI/Anthropic-compatible proxy endpoints "
+        "(/v1/models, /v1/chat/completions, /v1/messages). "
+        "Starts the HTTP daemon even without --mcp.");
     app.add_option("--login", login_provider,
                    "Authenticate with a provider and exit (e.g. --login openai, --login claude)");
     auto* resume_opt = app.add_option(
@@ -127,6 +139,7 @@ int main(int argc, char** argv) {
     const bool mcp_mode = mcp_option_provided || daemon_mode_legacy;
     const bool mcp_stdio_mode = mcp_mode && normalized_mcp_transport == "stdio";
     const bool mcp_tcp_mode = mcp_mode && normalized_mcp_transport == "tcp";
+    const bool http_daemon_mode = mcp_tcp_mode || enable_api_gateway;
 
     if (!work_dir.empty()) {
         std::error_code ec;
@@ -209,6 +222,7 @@ int main(int argc, char** argv) {
 
     const bool has_stdin_input = stdin_has_data();
     const bool run_prompter_mode = !mcp_mode
+        && !enable_api_gateway
         && exec::prompter::should_run(
             prompter_mode,
             prompt_opt->count() > 0,
@@ -246,11 +260,18 @@ int main(int argc, char** argv) {
         });
     }
 
-    std::thread mcp_tcp_thread;
-    if (mcp_tcp_mode) {
-        core::logging::info("Starting Filo MCP daemon on {}:{}...", host, port);
-        mcp_tcp_thread = std::thread([port, host]() {
-            exec::daemon::run_server(port, host);
+    std::thread http_daemon_thread;
+    if (http_daemon_mode) {
+        if (mcp_tcp_mode && enable_api_gateway) {
+            core::logging::info("Starting Filo HTTP daemon (MCP + API gateway) on {}:{}...", host, port);
+        } else if (mcp_tcp_mode) {
+            core::logging::info("Starting Filo MCP daemon on {}:{}...", host, port);
+        } else {
+            core::logging::info("Starting Filo API gateway daemon on {}:{}...", host, port);
+        }
+
+        http_daemon_thread = std::thread([port, host, enable_api_gateway, mcp_tcp_mode]() {
+            exec::daemon::run_server(port, host, enable_api_gateway, mcp_tcp_mode);
         });
     }
 
@@ -264,14 +285,14 @@ int main(int argc, char** argv) {
         const auto run_result = tui::run(run_opts);
 
         if (mcp_stdio_mode) exec::mcp::stop_server();
-        if (mcp_tcp_mode)   exec::daemon::stop_server();
+        if (http_daemon_mode) exec::daemon::stop_server();
         
         // Close stdin to unblock the MCP server's std::getline, then join
         if (mcp_stdio_thread.joinable()) {
             std::fclose(stdin);
             mcp_stdio_thread.join();
         }
-        if (mcp_tcp_thread.joinable()) mcp_tcp_thread.join();
+        if (http_daemon_thread.joinable()) http_daemon_thread.join();
 
         // Print the end-of-session summary report.
         core::session::SessionReport::print(
@@ -282,7 +303,7 @@ int main(int argc, char** argv) {
     } else {
         // Headless: block until all servers stop.
         if (mcp_stdio_thread.joinable()) mcp_stdio_thread.join();
-        if (mcp_tcp_thread.joinable())   mcp_tcp_thread.join();
+        if (http_daemon_thread.joinable())   http_daemon_thread.join();
     }
 
     return 0;

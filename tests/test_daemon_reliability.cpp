@@ -2,6 +2,9 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <httplib.h>
 
+#include "core/config/ConfigManager.hpp"
+#include "core/llm/ProviderManager.hpp"
+#include "exec/ApiGateway.hpp"
 #include "exec/Daemon.hpp"
 
 #include <chrono>
@@ -11,9 +14,11 @@
 #include <format>
 #include <future>
 #include <optional>
+#include <random>
 #include <simdjson.h>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #if defined(_WIN32)
 #include <process.h>
 #else
@@ -31,16 +36,36 @@ namespace {
 }
 
 [[nodiscard]] int next_test_port() {
-    // CTest executes each Catch2 case in a separate process.
-    // Allocate a per-process port block so concurrent daemon tests do not
-    // all start from the same base port and race on bind().
-    constexpr int kBasePort = 19080;
-    constexpr int kPortsPerProcess = 16;
-    constexpr int kProcessBuckets = 2500;
-    static const int start_port =
-        kBasePort + (current_process_id() % kProcessBuckets) * kPortsPerProcess;
-    static std::atomic<int> port{start_port};
-    return port.fetch_add(1, std::memory_order_relaxed);
+    // CTest executes each Catch2 case in a separate process. Fixed per-process
+    // buckets can collide when process ids alias modulo the bucket count, so
+    // probe an actually bindable loopback port and return that candidate.
+    constexpr int kMinPort = 19080;
+    constexpr int kMaxPort = 60999;
+    constexpr int kProbeAttempts = 256;
+    static thread_local std::mt19937 rng{
+        static_cast<std::mt19937::result_type>(
+            std::random_device{}()
+            ^ static_cast<unsigned>(current_process_id())
+            ^ static_cast<unsigned>(
+                std::chrono::steady_clock::now().time_since_epoch().count()))
+    };
+    std::uniform_int_distribution<int> dist(kMinPort, kMaxPort);
+
+    for (int attempt = 0; attempt < kProbeAttempts; ++attempt) {
+        const int candidate = dist(rng);
+        httplib::Server probe;
+        if (probe.bind_to_port("127.0.0.1", candidate)) {
+            return candidate;
+        }
+    }
+
+    // Fall back to a deterministic value if probing fails repeatedly.
+    constexpr int kFallbackBase = 20000;
+    constexpr int kFallbackSpan = 20000;
+    static std::atomic<int> fallback{
+        kFallbackBase + (current_process_id() % kFallbackSpan)
+    };
+    return fallback.fetch_add(1, std::memory_order_relaxed);
 }
 
 [[nodiscard]] bool wait_for_ping(int port,
@@ -156,6 +181,46 @@ extract_negotiated_protocol_version(std::string_view response_body) {
     return client.Delete("/mcp", headers);
 }
 
+[[nodiscard]] httplib::Result get_request(int port, std::string_view path) {
+    httplib::Client client("127.0.0.1", port);
+    client.set_connection_timeout(std::chrono::seconds{1});
+    client.set_read_timeout(std::chrono::seconds{10});
+    client.set_write_timeout(std::chrono::seconds{10});
+    return client.Get(std::string(path));
+}
+
+[[nodiscard]] httplib::Result post_json_request(int port,
+                                                std::string_view path,
+                                                std::string_view payload) {
+    httplib::Client client("127.0.0.1", port);
+    client.set_connection_timeout(std::chrono::seconds{1});
+    client.set_read_timeout(std::chrono::seconds{10});
+    client.set_write_timeout(std::chrono::seconds{10});
+    return client.Post(std::string(path), std::string(payload), "application/json");
+}
+
+[[nodiscard]] std::unordered_set<std::string> extract_model_ids(std::string_view response_body) {
+    std::unordered_set<std::string> ids;
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(response_body).get(doc) != simdjson::SUCCESS) {
+        return ids;
+    }
+
+    simdjson::dom::array models;
+    if (doc["data"].get(models) != simdjson::SUCCESS) {
+        return ids;
+    }
+
+    for (simdjson::dom::element model_el : models) {
+        std::string_view id;
+        if (model_el["id"].get(id) == simdjson::SUCCESS) {
+            ids.insert(std::string(id));
+        }
+    }
+    return ids;
+}
+
 [[nodiscard]] std::size_t count_lines(const std::filesystem::path& path) {
     std::ifstream in(path);
     std::size_t lines = 0;
@@ -172,8 +237,16 @@ extract_negotiated_protocol_version(std::string_view response_body) {
 
 class DaemonRunner {
 public:
-    explicit DaemonRunner(int port)
-        : thread_([port]() { exec::daemon::run_server(port, "127.0.0.1"); }) {}
+    explicit DaemonRunner(int port,
+                          bool enable_api_gateway = false,
+                          bool enable_mcp_http = true)
+        : thread_([port, enable_api_gateway, enable_mcp_http]() {
+            exec::daemon::run_server(
+                port,
+                "127.0.0.1",
+                enable_api_gateway,
+                enable_mcp_http);
+        }) {}
 
     ~DaemonRunner() {
         exec::daemon::stop_server();
@@ -184,6 +257,35 @@ public:
     DaemonRunner& operator=(const DaemonRunner&) = delete;
 
 private:
+    std::thread thread_;
+};
+
+class GatewayServerRunner {
+public:
+    GatewayServerRunner(int port,
+                        const core::config::AppConfig& config,
+                        exec::gateway::ProviderCatalog provider_catalog)
+        : port_(port),
+          gateway_(config,
+                   core::llm::ProviderManager::get_instance(),
+                   std::move(provider_catalog)) {
+        gateway_.register_routes(server_);
+        thread_ = std::thread([this]() {
+            server_.listen("127.0.0.1", port_);
+        });
+    }
+
+    ~GatewayServerRunner() {
+        server_.stop();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    int port_;
+    httplib::Server server_;
+    exec::gateway::ApiGateway gateway_;
     std::thread thread_;
 };
 
@@ -497,4 +599,207 @@ TEST_CASE("Daemon DELETE /mcp resets run_terminal_command shell state for that s
     auto get_res_after = post_mcp_request(port, get_payload_after, session_headers(*session));
     REQUIRE(get_res_after);
     REQUIRE(get_res_after->status == 404);
+}
+
+TEST_CASE("API gateway routes are disabled unless explicitly enabled",
+          "[daemon][api_gateway]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port, false);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto models = get_request(port, "/v1/models");
+    auto chat = post_json_request(
+        port,
+        "/v1/chat/completions",
+        R"({"model":"openai","messages":[{"role":"user","content":"hi"}]})");
+    auto messages = post_json_request(
+        port,
+        "/v1/messages",
+        R"({"model":"openai","messages":[{"role":"user","content":"hi"}]})");
+
+    REQUIRE(models);
+    REQUIRE(chat);
+    REQUIRE(messages);
+    REQUIRE(models->status == 404);
+    REQUIRE(chat->status == 404);
+    REQUIRE(messages->status == 404);
+}
+
+TEST_CASE("API gateway exposes /v1/models when enabled",
+          "[daemon][api_gateway]") {
+    constexpr int kStartupAttempts = 6;
+    bool saw_reachable_server = false;
+    std::optional<int> last_status;
+    std::string last_body;
+    for (int startup_attempt = 0; startup_attempt < kStartupAttempts; ++startup_attempt) {
+        const int port = next_test_port();
+        DaemonRunner daemon(port, true);
+        if (!wait_for_ping(port, std::chrono::seconds{1})) {
+            continue;
+        }
+        saw_reachable_server = true;
+
+        auto models = get_request(port, "/v1/models");
+        if (!models) {
+            continue;
+        }
+        last_status = models->status;
+        last_body = models->body;
+        if (models->status != 200) {
+            continue;
+        }
+        REQUIRE_THAT(models->body, Catch::Matchers::ContainsSubstring(R"("object":"list")"));
+        return;
+    }
+
+    if (!saw_reachable_server) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    INFO("Last /v1/models status: "
+         << (last_status.has_value() ? std::to_string(*last_status) : std::string("<none>")));
+    INFO("Last /v1/models body: " << last_body);
+    FAIL("API gateway was reachable but /v1/models did not become ready after retries.");
+}
+
+TEST_CASE("API-only daemon mode does not expose MCP HTTP endpoints",
+          "[daemon][api_gateway]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port, true, false);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto models = get_request(port, "/v1/models");
+    auto mcp_get = get_request(port, "/mcp");
+    auto mcp_post = post_json_request(
+        port,
+        "/mcp",
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})");
+
+    REQUIRE(models);
+    REQUIRE(mcp_get);
+    REQUIRE(mcp_post);
+    REQUIRE(models->status == 200);
+    REQUIRE(mcp_get->status == 404);
+    REQUIRE(mcp_post->status == 404);
+}
+
+TEST_CASE("API gateway /v1/models advertises only initialized providers",
+          "[daemon][api_gateway]") {
+    core::config::AppConfig config;
+    config.default_provider = "openai";
+    config.default_model_selection = "manual";
+
+    config.providers["openai"].model = "gpt-5.4";
+    config.providers["broken-custom"].api_type = core::config::ApiType::OpenAI;
+    config.providers["broken-custom"].model = "broken-model";
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.provider_names.insert("openai");
+    provider_catalog.provider_default_models["openai"] = "gpt-5.4";
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto models = get_request(port, "/v1/models");
+    REQUIRE(models);
+    REQUIRE(models->status == 200);
+
+    const auto model_ids = extract_model_ids(models->body);
+    REQUIRE(model_ids.contains("openai"));
+    REQUIRE(model_ids.contains("gpt-5.4"));
+    REQUIRE(model_ids.contains("openai/gpt-5.4"));
+
+    REQUIRE_FALSE(model_ids.contains("broken-custom"));
+    REQUIRE_FALSE(model_ids.contains("broken-model"));
+    REQUIRE_FALSE(model_ids.contains("broken-custom/broken-model"));
+}
+
+TEST_CASE("API gateway validates OpenAI-compatible payloads locally",
+          "[daemon][api_gateway]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port, true);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto invalid_json = post_json_request(
+        port,
+        "/v1/chat/completions",
+        R"(not-json)");
+    REQUIRE(invalid_json);
+    REQUIRE(invalid_json->status == 400);
+    REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring(R"("error")"));
+    REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring("Invalid JSON"));
+
+    auto stream_unsupported = post_json_request(
+        port,
+        "/v1/chat/completions",
+        R"({"model":"openai","stream":true,"messages":[{"role":"user","content":"hi"}]})");
+    REQUIRE(stream_unsupported);
+    REQUIRE(stream_unsupported->status == 400);
+    REQUIRE_THAT(stream_unsupported->body, Catch::Matchers::ContainsSubstring("stream=true"));
+}
+
+TEST_CASE("API gateway validates Anthropic-compatible payloads locally",
+          "[daemon][api_gateway]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port, true);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto invalid_json = post_json_request(
+        port,
+        "/v1/messages",
+        R"(not-json)");
+    REQUIRE(invalid_json);
+    REQUIRE(invalid_json->status == 400);
+    REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring(R"("type":"error")"));
+    REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring("Invalid JSON"));
+
+    auto stream_unsupported = post_json_request(
+        port,
+        "/v1/messages",
+        R"({"model":"openai","stream":true,"messages":[{"role":"user","content":"hi"}]})");
+    REQUIRE(stream_unsupported);
+    REQUIRE(stream_unsupported->status == 400);
+    REQUIRE_THAT(stream_unsupported->body, Catch::Matchers::ContainsSubstring("stream=true"));
+}
+
+TEST_CASE("API gateway surfaces policy routing validation errors",
+          "[daemon][api_gateway]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port, true);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto unknown_policy = post_json_request(
+        port,
+        "/v1/chat/completions",
+        R"({"model":"policy/does-not-exist","messages":[{"role":"user","content":"hi"}]})");
+
+    REQUIRE(unknown_policy);
+    REQUIRE(unknown_policy->status == 400);
+
+    const bool has_policy_error =
+        unknown_policy->body.find("Unknown router policy") != std::string::npos
+        || unknown_policy->body.find("Router policies are unavailable") != std::string::npos;
+    REQUIRE(has_policy_error);
 }

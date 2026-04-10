@@ -100,6 +100,7 @@ unset(_filo_saved_folder)
 set(FILO_CORE_SOURCES
     src/exec/Server.cpp
     src/exec/Daemon.cpp
+    src/exec/ApiGateway.cpp
     src/exec/Prompter.cpp
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp

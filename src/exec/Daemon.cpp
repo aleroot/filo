@@ -1,4 +1,5 @@
 #include "Daemon.hpp"
+#include "ApiGateway.hpp"
 #include "RequestReplayCache.hpp"
 #include <httplib.h>
 #include <format>
@@ -17,7 +18,6 @@
 #include "../core/logging/Logger.hpp"
 #include <simdjson.h>
 #include <array>
-#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -31,6 +31,7 @@
 #include <system_error>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 namespace exec::daemon {
 
@@ -48,13 +49,19 @@ void stop_server() {
     if (server) server->stop();
 }
 
-static void init_providers() {
+void init_providers(gateway::ProviderCatalog* provider_catalog = nullptr) {
     auto& config_manager = core::config::ConfigManager::get_instance();
     const auto& config = config_manager.get_config();
     auto& provider_manager = core::llm::ProviderManager::get_instance();
+
     for (const auto& [name, pconfig] : config.providers) {
-        if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig))
+        if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
             provider_manager.register_provider(name, provider);
+            if (provider_catalog != nullptr) {
+                provider_catalog->provider_names.insert(name);
+                provider_catalog->provider_default_models[name] = pconfig.model;
+            }
+        }
     }
 }
 
@@ -1299,14 +1306,23 @@ void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
 
 } // namespace
 
-void run_server(int port, const std::string& host) {
+void run_server(int port,
+                const std::string& host,
+                bool enable_api_gateway,
+                bool enable_mcp_http) {
     auto svr = std::make_shared<httplib::Server>();
     {
         std::lock_guard<std::mutex> lock(g_server_mutex);
         g_svr = svr;
     }
 
-    init_providers();
+    auto& config_manager = core::config::ConfigManager::get_instance();
+    const auto& config = config_manager.get_config();
+    auto& provider_manager = core::llm::ProviderManager::get_instance();
+
+    gateway::ProviderCatalog provider_catalog;
+    init_providers(enable_api_gateway ? &provider_catalog : nullptr);
+
     clear_http_sessions();
 
     // Pre-construct the McpDispatcher singleton so tools are registered once,
@@ -1336,11 +1352,24 @@ void run_server(int port, const std::string& host) {
     // Spec §Transport: servers MUST return HTTP 405 for wrong method on /mcp.
     // -------------------------------------------------------------------------
 
-    const auto host_copy = std::string(host);
-    svr->Options("/mcp", std::bind_front(handle_mcp_options, host_copy));
-    svr->Get("/mcp", std::bind_front(handle_mcp_get, host_copy));
-    svr->Post("/mcp", std::bind_front(handle_mcp_post, host_copy));
-    svr->Delete("/mcp", std::bind_front(handle_mcp_delete, host_copy));
+    if (enable_mcp_http) {
+        const auto host_copy = std::string(host);
+        svr->Options("/mcp", std::bind_front(handle_mcp_options, host_copy));
+        svr->Get("/mcp", std::bind_front(handle_mcp_get, host_copy));
+        svr->Post("/mcp", std::bind_front(handle_mcp_post, host_copy));
+        svr->Delete("/mcp", std::bind_front(handle_mcp_delete, host_copy));
+    }
+
+    // Optional API gateway endpoints.
+    if (enable_api_gateway) {
+        gateway::ApiGateway api_gateway(
+            config,
+            provider_manager,
+            std::move(provider_catalog));
+        api_gateway.register_routes(*svr);
+    }
+
+    // Legacy local endpoint.
     svr->Post("/api/chat", handle_api_chat);
 
     if (!svr->bind_to_port(host, port)) {
@@ -1351,8 +1380,13 @@ void run_server(int port, const std::string& host) {
     }
 
     core::logging::info("Filo daemon listening on {}:{}.", host, port);
-    core::logging::info("MCP endpoint : http://{}:{}/mcp", host, port);
     core::logging::info("Health check : http://{}:{}/ping", host, port);
+    if (enable_mcp_http) {
+        core::logging::info("MCP endpoint : http://{}:{}/mcp", host, port);
+    }
+    if (enable_api_gateway) {
+        core::logging::info("API gateway endpoints: /v1/models, /v1/chat/completions, /v1/messages");
+    }
 
     const bool listen_ok = svr->listen_after_bind();
     if (!listen_ok) {

@@ -6,11 +6,11 @@
 
 **Filo** is a high-performance AI coding assistant written in modern C++.
 
-It runs in four modes:
+It runs in multiple runtime modes:
 - interactive terminal app (TUI)
 - non-interactive prompter mode for scripts/CI
 - MCP server over stdio
-- HTTP daemon exposing MCP and chat endpoints
+- HTTP daemon exposing MCP and/or OpenAI/Anthropic-compatible API endpoints
 
 ## Why Filo
 
@@ -109,15 +109,28 @@ Minimal local provider example:
 | Prompter (single-shot) | `filo --prompt "Summarize this diff"` |
 | MCP over stdio | `filo --mcp --headless` or `filo --mcp stdio --headless` |
 | MCP over TCP (HTTP `/mcp` endpoint) | `filo --mcp tcp --headless --port 8080` |
+| API gateway only | `filo --api --headless --port 8080` |
+| MCP + API gateway | `filo --mcp tcp --headless --api --port 8080` |
 
-MCP transport notes:
+Daemon transport notes:
 - `--mcp` without a value defaults to `stdio`.
 - `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
 - `--daemon` is still accepted as a deprecated alias for `--mcp tcp`.
+- The API gateway is off by default to keep daemon startup minimal and local-first.
+- `--api` starts the same HTTP daemon and exposes OpenAI/Anthropic-compatible proxy endpoints:
+  - `GET /v1/models`
+  - `POST /v1/chat/completions` (OpenAI-style)
+  - `POST /v1/messages` (Anthropic-style)
+- Combine `--api` with `--mcp tcp` if you want both `/mcp` and `/v1/*` on one port.
+- Model routing in API gateway endpoints:
+  - `policy/<policy_name>` routes via filo smart router policy.
+  - `<provider>/<model>` routes directly to a configured provider/model.
+  - `<provider>` routes to that provider's default configured model.
 
 Useful CLI flags:
 - `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
 - `--daemon` deprecated alias for `--mcp tcp`
+- `--api` enable optional OpenAI/Anthropic-compatible proxy mode
 - `--login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
 - `--list-sessions` list resumable sessions
 - `--resume [id|index]` resume a saved session
