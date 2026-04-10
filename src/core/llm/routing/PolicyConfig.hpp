@@ -90,6 +90,11 @@ struct RouterConfig {
     // Auto-classifier configuration shared across all policies.
     // The Smart strategy uses this to choose the right tier per request.
     AutoClassifierConfig auto_classifier;
+
+    // True when this config instance explicitly set auto_classifier fields.
+    // Needed so merge_router_config can avoid clobbering an existing classifier
+    // config when an overlay omits the section.
+    bool has_auto_classifier_overrides = false;
 };
 
 struct RouteContext {

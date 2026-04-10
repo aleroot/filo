@@ -43,10 +43,10 @@ void presort_policy_rules(PolicyDefinition& policy) {
 } // namespace
 
 RouterEngine::RouterEngine(RouterConfig config,
-                           std::unordered_set<std::string> available_providers)
+                           core::llm::ProviderDescriptorSet providers)
     : auto_classifier_(config.auto_classifier)   // read before move below
     , config_(std::move(config))
-    , available_providers_(std::move(available_providers)) {
+    , providers_(std::move(providers)) {
     // Pre-sort rules in every policy so route() never allocates during matching.
     for (auto& [_, policy] : config_.policies) {
         presort_policy_rules(policy);
@@ -464,6 +464,53 @@ const RouteCandidate* RouterEngine::choose_smart(const std::vector<RouteCandidat
 
     const ClassificationResult cr = auto_classifier_.classify(input);
 
+    auto tier_pin_matches = [](const RouteCandidate& c, Tier target) {
+        // An unpinned candidate (empty tier) accepts any tier.
+        if (c.tier.empty()) return true;
+        if (c.tier == "fast"     && target == Tier::Fast)     return true;
+        if (c.tier == "balanced" && target == Tier::Balanced) return true;
+        if (c.tier == "powerful" && target == Tier::Powerful) return true;
+        return false;
+    };
+
+    const bool any_pinned = std::ranges::any_of(candidates, [](const RouteCandidate& c) {
+        return !c.tier.empty();
+    });
+
+    auto pick_latency_from_pool = [&](const std::vector<const RouteCandidate*>& pool) -> const RouteCandidate* {
+        if (pool.empty()) return nullptr;
+        std::vector<RouteCandidate> sub;
+        sub.reserve(pool.size());
+        for (const auto* c : pool) sub.push_back(*c);
+        const RouteCandidate* picked = choose_latency(sub, reason);
+        if (!picked) return nullptr;
+        for (const auto& c : candidates) {
+            if (c.provider == picked->provider && c.model == picked->model) {
+                return &c;
+            }
+        }
+        return nullptr;
+    };
+
+    // Local-first optimization for low-complexity requests:
+    // keep simple edits/iterations on local backends when available, while
+    // preserving tier pins and remote fallback for harder tasks.
+    if (cr.tier == Tier::Fast && !providers_.empty()) {
+        std::vector<const RouteCandidate*> local_pool;
+        local_pool.reserve(candidates.size());
+        for (const auto& c : candidates) {
+            if (!candidate_available(c) || !candidate_is_local(c)) continue;
+            if (any_pinned && !tier_pin_matches(c, cr.tier)) continue;
+            local_pool.push_back(&c);
+        }
+
+        if (const RouteCandidate* local_pick = pick_latency_from_pool(local_pool);
+            local_pick != nullptr) {
+            reason = std::format("smart [{}] → local-first fast ({})", cr.reason, local_pick->provider);
+            return local_pick;
+        }
+    }
+
     // ── Tier-aware candidate selection ───────────────────────────────────────
     //
     // If ANY candidate has an explicit tier pin we use tier-based selection:
@@ -475,19 +522,6 @@ const RouteCandidate* RouterEngine::choose_smart(const std::vector<RouteCandidat
     // original choose_smart: quality-score for complex requests, latency for
     // everything else.  This preserves backwards compatibility when the policy
     // author hasn't opted into explicit tier pinning.
-
-    const bool any_pinned = std::ranges::any_of(candidates, [](const RouteCandidate& c) {
-        return !c.tier.empty();
-    });
-
-    auto tier_pin_matches = [](const RouteCandidate& c, Tier target) {
-        // An unpinned candidate (empty tier) accepts any tier.
-        if (c.tier.empty()) return true;
-        if (c.tier == "fast"     && target == Tier::Fast)     return true;
-        if (c.tier == "balanced" && target == Tier::Balanced) return true;
-        if (c.tier == "powerful" && target == Tier::Powerful) return true;
-        return false;
-    };
 
     if (any_pinned) {
         // ── Tier-pinned path ─────────────────────────────────────────────────
@@ -576,8 +610,13 @@ const RouteCandidate* RouterEngine::choose_smart(const std::vector<RouteCandidat
 
 bool RouterEngine::candidate_available(const RouteCandidate& candidate) const {
     if (candidate.provider.empty()) return false;
-    if (available_providers_.empty()) return true;
-    return available_providers_.contains(candidate.provider);
+    if (providers_.empty()) return true;
+    return core::llm::contains_provider(providers_, candidate.provider);
+}
+
+bool RouterEngine::candidate_is_local(const RouteCandidate& candidate) const {
+    if (candidate.provider.empty()) return false;
+    return core::llm::is_local_provider(providers_, candidate.provider);
 }
 
 std::string RouterEngine::candidate_key(const RouteCandidate& candidate) {

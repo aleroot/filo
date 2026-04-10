@@ -12,7 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 using namespace core::llm;
@@ -99,11 +98,11 @@ struct RouterFixture {
         if (!parse_router_config(router_obj, config, error))
             throw std::runtime_error("parse_router_config: " + error);
 
-        std::unordered_set<std::string> avail;
+        core::llm::ProviderDescriptorSet avail;
         auto& pm = ProviderManager::get_instance();
         for (auto& [name, prov] : providers) {
             pm.register_provider(name, prov);
-            avail.insert(name);
+            avail.insert({name, false});
             default_models[name] = name + "-default-model";
         }
 

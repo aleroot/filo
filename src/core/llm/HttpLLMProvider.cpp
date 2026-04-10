@@ -2,6 +2,7 @@
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "../logging/Logger.hpp"
+#include "../utils/UriUtils.hpp"
 #include <cpr/cpr.h>
 #include <algorithm>
 #include <chrono>
@@ -76,6 +77,10 @@ namespace {
         delay_ms = std::max(100, delay_ms + jitter(rng));
         
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+
+    [[nodiscard]] bool looks_like_loopback_base_url(std::string_view base_url) {
+        return core::utils::uri::is_loopback_http_url(base_url);
     }
 
 }
@@ -160,6 +165,14 @@ double HttpLLMProvider::estimate_cost(int input_tokens, int output_tokens) const
 
 bool HttpLLMProvider::should_estimate_cost() const {
     return !cred_source_ || !cred_source_->uses_subscription_billing();
+}
+
+ProviderCapabilities HttpLLMProvider::capabilities() const {
+    const bool is_ollama = protocol_ && protocol_->name() == "ollama";
+    return ProviderCapabilities{
+        .supports_tool_calls = true,
+        .is_local = is_ollama && looks_like_loopback_base_url(base_url_),
+    };
 }
 
 void HttpLLMProvider::reset_conversation_state() {

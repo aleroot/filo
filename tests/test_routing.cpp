@@ -6,7 +6,9 @@
 
 #include <simdjson.h>
 
+#include <string_view>
 #include <unordered_set>
+#include <utility>
 
 namespace {
 
@@ -21,6 +23,24 @@ core::llm::routing::RouterConfig parse_router_from_json(const std::string& json)
     std::string error;
     REQUIRE(core::llm::routing::parse_router_config(router_obj, config, error));
     return config;
+}
+
+core::llm::ProviderDescriptorSet providers(
+    std::initializer_list<std::string_view> names) {
+    core::llm::ProviderDescriptorSet descriptors;
+    for (const auto name : names) {
+        descriptors.insert({std::string(name), false});
+    }
+    return descriptors;
+}
+
+core::llm::ProviderDescriptorSet providers_with_locality(
+    std::initializer_list<std::pair<std::string_view, bool>> entries) {
+    core::llm::ProviderDescriptorSet descriptors;
+    for (const auto& [name, is_local] : entries) {
+        descriptors.insert({std::string(name), is_local});
+    }
+    return descriptors;
 }
 
 } // namespace
@@ -85,6 +105,40 @@ TEST_CASE("Router policy loader accepts models alias for defaults", "[routing][c
     REQUIRE(config.policies.at("p").defaults[0].provider == "x");
 }
 
+TEST_CASE("Router policy loader parses tier pins and auto classifier config", "[routing][config]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "smart",
+        "auto_classifier": {
+            "quality_bias": 0.9,
+            "fast_token_threshold": 256,
+            "powerful_token_threshold": 4096,
+            "escalation_turn_threshold": 4
+        },
+        "policies": {
+            "smart": {
+                "strategy": "smart",
+                "defaults": [
+                    { "provider": "local", "model": "qwen-local", "tier": "FAST" },
+                    { "provider": "remote", "model": "gpt-5.4", "tier": "powerful" }
+                ]
+            }
+        }
+    })";
+
+    const auto config = parse_router_from_json(json);
+    REQUIRE(config.auto_classifier.quality_bias == Catch::Approx(0.9));
+    REQUIRE(config.auto_classifier.fast_token_threshold == 256);
+    REQUIRE(config.auto_classifier.powerful_token_threshold == 4096);
+    REQUIRE(config.auto_classifier.escalation_turn_threshold == 4);
+    REQUIRE(config.has_auto_classifier_overrides);
+
+    const auto& defaults = config.policies.at("smart").defaults;
+    REQUIRE(defaults.size() == 2);
+    REQUIRE(defaults[0].tier == "fast");
+    REQUIRE(defaults[1].tier == "powerful");
+}
+
 TEST_CASE("merge_router_config overlays policies and toggles enabled", "[routing][config]") {
     using namespace core::llm::routing;
 
@@ -108,6 +162,38 @@ TEST_CASE("merge_router_config overlays policies and toggles enabled", "[routing
     REQUIRE(base.default_policy == "new-policy");
     REQUIRE(base.policies.contains("base-policy")); // original kept
     REQUIRE(base.policies.contains("new-policy"));  // new one added
+}
+
+TEST_CASE("merge_router_config overlays auto classifier only when explicitly configured", "[routing][config]") {
+    auto base = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "base",
+        "auto_classifier": { "quality_bias": 0.2 },
+        "policies": {
+            "base": { "strategy": "fallback", "defaults": [{ "provider": "a", "model": "a" }] }
+        }
+    })");
+
+    const auto overlay_without_classifier = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "base",
+        "policies": {
+            "base": { "strategy": "fallback", "defaults": [{ "provider": "b", "model": "b" }] }
+        }
+    })");
+    merge_router_config(base, overlay_without_classifier);
+    REQUIRE(base.auto_classifier.quality_bias == Catch::Approx(0.2));
+
+    const auto overlay_with_classifier = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "base",
+        "auto_classifier": { "quality_bias": 0.75 },
+        "policies": {
+            "base": { "strategy": "fallback", "defaults": [{ "provider": "b", "model": "b" }] }
+        }
+    })");
+    merge_router_config(base, overlay_with_classifier);
+    REQUIRE(base.auto_classifier.quality_bias == Catch::Approx(0.75));
 }
 
 TEST_CASE("Router policy loader parses guardrails and clamps ratios", "[routing][config]") {
@@ -237,7 +323,7 @@ TEST_CASE("RouterEngine exposes configured guardrails", "[routing][engine]") {
 
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"fast"});
+        providers({"fast"}));
 
     const auto guardrails = engine.guardrails();
     REQUIRE(guardrails.has_value());
@@ -275,7 +361,7 @@ TEST_CASE("Router engine applies rule matching before defaults", "[routing][engi
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"fast", "pro"});
+        providers({"fast", "pro"}));
 
     const auto deep = engine.route({
         .prompt = "Please debug this failing integration trace",
@@ -315,7 +401,7 @@ TEST_CASE("Rule condition: all_keywords requires every keyword to be present", "
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"default", "specialist"});
+        providers({"default", "specialist"}));
 
     // Only one keyword present → default
     const auto r1 = engine.route({.prompt = "how do I migrate this code?", .has_tool_messages = false});
@@ -350,7 +436,7 @@ TEST_CASE("Rule condition: needs_tool_history matches only when tool messages pr
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"default", "tool-specialist"});
+        providers({"default", "tool-specialist"}));
 
     const auto no_tools = engine.route({.prompt = "hello world", .has_tool_messages = false});
     REQUIRE(no_tools.provider == "default");
@@ -383,7 +469,7 @@ TEST_CASE("Rule condition: min_prompt_chars triggers on long prompts", "[routing
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"fast", "powerful"});
+        providers({"fast", "powerful"}));
 
     const auto short_p = engine.route({.prompt = "short", .has_tool_messages = false});
     REQUIRE(short_p.provider == "fast");
@@ -417,7 +503,7 @@ TEST_CASE("Rule condition: max_prompt_chars triggers on short prompts", "[routin
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"default", "nano"});
+        providers({"default", "nano"}));
 
     const auto short_p = engine.route({.prompt = "hi", .has_tool_messages = false});
     REQUIRE(short_p.provider == "nano");
@@ -458,7 +544,7 @@ TEST_CASE("Rule priority: lower number wins when multiple rules match", "[routin
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"default", "code-generic", "code-specialist"});
+        providers({"default", "code-generic", "code-specialist"}));
 
     const auto r = engine.route({.prompt = "write some code", .has_tool_messages = false});
     REQUIRE(r.provider == "code-specialist");
@@ -485,7 +571,7 @@ TEST_CASE("Router load_balance decisions are deterministic per prompt", "[routin
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"a", "b"});
+        providers({"a", "b"}));
 
     const auto r1 = engine.route({.prompt = "small task", .has_tool_messages = false});
     const auto r2 = engine.route({.prompt = "small task", .has_tool_messages = false});
@@ -511,7 +597,7 @@ TEST_CASE("Router latency strategy prefers lower-latency candidate", "[routing][
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"slow", "fast"});
+        providers({"slow", "fast"}));
 
     engine.record_latency({.policy = "lat", .provider = "slow", .model = "slow-model"}, 240);
     engine.record_latency({.policy = "lat", .provider = "fast", .model = "fast-model"}, 45);
@@ -538,7 +624,7 @@ TEST_CASE("Router smart strategy: complex prompt routes to quality model", "[rou
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"nano", "pro"});
+        providers({"nano", "pro"}));
 
     // Long prompt with complexity keywords → should pick "pro-reasoning" (high quality score)
     const std::string complex_prompt =
@@ -568,7 +654,7 @@ TEST_CASE("Router smart strategy: simple prompt routes to fast model via latency
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"nano", "pro"});
+        providers({"nano", "pro"}));
 
     // Seed latency: nano is faster
     engine.record_latency({.policy = "sm", .provider = "nano", .model = "nano-mini"}, 80);
@@ -577,6 +663,35 @@ TEST_CASE("Router smart strategy: simple prompt routes to fast model via latency
     // Short, simple prompt → iterative path → picks lowest latency
     const auto r = engine.route({.prompt = "rename this variable", .has_tool_messages = false});
     REQUIRE(r.provider == "nano");
+}
+
+TEST_CASE("Router smart strategy: fast-tier prompts prefer local candidates", "[routing][engine]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "sm",
+        "policies": {
+            "sm": {
+                "strategy": "smart",
+                "defaults": [
+                    { "provider": "local",  "model": "qwen-local" },
+                    { "provider": "remote", "model": "gpt-5.4" }
+                ]
+            }
+        }
+    })";
+
+    auto config = parse_router_from_json(json);
+    core::llm::routing::RouterEngine engine(
+        std::move(config),
+        providers_with_locality({{"local", true}, {"remote", false}}));
+
+    // Even if remote has better measured latency, fast-tier requests should stay local.
+    engine.record_latency({.policy = "sm", .provider = "local",  .model = "qwen-local"}, 450);
+    engine.record_latency({.policy = "sm", .provider = "remote", .model = "gpt-5.4"}, 30);
+
+    const auto decision = engine.route({.prompt = "hi", .has_tool_messages = false});
+    REQUIRE(decision.provider == "local");
+    REQUIRE(decision.reason.find("local-first") != std::string::npos);
 }
 
 // ─── Unavailable providers ────────────────────────────────────────────────────
@@ -600,7 +715,7 @@ TEST_CASE("Router skips unavailable candidates and falls back to next", "[routin
     // Only "available" is registered
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"available"});
+        providers({"available"}));
 
     const auto r = engine.route({.prompt = "do something", .has_tool_messages = false});
     REQUIRE(r.provider == "available");
@@ -627,7 +742,7 @@ TEST_CASE("set_active_policy switches routing behaviour", "[routing][engine]") {
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"alpha", "beta"});
+        providers({"alpha", "beta"}));
 
     REQUIRE(engine.active_policy() == "alpha-policy");
     auto r1 = engine.route({.prompt = "task", .has_tool_messages = false});
@@ -663,7 +778,7 @@ TEST_CASE("route_chain returns all candidates in fallback order", "[routing][cha
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"primary", "secondary", "tertiary"});
+        providers({"primary", "secondary", "tertiary"}));
 
     const auto chain = engine.route_chain({.prompt = "any task", .has_tool_messages = false});
     REQUIRE(chain.size() == 3);
@@ -694,7 +809,7 @@ TEST_CASE("route_chain: selected candidate is first, rest are fallback tail", "[
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"slow", "medium", "fast"});
+        providers({"slow", "medium", "fast"}));
 
     engine.record_latency({.policy = "p", .provider = "slow",   .model = "slow-model"}, 500);
     engine.record_latency({.policy = "p", .provider = "medium", .model = "med-model"},  200);
@@ -732,7 +847,7 @@ TEST_CASE("route_chain: policy defaults appended after rule candidates", "[routi
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"specialist", "default-prov"});
+        providers({"specialist", "default-prov"}));
 
     const auto chain = engine.route_chain({.prompt = "do something special", .has_tool_messages = false});
     // chain[0] = specialist (matched rule), chain[1] = default-prov (last-resort default)
@@ -759,7 +874,7 @@ TEST_CASE("route_chain: retries field propagated from candidate config", "[routi
     auto config = parse_router_from_json(json);
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"a", "b"});
+        providers({"a", "b"}));
 
     const auto chain = engine.route_chain({.prompt = "task", .has_tool_messages = false});
     REQUIRE(chain.size() == 2);
@@ -783,7 +898,7 @@ TEST_CASE("route_chain: empty when no providers available", "[routing][chain]") 
     // "ghost" is not registered
     core::llm::routing::RouterEngine engine(
         std::move(config),
-        std::unordered_set<std::string>{"some-other-provider"});
+        providers({"some-other-provider"}));
 
     const auto chain = engine.route_chain({.prompt = "task", .has_tool_messages = false});
     REQUIRE(chain.empty());

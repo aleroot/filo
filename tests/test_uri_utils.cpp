@@ -32,3 +32,20 @@ TEST_CASE("uri percent encode/decode round-trip for path text", "[utils][uri]") 
     REQUIRE(core::utils::uri::percent_decode(encoded, decoded));
     REQUIRE(decoded == raw);
 }
+
+TEST_CASE("uri::extract_http_host parses authority safely", "[utils][uri]") {
+    REQUIRE(core::utils::uri::extract_http_host("https://localhost:11434/v1").value() == "localhost");
+    REQUIRE(core::utils::uri::extract_http_host("http://[::1]:8080").value() == "::1");
+    REQUIRE(core::utils::uri::extract_http_host("https://localhost.run/v1").value() == "localhost.run");
+    REQUIRE_FALSE(core::utils::uri::extract_http_host("file:///tmp/test").has_value());
+    REQUIRE_FALSE(core::utils::uri::extract_http_host("http://user@localhost:11434").has_value());
+}
+
+TEST_CASE("uri::is_loopback_http_url requires exact loopback host", "[utils][uri]") {
+    REQUIRE(core::utils::uri::is_loopback_http_url("http://localhost:11434"));
+    REQUIRE(core::utils::uri::is_loopback_http_url("http://127.0.0.1:11434"));
+    REQUIRE(core::utils::uri::is_loopback_http_url("http://[::1]:11434"));
+
+    REQUIRE_FALSE(core::utils::uri::is_loopback_http_url("https://localhost.run/v1"));
+    REQUIRE_FALSE(core::utils::uri::is_loopback_http_url("https://127.0.0.1.example.com/v1"));
+}

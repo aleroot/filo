@@ -518,30 +518,33 @@ RunResult run(RunOptions opts) {
         return normalized == "yolo" ? ApprovalMode::Yolo : ApprovalMode::Prompt;
     };
 
-    std::unordered_set<std::string> registered_provider_names;
+    core::llm::ProviderDescriptorSet registered_providers;
     std::unordered_map<std::string, std::string> provider_default_models;
 
     for (const auto& [name, pconfig] : config.providers) {
         if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
+            const auto caps = provider->capabilities();
             provider_manager.register_provider(name, provider);
-            registered_provider_names.insert(name);
+            registered_providers.insert({name, caps.is_local});
             provider_default_models[name] = pconfig.model;
         }
     }
 
-    std::vector<std::string> sorted_provider_names(
-        registered_provider_names.begin(),
-        registered_provider_names.end());
+    std::vector<std::string> sorted_provider_names;
+    sorted_provider_names.reserve(registered_providers.size());
+    for (const auto& provider : registered_providers) {
+        sorted_provider_names.push_back(provider.name);
+    }
     std::ranges::sort(sorted_provider_names);
 
-    if (registered_provider_names.empty()) {
+    if (registered_providers.empty()) {
         core::logging::error("Fatal: No providers could be initialised from configuration.");
         return {};
     }
 
     std::string manual_provider_name = config.default_provider;
-    if (!registered_provider_names.contains(manual_provider_name)) {
-        manual_provider_name = *registered_provider_names.begin();
+    if (!core::llm::contains_provider(registered_providers, manual_provider_name)) {
+        manual_provider_name = registered_providers.begin()->name;
     }
 
     std::string manual_model_name;
@@ -552,7 +555,7 @@ RunResult run(RunOptions opts) {
 
     auto router_engine = std::make_shared<core::llm::routing::RouterEngine>(
         config.router,
-        registered_provider_names);
+        registered_providers);
     auto router_provider = std::make_shared<core::llm::providers::RouterProvider>(
         provider_manager,
         router_engine,
@@ -1279,7 +1282,7 @@ RunResult run(RunOptions opts) {
             manual_provider_name = data.provider;
             manual_model_name    = data.model;
             // If the resumed session used a provider we still have, switch to it.
-            if (registered_provider_names.contains(data.provider)) {
+            if (core::llm::contains_provider(registered_providers, data.provider)) {
                 try {
                     auto p = provider_manager.get_provider(data.provider);
                     agent->set_provider(p);
@@ -1522,26 +1525,27 @@ RunResult run(RunOptions opts) {
         const auto loaded = config_manager.get_config();
         config = loaded;
 
-        std::unordered_set<std::string> next_registered_names;
+        core::llm::ProviderDescriptorSet next_registered_providers;
         std::unordered_map<std::string, std::string> next_provider_models;
         for (const auto& [name, pconfig] : config.providers) {
             if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
+                const auto caps = provider->capabilities();
                 provider_manager.register_provider(name, provider);
-                next_registered_names.insert(name);
+                next_registered_providers.insert({name, caps.is_local});
                 next_provider_models[name] = pconfig.model;
             }
         }
 
-        if (next_registered_names.empty()) {
+        if (next_registered_providers.empty()) {
             return "the selected profile leaves no usable providers.";
         }
 
-        registered_provider_names = std::move(next_registered_names);
+        registered_providers = std::move(next_registered_providers);
         provider_default_models = std::move(next_provider_models);
 
         router_engine = std::make_shared<core::llm::routing::RouterEngine>(
             config.router,
-            registered_provider_names);
+            registered_providers);
         router_provider = std::make_shared<core::llm::providers::RouterProvider>(
             provider_manager,
             router_engine,
@@ -1550,8 +1554,8 @@ RunResult run(RunOptions opts) {
         active_router_policy = router_engine->active_policy();
 
         manual_provider_name = config.default_provider;
-        if (!registered_provider_names.contains(manual_provider_name)) {
-            manual_provider_name = *registered_provider_names.begin();
+        if (!core::llm::contains_provider(registered_providers, manual_provider_name)) {
+            manual_provider_name = registered_providers.begin()->name;
         }
         if (const auto it = config.providers.find(manual_provider_name);
             it != config.providers.end()) {

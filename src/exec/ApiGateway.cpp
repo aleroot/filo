@@ -22,7 +22,6 @@
 #include <set>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -36,12 +35,12 @@ namespace uri = core::utils::uri;
 struct GatewayRuntime {
     GatewayRuntime(const core::config::AppConfig& config_ref, core::llm::ProviderManager& provider_manager_ref, ProviderCatalog provider_catalog) : config(config_ref),
           provider_manager(provider_manager_ref),
-          provider_names(std::move(provider_catalog.provider_names)),
+          providers(std::move(provider_catalog.providers)),
           provider_default_models(std::move(provider_catalog.provider_default_models)) {}
 
     const core::config::AppConfig& config;
     core::llm::ProviderManager& provider_manager;
-    std::unordered_set<std::string> provider_names;
+    core::llm::ProviderDescriptorSet providers;
     std::unordered_map<std::string, std::string> provider_default_models;
     std::shared_ptr<core::llm::routing::RouterEngine> router_engine;
     std::shared_ptr<core::llm::providers::RouterProvider> router_provider;
@@ -904,7 +903,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
 
         auto policy_engine = std::make_shared<core::llm::routing::RouterEngine>(
             policy_router_config,
-            runtime.provider_names);
+            runtime.providers);
         auto policy_provider = std::make_shared<core::llm::providers::RouterProvider>(
             provider_manager,
             std::move(policy_engine),
@@ -935,7 +934,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
         if (slash != std::string::npos) {
             const std::string provider_name = requested_model.substr(0, slash);
             const std::string routed_model = requested_model.substr(slash + 1);
-            if (runtime.provider_names.contains(provider_name)) {
+            if (core::llm::contains_provider(runtime.providers, provider_name)) {
                 if (!resolve_provider(provider_name, selection)) return std::nullopt;
                 if (!routed_model.empty()) {
                     selection.model_override = routed_model;
@@ -948,7 +947,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
             }
         }
 
-        if (runtime.provider_names.contains(requested_model)) {
+        if (core::llm::contains_provider(runtime.providers, requested_model)) {
             if (!resolve_provider(requested_model, selection)) return std::nullopt;
             if (const auto it = runtime.provider_default_models.find(requested_model);
                 it != runtime.provider_default_models.end()) {
@@ -1250,7 +1249,8 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
 
 [[nodiscard]] std::string build_models_list_body(const GatewayRuntime& runtime) {
     std::set<std::string> model_ids;
-    for (const auto& provider_name : runtime.provider_names) {
+    for (const auto& provider : runtime.providers) {
+        const auto& provider_name = provider.name;
         model_ids.insert(provider_name);
         if (const auto it = runtime.provider_default_models.find(provider_name);
             it != runtime.provider_default_models.end() && !it->second.empty()) {
@@ -1298,7 +1298,7 @@ struct ApiGateway::Impl {
         : runtime(config, provider_manager, std::move(provider_catalog)) {
         runtime.router_engine = std::make_shared<core::llm::routing::RouterEngine>(
             config.router,
-            runtime.provider_names);
+            runtime.providers);
         runtime.router_provider = std::make_shared<core::llm::providers::RouterProvider>(
             provider_manager,
             runtime.router_engine,

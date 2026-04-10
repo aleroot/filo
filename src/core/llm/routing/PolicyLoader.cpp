@@ -33,6 +33,7 @@ struct Reflection<RouteCandidate> {
             field("weight", &RouteCandidate::weight),
             field("retries", &RouteCandidate::retries),
             field("latency_bias_ms", &RouteCandidate::latency_bias_ms),
+            field("tier", &RouteCandidate::tier),
         };
     }
 };
@@ -232,11 +233,32 @@ template <typename T>
     }
 }
 
+[[nodiscard]] std::string normalize_token(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const unsigned char ch : value) {
+        if (std::isspace(ch) || ch == '_' || ch == '-') continue;
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+[[nodiscard]] std::string normalize_tier_pin(std::string_view value) {
+    const std::string token = normalize_token(value);
+    if (token == "fast") return "fast";
+    if (token == "balanced" || token == "balance") return "balanced";
+    if (token == "powerful" || token == "power") return "powerful";
+    return {};
+}
+
 void normalize_candidates(std::vector<RouteCandidate>& candidates) {
     for (auto& candidate : candidates) {
         if (candidate.weight <= 0) candidate.weight = 1;
         if (candidate.retries < 0) candidate.retries = 0;
         if (candidate.latency_bias_ms < 0) candidate.latency_bias_ms = 0;
+        if (!candidate.tier.empty()) {
+            candidate.tier = normalize_tier_pin(candidate.tier);
+        }
     }
 }
 
@@ -327,6 +349,79 @@ void normalize_policy(PolicyDefinition& policy) {
     return true;
 }
 
+[[nodiscard]] bool parse_auto_classifier_object(simdjson::dom::object classifier_obj,
+                                                AutoClassifierConfig& out,
+                                                std::string& error) {
+    auto read_ratio = [&](std::string_view field_name, double& target) -> bool {
+        simdjson::dom::element el;
+        const auto ec = classifier_obj[field_name].get(el);
+        if (ec == simdjson::NO_SUCH_FIELD) return true;
+        if (ec != simdjson::SUCCESS) {
+            error = std::format("failed to read field '{}'", field_name);
+            return false;
+        }
+
+        double value = 0.0;
+        if (el.get(value) != simdjson::SUCCESS) {
+            error = std::format("field '{}': expected number", field_name);
+            return false;
+        }
+
+        target = std::clamp(value, 0.0, 1.0);
+        return true;
+    };
+
+    auto read_non_negative_size = [&](std::string_view field_name,
+                                      std::size_t& target) -> bool {
+        simdjson::dom::element el;
+        const auto ec = classifier_obj[field_name].get(el);
+        if (ec == simdjson::NO_SUCH_FIELD) return true;
+        if (ec != simdjson::SUCCESS) {
+            error = std::format("failed to read field '{}'", field_name);
+            return false;
+        }
+
+        uint64_t value = 0;
+        if (el.get(value) != simdjson::SUCCESS) {
+            error = std::format("field '{}': expected non-negative integer", field_name);
+            return false;
+        }
+
+        target = static_cast<std::size_t>(value);
+        return true;
+    };
+
+    auto read_non_negative_int = [&](std::string_view field_name, int& target) -> bool {
+        simdjson::dom::element el;
+        const auto ec = classifier_obj[field_name].get(el);
+        if (ec == simdjson::NO_SUCH_FIELD) return true;
+        if (ec != simdjson::SUCCESS) {
+            error = std::format("failed to read field '{}'", field_name);
+            return false;
+        }
+
+        int64_t value = 0;
+        if (el.get(value) != simdjson::SUCCESS) {
+            error = std::format("field '{}': expected integer", field_name);
+            return false;
+        }
+
+        target = static_cast<int>(std::max<int64_t>(0, value));
+        return true;
+    };
+
+    if (!read_ratio("quality_bias", out.quality_bias)) return false;
+    if (!read_non_negative_size("fast_token_threshold", out.fast_token_threshold)) return false;
+    if (!read_non_negative_size("powerful_token_threshold", out.powerful_token_threshold)) return false;
+    if (!read_non_negative_int("escalation_turn_threshold", out.escalation_turn_threshold)) return false;
+
+    if (out.powerful_token_threshold < out.fast_token_threshold) {
+        out.powerful_token_threshold = out.fast_token_threshold;
+    }
+
+    return true;
+}
+
 } // namespace
 
 RouterConfig make_default_router_config() {
@@ -407,6 +502,21 @@ bool parse_router_config(simdjson::dom::object router_obj,
                 error = std::format("router.default_policy: {}", error);
                 return false;
             }
+        }
+    }
+
+    {
+        simdjson::dom::object classifier_obj;
+        const auto ec = router_obj["auto_classifier"].get(classifier_obj);
+        if (ec == simdjson::SUCCESS) {
+            if (!parse_auto_classifier_object(classifier_obj, out.auto_classifier, error)) {
+                error = std::format("router.auto_classifier: {}", error);
+                return false;
+            }
+            out.has_auto_classifier_overrides = true;
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "router.auto_classifier must be an object";
+            return false;
         }
     }
 
@@ -491,6 +601,10 @@ void merge_router_config(RouterConfig& base, const RouterConfig& overlay) {
     }
     if (overlay.guardrails.has_value()) {
         base.guardrails = overlay.guardrails;
+    }
+    if (overlay.has_auto_classifier_overrides) {
+        base.auto_classifier = overlay.auto_classifier;
+        base.has_auto_classifier_overrides = true;
     }
 
     for (const auto& [name, policy] : overlay.policies) {

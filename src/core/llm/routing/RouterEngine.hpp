@@ -2,6 +2,7 @@
 
 #include "AutoClassifier.hpp"
 #include "PolicyConfig.hpp"
+#include "../ProviderDescriptor.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -9,7 +10,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace core::llm::routing {
@@ -29,7 +29,7 @@ namespace core::llm::routing {
 class RouterEngine {
 public:
     RouterEngine(RouterConfig config,
-                 std::unordered_set<std::string> available_providers);
+                 core::llm::ProviderDescriptorSet providers = {});
 
     [[nodiscard]] bool has_policy(std::string_view policy_name) const;
     [[nodiscard]] std::vector<std::string> list_policies() const;
@@ -83,6 +83,7 @@ private:
                                                      std::string& reason);
 
     [[nodiscard]] bool candidate_available(const RouteCandidate& candidate) const;
+    [[nodiscard]] bool candidate_is_local(const RouteCandidate& candidate) const;
     [[nodiscard]] static std::string candidate_key(const RouteCandidate& candidate);
     [[nodiscard]] static std::string decision_key(const RouteDecision& decision);
     [[nodiscard]] double candidate_quality_score(std::string_view model_name) const;
@@ -93,7 +94,7 @@ private:
 
     AutoClassifier auto_classifier_;                // stateless — no lock required; init before config_ move
     RouterConfig config_;                            // rules pre-sorted by priority in ctor
-    std::unordered_set<std::string> available_providers_;
+    core::llm::ProviderDescriptorSet providers_;
     std::string active_policy_;
     std::unordered_map<std::string, LatencyStat> latency_stats_;
 

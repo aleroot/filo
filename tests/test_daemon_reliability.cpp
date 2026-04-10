@@ -698,7 +698,7 @@ TEST_CASE("API gateway /v1/models advertises only initialized providers",
     config.providers["broken-custom"].model = "broken-model";
 
     exec::gateway::ProviderCatalog provider_catalog;
-    provider_catalog.provider_names.insert("openai");
+    provider_catalog.providers.insert({"openai", false});
     provider_catalog.provider_default_models["openai"] = "gpt-5.4";
 
     const int port = next_test_port();

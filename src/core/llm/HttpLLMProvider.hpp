@@ -76,6 +76,8 @@ public:
     void stream_response(const ChatRequest&                    request,
                          std::function<void(const StreamChunk&)> callback) override;
 
+    [[nodiscard]] ProviderCapabilities capabilities() const override;
+
     /**
      * @brief Return whether synthetic token-cost estimation should run.
      *

@@ -150,3 +150,43 @@ TEST_CASE("ProviderFactory - creates Ollama provider", "[ollama][factory]") {
     auto provider = core::llm::ProviderFactory::create_provider("ollama", config);
     REQUIRE(provider != nullptr);
 }
+
+TEST_CASE("ProviderFactory - localhost Ollama provider is flagged local", "[ollama][factory]") {
+    core::config::ProviderConfig config;
+    config.base_url = "http://localhost:11434";
+    config.model = "llama3";
+
+    auto provider = core::llm::ProviderFactory::create_provider("ollama", config);
+    REQUIRE(provider != nullptr);
+    REQUIRE(provider->capabilities().is_local);
+}
+
+TEST_CASE("ProviderFactory - remote Ollama endpoint is not flagged local", "[ollama][factory]") {
+    core::config::ProviderConfig config;
+    config.base_url = "http://192.168.1.25:11434";
+    config.model = "llama3";
+
+    auto provider = core::llm::ProviderFactory::create_provider("ollama-remote", config);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->capabilities().is_local);
+}
+
+TEST_CASE("ProviderFactory - lookalike localhost domain is not flagged local", "[ollama][factory]") {
+    core::config::ProviderConfig config;
+    config.base_url = "https://localhost.run/ollama";
+    config.model = "llama3";
+
+    auto provider = core::llm::ProviderFactory::create_provider("ollama-lookalike", config);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->capabilities().is_local);
+}
+
+TEST_CASE("ProviderFactory - lookalike loopback subdomain is not flagged local", "[ollama][factory]") {
+    core::config::ProviderConfig config;
+    config.base_url = "https://127.0.0.1.example.com/ollama";
+    config.model = "llama3";
+
+    auto provider = core::llm::ProviderFactory::create_provider("ollama-lookalike-subdomain", config);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->capabilities().is_local);
+}

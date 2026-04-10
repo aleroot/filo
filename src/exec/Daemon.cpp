@@ -56,9 +56,10 @@ void init_providers(gateway::ProviderCatalog* provider_catalog = nullptr) {
 
     for (const auto& [name, pconfig] : config.providers) {
         if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
+            const auto caps = provider->capabilities();
             provider_manager.register_provider(name, provider);
             if (provider_catalog != nullptr) {
-                provider_catalog->provider_names.insert(name);
+                provider_catalog->providers.insert({name, caps.is_local});
                 provider_catalog->provider_default_models[name] = pconfig.model;
             }
         }

@@ -1,11 +1,12 @@
 #pragma once
 
+#include "../core/llm/ProviderDescriptor.hpp"
+
 #include <httplib.h>
 
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace core::config {
 struct AppConfig;
@@ -18,7 +19,7 @@ class ProviderManager;
 namespace exec::gateway {
 
 struct ProviderCatalog {
-    std::unordered_set<std::string> provider_names;
+    core::llm::ProviderDescriptorSet providers;
     std::unordered_map<std::string, std::string> provider_default_models;
 };
 
