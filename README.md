@@ -174,13 +174,67 @@ For local Ollama, default endpoint is:
 Config files are layered in this order:
 
 1. `~/.config/filo/config.json`
-2. `~/.config/filo/model_defaults.json`
+2. `~/.config/filo/auth_defaults.json`
 3. `~/.config/filo/settings.json`
 4. `./.filo/config.json`
 5. `./.filo/settings.json`
+6. `~/.config/filo/profile_defaults.json`
+7. `~/.config/filo/model_defaults.json`
 
 Use `config.json` for providers/router/subagents.
 Use `settings.json` for managed UI/workflow preferences.
+
+### Profiles
+
+Profiles let you keep multiple named configuration overlays and switch between them instantly.
+This is useful for context switching (for example: `work`, `oss`, `local`), without rewriting
+your main config each time.
+
+What profiles support:
+
+- Define named overlays under `profiles` in `config.json`
+- Inherit from one or more parent profiles with `extends_from`
+- Override normal config fields (provider/model selection, mode, approval mode, router, MCP servers, subagents, UI defaults)
+- Switch in TUI with `/profile <name>` and apply changes live in the current session
+- Persist the active profile in `~/.config/filo/profile_defaults.json` for future launches
+
+Example profile config:
+
+```json
+{
+  "profiles": {
+    "work": {
+      "description": "Company defaults",
+      "default_provider": "openai",
+      "default_mode": "BUILD"
+    },
+    "oss": {
+      "extends_from": ["work"],
+      "default_provider": "grok",
+      "default_approval_mode": "prompt"
+    }
+  }
+}
+```
+
+Quick usage:
+
+1. Define profiles under `profiles` in `~/.config/filo/config.json` or `./.filo/config.json`.
+2. In TUI, run `/profile` (or `/profile list`) to see active and available profiles.
+3. Switch profile with `/profile <name>` (for example `/profile work`).
+4. Remove the persisted profile with `/profile clear`.
+
+Commands:
+
+```bash
+/profile
+/profile list
+/profile work
+/profile oss
+/profile clear
+```
+
+Precedence note: `FILO_PROFILE=<name>` forces a profile for that process and overrides the persisted selection until unset.
 
 ### Smart router with local-first policy example
 

@@ -194,7 +194,8 @@ private:
 };
 
 void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
-                   const std::string& prompt) {
+                   const std::string& prompt,
+                   core::agent::Agent::TurnCallbacks callbacks) {
     std::mutex done_mutex;
     std::condition_variable done_cv;
     bool done = false;
@@ -209,10 +210,16 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
                 done = true;
             }
             done_cv.notify_one();
-        });
+        },
+        std::move(callbacks));
 
     std::unique_lock lock(done_mutex);
     REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; }));
+}
+
+void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
+                   const std::string& prompt) {
+    send_and_wait(agent, prompt, core::agent::Agent::TurnCallbacks{});
 }
 
 } // namespace
@@ -406,4 +413,34 @@ TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loo
     }
 
     CHECK_FALSE(third_request_has_user);
+}
+
+TEST_CASE("Agent can gate efficiency rotation by minimum context utilization",
+          "[agent][loop][rotation]") {
+    auto provider = std::make_shared<RotatingToolLoopProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<NoopLoopTool>());
+
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    int rotations = 0;
+    agent->set_efficiency_decision_fn(
+        [agent, &rotations](const core::session::SessionEfficiencyDecision&) {
+            ++rotations;
+            agent->compact_history("Rotation should be suppressed for this turn.");
+        });
+
+    send_and_wait(
+        agent,
+        std::string(200'000, 'x'),
+        core::agent::Agent::TurnCallbacks{
+            .min_context_utilization_for_rotation = 0.90,
+        });
+
+    CHECK(rotations == 0);
+    CHECK(provider->reset_count() == 0);
+    CHECK(provider->call_count() == 11);
 }

@@ -196,6 +196,12 @@ struct AppConfig {
     bool has_router_section = false;
 };
 
+struct ProfileConfig {
+    std::string description;
+    std::vector<std::string> extends_from;
+    AppConfig overlay;
+};
+
 class ConfigManager {
 public:
     static ConfigManager& get_instance() {
@@ -212,6 +218,10 @@ public:
                                 std::string_view specific_model = {},
                                 std::string* error = nullptr);
 
+    bool persist_active_profile(std::optional<std::string> profile_name,
+                                std::optional<std::filesystem::path> working_dir = std::nullopt,
+                                std::string* error = nullptr);
+
     bool persist_login_profile(std::string_view login_provider,
                                std::string* error = nullptr);
 
@@ -226,6 +236,7 @@ public:
                                  std::string* error = nullptr);
 
     std::string get_config_dir() const;
+    std::filesystem::path get_profile_defaults_path() const;
 
     std::filesystem::path get_settings_path(
         SettingsScope scope,
@@ -235,11 +246,21 @@ public:
         return scope == SettingsScope::User ? user_settings_ : workspace_settings_;
     }
 
+    const std::unordered_map<std::string, ProfileConfig>& get_profiles() const {
+        return profiles_;
+    }
+
+    const std::string& get_active_profile() const {
+        return active_profile_;
+    }
+
 private:
     ConfigManager() = default;
     AppConfig config_;
     ManagedSettings user_settings_;
     ManagedSettings workspace_settings_;
+    std::unordered_map<std::string, ProfileConfig> profiles_;
+    std::string active_profile_;
     std::filesystem::path last_working_dir_;
 };
 

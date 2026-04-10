@@ -23,6 +23,10 @@ fs::path model_defaults_overlay_path(const fs::path& config_dir) {
     return config_dir / "model_defaults.json";
 }
 
+fs::path profile_defaults_overlay_path(const fs::path& config_dir) {
+    return config_dir / "profile_defaults.json";
+}
+
 fs::path auth_defaults_overlay_path(const fs::path& config_dir) {
     return config_dir / "auth_defaults.json";
 }
@@ -289,6 +293,24 @@ std::string normalize_subagent_name(std::string_view name) {
         ++start;
     }
     if (start < name.size() && name[start] == '@') {
+        ++start;
+    }
+
+    for (std::size_t i = start; i < name.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(name[i]);
+        if (std::isspace(ch)) break;
+        normalized.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return normalized;
+}
+
+std::string normalize_profile_name(std::string_view name) {
+    std::string normalized;
+    normalized.reserve(name.size());
+
+    std::size_t start = 0;
+    while (start < name.size()
+           && std::isspace(static_cast<unsigned char>(name[start]))) {
         ++start;
     }
 
@@ -753,13 +775,13 @@ void apply_managed_settings(const ManagedSettings& settings, AppConfig& config) 
     }
 }
 
-AppConfig parse_config_file(const fs::path& config_path) {
-    simdjson::padded_string json = simdjson::padded_string::load(config_path.string());
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc = parser.parse(json);
+struct ParsedConfigFile {
+    AppConfig config;
+    std::unordered_map<std::string, ProfileConfig> profiles;
+    std::optional<std::string> active_profile;
+};
 
-    AppConfig parsed;
-
+void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     std::string_view value;
     if (!doc["default_provider"].get(value)) {
         parsed.default_provider = std::string(value);
@@ -795,6 +817,7 @@ AppConfig parse_config_file(const fs::path& config_path) {
     if (!doc["auto_compact_threshold"].get(threshold)) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
     }
+
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
         for (auto field : providers_obj) {
@@ -856,6 +879,87 @@ AppConfig parse_config_file(const fs::path& config_path) {
             if (!server.name.empty() && !server.transport.empty()) {
                 parsed.mcp_servers.push_back(std::move(server));
             }
+        }
+    }
+}
+
+ProfileConfig parse_profile_config(simdjson::dom::object profile_obj) {
+    ProfileConfig profile;
+
+    std::string_view value;
+    if (!profile_obj["description"].get(value)) {
+        profile.description = std::string(value);
+    }
+
+    auto parse_extends_key = [&](std::string_view key) {
+        simdjson::dom::array extends_arr;
+        if (!profile_obj[key].get(extends_arr)) {
+            std::vector<std::string> extends;
+            for (simdjson::dom::element parent : extends_arr) {
+                std::string_view parent_name;
+                if (!parent.get(parent_name)) {
+                    const std::string normalized = normalize_profile_name(parent_name);
+                    if (!normalized.empty()) {
+                        extends.push_back(normalized);
+                    }
+                }
+            }
+            if (!extends.empty()) {
+                profile.extends_from = std::move(extends);
+            }
+            return;
+        }
+
+        if (!profile_obj[key].get(value)) {
+            const std::string normalized = normalize_profile_name(value);
+            if (!normalized.empty()) {
+                profile.extends_from = {normalized};
+            }
+        }
+    };
+
+    parse_extends_key("extends_from");
+    if (profile.extends_from.empty()) {
+        parse_extends_key("extends");
+    }
+
+    parse_config_object(profile_obj, profile.overlay);
+    return profile;
+}
+
+ParsedConfigFile parse_config_file(const fs::path& config_path) {
+    simdjson::padded_string json = simdjson::padded_string::load(config_path.string());
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc = parser.parse(json);
+    simdjson::dom::object root;
+    if (doc.get(root) != simdjson::SUCCESS) {
+        throw std::runtime_error("config root must be a JSON object");
+    }
+
+    ParsedConfigFile parsed;
+    parse_config_object(root, parsed.config);
+
+    std::string_view value;
+    if (!root["active_profile"].get(value)) {
+        const std::string normalized = normalize_profile_name(value);
+        if (!normalized.empty()) {
+            parsed.active_profile = normalized;
+        }
+    }
+
+    simdjson::dom::object profiles_obj;
+    if (!root["profiles"].get(profiles_obj)) {
+        for (auto field : profiles_obj) {
+            simdjson::dom::object profile_obj;
+            if (field.value.get(profile_obj) != simdjson::SUCCESS) {
+                continue;
+            }
+            const std::string profile_name =
+                normalize_profile_name(std::string(field.key));
+            if (profile_name.empty()) {
+                continue;
+            }
+            parsed.profiles[profile_name] = parse_profile_config(profile_obj);
         }
     }
 
@@ -926,10 +1030,42 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
 }
 
-void load_optional_config(const fs::path& path, AppConfig& config) {
+ProfileConfig merge_profile(const ProfileConfig& base, const ProfileConfig& overlay) {
+    ProfileConfig merged = base;
+    if (!overlay.description.empty()) {
+        merged.description = overlay.description;
+    }
+    if (!overlay.extends_from.empty()) {
+        merged.extends_from = overlay.extends_from;
+    }
+    merge_into(merged.overlay, overlay.overlay);
+    return merged;
+}
+
+void merge_profiles(std::unordered_map<std::string, ProfileConfig>& base,
+                    const std::unordered_map<std::string, ProfileConfig>& overlay) {
+    for (const auto& [name, profile] : overlay) {
+        auto it = base.find(name);
+        if (it == base.end()) {
+            base[name] = profile;
+        } else {
+            it->second = merge_profile(it->second, profile);
+        }
+    }
+}
+
+void load_optional_config(const fs::path& path,
+                          AppConfig& config,
+                          std::unordered_map<std::string, ProfileConfig>& profiles,
+                          std::optional<std::string>& active_profile) {
     if (!fs::exists(path)) return;
     try {
-        merge_into(config, parse_config_file(path));
+        ParsedConfigFile parsed = parse_config_file(path);
+        merge_into(config, parsed.config);
+        merge_profiles(profiles, parsed.profiles);
+        if (parsed.active_profile.has_value()) {
+            active_profile = parsed.active_profile;
+        }
     } catch (const std::exception& e) {
         core::logging::warn(
             "Failed to parse {}: {}. Using previous configuration values.",
@@ -955,6 +1091,48 @@ ManagedSettings load_optional_managed_settings(const fs::path& path,
             e.what());
         return {};
     }
+}
+
+bool apply_profile_overlay_recursive(
+    const std::string& profile_name,
+    const std::unordered_map<std::string, ProfileConfig>& profiles,
+    AppConfig& config,
+    std::unordered_map<std::string, int>& visit_state,
+    std::string& error) {
+    // 0 = unvisited, 1 = visiting, 2 = done.
+    const int state = visit_state[profile_name];
+    if (state == 1) {
+        error = std::format("detected cycle while resolving profile '{}'", profile_name);
+        return false;
+    }
+    if (state == 2) {
+        return true;
+    }
+
+    const auto it = profiles.find(profile_name);
+    if (it == profiles.end()) {
+        error = std::format("profile '{}' is not defined", profile_name);
+        return false;
+    }
+
+    visit_state[profile_name] = 1;
+    for (const auto& parent : it->second.extends_from) {
+        if (!apply_profile_overlay_recursive(parent, profiles, config, visit_state, error)) {
+            return false;
+        }
+    }
+
+    merge_into(config, it->second.overlay);
+    visit_state[profile_name] = 2;
+    return true;
+}
+
+bool apply_profile_overlay(const std::string& profile_name,
+                           const std::unordered_map<std::string, ProfileConfig>& profiles,
+                           AppConfig& config,
+                           std::string& error) {
+    std::unordered_map<std::string, int> visit_state;
+    return apply_profile_overlay_recursive(profile_name, profiles, config, visit_state, error);
 }
 
 bool write_text_atomic(const fs::path& path,
@@ -1034,6 +1212,10 @@ std::string ConfigManager::get_config_dir() const {
     return ".filo"; // fallback to current dir
 }
 
+std::filesystem::path ConfigManager::get_profile_defaults_path() const {
+    return profile_defaults_overlay_path(get_config_dir());
+}
+
 std::filesystem::path ConfigManager::get_settings_path(
     SettingsScope scope,
     std::optional<std::filesystem::path> working_dir) const {
@@ -1051,16 +1233,20 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     config_ = make_default_config();
     user_settings_ = {};
     workspace_settings_ = {};
+    profiles_.clear();
+    active_profile_.clear();
 
     const fs::path config_dir = get_config_dir();
     const fs::path global_config_path = config_dir / "config.json";
     const fs::path model_overlay_path = model_defaults_overlay_path(config_dir);
+    const fs::path profile_overlay_path = profile_defaults_overlay_path(config_dir);
     const fs::path auth_overlay_path = auth_defaults_overlay_path(config_dir);
     const fs::path cwd = working_dir.value_or(fs::current_path());
     last_working_dir_ = cwd;
     const fs::path user_settings_file = user_settings_path(config_dir);
     const fs::path project_config_path = cwd / ".filo" / "config.json";
     const fs::path workspace_settings_file = workspace_settings_path(cwd);
+    std::optional<std::string> selected_profile;
 
     if (!fs::exists(global_config_path)) {
         std::error_code ec;
@@ -1071,12 +1257,34 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
         }
     }
 
-    load_optional_config(global_config_path, config_);
-    load_optional_config(auth_overlay_path, config_);
+    load_optional_config(global_config_path, config_, profiles_, selected_profile);
+    load_optional_config(auth_overlay_path, config_, profiles_, selected_profile);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
-    load_optional_config(project_config_path, config_);
+    load_optional_config(project_config_path, config_, profiles_, selected_profile);
     workspace_settings_ = load_optional_managed_settings(workspace_settings_file, config_);
-    load_optional_config(model_overlay_path, config_);
+    load_optional_config(profile_overlay_path, config_, profiles_, selected_profile);
+
+    if (const char* env_profile = std::getenv("FILO_PROFILE");
+        env_profile != nullptr && env_profile[0] != '\0') {
+        const std::string normalized = normalize_profile_name(env_profile);
+        if (!normalized.empty()) {
+            selected_profile = normalized;
+        }
+    }
+
+    if (selected_profile.has_value()) {
+        active_profile_ = *selected_profile;
+        std::string profile_error;
+        if (!apply_profile_overlay(active_profile_, profiles_, config_, profile_error)) {
+            core::logging::warn(
+                "Failed to apply active profile '{}': {}",
+                active_profile_,
+                profile_error);
+        }
+    }
+
+    std::optional<std::string> ignored_profile;
+    load_optional_config(model_overlay_path, config_, profiles_, ignored_profile);
 }
 
 bool ConfigManager::persist_managed_setting(SettingsScope scope,
@@ -1178,6 +1386,85 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
     return true;
 }
 
+bool ConfigManager::persist_active_profile(
+    std::optional<std::string> profile_name,
+    std::optional<std::filesystem::path> working_dir,
+    std::string* error) {
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+
+    std::optional<std::string> normalized_profile;
+    if (profile_name.has_value()) {
+        const std::string normalized = normalize_profile_name(*profile_name);
+        if (normalized.empty()) {
+            if (error) {
+                *error = "profile name cannot be empty";
+            }
+            return false;
+        }
+        normalized_profile = normalized;
+    }
+
+    load(cwd);
+
+    if (normalized_profile.has_value()
+        && !profiles_.contains(*normalized_profile)) {
+        if (error) {
+            *error = std::format("profile '{}' is not defined", *normalized_profile);
+        }
+        return false;
+    }
+
+    if (normalized_profile.has_value()) {
+        AppConfig preview = config_;
+        std::string profile_error;
+        if (!apply_profile_overlay(*normalized_profile, profiles_, preview, profile_error)) {
+            if (error) {
+                *error = std::format(
+                    "profile '{}' could not be applied: {}",
+                    *normalized_profile,
+                    profile_error);
+            }
+            return false;
+        }
+    }
+
+    const fs::path overlay_path = get_profile_defaults_path();
+    if (!normalized_profile.has_value()) {
+        std::error_code remove_ec;
+        fs::remove(overlay_path, remove_ec);
+        if (remove_ec) {
+            if (error) {
+                *error = std::format(
+                    "could not clear active profile '{}': {}",
+                    overlay_path.string(),
+                    remove_ec.message());
+            }
+            return false;
+        }
+    } else {
+        const std::string payload = std::format(
+            "{{\n"
+            "    \"active_profile\": \"{}\"\n"
+            "}}\n",
+            core::utils::escape_json_string(*normalized_profile));
+
+        std::string write_error;
+        if (!write_text_atomic(overlay_path, payload, write_error)) {
+            if (error) {
+                *error = write_error;
+            }
+            return false;
+        }
+    }
+
+    load(cwd);
+    if (error) {
+        error->clear();
+    }
+    return true;
+}
+
 bool ConfigManager::persist_login_profile(std::string_view login_provider,
                                           std::string* error) {
     if (login_provider.empty()) {
@@ -1199,7 +1486,7 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
     AppConfig overlay;
     if (fs::exists(overlay_path)) {
         try {
-            overlay = parse_config_file(overlay_path);
+            overlay = parse_config_file(overlay_path).config;
         } catch (const std::exception& e) {
             core::logging::warn(
                 "Failed to parse {}: {}. Rewriting auth login overlay.",

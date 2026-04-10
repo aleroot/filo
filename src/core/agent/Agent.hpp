@@ -14,6 +14,10 @@
 #include <atomic>
 #include <optional>
 
+namespace core::config {
+struct AppConfig;
+}
+
 namespace core::agent {
 
 class Agent : public std::enable_shared_from_this<Agent> {
@@ -27,9 +31,13 @@ public:
     };
 
     struct TurnCallbacks {
-        std::function<void()> on_step_begin;
-        std::function<void(const core::llm::ToolCall&)> on_tool_start;
-        std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish;
+        std::function<void()> on_step_begin = {};
+        std::function<void(const core::llm::ToolCall&)> on_tool_start = {};
+        std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
+            {};
+        bool allow_efficiency_rotation = true;
+        // Rotate only when current context usage reaches this fraction [0.0, 1.0].
+        double min_context_utilization_for_rotation = 0.0;
     };
 
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
@@ -60,14 +68,24 @@ public:
     void send_message(const std::string& user_message,
                       std::function<void(const std::string&)> text_callback,
                       std::function<void(const std::string&, const std::string&)> tool_callback,
+                      std::function<void()> done_callback);
+
+    void send_message(const std::string& user_message,
+                      std::function<void(const std::string&)> text_callback,
+                      std::function<void(const std::string&, const std::string&)> tool_callback,
                       std::function<void()> done_callback,
-                      TurnCallbacks turn_callbacks = {});
+                      TurnCallbacks turn_callbacks);
+
+    void send_message(core::llm::Message user_message,
+                      std::function<void(const std::string&)> text_callback,
+                      std::function<void(const std::string&, const std::string&)> tool_callback,
+                      std::function<void()> done_callback);
 
     void send_message(core::llm::Message user_message,
                       std::function<void(const std::string&)> text_callback,
                       std::function<void(const std::string&, const std::string&)> tool_callback,
                       std::function<void()> done_callback,
-                      TurnCallbacks turn_callbacks = {});
+                      TurnCallbacks turn_callbacks);
 
     void clear_history();
     void compact_history(std::string summary);
@@ -134,6 +152,8 @@ public:
         provider_ = std::move(provider);
     }
 
+    void reload_subagent_profiles(const core::config::AppConfig& app_config);
+
     void set_efficiency_decision_fn(
         std::function<void(const core::session::SessionEfficiencyDecision&)> fn) {
         std::lock_guard lock(history_mutex_);
@@ -166,7 +186,7 @@ private:
                                         const std::string& args);
     [[nodiscard]] core::session::SessionEfficiencyDecision current_efficiency_decision_unlocked() const;
     void reset_efficiency_tracking_unlocked();
-    void run_efficiency_rotation_if_needed();
+    void run_efficiency_rotation_if_needed(double min_context_utilization_for_rotation);
 
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
     [[nodiscard]] const core::context::SessionContext& session_context() const noexcept {

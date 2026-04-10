@@ -728,6 +728,7 @@ public:
             "  /undo               Remove the last user message from history\n"
             "  /retry              Re-send the last user message\n"
             "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
+            "  /profile [name]     Show/list/switch named configuration profiles\n"
             "  /effort [level]     Show/set model effort (auto|low|medium|high|max)\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
@@ -891,6 +892,59 @@ public:
             "\n{}\n", success
                 ? "\xe2\x9c\x93  " + body   // ✓
                 : "\xe2\x9c\x97  " + body)); // ✗
+    }
+};
+
+class ProfileCommand : public Command {
+public:
+    std::string get_name() const override { return "/profile"; }
+    std::string get_description() const override {
+        return "Show/list/switch named configuration profiles";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        std::string_view arg = trim(std::string_view{ctx.text}.substr(
+            std::min(ctx.text.size(), std::string::size_type{8})));
+
+        auto emit_info_body = [&](const std::string& body) {
+            std::string remaining = body;
+            bool first = true;
+            while (!remaining.empty()) {
+                const auto nl = remaining.find('\n');
+                std::string line = nl == std::string::npos
+                    ? remaining
+                    : remaining.substr(0, nl);
+                remaining = nl == std::string::npos ? "" : remaining.substr(nl + 1);
+                const auto start = line.find_first_not_of(" \t");
+                if (start == std::string::npos) continue;
+                ctx.append_history_fn(std::format(
+                    "{}ℹ  {}\n", first ? "\n" : "", line.substr(start)));
+                first = false;
+            }
+            if (first) ctx.append_history_fn("\nℹ  No profile information is available.\n");
+        };
+
+        const std::string lowered = to_lower_ascii(arg);
+        if (arg.empty() || lowered == "status"
+            || lowered == "list" || lowered == "ls") {
+            const std::string body = ctx.profile_status_fn
+                ? ctx.profile_status_fn()
+                : "Use /profile <name> to switch profiles (not available in this session).";
+            emit_info_body(body);
+            return;
+        }
+
+        const std::string body = ctx.switch_profile_fn
+            ? ctx.switch_profile_fn(arg)
+            : "Profile switching is not available in this session.";
+        const bool success = body.starts_with("Switched")
+            || body.starts_with("Cleared");
+        ctx.append_history_fn(std::format(
+            "\n{}\n", success
+                ? "✓  " + body
+                : "✗  " + body));
     }
 };
 
@@ -1529,6 +1583,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<UndoCommand>());
     register_command(std::make_unique<RetryCommand>());
     register_command(std::make_unique<ModelCommand>());
+    register_command(std::make_unique<ProfileCommand>());
     register_command(std::make_unique<EffortCommand>());
     register_command(std::make_unique<SettingsCommand>());
     register_command(std::make_unique<YoloCommand>());

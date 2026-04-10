@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <string>
 #include <unistd.h>
@@ -53,6 +54,27 @@ public:
         core::context::SessionTransport::cli,
         std::move(session_id));
 }
+
+class ToolManagerProbeTool final : public core::tools::Tool {
+public:
+    explicit ToolManagerProbeTool(std::string name)
+        : name_(std::move(name)) {}
+
+    core::tools::ToolDefinition get_definition() const override {
+        return core::tools::ToolDefinition{
+            .name = name_,
+            .description = "Probe tool for ToolManager tests.",
+        };
+    }
+
+    std::string execute(const std::string&,
+                        const core::context::SessionContext&) override {
+        return R"({"success":true})";
+    }
+
+private:
+    std::string name_;
+};
 
 } // namespace
 
@@ -997,6 +1019,23 @@ TEST_CASE("ToolManager get_all_tools returns registered tools", "[tools]") {
         names.push_back(t.function.name);
     }
     REQUIRE(std::ranges::is_sorted(names));
+}
+
+TEST_CASE("ToolManager can unregister tools by name and batch", "[tools]") {
+    auto& mgr = ToolManager::get_instance();
+    const std::string one = std::format("probe_tool_one_{}", getpid());
+    const std::string two = std::format("probe_tool_two_{}", getpid());
+
+    mgr.register_tool(std::make_shared<ToolManagerProbeTool>(one));
+    mgr.register_tool(std::make_shared<ToolManagerProbeTool>(two));
+    REQUIRE(mgr.has_tool(one));
+    REQUIRE(mgr.has_tool(two));
+
+    REQUIRE(mgr.unregister_tool(one));
+    REQUIRE_FALSE(mgr.has_tool(one));
+
+    mgr.unregister_tools({two, "probe_tool_missing"});
+    REQUIRE_FALSE(mgr.has_tool(two));
 }
 
 // ---------------------------------------------------------------------------

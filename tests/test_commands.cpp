@@ -26,6 +26,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto input_cleared  = std::make_shared<bool>(false);
     auto quit_called    = std::make_shared<bool>(false);
     auto switch_target  = std::make_shared<std::string>();
+    auto profile_target = std::make_shared<std::string>();
     auto effort_target  = std::make_shared<std::string>();
     auto effort_value   = std::make_shared<std::string>("auto");
     auto picker_opened  = std::make_shared<bool>(false);
@@ -49,6 +50,15 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .switch_model_fn = [switch_target](std::string_view name) {
             *switch_target = std::string(name);
             return std::string("Switched to ") + std::string(name);
+        },
+        .profile_status_fn = []() {
+            return std::string(
+                "Active profile: work\n"
+                "        Available profiles: work (Company defaults), oss (Open-source defaults)");
+        },
+        .switch_profile_fn = [profile_target](std::string_view name) {
+            *profile_target = std::string(name);
+            return std::string("Switched active profile to '") + std::string(name) + "'.";
         },
         .effort_status_fn = [effort_value]() {
             return std::string("Effort: ") + *effort_value + "\n        Supported: auto, low, medium, high, max";
@@ -259,6 +269,25 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*switch_target == "claude opus");
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to claude opus"));
+    }
+
+    SECTION("/profile shows profile status by default") {
+        *mock_history = "";
+        ctx.text = "/profile";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Active profile: work"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Available profiles"));
+    }
+
+    SECTION("/profile switches active profile") {
+        *mock_history = "";
+        *profile_target = "";
+        ctx.text = "/profile oss";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*profile_target == "oss");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched active profile to 'oss'"));
     }
 
     SECTION("/effort command reports current effort") {
@@ -544,6 +573,12 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         });
         REQUIRE(model_it != commands.end());
         REQUIRE(model_it->accepts_arguments);
+
+        const auto profile_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
+            return cmd.name == "/profile";
+        });
+        REQUIRE(profile_it != commands.end());
+        REQUIRE(profile_it->accepts_arguments);
 
         const auto settings_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/settings";

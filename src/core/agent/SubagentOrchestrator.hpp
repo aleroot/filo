@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -43,6 +44,7 @@ public:
         const RunContext& context);
 
     void clear_sessions();
+    void reload_profiles(const core::config::AppConfig& app_config);
 
 private:
     struct Profile {
@@ -85,11 +87,12 @@ private:
         std::string error;
     };
 
-    [[nodiscard]] const Profile* find_profile(std::string_view name) const;
+    [[nodiscard]] std::optional<Profile> find_profile(std::string_view name) const;
     [[nodiscard]] std::string available_profile_names() const;
     [[nodiscard]] std::string build_task_description() const;
     [[nodiscard]] std::string create_task_id();
-    void apply_config_overrides(const core::config::AppConfig& app_config);
+    [[nodiscard]] static std::vector<Profile> make_default_profiles();
+    void apply_config_overrides_unlocked(const core::config::AppConfig& app_config);
     [[nodiscard]] std::shared_ptr<TaskSession> get_or_create_session(
         const std::string& description,
         const Profile& profile,
@@ -128,6 +131,7 @@ private:
 
     core::tools::ToolManager& tool_manager_;
     std::vector<Profile> profiles_;
+    mutable std::mutex profiles_mutex_;
 
     std::atomic<uint64_t> next_task_id_{1};
 

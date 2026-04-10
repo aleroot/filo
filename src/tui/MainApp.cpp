@@ -558,7 +558,7 @@ RunResult run(RunOptions opts) {
         router_engine,
         provider_default_models);
 
-    const bool router_available = config.router.enabled && !router_engine->list_policies().empty();
+    bool router_available = config.router.enabled && !router_engine->list_policies().empty();
 
     ModelSelectionMode model_selection_mode = parse_model_selection_mode(config.default_model_selection);
     if ((model_selection_mode == ModelSelectionMode::Router
@@ -1447,10 +1447,13 @@ RunResult run(RunOptions opts) {
             screen.PostEvent(ftxui::Event::Custom);
         });
 
+    std::function<std::string()> apply_active_profile_live;
+
     auto activate_manual_mode = [&]() -> std::string {
         try {
             auto provider = provider_manager.get_provider(manual_provider_name);
             agent->set_provider(provider);
+            llm_provider = provider;
             model_selection_mode = ModelSelectionMode::Manual;
             agent->set_active_model(manual_model_name);
             sync_mcp_sampling_backend(provider, manual_model_name);
@@ -1484,6 +1487,7 @@ RunResult run(RunOptions opts) {
         model_selection_mode = ModelSelectionMode::Router;
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
+        llm_provider = router_provider;
         agent->set_active_model(router_policy_label());
         sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
@@ -1504,6 +1508,7 @@ RunResult run(RunOptions opts) {
         model_selection_mode = ModelSelectionMode::Auto;
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
+        llm_provider = router_provider;
         agent->set_active_model("auto");
         sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
@@ -1511,6 +1516,102 @@ RunResult run(RunOptions opts) {
         return std::format(
             "Switched to Auto mode — task-aware smart routing via policy '{}'",
             active_router_policy.empty() ? "<unset>" : active_router_policy);
+    };
+
+    apply_active_profile_live = [&]() -> std::string {
+        const auto loaded = config_manager.get_config();
+        config = loaded;
+
+        std::unordered_set<std::string> next_registered_names;
+        std::unordered_map<std::string, std::string> next_provider_models;
+        for (const auto& [name, pconfig] : config.providers) {
+            if (auto provider = core::llm::ProviderFactory::create_provider(name, pconfig)) {
+                provider_manager.register_provider(name, provider);
+                next_registered_names.insert(name);
+                next_provider_models[name] = pconfig.model;
+            }
+        }
+
+        if (next_registered_names.empty()) {
+            return "the selected profile leaves no usable providers.";
+        }
+
+        registered_provider_names = std::move(next_registered_names);
+        provider_default_models = std::move(next_provider_models);
+
+        router_engine = std::make_shared<core::llm::routing::RouterEngine>(
+            config.router,
+            registered_provider_names);
+        router_provider = std::make_shared<core::llm::providers::RouterProvider>(
+            provider_manager,
+            router_engine,
+            provider_default_models);
+        router_available = config.router.enabled && !router_engine->list_policies().empty();
+        active_router_policy = router_engine->active_policy();
+
+        manual_provider_name = config.default_provider;
+        if (!registered_provider_names.contains(manual_provider_name)) {
+            manual_provider_name = *registered_provider_names.begin();
+        }
+        if (const auto it = config.providers.find(manual_provider_name);
+            it != config.providers.end()) {
+            manual_model_name = it->second.model;
+        } else {
+            manual_model_name.clear();
+        }
+
+        const ModelSelectionMode preferred_mode = parse_model_selection_mode(
+            config.default_model_selection);
+        if (preferred_mode == ModelSelectionMode::Router) {
+            const std::string result = activate_router_mode();
+            if (!result.starts_with("Switched")) {
+                activate_manual_mode();
+            }
+        } else if (preferred_mode == ModelSelectionMode::Auto) {
+            const std::string result = activate_auto_mode();
+            if (!result.starts_with("Switched")) {
+                activate_manual_mode();
+            }
+        } else {
+            activate_manual_mode();
+        }
+
+        {
+            std::string desired_mode = normalize_mode(config.default_mode);
+            for (std::size_t i = 0; i < modes.size(); ++i) {
+                if (modes[i].first == desired_mode) {
+                    current_mode_idx = static_cast<int>(i);
+                    agent->set_mode(modes[current_mode_idx].first);
+                    break;
+                }
+            }
+        }
+
+        set_yolo_mode_enabled(
+            parse_approval_mode(config.default_approval_mode) == ApprovalMode::Yolo);
+
+        ui_show_banner = visibility_setting_enabled(config.ui_banner, true);
+        ui_show_footer = visibility_setting_enabled(config.ui_footer, true);
+        ui_show_model_info = visibility_setting_enabled(config.ui_model_info, true);
+        ui_show_context_usage = visibility_setting_enabled(config.ui_context_usage, true);
+        ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
+        ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
+        agent->set_auto_compact_threshold(config.auto_compact_threshold);
+        agent->reload_subagent_profiles(config);
+
+        core::mcp::McpConnectionManager::get_instance().connect_all(
+            config,
+            tool_manager,
+            llm_provider,
+            model_selection_mode == ModelSelectionMode::Manual
+                ? manual_model_name
+                : std::string{});
+
+        refresh_status_labels();
+        animation_cv.notify_one();
+        screen.PostEvent(Event::Custom);
+
+        return "Applied profile live.";
     };
 
     // Keep status labels coherent with startup mode.
@@ -1929,6 +2030,125 @@ RunResult run(RunOptions opts) {
 
     auto switch_provider = [&](std::string_view requested) -> std::string {
         return apply_model_selector(requested, true);
+    };
+
+    auto profile_status = [&]() -> std::string {
+        const auto& profiles = config_manager.get_profiles();
+        const std::string active = config_manager.get_active_profile().empty()
+            ? std::string("<none>")
+            : config_manager.get_active_profile();
+
+        if (profiles.empty()) {
+            return std::format(
+                "Active profile: {}\n"
+                "        Available profiles: <none>\n"
+                "        Define named profiles under `profiles` in your config.json.",
+                active);
+        }
+
+        std::vector<std::string> names;
+        names.reserve(profiles.size());
+        for (const auto& [name, profile] : profiles) {
+            (void)profile;
+            names.push_back(name);
+        }
+        std::ranges::sort(names);
+
+        auto join_values = [](const std::vector<std::string>& values) {
+            std::string out;
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (i > 0) out += ", ";
+                out += values[i];
+            }
+            return out;
+        };
+
+        std::string body = std::format("Active profile: {}", active);
+        body += "\n        Available profiles:";
+        for (const auto& name : names) {
+            const auto it = profiles.find(name);
+            if (it == profiles.end()) {
+                continue;
+            }
+            std::string line = name;
+            if (!it->second.description.empty()) {
+                line += " - " + it->second.description;
+            }
+            if (!it->second.extends_from.empty()) {
+                line += " (extends: " + join_values(it->second.extends_from) + ")";
+            }
+            body += "\n        - " + line;
+        }
+        body += "\n        Use `/profile <name>` to switch and apply profile immediately.";
+        return body;
+    };
+
+    auto switch_profile = [&](std::string_view requested) -> std::string {
+        auto trim_ascii = [](std::string_view s) -> std::string_view {
+            const auto start = s.find_first_not_of(" \t\r\n");
+            if (start == std::string_view::npos) return {};
+            const auto end = s.find_last_not_of(" \t\r\n");
+            return s.substr(start, end - start + 1);
+        };
+
+        const std::string_view trimmed = trim_ascii(requested);
+        if (trimmed.empty()) {
+            return "Usage: /profile <name>|list|status|clear";
+        }
+
+        const std::string lowered = lower_ascii_copy(trimmed);
+        if (lowered == "list" || lowered == "status" || lowered == "ls") {
+            return profile_status();
+        }
+
+        std::optional<std::string> next_profile;
+        if (lowered == "clear"
+            || lowered == "none"
+            || lowered == "unset"
+            || lowered == "off") {
+            next_profile = std::nullopt;
+        } else {
+            next_profile = std::string(trimmed);
+        }
+
+        std::string error;
+        if (!config_manager.persist_active_profile(next_profile, settings_working_dir, &error)) {
+            return std::format("Could not switch profile: {}", error);
+        }
+
+        const std::string live_result = apply_active_profile_live
+            ? apply_active_profile_live()
+            : "live profile application is unavailable in this session.";
+
+        if (!next_profile.has_value()) {
+            if (!config_manager.get_active_profile().empty()) {
+                if (live_result.starts_with("Applied")) {
+                    return std::format(
+                        "Could not clear active profile because '{}' is still enforced (via FILO_PROFILE or config active_profile).",
+                        config_manager.get_active_profile());
+                }
+                return std::format(
+                    "Could not clear active profile because '{}' is still enforced (via FILO_PROFILE or config active_profile), and {} Restart Filo to fully apply.",
+                    config_manager.get_active_profile(),
+                    live_result);
+            }
+            if (live_result.starts_with("Applied")) {
+                return "Cleared active profile and applied base configuration live.";
+            }
+            return std::format(
+                "Cleared active profile, but {} Restart Filo to fully apply.",
+                live_result);
+        }
+
+        if (live_result.starts_with("Applied")) {
+            return std::format(
+                "Switched active profile to '{}' and applied it live.",
+                config_manager.get_active_profile());
+        }
+        return std::format(
+            "Switched active profile to '{}', but {} Restart Filo to fully apply.",
+            config_manager.get_active_profile(),
+            live_result);
     };
 
     auto open_model_picker = [&]() -> bool {
@@ -2707,6 +2927,8 @@ RunResult run(RunOptions opts) {
             .quit_fn          = screen.ExitLoopClosure(),
             .model_status_fn  = describe_models,
             .switch_model_fn  = switch_provider,
+            .profile_status_fn = profile_status,
+            .switch_profile_fn = switch_profile,
             .effort_status_fn = describe_effort,
             .switch_effort_fn = switch_effort,
             .open_model_picker_fn = open_model_picker,

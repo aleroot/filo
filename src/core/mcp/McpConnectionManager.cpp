@@ -5,6 +5,7 @@
 #include "../logging/Logger.hpp"
 #include "../llm/LLMProvider.hpp"
 #include <stdexcept>
+#include <unordered_set>
 
 namespace core::mcp {
 
@@ -13,6 +14,37 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
                                        std::shared_ptr<core::llm::LLMProvider> sampling_provider,
                                        std::string sampling_model) {
     std::lock_guard lock(mutex_);
+
+    // Replace any existing MCP sessions/tools to keep runtime state in sync
+    // with the latest config (for example after live profile switching).
+    std::unordered_set<std::string> stale_tool_names;
+    for (auto& entry : servers_) {
+        for (const auto& tool_name : entry.tool_names) {
+            stale_tool_names.insert(tool_name);
+        }
+        try {
+            entry.session->shutdown();
+        } catch (...) {}
+    }
+    servers_.clear();
+
+    if (!stale_tool_names.empty()) {
+        std::vector<std::string> tool_names_to_remove;
+        tool_names_to_remove.reserve(stale_tool_names.size());
+        for (const auto& name : stale_tool_names) {
+            const auto definition = tool_manager.get_tool_definition(name);
+            if (!definition.has_value()) {
+                continue;
+            }
+            if (!definition->description.starts_with("[MCP:")) {
+                continue;
+            }
+            tool_names_to_remove.push_back(name);
+        }
+        if (!tool_names_to_remove.empty()) {
+            tool_manager.unregister_tools(tool_names_to_remove);
+        }
+    }
 
     if (sampling_provider) {
         if (!sampling_bridge_) {

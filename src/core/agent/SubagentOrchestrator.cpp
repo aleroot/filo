@@ -60,7 +60,15 @@ constexpr int kMaxSubagentSteps = 64;
 SubagentOrchestrator::SubagentOrchestrator(core::tools::ToolManager& tool_manager,
                                            const core::config::AppConfig* app_config)
     : tool_manager_(tool_manager)
-    , profiles_({
+    , profiles_(make_default_profiles()) {
+    if (app_config != nullptr) {
+        std::lock_guard lock(profiles_mutex_);
+        apply_config_overrides_unlocked(*app_config);
+    }
+}
+
+std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_profiles() {
+    return {
         Profile{
             .name = "general",
             .description = "General-purpose subagent for complex multi-step tasks and broad research.",
@@ -97,10 +105,7 @@ SubagentOrchestrator::SubagentOrchestrator(core::tools::ToolManager& tool_manage
             .max_steps = 10,
             .enabled = true,
         },
-    }) {
-    if (app_config != nullptr) {
-        apply_config_overrides(*app_config);
-    }
+    };
 }
 
 core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
@@ -180,7 +185,7 @@ std::string SubagentOrchestrator::execute_task(
         return render_error_json("Missing required 'subagent_type' for task.");
     }
 
-    const Profile* profile = find_profile(subagent_type);
+    const std::optional<Profile> profile = find_profile(subagent_type);
     if (!profile) {
         return render_error_json(std::format(
             "Unknown subagent_type '{}'. Available: {}.",
@@ -269,17 +274,29 @@ void SubagentOrchestrator::clear_sessions() {
     sessions_.clear();
 }
 
-const SubagentOrchestrator::Profile* SubagentOrchestrator::find_profile(std::string_view name) const {
+void SubagentOrchestrator::reload_profiles(const core::config::AppConfig& app_config) {
+    {
+        std::lock_guard lock(profiles_mutex_);
+        profiles_ = make_default_profiles();
+        apply_config_overrides_unlocked(app_config);
+    }
+    clear_sessions();
+}
+
+std::optional<SubagentOrchestrator::Profile> SubagentOrchestrator::find_profile(
+    std::string_view name) const {
     const std::string normalized = normalize_agent_name(name);
+    std::lock_guard lock(profiles_mutex_);
     for (const auto& profile : profiles_) {
         if (profile.name == normalized) {
-            return &profile;
+            return profile;
         }
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 std::string SubagentOrchestrator::available_profile_names() const {
+    std::lock_guard lock(profiles_mutex_);
     if (profiles_.empty()) return "none";
 
     std::string names;
@@ -290,7 +307,8 @@ std::string SubagentOrchestrator::available_profile_names() const {
     return names;
 }
 
-void SubagentOrchestrator::apply_config_overrides(const core::config::AppConfig& app_config) {
+void SubagentOrchestrator::apply_config_overrides_unlocked(
+    const core::config::AppConfig& app_config) {
     for (const auto& [raw_name, config_profile] : app_config.subagents) {
         const std::string name = normalize_agent_name(raw_name);
         if (name.empty()) continue;
@@ -351,16 +369,22 @@ void SubagentOrchestrator::apply_config_overrides(const core::config::AppConfig&
 }
 
 std::string SubagentOrchestrator::build_task_description() const {
+    std::vector<Profile> profiles_snapshot;
+    {
+        std::lock_guard lock(profiles_mutex_);
+        profiles_snapshot = profiles_;
+    }
+
     std::string description =
         "Delegates work to a specialized background subagent. "
         "Use this for complex multi-step research, broad file/code exploration, "
         "or splitting ambiguous work while you stay focused on the primary user goal.\\n\\n"
         "Available subagent_type values:\\n";
 
-    if (profiles_.empty()) {
+    if (profiles_snapshot.empty()) {
         description += "- none configured\\n";
     } else {
-        for (const auto& profile : profiles_) {
+        for (const auto& profile : profiles_snapshot) {
             description += std::format("- {}: {}\\n", profile.name, profile.description);
         }
     }

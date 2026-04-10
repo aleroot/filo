@@ -165,7 +165,7 @@ struct ReviewOutputRecord {
 
 constexpr std::string_view kReviewFallbackMessage =
     "Reviewer failed to output a response.";
-constexpr int kReviewMaxModelSteps = 12;
+constexpr double kReviewRotationMinContextUtilization = 0.90;
 
 constexpr std::string_view kReviewUncommittedPrompt =
     "Review the current code changes (staged, unstaged, and untracked files) and "
@@ -1018,16 +1018,6 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
     }
 
     const std::string prompt = build_review_submission_prompt(*resolved);
-    const auto prior_limits = ctx.agent->get_loop_limits();
-    const bool should_cap_review_steps =
-        prior_limits.max_steps_per_turn <= 0
-        || prior_limits.max_steps_per_turn > kReviewMaxModelSteps;
-    if (should_cap_review_steps) {
-        auto review_limits = prior_limits;
-        review_limits.max_steps_per_turn = kReviewMaxModelSteps;
-        ctx.agent->set_loop_limits(review_limits);
-    }
-
     const std::string review_hint = trim_copy(resolved->user_facing_hint);
     ctx.append_history_fn(std::format("\n»  Code review started: {}…\n",
                                       review_hint.empty()
@@ -1048,16 +1038,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
         [](const std::string&, const std::string&) {
             // Keep /review output focused on final findings.
         },
-        [append_fn,
-         collected_output,
-         interrupted,
-         agent = ctx.agent,
-         prior_limits,
-         should_cap_review_steps]() {
-            if (agent && should_cap_review_steps) {
-                agent->set_loop_limits(prior_limits);
-            }
-
+        [append_fn, collected_output, interrupted]() {
             const std::string raw = trim_copy(*collected_output);
             if (*interrupted || raw.find("[Generation stopped by user]") != std::string::npos) {
                 append_fn(
@@ -1068,6 +1049,11 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
             const ReviewOutputRecord output = parse_review_output_event(raw);
             const std::string rendered = render_review_output_text(output);
             append_fn(std::format("\n{}\n", rendered));
+        },
+        core::agent::Agent::TurnCallbacks{
+            // For /review, only rotate under real context pressure.
+            // This avoids heuristic waste-based churn that can interrupt long review loops.
+            .min_context_utilization_for_rotation = kReviewRotationMinContextUtilization,
         });
 }
 

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <future>
 #include <format>
 #include <ranges>
@@ -36,6 +37,13 @@ namespace {
     if (start == std::string::npos) return {};
     const auto end = value.find_last_not_of(" \t\r\n");
     return value.substr(start, end - start + 1);
+}
+
+[[nodiscard]] double sanitize_context_utilization_threshold(double value) noexcept {
+    if (!std::isfinite(value)) {
+        return 0.0;
+    }
+    return std::clamp(value, 0.0, 1.0);
 }
 
 [[nodiscard]] std::filesystem::path resolve_agent_project_root(
@@ -107,6 +115,11 @@ void Agent::set_mode(const std::string& mode) {
         mark_stable_prompt_prefix_dirty();
         ensure_system_prompt();
     }
+}
+
+void Agent::reload_subagent_profiles(const core::config::AppConfig& app_config) {
+    std::lock_guard lock(history_mutex_);
+    orchestrator_.reload_profiles(app_config);
 }
 
 int Agent::sanitize_max_steps_per_turn(int value) noexcept {
@@ -298,6 +311,18 @@ bool Agent::check_permission(const std::string& tool_name, const std::string& ar
 void Agent::send_message(const std::string& user_message,
                          std::function<void(const std::string&)> text_callback,
                          std::function<void(const std::string&, const std::string&)> tool_callback,
+                         std::function<void()> done_callback) {
+    send_message(
+        user_message,
+        std::move(text_callback),
+        std::move(tool_callback),
+        std::move(done_callback),
+        TurnCallbacks{});
+}
+
+void Agent::send_message(const std::string& user_message,
+                         std::function<void(const std::string&)> text_callback,
+                         std::function<void(const std::string&, const std::string&)> tool_callback,
                          std::function<void()> done_callback,
                          TurnCallbacks turn_callbacks) {
     send_message(
@@ -309,6 +334,18 @@ void Agent::send_message(const std::string& user_message,
         std::move(tool_callback),
         std::move(done_callback),
         std::move(turn_callbacks));
+}
+
+void Agent::send_message(core::llm::Message user_message,
+                         std::function<void(const std::string&)> text_callback,
+                         std::function<void(const std::string&, const std::string&)> tool_callback,
+                         std::function<void()> done_callback) {
+    send_message(
+        std::move(user_message),
+        std::move(text_callback),
+        std::move(tool_callback),
+        std::move(done_callback),
+        TurnCallbacks{});
 }
 
 void Agent::send_message(core::llm::Message user_message,
@@ -522,7 +559,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         if (tool_calls_accum->empty()) {
             // Pure text response — we're done
-            self->run_efficiency_rotation_if_needed();
+            if (turn_callbacks.allow_efficiency_rotation) {
+                self->run_efficiency_rotation_if_needed(
+                    turn_callbacks.min_context_utilization_for_rotation);
+            }
             self->check_auto_compact(text_callback);
             done_callback();
             return;
@@ -690,7 +730,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // A transparent rotation is safe here because the current step's
             // tool results are already in history and the next request can
             // continue from the handoff summary with a leaner working set.
-            self->run_efficiency_rotation_if_needed();
+            if (turn_callbacks.allow_efficiency_rotation) {
+                self->run_efficiency_rotation_if_needed(
+                    turn_callbacks.min_context_utilization_for_rotation);
+            }
             self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
             } catch (const std::exception& e) {
                 core::logging::error("Agent tool loop crashed: {}", e.what());
@@ -796,13 +839,18 @@ void Agent::reset_efficiency_tracking_unlocked() {
     efficiency_controller_.reset();
 }
 
-void Agent::run_efficiency_rotation_if_needed() {
+void Agent::run_efficiency_rotation_if_needed(double min_context_utilization_for_rotation) {
     std::function<void(const core::session::SessionEfficiencyDecision&)> efficiency_fn;
     core::session::SessionEfficiencyDecision efficiency_decision;
     {
         std::lock_guard lock(history_mutex_);
         efficiency_decision = current_efficiency_decision_unlocked();
         efficiency_fn = efficiency_decision_fn_;
+    }
+    const double min_context_utilization = sanitize_context_utilization_threshold(
+        min_context_utilization_for_rotation);
+    if (efficiency_decision.context_utilization < min_context_utilization) {
+        return;
     }
     if (efficiency_decision.action == core::session::SessionEfficiencyDecision::Action::Rotate
         && efficiency_fn) {

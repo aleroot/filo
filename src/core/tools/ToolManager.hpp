@@ -29,6 +29,20 @@ public:
         tools_[def.name] = std::move(tool);
     }
 
+    // Thread-safe remove: useful for replacing dynamic tool sets (e.g. MCP).
+    [[nodiscard]] bool unregister_tool(const std::string& name) {
+        std::lock_guard lock(mutex_);
+        return tools_.erase(name) > 0;
+    }
+
+    // Thread-safe batch remove for efficiency when pruning many tools at once.
+    void unregister_tools(const std::vector<std::string>& names) {
+        std::lock_guard lock(mutex_);
+        for (const auto& name : names) {
+            tools_.erase(name);
+        }
+    }
+
     // Thread-safe read: called from any HTTP handler thread or the TUI agent thread.
     std::vector<core::llm::Tool> get_all_tools() const {
         std::lock_guard lock(mutex_);

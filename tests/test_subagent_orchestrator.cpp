@@ -238,6 +238,52 @@ TEST_CASE("SubagentOrchestrator applies model override from subagent profile con
     REQUIRE(requests.front().model == "model-from-subagent-profile");
 }
 
+TEST_CASE("SubagentOrchestrator reloads profile overrides live", "[agent][orchestration]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+
+    core::config::AppConfig initial_config;
+    core::config::SubagentConfig initial_general;
+    initial_general.model = "model-from-initial-profile";
+    initial_config.subagents["general"] = std::move(initial_general);
+
+    core::agent::SubagentOrchestrator orchestrator(tool_manager, &initial_config);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto first = orchestrator.execute_task(
+        R"({"description":"reload profile","prompt":"first run","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "parent-model",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+    REQUIRE_FALSE(first.contains("\"error\""));
+
+    core::config::AppConfig reloaded_config;
+    core::config::SubagentConfig reloaded_general;
+    reloaded_general.model = "model-from-reloaded-profile";
+    reloaded_config.subagents["general"] = std::move(reloaded_general);
+    orchestrator.reload_profiles(reloaded_config);
+
+    const auto second = orchestrator.execute_task(
+        R"({"description":"reload profile","prompt":"second run","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "parent-model",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+    REQUIRE_FALSE(second.contains("\"error\""));
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    REQUIRE(requests[0].model == "model-from-initial-profile");
+    REQUIRE(requests[1].model == "model-from-reloaded-profile");
+}
+
 TEST_CASE("SubagentOrchestrator routes through provider override when configured", "[agent][orchestration]") {
     auto parent_provider = std::make_shared<RecordingProvider>();
     auto worker_provider = std::make_shared<RecordingProvider>();

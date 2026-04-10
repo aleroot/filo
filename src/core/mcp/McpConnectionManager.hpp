@@ -22,7 +22,7 @@ class McpSamplingBridge;
 // McpConnectionManager — initialises all configured MCP servers and registers
 // their tools in the given ToolManager.
 //
-// Singleton.  Call connect_all() once during application startup.
+// Singleton.
 // ---------------------------------------------------------------------------
 class McpConnectionManager {
 public:
@@ -33,6 +33,8 @@ public:
 
     // Connect to every MCP server in config.mcp_servers, initialise each
     // session, discover their tools, and register them in tool_manager.
+    // If MCP sessions were already connected, this call replaces the previous
+    // set atomically (old sessions are shut down and old MCP tools removed).
     // Errors for individual servers are logged and skipped gracefully.
     void connect_all(const core::config::AppConfig& config,
                      core::tools::ToolManager& tool_manager,

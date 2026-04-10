@@ -169,6 +169,157 @@ TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[confi
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("ConfigManager applies active profile overlays with inheritance", "[config][profiles]") {
+    const fs::path sandbox = make_temp_dir("filo_config_profiles_apply");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+    const fs::path profile_defaults = xdg_home / "filo" / "profile_defaults.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "openai",
+        "default_model_selection": "manual",
+        "default_mode": "BUILD",
+        "default_approval_mode": "prompt",
+        "providers": {
+            "openai": { "model": "gpt-4o" },
+            "grok": { "model": "grok-code-fast-1" },
+            "mistral": { "model": "devstral-small-latest" }
+        },
+        "profiles": {
+            "work": {
+                "description": "Work defaults",
+                "default_provider": "mistral",
+                "default_mode": "DEBUG",
+                "providers": {
+                    "mistral": { "model": "codestral-latest" }
+                }
+            },
+            "oss": {
+                "extends_from": ["work"],
+                "default_provider": "grok",
+                "default_approval_mode": "yolo"
+            }
+        }
+    })");
+
+    write_text(profile_defaults, R"({
+        "active_profile": "oss"
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& config = manager.get_config();
+
+    REQUIRE(manager.get_active_profile() == "oss");
+    REQUIRE(manager.get_profiles().contains("work"));
+    REQUIRE(manager.get_profiles().contains("oss"));
+    REQUIRE(config.default_provider == "grok");
+    REQUIRE(config.default_mode == "DEBUG");
+    REQUIRE(config.default_approval_mode == "yolo");
+    REQUIRE(config.providers.at("mistral").model == "codestral-latest");
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persists active profile selection and can clear it", "[config][profiles]") {
+    const fs::path sandbox = make_temp_dir("filo_config_profiles_persist");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+    const fs::path profile_defaults = xdg_home / "filo" / "profile_defaults.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "openai",
+        "default_model_selection": "manual",
+        "providers": {
+            "openai": { "model": "gpt-4o" },
+            "grok": { "model": "grok-code-fast-1" }
+        },
+        "profiles": {
+            "work": {
+                "default_provider": "openai",
+                "default_mode": "BUILD"
+            },
+            "travel": {
+                "default_provider": "grok",
+                "default_mode": "RESEARCH"
+            }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    REQUIRE(manager.persist_active_profile(std::string("work"), project_dir, &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_active_profile() == "work");
+    REQUIRE(fs::exists(profile_defaults));
+    REQUIRE(read_text(profile_defaults).find("\"active_profile\": \"work\"") != std::string::npos);
+
+    REQUIRE_FALSE(manager.persist_active_profile(std::string("unknown"), project_dir, &error));
+    REQUIRE(error.find("not defined") != std::string::npos);
+
+    REQUIRE(manager.persist_active_profile(std::nullopt, project_dir, &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_active_profile().empty());
+    REQUIRE_FALSE(fs::exists(profile_defaults));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager rejects persisting unresolved profile inheritance", "[config][profiles]") {
+    const fs::path sandbox = make_temp_dir("filo_config_profiles_invalid");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+    const fs::path profile_defaults = xdg_home / "filo" / "profile_defaults.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "openai",
+        "providers": {
+            "openai": { "model": "gpt-4o" }
+        },
+        "profiles": {
+            "dangling": {
+                "extends_from": ["missing-parent"],
+                "default_mode": "RESEARCH"
+            },
+            "cycle-a": {
+                "extends_from": ["cycle-b"],
+                "default_mode": "BUILD"
+            },
+            "cycle-b": {
+                "extends_from": ["cycle-a"],
+                "default_mode": "DEBUG"
+            }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    REQUIRE_FALSE(manager.persist_active_profile(std::string("dangling"), project_dir, &error));
+    REQUIRE(error.find("could not be applied") != std::string::npos);
+    REQUIRE(error.find("not defined") != std::string::npos);
+    REQUIRE_FALSE(fs::exists(profile_defaults));
+
+    REQUIRE_FALSE(manager.persist_active_profile(std::string("cycle-a"), project_dir, &error));
+    REQUIRE(error.find("could not be applied") != std::string::npos);
+    REQUIRE(error.find("cycle") != std::string::npos);
+    REQUIRE_FALSE(fs::exists(profile_defaults));
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager defaults leave openai wire_api unset", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_defaults_wire_api");
     const fs::path xdg_home = sandbox / "xdg";

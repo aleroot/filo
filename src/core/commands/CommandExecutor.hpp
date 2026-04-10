@@ -23,6 +23,8 @@ struct CommandContext {
     std::function<void()> quit_fn = {};
     std::function<std::string()> model_status_fn = {};
     std::function<std::string(std::string_view)> switch_model_fn = {};
+    std::function<std::string()> profile_status_fn = {};
+    std::function<std::string(std::string_view)> switch_profile_fn = {};
     std::function<std::string()> effort_status_fn = {};
     std::function<std::string(std::string_view)> switch_effort_fn = {};
     std::function<bool()> open_model_picker_fn = {};
