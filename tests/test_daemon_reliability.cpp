@@ -14,7 +14,6 @@
 #include <format>
 #include <future>
 #include <optional>
-#include <random>
 #include <simdjson.h>
 #include <string>
 #include <thread>
@@ -36,36 +35,20 @@ namespace {
 }
 
 [[nodiscard]] int next_test_port() {
-    // CTest executes each Catch2 case in a separate process. Fixed per-process
-    // buckets can collide when process ids alias modulo the bucket count, so
-    // probe an actually bindable loopback port and return that candidate.
-    constexpr int kMinPort = 19080;
+    // Avoid bind-probing with cpp-httplib: bind_to_port() without listen can
+    // leave a bound socket around on some Linux/libstdc++ combos.
+    // Use a deterministic per-process sequence instead and let wait_for_ping()
+    // skip when the selected port is unavailable.
+    constexpr int kMinPort = 20000;
     constexpr int kMaxPort = 60999;
-    constexpr int kProbeAttempts = 256;
-    static thread_local std::mt19937 rng{
-        static_cast<std::mt19937::result_type>(
-            std::random_device{}()
-            ^ static_cast<unsigned>(current_process_id())
-            ^ static_cast<unsigned>(
-                std::chrono::steady_clock::now().time_since_epoch().count()))
-    };
-    std::uniform_int_distribution<int> dist(kMinPort, kMaxPort);
+    constexpr int kSpan = kMaxPort - kMinPort + 1; // 41,000 ports
 
-    for (int attempt = 0; attempt < kProbeAttempts; ++attempt) {
-        const int candidate = dist(rng);
-        httplib::Server probe;
-        if (probe.bind_to_port("127.0.0.1", candidate)) {
-            return candidate;
-        }
-    }
-
-    // Fall back to a deterministic value if probing fails repeatedly.
-    constexpr int kFallbackBase = 20000;
-    constexpr int kFallbackSpan = 20000;
-    static std::atomic<int> fallback{
-        kFallbackBase + (current_process_id() % kFallbackSpan)
+    static std::atomic<int> next{
+        kMinPort + ((current_process_id() * 37) % kSpan)
     };
-    return fallback.fetch_add(1, std::memory_order_relaxed);
+
+    const int offset = next.fetch_add(1, std::memory_order_relaxed);
+    return kMinPort + (offset % kSpan);
 }
 
 [[nodiscard]] bool wait_for_ping(int port,
