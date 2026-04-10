@@ -630,6 +630,16 @@ TEST_CASE("AnthropicSSEParser - message_start produces no output", "[claude][sse
     REQUIRE(!r.done);
 }
 
+TEST_CASE("AnthropicSSEParser - message_start usage includes cached prompt tokens", "[claude][sse]") {
+    AnthropicSSEParser p;
+    auto r = p.process_event(
+        "message_start",
+        R"({"type":"message_start","message":{"id":"msg_01","model":"claude-sonnet-4-6","usage":{"input_tokens":1200,"cache_creation_input_tokens":300,"cache_read_input_tokens":4500}}})");
+    REQUIRE(r.text.empty());
+    REQUIRE(!r.done);
+    REQUIRE(r.input_tokens == 6000);
+}
+
 TEST_CASE("AnthropicSSEParser - message_delta produces no output", "[claude][sse]") {
     AnthropicSSEParser p;
     auto r = p.process_event("message_delta",
@@ -840,6 +850,31 @@ TEST_CASE("AnthropicSSEParser - full text streaming sequence", "[claude][sse][in
 
     REQUIRE(full_text == "Hello World");
     REQUIRE(done.done);
+}
+
+TEST_CASE("AnthropicProtocol - final usage includes cached input token fields", "[claude][sse][integration]") {
+    AnthropicProtocol protocol;
+
+    auto start = protocol.parse_event(
+        "event: message_start\n"
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":500,\"cache_creation_input_tokens\":200,\"cache_read_input_tokens\":1300}}}\n");
+    REQUIRE(!start.done);
+    REQUIRE(start.prompt_tokens == 0);
+    REQUIRE(start.completion_tokens == 0);
+
+    auto delta = protocol.parse_event(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n");
+    REQUIRE(!delta.done);
+    REQUIRE(delta.prompt_tokens == 0);
+    REQUIRE(delta.completion_tokens == 0);
+
+    auto stop = protocol.parse_event(
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n");
+    REQUIRE(stop.done);
+    REQUIRE(stop.prompt_tokens == 2000);
+    REQUIRE(stop.completion_tokens == 42);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

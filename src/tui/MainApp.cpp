@@ -68,12 +68,10 @@
 #include <optional>
 #include <future>
 #include <algorithm>
-#include <cctype>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 #include <system_error>
-#include <cstdint>
 #include <cstdio>
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -4230,7 +4228,12 @@ RunResult run(RunOptions opts) {
 
             std::string util_str;
             for (const auto& w : rate_limit_info.usage_windows) {
-                util_str += std::format(" {}:{:.0f}%", w.label, w.utilization * 100.0f);
+                const std::string pct_str =
+                    std::format("{:.0f}", w.utilization * 100.0f);
+                if (w.label == "overage" && pct_str == "0") {
+                    continue;
+                }
+                util_str += std::format(" {}:{}%", w.label, pct_str);
             }
             rate_limit_el = text(util_str) | color(util_color);
         } else if (rate_limit_info.requests_limit > 0 || rate_limit_info.tokens_limit > 0

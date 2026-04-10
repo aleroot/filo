@@ -2,9 +2,8 @@
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
-#include <cctype>
 #include <cstdio>
-#include <ctime>
+#include <limits>
 #include <utility>
 
 namespace core::llm::protocols {
@@ -570,9 +569,27 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
         if (doc["message"].get(msg_obj) == simdjson::SUCCESS) {
             simdjson::dom::object usage_obj;
             if (msg_obj["usage"].get(usage_obj) == simdjson::SUCCESS) {
-                int64_t it = 0;
-                [[maybe_unused]] const auto err = usage_obj["input_tokens"].get(it);
-                result.input_tokens = static_cast<int32_t>(it);
+                const auto read_non_negative_usage = [&](std::string_view key) -> int64_t {
+                    int64_t value = 0;
+                    if (usage_obj[key].get(value) == simdjson::SUCCESS && value > 0) {
+                        return value;
+                    }
+                    return 0;
+                };
+                // Claude prompt caching reports a split of prompt usage:
+                // input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
+                // Context usage should account for the full effective prompt footprint.
+                const int64_t input_tokens = read_non_negative_usage("input_tokens");
+                const int64_t cache_creation_tokens =
+                    read_non_negative_usage("cache_creation_input_tokens");
+                const int64_t cache_read_tokens =
+                    read_non_negative_usage("cache_read_input_tokens");
+                const int64_t total_input_tokens =
+                    input_tokens + cache_creation_tokens + cache_read_tokens;
+                result.input_tokens = static_cast<int32_t>(
+                    std::min<int64_t>(
+                        total_input_tokens,
+                        static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
             }
         }
         return result;

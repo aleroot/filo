@@ -713,8 +713,9 @@ bool parse_openai_gateway_request(const httplib::Request& http_request,
                                   GatewayRequest& out_request,
                                   std::string& error_out) {
     simdjson::dom::parser parser;
+    simdjson::padded_string padded_body(http_request.body);
     simdjson::dom::element doc;
-    if (parser.parse(http_request.body).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse(padded_body).get(doc) != simdjson::SUCCESS) {
         error_out = "Invalid JSON";
         return false;
     }
@@ -776,8 +777,9 @@ bool parse_anthropic_gateway_request(const httplib::Request& http_request,
                                      GatewayRequest& out_request,
                                      std::string& error_out) {
     simdjson::dom::parser parser;
+    simdjson::padded_string padded_body(http_request.body);
     simdjson::dom::element doc;
-    if (parser.parse(http_request.body).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse(padded_body).get(doc) != simdjson::SUCCESS) {
         error_out = "Invalid JSON";
         return false;
     }

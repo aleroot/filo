@@ -14,7 +14,9 @@
  *   - Tool call arguments are streamed as `input_json_delta` fragments and
  *     must be accumulated until `content_block_stop`.
  *   - Usage is split: input tokens in `message_start`, output tokens in
- *     `message_delta`.
+ *     `message_delta`. With prompt caching enabled, `message_start` usage
+ *     may also include cache creation/read token fields that contribute to
+ *     effective prompt footprint.
  *   - Extended thinking is enabled via a request-level `thinking` block and
  *     a beta header.
  */
@@ -78,7 +80,7 @@ public:
         std::string          text;             ///< Non-empty on `text_delta` events.
         std::vector<ToolCall> completed_tools; ///< Non-empty on `content_block_stop` with a tool.
         bool    done          = false;         ///< True on `message_stop`.
-        int32_t input_tokens  = 0;             ///< From `message_start`.
+        int32_t input_tokens  = 0;             ///< From `message_start` usage (includes cache token fields when present).
         int32_t output_tokens = 0;             ///< From `message_delta`.
     };
 
