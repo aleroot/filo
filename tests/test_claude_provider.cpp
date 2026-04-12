@@ -877,6 +877,44 @@ TEST_CASE("AnthropicProtocol - final usage includes cached input token fields", 
     REQUIRE(stop.completion_tokens == 42);
 }
 
+TEST_CASE("AnthropicProtocol - parse_event accepts no-space SSE field separators",
+          "[claude][sse][parser]") {
+    AnthropicProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event:content_block_delta\n"
+        "data:{\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"NoSpace\"}}\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "NoSpace");
+}
+
+TEST_CASE("AnthropicProtocol - parse_event accepts CRLF framing",
+          "[claude][sse][parser]") {
+    AnthropicProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event: content_block_delta\r\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"CRLF\"}}\r\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "CRLF");
+}
+
+TEST_CASE("AnthropicProtocol - parse_event falls back to payload type when event line missing",
+          "[claude][sse][parser]") {
+    AnthropicProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"text_delta\",\"text\":\"TypeFallback\"}}\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "TypeFallback");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bug-fix: Bug 1 — extended thinking forces temperature=1
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 #include "GeminiProtocol.hpp"
+#include "SseUtils.hpp"
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -237,10 +238,11 @@ std::string GeminiProtocol::build_url(std::string_view base_url,
 }
 
 ParseResult GeminiProtocol::parse_event(std::string_view raw_event) {
-    if (!raw_event.starts_with("data: ")) return {};
-    std::string_view json_sv = raw_event.substr(6);
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return {};
+    const std::string_view json_sv = parsed.data;
 
-    if (json_sv == "[DONE]") {
+    if (parsed.is_done) {
         ParseResult r;
         r.done = true;
         return r;

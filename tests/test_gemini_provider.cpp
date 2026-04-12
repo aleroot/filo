@@ -225,6 +225,41 @@ TEST_CASE("parse_gemini_sse_chunk - missing candidates key returns empty result"
     REQUIRE(tools.empty());
 }
 
+TEST_CASE("GeminiProtocol parse_event - accepts data prefix without a space",
+          "[gemini][sse][parser]") {
+    GeminiProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data:{"candidates":[{"content":{"role":"model","parts":[{"text":"NoSpace"}]}}]})");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "NoSpace");
+}
+
+TEST_CASE("GeminiProtocol parse_event - accepts event envelope with CRLF",
+          "[gemini][sse][parser]") {
+    GeminiProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event: message\r\n"
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"CRLF\"}]}}]}\r\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "CRLF");
+}
+
+TEST_CASE("GeminiProtocol parse_event - joins multiline data payloads",
+          "[gemini][sse][parser]") {
+    GeminiProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello\"}]}\n"
+        "data: }]}\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "Hello");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ProviderFactory — creates Gemini provider
 // ─────────────────────────────────────────────────────────────────────────────

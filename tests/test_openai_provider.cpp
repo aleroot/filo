@@ -384,6 +384,41 @@ TEST_CASE("parse_openai_sse_chunk - null content produces empty string", "[opena
     REQUIRE(content.empty());
 }
 
+TEST_CASE("OpenAIProtocol parse_event - accepts data prefix without a space",
+          "[openai][sse][parser]") {
+    OpenAIProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data:{"choices":[{"delta":{"content":"NoSpace"},"index":0}]})");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "NoSpace");
+}
+
+TEST_CASE("OpenAIProtocol parse_event - accepts event envelope with CRLF",
+          "[openai][sse][parser]") {
+    OpenAIProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event: response.output_text.delta\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"CRLF\"},\"index\":0}]}\r\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "CRLF");
+}
+
+TEST_CASE("OpenAIProtocol parse_event - joins multiline data payloads",
+          "[openai][sse][parser]") {
+    OpenAIProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}\n"
+        "data: ,\"index\":0}]}\n");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "Hello");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // parse_openai_sse_chunk — tool calls
 // ─────────────────────────────────────────────────────────────────────────────

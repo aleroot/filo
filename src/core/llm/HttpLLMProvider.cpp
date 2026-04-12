@@ -256,45 +256,74 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetHeader(headers);
                 session.SetBody(cpr::Body{payload});
 
-                session.SetWriteCallback(cpr::WriteCallback([self, &buffer, &done_signalled, &delimiter, &protocol, callback] (std::string_view data, intptr_t /*userdata*/) -> bool {
-                    buffer.append(data);
+                auto forward_parsed_event = [&] (std::string_view event_payload) {
+                    if (event_payload.empty()) return;
+                    protocols::ParseResult result = protocol->parse_event(event_payload);
 
-                    std::size_t pos = 0;
-                    while ((pos = buffer.find(delimiter)) != std::string::npos) {
-                        std::string event = buffer.substr(0, pos);
-                        buffer.erase(0, pos + delimiter.size());
-
-                        if (event.empty()) continue;
-                        protocols::ParseResult result = protocol->parse_event(event);
-
-                        // Forward all content/tool chunks produced by this event.
-                        bool has_terminal_chunk = false;
-                        for (auto& chunk : result.chunks) {
-                            callback(chunk);
-                            if (chunk.is_final) has_terminal_chunk = true;
-                        }
-
-                        if (has_terminal_chunk) {
-                            done_signalled = true;
-                            return true;
-                        }
-
-                        // Report token usage before emitting the final chunk so that
-                        // get_last_usage() is populated before callers observe is_final.
-                        if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
-                            self->set_last_usage(result.prompt_tokens, result.completion_tokens);
-                        }
-
-                        if (result.done) {
-                            done_signalled = true;
-                            callback(StreamChunk::make_final());
-                            return true;
-                        }
+                    // Forward all content/tool chunks produced by this event.
+                    bool has_terminal_chunk = false;
+                    for (auto& chunk : result.chunks) {
+                        callback(chunk);
+                        if (chunk.is_final) has_terminal_chunk = true;
                     }
+
+                    if (has_terminal_chunk) {
+                        done_signalled = true;
+                        return;
+                    }
+
+                    // Report token usage before emitting the final chunk so that
+                    // get_last_usage() is populated before callers observe is_final.
+                    if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
+                        self->set_last_usage(result.prompt_tokens, result.completion_tokens);
+                    }
+
+                    if (result.done) {
+                        done_signalled = true;
+                        callback(StreamChunk::make_final());
+                    }
+                };
+
+                auto drain_complete_events = [&] {
+                    while (!done_signalled) {
+                        std::size_t pos = buffer.find(delimiter);
+                        std::size_t delim_len = delimiter.size();
+
+                        // Most SSE providers use "\n\n", but some use CRLF framing.
+                        if (delimiter == "\n\n") {
+                            const std::size_t crlf_pos = buffer.find("\r\n\r\n");
+                            if (crlf_pos != std::string::npos
+                                && (pos == std::string::npos || crlf_pos < pos)) {
+                                pos = crlf_pos;
+                                delim_len = 4;
+                            }
+                        }
+
+                        if (pos == std::string::npos) break;
+
+                        std::string event = buffer.substr(0, pos);
+                        buffer.erase(0, pos + delim_len);
+                        forward_parsed_event(event);
+                    }
+                };
+
+                session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events]
+                                                            (std::string_view data,
+                                                             intptr_t /*userdata*/) -> bool {
+                    buffer.append(data);
+                    drain_complete_events();
                     return true;
                 }));
 
                 cpr::Response r = session.Post();
+                if (!done_signalled) {
+                    // Some providers close the stream without a trailing delimiter.
+                    // Parse any non-whitespace remainder as one final event.
+                    if (buffer.find_first_not_of(" \t\r\n") != std::string::npos) {
+                        forward_parsed_event(buffer);
+                    }
+                    buffer.clear();
+                }
                 if (r.status_code != 200) {
                     core::logging::debug("[HTTP] Response status={}, body={}", r.status_code, r.text.substr(0, 500));
                 }

@@ -1,4 +1,5 @@
 #include "OpenAIResponsesProtocol.hpp"
+#include "SseUtils.hpp"
 #include "../Models.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
@@ -13,78 +14,6 @@
 namespace core::llm::protocols {
 
 namespace {
-
-struct SseEnvelopeView {
-    std::string_view event;
-    std::string_view data;
-};
-
-[[nodiscard]] std::string_view trim_ascii(std::string_view sv) {
-    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) {
-        sv.remove_prefix(1);
-    }
-    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) {
-        sv.remove_suffix(1);
-    }
-    return sv;
-}
-
-[[nodiscard]] bool parse_sse_envelope(std::string_view raw,
-                                      SseEnvelopeView& out,
-                                      std::string& data_scratch) {
-    out = {};
-    data_scratch.clear();
-
-    std::string_view first_data_line;
-    bool saw_data = false;
-
-    std::size_t start = 0;
-    while (start <= raw.size()) {
-        const std::size_t end =
-            (start < raw.size()) ? raw.find('\n', start) : std::string_view::npos;
-
-        std::string_view line = (end == std::string_view::npos)
-            ? raw.substr(start)
-            : raw.substr(start, end - start);
-
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-
-        if (line.starts_with("event:")) {
-            out.event = trim_ascii(line.substr(6));
-        } else if (line.starts_with("data:")) {
-            std::string_view data_part = line.substr(5);
-            if (!data_part.empty() && data_part.front() == ' ') data_part.remove_prefix(1);
-            if (!saw_data) {
-                first_data_line = data_part;
-                out.data = first_data_line;
-                saw_data = true;
-            } else if (data_scratch.empty()) {
-                data_scratch.reserve(first_data_line.size() + 1 + data_part.size());
-                data_scratch.append(first_data_line);
-                data_scratch.push_back('\n');
-                data_scratch.append(data_part);
-                out.data = data_scratch;
-            } else {
-                data_scratch.push_back('\n');
-                data_scratch.append(data_part);
-                out.data = data_scratch;
-            }
-        }
-
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-    }
-
-    if (saw_data) return true;
-
-    const std::string_view trimmed = trim_ascii(raw);
-    if (trimmed == "[DONE]" || (!trimmed.empty() && (trimmed.front() == '{' || trimmed.front() == '['))) {
-        out.data = trimmed;
-        return true;
-    }
-
-    return false;
-}
 
 [[nodiscard]] std::string generate_prompt_cache_key() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
@@ -536,12 +465,11 @@ std::string OpenAIResponsesProtocol::build_url(std::string_view base_url,
 }
 
 ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
-    SseEnvelopeView envelope;
-    thread_local std::string data_scratch;
-    if (!parse_sse_envelope(raw_event, envelope, data_scratch)) return {};
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return {};
 
-    const std::string_view payload_sv = trim_ascii(envelope.data);
-    if (payload_sv == "[DONE]") {
+    const std::string_view payload_sv = parsed.data;
+    if (parsed.is_done) {
         ParseResult result;
         result.done = true;
         saw_text_delta_ = false;
@@ -556,7 +484,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         return {};
     }
 
-    std::string_view event_type = trim_ascii(envelope.event);
+    std::string_view event_type = parsed.event;
     if (event_type.empty()) {
         std::string_view type_from_payload;
         if (doc["type"].get(type_from_payload) == simdjson::SUCCESS) {

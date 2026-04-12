@@ -11,8 +11,11 @@
  */
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "tui/MarkdownRenderer.hpp"
+
+#include <ftxui/screen/screen.hpp>
 
 #include <string>
 
@@ -27,6 +30,39 @@ static void smoke(std::string_view md)
     REQUIRE_NOTHROW(render_markdown(md));
     auto el = render_markdown(md);
     REQUIRE(el != nullptr);
+}
+
+static std::string strip_ansi(std::string_view input)
+{
+    std::string out;
+    out.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size();) {
+        if (input[i] == '\x1b' && i + 1 < input.size() && input[i + 1] == '[') {
+            i += 2;
+            while (i < input.size()) {
+                const char ch = input[i++];
+                if (ch >= '@' && ch <= '~') {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        out.push_back(input[i]);
+        ++i;
+    }
+
+    return out;
+}
+
+static std::string render_text(std::string_view md, int width)
+{
+    auto el = render_markdown(md);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(8));
+    ftxui::Render(screen, el);
+    return strip_ansi(screen.ToString());
 }
 
 // ============================================================================
@@ -453,6 +489,30 @@ TEST_CASE("render_markdown — streaming partial response (no trailing newline)"
 TEST_CASE("render_markdown — blank lines between blocks", "[md][multi]")
 {
     smoke("Para one.\n\nPara two.\n\nPara three.");
+}
+
+TEST_CASE("render_markdown — mixed inline spans wrap instead of clipping", "[md][wrap]")
+{
+    const auto output = render_text(
+        "This sentence has **bold text** and must keep tailword visible.",
+        32);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("tailword"));
+}
+
+TEST_CASE("render_markdown — link lines wrap instead of clipping", "[md][wrap]")
+{
+    const auto output = render_text(
+        "Prefix [link text](https://example.com/path) suffixword",
+        28);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("suffixword"));
+}
+
+TEST_CASE("render_markdown — heading lines wrap instead of clipping", "[md][wrap]")
+{
+    const auto output = render_text(
+        "## Heading with **bold** marker and headingtail",
+        28);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("headingtail"));
 }
 
 // ============================================================================

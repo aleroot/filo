@@ -14,8 +14,7 @@ namespace tui {
 //   Inline: **bold**, *italic*, ***bold-italic***, `code`, ~~strikethrough~~,
 //           [link text](url), backslash escapes
 //
-// Plain paragraphs use paragraph() and wrap; styled/mixed lines use hbox()
-// (no wrapping) as a trade-off for inline decoration support.
+// Plain paragraphs and mixed inline spans both wrap to the viewport width.
 ftxui::Element render_markdown(std::string_view text,
                                ftxui::Color base_color = ftxui::Color::White);
 

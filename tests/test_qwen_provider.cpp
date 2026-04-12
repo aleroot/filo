@@ -222,6 +222,27 @@ TEST_CASE("DashScopeProtocol - parse_event extracts content chunk", "[qwen][sse]
     REQUIRE(result.chunks[0].reasoning_content.empty());
 }
 
+TEST_CASE("DashScopeProtocol - parse_event accepts data prefix without a space", "[qwen][sse]") {
+    DashScopeProtocol proto;
+    const std::string event =
+        R"(data:{"choices":[{"delta":{"content":"NoSpace"},"index":0}]})";
+    auto result = proto.parse_event(event);
+    REQUIRE(!result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "NoSpace");
+}
+
+TEST_CASE("DashScopeProtocol - parse_event accepts event envelope with CRLF", "[qwen][sse]") {
+    DashScopeProtocol proto;
+    const std::string event =
+        "event: response.output_text.delta\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"CRLF\"},\"index\":0}]}\r\n";
+    auto result = proto.parse_event(event);
+    REQUIRE(!result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "CRLF");
+}
+
 TEST_CASE("DashScopeProtocol - parse_event handles [DONE] sentinel", "[qwen][sse]") {
     DashScopeProtocol proto;
     auto result = proto.parse_event("data: [DONE]");

@@ -1,7 +1,7 @@
 #include "DashScopeProtocol.hpp"
+#include "SseUtils.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
-#include <cctype>
 
 namespace core::llm::protocols {
 
@@ -87,11 +87,10 @@ ParseResult DashScopeProtocol::parse_event(std::string_view raw_event) {
     ParseResult result = OpenAIProtocol::parse_event(raw_event);
     if (result.done) return result;
 
-    // Strip "data: " prefix to reach the raw JSON.
-    if (!raw_event.starts_with("data:")) return result;
-    std::string_view json_sv = raw_event.substr(5);
-    if (!json_sv.empty() && json_sv[0] == ' ') json_sv = json_sv.substr(1);
-    if (json_sv == "[DONE]") return result;
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return result;
+    if (parsed.is_done) return result;
+    const std::string_view json_sv = parsed.data;
 
     // Second pass: scan for delta.reasoning_content (Qwen3 thinking tokens).
     // Thinking tokens arrive in separate chunks before regular content chunks.

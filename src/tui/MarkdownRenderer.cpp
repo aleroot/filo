@@ -132,7 +132,16 @@ static std::string sanitize_for_ftxui(std::string_view input) {
 // Inline span types
 // ============================================================================
 
-enum class SpanKind { Normal, Bold, Italic, BoldItalic, Code, Strikethrough, Link };
+enum class SpanKind {
+    Normal,
+    Bold,
+    Italic,
+    BoldItalic,
+    Code,
+    Strikethrough,
+    Link,
+    LinkUrl,
+};
 
 struct TextSpan {
     SpanKind    kind = SpanKind::Normal;
@@ -327,45 +336,91 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
     return spans;
 }
 
-// ============================================================================
-// Span → FTXUI element
-// ============================================================================
-
-static Element render_span(const TextSpan& span, Color base)
+static void append_wrapping_tokens(std::vector<TextSpan>& out,
+                                   SpanKind kind,
+                                   std::string_view text)
 {
-    switch (span.kind) {
-        case SpanKind::Normal:
-            return ftxui::text(span.text) | ftxui::color(base);
-        case SpanKind::Bold:
-            return ftxui::text(span.text) | ftxui::color(base) | ftxui::bold;
-        case SpanKind::Italic:
-            return ftxui::text(span.text) | ftxui::color(base) | italic;
-        case SpanKind::BoldItalic:
-            return ftxui::text(span.text) | ftxui::color(base) | ftxui::bold | italic;
-        case SpanKind::Strikethrough:
-            return ftxui::text(span.text) | ftxui::color(base) | strikethrough;
-        case SpanKind::Code:
-            return hbox({
-                ftxui::text(" " + span.text + " ")
-                    | ftxui::color(kMdCodeFg)
-                    | ftxui::bgcolor(kMdCodeBg),
-            });
-        case SpanKind::Link:
-            return hbox({
-                ftxui::text(span.text)
-                    | ftxui::color(kMdLinkFg)
-                    | underlined,
-                ftxui::text(" (" + span.href + ")")
-                    | ftxui::color(Color::GrayDark)
-                    | dim,
-            });
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const bool whitespace = std::isspace(static_cast<unsigned char>(text[start])) != 0;
+        std::size_t end = start + 1;
+        while (end < text.size()) {
+            const bool next_is_space =
+                std::isspace(static_cast<unsigned char>(text[end])) != 0;
+            if (next_is_space != whitespace) break;
+            ++end;
+        }
+
+        out.push_back({
+            .kind = whitespace ? SpanKind::Normal : kind,
+            .text = std::string(text.substr(start, end - start)),
+            .href = {},
+        });
+        start = end;
     }
-    return ftxui::text(span.text) | ftxui::color(base); // unreachable
+}
+
+static std::vector<TextSpan> tokenize_spans_for_wrapping(const std::vector<TextSpan>& spans)
+{
+    std::vector<TextSpan> tokens;
+    tokens.reserve(spans.size() * 2);
+
+    for (const auto& span : spans) {
+        switch (span.kind) {
+            case SpanKind::Link: {
+                append_wrapping_tokens(tokens, SpanKind::Link, span.text);
+                if (!span.href.empty()) {
+                    std::string suffix = " (" + span.href + ")";
+                    append_wrapping_tokens(tokens, SpanKind::LinkUrl, suffix);
+                }
+                break;
+            }
+            case SpanKind::Code:
+                tokens.push_back({
+                    .kind = SpanKind::Code,
+                    .text = " " + span.text + " ",
+                    .href = {},
+                });
+                break;
+            default:
+                append_wrapping_tokens(tokens, span.kind, span.text);
+                break;
+        }
+    }
+
+    return tokens;
+}
+
+static Element render_wrapping_token(const TextSpan& token, Color base)
+{
+    switch (token.kind) {
+        case SpanKind::Normal:
+            return ftxui::text(token.text) | ftxui::color(base);
+        case SpanKind::Bold:
+            return ftxui::text(token.text) | ftxui::color(base) | ftxui::bold;
+        case SpanKind::Italic:
+            return ftxui::text(token.text) | ftxui::color(base) | italic;
+        case SpanKind::BoldItalic:
+            return ftxui::text(token.text) | ftxui::color(base) | ftxui::bold | italic;
+        case SpanKind::Strikethrough:
+            return ftxui::text(token.text) | ftxui::color(base) | strikethrough;
+        case SpanKind::Code:
+            return ftxui::text(token.text)
+                | ftxui::color(kMdCodeFg)
+                | ftxui::bgcolor(kMdCodeBg);
+        case SpanKind::Link:
+            return ftxui::text(token.text)
+                | ftxui::color(kMdLinkFg)
+                | underlined;
+        case SpanKind::LinkUrl:
+            return ftxui::text(token.text) | ftxui::color(Color::GrayDark) | dim;
+    }
+    return ftxui::text(token.text) | ftxui::color(base); // unreachable
 }
 
 // Render one line of inline markdown.
-// Plain text → paragraph() which wraps.
-// Styled / mixed → hbox() (no wrap, preserves decoration).
+// Single-style lines use paragraph() for wrapping.
+// Mixed style lines are tokenized and wrapped with hflow() to avoid clipping.
 static Element render_inline_line(std::string_view line, Color base)
 {
     if (line.empty()) return ftxui::text("");
@@ -391,13 +446,14 @@ static Element render_inline_line(std::string_view line, Color base)
         }
     }
 
-    // Multi-span or special span types: hbox
+    // Mixed or special spans: tokenized hflow to preserve wrapping.
+    const auto tokens = tokenize_spans_for_wrapping(spans);
     Elements elems;
-    elems.reserve(spans.size());
-    for (const auto& s : spans) {
-        elems.push_back(render_span(s, base));
+    elems.reserve(tokens.size());
+    for (const auto& token : tokens) {
+        elems.push_back(render_wrapping_token(token, base));
     }
-    return hbox(std::move(elems)) | xflex;
+    return hflow(std::move(elems)) | xflex;
 }
 
 // ============================================================================
@@ -746,20 +802,15 @@ static Element render_heading(const Block& block)
     const std::string_view content = block.lines.empty()
         ? std::string_view{}
         : std::string_view{block.lines.front()};
-    auto spans = parse_inline(content);
 
     auto make_inline = [&](Color fg, bool do_bold, bool do_underline,
                            bool do_underline_double) -> Element
     {
-        Elements es;
-        for (const auto& s : spans) {
-            Element e = render_span(s, fg);
-            if (do_bold)            e = std::move(e) | ftxui::bold;
-            if (do_underline_double)e = std::move(e) | underlinedDouble;
-            else if (do_underline)  e = std::move(e) | underlined;
-            es.push_back(std::move(e));
-        }
-        return hbox(std::move(es)) | xflex;
+        Element e = render_inline_line(content, fg);
+        if (do_bold)             e = std::move(e) | ftxui::bold;
+        if (do_underline_double) e = std::move(e) | underlinedDouble;
+        else if (do_underline)   e = std::move(e) | underlined;
+        return e;
     };
 
     Elements out;

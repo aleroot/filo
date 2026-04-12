@@ -1,4 +1,5 @@
 #include "AnthropicProtocol.hpp"
+#include "SseUtils.hpp"
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -83,6 +84,17 @@ namespace {
             --end;
         }
         return std::string(sv.substr(begin, end - begin));
+    }
+
+    [[nodiscard]] std::string infer_anthropic_event_type(std::string_view payload) {
+        thread_local simdjson::dom::parser parser;
+        simdjson::padded_string padded(payload);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return {};
+
+        std::string_view type;
+        if (doc["type"].get(type) != simdjson::SUCCESS) return {};
+        return std::string(type);
     }
 
     std::string lower_copy(std::string_view sv) {
@@ -757,21 +769,16 @@ std::string AnthropicProtocol::build_url(std::string_view base_url,
 }
 
 ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
-    std::string event_type;
-    std::string event_data;
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return {};
+    if (parsed.is_done || parsed.data.empty()) return {};
 
-    size_t line_start = 0;
-    while (line_start < raw_event.size()) {
-        size_t line_end = raw_event.find('\n', line_start);
-        if (line_end == std::string_view::npos) line_end = raw_event.size();
-
-        std::string_view line(raw_event.data() + line_start, line_end - line_start);
-        if (line.starts_with("event: "))     event_type = std::string(line.substr(7));
-        else if (line.starts_with("data: ")) event_data = std::string(line.substr(6));
-        line_start = line_end + 1;
+    const std::string event_data = std::string(parsed.data);
+    std::string event_type = std::string(parsed.event);
+    if (event_type.empty()) {
+        event_type = infer_anthropic_event_type(event_data);
     }
-
-    if (event_type.empty() || event_data.empty()) return {};
+    if (event_type.empty()) return {};
 
     auto r = sse_parser_.process_event(event_type, event_data);
 

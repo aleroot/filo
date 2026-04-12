@@ -1,6 +1,8 @@
 #include "KimiProtocol.hpp"
+#include "SseUtils.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../logging/Logger.hpp"
+#include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -187,16 +189,9 @@ struct KimiUsageSnapshot {
     std::vector<UsageWindow> windows;
 };
 
-[[nodiscard]] std::string_view trim_ascii(std::string_view input) noexcept {
-    const auto begin = input.find_first_not_of(" \t\r\n");
-    if (begin == std::string_view::npos) return {};
-    const auto end = input.find_last_not_of(" \t\r\n");
-    return input.substr(begin, end - begin + 1);
-}
-
 [[nodiscard]] std::optional<int32_t>
 parse_int_string(std::string_view value) noexcept {
-    value = trim_ascii(value);
+    value = core::utils::str::trim_ascii_view(value);
     if (value.empty()) return std::nullopt;
     int32_t parsed = 0;
     const auto [ptr, ec] =
@@ -247,7 +242,7 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
     if (obj == nullptr) return std::nullopt;
     std::string_view value;
     if ((*obj)[key].get(value) != simdjson::SUCCESS) return std::nullopt;
-    value = trim_ascii(value);
+    value = core::utils::str::trim_ascii_view(value);
     if (value.empty()) return std::nullopt;
     return std::string(value);
 }
@@ -761,17 +756,11 @@ void KimiProtocol::enrich_rate_limit(std::string_view base_url,
 }
 
 ParseResult KimiProtocol::parse_event(std::string_view raw_event) {
-    // Handle SSE event format: "data: {...}" or "data:{...}" (Kimi has no space)
-    if (!raw_event.starts_with("data:")) {
-        return {};
-    }
-    // Skip "data:" and optional space
-    std::string_view json_sv = raw_event.substr(5);
-    if (!json_sv.empty() && json_sv[0] == ' ') {
-        json_sv = json_sv.substr(1);
-    }
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return {};
+    const std::string_view json_sv = parsed.data;
 
-    if (json_sv == "[DONE]") {
+    if (parsed.is_done) {
         ParseResult r;
         r.done = true;
         return r;

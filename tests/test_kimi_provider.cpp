@@ -434,6 +434,27 @@ TEST_CASE("KimiProtocol parse_event - accepts data prefix without a space", "[ki
     REQUIRE(result.chunks[0].content == "NoSpace");
 }
 
+TEST_CASE("KimiProtocol parse_event - accepts event envelope with CRLF", "[kimi][parser]") {
+    KimiProtocol protocol;
+    std::string event =
+        "event: response.output_text.delta\r\n"
+        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,"
+        "\"delta\":{\"content\":\"CRLF\"},\"finish_reason\":null}]}\r\n";
+    auto result = protocol.parse_event(event);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "CRLF");
+}
+
+TEST_CASE("KimiProtocol parse_event - joins multiline data payloads", "[kimi][parser]") {
+    KimiProtocol protocol;
+    std::string event =
+        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}\n"
+        "data: ,\"index\":0,\"finish_reason\":null}]}\n";
+    auto result = protocol.parse_event(event);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "Hello");
+}
+
 TEST_CASE("KimiProtocol parse_event - extracts top-level usage chunk", "[kimi][parser][usage]") {
     KimiProtocol protocol;
     std::string event = R"(data: {"id":"chatcmpl-usage","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":10,"total_tokens":52}})";

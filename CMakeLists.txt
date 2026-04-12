@@ -131,6 +131,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/GeminiProtocol.cpp
     src/core/llm/protocols/OllamaProtocol.cpp
+    src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp
     src/core/llm/routing/PolicyConfig.cpp
     src/core/llm/routing/PolicyLoader.cpp
@@ -327,6 +328,7 @@ add_executable(filo_tests
     tests/test_context_mentions.cpp
     tests/test_openai_provider.cpp
     tests/test_openai_responses_protocol.cpp
+    tests/test_sse_utils.cpp
     tests/test_model_registry.cpp
     tests/test_grok_provider.cpp
     tests/test_grok_enhanced.cpp

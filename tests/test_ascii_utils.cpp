@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/utils/AsciiUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 
 TEST_CASE("ascii::to_lower lowercases only ASCII uppercase letters", "[utils][ascii]") {
     REQUIRE(core::utils::ascii::to_lower('A') == 'a');
@@ -32,4 +33,21 @@ TEST_CASE("ascii::istarts_with matches prefix ignoring ASCII case", "[utils][asc
     REQUIRE(core::utils::ascii::istarts_with("localHOST", "LOCAL"));
     REQUIRE_FALSE(core::utils::ascii::istarts_with("abc", "abcd"));
     REQUIRE_FALSE(core::utils::ascii::istarts_with("http://x", "file://"));
+}
+
+TEST_CASE("str::trim_ascii_view trims leading and trailing ASCII whitespace",
+          "[utils][string]") {
+    const auto trimmed = core::utils::str::trim_ascii_view(" \t  hello\n");
+    REQUIRE(trimmed == "hello");
+}
+
+TEST_CASE("str::trim_ascii_view returns empty view for all-whitespace input",
+          "[utils][string]") {
+    const auto trimmed = core::utils::str::trim_ascii_view(" \t\r\n  ");
+    REQUIRE(trimmed.empty());
+}
+
+TEST_CASE("str::trim_ascii_copy returns owned trimmed string",
+          "[utils][string]") {
+    REQUIRE(core::utils::str::trim_ascii_copy("  value  ") == "value");
 }

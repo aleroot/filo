@@ -261,6 +261,33 @@ TEST_CASE("OpenAIResponsesProtocol - parse output_text.delta event",
     REQUIRE_FALSE(result.chunks[0].is_final);
 }
 
+TEST_CASE("OpenAIResponsesProtocol - accepts no-space SSE separators",
+          "[openai][responses][sse]") {
+    OpenAIResponsesProtocol protocol;
+
+    auto result = protocol.parse_event(
+        "event:response.output_text.delta\n"
+        "data:{\"type\":\"response.output_text.delta\",\"delta\":\"NoSpace\"}");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "NoSpace");
+}
+
+TEST_CASE("OpenAIResponsesProtocol - joins multiline data payloads",
+          "[openai][responses][sse]") {
+    OpenAIResponsesProtocol protocol;
+
+    auto result = protocol.parse_event(
+        "event: response.output_text.delta\n"
+        "data: {\"type\":\"response.output_text.delta\",\n"
+        "data: \"delta\":\"Multi\"}");
+
+    REQUIRE_FALSE(result.done);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].content == "Multi");
+}
+
 TEST_CASE("OpenAIResponsesProtocol - parse function_call item event",
           "[openai][responses][sse][tools]") {
     OpenAIResponsesProtocol protocol;
