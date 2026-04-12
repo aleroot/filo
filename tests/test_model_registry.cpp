@@ -33,9 +33,12 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("o3-mini") == 200000);
     
     // Gemini (via new registry)
-    REQUIRE(get_max_context_size("gemini-2.5-pro") == 1000000);
-    REQUIRE(get_max_context_size("gemini-2.0-flash") == 1000000);
-    REQUIRE(get_max_context_size("gemini-1.5-pro") == 2000000);
+    REQUIRE(get_max_context_size("gemini-3.1-pro-preview") == 1048576);
+    REQUIRE(get_max_context_size("gemini-3-flash-preview") == 1048576);
+    REQUIRE(get_max_context_size("gemini-2.5-pro") == 1048576);
+    REQUIRE(get_max_context_size("gemini-2.5-flash-lite") == 1048576);
+    REQUIRE(get_max_context_size("gemini-2.0-flash") == 1048576);
+    REQUIRE(get_max_context_size("gemini-1.5-pro") == 2097152);
     
     // Grok (via legacy fallback)
     REQUIRE(get_max_context_size("grok-1") == 128000);
@@ -69,6 +72,8 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-3-7-sonnet"));
     REQUIRE(registry.has_model("kimi-k2.5"));
+    REQUIRE(registry.has_model("gemini-2.5-pro"));
+    REQUIRE(registry.has_model("gemini-3.1-pro-preview"));
 }
 
 TEST_CASE("ModelRegistry::lookup - finds models by canonical ID", "[llm][registry]") {
@@ -87,6 +92,24 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto* info = registry.lookup("gpt-4o");
     REQUIRE(info != nullptr);
     REQUIRE(info->canonical_id == "gpt-4o-2024-08-06");
+
+    const auto* gemini = registry.lookup("gemini-flash-latest");
+    REQUIRE(gemini != nullptr);
+    REQUIRE(gemini->canonical_id == "gemini-2.5-flash");
+
+    const auto* gemini_auto = registry.lookup("auto-gemini-3");
+    REQUIRE(gemini_auto != nullptr);
+    REQUIRE(gemini_auto->canonical_id == "gemini-3.1-pro-preview");
+}
+
+TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {
+    auto& registry = ModelRegistry::instance();
+
+    const auto* info = registry.lookup("gemini-3.1-pro-preview");
+    REQUIRE(info != nullptr);
+    REQUIRE(info->context_window == 1048576);
+    REQUIRE(info->max_output_tokens == 65536);
+    REQUIRE(info->supports(ModelCapability::TokenCounting));
 }
 
 TEST_CASE("ModelRegistry::get_info - returns full model information", "[llm][registry]") {

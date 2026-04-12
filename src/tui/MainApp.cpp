@@ -4119,8 +4119,12 @@ RunResult run(RunOptions opts) {
 
         // ── Status bar ───────────────────────────────────────────────────
         std::string budget_str = core::budget::BudgetTracker::get_instance().status_string();
+        std::string context_model_name = llm_provider->get_last_model();
+        if (context_model_name.empty()) {
+            context_model_name = active_model_name;
+        }
         const int32_t ctx_pct  = core::budget::BudgetTracker::get_instance()
-                                     .context_remaining_pct(active_model_name);
+                                     .context_remaining_pct(context_model_name);
 
         Color ctx_color = Color::Green;
         if (ctx_pct >= 0 && ctx_pct < 25)       ctx_color = Color::Red;

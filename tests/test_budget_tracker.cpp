@@ -50,10 +50,15 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
     }
 
     SECTION("Google Gemini models") {
+        CHECK(context_window_for_model("gemini-3.1-pro-preview") == 1'048'576);
+        CHECK(context_window_for_model("gemini-3-flash-preview") == 1'048'576);
         CHECK(context_window_for_model("gemini-2.5-flash")       == 1'048'576);
+        CHECK(context_window_for_model("gemini-2.5-flash-lite")  == 1'048'576);
         CHECK(context_window_for_model("gemini-2.0-flash")       == 1'048'576);
         CHECK(context_window_for_model("gemini-1.5-pro")         == 2'097'152);
         CHECK(context_window_for_model("gemini-1.5-flash")       == 2'097'152);
+        CHECK(context_window_for_model("gemini-flash-latest")    == 1'048'576);
+        CHECK(context_window_for_model("auto-gemini-3")          == 1'048'576);
     }
 
     SECTION("Unknown model falls back to 128K") {

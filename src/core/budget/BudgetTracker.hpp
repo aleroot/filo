@@ -72,9 +72,16 @@ namespace core::budget {
     if (model.find("gpt-4")            != std::string_view::npos) return     8'192;
     if (model.find("gpt-3.5")          != std::string_view::npos) return    16'385;
     // Google Gemini
+    if (model.find("gemini-3.1")       != std::string_view::npos) return 1'048'576;
+    if (model.find("gemini-3")         != std::string_view::npos) return 1'048'576;
     if (model.find("gemini-2.5")       != std::string_view::npos) return 1'048'576;
     if (model.find("gemini-2.0")       != std::string_view::npos) return 1'048'576;
     if (model.find("gemini-1.5")       != std::string_view::npos) return 2'097'152;
+    if (model.find("gemini-flash-latest") != std::string_view::npos) return 1'048'576;
+    if (model.find("gemini-flash-lite-latest") != std::string_view::npos) return 1'048'576;
+    if (model.find("gemini-pro-latest") != std::string_view::npos) return 1'048'576;
+    if (model.find("auto-gemini-3")    != std::string_view::npos) return 1'048'576;
+    if (model.find("auto-gemini-2.5")  != std::string_view::npos) return 1'048'576;
     // Default: conservative 128K
     return 128'000;
 }
@@ -125,9 +132,16 @@ struct ModelRates {
     if (model.find("gpt-4")       != std::string_view::npos) return {30.00, 60.00 };
     if (model.find("gpt-3.5")     != std::string_view::npos) return { 0.50,  1.50 };
     // Gemini
+    if (model.find("gemini-3.1")  != std::string_view::npos) return { 1.25, 10.00 };
+    if (model.find("gemini-3")    != std::string_view::npos) return { 1.25, 10.00 };
     if (model.find("gemini-2.5")  != std::string_view::npos) return { 1.25,  5.00 };
     if (model.find("gemini-2.0")  != std::string_view::npos) return { 0.10,  0.40 };
     if (model.find("gemini-1.5")  != std::string_view::npos) return { 0.075, 0.30 };
+    if (model.find("gemini-pro-latest") != std::string_view::npos) return { 1.25,  5.00 };
+    if (model.find("gemini-flash-latest") != std::string_view::npos) return { 0.30,  2.50 };
+    if (model.find("gemini-flash-lite-latest") != std::string_view::npos) return { 0.10,  0.40 };
+    if (model.find("auto-gemini-3") != std::string_view::npos) return { 1.25, 10.00 };
+    if (model.find("auto-gemini-2.5") != std::string_view::npos) return { 1.25,  5.00 };
     // Default: unknown model
     return { 2.00, 8.00 };
 }

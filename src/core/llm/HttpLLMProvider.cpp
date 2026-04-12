@@ -1,6 +1,7 @@
 #include "HttpLLMProvider.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
+#include "protocols/GeminiProtocol.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/UriUtils.hpp"
 #include <cpr/cpr.h>
@@ -18,9 +19,23 @@ namespace {
         std::unique_ptr<protocols::ApiProtocolBase> protocol;
         std::string                                  payload;
         std::string                                  delimiter;
+        std::string                                  model;
         std::string                                  url;
         cpr::Header                                  headers;
     };
+
+    [[nodiscard]] std::string normalize_metadata_model(
+        std::string_view model,
+        const protocols::ApiProtocolBase* protocol) {
+        if (!protocol) return std::string(model);
+
+        const std::string_view protocol_name = protocol->name();
+        if (protocol_name == "gemini" || protocol_name == "gemini_code_assist") {
+            return protocols::normalize_requested_gemini_model(model);
+        }
+
+        return std::string(model);
+    }
 
     [[nodiscard]] PreparedHttpStreamRequest prepare_stream_request(
         const ChatRequest& request,
@@ -40,7 +55,9 @@ namespace {
         if (req.model.empty()) {
             req.model = std::string(default_model);
         }
+        req.auth_properties = auth.properties;
         prepared.protocol->prepare_request(req);
+        prepared.model = req.model;
         prepared.payload = prepared.protocol->serialize(req);
         prepared.delimiter = std::string(prepared.protocol->event_delimiter());
         prepared.url = prepared.protocol->build_url(base_url, req.model);
@@ -96,17 +113,26 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
 {}
 
 int HttpLLMProvider::max_context_size() const noexcept {
-    return core::llm::get_max_context_size(default_model_);
+    return core::llm::get_max_context_size(
+        normalize_metadata_model(default_model_, protocol_.get()));
 }
 
 std::optional<ModelInfo> HttpLLMProvider::get_model_info() const {
-    return ModelRegistry::instance().get_info(default_model_);
+    return ModelRegistry::instance().get_info(
+        normalize_metadata_model(default_model_, protocol_.get()));
+}
+
+std::string HttpLLMProvider::get_last_model() const {
+    std::lock_guard lock(state_mutex_);
+    return last_model_;
 }
 
 std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& request) const {
     std::vector<std::string> errors;
     
-    const std::string& model = request.model.empty() ? default_model_ : request.model;
+    const std::string model = normalize_metadata_model(
+        request.model.empty() ? std::string_view(default_model_) : std::string_view(request.model),
+        protocol_.get());
     const auto* info = ModelRegistry::instance().lookup(model);
     
     if (!info) {
@@ -156,11 +182,16 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
 }
 
 bool HttpLLMProvider::supports(ModelCapability cap) const {
-    return ModelRegistry::instance().supports(default_model_, cap);
+    return ModelRegistry::instance().supports(
+        normalize_metadata_model(default_model_, protocol_.get()),
+        cap);
 }
 
 double HttpLLMProvider::estimate_cost(int input_tokens, int output_tokens) const {
-    return ModelRegistry::instance().estimate_cost(default_model_, input_tokens, output_tokens);
+    return ModelRegistry::instance().estimate_cost(
+        normalize_metadata_model(default_model_, protocol_.get()),
+        input_tokens,
+        output_tokens);
 }
 
 bool HttpLLMProvider::should_estimate_cost() const {
@@ -198,10 +229,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
     ChatRequest effective_request = request;
 
     try {
-        const std::string& model = effective_request.model.empty()
-            ? default_model_
-            : effective_request.model;
-        if (!ModelRegistry::instance().supports(model, ModelCapability::Vision)) {
+        const std::string metadata_model = normalize_metadata_model(
+            effective_request.model.empty()
+                ? std::string_view(default_model_)
+                : std::string_view(effective_request.model),
+            protocol_.get());
+        if (!ModelRegistry::instance().supports(metadata_model, ModelCapability::Vision)) {
             degrade_historical_image_inputs(effective_request);
         }
 
@@ -218,6 +251,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
         prepared = prepare_stream_request(
             effective_request, default_model_, base_url_, cred_source_, *protocol_);
+        {
+            std::lock_guard lock(state_mutex_);
+            last_model_ = prepared.model;
+        }
     } catch (const std::exception& e) {
         core::logging::error("[HTTP] Failed to start request: {}", e.what());
         callback(StreamChunk::make_error(std::string("\n[Failed to start request: ") + e.what() + "]"));

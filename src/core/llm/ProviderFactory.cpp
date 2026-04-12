@@ -10,10 +10,12 @@
 #include "protocols/DashScopeProtocol.hpp"
 #include "protocols/AnthropicProtocol.hpp"
 #include "protocols/GeminiProtocol.hpp"
+#include "protocols/GeminiCodeAssistProtocol.hpp"
 #include "protocols/OllamaProtocol.hpp"
 #include "OpenAIEndpointUtils.hpp"
 #include "../auth/ApiKeyCredentialSource.hpp"
 #include "../auth/AuthenticationManager.hpp"
+#include "../auth/GoogleCodeAssist.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/StringUtils.hpp"
 #include <algorithm>
@@ -158,6 +160,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::config::ConfigManager::get_instance().get_config_dir());
     std::shared_ptr<core::auth::ICredentialSource> cred =
         auth_manager.create_credential_source(canonical_type, config);
+    const std::string normalized_auth_type =
+        core::utils::str::to_lower_ascii_copy(config.auth_type);
 
     // For Kimi OAuth, use the correct OAuth endpoint instead of the API key endpoint.
     // The official kimi-cli uses https://api.kimi.com/coding/v1 for OAuth,
@@ -169,10 +173,16 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
 
     // For OpenAI ChatGPT PKCE auth, route to the ChatGPT Codex backend by default.
     if (cred && canonical_type == "openai"
-        && core::utils::str::to_lower_ascii_copy(config.auth_type) == "oauth_openai_pkce"
+        && normalized_auth_type == "oauth_openai_pkce"
         && base_url == "https://api.openai.com/v1") {
         base_url = "https://chatgpt.com/backend-api/codex";
         core::logging::debug("Using OpenAI PKCE endpoint: {}", base_url);
+    }
+
+    if (cred && canonical_type == "gemini"
+        && normalized_auth_type == "oauth_google") {
+        base_url = core::auth::google_code_assist::code_assist_endpoint();
+        core::logging::debug("Using Gemini Code Assist endpoint: {}", base_url);
     }
 
     if (!cred) {
@@ -255,7 +265,11 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         break;
     }
     case ApiType::Gemini:
-        protocol = std::make_unique<protocols::GeminiProtocol>();
+        if (normalized_auth_type == "oauth_google") {
+            protocol = std::make_unique<protocols::GeminiCodeAssistProtocol>();
+        } else {
+            protocol = std::make_unique<protocols::GeminiProtocol>();
+        }
         break;
     case ApiType::Ollama:
         protocol = std::make_unique<protocols::OllamaProtocol>();

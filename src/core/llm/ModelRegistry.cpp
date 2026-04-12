@@ -129,10 +129,12 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Google Gemini Models
     // -----------------------------------------------------------------------
-    { "gemini-1.5",        1000000 },
-    { "gemini-2.0",        1000000 },
-    { "gemini-2.5",        1000000 },
-    { "gemini-",           32000 },
+    { "gemini-1.5",        2097152 },
+    { "gemini-2.0",        1048576 },
+    { "gemini-2.5",        1048576 },
+    { "gemini-3.1",        1048576 },
+    { "gemini-3",          1048576 },
+    { "gemini-",           1048576 },
 
     // -----------------------------------------------------------------------
     // xAI Grok Models
@@ -446,18 +448,22 @@ std::vector<ModelInfo> build_kimi_catalog() {
 
 // Gemini models (Google)
 std::vector<ModelInfo> build_gemini_catalog() {
+    constexpr ModelCapabilities CAP_GEMINI =
+        CAP_FULL |
+        static_cast<uint32_t>(ModelCapability::PromptCaching) |
+        static_cast<uint32_t>(ModelCapability::TokenCounting);
+
     return {
         {
-            .canonical_id = "gemini-2.5-pro-exp-03-25",
-            .aliases = {"gemini-2.5-pro", "gemini-2.5", "gemini-pro-2.5"},
-            .display_name = "Gemini 2.5 Pro",
+            .canonical_id = "gemini-3.1-pro-preview",
+            .aliases = {"auto-gemini-3"},
+            .display_name = "Gemini 3.1 Pro Preview",
             .provider = "gemini",
-            .context_window = 1000000,
-            .max_output_tokens = 8192,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
             .tier = ModelTier::Powerful,
-            .pricing = {1.25, 10.0, -1.0, -1.0},  // Context caching: $4.50/Mtok
+            .pricing = {1.25, 10.0, -1.0, -1.0},
             .knowledge_cutoff = "2025-01",
             .constraints = [] {
                 ParameterConstraints c;
@@ -466,16 +472,123 @@ std::vector<ModelInfo> build_gemini_catalog() {
             }(),
         },
         {
-            .canonical_id = "gemini-2.0-flash-001",
-            .aliases = {"gemini-2.0-flash", "gemini-flash", "gemini-2.0"},
-            .display_name = "Gemini 2.0 Flash",
+            .canonical_id = "gemini-3.1-pro-preview-customtools",
+            .aliases = {},
+            .display_name = "Gemini 3.1 Pro Preview (Custom Tools)",
             .provider = "gemini",
-            .context_window = 1000000,
-            .max_output_tokens = 8192,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Powerful,
+            .pricing = {1.25, 10.0, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-3-pro-preview",
+            .aliases = {},
+            .display_name = "Gemini 3 Pro Preview",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Powerful,
+            .pricing = {1.25, 10.0, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-3-flash-preview",
+            .aliases = {},
+            .display_name = "Gemini 3 Flash Preview",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Fast,
+            .pricing = {0.30, 2.50, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-3.1-flash-lite-preview",
+            .aliases = {},
+            .display_name = "Gemini 3.1 Flash-Lite Preview",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
             .tier = ModelTier::Fast,
             .pricing = {0.10, 0.40, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-2.5-pro",
+            .aliases = {"gemini-2.5", "gemini-pro-2.5", "gemini-pro-latest", "auto-gemini-2.5"},
+            .display_name = "Gemini 2.5 Pro",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Powerful,
+            .pricing = {1.25, 10.0, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = [] {
+                ParameterConstraints c;
+                c.temperature = {0.0, 2.0};
+                return c;
+            }(),
+        },
+        {
+            .canonical_id = "gemini-2.5-flash",
+            .aliases = {"gemini-flash-latest"},
+            .display_name = "Gemini 2.5 Flash",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Fast,
+            .pricing = {0.30, 2.50, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-2.5-flash-lite",
+            .aliases = {"gemini-flash-lite-latest"},
+            .display_name = "Gemini 2.5 Flash-Lite",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 65'536,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Fast,
+            .pricing = {0.10, 0.40, -1.0, -1.0},
+            .knowledge_cutoff = "2025-01",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-2.0-flash",
+            .aliases = {"gemini-2.0-flash-001", "gemini-2.0"},
+            .display_name = "Gemini 2.0 Flash",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 8'192,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Fast,
+            .pricing = {0.10, 0.40, -1.0, -1.0},
+            .knowledge_cutoff = "2024-06",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "gemini-2.0-flash-lite",
+            .aliases = {"gemini-2.0-flash-lite-001"},
+            .display_name = "Gemini 2.0 Flash-Lite",
+            .provider = "gemini",
+            .context_window = 1'048'576,
+            .max_output_tokens = 8'192,
+            .capabilities = CAP_GEMINI,
+            .tier = ModelTier::Fast,
+            .pricing = {0.075, 0.30, -1.0, -1.0},
             .knowledge_cutoff = "2024-06",
             .constraints = kStandardConstraints,
         },
@@ -484,10 +597,9 @@ std::vector<ModelInfo> build_gemini_catalog() {
             .aliases = {"gemini-1.5-pro", "gemini-1.5"},
             .display_name = "Gemini 1.5 Pro",
             .provider = "gemini",
-            .context_window = 2000000,  // 2M tokens!
-            .max_output_tokens = 8192,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .context_window = 2'097'152,
+            .max_output_tokens = 8'192,
+            .capabilities = CAP_GEMINI,
             .tier = ModelTier::Balanced,
             .pricing = {1.25, 5.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-05",

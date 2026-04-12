@@ -1,6 +1,7 @@
 #include "AuthenticationManager.hpp"
 #include "ClaudeOAuthFlow.hpp"
 #include "FileTokenStore.hpp"
+#include "GoogleOAuthCredentialSource.hpp"
 #include "GoogleOAuthFlow.hpp"
 #include "KimiOAuthFlow.hpp"
 #include "QwenOAuthFlow.hpp"
@@ -51,11 +52,11 @@ public:
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store));
-        return std::make_shared<OAuthCredentialSource>(std::move(manager));
+        return std::make_shared<GoogleOAuthCredentialSource>(std::move(manager));
     }
 
     void login(std::string_view config_dir) const override {
-        auto flow = std::make_shared<GoogleOAuthFlow>();
+        auto flow = std::make_shared<GoogleOAuthFlow>(std::make_shared<ui::ConsoleAuthUI>());
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store));

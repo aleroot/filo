@@ -31,6 +31,7 @@
 #include "protocols/ApiProtocol.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -75,6 +76,7 @@ public:
 
     void stream_response(const ChatRequest&                    request,
                          std::function<void(const StreamChunk&)> callback) override;
+    [[nodiscard]] std::string get_last_model() const override;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
 
@@ -127,6 +129,8 @@ private:
     std::string                                    base_url_;
     std::shared_ptr<core::auth::ICredentialSource> cred_source_;
     std::string                                    default_model_;
+    mutable std::mutex                             state_mutex_;
+    std::string                                    last_model_;
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
 };
 

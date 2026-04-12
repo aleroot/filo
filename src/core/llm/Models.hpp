@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <unordered_map>
 #include <sstream>
 #include <iomanip>
 #include <charconv>
@@ -255,6 +256,7 @@ struct ChatRequest {
     std::string prompt_cache_key = {};     ///< Responses API prompt cache key
     std::string service_tier = {};         ///< Responses API service_tier (e.g. "priority")
     std::string effort = {};               ///< Optional effort hint ("low"/"medium"/"high"/"max")
+    std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

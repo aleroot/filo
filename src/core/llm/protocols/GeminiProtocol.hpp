@@ -22,6 +22,21 @@
 
 namespace core::llm::protocols {
 
+struct GeminiUsageMetadata {
+    int32_t prompt_tokens = 0;
+    int32_t completion_tokens = 0;
+};
+
+/**
+ * @brief Resolve Gemini convenience aliases to concrete model IDs.
+ *
+ * This mirrors the official Gemini CLI aliases where practical, but defaults
+ * to stable production models unless preview selection is requested
+ * explicitly or enabled via environment.
+ */
+[[nodiscard]] std::string
+normalize_requested_gemini_model(std::string_view raw_model);
+
 /**
  * @brief Serialise a ChatRequest into the Gemini request body format.
  *
@@ -48,6 +63,15 @@ serialize_gemini_request(const ChatRequest& req, const std::string& default_mode
 parse_gemini_sse_chunk(std::string_view json_sv);
 
 /**
+ * @brief Extract token usage metadata from a Gemini response object.
+ *
+ * Accepts the bare Gemini/Vertex-style response JSON containing an optional
+ * `usageMetadata` object and returns the prompt/completion counts when present.
+ */
+[[nodiscard]] GeminiUsageMetadata
+extract_gemini_usage_metadata(std::string_view json_sv);
+
+/**
  * @brief Google Gemini streaming API protocol.
  *
  * **Request**: `POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`
@@ -63,6 +87,7 @@ class GeminiProtocol : public ApiProtocolBase {
 public:
     GeminiProtocol() = default;
 
+    void                        prepare_request(ChatRequest& request) override;
     [[nodiscard]] std::string  serialize(const ChatRequest& req) const override;
     [[nodiscard]] cpr::Header  build_headers(const core::auth::AuthInfo& auth) const override;
     [[nodiscard]] std::string  build_url(std::string_view base_url,

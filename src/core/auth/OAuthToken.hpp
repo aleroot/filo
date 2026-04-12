@@ -21,6 +21,7 @@ struct OAuthToken {
     std::string device_id;      // Device ID extracted from token (for Kimi OAuth)
     std::string account_id;     // Optional provider account identifier
     std::string organization_id; // Optional organization UUID (Claude Team/Enterprise)
+    std::string project_id;     // Optional Google Code Assist project identifier
     std::vector<std::string> scopes; // Optional OAuth scopes granted by provider
 
     bool is_valid() const noexcept {

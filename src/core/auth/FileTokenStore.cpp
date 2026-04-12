@@ -45,6 +45,13 @@ std::optional<OAuthToken> FileTokenStore::load(std::string_view provider_id) {
             // Backward compatibility with tokens persisted before the rename.
             token.organization_id = std::string(sv);
         }
+        if (doc["project_id"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.project_id = std::string(sv);
+        } else if (doc["project"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.project_id = std::string(sv);
+        } else if (doc["cloudaicompanion_project"].get_string().get(sv) == simdjson::SUCCESS) {
+            token.project_id = std::string(sv);
+        }
         simdjson::dom::array scopes;
         if (doc["scopes"].get(scopes) == simdjson::SUCCESS) {
             for (auto entry : scopes) {
@@ -79,6 +86,7 @@ void FileTokenStore::save(std::string_view provider_id, const OAuthToken& token)
             << "  \"device_id\":     \"" << core::utils::escape_json_string(token.device_id)     << "\",\n"
             << "  \"account_id\":    \"" << core::utils::escape_json_string(token.account_id)    << "\",\n"
             << "  \"organization_id\": \"" << core::utils::escape_json_string(token.organization_id) << "\",\n"
+            << "  \"project_id\":    \"" << core::utils::escape_json_string(token.project_id)    << "\",\n"
             << "  \"scopes\":        [";
 
         for (std::size_t i = 0; i < token.scopes.size(); ++i) {

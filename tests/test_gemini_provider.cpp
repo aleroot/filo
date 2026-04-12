@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
+#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
@@ -164,6 +168,113 @@ TEST_CASE("GeminiProvider serializes inlineData image parts", "[GeminiProvider][
     REQUIRE_THAT(json_payload, Catch::Matchers::ContainsSubstring(R"("text":"Summarize the error shown here.")"));
 }
 
+TEST_CASE("GeminiProvider serializes JSON mode for structured output", "[GeminiProvider][json]") {
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.response_format.type = ResponseFormat::Type::JsonObject;
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Return JSON only.",
+    });
+
+    const std::string json_payload = serialize_gemini_request(req, "gemini-2.5-flash");
+
+    REQUIRE_THAT(json_payload, Catch::Matchers::ContainsSubstring(R"("responseMimeType":"application/json")"));
+    REQUIRE(json_payload.find(R"("responseJsonSchema")") == std::string::npos);
+}
+
+TEST_CASE("GeminiProvider serializes responseJsonSchema for schema outputs", "[GeminiProvider][json]") {
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.response_format.type = ResponseFormat::Type::JsonSchema;
+    req.response_format.schema =
+        R"({"type":"object","properties":{"city":{"type":"string"},"temp_c":{"type":"number"}},"required":["city"]})";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Return weather JSON.",
+    });
+
+    const std::string json_payload = serialize_gemini_request(req, "gemini-2.5-flash");
+
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(json_payload);
+    simdjson::ondemand::document doc;
+    REQUIRE(parser.iterate(padded).get(doc) == simdjson::SUCCESS);
+
+    std::string_view mime_type;
+    REQUIRE(doc["generationConfig"]["responseMimeType"].get_string().get(mime_type)
+            == simdjson::SUCCESS);
+    REQUIRE(mime_type == "application/json");
+
+    simdjson::ondemand::object schema;
+    REQUIRE(doc["generationConfig"]["responseJsonSchema"].get_object().get(schema)
+            == simdjson::SUCCESS);
+
+    std::string_view type_value;
+    REQUIRE(schema["type"].get_string().get(type_value) == simdjson::SUCCESS);
+    REQUIRE(type_value == "object");
+
+    simdjson::ondemand::object props;
+    REQUIRE(schema["properties"].get_object().get(props) == simdjson::SUCCESS);
+    REQUIRE(props["city"].error() == simdjson::SUCCESS);
+    REQUIRE(props["temp_c"].error() == simdjson::SUCCESS);
+}
+
+TEST_CASE("GeminiProvider injects propertyOrdering for Gemini 2.0 schemas", "[GeminiProvider][json]") {
+    ChatRequest req;
+    req.model = "gemini-2.0-flash";
+    req.response_format.type = ResponseFormat::Type::JsonSchema;
+    req.response_format.schema =
+        R"({"type":"object","properties":{"b":{"type":"string"},"a":{"type":"string"}}})";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Return JSON in schema order.",
+    });
+
+    const std::string json_payload = serialize_gemini_request(req, "gemini-2.0-flash");
+    REQUIRE_THAT(json_payload, Catch::Matchers::ContainsSubstring(R"("propertyOrdering":["b","a"])"));
+}
+
+TEST_CASE("normalize_requested_gemini_model resolves Gemini aliases by default", "[GeminiProvider][models]") {
+    REQUIRE(normalize_requested_gemini_model("gemini-2.5-flash") == "gemini-2.5-flash");
+    REQUIRE(normalize_requested_gemini_model("auto-gemini-2.5") == "gemini-2.5-pro");
+    REQUIRE(normalize_requested_gemini_model("gemini-flash-latest") == "gemini-2.5-flash");
+    REQUIRE(normalize_requested_gemini_model("auto-gemini-3") == "gemini-3.1-pro-preview");
+    REQUIRE(normalize_requested_gemini_model("pro") == "gemini-3.1-pro-preview");
+    REQUIRE(normalize_requested_gemini_model("flash") == "gemini-3-flash-preview");
+    REQUIRE(normalize_requested_gemini_model("flash-lite") == "gemini-3.1-flash-lite-preview");
+}
+
+TEST_CASE("HttpLLMProvider normalizes Gemini shorthand aliases for metadata lookups",
+          "[GeminiProvider][models]") {
+    HttpLLMProvider provider(
+        "https://generativelanguage.googleapis.com",
+        core::auth::ApiKeyCredentialSource::as_query_param("test-key"),
+        "pro",
+        std::make_unique<GeminiProtocol>());
+
+    REQUIRE(provider.max_context_size() == 1'048'576);
+
+    const auto info = provider.get_model_info();
+    REQUIRE(info.has_value());
+    REQUIRE(info->canonical_id == "gemini-3.1-pro-preview");
+
+    REQUIRE(provider.supports(ModelCapability::PromptCaching));
+    REQUIRE(provider.estimate_cost(1'000'000, 1'000'000) == Catch::Approx(11.25));
+
+    ChatRequest request;
+    request.model = "flash-lite";
+    request.max_tokens = 100'000;
+    request.messages.push_back(Message{
+        .role = "user",
+        .content = "Return a short response.",
+    });
+
+    const auto errors = provider.validate_request(request);
+    REQUIRE(errors.size() == 1);
+    REQUIRE_THAT(errors.front(), Catch::Matchers::ContainsSubstring("65536"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // parse_gemini_sse_chunk — SSE parsing
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,6 +290,13 @@ TEST_CASE("parse_gemini_sse_chunk - multi-sentence text preserved", "[gemini][ss
     auto [content, tools] = parse_gemini_sse_chunk(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello World!"}]}}]})");
     REQUIRE(content == "Hello World!");
+}
+
+TEST_CASE("parse_gemini_sse_chunk - multiple text parts are concatenated", "[gemini][sse]") {
+    auto [content, tools] = parse_gemini_sse_chunk(
+        R"({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello "},{"text":"World"}]}}]})");
+    REQUIRE(content == "Hello World");
+    REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_gemini_sse_chunk - function call extracted with auto id", "[gemini][sse][tools]") {
@@ -225,6 +343,13 @@ TEST_CASE("parse_gemini_sse_chunk - missing candidates key returns empty result"
     REQUIRE(tools.empty());
 }
 
+TEST_CASE("extract_gemini_usage_metadata - prompt and completion tokens", "[gemini][usage]") {
+    const auto usage = extract_gemini_usage_metadata(
+        R"({"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":34}})");
+    REQUIRE(usage.prompt_tokens == 12);
+    REQUIRE(usage.completion_tokens == 34);
+}
+
 TEST_CASE("GeminiProtocol parse_event - accepts data prefix without a space",
           "[gemini][sse][parser]") {
     GeminiProtocol protocol;
@@ -258,6 +383,45 @@ TEST_CASE("GeminiProtocol parse_event - joins multiline data payloads",
     REQUIRE_FALSE(result.done);
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].content == "Hello");
+}
+
+TEST_CASE("GeminiProtocol parse_event - usage-only events still surface token counts",
+          "[gemini][sse][parser][usage]") {
+    GeminiProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data: {"usageMetadata":{"promptTokenCount":21,"outputTokenCount":8}})");
+
+    REQUIRE(result.chunks.empty());
+    REQUIRE(result.prompt_tokens == 21);
+    REQUIRE(result.completion_tokens == 8);
+}
+
+TEST_CASE("Gemini Code Assist request wraps Gemini payload with project", "[gemini][codeassist]") {
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.auth_properties["project_id"] = "project-123";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Hello"
+    });
+
+    const std::string payload =
+        serialize_gemini_code_assist_request(req, "gemini-2.5-flash");
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gemini-2.5-flash")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("project":"project-123")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("request":{)"));
+}
+
+TEST_CASE("Gemini Code Assist protocol parses wrapped response and usage", "[gemini][codeassist]") {
+    GeminiCodeAssistProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello from CA\"}]}}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":9}}}\n\n");
+
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks.front().content == "Hello from CA");
+    REQUIRE(result.prompt_tokens == 7);
+    REQUIRE(result.completion_tokens == 9);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

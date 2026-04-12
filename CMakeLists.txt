@@ -130,6 +130,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/GeminiProtocol.cpp
+    src/core/llm/protocols/GeminiCodeAssistProtocol.cpp
     src/core/llm/protocols/OllamaProtocol.cpp
     src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp
@@ -138,7 +139,9 @@ set(FILO_CORE_SOURCES
     src/core/llm/routing/RouterEngine.cpp
     src/core/llm/routing/AutoClassifier.cpp
     src/core/auth/FileTokenStore.cpp
+    src/core/auth/GoogleCodeAssist.cpp
     src/core/auth/GoogleOAuthFlow.cpp
+    src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp

@@ -40,6 +40,9 @@ OAuthToken OAuthTokenManager::get_valid_token() {
             if (refreshed.organization_id.empty()) {
                 refreshed.organization_id = stored->organization_id;
             }
+            if (refreshed.project_id.empty()) {
+                refreshed.project_id = stored->project_id;
+            }
             if (refreshed.scopes.empty()) {
                 refreshed.scopes = stored->scopes;
             }
@@ -54,6 +57,12 @@ OAuthToken OAuthTokenManager::get_valid_token() {
     store_->save(provider_id_, token);
     cached_token_ = token;
     return *cached_token_;
+}
+
+void OAuthTokenManager::save_token(const OAuthToken& token) {
+    std::unique_lock lock(mutex_);
+    store_->save(provider_id_, token);
+    cached_token_ = token;
 }
 
 void OAuthTokenManager::force_refresh() {
@@ -73,6 +82,9 @@ void OAuthTokenManager::force_refresh() {
         }
         if (refreshed.organization_id.empty()) {
             refreshed.organization_id = stored->organization_id;
+        }
+        if (refreshed.project_id.empty()) {
+            refreshed.project_id = stored->project_id;
         }
         if (refreshed.scopes.empty()) {
             refreshed.scopes = stored->scopes;

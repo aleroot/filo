@@ -4,6 +4,8 @@
 #include "core/auth/IOAuthFlow.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/FileTokenStore.hpp"
+#include "core/auth/GoogleCodeAssist.hpp"
+#include "core/auth/GoogleOAuthCredentialSource.hpp"
 #include "core/auth/GoogleOAuthFlow.hpp"
 
 #include "core/auth/OpenAIOAuthFlow.hpp"
@@ -220,6 +222,7 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     original.device_id = "device-123";
     original.account_id = "acct_123";
     original.organization_id = "org_123";
+    original.project_id = "project_123";
     store.save("google", original);
 
     auto loaded = store.load("google");
@@ -231,6 +234,7 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     REQUIRE(loaded->device_id     == "device-123");
     REQUIRE(loaded->account_id == "acct_123");
     REQUIRE(loaded->organization_id == "org_123");
+    REQUIRE(loaded->project_id == "project_123");
 }
 
 TEST_CASE("FileTokenStore — load accepts legacy organization_uuid field", "[FileTokenStore]") {
@@ -271,6 +275,27 @@ TEST_CASE("FileTokenStore — save writes organization_id key", "[FileTokenStore
 
     REQUIRE(raw.find("\"organization_id\"") != std::string::npos);
     REQUIRE(raw.find("\"organization_uuid\"") == std::string::npos);
+}
+
+TEST_CASE("FileTokenStore — load accepts legacy project aliases", "[FileTokenStore]") {
+    TempDir tmp;
+    const std::string token_path = tmp.path + "/oauth_google.json";
+
+    std::ofstream out(token_path, std::ios::trunc);
+    REQUIRE(out.good());
+    out << R"({
+  "access_token": "legacy-at",
+  "refresh_token": "legacy-rt",
+  "token_type": "Bearer",
+  "expires_at": 9999999999,
+  "project": "legacy-project"
+})";
+    out.close();
+
+    FileTokenStore store(tmp.path);
+    auto loaded = store.load("google");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->project_id == "legacy-project");
 }
 
 TEST_CASE("FileTokenStore — save/load round-trips OAuth scopes", "[FileTokenStore]") {
@@ -375,6 +400,18 @@ TEST_CASE("GoogleOAuthFlow::build_auth_url — contains access_type=offline", "[
     REQUIRE(url.find("access_type=offline") != std::string::npos);
 }
 
+TEST_CASE("GoogleOAuthFlow::build_auth_url — includes PKCE challenge when provided",
+          "[GoogleOAuthFlow]") {
+    auto url = GoogleOAuthFlow::build_auth_url(
+        "c",
+        "https://codeassist.google.com/authcode",
+        {"scope"},
+        "state",
+        "challenge123");
+    REQUIRE(url.find("code_challenge=challenge123") != std::string::npos);
+    REQUIRE(url.find("code_challenge_method=S256") != std::string::npos);
+}
+
 TEST_CASE("GoogleOAuthFlow::build_auth_url — scopes are joined and encoded", "[GoogleOAuthFlow]") {
     auto url = GoogleOAuthFlow::build_auth_url(
         "c", "http://r",
@@ -384,6 +421,24 @@ TEST_CASE("GoogleOAuthFlow::build_auth_url — scopes are joined and encoded", "
     REQUIRE(url.find("scope=") != std::string::npos);
     REQUIRE(url.find("cloud-platform") != std::string::npos);
     REQUIRE(url.find("userinfo.email") != std::string::npos);
+}
+
+TEST_CASE("GoogleOAuthFlow::build_loopback_redirect_uri — preserves explicit host", "[GoogleOAuthFlow]") {
+    const std::string redirect_uri =
+        GoogleOAuthFlow::build_loopback_redirect_uri("localhost", 54321);
+    REQUIRE(redirect_uri == "http://localhost:54321/oauth2callback");
+}
+
+TEST_CASE("GoogleOAuthFlow::build_loopback_redirect_uri — normalizes wildcard host", "[GoogleOAuthFlow]") {
+    const std::string redirect_uri =
+        GoogleOAuthFlow::build_loopback_redirect_uri("0.0.0.0", 54321);
+    REQUIRE(redirect_uri == "http://127.0.0.1:54321/oauth2callback");
+}
+
+TEST_CASE("GoogleOAuthFlow::build_loopback_redirect_uri — supports redirect host override", "[GoogleOAuthFlow]") {
+    const std::string redirect_uri =
+        GoogleOAuthFlow::build_loopback_redirect_uri("0.0.0.0", 54321, "/oauth2callback", "localhost");
+    REQUIRE(redirect_uri == "http://localhost:54321/oauth2callback");
 }
 
 TEST_CASE("GoogleOAuthFlow::parse_token_response — extracts access_token", "[GoogleOAuthFlow]") {
@@ -411,6 +466,27 @@ TEST_CASE("GoogleOAuthFlow::parse_token_response — throws when access_token ab
     std::string json = R"({"error": "invalid_grant"})";
     REQUIRE_THROWS_AS(
         GoogleOAuthFlow::parse_token_response(json, now_unix()),
+        std::runtime_error);
+}
+
+TEST_CASE("GoogleOAuthFlow::parse_manual_auth_input — plain code", "[GoogleOAuthFlow]") {
+    const auto parsed = GoogleOAuthFlow::parse_manual_auth_input("  abc123  ");
+    REQUIRE(parsed.code == "abc123");
+    REQUIRE_FALSE(parsed.state.has_value());
+}
+
+TEST_CASE("GoogleOAuthFlow::parse_manual_auth_input — callback URL extracts code and state", "[GoogleOAuthFlow]") {
+    const auto parsed = GoogleOAuthFlow::parse_manual_auth_input(
+        "http://127.0.0.1:54321/oauth2callback?code=4%2F0AQSTgQ&state=my-state");
+    REQUIRE(parsed.code == "4/0AQSTgQ");
+    REQUIRE(parsed.state.has_value());
+    REQUIRE(*parsed.state == "my-state");
+}
+
+TEST_CASE("GoogleOAuthFlow::parse_manual_auth_input — callback URL requires code", "[GoogleOAuthFlow]") {
+    REQUIRE_THROWS_AS(
+        GoogleOAuthFlow::parse_manual_auth_input(
+            "http://127.0.0.1:54321/oauth2callback?state=only-state"),
         std::runtime_error);
 }
 
@@ -560,6 +636,21 @@ TEST_CASE("OAuthTokenManager — refresh preserves organization_id when omitted"
     REQUIRE(token.organization_id == "org_abc");
 }
 
+TEST_CASE("OAuthTokenManager — refresh preserves project_id when omitted", "[OAuthTokenManager]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken stored = make_token(-3600, "refresh-me", "expired-at");
+    stored.project_id = "project_abc";
+    store->stored = stored;
+
+    flow->refresh_result = make_token(3600, "new-rt", "new-at");
+
+    OAuthTokenManager mgr("google", flow, store);
+    auto token = mgr.get_valid_token();
+
+    REQUIRE(token.project_id == "project_abc");
+}
+
 TEST_CASE("OAuthTokenManager — force_refresh() throws without refresh token", "[OAuthTokenManager]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
@@ -681,6 +772,69 @@ TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns false wit
 
     REQUIRE_FALSE(src.refresh_on_auth_failure());
     REQUIRE(flow->refresh_calls == 0);
+}
+
+TEST_CASE("GoogleOAuthCredentialSource — exposes Code Assist project_id", "[GoogleOAuthCredentialSource]") {
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(3600, "rt", "my-google-access-token");
+    token.project_id = "project-123";
+    store->stored = token;
+
+    auto manager = std::make_shared<OAuthTokenManager>("google", flow, store);
+    GoogleOAuthCredentialSource src(manager);
+
+    const auto auth = src.get_auth();
+    REQUIRE(auth.headers.count("Authorization") == 1);
+    REQUIRE(auth.headers.at("Authorization") == "Bearer my-google-access-token");
+    REQUIRE(auth.properties.at("project_id") == "project-123");
+}
+
+TEST_CASE("GoogleOAuthCredentialSource — GOOGLE_CLOUD_PROJECT overrides stored project", "[GoogleOAuthCredentialSource]") {
+    ScopedEnvVar project_override("GOOGLE_CLOUD_PROJECT", "env-project");
+    auto flow  = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthToken token = make_token(3600, "rt", "my-google-access-token");
+    token.project_id = "stored-project";
+    store->stored = token;
+
+    auto manager = std::make_shared<OAuthTokenManager>("google", flow, store);
+    GoogleOAuthCredentialSource src(manager);
+
+    const auto auth = src.get_auth();
+    REQUIRE(auth.properties.at("project_id") == "env-project");
+}
+
+TEST_CASE("Google Code Assist — parse loadCodeAssist response", "[GoogleCodeAssist]") {
+    const auto parsed = google_code_assist::parse_load_code_assist_response(R"({
+  "cloudaicompanionProject": "project-123",
+  "allowedTiers": [
+    { "id": "free-tier", "isDefault": true, "userDefinedCloudaicompanionProject": false }
+  ]
+})");
+
+    REQUIRE(parsed.project_id == "project-123");
+    REQUIRE(parsed.allowed_tiers.size() == 1);
+    REQUIRE(parsed.allowed_tiers.front().id == "free-tier");
+    REQUIRE(parsed.allowed_tiers.front().is_default);
+}
+
+TEST_CASE("Google Code Assist — current tier wins over default tier", "[GoogleCodeAssist]") {
+    google_code_assist::LoadCodeAssistResponseData response;
+    response.current_tier = google_code_assist::TierInfo{
+        .id = "standard-tier",
+        .user_defined_project = true,
+        .is_default = false,
+    };
+    response.allowed_tiers.push_back(google_code_assist::TierInfo{
+        .id = "free-tier",
+        .user_defined_project = false,
+        .is_default = true,
+    });
+
+    const auto tier = google_code_assist::select_onboard_tier(response);
+    REQUIRE(tier.id == "standard-tier");
+    REQUIRE(tier.user_defined_project);
 }
 
 // ── ClaudeOAuthFlow / AuthenticationManager ──────────────────────────────────
