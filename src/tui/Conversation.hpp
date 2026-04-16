@@ -85,6 +85,7 @@ struct UiMessage {
     std::string secondary_text;          // Secondary/subtitle text
     std::string disclosure_text;         // Optional expandable details (collapsed by default)
     std::string icon;                    // Custom icon override
+    std::size_t repeat_count = 1;        // Number of collapsed consecutive duplicates
     
     // Visual styling
     std::optional<ftxui::Color> custom_color;
@@ -203,6 +204,7 @@ UiMessage make_tool_group_message(std::vector<ToolActivity> tools,
 UiMessage make_system_message(std::string text);
 UiMessage make_system_disclosure_message(std::string summary,
                                          std::string details);
+void append_ui_message(std::vector<UiMessage>& messages, UiMessage message);
 
 // Tool activity factory
 ToolActivity make_tool_activity(std::string id,

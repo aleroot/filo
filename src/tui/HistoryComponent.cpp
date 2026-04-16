@@ -130,6 +130,9 @@ int estimate_message_line_cost(
                     expanded = expanded || it->second;
                 }
                 if (expanded) {
+                    if (msg.repeat_count > 1) {
+                        lines += 1;  // Repeated-event explanatory line.
+                    }
                     lines += estimate_wrapped_line_count(msg.disclosure_text);
                 }
             }
@@ -344,6 +347,7 @@ std::size_t HistoryComponent::history_layout_fingerprint(
         seed = combine_hash(seed, msg.secondary_text.size());
         seed = combine_hash(seed, msg.disclosure_text.size());
         seed = combine_hash(seed, msg.timestamp.size());
+        seed = combine_hash(seed, msg.repeat_count);
         seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_top));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_bottom));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.pending));

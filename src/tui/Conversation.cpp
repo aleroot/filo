@@ -654,6 +654,32 @@ UiMessage make_system_disclosure_message(std::string summary,
     return msg;
 }
 
+void append_ui_message(std::vector<UiMessage>& messages, UiMessage message) {
+    if (!messages.empty()) {
+        auto& previous = messages.back();
+        const bool same_system_summary =
+            previous.type == MessageType::System
+            && message.type == MessageType::System
+            && previous.text == message.text;
+        if (same_system_summary) {
+            const std::size_t previous_count = std::max<std::size_t>(previous.repeat_count, 1);
+            const std::size_t incoming_count = std::max<std::size_t>(message.repeat_count, 1);
+            previous.repeat_count = previous_count + incoming_count;
+            if (!message.secondary_text.empty()) {
+                previous.secondary_text = std::move(message.secondary_text);
+            }
+            if (!message.disclosure_text.empty()) {
+                // Keep the latest details for repeated events.
+                previous.disclosure_text = std::move(message.disclosure_text);
+            }
+            return;
+        }
+    }
+
+    message.repeat_count = std::max<std::size_t>(message.repeat_count, 1);
+    messages.push_back(std::move(message));
+}
+
 ToolActivity make_tool_activity(std::string id,
                                  std::string name,
                                  std::string args,
@@ -923,6 +949,9 @@ Element render_system_message(const UiMessage& msg,
         }
 
         std::string summary = std::string(expanded ? "▼ " : "▶ ") + msg.text;
+        if (msg.repeat_count > 1) {
+            summary += std::format("  (x{})", msg.repeat_count);
+        }
         if (!expanded) {
             summary += "  (click or Ctrl+O for details)";
         }
@@ -935,6 +964,18 @@ Element render_system_message(const UiMessage& msg,
         lines.push_back(std::move(summary_el));
 
         if (expanded) {
+            if (msg.repeat_count > 1) {
+                lines.push_back(
+                    hbox({
+                        ftxui::text("  "),
+                        paragraph(std::format(
+                            "Collapsed {} repeated events. Showing latest details.",
+                            msg.repeat_count))
+                        | ftxui::color(Color::GrayDark)
+                        | dim
+                        | xflex,
+                    }) | xflex);
+            }
             for (const auto& line : split_lines(msg.disclosure_text)) {
                 if (line.empty()) {
                     lines.push_back(ftxui::text(""));
@@ -950,8 +991,12 @@ Element render_system_message(const UiMessage& msg,
         return vbox(std::move(lines));
     }
 
+    const std::string body = msg.repeat_count > 1
+        ? std::format("{}  (x{})", msg.text, msg.repeat_count)
+        : msg.text;
+
     std::vector<Element> lines;
-    for (const auto& line : split_lines(msg.text)) {
+    for (const auto& line : split_lines(body)) {
         lines.push_back(ftxui::text(line) | ftxui::color(ColorYellowDark));
     }
     return vbox(std::move(lines));

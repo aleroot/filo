@@ -115,6 +115,21 @@ TEST_CASE("make_system_disclosure_message — basic creation", "[tui][conversati
     REQUIRE(msg.disclosure_text == "Previous segment: old\nNew segment: new");
 }
 
+TEST_CASE("append_ui_message — collapses repeated system disclosures",
+          "[tui][conversation][factory]") {
+    std::vector<UiMessage> messages;
+    append_ui_message(messages, make_system_disclosure_message(
+        "Internal session rotated.",
+        "Previous segment: seg-a\nNew segment: seg-b\nReason: threshold-a"));
+    append_ui_message(messages, make_system_disclosure_message(
+        "Internal session rotated.",
+        "Previous segment: seg-c\nNew segment: seg-d\nReason: threshold-b"));
+
+    REQUIRE(messages.size() == 1);
+    REQUIRE(messages[0].repeat_count == 2);
+    REQUIRE(messages[0].disclosure_text == "Previous segment: seg-c\nNew segment: seg-d\nReason: threshold-b");
+}
+
 TEST_CASE("make_tool_group_message — with tools", "[tui][conversation][factory]") {
     std::vector<ToolActivity> tools;
     tools.push_back(make_tool_activity("id1", "read_file", "{}", "src/main.cpp"));
@@ -431,6 +446,37 @@ TEST_CASE("render_history_panel — system disclosure expands with option",
     REQUIRE_THAT(output, ContainsSubstring("Previous segment: seg-a"));
     REQUIRE_THAT(output, ContainsSubstring("New segment: seg-b"));
     REQUIRE_THAT(output, ContainsSubstring("Reason: threshold"));
+}
+
+TEST_CASE("render_history_panel — repeated system disclosure shows counter and latest hint",
+          "[tui][conversation][render]") {
+    std::vector<UiMessage> messages;
+    auto repeated = make_system_disclosure_message(
+        "Internal session rotated to keep the working set lean (context preserved).",
+        "Previous segment: seg-c\nNew segment: seg-d\nReason: threshold-b");
+    repeated.repeat_count = 3;
+    messages.push_back(std::move(repeated));
+
+    auto compact_panel = render_history_panel(messages, 0);
+    auto compact_screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                                ftxui::Dimension::Fit(compact_panel));
+    ftxui::Render(compact_screen, compact_panel);
+    const auto compact_output = strip_ansi(compact_screen.ToString());
+    REQUIRE_THAT(compact_output, ContainsSubstring("(x3)"));
+    REQUIRE_THAT(compact_output, ContainsSubstring("click or Ctrl+O for details"));
+
+    auto expanded_panel = render_history_panel(
+        messages,
+        0,
+        ConversationRenderOptions{
+            .expand_system_details = true,
+        });
+    auto expanded_screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                                 ftxui::Dimension::Fit(expanded_panel));
+    ftxui::Render(expanded_screen, expanded_panel);
+    const auto expanded_output = strip_ansi(expanded_screen.ToString());
+    REQUIRE_THAT(expanded_output, ContainsSubstring("Collapsed 3 repeated events. Showing latest details."));
+    REQUIRE_THAT(expanded_output, ContainsSubstring("Previous segment: seg-c"));
 }
 
 TEST_CASE("render_history_panel — tool group", "[tui][conversation][render]") {

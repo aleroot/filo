@@ -679,7 +679,7 @@ RunResult run(RunOptions opts) {
 
     std::vector<UiMessage> ui_messages;
     if (const auto message = startup_history_message(); !message.empty()) {
-        ui_messages.push_back(make_system_message(message));
+        append_ui_message(ui_messages, make_system_message(message));
     }
 
     std::string input_text;
@@ -1010,7 +1010,7 @@ RunResult run(RunOptions opts) {
                 SessionReplayOptions{.include_continue_hint = true});
         } else {
             // Session not found — warn and continue with a fresh session.
-            ui_messages.push_back(make_warning_message(
+            append_ui_message(ui_messages, make_warning_message(
                 std::format("Session '{}' not found. Starting a fresh session.",
                     req.empty() ? std::string("most recent") : req)));
         }
@@ -1042,7 +1042,7 @@ RunResult run(RunOptions opts) {
             review_activity_state.hint.clear();
             review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
             if (const auto message = startup_history_message(); !message.empty()) {
-                ui_messages.push_back(make_system_message(message));
+                append_ui_message(ui_messages, make_system_message(message));
             }
         }
         animation_cv.notify_one();
@@ -1058,7 +1058,7 @@ RunResult run(RunOptions opts) {
     auto append_history = [&](const std::string& str) {
         std::lock_guard lock(ui_mutex);
         if (ui_messages.empty() || ui_messages.back().type != MessageType::System) {
-            ui_messages.push_back(make_system_message(str));
+            append_ui_message(ui_messages, make_system_message(str));
         } else {
             ui_messages.back().text += str;
         }
@@ -1460,7 +1460,7 @@ RunResult run(RunOptions opts) {
                     save_error);
                 {
                     std::lock_guard lock(ui_mutex);
-                    ui_messages.push_back(make_warning_message(std::format(
+                    append_ui_message(ui_messages, make_warning_message(std::format(
                         "Filo skipped an internal session rotation because it could not archive the current segment.\nSession: {}\nReason: {}\nYour full context is still intact and no history was compacted.",
                         archived.session_id,
                         save_error.empty() ? std::string("unknown archival error.") : save_error)));
@@ -1488,7 +1488,7 @@ RunResult run(RunOptions opts) {
                 const std::string reason = decision.reason.empty()
                     ? std::string("session growth exceeded the efficiency budget.")
                     : decision.reason;
-                ui_messages.push_back(make_system_disclosure_message(
+                append_ui_message(ui_messages, make_system_disclosure_message(
                     "Internal session rotated to keep the working set lean (context preserved).",
                     std::format(
                         "Previous segment: {}\nNew segment: {}\nReason: {}",
@@ -2722,8 +2722,8 @@ RunResult run(RunOptions opts) {
         std::string assistant_message_id;
         {
             std::lock_guard lock(ui_mutex);
-            ui_messages.push_back(make_user_message(text, timestamp));
-            ui_messages.push_back(make_assistant_message("", "", true));
+            append_ui_message(ui_messages, make_user_message(text, timestamp));
+            append_ui_message(ui_messages, make_assistant_message("", "", true));
             assistant_index = ui_messages.size() - 1;
             assistant_message_id = ui_messages.back().id;
         }
