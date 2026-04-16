@@ -33,6 +33,12 @@ struct ConversationSearchHit {
     std::string snippet;
 };
 
+enum class ReviewPickerMode {
+    SelectTarget,
+    EnterBaseBranch,
+    EnterCustomPrompt,
+};
+
 ftxui::Element render_default_prompt_panel(ftxui::Element input_line,
                                            std::string_view input_text);
 
@@ -80,6 +86,10 @@ ftxui::Element render_local_model_picker_panel(std::string_view current_dir,
 
 ftxui::Element render_session_picker_panel(const std::vector<core::session::SessionInfo>& sessions,
                                            int selected_index);
+
+ftxui::Element render_review_picker_panel(ReviewPickerMode mode,
+                                          int selected_index,
+                                          std::string_view input_text);
 
 ftxui::Element render_conversation_search_panel(
     std::string_view query,

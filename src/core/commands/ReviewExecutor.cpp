@@ -288,7 +288,8 @@ OUTPUT FORMAT:
 std::string review_usage_text() {
     return
         "\n\xe2\x84\xb9  Usage: /review [--uncommitted | --base <branch> | --commit <sha> [--title <title>] | <custom instructions>]\n"
-        "   /review                      Review current changes (staged, unstaged, and untracked).\n"
+        "   /review                      Open the review menu.\n"
+        "   /review --uncommitted        Review current changes (staged, unstaged, and untracked).\n"
         "   /review --base main          Review changes against a base branch.\n"
         "   /review --commit <sha>       Review a specific commit.\n"
         "   /review --commit <sha> --title \"Subject\"\n"
@@ -1023,6 +1024,12 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
                                       review_hint.empty()
                                           ? std::string("current changes")
                                           : review_hint));
+    const auto set_review_activity_fn = ctx.set_review_activity_fn;
+    if (set_review_activity_fn) {
+        set_review_activity_fn(
+            true,
+            review_hint.empty() ? std::string("current changes") : review_hint);
+    }
 
     auto append_fn = ctx.append_history_fn;
     auto collected_output = std::make_shared<std::string>();
@@ -1038,7 +1045,10 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
         [](const std::string&, const std::string&) {
             // Keep /review output focused on final findings.
         },
-        [append_fn, collected_output, interrupted]() {
+        [append_fn, collected_output, interrupted, set_review_activity_fn]() {
+            if (set_review_activity_fn) {
+                set_review_activity_fn(false, "");
+            }
             const std::string raw = trim_copy(*collected_output);
             if (*interrupted || raw.find("[Generation stopped by user]") != std::string::npos) {
                 append_fn(

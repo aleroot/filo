@@ -1029,6 +1029,64 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
       | size(HEIGHT, GREATER_THAN, 12);
 }
 
+Element render_review_picker_panel(ReviewPickerMode mode,
+                                   int selected_index,
+                                   std::string_view input_text) {
+    const auto uncommitted_option = make_selection_row(
+        "Uncommitted changes",
+        "Review the current staged, unstaged, and untracked changes.",
+        selected_index == 0,
+        ColorYellowDark);
+
+    const auto base_option = make_selection_row(
+        "Base branch",
+        "Review the current branch against a base branch you choose.",
+        selected_index == 1,
+        ColorYellowDark);
+
+    const auto custom_option = make_selection_row(
+        "Customised",
+        "Write your own review instructions for the model to follow.",
+        selected_index == 2,
+        ColorYellowDark);
+
+    Elements children;
+    children.push_back(hbox({
+        text(" REVIEW ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        filler(),
+        text(mode == ReviewPickerMode::SelectTarget
+                 ? "Up/Down: select  Enter: confirm  1/2/3: quick choose  Esc: cancel"
+                 : "Type to edit  Enter: start review  Esc: back")
+            | color(Color::GrayDark)
+    }));
+    children.push_back(separator());
+    children.push_back(text("Choose how /review should run.") | color(Color::White));
+    children.push_back(filler());
+    children.push_back(uncommitted_option);
+    children.push_back(base_option);
+    children.push_back(custom_option);
+    children.push_back(filler());
+
+    if (mode == ReviewPickerMode::EnterBaseBranch) {
+        const std::string display = input_text.empty() ? "<branch>" : std::string(input_text);
+        children.push_back(separator());
+        children.push_back(text("Base branch") | color(ColorYellowBright));
+        children.push_back(text(std::format("  > {}█", display)) | color(Color::White));
+        children.push_back(text("Enter the branch name to diff against. Esc returns to the menu.") | dim);
+    } else if (mode == ReviewPickerMode::EnterCustomPrompt) {
+        const std::string display =
+            input_text.empty() ? "<custom review prompt>" : std::string(input_text);
+        children.push_back(separator());
+        children.push_back(text("Custom review prompt") | color(ColorYellowBright));
+        children.push_back(text(std::format("  > {}█", display)) | color(Color::White));
+        children.push_back(text("Write custom review instructions here. Esc returns to the menu.") | dim);
+    }
+
+    return vbox(std::move(children))
+        | UiBorder(ColorYellowBright)
+        | size(HEIGHT, GREATER_THAN, 16);
+}
+
 Element render_conversation_search_panel(std::string_view query,
                                          const std::vector<ConversationSearchHit>& hits,
                                          int selected_index) {

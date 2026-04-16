@@ -388,6 +388,64 @@ std::optional<std::string> choose_auth_provider_menu(const std::vector<std::stri
     }
 }
 
+std::optional<std::string> choose_review_menu_request() {
+    while (true) {
+        std::cout
+            << "\nReview Targets\n"
+            << "  1. Uncommitted changes\n"
+            << "  2. Base branch\n"
+            << "  3. Customised\n"
+            << "Select an option [1-3] or press Enter to cancel: ";
+        std::cout.flush();
+
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+            return std::nullopt;
+        }
+
+        const std::string_view input = trim(line);
+        if (input.empty()) {
+            return std::nullopt;
+        }
+
+        if (input == "1") {
+            return std::string{};
+        }
+        if (input == "2") {
+            std::cout << "Base branch: ";
+            std::cout.flush();
+
+            std::string branch;
+            if (!std::getline(std::cin, branch)) {
+                return std::nullopt;
+            }
+            const std::string_view trimmed_branch = trim(branch);
+            if (trimmed_branch.empty()) {
+                std::cout << "Base branch cannot be empty.\n";
+                continue;
+            }
+            return std::format("--base {}", std::string(trimmed_branch));
+        }
+        if (input == "3") {
+            std::cout << "Custom review prompt: ";
+            std::cout.flush();
+
+            std::string prompt;
+            if (!std::getline(std::cin, prompt)) {
+                return std::nullopt;
+            }
+            const std::string_view trimmed_prompt = trim(prompt);
+            if (trimmed_prompt.empty()) {
+                std::cout << "Custom review prompt cannot be empty.\n";
+                continue;
+            }
+            return std::string(trimmed_prompt);
+        }
+
+        std::cout << "Invalid selection. Choose 1, 2, or 3.\n";
+    }
+}
+
 void run_provider_auth(const std::string& provider,
                        const std::string& config_dir,
                        const std::function<void(std::function<void()>)>& suspend_fn,
@@ -734,7 +792,7 @@ public:
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /copy               Copy the latest assistant response to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
-            "  /review [target]    Run Codex-style AI code review (uncommitted/base/commit/custom)\n"
+            "  /review [target]    Open review menu or run Codex-style AI code review\n"
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
@@ -1291,13 +1349,47 @@ class ReviewCommand : public Command {
 public:
     std::string get_name() const override { return "/review"; }
     std::string get_description() const override {
-        return "Run Codex-style review (/review [--uncommitted|--base|--commit|custom])";
+        return "Open the review menu or run Codex-style review (/review [--uncommitted|--base|--commit|custom])";
     }
     bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        ReviewExecutor::execute(ctx, trailing_arguments(ctx.text));
+
+        const std::string args = trailing_arguments(ctx.text);
+        if (!args.empty()) {
+            ReviewExecutor::execute(ctx, args);
+            return;
+        }
+
+        if (!ctx.agent) {
+            ReviewExecutor::execute(ctx, args);
+            return;
+        }
+
+        if (ctx.open_review_picker_fn) {
+            const CommandContext picker_ctx = ctx;
+            ctx.open_review_picker_fn([picker_ctx](std::optional<std::string> selection) {
+                if (!selection.has_value()) {
+                    return;
+                }
+                ReviewExecutor::execute(picker_ctx, *selection);
+            });
+            return;
+        }
+
+        if (ctx.suspend_tui_fn) {
+            std::optional<std::string> selection;
+            ctx.suspend_tui_fn([&selection]() {
+                selection = choose_review_menu_request();
+            });
+            if (selection.has_value()) {
+                ReviewExecutor::execute(ctx, *selection);
+            }
+            return;
+        }
+
+        ReviewExecutor::execute(ctx, args);
     }
 };
 

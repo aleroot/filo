@@ -1,8 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "TestSessionContext.hpp"
+#include "core/agent/Agent.hpp"
 #include "core/commands/CommandExecutor.hpp"
+#include "core/llm/LLMProvider.hpp"
+#include "core/tools/ToolManager.hpp"
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -12,8 +17,23 @@
 #include <format>
 #include <cstdlib>
 #include <fstream>
+#include <utility>
 
 using namespace core::commands;
+
+namespace {
+
+class NoopProvider : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        core::llm::StreamChunk final_chunk;
+        final_chunk.is_final = true;
+        callback(final_chunk);
+    }
+};
+
+} // namespace
 
 TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     CommandExecutor executor;
@@ -31,6 +51,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto effort_value   = std::make_shared<std::string>("auto");
     auto picker_opened  = std::make_shared<bool>(false);
     auto settings_picker_opened = std::make_shared<bool>(false);
+    auto review_picker_opened = std::make_shared<bool>(false);
+    auto review_activity_events =
+        std::make_shared<std::vector<std::pair<bool, std::string>>>();
     auto yolo_enabled   = std::make_shared<bool>(false);
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
 
@@ -72,6 +95,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *picker_opened = true;
             return false;
         },
+        .open_review_picker_fn = [review_picker_opened](std::function<void(std::optional<std::string>)>) {
+            *review_picker_opened = true;
+        },
         .settings_status_fn = []() {
             return std::string(
                 "Effective settings\n"
@@ -91,6 +117,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .latest_assistant_output_fn = []() { return std::string(); },
         .copy_to_clipboard_fn = [](std::string_view) {
             return std::optional<std::string>{};
+        },
+        .set_review_activity_fn = [review_activity_events](bool active, const std::string& hint) {
+            review_activity_events->emplace_back(active, hint);
         },
     };
 
@@ -420,12 +449,49 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
 
     SECTION("/review requires an active agent") {
         *mock_history = "";
+        *review_picker_opened = false;
         ctx.agent = nullptr;
         ctx.text = "/review";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("requires an active agent"));
+        REQUIRE(*review_picker_opened == false);
+    }
+
+    SECTION("/review opens picker when callback is available") {
+        *mock_history = "";
+        *review_picker_opened = false;
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.text = "/review";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*review_picker_opened == true);
+        REQUIRE(mock_history->find("Code review started") == std::string::npos);
+    }
+
+    SECTION("/review with inline prompt toggles review activity callbacks") {
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.text = "/review custom review prompt";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(review_activity_events->size() >= 2);
+        REQUIRE(review_activity_events->front().first == true);
+        REQUIRE(review_activity_events->front().second == "custom review prompt");
+        REQUIRE(review_activity_events->back().first == false);
+        REQUIRE(review_activity_events->back().second.empty());
     }
 
     SECTION("/review --help shows usage without needing an agent") {

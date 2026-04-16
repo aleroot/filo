@@ -32,6 +32,7 @@ struct CommandContext {
     std::function<bool()> open_sessions_picker_fn = {};
     std::function<void(std::string_view)> resume_session_fn = {};
     std::function<void(std::vector<std::string>, std::function<void(std::optional<std::string>)>)> open_provider_picker_fn = {};
+    std::function<void(std::function<void(std::optional<std::string>)>)> open_review_picker_fn = {};
     std::function<std::string()> settings_status_fn = {};
     std::function<bool()> yolo_mode_enabled_fn = {};
     std::function<void(bool)> set_yolo_mode_enabled_fn = {};
@@ -42,6 +43,8 @@ struct CommandContext {
     std::shared_ptr<core::history::PromptHistoryStore> history_store_fn = {};
     std::function<void()> clear_history_fn = {};
     std::function<void(const std::string&)> send_user_message_fn = {};
+    // Toggle and describe long-running /review activity in the TUI.
+    std::function<void(bool, const std::string&)> set_review_activity_fn = {};
 };
 
 struct CommandDescriptor {

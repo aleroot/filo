@@ -780,6 +780,23 @@ RunResult run(RunOptions opts) {
     };
     ProviderPickerState provider_picker_state;
 
+    struct ReviewPickerState {
+        bool active = false;
+        int selected = 0;
+        ReviewPickerMode mode = ReviewPickerMode::SelectTarget;
+        std::string input_text;
+        std::function<void(std::optional<std::string>)> on_select;
+    };
+    ReviewPickerState review_picker_state;
+
+    struct ReviewActivityState {
+        bool active = false;
+        std::string hint;
+        std::chrono::steady_clock::time_point started_at =
+            std::chrono::steady_clock::time_point::min();
+    };
+    ReviewActivityState review_activity_state;
+
     struct LocalModelPickerState {
         bool active = false;
         int selected = 0;
@@ -1021,6 +1038,9 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.clear();
+            review_activity_state.active = false;
+            review_activity_state.hint.clear();
+            review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
             if (const auto message = startup_history_message(); !message.empty()) {
                 ui_messages.push_back(make_system_message(message));
             }
@@ -1050,6 +1070,9 @@ RunResult run(RunOptions opts) {
             return true;
         }
         std::lock_guard lock(ui_mutex);
+        if (review_activity_state.active) {
+            return true;
+        }
         return conversation_uses_animation(ui_messages, ui_show_spinner);
     };
 
@@ -1307,6 +1330,34 @@ RunResult run(RunOptions opts) {
         }
         screen.PostEvent(Event::Custom);
         return true;
+    };
+
+    auto open_review_picker = [&](std::function<void(std::optional<std::string>)> on_select) {
+        {
+            std::lock_guard lock(ui_mutex);
+            review_picker_state.active = true;
+            review_picker_state.selected = 0;
+            review_picker_state.mode = ReviewPickerMode::SelectTarget;
+            review_picker_state.input_text.clear();
+            review_picker_state.on_select = std::move(on_select);
+        }
+        screen.PostEvent(Event::Custom);
+    };
+
+    auto set_review_activity = [&](bool active, const std::string& hint) {
+        {
+            std::lock_guard lock(ui_mutex);
+            review_activity_state.active = active;
+            if (active) {
+                review_activity_state.hint = hint;
+                review_activity_state.started_at = std::chrono::steady_clock::now();
+            } else {
+                review_activity_state.hint.clear();
+                review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
+            }
+        }
+        animation_cv.notify_one();
+        screen.PostEvent(Event::Custom);
     };
 
     auto fork_session = [&]() -> std::string {
@@ -2911,6 +2962,7 @@ RunResult run(RunOptions opts) {
                 || question_dialog_state.active
                 || model_picker_state.active
                 || provider_picker_state.active
+                || review_picker_state.active
                 || local_model_picker_state.active
                 || conversation_search_state.active
                 || settings_panel_state.active) return;
@@ -2958,6 +3010,7 @@ RunResult run(RunOptions opts) {
                 provider_picker_state.on_select = std::move(on_select);
                 screen.PostEvent(Event::Custom);
             },
+            .open_review_picker_fn = open_review_picker,
             .settings_status_fn = settings_status,
             .yolo_mode_enabled_fn = is_yolo_mode_enabled,
             .set_yolo_mode_enabled_fn = set_yolo_mode_enabled,
@@ -2988,6 +3041,7 @@ RunResult run(RunOptions opts) {
             // prompt as a full agent turn with TUI message cards and tool
             // activity panels, identical to normal user input.
             .send_user_message_fn = submit_agent_turn,
+            .set_review_activity_fn = set_review_activity,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;
@@ -3002,6 +3056,7 @@ RunResult run(RunOptions opts) {
                 || question_dialog_state.active
                 || model_picker_state.active
                 || provider_picker_state.active
+                || review_picker_state.active
                 || local_model_picker_state.active
                 || conversation_search_state.active
                 || settings_panel_state.active) {
@@ -3332,6 +3387,90 @@ RunResult run(RunOptions opts) {
                     question_promise->set_value(*question_result);
                 } else if (question_dialog_dismissed) {
                     question_promise->set_value(std::nullopt);
+                }
+            }
+            return true;
+        }
+
+        bool review_picker_was_active = false;
+        bool review_picker_cancelled = false;
+        std::optional<std::string> review_picker_request;
+        std::function<void(std::optional<std::string>)> review_picker_on_select;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (review_picker_state.active) {
+                review_picker_was_active = true;
+
+                if (review_picker_state.mode == ReviewPickerMode::SelectTarget) {
+                    if (event == Event::ArrowUp) {
+                        review_picker_state.selected = (review_picker_state.selected + 2) % 3;
+                    } else if (event == Event::ArrowDown) {
+                        review_picker_state.selected = (review_picker_state.selected + 1) % 3;
+                    } else if (event == Event::Character('1')) {
+                        review_picker_request = std::string{};
+                        review_picker_on_select = std::move(review_picker_state.on_select);
+                        review_picker_state.active = false;
+                    } else if (event == Event::Character('2')) {
+                        review_picker_state.selected = 1;
+                        review_picker_state.mode = ReviewPickerMode::EnterBaseBranch;
+                        review_picker_state.input_text.clear();
+                    } else if (event == Event::Character('3')) {
+                        review_picker_state.selected = 2;
+                        review_picker_state.mode = ReviewPickerMode::EnterCustomPrompt;
+                        review_picker_state.input_text.clear();
+                    } else if (event == Event::Return) {
+                        if (review_picker_state.selected == 0) {
+                            review_picker_request = std::string{};
+                            review_picker_on_select = std::move(review_picker_state.on_select);
+                            review_picker_state.active = false;
+                        } else if (review_picker_state.selected == 1) {
+                            review_picker_state.mode = ReviewPickerMode::EnterBaseBranch;
+                            review_picker_state.input_text.clear();
+                        } else {
+                            review_picker_state.mode = ReviewPickerMode::EnterCustomPrompt;
+                            review_picker_state.input_text.clear();
+                        }
+                    } else if (event == Event::Escape) {
+                        review_picker_cancelled = true;
+                        review_picker_on_select = std::move(review_picker_state.on_select);
+                        review_picker_state.active = false;
+                    }
+                } else if (event == Event::Escape) {
+                    review_picker_state.mode = ReviewPickerMode::SelectTarget;
+                    review_picker_state.input_text.clear();
+                } else if (event == Event::Backspace || event == Event::Delete) {
+                    erase_last_utf8_codepoint(review_picker_state.input_text);
+                } else if (event == Event::Return) {
+                    const std::string_view trimmed =
+                        trim_ascii(review_picker_state.input_text);
+                    if (!trimmed.empty()) {
+                        if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch) {
+                            review_picker_request = std::format("--base {}", std::string(trimmed));
+                        } else {
+                            review_picker_request = std::string(trimmed);
+                        }
+                        review_picker_on_select = std::move(review_picker_state.on_select);
+                        review_picker_state.active = false;
+                    }
+                } else if (event.is_character()) {
+                    const std::string input = event.character();
+                    if (!input.empty()) {
+                        const unsigned char first =
+                            static_cast<unsigned char>(input.front());
+                        const bool is_control = input.size() == 1 && std::iscntrl(first);
+                        if (!is_control) {
+                            review_picker_state.input_text += input;
+                        }
+                    }
+                }
+            }
+        }
+        if (review_picker_was_active) {
+            if (review_picker_on_select) {
+                if (review_picker_request.has_value()) {
+                    review_picker_on_select(*review_picker_request);
+                } else if (review_picker_cancelled) {
+                    review_picker_on_select(std::nullopt);
                 }
             }
             return true;
@@ -3951,15 +4090,23 @@ RunResult run(RunOptions opts) {
         bool                   perm_active = false;
         bool                   model_picker_active = false;
         bool                   provider_picker_active = false;
+        bool                   review_picker_active = false;
+        bool                   review_activity_active = false;
         bool                   settings_panel_active = false;
         std::string            perm_tool, perm_args, perm_allow_label;
+        std::string            review_activity_hint;
         std::string            settings_panel_status;
         ToolDiffPreview        perm_diff;
         int                    perm_selected = 0;
         int                    model_picker_selected = 0;
         int                    provider_picker_selected = 0;
+        int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
         std::vector<std::string> provider_picker_providers;
+        ReviewPickerMode       review_picker_mode = ReviewPickerMode::SelectTarget;
+        std::string            review_picker_input;
+        std::chrono::steady_clock::time_point review_activity_started_at =
+            std::chrono::steady_clock::time_point::min();
         core::config::SettingsScope settings_panel_scope = core::config::SettingsScope::User;
         bool                            local_model_picker_active   = false;
         int                             local_model_picker_selected = 0;
@@ -3988,6 +4135,13 @@ RunResult run(RunOptions opts) {
             provider_picker_active    = provider_picker_state.active;
             provider_picker_selected  = provider_picker_state.selected;
             provider_picker_providers = provider_picker_state.providers;
+            review_picker_active = review_picker_state.active;
+            review_picker_selected = review_picker_state.selected;
+            review_picker_mode = review_picker_state.mode;
+            review_picker_input = review_picker_state.input_text;
+            review_activity_active = review_activity_state.active;
+            review_activity_hint = review_activity_state.hint;
+            review_activity_started_at = review_activity_state.started_at;
             settings_panel_active = settings_panel_state.active;
             settings_panel_selected = settings_panel_state.selected;
             settings_panel_scope = settings_panel_state.scope;
@@ -4060,6 +4214,11 @@ RunResult run(RunOptions opts) {
         } else if (provider_picker_active) {
             bottom_el = render_provider_selection_panel(provider_picker_providers,
                                                         provider_picker_selected);
+        } else if (review_picker_active) {
+            bottom_el = render_review_picker_panel(
+                review_picker_mode,
+                review_picker_selected,
+                review_picker_input);
         } else if (local_model_picker_active) {
             bottom_el = render_local_model_picker_panel(
                 local_model_picker_dir,
@@ -4118,6 +4277,7 @@ RunResult run(RunOptions opts) {
         }
 
         // ── Status bar ───────────────────────────────────────────────────
+        const std::size_t tick = animation_tick.load(std::memory_order_relaxed);
         std::string budget_str = core::budget::BudgetTracker::get_instance().status_string();
         std::string context_model_name = llm_provider->get_last_model();
         if (context_model_name.empty()) {
@@ -4280,6 +4440,29 @@ RunResult run(RunOptions opts) {
                                | bgcolor(ColorWarn) | color(Color::Black);
             }
         }
+
+        Element review_activity_el = text("");
+        if (review_activity_active) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = review_activity_started_at == std::chrono::steady_clock::time_point::min()
+                ? std::chrono::seconds::zero()
+                : std::chrono::duration_cast<std::chrono::seconds>(now - review_activity_started_at);
+            const bool blink_on = !ui_show_spinner || ((tick / 4) % 2 == 0);
+            const std::string hint = review_activity_hint.empty()
+                ? std::string("current changes")
+                : compact_single_line(review_activity_hint, 44);
+            const std::string label = std::format(" reviewing {} ({})", hint, format_elapsed_compact(elapsed));
+            Element bulb_el = text("·") | color(Color::GrayDark);
+            if (blink_on) {
+                bulb_el = text("💡") | color(ColorYellowBright) | ftxui::bold;
+            }
+            review_activity_el = hbox({
+                text(" "),
+                std::move(bulb_el),
+                text(label + " ")
+                    | color(blink_on ? ColorYellowBright : Color::GrayLight),
+            });
+        }
         
         Elements left_items;
         left_items.push_back(
@@ -4295,11 +4478,13 @@ RunResult run(RunOptions opts) {
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
         left_items.push_back(guardrail_el);
-        auto left_el = ui_show_footer
+        left_items.push_back(review_activity_el);
+        const bool show_status_footer = ui_show_footer || review_activity_active;
+        auto left_el = show_status_footer
             ? hbox(std::move(left_items)) | xflex
             : text("");
 
-        auto status_el = (ui_show_footer || ctrl_d_warning_active())
+        auto status_el = (show_status_footer || ctrl_d_warning_active())
             ? hbox({
                 left_el,
                 right_el,
