@@ -57,7 +57,7 @@ inline constexpr int kCommandPickerMaxDisplayRows = 6;
 
 /// Interval between animation frames in milliseconds (controls the spinner and
 /// thinking-pulse animations in the conversation history).
-/// 150 ms → thinking dots cycle ≈ 900 ms; lightbulb glow cycle ≈ 3.6 s (24 frames).
+/// 150 ms → thinking dots cycle ≈ 900 ms; status spinners cycle smoothly without layout jitter.
 inline constexpr int kAnimationIntervalMs = 150;
 
 } // namespace tui

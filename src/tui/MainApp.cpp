@@ -96,6 +96,7 @@ constexpr std::string_view kDisableTerminalInputModes =
 constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
 constexpr auto kStreamChunkPauseBreakThreshold = std::chrono::milliseconds(1500);
 constexpr std::string_view kStreamChunkResumeMarker = "💡";
+constexpr int kReviewActivitySpinnerCharset = 12; // Compact circle spinner (single-cell frames).
 
 struct PromptActivitySnapshot {
     std::string message_id;
@@ -4447,20 +4448,20 @@ RunResult run(RunOptions opts) {
             const auto elapsed = review_activity_started_at == std::chrono::steady_clock::time_point::min()
                 ? std::chrono::seconds::zero()
                 : std::chrono::duration_cast<std::chrono::seconds>(now - review_activity_started_at);
-            const bool blink_on = !ui_show_spinner || ((tick / 4) % 2 == 0);
             const std::string hint = review_activity_hint.empty()
                 ? std::string("current changes")
                 : compact_single_line(review_activity_hint, 44);
             const std::string label = std::format(" reviewing {} ({})", hint, format_elapsed_compact(elapsed));
-            Element bulb_el = text("·") | color(Color::GrayDark);
-            if (blink_on) {
-                bulb_el = text("💡") | color(ColorYellowBright) | ftxui::bold;
-            }
+            const std::size_t spinner_frame = ui_show_spinner ? (tick / 2) : 0;
+            Element spinner_el = spinner(kReviewActivitySpinnerCharset, spinner_frame)
+                               | color(ColorYellowBright)
+                               | ftxui::bold
+                               | size(WIDTH, EQUAL, 1);
             review_activity_el = hbox({
                 text(" "),
-                std::move(bulb_el),
+                std::move(spinner_el),
                 text(label + " ")
-                    | color(blink_on ? ColorYellowBright : Color::GrayLight),
+                    | color(Color::GrayLight),
             });
         }
         
