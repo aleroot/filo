@@ -59,6 +59,37 @@ private:
     std::atomic<int> calls_{0};
 };
 
+class BlockedToolProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        const int call = ++calls_;
+        if (call > 1) {
+            core::llm::StreamChunk final_chunk;
+            final_chunk.content = "blocked tool handled";
+            final_chunk.is_final = true;
+            callback(final_chunk);
+            return;
+        }
+
+        core::llm::ToolCall tool_call;
+        tool_call.index = 0;
+        tool_call.id = "tc-blocked";
+        tool_call.type = "function";
+        tool_call.function.name = "run_terminal_command";
+        tool_call.function.arguments = R"({"command":"echo should_not_run"})";
+
+        core::llm::StreamChunk chunk;
+        chunk.tools = {tool_call};
+        chunk.is_final = true;
+        callback(chunk);
+    }
+
+private:
+    std::atomic<int> calls_{0};
+};
+
 class ThrowingProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -117,6 +148,48 @@ TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][per
     REQUIRE(history[3].role == "tool");
     REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
     REQUIRE_THAT(history[3].content, Catch::Matchers::ContainsSubstring("skipped after a previous denial"));
+}
+
+TEST_CASE("Agent distinguishes turn tool allow-list blocks from user denials",
+          "[agent][permission][constraints]") {
+    auto provider = std::make_shared<BlockedToolProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "Trigger a blocked tool call.",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        core::agent::Agent::TurnCallbacks{
+            .allowed_tools = {"read_file"},
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&]() { return done; }));
+    }
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 4);
+    REQUIRE(history[2].role == "tool");
+    REQUIRE(history[3].role == "assistant");
+    REQUIRE_THAT(
+        history[2].content,
+        Catch::Matchers::ContainsSubstring("blocked by the turn tool allow-list"));
 }
 
 TEST_CASE("Agent turns provider startup exceptions into terminal assistant errors",

@@ -4,9 +4,14 @@
 #include "core/commands/CommandExecutor.hpp"
 #include "core/commands/SkillCommand.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
+#include "core/commands/SkillTurnResolver.hpp"
+#include "core/config/ConfigManager.hpp"
+#include "core/llm/LLMProvider.hpp"
+#include "core/llm/ProviderManager.hpp"
 #include "core/tools/SkillLoader.hpp"
 #include "core/tools/SkillManifest.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -29,9 +34,39 @@ static fs::path make_temp_root(std::string_view tag) {
 }
 
 static void write_file(const fs::path& p, std::string_view content) {
+    fs::create_directories(p.parent_path());
     std::ofstream f(p);
     f << content;
 }
+
+struct ScopedEnvVar {
+    std::string name;
+    std::optional<std::string> old_value;
+
+    ScopedEnvVar(std::string env_name, const std::string& value)
+        : name(std::move(env_name)) {
+        if (const char* existing = std::getenv(name.c_str())) {
+            old_value = std::string(existing);
+        }
+        ::setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value.has_value()) {
+            ::setenv(name.c_str(), old_value->c_str(), 1);
+        } else {
+            ::unsetenv(name.c_str());
+        }
+    }
+};
+
+class DummyProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest&,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        callback(core::llm::StreamChunk::make_final());
+    }
+};
 
 static core::commands::CommandContext make_null_ctx() {
     return core::commands::CommandContext{
@@ -199,6 +234,110 @@ Review $ARGUMENTS quickly.
     CHECK(result->model_hint == "grok-3-mini");
 
     fs::remove_all(root);
+}
+
+TEST_CASE("resolve_skill_turn selects the provider family for known model IDs",
+          "[skill_commands][model_resolution]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_family");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "default_provider": "claude"
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    core::llm::ProviderManager::get_instance().register_provider(
+        "claude",
+        std::make_shared<DummyProvider>());
+
+    const auto resolution = resolve_skill_turn(
+        "claude-sonnet-4-6",
+        {"read_file"},
+        std::optional<std::string_view>{"claude"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override != nullptr);
+    CHECK(resolution.callbacks.model_override == "claude-sonnet-4-6");
+    REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
+    CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("resolve_skill_turn falls back safely when provider hints are unavailable",
+          "[skill_commands][model_resolution]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_missing");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "providers": {
+            "openai-skill-test": {
+                "api_type": "openai",
+                "base_url": "https://example.test/v1",
+                "model": "gpt-5.4"
+            }
+        }
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+
+    const auto resolution = resolve_skill_turn(
+        "claude-sonnet-4-6",
+        {"read_file"});
+
+    CHECK(resolution.callbacks.provider_override == nullptr);
+    CHECK(resolution.callbacks.model_override.empty());
+    CHECK_FALSE(resolution.warning.empty());
+    CHECK_THAT(
+        resolution.warning,
+        Catch::Matchers::ContainsSubstring("using the current model"));
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("resolve_skill_turn matches Qwen model hints to DashScope providers",
+          "[skill_commands][model_resolution]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_qwen_family");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "providers": {
+            "dashscope-prod": {
+                "api_type": "dashscope",
+                "base_url": "https://example.test/compatible-mode/v1",
+                "model": "qwen3-coder-plus"
+            }
+        }
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    core::llm::ProviderManager::get_instance().register_provider(
+        "dashscope-prod",
+        std::make_shared<DummyProvider>());
+
+    const auto resolution = resolve_skill_turn(
+        "qwen3-max",
+        {"read_file"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override != nullptr);
+    CHECK(resolution.callbacks.model_override == "qwen3-max");
+    REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
+    CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
 }
 
 TEST_CASE("parse_manifest: parses 'allowed-tools' into allowed_tools vector",

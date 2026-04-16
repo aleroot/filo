@@ -1,6 +1,7 @@
 #include "MoveFileTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <format>
@@ -9,7 +10,7 @@ namespace core::tools {
 
 ToolDefinition MoveFileTool::get_definition() const {
     return {
-        .name  = "move_file",
+        .name  = std::string(names::kMoveFile),
         .title = "Move File",
         .description =
             "Moves or renames a file or directory. "
@@ -50,11 +51,21 @@ std::string MoveFileTool::execute(const std::string& json_args, const core::cont
     std::filesystem::path src;
     std::filesystem::path dst;
     if (const auto access_error =
-            detail::check_workspace_access(requested_src, src_str, context, &src)) {
+            detail::check_workspace_access(
+                requested_src,
+                src_str,
+                context,
+                &src,
+                names::kMoveFile)) {
         return *access_error;
     }
     if (const auto access_error =
-            detail::check_workspace_access(requested_dst, dst_str, context, &dst)) {
+            detail::check_workspace_access(
+                requested_dst,
+                dst_str,
+                context,
+                &dst,
+                names::kMoveFile)) {
         return *access_error;
     }
     std::error_code ec;

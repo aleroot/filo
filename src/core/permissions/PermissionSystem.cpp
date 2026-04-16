@@ -1,6 +1,7 @@
 #include "PermissionSystem.hpp"
 #include "../agent/PermissionGate.hpp"
 #include "../agent/SafetyPolicy.hpp"
+#include "../tools/ToolNames.hpp"
 #include <array>
 #include <cctype>
 #include <format>
@@ -21,13 +22,13 @@ struct AllowRule {
 };
 
 constexpr std::array<AllowRule, 7> kAllowRules{{
-    {"run_terminal_command", "terminal commands", AllowKeyStrategy::ShellProgram},
-    {"write_file",           "file modifications", AllowKeyStrategy::ToolName},
-    {"apply_patch",          "file modifications", AllowKeyStrategy::ToolName},
-    {"replace",              "file modifications", AllowKeyStrategy::ToolName},
-    {"replace_in_file",      "file modifications", AllowKeyStrategy::ToolName},
-    {"delete_file",          "file deletions",     AllowKeyStrategy::ToolName},
-    {"move_file",            "file moves",         AllowKeyStrategy::ToolName},
+    {core::tools::names::kRunTerminalCommand, "terminal commands", AllowKeyStrategy::ShellProgram},
+    {core::tools::names::kWriteFile,          "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kApplyPatch,         "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kReplace,            "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kReplaceInFile,      "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kDeleteFile,         "file deletions",     AllowKeyStrategy::ToolName},
+    {core::tools::names::kMoveFile,           "file moves",         AllowKeyStrategy::ToolName},
 }};
 
 const AllowRule* find_allow_rule(std::string_view tool_name) {

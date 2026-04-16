@@ -698,6 +698,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     std::string session_id = core::session::SessionStore::generate_id();
     std::string created_at = core::session::SessionStore::now_iso8601();
+    std::vector<core::session::SessionTodoItem> session_todos;
 
     std::optional<core::session::SessionData> resumed_session;
     {
@@ -720,6 +721,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
         diagnostics.used_resumed_session = true;
         diagnostics.resumed_session_id = resumed_session->session_id;
         if (options.continue_last) {
+            session_todos = resumed_session->todos;
             agent->load_history(
                 {},
                 core::session::build_handoff_summary(*resumed_session),
@@ -727,6 +729,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
         } else {
             session_id = resumed_session->session_id;
             created_at = resumed_session->created_at;
+            session_todos = resumed_session->todos;
             agent->load_history(
                 resumed_session->messages,
                 resumed_session->context_summary,
@@ -739,7 +742,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     const std::string emitted_session_id = session_id;
 
     agent->set_efficiency_decision_fn(
-        [agent, &store, &session_id, &created_at, &runtime](
+        [agent, &store, &session_id, &created_at, &runtime, &session_todos](
             const core::session::SessionEfficiencyDecision&) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
@@ -755,6 +758,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
             archived.mode = snap_mode;
             archived.context_summary = snap_context;
             archived.messages = snap_messages;
+            archived.todos = session_todos;
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
             const auto total = budget.session_total();
@@ -978,6 +982,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     data.mode = agent->get_mode();
     data.context_summary = agent->get_context_summary();
     data.messages = history_after;
+    data.todos = session_todos;
     data.stats.prompt_tokens = totals.prompt_tokens;
     data.stats.completion_tokens = totals.completion_tokens;
     data.stats.cost_usd = cost_usd;

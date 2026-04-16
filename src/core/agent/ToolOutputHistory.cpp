@@ -1,5 +1,6 @@
 #include "ToolOutputHistory.hpp"
 
+#include "../tools/ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <algorithm>
@@ -66,14 +67,13 @@ split_preview(std::string_view text, Limits limits) {
 } // namespace
 
 Limits limits_for_tool(std::string_view tool_name) {
-    using namespace std::literals;
-    if (tool_name == "read_file"sv) {
+    if (tool_name == core::tools::names::kReadFile) {
         return Limits{.max_chars = 12 * 1024, .head_chars = 8 * 1024, .tail_chars = 4 * 1024};
     }
-    if (tool_name == "run_terminal_command"sv
-        || tool_name == "grep_search"sv
-        || tool_name == "file_search"sv
-        || tool_name == "list_directory"sv) {
+    if (tool_name == core::tools::names::kRunTerminalCommand
+        || tool_name == core::tools::names::kGrepSearch
+        || tool_name == core::tools::names::kFileSearch
+        || tool_name == core::tools::names::kListDirectory) {
         return Limits{.max_chars = 10 * 1024, .head_chars = 7 * 1024, .tail_chars = 3 * 1024};
     }
     return Limits{};

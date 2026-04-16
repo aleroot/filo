@@ -1,6 +1,7 @@
 #include "DeleteFileTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <format>
@@ -9,7 +10,7 @@ namespace core::tools {
 
 ToolDefinition DeleteFileTool::get_definition() const {
     return {
-        .name  = "delete_file",
+        .name  = std::string(names::kDeleteFile),
         .title = "Delete File",
         .description =
             "Permanently deletes a file or empty directory from the filesystem. "
@@ -44,7 +45,12 @@ std::string DeleteFileTool::execute(const std::string& json_args, const core::co
     const std::filesystem::path requested_path(path_str);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                requested_path,
+                path_str,
+                context,
+                &resolved_path,
+                names::kDeleteFile)) {
         return *access_error;
     }
     std::error_code ec;

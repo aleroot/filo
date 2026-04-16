@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SafetyPolicy.hpp"
+#include "../tools/ToolNames.hpp"
 
 #include <string>
 #include <string_view>
@@ -141,16 +142,10 @@ enum class PermissionProfile {
     }
 
     // 2. Identify tool categories.
-    const bool is_file_mod = (tool_name == "write_file"
-                           || tool_name == "apply_patch"
-                           || tool_name == "replace"
-                           || tool_name == "replace_in_file"
-                           || tool_name == "delete_file"
-                           || tool_name == "move_file"
-                           || tool_name == "create_directory");
+    const bool is_file_mod = core::tools::names::is_file_modification_tool(tool_name);
 
     const bool is_task = (tool_name == "task");
-    const bool is_shell = (tool_name == "run_terminal_command");
+    const bool is_shell = core::tools::names::is_terminal_tool(tool_name);
 
     // 3. Standard mode: Allow file mods, gate shell/task.
     if (profile == PermissionProfile::Standard) {

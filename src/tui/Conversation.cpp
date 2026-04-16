@@ -4,6 +4,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/tools/ToolNames.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <simdjson.h>
@@ -342,7 +343,7 @@ Element render_tool_header(const ToolActivity& tool,
         tool.status != ToolActivity::Status::Executing) {
         header_items.push_back(filler());
         std::string status_label = std::string(tui::tool_status_label(tool.status));
-        if (tool.name == "run_terminal_command" && tool.result.exit_code.has_value()) {
+        if (core::tools::names::is_terminal_tool(tool.name) && tool.result.exit_code.has_value()) {
             status_label += std::format(" · exit {}", *tool.result.exit_code);
         }
         header_items.push_back(ftxui::text(std::move(status_label)) | ftxui::color(status_color));
@@ -384,7 +385,7 @@ Element render_tool_result(const ToolActivity& tool,
                           tool.status == ToolActivity::Status::Denied;
     const Color text_color = is_error ? ColorToolFail : Color::GrayLight;
 
-    const bool is_terminal_output = tool.name == "run_terminal_command";
+    const bool is_terminal_output = core::tools::names::is_terminal_tool(tool.name);
     std::vector<Element> rows;
     if (is_terminal_output) {
         std::string label = "Terminal output";
@@ -721,7 +722,7 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
         return;
     }
 
-    if (tool.name == "run_terminal_command") {
+    if (core::tools::names::is_terminal_tool(tool.name)) {
         if (const auto exit_code = extract_int_field(object, "exit_code")) {
             tool.result.exit_code = *exit_code;
             tool.status = (*exit_code == 0)
@@ -1183,7 +1184,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         return truncate_preview(tool_args);
     }
 
-    if (tool_name == "move_file") {
+    if (tool_name == core::tools::names::kMoveFile) {
         const auto source = extract_string_field(object, {"source_path", "from_path"});
         const auto destination = extract_string_field(object, {"destination_path", "to_path"});
         if (source && destination) {
@@ -1191,7 +1192,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         }
     }
 
-    if (tool_name == "grep_search") {
+    if (tool_name == core::tools::names::kGrepSearch) {
         const auto pattern = extract_string_field(object, {"pattern"});
         const auto dir = extract_string_field(object, {"path"});
         if (pattern && dir) {
@@ -1199,13 +1200,13 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         }
     }
 
-    if (tool_name == "apply_patch") {
+    if (tool_name == core::tools::names::kApplyPatch) {
         if (const auto patch = extract_string_field(object, {"patch"})) {
             return extract_patch_preview(*patch);
         }
     }
 
-    if (tool_name == "run_terminal_command") {
+    if (core::tools::names::is_terminal_tool(tool_name)) {
         const auto command = extract_string_field(object, {"command"});
         const auto working_dir = extract_string_field(object, {"working_dir"});
         if (command && working_dir) {

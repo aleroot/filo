@@ -1,6 +1,7 @@
 #include "WriteFileTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
 #include <sstream>
@@ -11,7 +12,7 @@ namespace core::tools {
 
 ToolDefinition WriteFileTool::get_definition() const {
     return {
-        .name  = "write_file",
+        .name  = std::string(names::kWriteFile),
         .title = "Write File",
         .description =
             "Writes complete content to a file, overwriting any existing content. "
@@ -50,7 +51,12 @@ std::string WriteFileTool::execute(const std::string& json_args, const core::con
     const std::filesystem::path requested_path(path_str);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                requested_path,
+                path_str,
+                context,
+                &resolved_path,
+                names::kWriteFile)) {
         return *access_error;
     }
 

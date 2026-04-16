@@ -1,6 +1,7 @@
 #include "ReplaceTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
 #include <sstream>
@@ -11,7 +12,7 @@ namespace core::tools {
 
 ToolDefinition ReplaceTool::get_definition() const {
     return {
-        .name  = "replace",
+        .name  = std::string(names::kReplace),
         .title = "Replace in File",
         .description =
             "Replaces the first occurrence of an exact literal string within a file. "
@@ -48,7 +49,12 @@ std::string ReplaceTool::execute(const std::string& json_args, const core::conte
     const std::string path_str(file_path);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                path_str,
+                path_str,
+                context,
+                &resolved_path,
+                names::kReplace)) {
         return *access_error;
     }
     std::error_code ec;

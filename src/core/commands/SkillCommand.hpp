@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CommandExecutor.hpp"
+#include "SkillTurnResolver.hpp"
 #include "../tools/SkillManifest.hpp"
 #include <string>
 #include <string_view>
@@ -113,7 +114,15 @@ public:
         }
 
         // Preferred path: inject through the full TUI turn (rich UI feedback).
-        if (ctx.send_user_message_fn) {
+        if (ctx.send_user_skill_message_fn) {
+            ctx.send_user_skill_message_fn(prompt, manifest_.model_hint, manifest_.allowed_tools);
+            return;
+        }
+
+        const bool needs_turn_resolution =
+            !manifest_.model_hint.empty() || !manifest_.allowed_tools.empty();
+
+        if (ctx.send_user_message_fn && !needs_turn_resolution) {
             ctx.send_user_message_fn(prompt);
             return;
         }
@@ -121,12 +130,28 @@ public:
         // Fallback: direct agent call (headless, test, or daemon contexts).
         if (ctx.agent) {
             auto append_fn = ctx.append_history_fn;
+            const auto resolution = detail::resolve_skill_turn(
+                manifest_.model_hint,
+                manifest_.allowed_tools);
+            if (!resolution.warning.empty()) {
+                append_fn("\n⚠  " + resolution.warning + "\n");
+            }
             ctx.agent->send_message(
                 prompt,
                 [append_fn](const std::string& chunk) { append_fn(chunk); },
                 [](const std::string&, const std::string&) {},
-                []() {}
+                []() {},
+                resolution.callbacks
             );
+            return;
+        }
+
+        if (ctx.send_user_message_fn) {
+            if (needs_turn_resolution) {
+                ctx.append_history_fn(
+                    "\n⚠  Skill model/tool constraints are unavailable in this context; sending the prompt without overrides.\n");
+            }
+            ctx.send_user_message_fn(prompt);
             return;
         }
 

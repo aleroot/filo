@@ -7,6 +7,7 @@
 #include <filesystem>
 #include "core/llm/routing/PolicyLoader.hpp"
 #include "core/logging/Logger.hpp"
+#include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include <algorithm>
@@ -37,6 +38,14 @@ fs::path user_settings_path(const fs::path& config_dir) {
 
 fs::path workspace_settings_path(const fs::path& working_dir) {
     return working_dir / ".filo" / "settings.json";
+}
+
+fs::path user_mcp_overlay_path(const fs::path& config_dir) {
+    return config_dir / "mcp_servers.json";
+}
+
+fs::path workspace_mcp_overlay_path(const fs::path& working_dir) {
+    return working_dir / ".filo" / "mcp_servers.json";
 }
 
 std::optional<std::string>& managed_setting_slot(ManagedSettings& settings,
@@ -322,6 +331,15 @@ std::string normalize_profile_name(std::string_view name) {
     return normalized;
 }
 
+std::string trim_copy(std::string_view value) {
+    const auto start = value.find_first_not_of(" \t\r\n");
+    if (start == std::string_view::npos) {
+        return {};
+    }
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return std::string(value.substr(start, end - start + 1));
+}
+
 SubagentConfig merge_subagent(const SubagentConfig& base, const SubagentConfig& overlay) {
     SubagentConfig merged = base;
     if (!overlay.description.empty()) merged.description = overlay.description;
@@ -334,6 +352,28 @@ SubagentConfig merge_subagent(const SubagentConfig& base, const SubagentConfig& 
     if (overlay.enabled.has_value()) merged.enabled = overlay.enabled;
     if (overlay.max_steps.has_value()) merged.max_steps = overlay.max_steps;
     return merged;
+}
+
+ToolPolicyConfig merge_tool_policy(const ToolPolicyConfig& base, const ToolPolicyConfig& overlay) {
+    ToolPolicyConfig merged = base;
+    if (overlay.allowed_paths.has_value()) {
+        merged.allowed_paths = overlay.allowed_paths;
+    }
+    if (overlay.denied_paths.has_value()) {
+        merged.denied_paths = overlay.denied_paths;
+    }
+    if (overlay.allowed_commands.has_value()) {
+        merged.allowed_commands = overlay.allowed_commands;
+    }
+    if (overlay.trusted_urls.has_value()) {
+        merged.trusted_urls = overlay.trusted_urls;
+    }
+    return merged;
+}
+
+void append_hook_overlays(std::vector<HookCommandConfig>& base,
+                          const std::vector<HookCommandConfig>& overlay) {
+    base.insert(base.end(), overlay.begin(), overlay.end());
 }
 
 AppConfig make_default_config() {
@@ -403,13 +443,11 @@ AppConfig make_default_config() {
         "You are Filo's @explore worker subagent.\n"
         "Focus on finding information quickly using read/search/list tools.\n"
         "Do not edit files. Cite concrete files and findings in your final summary.";
-    explore.allowed_tools = std::vector<std::string>{
-        "read_file",
-        "file_search",
-        "grep_search",
-        "list_directory",
-        "get_current_time",
-    };
+    explore.allowed_tools = std::vector<std::string>{};
+    explore.allowed_tools->reserve(core::tools::names::kExploreAllowedTools.size());
+    for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
+        explore.allowed_tools->emplace_back(tool_name);
+    }
     explore.allow_task_tool = false;
     explore.use_allow_list = true;
     explore.enabled = true;
@@ -666,6 +704,115 @@ SubagentConfig parse_subagent(simdjson::dom::object subagent_obj) {
     return subagent;
 }
 
+std::optional<std::vector<std::string>> parse_string_array(
+    simdjson::dom::object object,
+    std::initializer_list<std::string_view> keys)
+{
+    for (const auto key : keys) {
+        simdjson::dom::array arr;
+        if (object[key].get(arr) != simdjson::SUCCESS) {
+            continue;
+        }
+
+        std::vector<std::string> values;
+        for (simdjson::dom::element item : arr) {
+            std::string_view value;
+            if (!item.get(value)) {
+                values.emplace_back(value);
+            }
+        }
+        return values;
+    }
+    return std::nullopt;
+}
+
+ToolPolicyConfig parse_tool_policy(simdjson::dom::object tool_obj) {
+    ToolPolicyConfig policy;
+    policy.allowed_paths = parse_string_array(tool_obj, {"allowed_paths", "allowed-paths"});
+    policy.denied_paths = parse_string_array(tool_obj, {"denied_paths", "denied-paths"});
+    policy.allowed_commands =
+        parse_string_array(tool_obj, {"allowed_commands", "allowed-commands"});
+    policy.trusted_urls = parse_string_array(tool_obj, {"trusted_urls", "trusted-urls"});
+    return policy;
+}
+
+HookCommandConfig parse_hook_command(simdjson::dom::element hook_el) {
+    HookCommandConfig hook;
+
+    std::string_view scalar;
+    if (hook_el.get(scalar) == simdjson::SUCCESS) {
+        hook.command = std::string(scalar);
+        return hook;
+    }
+
+    simdjson::dom::object object;
+    if (hook_el.get(object) != simdjson::SUCCESS) {
+        return hook;
+    }
+
+    if (!object["name"].get(scalar)) {
+        hook.name = std::string(scalar);
+    }
+    if (!object["command"].get(scalar)) {
+        hook.command = std::string(scalar);
+    }
+    if (!object["working_dir"].get(scalar)) {
+        hook.working_dir = std::string(scalar);
+    }
+
+    int64_t timeout_seconds = hook.timeout_seconds;
+    if (!object["timeout_seconds"].get(timeout_seconds) && timeout_seconds > 0) {
+        hook.timeout_seconds = static_cast<int>(timeout_seconds);
+    }
+
+    bool enabled = hook.enabled;
+    if (!object["enabled"].get(enabled)) {
+        hook.enabled = enabled;
+    }
+
+    if (auto env = parse_string_array(object, {"env"}); env.has_value()) {
+        hook.env = std::move(*env);
+    }
+
+    return hook;
+}
+
+void parse_hook_list(simdjson::dom::object hooks_obj,
+                     std::initializer_list<std::string_view> keys,
+                     std::vector<HookCommandConfig>& out) {
+    for (const auto key : keys) {
+        simdjson::dom::array hook_arr;
+        if (hooks_obj[key].get(hook_arr) != simdjson::SUCCESS) {
+            continue;
+        }
+
+        for (simdjson::dom::element hook_el : hook_arr) {
+            HookCommandConfig hook = parse_hook_command(hook_el);
+            if (!hook.command.empty()) {
+                out.push_back(std::move(hook));
+            }
+        }
+        return;
+    }
+}
+
+HookConfig parse_hook_config(simdjson::dom::object hooks_obj) {
+    HookConfig hooks;
+    parse_hook_list(
+        hooks_obj,
+        {"user_prompt_submit", "user-prompt-submit"},
+        hooks.user_prompt_submit);
+    parse_hook_list(
+        hooks_obj,
+        {"pre_tool_use", "pre-tool-use"},
+        hooks.pre_tool_use);
+    parse_hook_list(
+        hooks_obj,
+        {"post_tool_use", "post-tool-use"},
+        hooks.post_tool_use);
+    return hooks;
+}
+
 ManagedSettings parse_managed_settings_file(const fs::path& settings_path) {
     simdjson::padded_string json = simdjson::padded_string::load(settings_path.string());
     simdjson::dom::parser parser;
@@ -840,6 +987,29 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
                 }
             }
         }
+    }
+
+    auto parse_tool_policies_object = [&](std::string_view key) {
+        simdjson::dom::object tools_obj;
+        if (doc[key].get(tools_obj) != simdjson::SUCCESS) {
+            return false;
+        }
+
+        for (auto field : tools_obj) {
+            simdjson::dom::object tool_obj;
+            if (field.value.get(tool_obj) != simdjson::SUCCESS) {
+                continue;
+            }
+            parsed.tool_policies[std::string(field.key)] = parse_tool_policy(tool_obj);
+        }
+        return true;
+    };
+    parse_tool_policies_object("tools");
+    parse_tool_policies_object("tool_policies");
+
+    simdjson::dom::object hooks_obj;
+    if (!doc["hooks"].get(hooks_obj)) {
+        parsed.hooks = parse_hook_config(hooks_obj);
     }
 
     simdjson::dom::object router_obj;
@@ -1020,9 +1190,32 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
         }
     }
 
-    base.mcp_servers.insert(base.mcp_servers.end(),
-                            overlay.mcp_servers.begin(),
-                            overlay.mcp_servers.end());
+    for (const auto& [name, policy] : overlay.tool_policies) {
+        auto it = base.tool_policies.find(name);
+        if (it == base.tool_policies.end()) {
+            base.tool_policies[name] = policy;
+        } else {
+            it->second = merge_tool_policy(it->second, policy);
+        }
+    }
+
+    append_hook_overlays(base.hooks.user_prompt_submit, overlay.hooks.user_prompt_submit);
+    append_hook_overlays(base.hooks.pre_tool_use, overlay.hooks.pre_tool_use);
+    append_hook_overlays(base.hooks.post_tool_use, overlay.hooks.post_tool_use);
+
+    for (const auto& server : overlay.mcp_servers) {
+        auto it = std::find_if(
+            base.mcp_servers.begin(),
+            base.mcp_servers.end(),
+            [&](const McpServerConfig& existing) {
+                return existing.name == server.name;
+            });
+        if (it == base.mcp_servers.end()) {
+            base.mcp_servers.push_back(server);
+        } else {
+            *it = server;
+        }
+    }
 
     if (overlay.has_router_section) {
         core::llm::routing::merge_router_config(base.router, overlay.router);
@@ -1189,6 +1382,52 @@ bool write_text_atomic(const fs::path& path,
     return true;
 }
 
+std::string serialize_mcp_servers_overlay(const std::vector<McpServerConfig>& servers) {
+    core::utils::JsonWriter writer(1024 + servers.size() * 256);
+    {
+        auto object = writer.object();
+        writer.key("mcp_servers");
+        auto array = writer.array();
+        for (std::size_t i = 0; i < servers.size(); ++i) {
+            const auto& server = servers[i];
+            if (i > 0) {
+                writer.comma();
+            }
+
+            auto server_object = writer.object();
+            writer.kv_str("name", server.name).comma();
+            writer.kv_str("transport", server.transport);
+
+            if (!server.command.empty()) {
+                writer.comma().kv_str("command", server.command);
+            }
+            if (!server.url.empty()) {
+                writer.comma().kv_str("url", server.url);
+            }
+            if (!server.args.empty()) {
+                writer.comma().key("args");
+                auto args_array = writer.array();
+                for (std::size_t arg_index = 0; arg_index < server.args.size(); ++arg_index) {
+                    if (arg_index > 0) writer.comma();
+                    writer.str(server.args[arg_index]);
+                }
+            }
+            if (!server.env.empty()) {
+                writer.comma().key("env");
+                auto env_array = writer.array();
+                for (std::size_t env_index = 0; env_index < server.env.size(); ++env_index) {
+                    if (env_index > 0) writer.comma();
+                    writer.str(server.env[env_index]);
+                }
+            }
+        }
+    }
+
+    std::string output = std::move(writer).take();
+    output.push_back('\n');
+    return output;
+}
+
 } // namespace
 
 std::string ConfigManager::get_config_dir() const {
@@ -1216,6 +1455,19 @@ std::filesystem::path ConfigManager::get_profile_defaults_path() const {
     return profile_defaults_overlay_path(get_config_dir());
 }
 
+std::filesystem::path ConfigManager::get_mcp_overlay_path(
+    SettingsScope scope,
+    std::optional<std::filesystem::path> working_dir) const {
+    const fs::path config_dir = get_config_dir();
+    if (scope == SettingsScope::User) {
+        return user_mcp_overlay_path(config_dir);
+    }
+
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+    return workspace_mcp_overlay_path(cwd);
+}
+
 std::filesystem::path ConfigManager::get_settings_path(
     SettingsScope scope,
     std::optional<std::filesystem::path> working_dir) const {
@@ -1241,11 +1493,13 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     const fs::path model_overlay_path = model_defaults_overlay_path(config_dir);
     const fs::path profile_overlay_path = profile_defaults_overlay_path(config_dir);
     const fs::path auth_overlay_path = auth_defaults_overlay_path(config_dir);
+    const fs::path user_mcp_overlay = user_mcp_overlay_path(config_dir);
     const fs::path cwd = working_dir.value_or(fs::current_path());
     last_working_dir_ = cwd;
     const fs::path user_settings_file = user_settings_path(config_dir);
     const fs::path project_config_path = cwd / ".filo" / "config.json";
     const fs::path workspace_settings_file = workspace_settings_path(cwd);
+    const fs::path workspace_mcp_overlay = workspace_mcp_overlay_path(cwd);
     std::optional<std::string> selected_profile;
 
     if (!fs::exists(global_config_path)) {
@@ -1260,8 +1514,10 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     load_optional_config(global_config_path, config_, profiles_, selected_profile);
     load_optional_config(auth_overlay_path, config_, profiles_, selected_profile);
     user_settings_ = load_optional_managed_settings(user_settings_file, config_);
+    load_optional_config(user_mcp_overlay, config_, profiles_, selected_profile);
     load_optional_config(project_config_path, config_, profiles_, selected_profile);
     workspace_settings_ = load_optional_managed_settings(workspace_settings_file, config_);
+    load_optional_config(workspace_mcp_overlay, config_, profiles_, selected_profile);
     load_optional_config(profile_overlay_path, config_, profiles_, selected_profile);
 
     if (const char* env_profile = std::getenv("FILO_PROFILE");
@@ -1564,6 +1820,139 @@ bool ConfigManager::persist_local_provider(std::string_view model_path,
             .model_path = std::string(model_path),
         },
     };
+    return true;
+}
+
+bool ConfigManager::persist_mcp_server(const McpServerConfig& server,
+                                       SettingsScope scope,
+                                       std::optional<std::filesystem::path> working_dir,
+                                       std::string* error) {
+    if (server.name.empty()) {
+        if (error) *error = "MCP server name cannot be empty";
+        return false;
+    }
+    if (server.transport != "stdio" && server.transport != "http") {
+        if (error) *error = "MCP transport must be either 'stdio' or 'http'";
+        return false;
+    }
+    if (server.transport == "stdio" && server.command.empty()) {
+        if (error) *error = "stdio MCP servers require a command";
+        return false;
+    }
+    if (server.transport == "http" && server.url.empty()) {
+        if (error) *error = "http MCP servers require a url";
+        return false;
+    }
+
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+    const fs::path overlay_path = get_mcp_overlay_path(scope, cwd);
+
+    std::vector<McpServerConfig> servers;
+    if (fs::exists(overlay_path)) {
+        try {
+            servers = parse_config_file(overlay_path).config.mcp_servers;
+        } catch (const std::exception& e) {
+            core::logging::warn(
+                "Failed to parse {} while persisting MCP servers: {}. Rewriting overlay.",
+                overlay_path.string(),
+                e.what());
+        }
+    }
+
+    auto it = std::find_if(
+        servers.begin(),
+        servers.end(),
+        [&](const McpServerConfig& existing) { return existing.name == server.name; });
+    if (it == servers.end()) {
+        servers.push_back(server);
+    } else {
+        *it = server;
+    }
+
+    std::string write_error;
+    if (!write_text_atomic(
+            overlay_path,
+            serialize_mcp_servers_overlay(servers),
+            write_error)) {
+        if (error) *error = write_error;
+        return false;
+    }
+
+    load(cwd);
+    if (error) error->clear();
+    return true;
+}
+
+bool ConfigManager::remove_mcp_server(std::string_view server_name,
+                                      SettingsScope scope,
+                                      std::optional<std::filesystem::path> working_dir,
+                                      std::string* error) {
+    const std::string trimmed_name = trim_copy(server_name);
+    if (trimmed_name.empty()) {
+        if (error) *error = "MCP server name cannot be empty";
+        return false;
+    }
+
+    const fs::path cwd = working_dir.value_or(
+        last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
+    const fs::path overlay_path = get_mcp_overlay_path(scope, cwd);
+
+    std::vector<McpServerConfig> servers;
+    if (fs::exists(overlay_path)) {
+        try {
+            servers = parse_config_file(overlay_path).config.mcp_servers;
+        } catch (const std::exception& e) {
+            if (error) {
+                *error = std::format(
+                    "failed to parse MCP overlay '{}': {}",
+                    overlay_path.string(),
+                    e.what());
+            }
+            return false;
+        }
+    }
+
+    const auto erase_begin = std::remove_if(
+        servers.begin(),
+        servers.end(),
+        [&](const McpServerConfig& existing) { return existing.name == trimmed_name; });
+    if (erase_begin == servers.end()) {
+        if (error) {
+            *error = std::format(
+                "MCP server '{}' was not found in the {} overlay",
+                trimmed_name,
+                scope == SettingsScope::User ? "user" : "workspace");
+        }
+        return false;
+    }
+    servers.erase(erase_begin, servers.end());
+
+    if (servers.empty()) {
+        std::error_code remove_ec;
+        fs::remove(overlay_path, remove_ec);
+        if (remove_ec) {
+            if (error) {
+                *error = std::format(
+                    "could not remove MCP overlay '{}': {}",
+                    overlay_path.string(),
+                    remove_ec.message());
+            }
+            return false;
+        }
+    } else {
+        std::string write_error;
+        if (!write_text_atomic(
+                overlay_path,
+                serialize_mcp_servers_overlay(servers),
+                write_error)) {
+            if (error) *error = write_error;
+            return false;
+        }
+    }
+
+    load(cwd);
+    if (error) error->clear();
     return true;
 }
 

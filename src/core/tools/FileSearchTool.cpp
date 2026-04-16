@@ -1,5 +1,6 @@
 #include "FileSearchTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -51,7 +52,7 @@ namespace {
 
 ToolDefinition FileSearchTool::get_definition() const {
     return {
-        .name  = "file_search",
+        .name  = std::string(names::kFileSearch),
         .title = "File Search",
         .description =
             "Searches for files that match a glob pattern, recursively. "
@@ -78,7 +79,7 @@ std::string FileSearchTool::execute(const std::string& json_args, const core::co
         return R"({"error":"Invalid JSON arguments provided to file_search."})";
 
     if (const auto validation_error =
-            detail::validate_object_arguments(doc, "file_search", {"pattern", "path"})) {
+            detail::validate_object_arguments(doc, names::kFileSearch, {"pattern", "path"})) {
         return *validation_error;
     }
 
@@ -96,7 +97,12 @@ std::string FileSearchTool::execute(const std::string& json_args, const core::co
 
     std::filesystem::path resolved_dir;
     if (const auto access_error =
-            detail::check_workspace_access(dir, dir, context, &resolved_dir)) {
+            detail::check_workspace_access(
+                dir,
+                dir,
+                context,
+                &resolved_dir,
+                names::kFileSearch)) {
         return *access_error;
     }
 

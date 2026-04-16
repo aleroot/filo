@@ -3,8 +3,13 @@
 #include "ToolOutputHistory.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../context/SteeringLoader.hpp"
+#include "../hooks/HookManager.hpp"
 #include "../session/SessionStats.hpp"
 #include "../scm/ScmFactory.hpp"
+#include "../tools/ToolNames.hpp"
+#include "../tools/ToolPolicy.hpp"
+#include "../utils/JsonWriter.hpp"
 #include "../utils/FileSystemUtils.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/ModelRegistry.hpp"
@@ -50,6 +55,82 @@ namespace {
     const core::context::SessionContext& session_context)
 {
     return session_context.workspace_view().primary();
+}
+
+struct HookFieldPayload {
+    std::string value;
+    bool truncated = false;
+};
+
+[[nodiscard]] HookFieldPayload clamp_hook_field(std::string_view text) {
+    constexpr std::size_t kMaxChars = 4 * 1024;
+    constexpr std::size_t kHeadChars = 3 * 1024;
+    constexpr std::size_t kTailChars = kMaxChars - kHeadChars;
+
+    HookFieldPayload payload{.value = std::string(text)};
+    if (text.size() <= kMaxChars) {
+        return payload;
+    }
+
+    payload.truncated = true;
+    payload.value.clear();
+    payload.value.reserve(kMaxChars + 64);
+    payload.value.append(text.substr(0, kHeadChars));
+    payload.value.append("\n\n[... hook payload truncated ...]\n\n");
+    payload.value.append(text.substr(text.size() - kTailChars));
+    return payload;
+}
+
+[[nodiscard]] std::string build_user_prompt_hook_payload(
+    const core::llm::Message& user_message,
+    std::string_view mode)
+{
+    core::utils::JsonWriter writer(1024);
+    const auto content =
+        clamp_hook_field(core::llm::message_text_for_display(user_message));
+    {
+        auto object = writer.object();
+        writer.kv_str("role", user_message.role.empty() ? "user" : user_message.role).comma()
+              .kv_str("mode", mode).comma()
+              .kv_str("content", content.value).comma()
+              .kv_num("content_parts_count", user_message.content_parts.size());
+        if (content.truncated) {
+            writer.comma().kv_bool("content_truncated", true);
+        }
+    }
+    return std::move(writer).take();
+}
+
+[[nodiscard]] std::string build_tool_hook_payload(const core::llm::ToolCall& tool_call,
+                                                  const core::llm::Message* result = nullptr) {
+    core::utils::JsonWriter writer(2048);
+    const auto arguments = clamp_hook_field(tool_call.function.arguments);
+    {
+        auto object = writer.object();
+        writer.kv_str("tool_name", tool_call.function.name).comma()
+              .kv_str("tool_call_id", tool_call.id).comma()
+              .kv_str("arguments", arguments.value);
+        if (arguments.truncated) {
+            writer.comma().kv_bool("arguments_truncated", true);
+        }
+        if (result != nullptr) {
+            const auto result_content = clamp_hook_field(result->content);
+            writer.comma().kv_str("result", result_content.value).comma()
+                  .kv_bool("success", !is_tool_error(result->content));
+            if (result_content.truncated) {
+                writer.comma().kv_bool("result_truncated", true);
+            }
+        }
+    }
+    return std::move(writer).take();
+}
+
+[[nodiscard]] bool tool_is_allowed_for_turn(std::string_view tool_name,
+                                            const Agent::TurnCallbacks& turn_callbacks) {
+    if (turn_callbacks.allowed_tools.empty()) {
+        return true;
+    }
+    return core::tools::policy::is_tool_allowed(tool_name, turn_callbacks.allowed_tools);
 }
 
 } // namespace
@@ -160,6 +241,11 @@ std::string Agent::build_stable_prompt_prefix() const {
         const auto project_root = resolve_agent_project_root(session_context_);
         if (project_root.empty()) {
             return prompt;
+        }
+
+        if (const auto steering = core::context::load_project_steering_block(project_root);
+            !steering.empty()) {
+            prompt += steering;
         }
 
         // Detect SCM (Git, etc.) or fallback to NoOp
@@ -358,13 +444,20 @@ void Agent::send_message(core::llm::Message user_message,
     if (user_message.role.empty()) {
         user_message.role = "user";
     }
+    const core::llm::Message hook_message = user_message;
+    std::string mode_snapshot;
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
+        mode_snapshot = current_mode_;
         history_.push_back(std::move(user_message));
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
+    core::hooks::dispatch(
+        core::hooks::HookEvent::UserPromptSubmit,
+        build_user_prompt_hook_payload(hook_message, mode_snapshot),
+        session_context_);
     step(text_callback, tool_callback, done_callback, std::move(turn_callbacks), std::move(turn_state));
 }
 
@@ -406,9 +499,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     {
         std::lock_guard lock(history_mutex_);
         request.messages = history_;
-        request.model = active_model_;
+        request.model = turn_callbacks.model_override.empty()
+            ? active_model_
+            : turn_callbacks.model_override;
         request.effort = effort_level_;
-        provider = provider_;
+        provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
     }
     if (!provider) {
@@ -418,7 +513,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
     if (provider->capabilities().supports_tool_calls) {
         request.tools = skill_manager_.get_all_tools();
-        request.tools.push_back(orchestrator_.task_tool_definition());
+        if (!turn_callbacks.allowed_tools.empty()) {
+            std::erase_if(request.tools, [&](const core::llm::Tool& tool) {
+                return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks);
+            });
+        }
+        if (tool_is_allowed_for_turn(SubagentOrchestrator::kTaskToolName, turn_callbacks)) {
+            request.tools.push_back(orchestrator_.task_tool_definition());
+        }
     }
 
     if (turn_callbacks.on_step_begin) {
@@ -428,11 +530,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     // In PLAN/RESEARCH mode strip write-destructive tools
     if (mode_snapshot == "PLAN" || mode_snapshot == "RESEARCH") {
         std::erase_if(request.tools, [](const core::llm::Tool& t) {
-            return t.function.name == "apply_patch"
-                || t.function.name == "write_file"
-                || t.function.name == "replace_in_file"
-                || t.function.name == "delete_file"
-                || t.function.name == "move_file";
+            return core::tools::names::is_write_destructive_tool(t.function.name);
         });
     }
 
@@ -575,6 +673,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // 1. Permission checks (sequential — only one prompt at a time)
             enum class DeniedReason {
                 None,
+                BlockedByTurnAllowList,
                 UserDenied,
                 SkippedAfterEarlierDenial,
             };
@@ -585,6 +684,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 const auto& tc = (*tool_calls_accum)[i];
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
+                }
+                if (!tool_is_allowed_for_turn(tc.function.name, turn_callbacks)) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::BlockedByTurnAllowList;
+                    tool_callback(tc.function.name, "[blocked by turn tool allow-list]");
+                    continue;
                 }
                 if (denied_any) {
                     approved[i] = false;
@@ -606,8 +711,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::string parent_mode_for_task;
             {
                 std::lock_guard lock(self->history_mutex_);
-                provider_for_task = self->provider_;
-                active_model_for_task = self->active_model_;
+                provider_for_task = turn_callbacks.provider_override
+                    ? turn_callbacks.provider_override
+                    : self->provider_;
+                active_model_for_task = turn_callbacks.model_override.empty()
+                    ? self->active_model_
+                    : turn_callbacks.model_override;
                 parent_mode_for_task = self->current_mode_;
             }
 
@@ -617,9 +726,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 if (!approved[i]) {
                     const bool skipped_after_denial =
                         denied_reasons[i] == DeniedReason::SkippedAfterEarlierDenial;
+                    const bool blocked_by_turn_allow_list =
+                        denied_reasons[i] == DeniedReason::BlockedByTurnAllowList;
                     const std::string error_payload = skipped_after_denial
                         ? R"({"error":"Tool call skipped after a previous denial in this step."})"
-                        : R"({"error":"Tool call denied by user."})";
+                        : blocked_by_turn_allow_list
+                            ? R"({"error":"Tool call blocked by the turn tool allow-list."})"
+                            : R"({"error":"Tool call denied by user."})";
                     // Inject a denied message directly
                     futures.push_back(std::async(std::launch::deferred, [tc, error_payload]() {
                         return core::llm::Message{
@@ -638,6 +751,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      active_model_for_task,
                      parent_mode_for_task]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
+                        core::hooks::dispatch(
+                            core::hooks::HookEvent::PreToolUse,
+                            build_tool_hook_payload(tc),
+                            self->session_context());
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                             SubagentOrchestrator::RunContext run_context{
@@ -661,13 +778,18 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 self->session_context());
                         }
                         result = tool_output_history::clamp_for_history(tc.function.name, result);
-                        return core::llm::Message{
+                        core::llm::Message message{
                             .role         = "tool",
                             .content      = result,
                             .name         = tc.function.name,
                             .tool_call_id = tc.id,
                             .tool_calls   = {}
                         };
+                        core::hooks::dispatch(
+                            core::hooks::HookEvent::PostToolUse,
+                            build_tool_hook_payload(tc, &message),
+                            self->session_context());
+                        return message;
                     }));
             }
 

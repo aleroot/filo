@@ -1,5 +1,6 @@
 #include "ReadFileTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
@@ -45,7 +46,7 @@ namespace core::tools {
 
 ToolDefinition ReadFileTool::get_definition() const {
     return {
-        .name  = "read_file",
+        .name  = std::string(names::kReadFile),
         .title = "Read File",
         .description =
             "Reads the contents of a file. Optionally specify offset_line (1-based) and "
@@ -76,7 +77,7 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
     }
 
     if (const auto validation_error =
-            detail::validate_object_arguments(doc, "read_file", {"path", "offset_line", "limit_lines"})) {
+            detail::validate_object_arguments(doc, names::kReadFile, {"path", "offset_line", "limit_lines"})) {
         return *validation_error;
     }
 
@@ -96,7 +97,12 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
     const std::filesystem::path requested_path(path_str);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                requested_path,
+                path_str,
+                context,
+                &resolved_path,
+                names::kReadFile)) {
         return *access_error;
     }
     const std::string resolved_path_string = resolved_path.string();

@@ -1,5 +1,6 @@
 #include "GrepSearchTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -152,7 +153,7 @@ void search_file(
 
 ToolDefinition GrepSearchTool::get_definition() const {
     return {
-        .name  = "grep_search",
+        .name  = std::string(names::kGrepSearch),
         .title = "Grep Search",
         .description =
             "Searches for a regular expression pattern within file contents, recursively. "
@@ -183,7 +184,10 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
         return R"({"error":"Invalid JSON arguments provided to grep_search."})";
 
     if (const auto validation_error =
-            detail::validate_object_arguments(doc, "grep_search", {"pattern", "path", "include_pattern"})) {
+            detail::validate_object_arguments(
+                doc,
+                names::kGrepSearch,
+                {"pattern", "path", "include_pattern"})) {
         return *validation_error;
     }
 
@@ -205,7 +209,12 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
 
     std::filesystem::path resolved_dir;
     if (const auto access_error =
-            detail::check_workspace_access(dir_path, dir_path, context, &resolved_dir)) {
+            detail::check_workspace_access(
+                dir_path,
+                dir_path,
+                context,
+                &resolved_dir,
+                names::kGrepSearch)) {
         return *access_error;
     }
 

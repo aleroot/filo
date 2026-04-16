@@ -177,6 +177,34 @@ struct SubagentConfig {
     std::optional<int>  max_steps;
 };
 
+struct ToolPolicyConfig {
+    std::optional<std::vector<std::string>> allowed_paths;
+    std::optional<std::vector<std::string>> denied_paths;
+    std::optional<std::vector<std::string>> allowed_commands;
+    std::optional<std::vector<std::string>> trusted_urls;
+};
+
+struct HookCommandConfig {
+    std::string name;
+    std::string command;
+    std::string working_dir;
+    std::vector<std::string> env;
+    int timeout_seconds = 15;
+    bool enabled = true;
+};
+
+struct HookConfig {
+    std::vector<HookCommandConfig> user_prompt_submit;
+    std::vector<HookCommandConfig> pre_tool_use;
+    std::vector<HookCommandConfig> post_tool_use;
+
+    [[nodiscard]] bool empty() const {
+        return user_prompt_submit.empty()
+            && pre_tool_use.empty()
+            && post_tool_use.empty();
+    }
+};
+
 struct AppConfig {
     std::string default_provider;
     std::string default_model_selection;
@@ -191,6 +219,8 @@ struct AppConfig {
     int         auto_compact_threshold = 0;
     std::unordered_map<std::string, ProviderConfig> providers;
     std::unordered_map<std::string, SubagentConfig> subagents;
+    std::unordered_map<std::string, ToolPolicyConfig> tool_policies;
+    HookConfig hooks;
     std::vector<McpServerConfig> mcp_servers;
     core::llm::routing::RouterConfig router;
     bool has_router_section = false;
@@ -235,8 +265,21 @@ public:
                                  std::optional<std::filesystem::path> working_dir = std::nullopt,
                                  std::string* error = nullptr);
 
+    bool persist_mcp_server(const McpServerConfig& server,
+                            SettingsScope scope = SettingsScope::Workspace,
+                            std::optional<std::filesystem::path> working_dir = std::nullopt,
+                            std::string* error = nullptr);
+
+    bool remove_mcp_server(std::string_view server_name,
+                           SettingsScope scope = SettingsScope::Workspace,
+                           std::optional<std::filesystem::path> working_dir = std::nullopt,
+                           std::string* error = nullptr);
+
     std::string get_config_dir() const;
     std::filesystem::path get_profile_defaults_path() const;
+    std::filesystem::path get_mcp_overlay_path(
+        SettingsScope scope,
+        std::optional<std::filesystem::path> working_dir = std::nullopt) const;
 
     std::filesystem::path get_settings_path(
         SettingsScope scope,

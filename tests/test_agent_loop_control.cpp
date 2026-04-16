@@ -17,6 +17,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <vector>
@@ -57,6 +58,34 @@ public:
 
 private:
     std::filesystem::path path_;
+};
+
+class NamedNoopTool final : public core::tools::Tool {
+public:
+    explicit NamedNoopTool(std::string name)
+        : name_(std::move(name)) {}
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .title = "Named No-op",
+            .description = "No-op tool used for request filtering tests.",
+            .parameters = {},
+            .annotations = {
+                .read_only_hint = true,
+                .idempotent_hint = true,
+            },
+        };
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
+        return R"({"ok":true})";
+    }
+
+private:
+    std::string name_;
 };
 
 class NoopLoopTool final : public core::tools::Tool {
@@ -372,6 +401,139 @@ TEST_CASE("Agent project context follows the explicit SessionContext workspace",
     const auto& system_prompt = requests[0].messages[0].content;
     CHECK(system_prompt.find("workspace_marker.txt") != std::string::npos);
     CHECK(system_prompt.find("cwd_marker.txt") == std::string::npos);
+}
+
+TEST_CASE("Agent loads FILO steering files into the system prompt",
+          "[agent][prompt][steering]") {
+    const auto base = std::filesystem::temp_directory_path()
+        / std::format("filo_agent_steering_{}",
+                      std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir workspace_dir(base / "workspace");
+
+    {
+        std::ofstream filo_md(workspace_dir.path() / "FILO.md");
+        filo_md << "Project steering from FILO.md\n";
+    }
+    {
+        std::ofstream agents_md(workspace_dir.path() / "AGENTS.md");
+        agents_md << "Repository rules from AGENTS.md\n";
+    }
+    {
+        std::filesystem::create_directories(workspace_dir.path() / ".filo" / "steering");
+        std::ofstream steering_md(workspace_dir.path() / ".filo" / "steering" / "backend.md");
+        steering_md << "Backend steering document\n";
+    }
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_dir.path(),
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "agent-steering-session");
+    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager, session_context);
+
+    send_and_wait(agent, "hello");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    REQUIRE_FALSE(requests[0].messages.empty());
+
+    const auto& system_prompt = requests[0].messages[0].content;
+    CHECK(system_prompt.find("[Project Steering]") != std::string::npos);
+    CHECK(system_prompt.find("FILO.md") != std::string::npos);
+    CHECK(system_prompt.find("AGENTS.md") != std::string::npos);
+    CHECK(system_prompt.find("backend.md") != std::string::npos);
+    CHECK(system_prompt.find("Project steering from FILO.md") != std::string::npos);
+}
+
+TEST_CASE("Agent loads AGENTS.md hierarchically from repo root to workspace root",
+          "[agent][prompt][steering]") {
+    const auto base = std::filesystem::temp_directory_path()
+        / std::format("filo_agent_hierarchical_{}",
+                      std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir repo_dir(base / "repo");
+    const auto workspace_dir = repo_dir.path() / "workspace" / "crate_a";
+    std::filesystem::create_directories(workspace_dir);
+
+    {
+        std::filesystem::create_directories(repo_dir.path() / ".git");
+    }
+    {
+        std::ofstream root_agents(repo_dir.path() / "AGENTS.md");
+        root_agents << "Repository-wide rules\n";
+    }
+    {
+        std::ofstream nested_agents(workspace_dir / "AGENTS.md");
+        nested_agents << "Crate-specific rules\n";
+    }
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_dir,
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "agent-hierarchical-steering-session");
+    auto agent = std::make_shared<core::agent::Agent>(provider, tool_manager, session_context);
+
+    send_and_wait(agent, "hello");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    REQUIRE_FALSE(requests[0].messages.empty());
+
+    const auto& system_prompt = requests[0].messages[0].content;
+    const auto root_pos = system_prompt.find("Repository-wide rules");
+    const auto nested_pos = system_prompt.find("Crate-specific rules");
+
+    CHECK(root_pos != std::string::npos);
+    CHECK(nested_pos != std::string::npos);
+    CHECK(root_pos < nested_pos);
+    CHECK(system_prompt.find("workspace/crate_a/AGENTS.md") != std::string::npos);
+}
+
+TEST_CASE("Agent enforces per-turn model and tool constraints",
+          "[agent][turn][constraints]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<NamedNoopTool>("allowed_tool"));
+    tool_manager.register_tool(std::make_shared<NamedNoopTool>("blocked_tool"));
+
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    send_and_wait(
+        agent,
+        "use constrained tools",
+        core::agent::Agent::TurnCallbacks{
+            .model_override = "skill-model",
+            .allowed_tools = {"allowed_tool"},
+        });
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].model == "skill-model");
+
+    std::vector<std::string> tool_names;
+    tool_names.reserve(requests[0].tools.size());
+    for (const auto& tool : requests[0].tools) {
+        tool_names.push_back(tool.function.name);
+    }
+
+    CHECK(std::ranges::find(tool_names, "allowed_tool") != tool_names.end());
+    CHECK(std::ranges::find(tool_names, "blocked_tool") == tool_names.end());
+    CHECK(std::ranges::find(tool_names, "task") == tool_names.end());
 }
 
 TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {

@@ -1,6 +1,7 @@
 #include "SearchReplaceTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <fstream>
@@ -179,7 +180,7 @@ static constexpr std::string_view kEditsItemsSchema =
 
 ToolDefinition SearchReplaceTool::get_definition() const {
     return {
-        .name  = "search_replace",
+        .name  = std::string(names::kSearchReplace),
         .title = "Search & Replace",
         .description =
             "Applies one or more search-and-replace edits to a file in a single call. "
@@ -249,7 +250,12 @@ std::string SearchReplaceTool::execute(const std::string& json_args, const core:
     const std::string path_str(file_path_v);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                path_str,
+                path_str,
+                context,
+                &resolved_path,
+                names::kSearchReplace)) {
         return *access_error;
     }
     std::error_code ec;

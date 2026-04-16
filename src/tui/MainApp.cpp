@@ -15,6 +15,7 @@
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/TodoUtils.hpp"
 #include "core/history/PromptHistoryStore.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -51,10 +52,13 @@
 #include "core/context/ContextMentions.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
+#include "core/commands/SkillTurnResolver.hpp"
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <array>
+#include <charconv>
 #include <memory>
 #include <format>
 #include <chrono>
@@ -972,6 +976,12 @@ RunResult run(RunOptions opts) {
     std::string session_id          = core::session::SessionStore::generate_id();
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
     std::string session_file_path;  // computed after first save
+    std::vector<core::session::SessionTodoItem> session_todos;
+    struct SessionSaveState {
+        std::mutex write_mutex;
+        std::atomic<std::uint64_t> latest_requested{0};
+    };
+    auto session_save_state = std::make_shared<SessionSaveState>();
 
     // If resuming, compute the path now so we can return it in RunResult.
     auto compute_session_path = [&]() {
@@ -991,6 +1001,7 @@ RunResult run(RunOptions opts) {
             const auto& data = *data_opt;
             session_id         = data.session_id;
             session_created_at = data.created_at;
+            session_todos      = data.todos;
 
             // Restore agent state.
             agent->load_history(data.messages, data.context_summary, data.mode);
@@ -1045,6 +1056,7 @@ RunResult run(RunOptions opts) {
             if (const auto message = startup_history_message(); !message.empty()) {
                 append_ui_message(ui_messages, make_system_message(message));
             }
+            session_todos.clear();
         }
         animation_cv.notify_one();
         agent->clear_history();
@@ -1283,6 +1295,7 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
             session_created_at = data.created_at;
+            session_todos      = data.todos;
 
             // Restore agent state.
             agent->load_history(data.messages, data.context_summary, data.mode);
@@ -1369,11 +1382,13 @@ RunResult run(RunOptions opts) {
         std::string old_session_id;
         std::string provider_name;
         std::string model_name;
+        std::vector<core::session::SessionTodoItem> snap_todos;
         {
             std::lock_guard lock(ui_mutex);
             old_session_id = session_id;
             provider_name = active_provider_name;
             model_name = active_model_name;
+            snap_todos = session_todos;
         }
 
         const std::string new_session_id = core::session::SessionStore::generate_id();
@@ -1389,6 +1404,7 @@ RunResult run(RunOptions opts) {
         data.mode            = snap_mode;
         data.context_summary = snap_context;
         data.messages        = snap_messages;
+        data.todos           = snap_todos;
 
         const auto& budget = core::budget::BudgetTracker::get_instance();
         const auto total = budget.session_total();
@@ -1423,7 +1439,7 @@ RunResult run(RunOptions opts) {
     agent->set_efficiency_decision_fn(
         [agent, session_store, &ui_mutex, &session_id, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &screen](const core::session::SessionEfficiencyDecision& decision) {
+         &ui_messages, &screen, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
             auto snap_context = agent->get_context_summary();
@@ -1435,6 +1451,7 @@ RunResult run(RunOptions opts) {
                 archived.created_at = session_created_at;
                 archived.provider = active_provider_name;
                 archived.model = active_model_name;
+                archived.todos = session_todos;
             }
             archived.last_active_at = core::session::SessionStore::now_iso8601();
             archived.working_dir = std::filesystem::current_path().string();
@@ -1501,6 +1518,7 @@ RunResult run(RunOptions opts) {
         });
 
     std::function<std::string()> apply_active_profile_live;
+    std::function<std::string()> reload_mcp_live;
 
     auto activate_manual_mode = [&]() -> std::string {
         try {
@@ -1569,6 +1587,22 @@ RunResult run(RunOptions opts) {
         return std::format(
             "Switched to Auto mode — task-aware smart routing via policy '{}'",
             active_router_policy.empty() ? "<unset>" : active_router_policy);
+    };
+
+    reload_mcp_live = [&]() -> std::string {
+        config = config_manager.get_config();
+        core::mcp::McpConnectionManager::get_instance().connect_all(
+            config,
+            tool_manager,
+            llm_provider,
+            model_selection_mode == ModelSelectionMode::Manual
+                ? manual_model_name
+                : std::string{});
+
+        refresh_status_labels();
+        animation_cv.notify_one();
+        screen.PostEvent(Event::Custom);
+        return "Reloaded MCP servers live.";
     };
 
     apply_active_profile_live = [&]() -> std::string {
@@ -2714,10 +2748,288 @@ RunResult run(RunOptions opts) {
         screen.PostEvent(Event::Custom);
     };
 
+    auto save_session_snapshot = [&, session_save_state]() {
+        const auto snap_messages = agent->get_history();
+        const auto snap_mode = agent->get_mode();
+        const auto snap_context = agent->get_context_summary();
+        const auto working_dir = std::filesystem::current_path().string();
+
+        std::string sid;
+        std::string created_at;
+        std::string provider_name;
+        std::string model_name;
+        std::vector<core::session::SessionTodoItem> snap_todos;
+        {
+            std::lock_guard lock(ui_mutex);
+            sid = session_id;
+            created_at = session_created_at;
+            provider_name = active_provider_name;
+            model_name = active_model_name;
+            snap_todos = session_todos;
+        }
+
+        const std::uint64_t generation =
+            session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+        std::thread([session_store, sid, created_at,
+                     provider_name, model_name,
+                     working_dir,
+                     snap_messages = std::move(snap_messages),
+                     snap_mode, snap_context,
+                     snap_todos = std::move(snap_todos),
+                     session_save_state,
+                     generation]() {
+            core::session::SessionData data;
+            data.session_id        = sid;
+            data.created_at        = created_at;
+            data.last_active_at    = core::session::SessionStore::now_iso8601();
+            data.working_dir       = working_dir;
+            data.provider          = provider_name;
+            data.model             = model_name;
+            data.mode              = snap_mode;
+            data.context_summary   = snap_context;
+            data.messages          = snap_messages;
+            data.todos             = snap_todos;
+
+            const auto& budget = core::budget::BudgetTracker::get_instance();
+            const auto total = budget.session_total();
+            data.stats.prompt_tokens     = total.prompt_tokens;
+            data.stats.completion_tokens = total.completion_tokens;
+            data.stats.cost_usd          = budget.session_cost_usd();
+
+            const auto snap = core::session::SessionStats::get_instance().snapshot();
+            data.stats.turn_count         = snap.turn_count;
+            data.stats.tool_calls_total   = snap.tool_calls_total;
+            data.stats.tool_calls_success = snap.tool_calls_success;
+            data.handoff_summary          = core::session::build_handoff_summary(data);
+
+            std::lock_guard save_lock(session_save_state->write_mutex);
+            if (generation != session_save_state->latest_requested.load(std::memory_order_acquire)) {
+                return;
+            }
+
+            std::string error;
+            if (!session_store->save(data, &error)) {
+                core::logging::warn(
+                    "Failed to save session snapshot {}: {}",
+                    sid,
+                    error.empty() ? std::string("unknown save error") : error);
+            }
+        }).detach();
+    };
+
+    auto resolve_todo_index_locked = [&](std::string_view selector)
+        -> std::optional<std::size_t> {
+        return core::session::todo::resolve_index(session_todos, selector);
+    };
+
+    auto list_todos = [&]() {
+        std::lock_guard lock(ui_mutex);
+        return session_todos;
+    };
+
+    auto add_todo = [&](std::string_view text) -> core::commands::CommandOperationResult {
+        const std::string trimmed_text = std::string(trim_ascii(text));
+        if (trimmed_text.empty()) {
+            return {.ok = false, .message = "Todo text cannot be empty."};
+        }
+
+        std::string assigned_id;
+        {
+            std::lock_guard lock(ui_mutex);
+            assigned_id = core::session::todo::next_id(session_todos);
+            session_todos.push_back(core::session::SessionTodoItem{
+                .id = assigned_id,
+                .text = trimmed_text,
+                .completed = false,
+                .created_at = core::session::SessionStore::now_iso8601(),
+                .completed_at = {},
+            });
+        }
+        save_session_snapshot();
+        return {.ok = true, .message = std::format("Added todo {{{}}}.", assigned_id)};
+    };
+
+    auto set_todo_completed = [&](std::string_view selector, bool completed)
+        -> core::commands::CommandOperationResult {
+        std::string todo_label;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto index = resolve_todo_index_locked(selector);
+            if (!index.has_value()) {
+                return {.ok = false, .message = "Todo not found."};
+            }
+
+            auto& todo = session_todos[*index];
+            todo.completed = completed;
+            todo.completed_at = completed ? core::session::SessionStore::now_iso8601() : std::string{};
+            todo_label = todo.id.empty() ? todo.text : std::format("{{{}}}", todo.id);
+        }
+        save_session_snapshot();
+        return {
+            .ok = true,
+            .message = completed
+                ? std::format("Marked todo {} complete.", todo_label)
+                : std::format("Reopened todo {}.", todo_label),
+        };
+    };
+
+    auto remove_todo = [&](std::string_view selector) -> core::commands::CommandOperationResult {
+        std::string todo_label;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto index = resolve_todo_index_locked(selector);
+            if (!index.has_value()) {
+                return {.ok = false, .message = "Todo not found."};
+            }
+            todo_label = session_todos[*index].id.empty()
+                ? session_todos[*index].text
+                : std::format("{{{}}}", session_todos[*index].id);
+            session_todos.erase(
+                session_todos.begin() + static_cast<std::ptrdiff_t>(*index));
+        }
+        save_session_snapshot();
+        return {.ok = true, .message = std::format("Removed todo {}.", todo_label)};
+    };
+
+    auto clear_completed_todos = [&]() -> core::commands::CommandOperationResult {
+        std::size_t removed = 0;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto original_size = session_todos.size();
+            std::erase_if(session_todos, [](const core::session::SessionTodoItem& todo) {
+                return todo.completed;
+            });
+            removed = original_size - session_todos.size();
+        }
+        save_session_snapshot();
+        return {
+            .ok = true,
+            .message = removed == 0
+                ? "No completed todos to clear."
+                : std::format("Cleared {} completed todo(s).", removed),
+        };
+    };
+
+    auto add_mcp_server = [&](const core::config::McpServerConfig& server,
+                              core::config::SettingsScope scope)
+        -> core::commands::CommandOperationResult {
+        std::string error;
+        if (!core::config::ConfigManager::get_instance().persist_mcp_server(
+                server,
+                scope,
+                std::filesystem::current_path(),
+                &error)) {
+            return {.ok = false, .message = error};
+        }
+        const std::string reload_message = reload_mcp_live();
+        return {
+            .ok = true,
+            .message = std::format(
+                "Saved MCP server '{}' to the {} overlay. {}",
+                server.name,
+                scope == core::config::SettingsScope::User ? "user" : "workspace",
+                reload_message),
+        };
+    };
+
+    auto remove_mcp_server = [&](std::string_view server_name,
+                                 core::config::SettingsScope scope)
+        -> core::commands::CommandOperationResult {
+        std::string error;
+        if (!core::config::ConfigManager::get_instance().remove_mcp_server(
+                server_name,
+                scope,
+                std::filesystem::current_path(),
+                &error)) {
+            return {.ok = false, .message = error};
+        }
+        const std::string reload_message = reload_mcp_live();
+        return {
+            .ok = true,
+            .message = std::format(
+                "Removed MCP server '{}' from the {} overlay. {}",
+                std::string(server_name),
+                scope == core::config::SettingsScope::User ? "user" : "workspace",
+                reload_message),
+        };
+    };
+
+    auto list_mcp_servers = [&]() {
+        return core::config::ConfigManager::get_instance().get_config().mcp_servers;
+    };
+
+    auto make_turn_callbacks = [&](std::size_t assistant_index) {
+        core::agent::Agent::TurnCallbacks callbacks;
+        callbacks.on_step_begin = [assistant_index, &update_assistant_message, &assistant_turn_active]() {
+            assistant_turn_active.store(true, std::memory_order_relaxed);
+            update_assistant_message(assistant_index, [&](UiMessage& message) {
+                message.pending = true;
+                message.thinking = true;
+            });
+        };
+        callbacks.on_tool_start =
+            [assistant_index, &update_assistant_message](
+                const core::llm::ToolCall& tool_call) {
+                update_assistant_message(assistant_index, [&](UiMessage& message) {
+                    message.pending = true;
+                    message.thinking = false;
+                    message.show_lightbulb = true;
+                    message.tools.push_back(make_tool_activity(
+                        tool_call.id,
+                        tool_call.function.name,
+                        tool_call.function.arguments,
+                        summarize_tool_arguments(
+                            tool_call.function.name,
+                            tool_call.function.arguments)));
+                    message.tools.back().status = ToolActivity::Status::Executing;
+                });
+            };
+        callbacks.on_tool_finish =
+            [assistant_index, &update_assistant_message](
+                const core::llm::ToolCall& tool_call,
+                const core::llm::Message& result) {
+                update_assistant_message(assistant_index, [&](UiMessage& message) {
+                    auto* tool = find_tool_activity(message, tool_call.id);
+
+                    if (tool == nullptr) {
+                        message.tools.push_back(make_tool_activity(
+                            tool_call.id,
+                            tool_call.function.name,
+                            tool_call.function.arguments,
+                            summarize_tool_arguments(
+                                tool_call.function.name,
+                                tool_call.function.arguments)));
+                        tool = &message.tools.back();
+                    }
+
+                    apply_tool_result(*tool, result.content);
+
+                    bool has_pending_tools = false;
+                    for (const auto& t : message.tools) {
+                        if (t.status == ToolActivity::Status::Pending ||
+                            t.status == ToolActivity::Status::Executing) {
+                            has_pending_tools = true;
+                            break;
+                        }
+                    }
+                    if (!has_pending_tools && message.pending) {
+                        message.thinking = true;
+                        message.show_lightbulb = true;
+                    }
+                });
+            };
+        callbacks.allow_efficiency_rotation = true;
+        callbacks.min_context_utilization_for_rotation = 0.75;
+        return callbacks;
+    };
+
     // ── Agent turn submission ─────────────────────────────────────────────────
     // Extracted so that SkillCommand can inject an expanded prompt as a full
     // agent turn (with user message card + tool cards) via send_user_message_fn.
-    auto submit_agent_turn = [&](const std::string& text) {
+    auto submit_agent_turn = [&](const std::string& text,
+                                 core::agent::Agent::TurnCallbacks turn_callbacks =
+                                     core::agent::Agent::TurnCallbacks{}) {
         std::string timestamp = current_time_str();
         std::size_t assistant_index = 0;
         std::string assistant_message_id;
@@ -2731,6 +3043,16 @@ RunResult run(RunOptions opts) {
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
 
+        auto effective_callbacks = make_turn_callbacks(assistant_index);
+        effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
+        effective_callbacks.model_override = std::move(turn_callbacks.model_override);
+        effective_callbacks.allowed_tools = std::move(turn_callbacks.allowed_tools);
+        effective_callbacks.allow_efficiency_rotation = turn_callbacks.allow_efficiency_rotation;
+        if (turn_callbacks.min_context_utilization_for_rotation > 0.0) {
+            effective_callbacks.min_context_utilization_for_rotation =
+                turn_callbacks.min_context_utilization_for_rotation;
+        }
+
         const auto expanded_prompt =
             core::context::expand_prompt(text, std::filesystem::current_path());
 
@@ -2743,19 +3065,15 @@ RunResult run(RunOptions opts) {
 
         std::thread([user_message = std::move(user_message),
                      agent,
+                     effective_callbacks = std::move(effective_callbacks),
                      assistant_index,
-                     session_store,
-                     &ui_mutex,
-                     &session_id,
-                     &session_created_at,
-                     &active_provider_name,
-                     &active_model_name,
                      &update_assistant_message,
                      &assistant_turn_active,
                      &turn_activity_timers,
                      &stream_chunk_timing_mutex,
                      &stream_chunk_last_at,
-                     assistant_message_id = std::move(assistant_message_id)]() {
+                     assistant_message_id = std::move(assistant_message_id),
+                     &save_session_snapshot]() mutable {
             agent->send_message(user_message,
                 [assistant_index,
                  &update_assistant_message,
@@ -2802,16 +3120,14 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                // done_callback — update UI and auto-save session.
-                [assistant_index, agent, session_store,
-                 &ui_mutex, &session_id, &session_created_at,
-                 &active_provider_name, &active_model_name,
+                [assistant_index, agent,
                  &update_assistant_message,
                  &assistant_turn_active,
                  &turn_activity_timers,
                  &stream_chunk_timing_mutex,
                  &stream_chunk_last_at,
-                 assistant_message_id]() {
+                 assistant_message_id,
+                 &save_session_snapshot]() {
                     {
                         std::lock_guard lock(stream_chunk_timing_mutex);
                         stream_chunk_last_at.erase(assistant_index);
@@ -2827,121 +3143,23 @@ RunResult run(RunOptions opts) {
                             message.show_lightbulb = true;
                         }
                     });
-                    // Snapshot agent state now (before the save thread runs) to
-                    // avoid a race where the user types a new message and
-                    // send_message() appends it to history_ before get_history()
-                    // is called inside the detached thread.
-                    auto snap_messages = agent->get_history();
-                    auto snap_mode     = agent->get_mode();
-                    auto snap_context  = agent->get_context_summary();
-                    std::string sid;
-                    std::string created_at;
-                    std::string provider_name;
-                    std::string model_name;
-                    {
-                        std::lock_guard lock(ui_mutex);
-                        sid = session_id;
-                        created_at = session_created_at;
-                        provider_name = active_provider_name;
-                        model_name = active_model_name;
-                    }
-
-                    // Auto-save the session (detached; file I/O stays off the hot path).
-                    std::thread([session_store, sid, created_at,
-                                 provider_name, model_name,
-                                 snap_messages = std::move(snap_messages),
-                                 snap_mode, snap_context]() {
-                        core::session::SessionData data;
-                        data.session_id        = sid;
-                        data.created_at        = created_at;
-                        data.last_active_at    = core::session::SessionStore::now_iso8601();
-                        data.working_dir       = std::filesystem::current_path().string();
-                        data.provider          = provider_name;
-                        data.model             = model_name;
-                        data.mode              = snap_mode;
-                        data.context_summary   = snap_context;
-                        data.messages          = snap_messages;
-
-                        const auto& budget = core::budget::BudgetTracker::get_instance();
-                        const auto  total  = budget.session_total();
-                        data.stats.prompt_tokens     = total.prompt_tokens;
-                        data.stats.completion_tokens = total.completion_tokens;
-                        data.stats.cost_usd          = budget.session_cost_usd();
-
-                        const auto snap = core::session::SessionStats::get_instance().snapshot();
-                        data.stats.turn_count         = snap.turn_count;
-                        data.stats.tool_calls_total   = snap.tool_calls_total;
-                        data.stats.tool_calls_success = snap.tool_calls_success;
-                        data.handoff_summary          = core::session::build_handoff_summary(data);
-
-                        session_store->save(data);
-                    }).detach();
+                    save_session_snapshot();
                 },
-                core::agent::Agent::TurnCallbacks{
-                    .on_step_begin = [assistant_index, &update_assistant_message, &assistant_turn_active]() {
-                        assistant_turn_active.store(true, std::memory_order_relaxed);
-                        update_assistant_message(assistant_index, [&](UiMessage& message) {
-                            message.pending = true;
-                            message.thinking = true;
-                        });
-                    },
-                    .on_tool_start =
-                        [assistant_index, &update_assistant_message](
-                            const core::llm::ToolCall& tool_call) {
-                            update_assistant_message(assistant_index, [&](UiMessage& message) {
-                                message.pending = true;
-                                message.thinking = false;
-                                message.show_lightbulb = true;
-                                message.tools.push_back(make_tool_activity(
-                                    tool_call.id,
-                                    tool_call.function.name,
-                                    tool_call.function.arguments,
-                                    summarize_tool_arguments(
-                                        tool_call.function.name,
-                                        tool_call.function.arguments)));
-                                message.tools.back().status = ToolActivity::Status::Executing;
-                            });
-                        },
-                    .on_tool_finish =
-                        [assistant_index, &update_assistant_message](
-                            const core::llm::ToolCall& tool_call,
-                            const core::llm::Message& result) {
-                            update_assistant_message(assistant_index, [&](UiMessage& message) {
-                                auto* tool = find_tool_activity(message, tool_call.id);
-
-                                if (tool == nullptr) {
-                                    message.tools.push_back(make_tool_activity(
-                                        tool_call.id,
-                                        tool_call.function.name,
-                                        tool_call.function.arguments,
-                                        summarize_tool_arguments(
-                                            tool_call.function.name,
-                                            tool_call.function.arguments)));
-                                    tool = &message.tools.back();
-                                }
-
-                                apply_tool_result(*tool, result.content);
-
-                                // Check if all tools are now done but we're still waiting
-                                // for the model's response. Re-activate thinking indicator
-                                // so the user knows the model is processing.
-                                bool has_pending_tools = false;
-                                for (const auto& t : message.tools) {
-                                    if (t.status == ToolActivity::Status::Pending ||
-                                        t.status == ToolActivity::Status::Executing) {
-                                        has_pending_tools = true;
-                                        break;
-                                    }
-                                }
-                                if (!has_pending_tools && message.pending) {
-                                    message.thinking = true;
-                                    message.show_lightbulb = true;
-                                }
-                            });
-                        }
-                }
-            );
+                std::move(effective_callbacks));
         }).detach();
+    };
+
+    auto submit_skill_turn = [&](const std::string& text,
+                                 const std::string& model_hint,
+                                 const std::vector<std::string>& allowed_tools) {
+        const auto resolution = core::commands::detail::resolve_skill_turn(
+            model_hint,
+            allowed_tools,
+            active_provider_name);
+        if (!resolution.warning.empty()) {
+            append_history(std::format("\n⚠  {}\n", resolution.warning));
+        }
+        submit_agent_turn(text, resolution.callbacks);
     };
 
     // ── Input component ──────────────────────────────────────────────────────
@@ -3041,8 +3259,19 @@ RunResult run(RunOptions opts) {
             // Skill commands (SkillCommand) use this to inject an expanded
             // prompt as a full agent turn with TUI message cards and tool
             // activity panels, identical to normal user input.
-            .send_user_message_fn = submit_agent_turn,
+            .send_user_message_fn = [&](const std::string& message) {
+                submit_agent_turn(message);
+            },
             .set_review_activity_fn = set_review_activity,
+            .send_user_skill_message_fn = submit_skill_turn,
+            .list_todos_fn = list_todos,
+            .add_todo_fn = add_todo,
+            .set_todo_completed_fn = set_todo_completed,
+            .remove_todo_fn = remove_todo,
+            .clear_completed_todos_fn = clear_completed_todos,
+            .list_mcp_servers_fn = list_mcp_servers,
+            .add_mcp_server_fn = add_mcp_server,
+            .remove_mcp_server_fn = remove_mcp_server,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;

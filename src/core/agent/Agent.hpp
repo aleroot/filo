@@ -35,6 +35,9 @@ public:
         std::function<void(const core::llm::ToolCall&)> on_tool_start = {};
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
+        std::shared_ptr<core::llm::LLMProvider> provider_override = {};
+        std::string model_override;
+        std::vector<std::string> allowed_tools;
         bool allow_efficiency_rotation = true;
         // Rotate only when current context usage reaches this fraction [0.0, 1.0].
         double min_context_utilization_for_rotation = 0.0;

@@ -1,4 +1,5 @@
 #include "AskUserQuestionTool.hpp"
+#include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <format>
@@ -37,7 +38,7 @@ AskUserQuestionTool::AskUserQuestionTool() = default;
 
 ToolDefinition AskUserQuestionTool::get_definition() const {
     ToolDefinition def;
-    def.name = "AskUserQuestion";
+    def.name = std::string(names::kAskUserQuestion);
     def.title = "Ask User Question";
     def.description = R"(Ask the user structured question(s) to guide the conversation.
 

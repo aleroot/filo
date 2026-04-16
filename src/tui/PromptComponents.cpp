@@ -3,6 +3,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/tools/ToolNames.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -208,32 +209,32 @@ std::vector<PermissionField> describe_permission_arguments(std::string_view tool
         return fields;
     }
 
-    if (tool_name == "run_terminal_command") {
+    if (core::tools::names::is_terminal_tool(tool_name)) {
         if (const auto command = extract_string_field(object, {"command"})) {
             add_field(fields, "Command", *command);
         }
         if (const auto working_dir = extract_string_field(object, {"working_dir"})) {
             add_field(fields, "Working Dir", *working_dir);
         }
-    } else if (tool_name == "write_file") {
+    } else if (tool_name == core::tools::names::kWriteFile) {
         if (const auto file_path = extract_string_field(object, {"file_path", "path"})) {
             add_field(fields, "File", *file_path);
         }
         if (const auto content = extract_string_field(object, {"content"})) {
             add_field(fields, "Content", std::format("{} chars", content->size()));
         }
-    } else if (tool_name == "delete_file") {
+    } else if (tool_name == core::tools::names::kDeleteFile) {
         if (const auto path = extract_string_field(object, {"path", "file_path"})) {
             add_field(fields, "Path", *path);
         }
-    } else if (tool_name == "move_file") {
+    } else if (tool_name == core::tools::names::kMoveFile) {
         if (const auto source = extract_string_field(object, {"source", "source_path", "from_path"})) {
             add_field(fields, "From", *source);
         }
         if (const auto destination = extract_string_field(object, {"destination", "destination_path", "to_path"})) {
             add_field(fields, "To", *destination);
         }
-    } else if (tool_name == "apply_patch") {
+    } else if (tool_name == core::tools::names::kApplyPatch) {
         if (const auto working_dir = extract_string_field(object, {"working_dir"})) {
             add_field(fields, "Working Dir", *working_dir);
         }
@@ -241,7 +242,7 @@ std::vector<PermissionField> describe_permission_arguments(std::string_view tool
             add_field(fields, "Patch", extract_patch_target(*patch));
             add_field(fields, "Patch Size", std::format("{} chars", patch->size()));
         }
-    } else if (tool_name == "replace" || tool_name == "replace_in_file") {
+    } else if (core::tools::names::is_replace_tool(tool_name)) {
         if (const auto file_path = extract_string_field(object, {"file_path", "path"})) {
             add_field(fields, "File", *file_path);
         }
@@ -316,17 +317,18 @@ Element render_permission_fields(std::string_view tool_name,
 }
 
 std::string permission_intent_message(std::string_view tool_name) {
-    if (tool_name == "run_terminal_command") {
+    if (core::tools::names::is_terminal_tool(tool_name)) {
         return "Filo wants to run a terminal command on your machine.";
     }
-    if (tool_name == "delete_file") {
+    if (tool_name == core::tools::names::kDeleteFile) {
         return "Filo wants to permanently delete a path from your workspace.";
     }
-    if (tool_name == "move_file") {
+    if (tool_name == core::tools::names::kMoveFile) {
         return "Filo wants to move or rename files in your workspace.";
     }
-    if (tool_name == "write_file" || tool_name == "apply_patch"
-            || tool_name == "replace" || tool_name == "replace_in_file") {
+    if (tool_name == core::tools::names::kWriteFile
+            || tool_name == core::tools::names::kApplyPatch
+            || core::tools::names::is_replace_tool(tool_name)) {
         return "Filo wants to modify files in your workspace.";
     }
     return "Filo wants your approval before running a potentially sensitive action.";

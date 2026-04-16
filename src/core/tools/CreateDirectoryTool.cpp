@@ -1,6 +1,7 @@
 #include "CreateDirectoryTool.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <format>
@@ -9,7 +10,7 @@ namespace core::tools {
 
 ToolDefinition CreateDirectoryTool::get_definition() const {
     return {
-        .name  = "create_directory",
+        .name  = std::string(names::kCreateDirectory),
         .title = "Create Directory",
         .description =
             "Creates a directory (and any missing parent directories) at the given path. "
@@ -42,7 +43,12 @@ std::string CreateDirectoryTool::execute(const std::string& json_args, const cor
     const std::filesystem::path requested_path(path_str);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(requested_path, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                requested_path,
+                path_str,
+                context,
+                &resolved_path,
+                names::kCreateDirectory)) {
         return *access_error;
     }
     std::error_code ec;

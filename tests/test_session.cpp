@@ -5,6 +5,7 @@
 #include "core/session/SessionReport.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/TodoUtils.hpp"
 #include <ftxui/screen/string.hpp>
 
 #include <chrono>
@@ -201,6 +202,69 @@ TEST_CASE("SessionStore round-trips messages with special JSON characters", "[se
     const auto loaded = store.load_by_id("escape01");
     REQUIRE(loaded.has_value());
     CHECK(loaded->messages[0].content == "He said \"hello\"\nLine2\\nBackslash");
+}
+
+TEST_CASE("SessionStore round-trips session todos", "[session][json]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_todos"};
+    core::session::SessionStore store{tmp.path};
+
+    core::session::SessionData data = make_test_session("todo1234");
+    data.todos.push_back(core::session::SessionTodoItem{
+        .id = "1",
+        .text = "Investigate steering prompt",
+        .completed = false,
+        .created_at = "2026-03-22T10:20:00Z",
+        .completed_at = {},
+    });
+    data.todos.push_back(core::session::SessionTodoItem{
+        .id = "2",
+        .text = "Ship MCP command",
+        .completed = true,
+        .created_at = "2026-03-22T10:21:00Z",
+        .completed_at = "2026-03-22T10:30:00Z",
+    });
+
+    REQUIRE(store.save(data));
+    const auto loaded = store.load_by_id("todo1234");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->todos.size() == 2);
+    CHECK(loaded->todos[0].text == "Investigate steering prompt");
+    CHECK_FALSE(loaded->todos[0].completed);
+    CHECK(loaded->todos[1].completed);
+    CHECK(loaded->todos[1].completed_at == "2026-03-22T10:30:00Z");
+}
+
+TEST_CASE("Todo utils generate stable prefixed IDs across legacy sessions", "[session][todos]") {
+    std::vector<core::session::SessionTodoItem> todos = {
+        {.id = "1", .text = "Legacy one"},
+        {.id = "t3", .text = "Modern three"},
+    };
+
+    CHECK(core::session::todo::next_id(todos) == "t4");
+}
+
+TEST_CASE("Todo utils prefer exact IDs over row indexes for legacy numeric IDs", "[session][todos]") {
+    std::vector<core::session::SessionTodoItem> todos = {
+        {.id = "2", .text = "Second legacy todo"},
+        {.id = "3", .text = "Third legacy todo"},
+    };
+
+    REQUIRE(core::session::todo::resolve_index(todos, "2").has_value());
+    CHECK(*core::session::todo::resolve_index(todos, "2") == 0);
+    REQUIRE(core::session::todo::resolve_index(todos, "{3}").has_value());
+    CHECK(*core::session::todo::resolve_index(todos, "{3}") == 1);
+}
+
+TEST_CASE("Todo utils fall back to row indexes when IDs are prefixed", "[session][todos]") {
+    std::vector<core::session::SessionTodoItem> todos = {
+        {.id = "t2", .text = "First visible row"},
+        {.id = "t3", .text = "Second visible row"},
+    };
+
+    REQUIRE(core::session::todo::resolve_index(todos, "2").has_value());
+    CHECK(*core::session::todo::resolve_index(todos, "2") == 1);
+    REQUIRE(core::session::todo::resolve_index(todos, "t2").has_value());
+    CHECK(*core::session::todo::resolve_index(todos, "t2") == 0);
 }
 
 // ---------------------------------------------------------------------------

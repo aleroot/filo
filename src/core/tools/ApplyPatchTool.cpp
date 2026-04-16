@@ -1,4 +1,5 @@
 #include "ApplyPatchTool.hpp"
+#include "ToolNames.hpp"
 #include "shell/ShellUtils.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
@@ -109,7 +110,12 @@ static std::optional<std::string> validate_patch_paths(
             requested.is_absolute() ? requested : (base_dir / requested);
 
         if (const auto access_error =
-                detail::check_workspace_access(resolved, *patch_path, context)) {
+                detail::check_workspace_access(
+                    resolved,
+                    *patch_path,
+                    context,
+                    nullptr,
+                    names::kApplyPatch)) {
             return access_error;
         }
     }
@@ -119,7 +125,7 @@ static std::optional<std::string> validate_patch_paths(
 
 ToolDefinition ApplyPatchTool::get_definition() const {
     return {
-        .name  = "apply_patch",
+        .name  = std::string(names::kApplyPatch),
         .title = "Apply Patch",
         .description =
             "Applies a unified diff patch to the filesystem. "
@@ -178,7 +184,8 @@ std::string ApplyPatchTool::execute(const std::string& json_args, const core::co
             requested_patch_base_dir,
             working_dir.empty() ? std::string(".") : working_dir,
             context,
-            &patch_base_dir)) {
+            &patch_base_dir,
+            names::kApplyPatch)) {
         return *access_error;
     }
 

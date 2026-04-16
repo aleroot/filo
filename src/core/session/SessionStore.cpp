@@ -170,6 +170,20 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
     out += '}';
 }
 
+void append_todo_json(std::string& out, const core::session::SessionTodoItem& todo) {
+    out += "{\"id\":\"";
+    core::utils::append_escaped(out, todo.id);
+    out += "\",\"text\":\"";
+    core::utils::append_escaped(out, todo.text);
+    out += "\",\"completed\":";
+    out += todo.completed ? "true" : "false";
+    out += ",\"created_at\":\"";
+    core::utils::append_escaped(out, todo.created_at);
+    out += "\",\"completed_at\":\"";
+    core::utils::append_escaped(out, todo.completed_at);
+    out += "\"}";
+}
+
 } // namespace
 
 std::string SessionStore::to_json(const SessionData& data) {
@@ -201,6 +215,12 @@ std::string SessionStore::to_json(const SessionData& data) {
     for (std::size_t i = 0; i < data.messages.size(); ++i) {
         if (i > 0) out += ',';
         append_message_json(out, data.messages[i]);
+    }
+
+    out += "],\"todos\":[";
+    for (std::size_t i = 0; i < data.todos.size(); ++i) {
+        if (i > 0) out += ',';
+        append_todo_json(out, data.todos[i]);
     }
 
     out += "],\"stats\":{";
@@ -302,6 +322,33 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                     }
                 }
                 data.messages.push_back(std::move(msg));
+            }
+        }
+
+        simdjson::dom::array todos_arr;
+        if (doc["todos"].get(todos_arr) == simdjson::SUCCESS) {
+            for (simdjson::dom::element todo_el : todos_arr) {
+                core::session::SessionTodoItem todo;
+                std::string_view sv;
+                if (todo_el["id"].get(sv) == simdjson::SUCCESS) {
+                    todo.id = std::string(sv);
+                }
+                if (todo_el["text"].get(sv) == simdjson::SUCCESS) {
+                    todo.text = std::string(sv);
+                }
+                bool completed = false;
+                if (todo_el["completed"].get(completed) == simdjson::SUCCESS) {
+                    todo.completed = completed;
+                }
+                if (todo_el["created_at"].get(sv) == simdjson::SUCCESS) {
+                    todo.created_at = std::string(sv);
+                }
+                if (todo_el["completed_at"].get(sv) == simdjson::SUCCESS) {
+                    todo.completed_at = std::string(sv);
+                }
+                if (!todo.id.empty() || !todo.text.empty()) {
+                    data.todos.push_back(std::move(todo));
+                }
             }
         }
 

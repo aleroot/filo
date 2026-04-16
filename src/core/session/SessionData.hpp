@@ -6,13 +6,21 @@
 
 namespace core::session {
 
+struct SessionTodoItem {
+    std::string id;
+    std::string text;
+    bool completed = false;
+    std::string created_at;
+    std::string completed_at;
+};
+
 // ---------------------------------------------------------------------------
 // SessionData — complete serializable session state.
 // JSON encoding/decoding lives in SessionStore so this struct stays a plain
 // data type with no external dependencies.
 // ---------------------------------------------------------------------------
 struct SessionData {
-    static constexpr int kVersion = 1;
+    static constexpr int kVersion = 2;
 
     int         version         = kVersion;
     std::string session_id;
@@ -27,6 +35,7 @@ struct SessionData {
 
     /// Conversation messages — system message is excluded (regenerated on load).
     std::vector<core::llm::Message> messages;
+    std::vector<SessionTodoItem> todos;
 
     struct Stats {
         int32_t prompt_tokens      = 0;

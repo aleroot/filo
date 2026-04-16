@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "ToolPolicy.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 
@@ -25,7 +26,8 @@ inline std::optional<std::string> check_workspace_access(
     const std::filesystem::path& path,
     const std::string& path_str,
     const core::context::SessionContext& context,
-    std::filesystem::path* resolved_out = nullptr)
+    std::filesystem::path* resolved_out = nullptr,
+    std::string_view tool_name = {})
 {
     const auto resolved = context.resolve_path(path);
     if (resolved_out) {
@@ -36,6 +38,15 @@ inline std::optional<std::string> check_workspace_access(
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
+    }
+    if (!tool_name.empty()) {
+        if (const auto policy_error =
+                core::tools::policy::enforce_path_policy(tool_name, resolved, context)) {
+            return std::format(
+                R"({{"error":"Tool policy blocked path '{}': {}."}})",
+                core::utils::escape_json_string(path_str),
+                core::utils::escape_json_string(*policy_error));
+        }
     }
     return std::nullopt;
 }

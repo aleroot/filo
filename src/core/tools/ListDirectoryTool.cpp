@@ -1,5 +1,6 @@
 #include "ListDirectoryTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -10,7 +11,7 @@ namespace core::tools {
 
 ToolDefinition ListDirectoryTool::get_definition() const {
     return {
-        .name  = "list_directory",
+        .name  = std::string(names::kListDirectory),
         .title = "List Directory",
         .description =
             "Lists the immediate contents of a directory. "
@@ -37,7 +38,7 @@ std::string ListDirectoryTool::execute(const std::string& json_args, const core:
     }
 
     if (const auto validation_error =
-            detail::validate_object_arguments(doc, "list_directory", {"path"})) {
+            detail::validate_object_arguments(doc, names::kListDirectory, {"path"})) {
         return *validation_error;
     }
 
@@ -49,7 +50,12 @@ std::string ListDirectoryTool::execute(const std::string& json_args, const core:
     std::string path_str(dir_path);
     std::filesystem::path resolved_path;
     if (const auto access_error =
-            detail::check_workspace_access(path_str, path_str, context, &resolved_path)) {
+            detail::check_workspace_access(
+                path_str,
+                path_str,
+                context,
+                &resolved_path,
+                names::kListDirectory)) {
         return *access_error;
     }
     std::error_code ec;

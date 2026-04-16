@@ -157,9 +157,11 @@ set(FILO_CORE_SOURCES
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
     src/core/utils/FileSystemUtils.cpp
+    src/core/hooks/HookManager.cpp
     src/core/workspace/Workspace.cpp
     src/core/context/ContextMentions.cpp
     src/core/context/SessionContext.cpp
+    src/core/context/SteeringLoader.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/FileSearchTool.cpp
@@ -173,6 +175,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/CreateDirectoryTool.cpp
     src/core/tools/SearchReplaceTool.cpp
     src/core/tools/AskUserQuestionTool.cpp
+    src/core/tools/ToolPolicy.cpp
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp

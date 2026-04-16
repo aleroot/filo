@@ -1,5 +1,7 @@
 #include "ShellTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolNames.hpp"
+#include "ToolPolicy.hpp"
 #include "shell/ShellUtils.hpp"
 #include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
@@ -85,7 +87,7 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
 
 ToolDefinition ShellTool::get_definition() const {
     return {
-        .name  = "run_terminal_command",
+        .name  = std::string(names::kRunTerminalCommand),
         .title = "Run Terminal Command",
         .description =
             "Executes a shell command in a persistent bash session on the user's local machine. "
@@ -144,7 +146,8 @@ std::string ShellTool::execute(
                 std::filesystem::path(wd_view),
                 std::string(wd_view),
                 context,
-                &resolved_path)) {
+                &resolved_path,
+                names::kRunTerminalCommand)) {
             return *access_error;
         }
         std::error_code ec;
@@ -164,6 +167,21 @@ std::string ShellTool::execute(
         // Cap at 1 hour to prevent accidental infinite waits.
         timeout_secs = std::min(timeout_secs, static_cast<int64_t>(3600));
         timeout = std::chrono::milliseconds{timeout_secs * 1000};
+    }
+
+    if (const auto policy_error = core::tools::policy::enforce_command_policy(
+            names::kRunTerminalCommand,
+            command_view)) {
+        return std::format(
+            R"({{"error":"Tool policy blocked command: {}"}})",
+            core::utils::escape_json_string(*policy_error));
+    }
+    if (const auto policy_error = core::tools::policy::enforce_url_policy(
+            names::kRunTerminalCommand,
+            command_view)) {
+        return std::format(
+            R"({{"error":"Tool policy blocked URL: {}"}})",
+            core::utils::escape_json_string(*policy_error));
     }
 
     // Delegate to the platform executor.

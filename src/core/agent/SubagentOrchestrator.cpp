@@ -6,6 +6,7 @@
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../session/SessionStats.hpp"
+#include "../tools/ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <simdjson.h>
@@ -32,12 +33,7 @@ constexpr int kMinSubagentSteps = 1;
 constexpr int kMaxSubagentSteps = 64;
 
 [[nodiscard]] bool is_write_destructive_tool(std::string_view tool_name) {
-    return tool_name == "apply_patch"
-        || tool_name == "write_file"
-        || tool_name == "replace"
-        || tool_name == "replace_in_file"
-        || tool_name == "delete_file"
-        || tool_name == "move_file";
+    return core::tools::names::is_write_destructive_tool(tool_name);
 }
 
 [[nodiscard]] std::string normalize_ascii_lower(std::string_view value) {
@@ -93,13 +89,13 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
                 "Do not edit files. Cite concrete files and findings in your final summary.",
             .provider_override = "",
             .model_override = "",
-            .allowed_tools = {
-                "read_file",
-                "file_search",
-                "grep_search",
-                "list_directory",
-                "get_current_time",
-            },
+            .allowed_tools = [] {
+                std::unordered_set<std::string> tool_names;
+                for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
+                    tool_names.emplace(tool_name);
+                }
+                return tool_names;
+            }(),
             .use_allow_list = true,
             .allow_task_tool = false,
             .max_steps = 10,

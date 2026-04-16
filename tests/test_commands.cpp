@@ -157,6 +157,112 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Filo Commands]"));
     }
 
+    SECTION("/mcp add preserves quoted commands, args, and env values") {
+        auto captured_server = std::make_shared<std::optional<core::config::McpServerConfig>>();
+        auto captured_scope = std::make_shared<std::optional<core::config::SettingsScope>>();
+        ctx.add_mcp_server_fn = [captured_server, captured_scope](
+                                    const core::config::McpServerConfig& server,
+                                    core::config::SettingsScope scope) {
+            *captured_server = server;
+            *captured_scope = scope;
+            return CommandOperationResult{.ok = true, .message = "saved"};
+        };
+        ctx.list_mcp_servers_fn = [captured_server]() {
+            if (captured_server->has_value()) {
+                return std::vector<core::config::McpServerConfig>{captured_server->value()};
+            }
+            return std::vector<core::config::McpServerConfig>{};
+        };
+
+        *mock_history = "";
+        ctx.text =
+            "/mcp add --global --env \"API_KEY=foo bar\" docs stdio "
+            "\"/Applications/My Server.app/Contents/MacOS/server\" "
+            "\"--root=/tmp/my dir\"";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(captured_server->has_value());
+        REQUIRE(captured_scope->has_value());
+        CHECK(*captured_scope == core::config::SettingsScope::User);
+        CHECK(captured_server->value().name == "docs");
+        CHECK(captured_server->value().transport == "stdio");
+        CHECK(captured_server->value().command
+              == "/Applications/My Server.app/Contents/MacOS/server");
+        REQUIRE(captured_server->value().env.size() == 1);
+        CHECK(captured_server->value().env.front() == "API_KEY=foo bar");
+        REQUIRE(captured_server->value().args.size() == 1);
+        CHECK(captured_server->value().args.front() == "--root=/tmp/my dir");
+    }
+
+    SECTION("/mcp add preserves Windows-style backslashes in quoted values") {
+        auto captured_server = std::make_shared<std::optional<core::config::McpServerConfig>>();
+        ctx.add_mcp_server_fn = [captured_server](
+                                    const core::config::McpServerConfig& server,
+                                    core::config::SettingsScope) {
+            *captured_server = server;
+            return CommandOperationResult{.ok = true, .message = "saved"};
+        };
+        ctx.list_mcp_servers_fn = [captured_server]() {
+            if (captured_server->has_value()) {
+                return std::vector<core::config::McpServerConfig>{captured_server->value()};
+            }
+            return std::vector<core::config::McpServerConfig>{};
+        };
+
+        *mock_history = "";
+        ctx.text =
+            R"(/mcp add --env "API_KEY=C:\tmp\x" docs stdio "C:\Program Files\server.exe" "--root=C:\work dir")";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(captured_server->has_value());
+        REQUIRE(captured_server->value().env.size() == 1);
+        CHECK(captured_server->value().env.front() == R"(API_KEY=C:\tmp\x)");
+        CHECK(captured_server->value().command == R"(C:\Program Files\server.exe)");
+        REQUIRE(captured_server->value().args.size() == 1);
+        CHECK(captured_server->value().args.front() == R"(--root=C:\work dir)");
+    }
+
+    SECTION("/mcp add still supports escaped whitespace without dropping backslashes") {
+        auto captured_server = std::make_shared<std::optional<core::config::McpServerConfig>>();
+        ctx.add_mcp_server_fn = [captured_server](
+                                    const core::config::McpServerConfig& server,
+                                    core::config::SettingsScope) {
+            *captured_server = server;
+            return CommandOperationResult{.ok = true, .message = "saved"};
+        };
+        ctx.list_mcp_servers_fn = [captured_server]() {
+            if (captured_server->has_value()) {
+                return std::vector<core::config::McpServerConfig>{captured_server->value()};
+            }
+            return std::vector<core::config::McpServerConfig>{};
+        };
+
+        *mock_history = "";
+        ctx.text = R"(/mcp add docs stdio C:\Program\ Files\server.exe --root=C:\tmp\x)";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(captured_server->has_value());
+        CHECK(captured_server->value().command == R"(C:\Program Files\server.exe)");
+        REQUIRE(captured_server->value().args.size() == 1);
+        CHECK(captured_server->value().args.front() == R"(--root=C:\tmp\x)");
+    }
+
+    SECTION("/mcp add reports unterminated quotes") {
+        *mock_history = "";
+        ctx.list_mcp_servers_fn = []() {
+            return std::vector<core::config::McpServerConfig>{};
+        };
+        ctx.text = "/mcp add docs stdio \"unterminated";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Unterminated quote"));
+    }
+
     SECTION("/auth command without provider shows usage") {
         *mock_history = "";
         ctx.text = "/auth";

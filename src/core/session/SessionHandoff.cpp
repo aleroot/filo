@@ -1,5 +1,6 @@
 #include "SessionHandoff.hpp"
 
+#include "../tools/ToolNames.hpp"
 #include <algorithm>
 #include <array>
 #include <format>
@@ -219,18 +220,20 @@ void capture_tool_effects(HandoffSignals& signals,
 
     append_unique_limited(signals.recent_tools, tool, 8, 64);
 
-    if (tool == "read_file") {
+    if (tool == core::tools::names::kReadFile) {
         append_unique_limited(signals.files_read, basename_or_self(json_string_field(tool_args, {"path"})), 6, 96);
-    } else if (tool == "apply_patch") {
+    } else if (tool == core::tools::names::kApplyPatch) {
         capture_patch_paths(signals, json_string_field(tool_args, {"patch"}));
-    } else if (tool == "write_file" || tool == "replace" || tool == "search_replace"
-               || tool == "delete_file") {
+    } else if (tool == core::tools::names::kWriteFile
+               || tool == core::tools::names::kReplace
+               || tool == core::tools::names::kSearchReplace
+               || tool == core::tools::names::kDeleteFile) {
         append_unique_limited(
             signals.files_modified,
             basename_or_self(json_string_field(tool_args, {"file_path", "path"})),
             8,
             96);
-    } else if (tool == "move_file") {
+    } else if (tool == core::tools::names::kMoveFile) {
         append_unique_limited(
             signals.files_modified,
             basename_or_self(json_string_field(tool_args, {"source", "from"})),
@@ -243,7 +246,7 @@ void capture_tool_effects(HandoffSignals& signals,
             96);
     }
 
-    if (tool == "run_terminal_command") {
+    if (tool == core::tools::names::kRunTerminalCommand) {
         std::string command = json_string_field(tool_args, {"command"});
         command = clamp_line(command, 120);
         if (!command.empty()) {
@@ -358,6 +361,20 @@ std::string build_handoff_summary(const SessionData& data) {
         sentences.push_back(std::format(
             "Recent tools used: {}.",
             join_items(signals.recent_tools)));
+    }
+    if (!data.todos.empty()) {
+        std::vector<std::string> pending_todos;
+        for (const auto& todo : data.todos) {
+            if (todo.completed) {
+                continue;
+            }
+            append_unique_limited(pending_todos, todo.text, 5, 140);
+        }
+        if (!pending_todos.empty()) {
+            sentences.push_back(std::format(
+                "Outstanding session todos: {}.",
+                join_items(pending_todos, " | ")));
+        }
     }
 
     if (!data.provider.empty() || !data.model.empty()) {

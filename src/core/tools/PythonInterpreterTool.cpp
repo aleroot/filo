@@ -1,4 +1,5 @@
 #include "PythonInterpreterTool.hpp"
+#include "ToolNames.hpp"
 #include "PythonManager.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -8,7 +9,7 @@ namespace core::tools {
 
 ToolDefinition PythonInterpreterTool::get_definition() const {
     return {
-        .name  = "python",
+        .name  = std::string(names::kPython),
         .title = "Python Interpreter",
         .description =
             "Execute Python code in a persistent embedded interpreter. "

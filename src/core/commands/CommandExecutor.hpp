@@ -7,9 +7,16 @@
 #include <memory>
 #include <optional>
 #include "../../core/agent/Agent.hpp"
+#include "../../core/config/ConfigManager.hpp"
 #include "../../core/history/PromptHistoryStore.hpp"
+#include "../../core/session/SessionData.hpp"
 
 namespace core::commands {
+
+struct CommandOperationResult {
+    bool ok = false;
+    std::string message;
+};
 
 /**
  * @brief Context passed to every command execution containing the UI state.
@@ -45,6 +52,19 @@ struct CommandContext {
     std::function<void(const std::string&)> send_user_message_fn = {};
     // Toggle and describe long-running /review activity in the TUI.
     std::function<void(bool, const std::string&)> set_review_activity_fn = {};
+    std::function<void(const std::string&,
+                       const std::string&,
+                       const std::vector<std::string>&)> send_user_skill_message_fn = {};
+    std::function<std::vector<core::session::SessionTodoItem>()> list_todos_fn = {};
+    std::function<CommandOperationResult(std::string_view)> add_todo_fn = {};
+    std::function<CommandOperationResult(std::string_view, bool)> set_todo_completed_fn = {};
+    std::function<CommandOperationResult(std::string_view)> remove_todo_fn = {};
+    std::function<CommandOperationResult()> clear_completed_todos_fn = {};
+    std::function<std::vector<core::config::McpServerConfig>()> list_mcp_servers_fn = {};
+    std::function<CommandOperationResult(const core::config::McpServerConfig&,
+                                         core::config::SettingsScope)> add_mcp_server_fn = {};
+    std::function<CommandOperationResult(std::string_view,
+                                         core::config::SettingsScope)> remove_mcp_server_fn = {};
 };
 
 struct CommandDescriptor {

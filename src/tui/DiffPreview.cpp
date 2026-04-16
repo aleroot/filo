@@ -1,5 +1,6 @@
 #include "DiffPreview.hpp"
 
+#include "core/tools/ToolNames.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -366,7 +367,7 @@ ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
         return preview;
     }
 
-    if (tool_name == "apply_patch") {
+    if (tool_name == core::tools::names::kApplyPatch) {
         const auto patch = extract_string_field(object, {"patch"});
         if (!patch || patch->empty()) {
             return preview;
@@ -378,13 +379,13 @@ ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
         return preview;
     }
 
-    if (tool_name == "replace" || tool_name == "replace_in_file") {
+    if (core::tools::names::is_replace_tool(tool_name)) {
         preview = build_replace_preview(object);
         clamp_preview_lines(preview, max_lines);
         return preview;
     }
 
-    if (tool_name == "write_file") {
+    if (tool_name == core::tools::names::kWriteFile) {
         preview = build_write_file_preview(object);
         clamp_preview_lines(preview, max_lines);
         return preview;

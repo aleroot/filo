@@ -100,6 +100,89 @@ std::vector<std::string_view> split_ascii_whitespace(std::string_view input) {
     return tokens;
 }
 
+struct ShellLikeTokenizeResult {
+    std::vector<std::string> tokens;
+    std::string error;
+};
+
+ShellLikeTokenizeResult split_shell_like_tokens(std::string_view input) {
+    ShellLikeTokenizeResult result;
+    std::string current;
+    bool in_single_quotes = false;
+    bool in_double_quotes = false;
+
+    auto flush_token = [&]() {
+        if (!current.empty()) {
+            result.tokens.push_back(std::move(current));
+            current.clear();
+        }
+    };
+
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const char ch = input[i];
+
+        if (in_single_quotes) {
+            if (ch == '\'') {
+                in_single_quotes = false;
+            } else {
+                current.push_back(ch);
+            }
+            continue;
+        }
+
+        if (in_double_quotes) {
+            if (ch == '"') {
+                in_double_quotes = false;
+                continue;
+            }
+            if (ch == '\\' && i + 1 < input.size() && input[i + 1] == '"') {
+                current.push_back('"');
+                ++i;
+                continue;
+            }
+            current.push_back(ch);
+            continue;
+        }
+
+        if (std::isspace(static_cast<unsigned char>(ch))) {
+            flush_token();
+            continue;
+        }
+        if (ch == '\'') {
+            in_single_quotes = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_double_quotes = true;
+            continue;
+        }
+        if (ch == '\\') {
+            if (i + 1 < input.size()) {
+                const char next = input[i + 1];
+                if (std::isspace(static_cast<unsigned char>(next))
+                    || next == '\''
+                    || next == '"') {
+                    current.push_back(next);
+                    ++i;
+                    continue;
+                }
+            }
+            current.push_back('\\');
+            continue;
+        }
+
+        current.push_back(ch);
+    }
+
+    if (in_single_quotes || in_double_quotes) {
+        result.error = "Unterminated quote in command arguments.";
+        return result;
+    }
+
+    flush_token();
+    return result;
+}
+
 bool is_valid_provider_token(std::string_view value) {
     if (value.empty()) return false;
     for (const unsigned char ch : value) {
@@ -256,6 +339,50 @@ std::string export_history_markdown(const std::vector<core::llm::Message>& messa
     }
 
     return out;
+}
+
+std::string format_todos(const std::vector<core::session::SessionTodoItem>& todos) {
+    std::ostringstream out;
+    out << "\n[Session Todos]\n";
+    if (todos.empty()) {
+        out << "  No todos yet. Use `/todo add <text>` to capture the next step.\n";
+        return out.str();
+    }
+
+    std::size_t index = 1;
+    for (const auto& todo : todos) {
+        out << "  " << index++ << ". "
+            << (todo.completed ? "[x] " : "[ ] ")
+            << todo.text;
+        if (!todo.id.empty()) {
+            out << "  {" << todo.id << "}";
+        }
+        out << '\n';
+    }
+    return out.str();
+}
+
+std::string format_mcp_servers(const std::vector<core::config::McpServerConfig>& servers) {
+    std::ostringstream out;
+    out << "\n[MCP Servers]\n";
+    if (servers.empty()) {
+        out << "  No MCP servers configured.\n";
+        return out.str();
+    }
+
+    for (const auto& server : servers) {
+        out << "  - " << server.name << " [" << server.transport << "]";
+        if (server.transport == "stdio") {
+            out << " " << server.command;
+            if (!server.args.empty()) {
+                out << " " << join(" ", server.args);
+            }
+        } else if (!server.url.empty()) {
+            out << " " << server.url;
+        }
+        out << '\n';
+    }
+    return out.str();
 }
 
 #if !defined(_WIN32) && !defined(__APPLE__)
@@ -796,6 +923,8 @@ public:
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
+            "  /todo [action]      Manage session-backed todo items\n"
+            "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
@@ -1625,6 +1754,260 @@ Project-specific instructions for Filo.
     }
 };
 
+class TodoCommand : public Command {
+public:
+    std::string get_name() const override { return "/todo"; }
+    std::string get_description() const override {
+        return "Manage session-backed todo items";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.list_todos_fn) {
+            ctx.append_history_fn("\n✗  Todo management is unavailable in this context.\n");
+            return;
+        }
+
+        const std::string args = trailing_arguments(ctx.text);
+        const auto tokens = split_ascii_whitespace(args);
+        auto show_list = [&]() {
+            ctx.append_history_fn(format_todos(ctx.list_todos_fn()));
+        };
+
+        if (tokens.empty() || to_lower_ascii(tokens.front()) == "list") {
+            show_list();
+            return;
+        }
+
+        const std::string action = to_lower_ascii(tokens.front());
+        const std::size_t remainder_offset =
+            static_cast<std::size_t>(tokens.front().data() - args.data()) + tokens.front().size();
+        const std::string remainder = trim_copy(
+            remainder_offset >= args.size() ? std::string_view{} : std::string_view(args).substr(remainder_offset));
+
+        CommandOperationResult result;
+        if (action == "add") {
+            if (!ctx.add_todo_fn) {
+                ctx.append_history_fn("\n✗  Todo creation is unavailable in this context.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn(
+                    "\nℹ  Usage: /todo add <text>\n"
+                    "   Other actions: list, done <id|index>, undo <id|index>, remove <id|index>, clear-done.\n");
+                return;
+            }
+            result = ctx.add_todo_fn(remainder);
+        } else if (action == "done" || action == "complete") {
+            if (!ctx.set_todo_completed_fn) {
+                ctx.append_history_fn("\n✗  Todo completion is unavailable in this context.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /todo done <id|index>\n");
+                return;
+            }
+            result = ctx.set_todo_completed_fn(remainder, true);
+        } else if (action == "undo" || action == "open" || action == "reopen") {
+            if (!ctx.set_todo_completed_fn) {
+                ctx.append_history_fn("\n✗  Todo reopening is unavailable in this context.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /todo undo <id|index>\n");
+                return;
+            }
+            result = ctx.set_todo_completed_fn(remainder, false);
+        } else if (action == "remove" || action == "rm" || action == "delete") {
+            if (!ctx.remove_todo_fn) {
+                ctx.append_history_fn("\n✗  Todo removal is unavailable in this context.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /todo remove <id|index>\n");
+                return;
+            }
+            result = ctx.remove_todo_fn(remainder);
+        } else if (action == "clear-done" || action == "clear_done") {
+            if (!ctx.clear_completed_todos_fn) {
+                ctx.append_history_fn("\n✗  Clearing completed todos is unavailable in this context.\n");
+                return;
+            }
+            result = ctx.clear_completed_todos_fn();
+        } else {
+            ctx.append_history_fn(
+                "\nℹ  Usage: /todo [list|add <text>|done <id|index>|undo <id|index>|remove <id|index>|clear-done]\n");
+            return;
+        }
+
+        ctx.append_history_fn(std::format(
+            "\n{}  {}\n",
+            result.ok ? "✓" : "✗",
+            result.message.empty()
+                ? (result.ok ? "Todo updated." : "Todo update failed.")
+                : result.message));
+        if (result.ok) {
+            show_list();
+        }
+    }
+};
+
+class McpCommand : public Command {
+public:
+    std::string get_name() const override { return "/mcp"; }
+    std::string get_description() const override {
+        return "List or manage MCP server overlays";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.list_mcp_servers_fn) {
+            ctx.append_history_fn("\n✗  MCP management is unavailable in this context.\n");
+            return;
+        }
+
+        const std::string args = trailing_arguments(ctx.text);
+        const auto parsed_tokens = split_shell_like_tokens(args);
+        if (!parsed_tokens.error.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", parsed_tokens.error));
+            return;
+        }
+        const auto& tokens = parsed_tokens.tokens;
+        auto usage = [&]() {
+            ctx.append_history_fn(
+                "\nℹ  Usage:\n"
+                "   /mcp list\n"
+                "   /mcp add [--global|--workspace] [--env KEY=VALUE ...] <name> stdio <command> [args...]\n"
+                "   /mcp add [--global|--workspace] <name> http <url>\n"
+                "   /mcp remove [--global|--workspace] <name>\n");
+        };
+
+        if (tokens.empty() || to_lower_ascii(tokens.front()) == "list") {
+            ctx.append_history_fn(format_mcp_servers(ctx.list_mcp_servers_fn()));
+            return;
+        }
+
+        const std::string action = to_lower_ascii(tokens.front());
+        std::size_t index = 1;
+        core::config::SettingsScope scope = core::config::SettingsScope::Workspace;
+
+        auto consume_scope_options = [&](std::vector<std::string>& env_values) -> bool {
+            while (index < tokens.size()) {
+                const std::string option = to_lower_ascii(tokens[index]);
+                if (option == "--global") {
+                    scope = core::config::SettingsScope::User;
+                    ++index;
+                    continue;
+                }
+                if (option == "--workspace") {
+                    scope = core::config::SettingsScope::Workspace;
+                    ++index;
+                    continue;
+                }
+                if (option == "--env") {
+                    if (index + 1 >= tokens.size()) {
+                        ctx.append_history_fn("\n✗  /mcp --env requires KEY=VALUE.\n");
+                        return false;
+                    }
+                    env_values.push_back(std::string(tokens[index + 1]));
+                    index += 2;
+                    continue;
+                }
+                break;
+            }
+            return true;
+        };
+
+        if (action == "add") {
+            if (!ctx.add_mcp_server_fn) {
+                ctx.append_history_fn("\n✗  MCP persistence is unavailable in this context.\n");
+                return;
+            }
+
+            std::vector<std::string> env_values;
+            if (!consume_scope_options(env_values)) {
+                return;
+            }
+            if (index + 2 >= tokens.size()) {
+                usage();
+                return;
+            }
+
+            core::config::McpServerConfig server;
+            server.name = std::string(tokens[index++]);
+            server.transport = to_lower_ascii(tokens[index++]);
+            server.env = std::move(env_values);
+
+            if (server.transport == "stdio") {
+                if (index >= tokens.size()) {
+                    usage();
+                    return;
+                }
+                server.command = std::string(tokens[index++]);
+                while (index < tokens.size()) {
+                    server.args.push_back(std::string(tokens[index++]));
+                }
+            } else if (server.transport == "http") {
+                if (index >= tokens.size()) {
+                    usage();
+                    return;
+                }
+                server.url = std::string(tokens[index++]);
+                if (index != tokens.size()) {
+                    usage();
+                    return;
+                }
+            } else {
+                ctx.append_history_fn("\n✗  MCP transport must be `stdio` or `http`.\n");
+                return;
+            }
+
+            const auto result = ctx.add_mcp_server_fn(server, scope);
+            ctx.append_history_fn(std::format(
+                "\n{}  {}\n",
+                result.ok ? "✓" : "✗",
+                result.message.empty()
+                    ? (result.ok ? "MCP server saved." : "Failed to save MCP server.")
+                    : result.message));
+            if (result.ok) {
+                ctx.append_history_fn(format_mcp_servers(ctx.list_mcp_servers_fn()));
+            }
+            return;
+        }
+
+        if (action == "remove" || action == "rm" || action == "delete") {
+            if (!ctx.remove_mcp_server_fn) {
+                ctx.append_history_fn("\n✗  MCP persistence is unavailable in this context.\n");
+                return;
+            }
+            std::vector<std::string> ignored_env;
+            if (!consume_scope_options(ignored_env)) {
+                return;
+            }
+            if (index >= tokens.size()) {
+                usage();
+                return;
+            }
+
+            const auto result = ctx.remove_mcp_server_fn(tokens[index], scope);
+            ctx.append_history_fn(std::format(
+                "\n{}  {}\n",
+                result.ok ? "✓" : "✗",
+                result.message.empty()
+                    ? (result.ok ? "MCP server removed." : "Failed to remove MCP server.")
+                    : result.message));
+            if (result.ok) {
+                ctx.append_history_fn(format_mcp_servers(ctx.list_mcp_servers_fn()));
+            }
+            return;
+        }
+
+        usage();
+    }
+};
+
 class ShellCommand : public Command {
 public:
     std::string get_name() const override { return "!"; }
@@ -1685,6 +2068,8 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ExportCommand>());
     register_command(std::make_unique<ForkCommand>());
     register_command(std::make_unique<InitCommand>());
+    register_command(std::make_unique<TodoCommand>());
+    register_command(std::make_unique<McpCommand>());
     register_command(std::make_unique<ShellCommand>());
 }
 

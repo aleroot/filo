@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "ToolNames.hpp"
 #include <chrono>
 #include <format>
 
@@ -10,7 +11,7 @@ class GetTimeTool : public Tool {
 public:
     ToolDefinition get_definition() const override {
         return {
-            .name        = "get_current_time",
+            .name        = std::string(names::kGetCurrentTime),
             .title       = "Get Current Time",
             .description = "Returns the current system time in HH:MM:SS format.",
             .annotations = { .read_only_hint = true, .idempotent_hint = false },

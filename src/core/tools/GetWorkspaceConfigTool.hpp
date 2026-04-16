@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "ToolNames.hpp"
 #include "../workspace/Workspace.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <vector>
@@ -18,7 +19,7 @@ class GetWorkspaceConfigTool : public Tool {
 public:
     ToolDefinition get_definition() const override {
         return {
-            .name        = "get_workspace_config",
+            .name        = std::string(names::kGetWorkspaceConfig),
             .title       = "Get Workspace Configuration",
             .description = "Returns the current workspace configuration, including "
                            "primary and additional allowed directories and whether "

@@ -989,3 +989,92 @@ TEST_CASE("ConfigManager parses router spend_limits alias", "[config][router][gu
 
     fs::remove_all(sandbox);
 }
+
+TEST_CASE("ConfigManager parses tool policies and hooks", "[config][tools][hooks]") {
+    const fs::path sandbox = make_temp_dir("filo_config_tools_hooks");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path local_config = project_dir / ".filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(local_config, R"({
+        "tools": {
+            "*": {
+                "denied_paths": ["secrets"]
+            },
+            "shell": {
+                "allowed_commands": ["git status", "printf"],
+                "trusted_urls": ["https://example.com"]
+            }
+        },
+        "hooks": {
+            "user_prompt_submit": [
+                { "name": "log-submit", "command": "printf submit", "timeout_seconds": 3 }
+            ],
+            "pre_tool_use": [
+                "printf pre-tool"
+            ]
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& config = manager.get_config();
+
+    REQUIRE(config.tool_policies.contains("*"));
+    REQUIRE(config.tool_policies.contains("shell"));
+    REQUIRE(config.tool_policies.at("*").denied_paths.has_value());
+    REQUIRE(config.tool_policies.at("*").denied_paths->front() == "secrets");
+    REQUIRE(config.tool_policies.at("shell").allowed_commands.has_value());
+    REQUIRE(config.tool_policies.at("shell").allowed_commands->size() == 2);
+    REQUIRE(config.tool_policies.at("shell").trusted_urls.has_value());
+    REQUIRE(config.tool_policies.at("shell").trusted_urls->front() == "https://example.com");
+    REQUIRE(config.hooks.user_prompt_submit.size() == 1);
+    REQUIRE(config.hooks.user_prompt_submit.front().name == "log-submit");
+    REQUIRE(config.hooks.pre_tool_use.size() == 1);
+    REQUIRE(config.hooks.pre_tool_use.front().command == "printf pre-tool");
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persists MCP server overlays", "[config][mcp]") {
+    const fs::path sandbox = make_temp_dir("filo_config_mcp_overlay");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    core::config::McpServerConfig server;
+    server.name = "docs";
+    server.transport = "http";
+    server.url = "http://localhost:8123/mcp";
+
+    std::string error;
+    REQUIRE(manager.persist_mcp_server(
+        server,
+        core::config::SettingsScope::Workspace,
+        project_dir,
+        &error));
+    REQUIRE(error.empty());
+
+    const auto overlay_path = manager.get_mcp_overlay_path(
+        core::config::SettingsScope::Workspace,
+        project_dir);
+    REQUIRE(fs::exists(overlay_path));
+    REQUIRE(manager.get_config().mcp_servers.size() == 1);
+    CHECK(manager.get_config().mcp_servers.front().name == "docs");
+
+    REQUIRE(manager.remove_mcp_server(
+        "docs",
+        core::config::SettingsScope::Workspace,
+        project_dir,
+        &error));
+    REQUIRE(error.empty());
+    CHECK(manager.get_config().mcp_servers.empty());
+
+    fs::remove_all(sandbox);
+}

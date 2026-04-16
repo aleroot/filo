@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/config/ConfigManager.hpp"
 #include "core/tools/ReadFileTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
@@ -24,9 +25,12 @@
 #endif
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #ifdef FILO_ENABLE_PYTHON
@@ -48,6 +52,51 @@ public:
         core::workspace::Workspace::get_instance().initialize("", {}, false);
     }
 };
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, const std::string& value)
+        : key_(key) {
+        if (const char* existing = std::getenv(key); existing != nullptr) {
+            old_value_ = existing;
+        }
+        ::setenv(key, value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value_.has_value()) {
+            ::setenv(key_.c_str(), old_value_->c_str(), 1);
+        } else {
+            ::unsetenv(key_.c_str());
+        }
+    }
+
+private:
+    std::string key_;
+    std::optional<std::string> old_value_;
+};
+
+class ToolTestConfigEnvironment {
+public:
+    ToolTestConfigEnvironment()
+        : root_(std::filesystem::temp_directory_path()
+                / ("filo_tool_test_xdg_"
+                   + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+        , env_("XDG_CONFIG_HOME", root_.string()) {
+        core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    }
+
+    ~ToolTestConfigEnvironment() {
+        std::error_code ec;
+        std::filesystem::remove_all(root_, ec);
+    }
+
+private:
+    std::filesystem::path root_;
+    ScopedEnvVar env_;
+};
+
+ToolTestConfigEnvironment g_tool_test_config_environment;
 
 [[nodiscard]] core::context::SessionContext make_tool_test_context(std::string session_id = {}) {
     return test_support::make_workspace_session_context(
@@ -208,6 +257,131 @@ TEST_CASE("ReadFileTool reads files that contain spaces in their path", "[tools]
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("space_path_ok"));
 
     std::filesystem::remove(path);
+}
+
+TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",
+          "[tools][policy]") {
+    const auto stamp = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto sandbox = std::filesystem::temp_directory_path() / ("filo_tool_policy_" + stamp);
+    const auto xdg_home = sandbox / "xdg";
+    const auto project = sandbox / "project";
+    const auto config_path = project / ".filo" / "config.json";
+    const auto allowed_dir = project / "allowed";
+    const auto blocked_dir = project / "blocked";
+
+    std::filesystem::create_directories(allowed_dir);
+    std::filesystem::create_directories(blocked_dir);
+    {
+        std::ofstream allowed(allowed_dir / "ok.txt");
+        allowed << "allowed";
+    }
+    {
+        std::ofstream blocked(blocked_dir / "no.txt");
+        blocked << "blocked";
+    }
+    {
+        std::filesystem::create_directories(config_path.parent_path());
+        std::ofstream config(config_path);
+        config << R"({
+            "tools": {
+                "*": {
+                    "denied_paths": ["blocked"],
+                    "allowed_commands": ["echo base"]
+                },
+                "read_file": {
+                    "allowed_paths": ["allowed"]
+                },
+                "shell": {
+                    "allowed_commands": ["printf", "curl"],
+                    "trusted_urls": ["https://example.com/api"]
+                }
+            }
+        })";
+    }
+
+    {
+        ScopedEnvVar xdg_config("XDG_CONFIG_HOME", xdg_home.string());
+        auto& manager = core::config::ConfigManager::get_instance();
+        manager.load(project);
+
+        const ScopedWorkspaceEnforcement scoped_workspace(project);
+        const auto context = test_support::make_session_context(
+            core::workspace::WorkspaceSnapshot{
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+                .version = 1,
+            },
+            core::context::SessionTransport::cli,
+            "tool-policy-session");
+
+#undef execute
+        ReadFileTool read_tool;
+        const auto allowed_result = read_tool.execute(
+            R"({"path":"allowed/ok.txt"})",
+            context);
+        REQUIRE_THAT(allowed_result, Catch::Matchers::ContainsSubstring("allowed"));
+
+        const auto blocked_result = read_tool.execute(
+            R"({"path":"blocked/no.txt"})",
+            context);
+        REQUIRE_THAT(blocked_result, Catch::Matchers::ContainsSubstring("denied_paths"));
+
+        ShellTool shell_tool;
+        const auto denied_command = shell_tool.execute(
+            R"({"command":"pwd"})",
+            context);
+        REQUIRE_THAT(denied_command, Catch::Matchers::ContainsSubstring("allowed_commands"));
+
+        const auto wildcard_command = shell_tool.execute(
+            R"({"command":"echo base"})",
+            context);
+        REQUIRE_THAT(wildcard_command, Catch::Matchers::ContainsSubstring("allowed_commands"));
+
+        const auto chained_command = shell_tool.execute(
+            R"({"command":"printf allowed; pwd"})",
+            context);
+        REQUIRE_THAT(chained_command, Catch::Matchers::ContainsSubstring("allowed_commands"));
+
+        const auto quoted_separator_command = shell_tool.execute(
+            R"({"command":"printf 'allowed;still-literal'"})",
+            context);
+        REQUIRE_THAT(
+            quoted_separator_command,
+            Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+        const auto allowed_command = shell_tool.execute(
+            R"({"command":"printf allowed"})",
+            context);
+        REQUIRE_THAT(allowed_command, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+        const auto trusted_url_command = shell_tool.execute(
+            R"({"command":"printf https://example.com/api/status"})",
+            context);
+        REQUIRE_THAT(trusted_url_command, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+        const auto untrusted_path_command = shell_tool.execute(
+            R"({"command":"printf https://example.com/other"})",
+            context);
+        REQUIRE_THAT(untrusted_path_command, Catch::Matchers::ContainsSubstring("trusted_urls"));
+
+        const auto untrusted_host_command = shell_tool.execute(
+            R"({"command":"printf https://evil.example.com/api"})",
+            context);
+        REQUIRE_THAT(untrusted_host_command, Catch::Matchers::ContainsSubstring("trusted_urls"));
+
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+
+        std::error_code remove_ec;
+        std::filesystem::remove(config_path, remove_ec);
+        manager.load(project);
+    }
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+
+    std::error_code ec;
+    std::filesystem::remove_all(sandbox, ec);
 }
 
 TEST_CASE("ReadFileTool handles dot-segment paths", "[tools]") {
