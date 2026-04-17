@@ -531,9 +531,9 @@ TEST_CASE("Agent enforces per-turn model and tool constraints",
         tool_names.push_back(tool.function.name);
     }
 
-    CHECK(std::ranges::find(tool_names, "allowed_tool") != tool_names.end());
-    CHECK(std::ranges::find(tool_names, "blocked_tool") == tool_names.end());
-    CHECK(std::ranges::find(tool_names, "task") == tool_names.end());
+    CHECK(std::ranges::find(tool_names, std::string("allowed_tool")) != tool_names.end());
+    CHECK(std::ranges::find(tool_names, std::string("blocked_tool")) == tool_names.end());
+    CHECK(std::ranges::find(tool_names, std::string("task")) == tool_names.end());
 }
 
 TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loop][rotation]") {
