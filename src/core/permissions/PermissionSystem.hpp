@@ -144,4 +144,25 @@ private:
 std::string make_allow_key(std::string_view tool_name, std::string_view tool_args);
 std::string make_allow_label(std::string_view tool_name, std::string_view tool_args);
 
+// Session trust-rule helpers used by the TUI `/tools` command and the
+// interactive permission prompt "don't ask again" flow.
+//
+// Supported canonical rule formats:
+//   shell:*          → any run_terminal_command call
+//   shell:<program>  → run_terminal_command calls for one program
+//   files:*          → any file modification/deletion/move tool call
+//   files:write      → write/apply_patch/replace/create_directory calls
+//   files:delete     → delete_file calls
+//   files:move       → move_file calls
+//   tool:<name>      → a specific tool name
+//   <legacy key>     → exact make_allow_key() match (backward-compatible;
+//                      for example run_terminal_command remains exact)
+std::string make_session_allow_rule(std::string_view tool_name,
+                                    std::string_view tool_args);
+std::string normalize_session_allow_rule(std::string_view rule);
+bool session_allow_rule_matches(std::string_view rule,
+                                std::string_view tool_name,
+                                std::string_view tool_args);
+std::string describe_session_allow_rule(std::string_view rule);
+
 } // namespace core::permissions

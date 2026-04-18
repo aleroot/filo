@@ -21,6 +21,7 @@
 #endif
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/permissions/PermissionSystem.hpp"
 #include "core/utils/Base64.hpp"
 #include "ReviewExecutor.hpp"
 
@@ -181,6 +182,172 @@ ShellLikeTokenizeResult split_shell_like_tokens(std::string_view input) {
 
     flush_token();
     return result;
+}
+
+std::optional<std::string> parse_tools_rule_spec(std::string_view raw_spec,
+                                                 std::string& error) {
+    const std::string_view trimmed_spec = trim(raw_spec);
+    if (trimmed_spec.empty()) {
+        error = "Missing trust rule. Use `/tools allow shell <program|*>` or `/tools help`.";
+        return std::nullopt;
+    }
+
+    const auto tokens = split_ascii_whitespace(trimmed_spec);
+    if (tokens.empty()) {
+        error = "Missing trust rule.";
+        return std::nullopt;
+    }
+
+    const std::string command = to_lower_ascii(tokens.front());
+    auto require_single_value = [&](std::string_view usage) -> std::optional<std::string_view> {
+        if (tokens.size() != 2) {
+            error = std::format("Invalid rule syntax. Usage: {}", usage);
+            return std::nullopt;
+        }
+        return tokens[1];
+    };
+
+    auto normalize_scope = [](std::string_view raw_scope) -> std::optional<std::string> {
+        const std::string scope = to_lower_ascii(raw_scope);
+        if (scope == "*" || scope == "all" || scope == "any") {
+            return std::string("*");
+        }
+        if (scope == "write" || scope == "modify" || scope == "modification"
+            || scope == "modifications" || scope == "edit" || scope == "edits") {
+            return std::string("write");
+        }
+        if (scope == "delete" || scope == "deletion" || scope == "deletions"
+            || scope == "remove" || scope == "removal" || scope == "removals") {
+            return std::string("delete");
+        }
+        if (scope == "move" || scope == "moves" || scope == "rename" || scope == "renames") {
+            return std::string("move");
+        }
+        return std::nullopt;
+    };
+
+    if (command == "shell" || command == "terminal") {
+        const auto value = require_single_value("`/tools allow shell <program|*>`");
+        if (!value.has_value()) {
+            return std::nullopt;
+        }
+        const std::string program = to_lower_ascii(*value);
+        if (program.empty()) {
+            error = "Shell trust rule requires a program name.";
+            return std::nullopt;
+        }
+        return program == "*" || program == "all" || program == "any"
+            ? std::optional<std::string>{"shell:*"}
+            : std::optional<std::string>{std::format("shell:{}", program)};
+    }
+
+    if (command == "file" || command == "files") {
+        const auto value = require_single_value("`/tools allow files <write|delete|move|*>`");
+        if (!value.has_value()) {
+            return std::nullopt;
+        }
+        const auto normalized = normalize_scope(*value);
+        if (!normalized.has_value()) {
+            error = "Unknown files scope. Use write, delete, move, or *.";
+            return std::nullopt;
+        }
+        return *normalized == "*" ? std::optional<std::string>{"files:*"}
+                                   : std::optional<std::string>{std::format("files:{}", *normalized)};
+    }
+
+    if (command == "tool") {
+        const auto value = require_single_value("`/tools allow tool <tool_name>`");
+        if (!value.has_value()) {
+            return std::nullopt;
+        }
+        const std::string tool = to_lower_ascii(*value);
+        if (tool.empty()) {
+            error = "Tool trust rule requires a tool name.";
+            return std::nullopt;
+        }
+        return std::format("tool:{}", tool);
+    }
+
+    if (command == "key") {
+        const auto value = require_single_value("`/tools allow key <allow_key>`");
+        if (!value.has_value()) {
+            return std::nullopt;
+        }
+        const std::string canonical =
+            core::permissions::normalize_session_allow_rule(*value);
+        if (canonical.empty()) {
+            error = "Allow key cannot be empty.";
+            return std::nullopt;
+        }
+        return canonical;
+    }
+
+    if (tokens.size() == 1) {
+        const std::string single_token = to_lower_ascii(tokens.front());
+        if (single_token.starts_with("shell:")) {
+            const std::string value = single_token.substr(6);
+            if (value.empty()) {
+                error = "Shell trust rule requires a program name or `*`.";
+                return std::nullopt;
+            }
+            return value == "*"
+                ? std::optional<std::string>{"shell:*"}
+                : std::optional<std::string>{std::format("shell:{}", value)};
+        }
+        if (single_token.starts_with("files:")) {
+            const auto normalized = normalize_scope(single_token.substr(6));
+            if (!normalized.has_value()) {
+                error = "Unknown files scope. Use write, delete, move, or *.";
+                return std::nullopt;
+            }
+            return *normalized == "*" ? std::optional<std::string>{"files:*"}
+                                       : std::optional<std::string>{std::format("files:{}", *normalized)};
+        }
+        if (single_token.starts_with("tool:")) {
+            const std::string value = single_token.substr(5);
+            if (value.empty()) {
+                error = "Tool trust rule requires a tool name.";
+                return std::nullopt;
+            }
+            return std::format("tool:{}", value);
+        }
+
+        const std::string canonical =
+            core::permissions::normalize_session_allow_rule(tokens.front());
+        if (canonical.empty()) {
+            error = "Invalid trust rule.";
+            return std::nullopt;
+        }
+        return canonical;
+    }
+
+    error = "Invalid trust rule syntax. Use `/tools help` for examples.";
+    return std::nullopt;
+}
+
+std::vector<std::string> sorted_rule_snapshot(const ToolRuleCallbacks& tool_rules) {
+    std::vector<std::string> rules;
+    if (tool_rules.list) {
+        rules = tool_rules.list();
+    }
+    std::sort(rules.begin(), rules.end());
+    return rules;
+}
+
+std::string format_tool_rules(const std::vector<std::string>& rules) {
+    if (rules.empty()) {
+        return "\n[Tool Trust]\n  No session trust rules. Sensitive tools will prompt.\n";
+    }
+
+    std::ostringstream out;
+    out << "\n[Tool Trust]\n";
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        out << std::format("  {:>2}. {:<20}  {}\n",
+                           i + 1,
+                           rules[i],
+                           core::permissions::describe_session_allow_rule(rules[i]));
+    }
+    return out.str();
 }
 
 bool is_valid_provider_token(std::string_view value) {
@@ -917,6 +1084,7 @@ public:
             "  /effort [level]     Show/set model effort (auto|low|medium|high|max)\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
+            "  /tools [action]     Manage session trust rules for sensitive tools\n"
             "  /copy               Copy the latest assistant response to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
             "  /review [target]    Open review menu or run Codex-style AI code review\n"
@@ -1331,6 +1499,173 @@ public:
         ctx.append_history_fn(next
             ? "\n⚠  Approval mode set to YOLO: sensitive tools now run without confirmation.\n"
             : "\nℹ  Approval mode set to PROMPT: sensitive tools require confirmation.\n");
+    }
+};
+
+class ToolsCommand : public Command {
+public:
+    std::string get_name() const override { return "/tools"; }
+    std::string get_description() const override {
+        return "Manage session trust rules for sensitive tools";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+
+        if (!ctx.tool_rules.available()) {
+            ctx.append_history_fn(
+                "\n✗  Tool trust controls are unavailable in this session.\n");
+            return;
+        }
+
+        const std::string args = trailing_arguments(ctx.text);
+        const auto tokens = split_ascii_whitespace(args);
+        const std::string action = tokens.empty()
+            ? std::string("status")
+            : to_lower_ascii(tokens.front());
+
+        auto usage = [&]() {
+            ctx.append_history_fn(
+                "\nℹ  Usage:\n"
+                "   /tools                     Show trust status and active rules\n"
+                "   /tools list               List session trust rules\n"
+                "   /tools allow shell git    Trust one terminal program\n"
+                "   /tools allow shell *      Trust all terminal programs\n"
+                "   /tools allow files write  Trust file modifications\n"
+                "   /tools allow files delete Trust file deletions\n"
+                "   /tools allow files move   Trust file moves\n"
+                "   /tools allow tool write_file\n"
+                "   /tools remove <index|rule>\n"
+                "   /tools clear              Remove all session trust rules\n");
+        };
+
+        auto remainder_after_action = [&]() -> std::string_view {
+            if (tokens.empty()) {
+                return {};
+            }
+            const std::size_t offset =
+                static_cast<std::size_t>(tokens.front().data() - args.data())
+                + tokens.front().size();
+            if (offset >= args.size()) {
+                return {};
+            }
+            return trim(std::string_view(args).substr(offset));
+        };
+
+        auto append_result = [&](const CommandOperationResult& result,
+                                 std::string_view success_message = "Rule updated.") {
+            const std::string message = result.message.empty()
+                ? (result.ok ? std::string(success_message) : std::string("Operation failed."))
+                : result.message;
+            ctx.append_history_fn(std::format(
+                "\n{}  {}\n",
+                result.ok ? "✓" : "✗",
+                message));
+        };
+
+        if (action == "help") {
+            usage();
+            return;
+        }
+
+        if (action == "status" || action == "show") {
+            const auto rules = sorted_rule_snapshot(ctx.tool_rules);
+            const bool yolo_enabled = ctx.yolo_mode_enabled_fn
+                ? ctx.yolo_mode_enabled_fn()
+                : false;
+            ctx.append_history_fn(std::format(
+                "{}\n{}\n",
+                yolo_enabled
+                    ? "\n⚠  Approval mode: YOLO (all sensitive tools auto-approved)."
+                    : "\nℹ  Approval mode: PROMPT (sensitive tools require approval unless trusted).",
+                format_tool_rules(rules)));
+            return;
+        }
+
+        if (action == "list" || action == "ls") {
+            ctx.append_history_fn(format_tool_rules(sorted_rule_snapshot(ctx.tool_rules)));
+            return;
+        }
+
+        if (action == "allow" || action == "add" || action == "trust") {
+            std::string error;
+            const auto rule = parse_tools_rule_spec(remainder_after_action(), error);
+            if (!rule.has_value()) {
+                ctx.append_history_fn(std::format("\n✗  {}\n", error));
+                return;
+            }
+
+            const auto result = ctx.tool_rules.add(*rule);
+            append_result(result, "Rule added.");
+            if (result.ok) {
+                ctx.append_history_fn(format_tool_rules(sorted_rule_snapshot(ctx.tool_rules)));
+            }
+            return;
+        }
+
+        if (action == "remove" || action == "rm" || action == "revoke"
+            || action == "delete" || action == "untrust") {
+            const std::string_view target = remainder_after_action();
+            if (target.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /tools remove <index|rule>\n");
+                return;
+            }
+
+            std::string target_rule;
+            const bool numeric_target = std::all_of(
+                target.begin(),
+                target.end(),
+                [](unsigned char ch) { return std::isdigit(ch); });
+            if (numeric_target) {
+                std::size_t index = 0;
+                try {
+                    index = static_cast<std::size_t>(std::stoul(std::string(target)));
+                } catch (...) {
+                    ctx.append_history_fn("\n✗  Invalid rule index.\n");
+                    return;
+                }
+                const auto rules = sorted_rule_snapshot(ctx.tool_rules);
+                if (index == 0 || index > rules.size()) {
+                    if (rules.empty()) {
+                        ctx.append_history_fn("\n✗  There are no trust rules to remove.\n");
+                        return;
+                    }
+                    ctx.append_history_fn(std::format(
+                        "\n✗  Rule index {} is out of range (1-{}).\n",
+                        index,
+                        rules.size()));
+                    return;
+                }
+                target_rule = rules[index - 1];
+            } else {
+                std::string error;
+                const auto parsed = parse_tools_rule_spec(target, error);
+                if (!parsed.has_value()) {
+                    ctx.append_history_fn(std::format("\n✗  {}\n", error));
+                    return;
+                }
+                target_rule = *parsed;
+            }
+
+            const auto result = ctx.tool_rules.remove(target_rule);
+            append_result(result, "Rule removed.");
+            if (result.ok) {
+                ctx.append_history_fn(format_tool_rules(sorted_rule_snapshot(ctx.tool_rules)));
+            }
+            return;
+        }
+
+        if (action == "clear" || action == "reset") {
+            const auto result = ctx.tool_rules.clear();
+            append_result(result, "All tool trust rules cleared.");
+            if (result.ok) {
+                ctx.append_history_fn(format_tool_rules(sorted_rule_snapshot(ctx.tool_rules)));
+            }
+            return;
+        }
+
+        usage();
     }
 };
 
@@ -2062,6 +2397,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<EffortCommand>());
     register_command(std::make_unique<SettingsCommand>());
     register_command(std::make_unique<YoloCommand>());
+    register_command(std::make_unique<ToolsCommand>());
     register_command(std::make_unique<CopyCommand>());
     register_command(std::make_unique<HistoryCommand>());
     register_command(std::make_unique<ReviewCommand>());

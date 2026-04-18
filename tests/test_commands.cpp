@@ -5,6 +5,7 @@
 #include "core/agent/Agent.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/llm/LLMProvider.hpp"
+#include "core/permissions/PermissionSystem.hpp"
 #include "core/tools/ToolManager.hpp"
 #include <algorithm>
 #include <functional>
@@ -55,6 +56,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto review_activity_events =
         std::make_shared<std::vector<std::pair<bool, std::string>>>();
     auto yolo_enabled   = std::make_shared<bool>(false);
+    auto tool_rules = std::make_shared<std::vector<std::string>>();
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
 
     CommandContext ctx{
@@ -111,6 +113,35 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .set_yolo_mode_enabled_fn = [yolo_enabled](bool enabled) {
             *yolo_enabled = enabled;
         },
+        .tool_rules = {
+            .list = [tool_rules]() {
+                return *tool_rules;
+            },
+            .add = [tool_rules](std::string_view rule) {
+                const std::string normalized(rule);
+                if (normalized.empty()) {
+                    return CommandOperationResult{.ok = false, .message = "empty rule"};
+                }
+                if (std::find(tool_rules->begin(), tool_rules->end(), normalized)
+                    == tool_rules->end()) {
+                    tool_rules->push_back(normalized);
+                    return CommandOperationResult{.ok = true, .message = "added"};
+                }
+                return CommandOperationResult{.ok = true, .message = "already active"};
+            },
+            .remove = [tool_rules](std::string_view rule) {
+                const auto it = std::find(tool_rules->begin(), tool_rules->end(), std::string(rule));
+                if (it == tool_rules->end()) {
+                    return CommandOperationResult{.ok = false, .message = "not found"};
+                }
+                tool_rules->erase(it);
+                return CommandOperationResult{.ok = true, .message = "removed"};
+            },
+            .clear = [tool_rules]() {
+                tool_rules->clear();
+                return CommandOperationResult{.ok = true, .message = "cleared"};
+            },
+        },
         .fork_session_fn = [fork_result]() {
             return *fork_result;
         },
@@ -148,6 +179,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Filo Commands]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/auth [provider]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/settings"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/tools [action]"));
 
         // Test alias
         *mock_history = "";
@@ -527,6 +559,86 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Unknown /yolo option"));
     }
 
+    SECTION("/tools status and list show trust rules") {
+        *mock_history = "";
+        *yolo_enabled = false;
+        tool_rules->clear();
+        tool_rules->push_back("files:write");
+        tool_rules->push_back("shell:git");
+
+        ctx.text = "/tools";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Approval mode: PROMPT"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("files:write"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("shell:git"));
+
+        *mock_history = "";
+        ctx.text = "/tools list";
+        handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Tool Trust]"));
+    }
+
+    SECTION("/tools allow normalizes and adds trust rules") {
+        *mock_history = "";
+        tool_rules->clear();
+
+        ctx.text = "/tools allow shell git";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(std::find(tool_rules->begin(), tool_rules->end(), "shell:git") != tool_rules->end());
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("added"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("shell:git"));
+
+        *mock_history = "";
+        ctx.text = "/tools allow files delete";
+        handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(std::find(tool_rules->begin(), tool_rules->end(), "files:delete") != tool_rules->end());
+    }
+
+    SECTION("/tools allow key keeps legacy terminal fallback exact") {
+        *mock_history = "";
+        tool_rules->clear();
+
+        ctx.text = "/tools allow key run_terminal_command";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(std::find(tool_rules->begin(), tool_rules->end(), "run_terminal_command")
+                != tool_rules->end());
+        REQUIRE(std::find(tool_rules->begin(), tool_rules->end(), "shell:*")
+                == tool_rules->end());
+
+        REQUIRE_FALSE(core::permissions::session_allow_rule_matches(
+            "run_terminal_command",
+            "run_terminal_command",
+            R"({"command":"git status"})"));
+        REQUIRE(core::permissions::session_allow_rule_matches(
+            "run_terminal_command",
+            "run_terminal_command",
+            R"({"working_dir":"/tmp"})"));
+    }
+
+    SECTION("/tools remove supports index and clears rules") {
+        *mock_history = "";
+        tool_rules->clear();
+        tool_rules->push_back("shell:git");
+        tool_rules->push_back("files:write");
+
+        ctx.text = "/tools remove 1";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(tool_rules->size() == 1);
+
+        *mock_history = "";
+        ctx.text = "/tools clear";
+        handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(tool_rules->empty());
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("cleared"));
+    }
+
     SECTION("/copy copies the latest assistant output") {
         std::string copied_text;
         ctx.latest_assistant_output_fn = []() {
@@ -769,6 +881,12 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         });
         REQUIRE(yolo_it != commands.end());
         REQUIRE(yolo_it->accepts_arguments);
+
+        const auto tools_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
+            return cmd.name == "/tools";
+        });
+        REQUIRE(tools_it != commands.end());
+        REQUIRE(tools_it->accepts_arguments);
 
         const auto auth_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/auth";

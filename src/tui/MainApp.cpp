@@ -47,6 +47,7 @@
 #include "core/logging/Logger.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/agent/PermissionGate.hpp"
+#include "core/permissions/PermissionSystem.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/mcp/McpConnectionManager.hpp"
 #include "core/context/ContextMentions.hpp"
@@ -751,8 +752,9 @@ RunResult run(RunOptions opts) {
 
     ApprovalMode approval_mode = parse_approval_mode(config.default_approval_mode);
 
-    // Session allow-list: tool calls matching these keys are auto-approved
-    // without prompting (populated via the "don't ask again" option).
+    // Session trust rules used for auto-approval in this session.
+    // Rules are canonical strings (for example: shell:git, files:write,
+    // tool:write_file) and are managed by `/tools` plus the permission overlay.
     std::unordered_set<std::string> session_allowed;
 
     // Permission overlay state
@@ -762,7 +764,7 @@ RunResult run(RunOptions opts) {
         std::string                                     args_preview;
         ToolDiffPreview                                 diff_preview;
         int                                             selected = 0;  // 0-3
-        std::string                                     allow_key;
+        std::string                                     remember_rule;
         std::string                                     allow_label;
         std::shared_ptr<std::promise<bool>>             promise;
     };
@@ -1222,6 +1224,99 @@ RunResult run(RunOptions opts) {
             approval_mode = enabled ? ApprovalMode::Yolo : ApprovalMode::Prompt;
         }
         screen.PostEvent(Event::Custom);
+    };
+
+    auto list_tool_rules = [&]() -> std::vector<std::string> {
+        std::vector<std::string> rules;
+        {
+            std::lock_guard lock(ui_mutex);
+            rules.assign(session_allowed.begin(), session_allowed.end());
+        }
+        std::sort(rules.begin(), rules.end());
+        return rules;
+    };
+
+    auto add_tool_rule = [&](std::string_view raw_rule)
+        -> core::commands::CommandOperationResult {
+        const std::string normalized =
+            core::permissions::normalize_session_allow_rule(raw_rule);
+        if (normalized.empty()) {
+            return {
+                .ok = false,
+                .message = "Trust rule cannot be empty.",
+            };
+        }
+
+        bool inserted = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto [_, did_insert] = session_allowed.insert(normalized);
+            inserted = did_insert;
+        }
+
+        screen.PostEvent(Event::Custom);
+        return {
+            .ok = true,
+            .message = inserted
+                ? std::format(
+                    "Added `{}` ({})",
+                    normalized,
+                    core::permissions::describe_session_allow_rule(normalized))
+                : std::format(
+                    "Rule already active: `{}` ({})",
+                    normalized,
+                    core::permissions::describe_session_allow_rule(normalized)),
+        };
+    };
+
+    auto remove_tool_rule = [&](std::string_view raw_rule)
+        -> core::commands::CommandOperationResult {
+        const std::string normalized =
+            core::permissions::normalize_session_allow_rule(raw_rule);
+        if (normalized.empty()) {
+            return {
+                .ok = false,
+                .message = "Trust rule cannot be empty.",
+            };
+        }
+
+        bool removed = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            removed = session_allowed.erase(normalized) > 0;
+        }
+
+        screen.PostEvent(Event::Custom);
+        return removed
+            ? core::commands::CommandOperationResult{
+                .ok = true,
+                .message = std::format(
+                    "Removed `{}` ({})",
+                    normalized,
+                    core::permissions::describe_session_allow_rule(normalized)),
+            }
+            : core::commands::CommandOperationResult{
+                .ok = false,
+                .message = std::format(
+                    "Rule not found: `{}`",
+                    normalized),
+            };
+    };
+
+    auto clear_tool_rules = [&]() -> core::commands::CommandOperationResult {
+        std::size_t removed = 0;
+        {
+            std::lock_guard lock(ui_mutex);
+            removed = session_allowed.size();
+            session_allowed.clear();
+        }
+        screen.PostEvent(Event::Custom);
+        return {
+            .ok = true,
+            .message = removed == 0
+                ? std::string("No trust rules were set.")
+                : std::format("Cleared {} trust rule{}.", removed, removed == 1 ? "" : "s"),
+        };
     };
 
     auto router_policy_label = [&]() {
@@ -2622,12 +2717,19 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        // Check session allow-list ("don't ask again for this").
-        const std::string allow_key = make_allow_key(tool_name, args);
+        // Check session trust rules ("don't ask again for this").
         bool is_allowed = false;
         {
             std::lock_guard lock(ui_mutex);
-            is_allowed = session_allowed.count(allow_key) > 0;
+            for (const auto& allow_rule : session_allowed) {
+                if (core::permissions::session_allow_rule_matches(
+                        allow_rule,
+                        tool_name,
+                        args)) {
+                    is_allowed = true;
+                    break;
+                }
+            }
         }
         if (is_allowed) {
             // Auto-approved via session allow-list - no status message needed
@@ -2680,7 +2782,8 @@ RunResult run(RunOptions opts) {
                 args,
                 kPermissionDiffPreviewMaxLines);
             perm_state.selected     = 0;
-            perm_state.allow_key    = allow_key;
+            perm_state.remember_rule =
+                core::permissions::make_session_allow_rule(tool_name, args);
             perm_state.allow_label  = make_allow_label(tool_name, args);
             perm_state.promise      = prom;
         }
@@ -3233,6 +3336,12 @@ RunResult run(RunOptions opts) {
             .settings_status_fn = settings_status,
             .yolo_mode_enabled_fn = is_yolo_mode_enabled,
             .set_yolo_mode_enabled_fn = set_yolo_mode_enabled,
+            .tool_rules = {
+                .list = list_tool_rules,
+                .add = add_tool_rule,
+                .remove = remove_tool_rule,
+                .clear = clear_tool_rules,
+            },
             .fork_session_fn = fork_session,
             .suspend_tui_fn   = [&](std::function<void()> task) {
                 // Suspends the TUI loop and restores standard I/O for the duration of the task.
@@ -3441,7 +3550,7 @@ RunResult run(RunOptions opts) {
         std::optional<bool> perm_answer;
         bool enable_yolo_from_permission = false;
         bool enable_always_allow = false;
-        std::string always_allow_key;
+        std::string always_allow_rule;
         std::string always_allow_label;
         bool perm_was_active = false;
         {
@@ -3468,7 +3577,7 @@ RunResult run(RunOptions opts) {
                            || event == Event::Character('a')
                            || event == Event::Character('A')) {
                     // Yes, don't ask again for this
-                    always_allow_key   = perm_state.allow_key;
+                    always_allow_rule  = perm_state.remember_rule;
                     always_allow_label = perm_state.allow_label;
                     enable_always_allow = true;
                     perm_prom   = std::move(perm_state.promise);
@@ -3483,7 +3592,7 @@ RunResult run(RunOptions opts) {
                     perm_state.active = false;
                 } else if (event == Event::Return) {
                     const int sel = perm_state.selected;
-                    always_allow_key   = perm_state.allow_key;
+                    always_allow_rule  = perm_state.remember_rule;
                     always_allow_label = perm_state.allow_label;
                     perm_prom   = std::move(perm_state.promise);
                     perm_answer = sel != 3;
@@ -3509,10 +3618,10 @@ RunResult run(RunOptions opts) {
             if (perm_prom && perm_answer.has_value()) {
                 perm_prom->set_value(*perm_answer);
             }
-            if (enable_always_allow && !always_allow_key.empty()) {
+            if (enable_always_allow && !always_allow_rule.empty()) {
                 {
                     std::lock_guard lock(ui_mutex);
-                    session_allowed.insert(always_allow_key);
+                    session_allowed.insert(always_allow_rule);
                 }
                 // Session allow-list updated - no status message needed
                 (void)always_allow_label;

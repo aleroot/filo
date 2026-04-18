@@ -463,6 +463,7 @@ TEST_CASE("needs_permission — dangerous tools identified correctly", "[tier1][
     REQUIRE(needs_permission("run_terminal_command"));
     REQUIRE(needs_permission("replace"));
     REQUIRE(needs_permission("replace_in_file"));
+    REQUIRE(needs_permission("search_replace"));
     REQUIRE(needs_permission("delete_file"));
     REQUIRE(needs_permission("move_file"));
 

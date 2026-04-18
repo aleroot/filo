@@ -2,6 +2,7 @@
 #include "../agent/PermissionGate.hpp"
 #include "../agent/SafetyPolicy.hpp"
 #include "../tools/ToolNames.hpp"
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <format>
@@ -21,12 +22,14 @@ struct AllowRule {
     AllowKeyStrategy key_strategy;
 };
 
-constexpr std::array<AllowRule, 7> kAllowRules{{
+constexpr std::array<AllowRule, 9> kAllowRules{{
     {core::tools::names::kRunTerminalCommand, "terminal commands", AllowKeyStrategy::ShellProgram},
     {core::tools::names::kWriteFile,          "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kApplyPatch,         "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kReplace,            "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kReplaceInFile,      "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kSearchReplace,      "file modifications", AllowKeyStrategy::ToolName},
+    {core::tools::names::kCreateDirectory,    "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kDeleteFile,         "file deletions",     AllowKeyStrategy::ToolName},
     {core::tools::names::kMoveFile,           "file moves",         AllowKeyStrategy::ToolName},
 }};
@@ -106,6 +109,241 @@ std::string extract_shell_program(std::string_view tool_args) {
         return {};
     }
     return strip_path_prefix(token);
+}
+
+std::string_view trim_ascii(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+std::string to_lower_ascii_copy(std::string_view text) {
+    std::string lowered;
+    lowered.reserve(text.size());
+    for (const unsigned char ch : text) {
+        lowered.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return lowered;
+}
+
+bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
+    return to_lower_ascii_copy(lhs) == to_lower_ascii_copy(rhs);
+}
+
+enum class SessionRuleKind {
+    ExactAllowKey,
+    ToolName,
+    ShellAny,
+    ShellProgram,
+    FilesAny,
+    FilesWrite,
+    FilesDelete,
+    FilesMove,
+};
+
+struct ParsedSessionRule {
+    SessionRuleKind kind = SessionRuleKind::ExactAllowKey;
+    std::string value;
+};
+
+bool is_write_like_file_tool(std::string_view tool_name) {
+    return tool_name == core::tools::names::kWriteFile
+        || tool_name == core::tools::names::kApplyPatch
+        || core::tools::names::is_replace_tool(tool_name)
+        || tool_name == core::tools::names::kCreateDirectory
+        || tool_name == core::tools::names::kSearchReplace;
+}
+
+std::string normalize_files_scope(std::string_view value) {
+    const std::string normalized = to_lower_ascii_copy(trim_ascii(value));
+    if (normalized.empty()) {
+        return {};
+    }
+    if (normalized == "*" || normalized == "all" || normalized == "any") {
+        return "*";
+    }
+    if (normalized == "write" || normalized == "modify" || normalized == "modification"
+        || normalized == "modifications" || normalized == "edit" || normalized == "edits") {
+        return "write";
+    }
+    if (normalized == "delete" || normalized == "deletion" || normalized == "deletions"
+        || normalized == "remove" || normalized == "removal" || normalized == "removals") {
+        return "delete";
+    }
+    if (normalized == "move" || normalized == "moves" || normalized == "rename"
+        || normalized == "renames") {
+        return "move";
+    }
+    return {};
+}
+
+ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
+    const std::string_view trimmed_raw = trim_ascii(raw_rule);
+    if (trimmed_raw.empty()) {
+        return {};
+    }
+    const std::string trimmed_lower = to_lower_ascii_copy(trimmed_raw);
+    const std::string_view trimmed = trimmed_lower;
+
+    auto parse_prefixed = [&](std::string_view prefix) -> std::string_view {
+        if (!trimmed.starts_with(prefix)) {
+            return {};
+        }
+        return trim_ascii(trimmed.substr(prefix.size()));
+    };
+
+    if (const auto value = parse_prefixed("tool:"); !value.empty()) {
+        return ParsedSessionRule{.kind = SessionRuleKind::ToolName,
+                                 .value = to_lower_ascii_copy(value)};
+    }
+    if (const auto value = parse_prefixed("shell:"); !value.empty()) {
+        if (value == "*") {
+            return ParsedSessionRule{.kind = SessionRuleKind::ShellAny, .value = "*"};
+        }
+        return ParsedSessionRule{
+            .kind = SessionRuleKind::ShellProgram,
+            .value = to_lower_ascii_copy(strip_path_prefix(value)),
+        };
+    }
+    if (const auto value = parse_prefixed("files:"); !value.empty()) {
+        const std::string scope = normalize_files_scope(value);
+        if (scope == "*") {
+            return ParsedSessionRule{.kind = SessionRuleKind::FilesAny, .value = "*"};
+        }
+        if (scope == "write") {
+            return ParsedSessionRule{.kind = SessionRuleKind::FilesWrite, .value = "write"};
+        }
+        if (scope == "delete") {
+            return ParsedSessionRule{.kind = SessionRuleKind::FilesDelete, .value = "delete"};
+        }
+        if (scope == "move") {
+            return ParsedSessionRule{.kind = SessionRuleKind::FilesMove, .value = "move"};
+        }
+    }
+
+    // Backward-compatible legacy keys:
+    //   run_terminal_command:git  -> shell:git
+    //   run_terminal_command      -> exact allow key match
+    //   delete_file               -> files:delete
+    //   move_file                 -> files:move
+    //
+    // Legacy write keys (write_file/apply_patch/replace/...) intentionally stay
+    // exact to preserve historical "this tool only" allow-key semantics.
+    const std::string legacy_shell_prefix =
+        std::string(core::tools::names::kRunTerminalCommand) + ":";
+    if (trimmed.starts_with(legacy_shell_prefix)) {
+        const std::string_view suffix =
+            trim_ascii(trimmed.substr(core::tools::names::kRunTerminalCommand.size() + 1));
+        if (suffix.empty()) {
+            return ParsedSessionRule{
+                .kind = SessionRuleKind::ExactAllowKey,
+                .value = std::string(trimmed_raw),
+            };
+        }
+        return ParsedSessionRule{
+            .kind = SessionRuleKind::ShellProgram,
+            .value = to_lower_ascii_copy(strip_path_prefix(suffix)),
+        };
+    }
+    if (trimmed == core::tools::names::kRunTerminalCommand) {
+        return ParsedSessionRule{
+            .kind = SessionRuleKind::ExactAllowKey,
+            .value = std::string(trimmed_raw),
+        };
+    }
+    if (trimmed == core::tools::names::kDeleteFile) {
+        return ParsedSessionRule{.kind = SessionRuleKind::FilesDelete, .value = "delete"};
+    }
+    if (trimmed == core::tools::names::kMoveFile) {
+        return ParsedSessionRule{.kind = SessionRuleKind::FilesMove, .value = "move"};
+    }
+    return ParsedSessionRule{
+        .kind = SessionRuleKind::ExactAllowKey,
+        .value = std::string(trimmed_raw),
+    };
+}
+
+std::string session_rule_to_string(const ParsedSessionRule& rule) {
+    switch (rule.kind) {
+        case SessionRuleKind::ToolName:
+            return rule.value.empty() ? std::string{} : std::format("tool:{}", rule.value);
+        case SessionRuleKind::ShellAny:
+            return "shell:*";
+        case SessionRuleKind::ShellProgram:
+            return rule.value.empty() ? std::string{} : std::format("shell:{}", rule.value);
+        case SessionRuleKind::FilesAny:
+            return "files:*";
+        case SessionRuleKind::FilesWrite:
+            return "files:write";
+        case SessionRuleKind::FilesDelete:
+            return "files:delete";
+        case SessionRuleKind::FilesMove:
+            return "files:move";
+        case SessionRuleKind::ExactAllowKey:
+            return rule.value;
+    }
+    return {};
+}
+
+bool parsed_session_rule_matches(const ParsedSessionRule& rule,
+                                 std::string_view tool_name,
+                                 std::string_view tool_args) {
+    switch (rule.kind) {
+        case SessionRuleKind::ToolName:
+            return iequals_ascii(tool_name, rule.value);
+        case SessionRuleKind::ShellAny:
+            return tool_name == core::tools::names::kRunTerminalCommand;
+        case SessionRuleKind::ShellProgram: {
+            if (tool_name != core::tools::names::kRunTerminalCommand) {
+                return false;
+            }
+            const auto current_program = extract_shell_program(tool_args);
+            return !current_program.empty() && iequals_ascii(current_program, rule.value);
+        }
+        case SessionRuleKind::FilesAny:
+            return core::tools::names::is_file_modification_tool(tool_name);
+        case SessionRuleKind::FilesWrite:
+            return is_write_like_file_tool(tool_name);
+        case SessionRuleKind::FilesDelete:
+            return tool_name == core::tools::names::kDeleteFile;
+        case SessionRuleKind::FilesMove:
+            return tool_name == core::tools::names::kMoveFile;
+        case SessionRuleKind::ExactAllowKey:
+            return !rule.value.empty() && make_allow_key(tool_name, tool_args) == rule.value;
+    }
+    return false;
+}
+
+std::string describe_parsed_session_rule(const ParsedSessionRule& rule) {
+    switch (rule.kind) {
+        case SessionRuleKind::ToolName:
+            return rule.value.empty()
+                ? std::string("Specific tool")
+                : std::format("Tool `{}`", rule.value);
+        case SessionRuleKind::ShellAny:
+            return "All terminal commands";
+        case SessionRuleKind::ShellProgram:
+            return rule.value.empty()
+                ? std::string("Terminal commands")
+                : std::format("Terminal program `{}`", rule.value);
+        case SessionRuleKind::FilesAny:
+            return "All file operations";
+        case SessionRuleKind::FilesWrite:
+            return "File modifications (write/apply/replace/create)";
+        case SessionRuleKind::FilesDelete:
+            return "File deletions";
+        case SessionRuleKind::FilesMove:
+            return "File moves";
+        case SessionRuleKind::ExactAllowKey:
+            return rule.value.empty()
+                ? std::string("Exact rule")
+                : std::format("Exact allow key `{}`", rule.value);
+    }
+    return {};
 }
 
 std::string make_allow_key_from_rule(const AllowRule& rule, std::string_view tool_args) {
@@ -201,10 +439,13 @@ bool PermissionSystem::is_auto_approved(std::string_view tool_name,
         return true;
     }
     
-    // Check session allow list
-    auto key = make_allow_key(tool_name, tool_args);
-    if (allow_list_.contains(key)) {
-        return true;
+    // Check session allow list (supports both exact legacy keys and the new
+    // canonical session trust rules such as shell:git / files:write / tool:x).
+    const auto allow_rules = allow_list_.snapshot();
+    for (const auto& allow_rule : allow_rules) {
+        if (session_allow_rule_matches(allow_rule, tool_name, tool_args)) {
+            return true;
+        }
     }
     
     // Check if tool needs permission at all
@@ -283,8 +524,13 @@ void PermissionSystem::handle_decision(int selected) {
     }
     
     // Handle remember choice
-    if (remember && !current_request_->request.allow_key.empty()) {
-        allow_list_.insert(current_request_->request.allow_key);
+    if (remember) {
+        const std::string remember_rule = make_session_allow_rule(
+            current_request_->request.tool_name,
+            current_request_->request.tool_args);
+        if (!remember_rule.empty()) {
+            allow_list_.insert(remember_rule);
+        }
     }
     
     // Invoke callback
@@ -344,6 +590,62 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
         return make_allow_label_from_rule(*rule, tool_args);
     }
     return std::string(tool_name);
+}
+
+std::string make_session_allow_rule(std::string_view tool_name,
+                                    std::string_view tool_args) {
+    if (tool_name == core::tools::names::kRunTerminalCommand) {
+        const auto program = to_lower_ascii_copy(extract_shell_program(tool_args));
+        if (!program.empty()) {
+            return std::format("shell:{}", program);
+        }
+
+        // Fail-safe default: if we cannot confidently scope to a single shell
+        // program, preserve the historical exact allow-key behavior instead of
+        // broadening to shell:*.
+        return make_allow_key(tool_name, tool_args);
+    }
+
+    if (tool_name == core::tools::names::kDeleteFile) {
+        return "files:delete";
+    }
+    if (tool_name == core::tools::names::kMoveFile) {
+        return "files:move";
+    }
+    if (is_write_like_file_tool(tool_name)) {
+        return "files:write";
+    }
+    if (core::tools::names::is_file_modification_tool(tool_name)) {
+        return "files:*";
+    }
+
+    const std::string normalized_tool = to_lower_ascii_copy(trim_ascii(tool_name));
+    if (normalized_tool.empty()) {
+        return {};
+    }
+    return std::format("tool:{}", normalized_tool);
+}
+
+std::string normalize_session_allow_rule(std::string_view rule) {
+    return session_rule_to_string(parse_session_rule(rule));
+}
+
+bool session_allow_rule_matches(std::string_view rule,
+                                std::string_view tool_name,
+                                std::string_view tool_args) {
+    const ParsedSessionRule parsed = parse_session_rule(rule);
+    if (parsed.kind == SessionRuleKind::ExactAllowKey && parsed.value.empty()) {
+        return false;
+    }
+    return parsed_session_rule_matches(parsed, tool_name, tool_args);
+}
+
+std::string describe_session_allow_rule(std::string_view rule) {
+    const ParsedSessionRule parsed = parse_session_rule(rule);
+    if (parsed.kind == SessionRuleKind::ExactAllowKey && parsed.value.empty()) {
+        return "Empty rule";
+    }
+    return describe_parsed_session_rule(parsed);
 }
 
 } // namespace core::permissions

@@ -18,6 +18,20 @@ struct CommandOperationResult {
     std::string message;
 };
 
+struct ToolRuleCallbacks {
+    std::function<std::vector<std::string>()> list = {};
+    std::function<CommandOperationResult(std::string_view)> add = {};
+    std::function<CommandOperationResult(std::string_view)> remove = {};
+    std::function<CommandOperationResult()> clear = {};
+
+    [[nodiscard]] bool available() const noexcept {
+        return static_cast<bool>(list)
+            && static_cast<bool>(add)
+            && static_cast<bool>(remove)
+            && static_cast<bool>(clear);
+    }
+};
+
 /**
  * @brief Context passed to every command execution containing the UI state.
  */
@@ -43,6 +57,7 @@ struct CommandContext {
     std::function<std::string()> settings_status_fn = {};
     std::function<bool()> yolo_mode_enabled_fn = {};
     std::function<void(bool)> set_yolo_mode_enabled_fn = {};
+    ToolRuleCallbacks tool_rules = {};
     std::function<std::string()> fork_session_fn = {};
     std::function<void(std::function<void()>)> suspend_tui_fn = {};
     std::function<std::string()> latest_assistant_output_fn = {};

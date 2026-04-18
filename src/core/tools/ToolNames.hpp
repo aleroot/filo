@@ -42,6 +42,7 @@ inline constexpr std::array<std::string_view, 5> kExploreAllowedTools{
 [[nodiscard]] constexpr bool is_file_modification_tool(std::string_view tool_name) noexcept {
     return tool_name == kWriteFile
         || tool_name == kApplyPatch
+        || tool_name == kSearchReplace
         || is_replace_tool(tool_name)
         || tool_name == kDeleteFile
         || tool_name == kMoveFile
@@ -51,6 +52,7 @@ inline constexpr std::array<std::string_view, 5> kExploreAllowedTools{
 [[nodiscard]] constexpr bool is_write_destructive_tool(std::string_view tool_name) noexcept {
     return tool_name == kApplyPatch
         || tool_name == kWriteFile
+        || tool_name == kSearchReplace
         || is_replace_tool(tool_name)
         || tool_name == kDeleteFile
         || tool_name == kMoveFile;

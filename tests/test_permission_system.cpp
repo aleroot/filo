@@ -457,6 +457,81 @@ TEST_CASE("make_allow_label generates correct labels", "[permissions]") {
     }
 }
 
+TEST_CASE("Session trust-rule helpers", "[permissions]") {
+    SECTION("make_session_allow_rule returns canonical categories") {
+        REQUIRE(make_session_allow_rule("run_terminal_command",
+                                        R"({"command":"git status"})")
+                == "shell:git");
+        REQUIRE(make_session_allow_rule("run_terminal_command",
+                                        R"({"working_dir":"/tmp"})")
+                == "run_terminal_command");
+        REQUIRE(make_session_allow_rule("write_file", R"({"file_path":"x"})")
+                == "files:write");
+        REQUIRE(make_session_allow_rule("delete_file", R"({"path":"x"})")
+                == "files:delete");
+        REQUIRE(make_session_allow_rule("move_file", R"({"source_path":"a","destination_path":"b"})")
+                == "files:move");
+        REQUIRE(make_session_allow_rule("custom_tool", "{}")
+                == "tool:custom_tool");
+    }
+
+    SECTION("normalize_session_allow_rule handles canonical and legacy values") {
+        REQUIRE(normalize_session_allow_rule("shell:git") == "shell:git");
+        REQUIRE(normalize_session_allow_rule("SHELL:GIT") == "shell:git");
+        REQUIRE(normalize_session_allow_rule("run_terminal_command:git") == "shell:git");
+        REQUIRE(normalize_session_allow_rule("run_terminal_command")
+                == "run_terminal_command");
+        REQUIRE(normalize_session_allow_rule("run_terminal_command:")
+                == "run_terminal_command:");
+        REQUIRE(normalize_session_allow_rule("write_file") == "write_file");
+        REQUIRE(normalize_session_allow_rule("tool:Read_File") == "tool:read_file");
+    }
+
+    SECTION("session_allow_rule_matches supports shell, files, and tools") {
+        REQUIRE(session_allow_rule_matches("shell:git",
+                                           "run_terminal_command",
+                                           R"({"command":"git status"})"));
+        REQUIRE_FALSE(session_allow_rule_matches("shell:git",
+                                                 "run_terminal_command",
+                                                 R"({"command":"npm run build"})"));
+        REQUIRE_FALSE(session_allow_rule_matches("run_terminal_command",
+                                                 "run_terminal_command",
+                                                 R"({"command":"git status"})"));
+        REQUIRE(session_allow_rule_matches("run_terminal_command",
+                                           "run_terminal_command",
+                                           R"({"working_dir":"/tmp"})"));
+
+        REQUIRE(session_allow_rule_matches("files:write",
+                                           "apply_patch",
+                                           R"({"patch":"*** Begin Patch"})"));
+        REQUIRE(session_allow_rule_matches("files:*",
+                                           "search_replace",
+                                           R"({"file_path":"x","edits":[]})"));
+        REQUIRE_FALSE(session_allow_rule_matches("files:delete",
+                                                 "write_file",
+                                                 R"({"file_path":"x"})"));
+        REQUIRE(session_allow_rule_matches("write_file",
+                                           "write_file",
+                                           R"({"file_path":"x"})"));
+        REQUIRE_FALSE(session_allow_rule_matches("write_file",
+                                                 "apply_patch",
+                                                 R"({"patch":"*** Begin Patch"})"));
+
+        REQUIRE(session_allow_rule_matches("tool:python",
+                                           "python",
+                                           R"json({"code":"print(1)"})json"));
+    }
+
+    SECTION("describe_session_allow_rule is human-readable") {
+        REQUIRE_THAT(describe_session_allow_rule("shell:*"),
+                     Catch::Matchers::ContainsSubstring("terminal"));
+        REQUIRE_THAT(describe_session_allow_rule("files:write"),
+                     Catch::Matchers::ContainsSubstring("modifications"));
+        REQUIRE_THAT(describe_session_allow_rule("tool:write_file"),
+                     Catch::Matchers::ContainsSubstring("write_file"));
+    }
+}
+
 TEST_CASE("PermissionSystem concurrent access", "[permissions][threading]") {
     PermissionSystem& sys = PermissionSystem::instance();
     sys.reset();
