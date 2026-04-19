@@ -2,6 +2,7 @@
 
 #include "core/agent/Agent.hpp"
 #include "core/budget/BudgetTracker.hpp"
+#include "core/cli/TrustFlagResolver.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ProviderManager.hpp"
@@ -24,6 +25,7 @@
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/ToolPolicy.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/JsonUtils.hpp"
@@ -52,6 +54,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #if defined(_WIN32)
@@ -687,6 +690,27 @@ RunDiagnostics run_for_test(const RunOptions& options,
     }
     if (!runtime.model_name.empty()) {
         agent->set_active_model(runtime.model_name);
+    }
+
+    const auto trust_resolution =
+        core::cli::resolve_trust_flags(options.yolo, options.trusted_tools);
+
+    if (trust_resolution.trust_all_tools) {
+        agent->set_permission_profile(core::agent::PermissionProfile::Autonomous);
+    } else if (!trust_resolution.trusted_tool_names.empty()) {
+        std::unordered_set<std::string> trusted_sensitive_tools{
+            trust_resolution.trusted_tool_names.begin(),
+            trust_resolution.trusted_tool_names.end(),
+        };
+        agent->set_permission_profile(core::agent::PermissionProfile::Interactive);
+        agent->set_permission_fn(
+            [trusted_tools = std::move(trusted_sensitive_tools)](
+                std::string_view tool_name,
+                std::string_view /*tool_args*/) {
+                const auto canonical =
+                    core::tools::policy::canonical_tool_name(tool_name);
+                return trusted_tools.contains(canonical);
+            });
     }
 
     core::budget::BudgetTracker::get_instance().reset_session();

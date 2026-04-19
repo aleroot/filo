@@ -5,6 +5,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <vector>
 
 namespace exec::prompter {
 
@@ -20,6 +21,8 @@ struct RunOptions {
 
     bool include_partial_messages = false;
     bool continue_last = false;
+    bool yolo = false;
+    std::vector<std::string> trusted_tools;
 
     // When present and empty, resume the most recent session.
     std::optional<std::string> resume_session;

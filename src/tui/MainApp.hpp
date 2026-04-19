@@ -2,12 +2,20 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace tui {
+
+struct StartupTrust {
+    bool trust_all_tools = false;
+    std::vector<std::string> session_allow_rules;
+};
 
 struct RunOptions {
     /// Non-empty: resume by ID or 1-based index.  Empty string: resume most recent.
     std::optional<std::string> resume_session_id;
+    /// Optional startup trust settings applied before the first turn.
+    StartupTrust startup_trust;
 };
 
 struct RunResult {

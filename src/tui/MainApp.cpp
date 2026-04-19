@@ -750,12 +750,20 @@ RunResult run(RunOptions opts) {
     // Persistent prompt history with navigation.
     core::history::PersistentPromptHistory prompt_history(history_store);
 
-    ApprovalMode approval_mode = parse_approval_mode(config.default_approval_mode);
+    ApprovalMode approval_mode = opts.startup_trust.trust_all_tools
+        ? ApprovalMode::Yolo
+        : parse_approval_mode(config.default_approval_mode);
 
     // Session trust rules used for auto-approval in this session.
     // Rules are canonical strings (for example: shell:git, files:write,
     // tool:write_file) and are managed by `/tools` plus the permission overlay.
     std::unordered_set<std::string> session_allowed;
+    for (const auto& raw_rule : opts.startup_trust.session_allow_rules) {
+        const auto normalized = core::permissions::normalize_session_allow_rule(raw_rule);
+        if (!normalized.empty()) {
+            session_allowed.insert(normalized);
+        }
+    }
 
     // Permission overlay state
     struct PermissionState {

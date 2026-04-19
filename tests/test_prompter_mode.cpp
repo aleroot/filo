@@ -271,6 +271,103 @@ TEST_CASE("prompter combines prompt and stdin context", "[prompter][stdin]") {
     REQUIRE_THAT(diag.final_prompt, ContainsSubstring("Input from stdin"));
 }
 
+TEST_CASE("prompter trust-tools blocks untrusted sensitive tools", "[prompter][trust]") {
+    auto provider = std::make_shared<MockProvider>();
+    TempDir tmp{"filo_prompter_trust_blocked_test"};
+    const auto blocked_path = tmp.path / "blocked-write.txt";
+    auto provider_call_count = std::make_shared<std::atomic<int>>(0);
+
+    provider->on_stream = [blocked_path, provider_call_count](const auto&, auto callback) {
+        const int call_count = ++(*provider_call_count);
+        if (call_count == 1) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "tool-write-1";
+            tool_call.type = "function";
+            tool_call.function.name = "write_file";
+            tool_call.function.arguments = std::format(
+                R"({{"file_path":"{}","content":"blocked"}})",
+                blocked_path.string());
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content("done"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "Try writing a file";
+    opts.prompt_was_provided = true;
+    opts.trusted_tools = {"run_terminal_command"};
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE_FALSE(std::filesystem::exists(blocked_path));
+    REQUIRE(provider_call_count->load(std::memory_order_acquire) == 1);
+    REQUIRE(diag.final_text_response.empty());
+}
+
+TEST_CASE("prompter yolo allows sensitive tools", "[prompter][trust]") {
+    auto provider = std::make_shared<MockProvider>();
+    TempDir tmp{"filo_prompter_trust_yolo_test"};
+    const auto allowed_path = tmp.path / "allowed-write.txt";
+
+    provider->on_stream = [allowed_path, call_count = 0](const auto&, auto callback) mutable {
+        ++call_count;
+        if (call_count == 1) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "tool-write-1";
+            tool_call.type = "function";
+            tool_call.function.name = "write_file";
+            tool_call.function.arguments = std::format(
+                R"({{"file_path":"{}","content":"trusted"}})",
+                allowed_path.string());
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content("done"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "Write a file";
+    opts.prompt_was_provided = true;
+    opts.yolo = true;
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE(std::filesystem::exists(allowed_path));
+
+    std::ifstream ifs(allowed_path);
+    REQUIRE(ifs.good());
+    std::string file_text;
+    std::getline(ifs, file_text);
+    REQUIRE(file_text == "trusted");
+}
+
 TEST_CASE("prompter json mode emits structured array", "[prompter][json]") {
     auto provider = std::make_shared<MockProvider>();
     provider->on_stream = [](const auto&, auto callback) {

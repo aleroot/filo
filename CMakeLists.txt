@@ -188,6 +188,7 @@ set(FILO_CORE_SOURCES
     src/core/session/SessionHandoff.cpp
     src/core/history/PromptHistoryStore.cpp
     src/core/permissions/PermissionSystem.cpp
+    src/core/cli/TrustFlagResolver.cpp
 )
 
 file(GLOB_RECURSE FILO_HEADER_FILES CONFIGURE_DEPENDS
@@ -383,6 +384,7 @@ add_executable(filo_tests
     tests/test_agent_loop_control.cpp
     tests/test_tool_output_history.cpp
     tests/test_mcp_resources.cpp
+    tests/test_trust_flag_resolver.cpp
 )
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
@@ -484,4 +486,5 @@ source_group(
         tests/test_agent_loop_control.cpp
         tests/test_tool_output_history.cpp
         tests/test_mcp_resources.cpp
+        tests/test_trust_flag_resolver.cpp
 )

@@ -9,6 +9,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "core/cli/TrustFlagResolver.hpp"
 #include "tui/MainApp.hpp"
 #include "exec/Server.hpp"
 #include "exec/Daemon.hpp"
@@ -52,11 +53,13 @@ int main(int argc, char** argv) {
     std::string input_format = "text";
     bool        include_partial_messages = false;
     bool        continue_last = false;
+    bool        yolo_mode = false;
     bool        enable_api_gateway = false;
     std::string resume_session;      // --resume [id|index]; empty means most recent
     bool        list_sessions = false;  // --list-sessions
     std::string work_dir;
     std::vector<std::string> add_dirs;
+    std::vector<std::string> trusted_tools;
 
     auto* mcp_opt = app.add_option(
         "--mcp",
@@ -78,6 +81,16 @@ int main(int argc, char** argv) {
                  "Include content-delta events in stream-json prompter output");
     app.add_flag("--continue", continue_last,
                  "Prompter mode: continue the most recent session scoped to the current project");
+    app.add_flag(
+        "--yolo",
+        yolo_mode,
+        "Enable YOLO mode (auto-approve sensitive tools).");
+    app.add_option(
+        "--trust-tools",
+        trusted_tools,
+        "Comma-separated list of sensitive tools to auto-approve at startup "
+        "(prompter + TUI; e.g. run_terminal_command,write_file). Use '*' to trust all.")
+        ->delimiter(',');
     app.add_option("-w,--work-dir", work_dir,
                    "Working directory for the agent. Default: current directory.");
     app.add_option("--add-dir", add_dirs,
@@ -110,6 +123,7 @@ int main(int argc, char** argv) {
     CLI11_PARSE(app, argc, argv);
 
     core::logging::Logger::get_instance().configure_from_env();
+    const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
 
     std::string normalized_mcp_transport = core::utils::str::to_lower_ascii_copy(mcp_transport);
     const bool mcp_option_provided = mcp_opt->count() > 0;
@@ -244,6 +258,8 @@ int main(int argc, char** argv) {
         opts.input_format_was_provided = input_format_opt->count() > 0;
         opts.include_partial_messages = include_partial_messages;
         opts.continue_last = continue_last;
+        opts.yolo = trust_resolution.trust_all_tools;
+        opts.trusted_tools = trust_resolution.trusted_tool_names;
         if (resume_opt->count() > 0) {
             opts.resume_session = resume_session;
         }
@@ -282,6 +298,10 @@ int main(int argc, char** argv) {
             // Empty value means "resume most recent".
             run_opts.resume_session_id = resume_session;
         }
+        run_opts.startup_trust = {
+            .trust_all_tools = trust_resolution.trust_all_tools,
+            .session_allow_rules = trust_resolution.session_allow_rules,
+        };
         const auto run_result = tui::run(run_opts);
 
         if (mcp_stdio_mode) exec::mcp::stop_server();
