@@ -683,6 +683,11 @@ struct ParsedPromptGetRequest {
     std::string arguments;
 };
 
+struct ToolCallResultClassification {
+    bool is_error = false;
+    bool is_structured_object = false;
+};
+
 [[nodiscard]] std::string make_rpc_error(const RequestId& id, const RpcError& error) {
     return make_error(id, error.code, error.message);
 }
@@ -695,6 +700,66 @@ struct ParsedPromptGetRequest {
         return std::unexpected(RpcError{-32602, "Invalid params: missing 'params' object"});
     }
     return {};
+}
+
+/**
+ * @brief Classifies a raw tool execution payload for MCP tools/call envelope fields.
+ *
+ * - @c is_error is derived from top-level @c isError=true or top-level non-null
+ *   @c error field (MCP tool-level error semantics).
+ * - @c is_structured_object is true only when payload parses as a JSON object,
+ *   which is required before emitting @c structuredContent.
+ *
+ * Invalid / non-object payloads are treated as tool execution errors.
+ */
+[[nodiscard]] ToolCallResultClassification classify_tool_call_payload(std::string_view payload) {
+    ToolCallResultClassification out{};
+
+    if (payload.empty()) {
+        out.is_error = true;
+        return out;
+    }
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string padded(payload);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        out.is_error = true;
+        return out;
+    }
+
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        out.is_error = true;
+        return out;
+    }
+    out.is_structured_object = true;
+
+    bool is_error_flag = false;
+    if (object["isError"].get(is_error_flag) == simdjson::SUCCESS && is_error_flag) {
+        out.is_error = true;
+        return out;
+    }
+
+    simdjson::dom::element error_value;
+    if (object["error"].get(error_value) == simdjson::SUCCESS) {
+        const auto type = error_value.type();
+        if (type == simdjson::dom::element_type::NULL_VALUE) {
+            return out;
+        }
+
+        if (type == simdjson::dom::element_type::STRING) {
+            // Any present top-level "error" string indicates failure, even if empty.
+            out.is_error = true;
+            return out;
+        }
+
+        // Non-string, non-null top-level "error" still indicates a tool failure.
+        out.is_error = true;
+        return out;
+    }
+
+    return out;
 }
 
 [[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root,
@@ -1105,8 +1170,8 @@ struct ParsedPromptGetRequest {
         request.name,
         request.arguments_json,
         context);
-    const bool is_error = tool_result.starts_with(R"({"error")")
-        || tool_result.starts_with(R"({ "error")");
+    const ToolCallResultClassification classification = classify_tool_call_payload(tool_result);
+    const bool is_error = classification.is_error;
 
     JsonWriter rw(tool_result.size() + 128);
     {
@@ -1119,7 +1184,7 @@ struct ParsedPromptGetRequest {
                 .kv_str("text", tool_result);
         }
         rw.comma().kv_bool("isError", is_error);
-        if (!is_error) {
+        if (!is_error && classification.is_structured_object) {
             rw.comma().kv_raw("structuredContent", tool_result);
         }
     }

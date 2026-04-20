@@ -2,11 +2,13 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/mcp/McpDispatcher.hpp"
+#include "core/tools/ToolManager.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 #include <cstdlib>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <simdjson.h>
@@ -120,6 +122,40 @@ struct WorkspaceResetToDefault {
         }
         ws.initialize(cwd, {}, false);
     }
+};
+
+class EmptyTopLevelErrorTool final : public core::tools::Tool {
+public:
+    explicit EmptyTopLevelErrorTool(std::string name)
+        : name_(std::move(name)) {}
+
+    core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .title = "Empty Top-Level Error Tool",
+            .description = "Testing tool that always returns an empty top-level error string."
+        };
+    }
+
+    std::string execute(const std::string&, const core::context::SessionContext&) override {
+        return R"({"error":""})";
+    }
+
+private:
+    std::string name_;
+};
+
+struct ScopedToolRegistration {
+    explicit ScopedToolRegistration(std::shared_ptr<core::tools::Tool> tool)
+        : name(tool->get_definition().name) {
+        core::tools::ToolManager::get_instance().register_tool(std::move(tool));
+    }
+
+    ~ScopedToolRegistration() {
+        (void)core::tools::ToolManager::get_instance().unregister_tool(name);
+    }
+
+    std::string name;
 };
 
 /// A minimal valid initialize request (client identifies as Lampo).
@@ -634,6 +670,28 @@ TEST_CASE("MCP tools/call run_terminal_command returns exit_code", "[mcp]") {
 TEST_CASE("MCP tools/call omits structuredContent for tool execution errors", "[mcp]") {
     auto resp = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"echo should_not_run","working_dir":"/definitely/not/a/real/directory"}},"id":53})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool is_error = false;
+    REQUIRE(doc["result"]["isError"].get(is_error) == simdjson::SUCCESS);
+    REQUIRE(is_error);
+
+    simdjson::dom::element structured;
+    REQUIRE(doc["result"]["structuredContent"].get(structured) != simdjson::SUCCESS);
+}
+
+TEST_CASE("MCP tools/call treats empty top-level error string as failure", "[mcp]") {
+    static constexpr std::string_view kToolName = "mcp_test_empty_top_level_error";
+    ScopedToolRegistration registration(
+        std::make_shared<EmptyTopLevelErrorTool>(std::string(kToolName)));
+
+    const std::string request = std::string(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":")")
+        + std::string(kToolName) + R"(","arguments":{}},"id":54})";
+    const auto resp = disp().dispatch(request);
 
     simdjson::dom::parser parser;
     simdjson::dom::element doc;

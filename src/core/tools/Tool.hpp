@@ -105,19 +105,21 @@ struct ToolDefinition {
  * ### Tool result contract
  *
  * @c execute() must return a valid JSON object string (@c '{' … @c '}').
- * The top-level key signals success or failure:
+ * Success/failure is inferred from top-level MCP-compatible fields:
  *
  * @code{.json}
- * // Success — first key is NOT "error"
+ * // Success — no top-level error marker
  * {"output": "hello\n", "exit_code": 0}
  *
- * // Failure — first key MUST be "error" (dispatcher relies on this prefix)
+ * // Failure — top-level "error" field
  * {"error": "file not found: /tmp/x.txt"}
+ *
+ * // Failure — explicit MCP-style flag is also accepted
+ * {"isError": true, "error": "validation failed"}
  * @endcode
  *
- * The dispatcher uses a cheap prefix check to set @c isError in the MCP
- * envelope.  Therefore: @em every error result must begin with @c {"error"
- * (no leading space).  Do not re-order a failed result's keys.
+ * The MCP dispatcher sets @c tools/call.result.isError using top-level
+ * @c isError or @c error. Do not rely on key ordering.
  */
 class Tool {
 public:
@@ -145,9 +147,9 @@ public:
      *                   for choosing the authoritative workspace and session
      *                   identity up front and passing it explicitly.
      *
-     * @return A JSON object string.  On success the first key must @em not be
-     *         @c "error".  On failure the first key must be @c "error".
-     *         See the class-level documentation for the full contract.
+     * @return A JSON object string. On failure, set top-level @c error (or
+     *         top-level @c isError=true). See the
+     *         class-level documentation for the full contract.
      */
     virtual std::string execute(const std::string& json_args, const core::context::SessionContext& context) = 0;
 };
