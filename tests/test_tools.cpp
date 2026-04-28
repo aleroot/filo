@@ -506,6 +506,76 @@ TEST_CASE("ReplaceTool single occurrence", "[tools]") {
     std::filesystem::remove(test_file);
 }
 
+TEST_CASE("ReplaceTool includes bounded unified diff for text edits", "[tools]") {
+    std::string test_file = "test_artifact_replace_diff.txt";
+
+    std::ofstream ofs(test_file);
+    ofs << "Line 1\nLine 2\nLine 3\n";
+    ofs.close();
+
+    ReplaceTool tool;
+    std::string args = "{\"file_path\": \"" + test_file + "\", \"old_string\": \"Line 2\", \"new_string\": \"Replaced Line\"}";
+    const auto replace_res = tool.execute(args);
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("diff")"));
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("--- a/"));
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("-Line 2"));
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("+Replaced Line"));
+
+    std::filesystem::remove(test_file);
+}
+
+TEST_CASE("ReplaceTool diff preserves missing final newline markers", "[tools]") {
+    const std::string test_file = "test_artifact_replace_diff_no_final_newline.txt";
+    { std::ofstream(test_file, std::ios::binary) << "Line 1\nLine 2"; }
+
+    ReplaceTool tool;
+    const std::string args =
+        "{\"file_path\": \"" + test_file + "\", \"old_string\": \"Line 2\", \"new_string\": \"Replaced Line\"}";
+    const auto replace_res = tool.execute(args);
+
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"(\\ No newline at end of file)"));
+
+    std::filesystem::remove(test_file);
+}
+
+TEST_CASE("ReplaceTool omits diff for binary-like content", "[tools]") {
+    const std::string test_file = "test_artifact_replace_binary_diff.txt";
+    {
+        std::ofstream ofs(test_file, std::ios::binary);
+        const char bytes[] = {'a', '\0', 'b', '\n'};
+        ofs.write(bytes, sizeof(bytes));
+    }
+
+    ReplaceTool tool;
+    std::string args = "{\"file_path\": \"" + test_file + "\", \"old_string\": \"b\", \"new_string\": \"B\"}";
+    const auto replace_res = tool.execute(args);
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(replace_res, !Catch::Matchers::ContainsSubstring(R"("diff")"));
+
+    std::filesystem::remove(test_file);
+}
+
+TEST_CASE("ReplaceTool omits diff for non-UTF-8 content", "[tools]") {
+    const std::string test_file = "test_artifact_replace_non_utf8_diff.txt";
+    {
+        std::ofstream ofs(test_file, std::ios::binary);
+        const char bytes[] = {'a', static_cast<char>(0xFF), 'b', '\n'};
+        ofs.write(bytes, sizeof(bytes));
+    }
+
+    ReplaceTool tool;
+    const std::string args =
+        "{\"file_path\": \"" + test_file + "\", \"old_string\": \"b\", \"new_string\": \"B\"}";
+    const auto replace_res = tool.execute(args);
+
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(replace_res, !Catch::Matchers::ContainsSubstring(R"("diff")"));
+
+    std::filesystem::remove(test_file);
+}
+
 TEST_CASE("ReplaceTool rejects multiple occurrences", "[tools]") {
     std::string test_file = "test_artifact_3.txt";
 
@@ -1816,6 +1886,44 @@ TEST_CASE("SearchReplaceTool applies single edit", "[tools]") {
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("Line B (modified)"));
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("Line A"));
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("Line C"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("SearchReplaceTool includes bounded unified diff for text edits", "[tools]") {
+    const std::string path = "test_artifact_sr_diff.txt";
+    { std::ofstream(path) << "alpha\nbeta\ngamma\n"; }
+
+    SearchReplaceTool tool;
+    auto res = tool.execute(
+        R"({"file_path":")" + path + R"(","edits":[)"
+        R"({"old_string":"alpha","new_string":"ALPHA"},)"
+        R"({"old_string":"gamma","new_string":"GAMMA"}]})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("file_path")"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("diff")"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("-alpha"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("+ALPHA"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("-gamma"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("+GAMMA"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("SearchReplaceTool omits diff for non-UTF-8 content", "[tools]") {
+    const std::string path = "test_artifact_sr_non_utf8_diff.txt";
+    {
+        std::ofstream ofs(path, std::ios::binary);
+        const char bytes[] = {'a', static_cast<char>(0xFF), 'b', '\n'};
+        ofs.write(bytes, sizeof(bytes));
+    }
+
+    SearchReplaceTool tool;
+    const auto res = tool.execute(
+        R"({"file_path":")" + path + R"(","edits":[{"old_string":"b","new_string":"B"}]})");
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring(R"("diff")"));
 
     std::filesystem::remove(path);
 }

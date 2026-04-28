@@ -54,6 +54,28 @@ static std::optional<std::string> extract_structured_output(const std::string& r
     return std::string(output);
 }
 
+static std::optional<std::string> extract_structured_string_field(
+    const std::string& response_json,
+    std::string_view field_name)
+{
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(response_json).get(doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+
+    simdjson::dom::object structured;
+    if (doc["result"]["structuredContent"].get(structured) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+
+    std::string_view value;
+    if (structured[field_name].get(value) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return std::string(value);
+}
+
 /// Trims trailing CR/LF emitted by shell commands such as `pwd`.
 static std::string trim_trailing_newlines(std::string s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
@@ -894,6 +916,26 @@ TEST_CASE("MCP tools/call replace returns replaced_at_line", "[mcp]") {
     std::filesystem::remove(path);
 }
 
+TEST_CASE("MCP tools/call replace exposes structured unified diff", "[mcp]") {
+    const std::string path = "mcp_replace_diff_test.txt";
+    { std::ofstream ofs(path); ofs << "line one\nline two\nline three\n"; }
+
+    std::string req =
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"replace","arguments":{"file_path":")" +
+        path + R"(","old_string":"line two","new_string":"LINE TWO"}},"id":212})";
+    auto resp = disp().dispatch(req);
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    const auto diff = extract_structured_string_field(resp, "diff");
+    REQUIRE(diff.has_value());
+    REQUIRE_THAT(*diff, ContainsSubstring("--- a/"));
+    REQUIRE_THAT(*diff, ContainsSubstring("-line two"));
+    REQUIRE_THAT(*diff, ContainsSubstring("+LINE TWO"));
+
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("MCP tools/call replace on line 1 reports replaced_at_line:1", "[mcp]") {
     const std::string path = "mcp_replace_line1.txt";
     { std::ofstream ofs(path); ofs << "alpha\nbeta\n"; }
@@ -905,6 +947,27 @@ TEST_CASE("MCP tools/call replace on line 1 reports replaced_at_line:1", "[mcp]"
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("replaced_at_line":1)"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MCP tools/call search_replace exposes structured unified diff", "[mcp]") {
+    const std::string path = "mcp_search_replace_diff_test.txt";
+    { std::ofstream ofs(path); ofs << "alpha\nbeta\ngamma\n"; }
+
+    std::string req =
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_replace","arguments":{"file_path":")" +
+        path + R"(","edits":[{"old_string":"alpha","new_string":"ALPHA"},{"old_string":"gamma","new_string":"GAMMA"}]}},"id":213})";
+    auto resp = disp().dispatch(req);
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    const auto diff = extract_structured_string_field(resp, "diff");
+    REQUIRE(diff.has_value());
+    REQUIRE_THAT(*diff, ContainsSubstring("-alpha"));
+    REQUIRE_THAT(*diff, ContainsSubstring("+ALPHA"));
+    REQUIRE_THAT(*diff, ContainsSubstring("-gamma"));
+    REQUIRE_THAT(*diff, ContainsSubstring("+GAMMA"));
 
     std::filesystem::remove(path);
 }

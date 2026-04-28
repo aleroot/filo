@@ -1,5 +1,6 @@
 #include "SearchReplaceTool.hpp"
 #include "ToolArgumentUtils.hpp"
+#include "ToolDiffUtils.hpp"
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -189,7 +190,8 @@ ToolDefinition SearchReplaceTool::get_definition() const {
             "punctuation, and line endings — do NOT paraphrase or reformat. "
             "Include 3-5 lines of surrounding context to ensure uniqueness. "
             "Edits are applied sequentially, so later edits see the result of earlier ones. "
-            "Fails if any old_string is not found in the file.",
+            "Fails if any old_string is not found in the file. "
+            "On success, includes a bounded unified diff in 'diff' when the file is text-like.",
         .parameters = {
             {
                 .name = "file_path",
@@ -208,7 +210,7 @@ ToolDefinition SearchReplaceTool::get_definition() const {
             },
         },
         .output_schema =
-            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether all edits were applied successfully."},"blocks_applied":{"type":"integer","description":"Number of search-and-replace blocks applied."},"lines_changed":{"type":"integer","description":"Net line-count change after applying the edits."},"warnings":{"type":"array","items":{"type":"string"},"description":"Optional non-fatal warnings about ambiguous or repeated matches."}},"required":["success","blocks_applied","lines_changed"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether all edits were applied successfully."},"file_path":{"type":"string","description":"The modified file path."},"blocks_applied":{"type":"integer","description":"Number of search-and-replace blocks applied."},"lines_changed":{"type":"integer","description":"Net line-count change after applying the edits."},"diff":{"type":"string","description":"Bounded unified diff of the file before and after all edits, omitted for very large or binary-like content."},"warnings":{"type":"array","items":{"type":"string"},"description":"Optional non-fatal warnings about ambiguous or repeated matches."}},"required":["success","file_path","blocks_applied","lines_changed"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies file content on disk
         },
@@ -305,8 +307,17 @@ std::string SearchReplaceTool::execute(const std::string& json_args, const core:
     // Build success response, optionally with warnings.
     std::string resp;
     resp.reserve(128);
-    resp += std::format(R"({{"success":true,"blocks_applied":{},"lines_changed":{})",
-                        result.applied, new_lines - original_lines);
+    resp += std::format(
+        R"({{"success":true,"file_path":"{}","blocks_applied":{},"lines_changed":{})",
+        core::utils::escape_json_string(resolved_path.string()),
+        result.applied,
+        new_lines - original_lines);
+    if (const auto diff = detail::build_full_content_unified_diff(
+            resolved_path.string(),
+            file_content,
+            result.content)) {
+        resp += detail::json_diff_field(*diff);
+    }
     if (!result.warnings.empty()) {
         resp += R"(,"warnings":[)";
         for (size_t i = 0; i < result.warnings.size(); ++i) {
