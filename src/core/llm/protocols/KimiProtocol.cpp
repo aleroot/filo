@@ -551,7 +551,7 @@ std::string KimiProtocol::serialize(const ChatRequest& req) const {
     if (payload.ends_with('}')) {
         payload.pop_back();
         append_extra_fields(payload, req);
-        if (stream_usage_ && req.stream) {
+        if ((stream_usage_ || req.stream_include_usage) && req.stream) {
             payload += R"(,"stream_options":{"include_usage":true})";
         }
         payload += '}';

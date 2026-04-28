@@ -310,6 +310,19 @@ TEST_CASE("Serializer - reasoning_content is omitted for OpenAI requests", "[ope
     REQUIRE_THAT(protocol_payload, !Catch::Matchers::ContainsSubstring("reasoning_content"));
 }
 
+TEST_CASE("OpenAIProtocol - per-request stream usage is forwarded", "[openai][serializer]") {
+    auto req = make_simple_request();
+    OpenAIProtocol protocol;
+
+    REQUIRE_THAT(protocol.serialize(req), !Catch::Matchers::ContainsSubstring("stream_options"));
+
+    req.stream_include_usage = true;
+    REQUIRE_THAT(protocol.serialize(req), Catch::Matchers::ContainsSubstring(R"("stream_options":{"include_usage":true})"));
+
+    req.stream = false;
+    REQUIRE_THAT(protocol.serialize(req), !Catch::Matchers::ContainsSubstring("stream_options"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Serializer — JSON escaping
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,8 @@
 #include "ApiGateway.hpp"
 
+#include "http/SseStream.hpp"
+#include "openai/OpenAIChatCompletionStreamEncoder.hpp"
+
 #include "../core/config/ConfigManager.hpp"
 #include "../core/llm/Models.hpp"
 #include "../core/llm/ProviderManager.hpp"
@@ -14,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <format>
 #include <memory>
@@ -119,6 +123,7 @@ struct GatewayRequest {
     core::llm::ChatRequest request;
     std::string requested_model;
     bool stream = false;
+    bool stream_include_usage = false;
 };
 
 struct GatewaySelection {
@@ -669,6 +674,19 @@ void parse_optional_generation_settings(simdjson::dom::object root_obj, core::ll
     }
 }
 
+void parse_openai_stream_options(simdjson::dom::object root_obj, GatewayRequest& out_request) {
+    simdjson::dom::object stream_options_obj;
+    if (root_obj["stream_options"].get(stream_options_obj) != simdjson::SUCCESS) {
+        return;
+    }
+
+    bool include_usage = false;
+    if (stream_options_obj["include_usage"].get(include_usage) == simdjson::SUCCESS) {
+        out_request.stream_include_usage = include_usage;
+        out_request.request.stream_include_usage = include_usage;
+    }
+}
+
 void parse_openai_response_format(simdjson::dom::object root_obj,
                                   core::llm::ChatRequest& request) {
     simdjson::dom::object response_format_obj;
@@ -733,6 +751,7 @@ bool parse_openai_gateway_request(const httplib::Request& http_request,
     out_request.request.model = out_request.requested_model;
 
     parse_optional_generation_settings(root_obj, out_request.request, out_request.stream);
+    parse_openai_stream_options(root_obj, out_request);
     parse_openai_response_format(root_obj, out_request.request);
 
     std::string_view previous_response_id;
@@ -1100,6 +1119,13 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
     return std::move(writer).take();
 }
 
+void write_openai_usage(JsonWriter& writer, const core::llm::TokenUsage& usage) {
+    auto _usage = writer.object();
+    writer.kv_num("prompt_tokens", usage.prompt_tokens).comma()
+        .kv_num("completion_tokens", usage.completion_tokens).comma()
+        .kv_num("total_tokens", usage.total_tokens);
+}
+
 [[nodiscard]] std::string normalize_tool_input_json(std::string_view arguments_json) {
     if (arguments_json.empty()) return "{}";
 
@@ -1175,12 +1201,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
         }
 
         writer.comma().key("usage");
-        {
-            auto _usage = writer.object();
-            writer.kv_num("prompt_tokens", completion.usage.prompt_tokens).comma()
-                .kv_num("completion_tokens", completion.usage.completion_tokens).comma()
-                .kv_num("total_tokens", completion.usage.total_tokens);
-        }
+        write_openai_usage(writer, completion.usage);
     }
 
     return std::move(writer).take();
@@ -1291,6 +1312,182 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
     return std::move(writer).take();
 }
 
+[[nodiscard]] std::string choose_stream_model_label(const GatewaySelection& selection,
+                                                    const GatewayRequest& gateway_request) {
+    if (!gateway_request.requested_model.empty()) {
+        return gateway_request.requested_model;
+    }
+    if (!gateway_request.request.model.empty()) {
+        return gateway_request.request.model;
+    }
+    if (!selection.model_override.empty()) {
+        return selection.model_override;
+    }
+    if (!selection.provider_name.empty()) {
+        return selection.provider_name;
+    }
+    return "unknown";
+}
+
+void stream_openai_chat_completion_response(const GatewaySelection& selection,
+                                            const GatewayRequest& gateway_request,
+                                            httplib::Response& res) {
+    struct StreamState {
+        exec::http::SseFrameQueue queue;
+        std::atomic<bool> saw_tool_calls{false};
+    };
+
+    auto state = std::make_shared<StreamState>();
+    const std::string response_id = make_gateway_id("chatcmpl");
+    const int64_t created = unix_timestamp_now();
+    const std::string model = choose_stream_model_label(selection, gateway_request);
+    const bool include_usage = gateway_request.stream_include_usage;
+    const auto provider = selection.provider;
+    const auto request = gateway_request.request;
+
+    res.status = 200;
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("Connection", "keep-alive");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [state,
+         provider,
+         request,
+         response_id,
+         created,
+         model,
+         include_usage,
+         started = false](std::size_t, httplib::DataSink& sink) mutable -> bool {
+            if (started) {
+                return true;
+            }
+            started = true;
+
+            auto finish_with_error = [&](std::string_view message) {
+                std::string trimmed_message = trim_copy(message);
+                if (trimmed_message.empty()) {
+                    trimmed_message = "Upstream provider error";
+                }
+                state->queue.push_data(exec::gateway::openai::error_body(trimmed_message));
+                state->queue.push_data("[DONE]");
+                state->queue.close();
+            };
+
+            const exec::gateway::openai::StreamChunkContext context{
+                .response_id = response_id,
+                .created = created,
+                .model = model,
+                .include_usage = include_usage,
+            };
+            state->queue.push_data(exec::gateway::openai::role_chunk(context));
+
+            try {
+                provider->stream_response(
+                    request,
+                    [state,
+                     provider,
+                     response_id,
+                     created,
+                     model,
+                     include_usage](const core::llm::StreamChunk& chunk) {
+                        if (state->queue.is_closed()) {
+                            return;
+                        }
+
+                        const exec::gateway::openai::StreamChunkContext chunk_context{
+                            .response_id = response_id,
+                            .created = created,
+                            .model = model,
+                            .include_usage = include_usage,
+                        };
+
+                        if (chunk.is_error) {
+                            std::string message = trim_copy(chunk.content);
+                            if (message.empty()) {
+                                message = "Upstream provider error";
+                            }
+                            state->queue.push_data(exec::gateway::openai::error_body(message));
+                            state->queue.push_data("[DONE]");
+                            state->queue.close();
+                            return;
+                        }
+
+                        if (!chunk.content.empty()) {
+                            state->queue.push_data(
+                                exec::gateway::openai::content_chunk(
+                                    chunk_context,
+                                    chunk.content));
+                        }
+
+                        if (!chunk.tools.empty()) {
+                            state->saw_tool_calls.store(true, std::memory_order_relaxed);
+                            state->queue.push_data(
+                                exec::gateway::openai::tool_calls_chunk(
+                                    chunk_context,
+                                    chunk.tools));
+                        }
+
+                        if (chunk.is_final) {
+                            const std::string_view finish_reason =
+                                state->saw_tool_calls.load(std::memory_order_relaxed)
+                                    ? "tool_calls"
+                                    : "stop";
+                            state->queue.push_data(
+                                exec::gateway::openai::finish_chunk(
+                                    chunk_context,
+                                    finish_reason));
+                            if (include_usage) {
+                                state->queue.push_data(
+                                    exec::gateway::openai::usage_chunk(
+                                        chunk_context,
+                                        provider->get_last_usage()));
+                            }
+                            state->queue.push_data("[DONE]");
+                            state->queue.close();
+                        }
+                    });
+            } catch (const std::exception& e) {
+                finish_with_error(std::format("Provider execution failed: {}", e.what()));
+            } catch (...) {
+                finish_with_error("Provider execution failed with an unknown error");
+            }
+
+            constexpr auto kWaitTimeout = std::chrono::minutes{10};
+            const auto deadline = std::chrono::steady_clock::now() + kWaitTimeout;
+
+            while (true) {
+                std::deque<std::string> frames;
+                const auto wait_result = state->queue.wait_pop_until(deadline, frames);
+                if (wait_result == exec::http::SseFrameQueue::WaitResult::timeout) {
+                    const auto error_frame = exec::http::sse_data_frame(
+                        exec::gateway::openai::error_body(
+                            "Timed out while waiting for provider response"));
+                    if (!sink.write(error_frame.data(), error_frame.size())) {
+                        return false;
+                    }
+                    const auto done_frame = exec::http::sse_data_frame("[DONE]");
+                    if (!sink.write(done_frame.data(), done_frame.size())) {
+                        return false;
+                    }
+                    sink.done();
+                    return true;
+                }
+
+                for (const auto& frame : frames) {
+                    if (!sink.write(frame.data(), frame.size())) {
+                        return false;
+                    }
+                }
+
+                if (wait_result == exec::http::SseFrameQueue::WaitResult::closed) {
+                    sink.done();
+                    return true;
+                }
+            }
+        });
+}
+
 } // namespace
 
 struct ApiGateway::Impl {
@@ -1323,15 +1520,6 @@ struct ApiGateway::Impl {
             return;
         }
 
-        if (gateway_request.stream) {
-            res.status = 400;
-            res.set_content(
-                build_openai_error_body(
-                    "stream=true is not supported yet on /v1/chat/completions"),
-                "application/json");
-            return;
-        }
-
         std::string selection_error;
         auto selection = resolve_gateway_selection(runtime, gateway_request, selection_error);
         if (!selection.has_value()) {
@@ -1344,6 +1532,11 @@ struct ApiGateway::Impl {
             gateway_request.request.model.clear();
         } else if (!selection->model_override.empty()) {
             gateway_request.request.model = selection->model_override;
+        }
+
+        if (gateway_request.stream) {
+            stream_openai_chat_completion_response(*selection, gateway_request, res);
+            return;
         }
 
         CompletionResult completion = run_completion_sync(*selection, gateway_request.request);

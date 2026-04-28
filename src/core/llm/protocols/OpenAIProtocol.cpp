@@ -135,7 +135,7 @@ std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
             }
         }
         append_extra_fields(payload, req);
-        if (stream_usage_ && req.stream) {
+        if ((stream_usage_ || req.stream_include_usage) && req.stream) {
             payload += R"(,"stream_options":{"include_usage":true})";
         }
         payload += '}';

@@ -13,6 +13,8 @@
 #include <fstream>
 #include <format>
 #include <future>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <simdjson.h>
 #include <string>
@@ -217,6 +219,49 @@ extract_negotiated_protocol_version(std::string_view response_body) {
     return std::filesystem::temp_directory_path()
          / std::format("{}_{}.txt", prefix, now);
 }
+
+class StreamingGatewayTestProvider final : public core::llm::LLMProvider {
+public:
+    explicit StreamingGatewayTestProvider(bool emit_tool_call = false)
+        : emit_tool_call_(emit_tool_call) {}
+
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        std::thread([this, request, callback = std::move(callback)]() mutable {
+            {
+                std::lock_guard lock(mutex_);
+                last_model_ = request.model.empty() ? "stream-model" : request.model;
+            }
+
+            if (emit_tool_call_) {
+                core::llm::ToolCall call;
+                call.index = 0;
+                call.id = "call_stream_1";
+                call.type = "function";
+                call.function.name = "lookup";
+                call.function.arguments = R"({"query":"filo"})";
+                callback(core::llm::StreamChunk::make_tools({std::move(call)}));
+            } else {
+                callback(core::llm::StreamChunk::make_content("Hel"));
+                callback(core::llm::StreamChunk::make_content("lo"));
+            }
+
+            set_last_usage(3, emit_tool_call_ ? 2 : 5);
+            callback(core::llm::StreamChunk::make_final());
+        }).detach();
+    }
+
+    [[nodiscard]] std::string get_last_model() const override {
+        std::lock_guard lock(mutex_);
+        return last_model_;
+    }
+
+private:
+    bool emit_tool_call_ = false;
+    mutable std::mutex mutex_;
+    std::string last_model_ = "stream-model";
+};
 
 class DaemonRunner {
 public:
@@ -713,6 +758,104 @@ TEST_CASE("API gateway /v1/models advertises only initialized providers",
     REQUIRE_FALSE(model_ids.contains("broken-custom/broken-model"));
 }
 
+TEST_CASE("API gateway streams OpenAI-compatible chat completion chunks",
+          "[daemon][api_gateway]") {
+    const std::string provider_name =
+        std::format("stream-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    core::llm::ProviderManager::get_instance().register_provider(
+        provider_name,
+        std::make_shared<StreamingGatewayTestProvider>());
+
+    core::config::AppConfig config;
+    config.default_provider = provider_name;
+    config.default_model_selection = "manual";
+    config.providers[provider_name].model = "stream-model";
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.providers.insert({provider_name, true});
+    provider_catalog.provider_default_models[provider_name] = "stream-model";
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto streamed = post_json_request(
+        port,
+        "/v1/chat/completions",
+        std::format(
+            R"({{"model":"{}","stream":true,"stream_options":{{"include_usage":true}},"messages":[{{"role":"user","content":"hi"}}]}})",
+            provider_name));
+
+    REQUIRE(streamed);
+    REQUIRE(streamed->status == 200);
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring("data: "));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("object":"chat.completion.chunk")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("role":"assistant")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("content":"Hel")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("content":"lo")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("finish_reason":"stop")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8})"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring("data: [DONE]\n\n"));
+}
+
+TEST_CASE("API gateway streams OpenAI-compatible tool call chunks",
+          "[daemon][api_gateway]") {
+    const std::string provider_name =
+        std::format("tool-stream-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    core::llm::ProviderManager::get_instance().register_provider(
+        provider_name,
+        std::make_shared<StreamingGatewayTestProvider>(true));
+
+    core::config::AppConfig config;
+    config.default_provider = provider_name;
+    config.default_model_selection = "manual";
+    config.providers[provider_name].model = "stream-model";
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.providers.insert({provider_name, true});
+    provider_catalog.provider_default_models[provider_name] = "stream-model";
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto streamed = post_json_request(
+        port,
+        "/v1/chat/completions",
+        std::format(
+            R"({{"model":"{}","stream":true,"messages":[{{"role":"user","content":"call a tool"}}]}})",
+            provider_name));
+
+    REQUIRE(streamed);
+    REQUIRE(streamed->status == 200);
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("tool_calls":[{"index":0,"id":"call_stream_1","type":"function")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("name":"lookup","arguments":"{\"query\":\"filo\"}")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("finish_reason":"tool_calls")"));
+    REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring("data: [DONE]\n\n"));
+}
+
 TEST_CASE("API gateway validates OpenAI-compatible payloads locally",
           "[daemon][api_gateway]") {
     const int port = next_test_port();
@@ -730,13 +873,13 @@ TEST_CASE("API gateway validates OpenAI-compatible payloads locally",
     REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring(R"("error")"));
     REQUIRE_THAT(invalid_json->body, Catch::Matchers::ContainsSubstring("Invalid JSON"));
 
-    auto stream_unsupported = post_json_request(
+    auto missing_messages = post_json_request(
         port,
         "/v1/chat/completions",
-        R"({"model":"openai","stream":true,"messages":[{"role":"user","content":"hi"}]})");
-    REQUIRE(stream_unsupported);
-    REQUIRE(stream_unsupported->status == 400);
-    REQUIRE_THAT(stream_unsupported->body, Catch::Matchers::ContainsSubstring("stream=true"));
+        R"({"model":"openai","stream":true})");
+    REQUIRE(missing_messages);
+    REQUIRE(missing_messages->status == 400);
+    REQUIRE_THAT(missing_messages->body, Catch::Matchers::ContainsSubstring("Missing required field: messages"));
 }
 
 TEST_CASE("API gateway validates Anthropic-compatible payloads locally",

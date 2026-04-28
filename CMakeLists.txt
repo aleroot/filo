@@ -101,6 +101,7 @@ set(FILO_CORE_SOURCES
     src/exec/Server.cpp
     src/exec/Daemon.cpp
     src/exec/ApiGateway.cpp
+    src/exec/openai/OpenAIChatCompletionStreamEncoder.cpp
     src/exec/Prompter.cpp
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp
@@ -334,6 +335,7 @@ add_executable(filo_tests
     tests/test_config_manager.cpp
     tests/test_context_mentions.cpp
     tests/test_openai_provider.cpp
+    tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
     tests/test_sse_utils.cpp
     tests/test_model_registry.cpp
@@ -440,6 +442,7 @@ source_group(
         tests/test_config_manager.cpp
         tests/test_context_mentions.cpp
         tests/test_openai_provider.cpp
+        tests/test_openai_stream_encoder.cpp
         tests/test_openai_responses_protocol.cpp
         tests/test_grok_provider.cpp
         tests/test_grok_enhanced.cpp
