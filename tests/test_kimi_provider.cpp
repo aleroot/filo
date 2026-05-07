@@ -335,9 +335,12 @@ TEST_CASE("KimiSerializer - all known Kimi model names are preserved verbatim", 
         "moonshot-v1-8k",
         "moonshot-v1-32k",
         "moonshot-v1-128k",
-        // K2.5 series
+        // K2.x series
+        "kimi-k2.6",
         "kimi-k2-5",
         "kimi-k2-5-thinking",
+        // Official Kimi Code model ID
+        "kimi-for-coding",
         // Legacy models (if any)
         "moonshot-v1-8k-vision",
         "moonshot-v1-32k-vision",
@@ -472,6 +475,13 @@ TEST_CASE("KimiProtocol parse_event - extracts choice-level usage chunk", "[kimi
     REQUIRE(result.prompt_tokens == 8);
     REQUIRE(result.completion_tokens == 11);
     REQUIRE(result.chunks.empty());
+}
+
+TEST_CASE("KimiProtocol::build_url avoids duplicate slash for trailing-slash base URL",
+          "[kimi][protocol][url]") {
+    KimiProtocol protocol;
+    const std::string url = protocol.build_url("https://api.kimi.com/coding/v1/", "kimi-for-coding");
+    REQUIRE(url == "https://api.kimi.com/coding/v1/chat/completions");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -703,6 +713,36 @@ TEST_CASE("KimiProtocol on_response - parses case-insensitive headers and defaul
     REQUIRE(info.requests_remaining == 80);
     REQUIRE(info.tokens_limit == 120000);
     REQUIRE(info.tokens_remaining == 120000);
+}
+
+TEST_CASE("KimiProtocol enrich_rate_limit - skips usage endpoint call when headers are already complete",
+          "[kimi][rate_limit][enrich]") {
+    KimiProtocol protocol;
+    cpr::Header headers;
+    headers["x-ratelimit-limit-requests"] = "100";
+    headers["x-ratelimit-remaining-requests"] = "90";
+    headers["x-ratelimit-limit-tokens"] = "300000";
+    headers["x-ratelimit-remaining-tokens"] = "250000";
+    headers["x-ratelimit-unified-5h-utilization"] = "0.25";
+    headers["x-ratelimit-unified-7d-utilization"] = "0.40";
+
+    protocol.on_response(HttpResponse{200, "{}", headers});
+    const auto before = protocol.last_rate_limit();
+    REQUIRE(before.tokens_limit == 300000);
+    REQUIRE(before.tokens_remaining == 250000);
+    REQUIRE(before.usage_windows.size() == 2);
+
+    // With complete rate-limit headers, enrich_rate_limit should return early and
+    // not mutate the current snapshot.
+    protocol.enrich_rate_limit(
+        "https://api.kimi.com/coding/v1",
+        cpr::Header{{"Authorization", "Bearer test-token"}},
+        HttpResponse{200, "{}", {}});
+
+    const auto after = protocol.last_rate_limit();
+    REQUIRE(after.tokens_limit == before.tokens_limit);
+    REQUIRE(after.tokens_remaining == before.tokens_remaining);
+    REQUIRE(after.usage_windows.size() == before.usage_windows.size());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

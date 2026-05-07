@@ -14,6 +14,7 @@ using namespace core::llm;
 
 TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known models", "[llm][registry]") {
     // Kimi (via new registry)
+    REQUIRE(get_max_context_size("kimi-k2.6") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.5") == 256000);
     REQUIRE(get_max_context_size("kimi-for-coding") == 256000);
     
@@ -71,7 +72,9 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("gpt-5.4"));
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-3-7-sonnet"));
+    REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
+    REQUIRE(registry.has_model("kimi-for-coding"));
     REQUIRE(registry.has_model("gemini-2.5-pro"));
     REQUIRE(registry.has_model("gemini-3.1-pro-preview"));
 }
@@ -100,6 +103,10 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto* gemini_auto = registry.lookup("auto-gemini-3");
     REQUIRE(gemini_auto != nullptr);
     REQUIRE(gemini_auto->canonical_id == "gemini-3.1-pro-preview");
+
+    const auto* kimi_for_coding = registry.lookup("kimi-for-coding");
+    REQUIRE(kimi_for_coding != nullptr);
+    REQUIRE(kimi_for_coding->canonical_id == "kimi-for-coding");
 }
 
 TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {

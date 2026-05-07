@@ -90,6 +90,8 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Kimi Models (Moonshot AI)
     // -----------------------------------------------------------------------
+    { "kimi-k2.6",         256000 },
+    { "kimi-k2-6",         256000 },
     { "kimi-k2.5",         256000 },
     { "kimi-for-coding",   256000 },
     { "kimi-k2",           256000 },
@@ -391,6 +393,19 @@ std::vector<ModelInfo> build_openai_catalog() {
 std::vector<ModelInfo> build_kimi_catalog() {
     return {
         {
+            .canonical_id = "kimi-k2.6",
+            .aliases = {"kimi-k2-6", "k2.6"},
+            .display_name = "Kimi K2.6",
+            .provider = "kimi",
+            .context_window = 256000,
+            .max_output_tokens = 8192,
+            .capabilities = CAP_FULL,
+            .tier = ModelTier::Balanced,
+            .pricing = {5.0, 20.0, -1.0, -1.0},
+            .knowledge_cutoff = "2026-04",
+            .constraints = kStandardConstraints,
+        },
+        {
             .canonical_id = "kimi-k2.5",
             .aliases = {"kimi-k2-5", "k2.5"},
             .display_name = "Kimi K2.5",
@@ -405,7 +420,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
         },
         {
             .canonical_id = "kimi-for-coding",
-            .aliases = {"kimi-coding"},
+            .aliases = {},
             .display_name = "Kimi for Coding",
             .provider = "kimi",
             .context_window = 256000,

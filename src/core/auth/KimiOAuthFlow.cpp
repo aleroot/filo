@@ -25,7 +25,7 @@ namespace {
 
 constexpr std::string_view KIMI_OAUTH_HOST = "https://auth.kimi.com";
 constexpr std::string_view KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-constexpr std::string_view KIMI_VERSION = "1.25.0";
+constexpr std::string_view KIMI_VERSION = "1.41.0";
 
 void open_browser_best_effort(const std::string& url) {
 #if defined(_WIN32)

@@ -572,6 +572,15 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
     REQUIRE(config.providers.contains("grok-reasoning"));
     REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.20-reasoning");
+    REQUIRE(config.providers.contains("kimi"));
+    REQUIRE(config.providers.at("kimi").model == "kimi-k2.6");
+    REQUIRE(config.providers.contains("kimi-k2-6"));
+    REQUIRE(config.providers.at("kimi-k2-6").model == "kimi-k2.6");
+    REQUIRE(config.providers.contains("kimi-k2-5"));
+    REQUIRE(config.providers.at("kimi-k2-5").model == "kimi-k2.5");
+    REQUIRE(config.providers.contains("kimi-for-coding"));
+    REQUIRE(config.providers.at("kimi-for-coding").model == "kimi-for-coding");
+    REQUIRE(config.providers.at("kimi-for-coding").base_url == "https://api.kimi.com/coding/v1");
     REQUIRE(config.providers.contains("claude"));
     REQUIRE_FALSE(config.providers.contains("claude-oauth"));
     REQUIRE(config.subagents.contains("general"));
@@ -583,6 +592,40 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.router.enabled);
     REQUIRE(config.router.policies.contains("smart-code"));
     REQUIRE(fs::exists(xdg_home / "filo" / "config.json"));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and kimi-k2.6 default",
+          "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_login_kimi_profile");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "openai",
+        "default_model_selection": "manual",
+        "providers": {
+            "openai": { "type": "openai", "model": "gpt-5.4" }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    REQUIRE(manager.persist_login_profile("kimi", &error));
+    REQUIRE(error.empty());
+
+    const auto& config = manager.get_config();
+    REQUIRE(config.default_provider == "kimi");
+    REQUIRE(config.default_model_selection == "manual");
+    REQUIRE(config.providers.contains("kimi"));
+    REQUIRE(config.providers.at("kimi").auth_type == "oauth_kimi");
+    REQUIRE(config.providers.at("kimi").model == "kimi-k2.6");
 
     fs::remove_all(sandbox);
 }

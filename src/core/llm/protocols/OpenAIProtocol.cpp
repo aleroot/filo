@@ -175,7 +175,11 @@ std::string OpenAIProtocol::build_url(std::string_view base_url,
             model,
             api_version);
     }
-    return std::string(base_url) + "/chat/completions";
+    std::string normalized(base_url);
+    while (!normalized.empty() && normalized.back() == '/') {
+        normalized.pop_back();
+    }
+    return normalized + "/chat/completions";
 }
 
 ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {

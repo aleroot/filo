@@ -17,7 +17,7 @@
  *
  * The required headers are:
  *   - X-Msh-Platform: "kimi_cli"
- *   - X-Msh-Version: CLI version (e.g., "1.25.0")
+ *   - X-Msh-Version: CLI version (e.g., "1.41.0")
  *   - X-Msh-Device-Name: hostname
  *   - X-Msh-Device-Model: OS and architecture info
  *   - X-Msh-Os-Version: OS version
@@ -74,7 +74,7 @@ namespace core::llm::protocols {
  * ## Headers Added
  * Every request includes these additional headers:
  * - X-Msh-Platform: "kimi_cli"
- * - X-Msh-Version: "1.25.0" (matching official CLI)
+ * - X-Msh-Version: "1.41.0" (matching official CLI)
  * - X-Msh-Device-Name: system hostname
  * - X-Msh-Device-Model: OS and architecture (e.g., "Linux 5.15 x86_64")
  * - X-Msh-Os-Version: kernel/OS version

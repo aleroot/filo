@@ -43,9 +43,12 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
         CHECK(context_window_for_model("moonshot-v1-8k")         ==   8'192);
         CHECK(context_window_for_model("moonshot-v1-32k")        ==  32'768);
         CHECK(context_window_for_model("moonshot-v1-128k")       == 128'000);
+        CHECK(context_window_for_model("kimi-k2.6")              == 256'000);
+        CHECK(context_window_for_model("kimi-k2-6")              == 256'000);
         CHECK(context_window_for_model("kimi-k2-5")              == 256'000);
         CHECK(context_window_for_model("kimi-k2.5")              == 256'000);
         CHECK(context_window_for_model("kimi-for-coding")        == 256'000);
+        CHECK(context_window_for_model("kimi-k2-0711-preview")   == 128'000);
         CHECK(context_window_for_model("kimi-unknown")           == 128'000);
     }
 

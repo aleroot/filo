@@ -282,6 +282,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
             while (true) {
                 std::string buffer;
+                std::size_t buffer_start = 0;
                 bool        done_signalled = false;
 
                 // Prevent stale usage from previous requests if this request does not
@@ -323,12 +324,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                 auto drain_complete_events = [&] {
                     while (!done_signalled) {
-                        std::size_t pos = buffer.find(delimiter);
+                        std::size_t pos = buffer.find(delimiter, buffer_start);
                         std::size_t delim_len = delimiter.size();
 
                         // Most SSE providers use "\n\n", but some use CRLF framing.
                         if (delimiter == "\n\n") {
-                            const std::size_t crlf_pos = buffer.find("\r\n\r\n");
+                            const std::size_t crlf_pos = buffer.find("\r\n\r\n", buffer_start);
                             if (crlf_pos != std::string::npos
                                 && (pos == std::string::npos || crlf_pos < pos)) {
                                 pos = crlf_pos;
@@ -338,9 +339,22 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                         if (pos == std::string::npos) break;
 
-                        std::string event = buffer.substr(0, pos);
-                        buffer.erase(0, pos + delim_len);
-                        forward_parsed_event(event);
+                        const std::string_view event_payload{
+                            buffer.data() + buffer_start, pos - buffer_start};
+                        forward_parsed_event(event_payload);
+                        buffer_start = pos + delim_len;
+                    }
+
+                    // Compaction: avoid O(n) erase per event; erase in larger chunks.
+                    if (buffer_start == 0) return;
+                    if (buffer_start >= buffer.size()) {
+                        buffer.clear();
+                        buffer_start = 0;
+                        return;
+                    }
+                    if (buffer_start >= 8192 || buffer_start * 2 >= buffer.size()) {
+                        buffer.erase(0, buffer_start);
+                        buffer_start = 0;
                     }
                 };
 
@@ -356,10 +370,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 if (!done_signalled) {
                     // Some providers close the stream without a trailing delimiter.
                     // Parse any non-whitespace remainder as one final event.
-                    if (buffer.find_first_not_of(" \t\r\n") != std::string::npos) {
-                        forward_parsed_event(buffer);
+                    const std::string_view remainder{
+                        buffer.data() + buffer_start, buffer.size() - buffer_start};
+                    if (remainder.find_first_not_of(" \t\r\n") != std::string::npos) {
+                        forward_parsed_event(remainder);
                     }
                     buffer.clear();
+                    buffer_start = 0;
                 }
                 if (r.status_code != 200) {
                     core::logging::debug("[HTTP] Response status={}, body={}", r.status_code, r.text.substr(0, 500));

@@ -93,6 +93,11 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
     return OpenAIWireApi::ChatCompletions;
 }
 
+[[nodiscard]] bool model_prefers_kimi_code_endpoint(std::string_view model) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
+    return lowered == "kimi-for-coding";
+}
+
 } // namespace
 
 std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
@@ -169,6 +174,14 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     if (cred && canonical_type == "kimi" && base_url == "https://api.moonshot.cn/v1") {
         base_url = "https://api.kimi.com/coding/v1";
         core::logging::debug("Using Kimi OAuth endpoint: {}", base_url);
+    }
+
+    // The official Kimi Code model is served by the Kimi Code endpoint.
+    if (canonical_type == "kimi"
+        && base_url == "https://api.moonshot.cn/v1"
+        && model_prefers_kimi_code_endpoint(config.model)) {
+        base_url = "https://api.kimi.com/coding/v1";
+        core::logging::debug("Using Kimi Code endpoint for model '{}': {}", config.model, base_url);
     }
 
     // For OpenAI ChatGPT PKCE auth, route to the ChatGPT Codex backend by default.

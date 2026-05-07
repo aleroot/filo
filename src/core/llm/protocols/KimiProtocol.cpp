@@ -7,11 +7,15 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <format>
+#include <functional>
 #include <initializer_list>
 #include <limits>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 namespace core::llm::protocols {
 
@@ -189,6 +193,13 @@ struct KimiUsageSnapshot {
     std::vector<UsageWindow> windows;
 };
 
+struct CachedUsageSnapshot {
+    KimiUsageSnapshot value;
+    std::chrono::steady_clock::time_point expires_at;
+};
+
+constexpr auto kUsageSnapshotTtl = std::chrono::seconds(20);
+
 [[nodiscard]] std::optional<int32_t>
 parse_int_string(std::string_view value) noexcept {
     value = core::utils::str::trim_ascii_view(value);
@@ -254,6 +265,57 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
         out.push_back(static_cast<char>(std::tolower(ch)));
     }
     return out;
+}
+
+[[nodiscard]] std::string sanitize_os_version(std::string version) {
+    std::string sanitized;
+    sanitized.reserve(version.size());
+    for (char c : version) {
+        // Keep only printable ASCII that's safe for HTTP headers.
+        // Remove: # < > [ ] { } \ | ` and control characters.
+        if (c >= 32 && c < 127
+            && c != '#' && c != '<' && c != '>'
+            && c != '[' && c != ']' && c != '{' && c != '}'
+            && c != '\\' && c != '|' && c != '`') {
+            sanitized.push_back(c);
+        }
+    }
+
+    std::string result;
+    result.reserve(sanitized.size());
+    bool last_was_space = false;
+    for (char c : sanitized) {
+        if (c == ' ') {
+            if (!last_was_space) {
+                result.push_back(c);
+                last_was_space = true;
+            }
+        } else {
+            result.push_back(c);
+            last_was_space = false;
+        }
+    }
+
+    const size_t start = result.find_first_not_of(" \t");
+    const size_t end = result.find_last_not_of(" \t");
+    if (start == std::string::npos) return "unknown";
+    return result.substr(start, end - start + 1);
+}
+
+[[nodiscard]] const cpr::Header& cached_kimi_metadata_headers() {
+    static const cpr::Header kCachedHeaders = [] {
+        auto raw = core::auth::KimiOAuthFlow::getCommonHeaders();
+        if (raw.count("X-Msh-Os-Version")) {
+            raw["X-Msh-Os-Version"] = sanitize_os_version(raw["X-Msh-Os-Version"]);
+        }
+
+        cpr::Header headers;
+        for (const auto& [key, value] : raw) {
+            headers[key] = value;
+        }
+        return headers;
+    }();
+    return kCachedHeaders;
 }
 
 [[nodiscard]] std::string label_from_duration(int32_t duration, std::string_view time_unit) {
@@ -408,13 +470,62 @@ parse_kimi_usage_payload(std::string_view payload) {
     return base_url.find("/coding/") != std::string_view::npos;
 }
 
+[[nodiscard]] std::string trim_trailing_slash(std::string_view url) {
+    while (!url.empty() && url.back() == '/') {
+        url.remove_suffix(1);
+    }
+    return std::string(url);
+}
+
+[[nodiscard]] std::string usage_cache_key(std::string_view base_url,
+                                          const cpr::Header& request_headers) {
+    // Scope cache to endpoint + auth identity so we don't leak usage state
+    // between different accounts in the same process.
+    std::string key = trim_trailing_slash(base_url);
+    const auto auth_header = find_header_case_insensitive(request_headers, "Authorization");
+    const std::size_t auth_hash = std::hash<std::string_view>{}(
+        auth_header.has_value() ? *auth_header : std::string_view{});
+    key += "|auth:";
+    key += std::to_string(auth_hash);
+    return key;
+}
+
+[[nodiscard]] std::unordered_map<std::string, CachedUsageSnapshot>& kimi_usage_cache() {
+    static std::unordered_map<std::string, CachedUsageSnapshot> cache;
+    return cache;
+}
+
+[[nodiscard]] std::mutex& kimi_usage_cache_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+[[nodiscard]] std::optional<KimiUsageSnapshot>
+load_cached_kimi_usage_snapshot(const std::string& key) {
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock(kimi_usage_cache_mutex());
+    auto& cache = kimi_usage_cache();
+    auto it = cache.find(key);
+    if (it == cache.end()) return std::nullopt;
+    if (it->second.expires_at <= now) {
+        cache.erase(it);
+        return std::nullopt;
+    }
+    return it->second.value;
+}
+
+void store_cached_kimi_usage_snapshot(std::string key,
+                                      const KimiUsageSnapshot& snapshot) {
+    const auto expires_at = std::chrono::steady_clock::now() + kUsageSnapshotTtl;
+    std::scoped_lock lock(kimi_usage_cache_mutex());
+    auto& cache = kimi_usage_cache();
+    cache[std::move(key)] = CachedUsageSnapshot{snapshot, expires_at};
+}
+
 [[nodiscard]] std::optional<KimiUsageSnapshot>
 fetch_kimi_usage_snapshot(std::string_view base_url,
                           const cpr::Header& request_headers) {
-    std::string url(base_url);
-    while (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
+    std::string url = trim_trailing_slash(base_url);
     url += "/usages";
 
     cpr::Header headers = request_headers;
@@ -487,56 +598,96 @@ struct KimiParseResult {
     std::string content;
     std::string reasoning_content;
     std::vector<ToolCall> tools;
+    int32_t prompt_tokens = 0;
+    int32_t completion_tokens = 0;
 };
 
-static KimiParseResult
-parse_kimi_sse_chunk(std::string_view json_str) {
-    // First try standard OpenAI parsing for content and tool_calls
-    auto [content, tools] = parse_openai_sse_chunk(json_str);
-
-    // Parse the JSON to check for reasoning_content 
+[[nodiscard]] KimiParseResult parse_kimi_sse_chunk(std::string_view json_str) {
     thread_local simdjson::dom::parser parser;
     simdjson::padded_string ps(json_str);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
-        // Return OpenAI parse result even if JSON failed (shouldn't happen)
-        return {std::move(content), {}, std::move(tools)};
-    }
-    
-    simdjson::dom::array choices;
-    if (doc["choices"].get(choices) != simdjson::SUCCESS) {
-        return {std::move(content), {}, std::move(tools)};
+        return {};
     }
 
-    std::string reasoning_content;
-    
+    KimiParseResult result;
+
+    // Kimi can emit usage in top-level "usage" (OpenAI-style) or in
+    // "choices[i].usage" (vendor-specific streaming chunks).
+    simdjson::dom::object usage_obj;
+    bool has_usage = false;
+    if (doc["usage"].get(usage_obj) == simdjson::SUCCESS
+        && read_usage_object(usage_obj, result.prompt_tokens, result.completion_tokens)) {
+        has_usage = true;
+    }
+
+    simdjson::dom::array choices;
+    if (doc["choices"].get(choices) != simdjson::SUCCESS) {
+        return result;
+    }
+
     for (simdjson::dom::element choice : choices) {
+        if (!has_usage) {
+            simdjson::dom::object choice_usage;
+            if (choice["usage"].get(choice_usage) == simdjson::SUCCESS
+                && read_usage_object(choice_usage, result.prompt_tokens,
+                                     result.completion_tokens)) {
+                has_usage = true;
+            }
+        }
+
         simdjson::dom::object delta;
         if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
-        
-        // Check for reasoning_content (Kimi K2.5 thinking tokens)
-        // Note: reasoning_content comes in its own delta chunks, separate from content
+
+        // delta.content
+        std::string_view c;
+        if (delta["content"].get(c) == simdjson::SUCCESS) {
+            result.content = std::string(c);
+        }
+
+        // delta.reasoning_content (Kimi thinking stream)
         std::string_view rc;
         if (delta["reasoning_content"].get(rc) == simdjson::SUCCESS && rc.size() > 0) {
-            reasoning_content += std::string(rc);  // Append for streaming
+            result.reasoning_content.append(rc.data(), rc.size());
         }
-        
-        // Note: content is already extracted by parse_openai_sse_chunk
-        // We don't need to re-extract it here, but we check if OpenAI parsing missed it
-        if (content.empty()) {
-            std::string_view c;
-            if (delta["content"].get(c) == simdjson::SUCCESS && c.size() > 0) {
-                content += std::string(c);
+
+        // delta.tool_calls
+        simdjson::dom::array tool_calls_arr;
+        if (delta["tool_calls"].get(tool_calls_arr) == simdjson::SUCCESS) {
+            for (simdjson::dom::element tc : tool_calls_arr) {
+                ToolCall call;
+                int64_t index_v = -1;
+                if (tc["index"].get(index_v) == simdjson::SUCCESS) {
+                    call.index = static_cast<int>(index_v);
+                }
+
+                std::string_view id_v;
+                if (tc["id"].get(id_v) == simdjson::SUCCESS) {
+                    call.id = std::string(id_v);
+                }
+
+                std::string_view type_v;
+                if (tc["type"].get(type_v) == simdjson::SUCCESS) {
+                    call.type = std::string(type_v);
+                }
+
+                simdjson::dom::object func;
+                if (tc["function"].get(func) == simdjson::SUCCESS) {
+                    std::string_view name_v;
+                    if (func["name"].get(name_v) == simdjson::SUCCESS) {
+                        call.function.name = std::string(name_v);
+                    }
+                    std::string_view args_v;
+                    if (func["arguments"].get(args_v) == simdjson::SUCCESS) {
+                        call.function.arguments = std::string(args_v);
+                    }
+                }
+
+                result.tools.push_back(std::move(call));
             }
         }
     }
-    
-    // If we got content, tools, or reasoning_content, return them
-    if (!content.empty() || !reasoning_content.empty() || !tools.empty()) {
-        return {std::move(content), std::move(reasoning_content), std::move(tools)};
-    }
-
-    return {};
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -563,53 +714,11 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     cpr::Header headers{
         {"Content-Type", "application/json"},
         {"Accept",       "text/event-stream"},
-        {"User-Agent",   "KimiCLI/1.25.0"},
+        {"User-Agent",   "KimiCLI/1.41.0"},
     };
     
-    // Add Kimi-specific X-Msh-* headers for device identification
-    auto kimi_headers = core::auth::KimiOAuthFlow::getCommonHeaders();
-    
-    // Sanitize X-Msh-Os-Version: remove characters that can cause HTTP header issues.
-    // On some Linux kernels, platform.version() returns strings like:
-    //   "#101~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC ..."
-    // The '#' and other special characters can be rejected by HTTP libraries or servers.
-    // Reference: https://github.com/MoonshotAI/kimi-cli/issues/1389
-    auto sanitize_os_version = [](std::string version) -> std::string {
-        std::string sanitized;
-        for (char c : version) {
-            // Keep only printable ASCII that's safe for HTTP headers
-            // Remove: # < > [ ] { } \ | ` and control characters
-            if (c >= 32 && c < 127 && 
-                c != '#' && c != '<' && c != '>' && 
-                c != '[' && c != ']' && c != '{' && c != '}' &&
-                c != '\\' && c != '|' && c != '`') {
-                sanitized += c;
-            }
-        }
-        // Collapse multiple spaces into one
-        std::string result;
-        bool last_was_space = false;
-        for (char c : sanitized) {
-            if (c == ' ') {
-                if (!last_was_space) {
-                    result += c;
-                    last_was_space = true;
-                }
-            } else {
-                result += c;
-                last_was_space = false;
-            }
-        }
-        // Trim leading/trailing spaces
-        size_t start = result.find_first_not_of(" \t");
-        size_t end = result.find_last_not_of(" \t");
-        if (start == std::string::npos) return "unknown";
-        return result.substr(start, end - start + 1);
-    };
-    
-    if (kimi_headers.count("X-Msh-Os-Version")) {
-        kimi_headers["X-Msh-Os-Version"] = sanitize_os_version(kimi_headers["X-Msh-Os-Version"]);
-    }
+    // Add Kimi-specific X-Msh-* headers for device identification.
+    cpr::Header kimi_headers = cached_kimi_metadata_headers();
     
     // CRITICAL: Use device_id from OAuth token if available.
     // The X-Msh-Device-Id header MUST match the device_id claim in the JWT token,
@@ -617,10 +726,7 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     // The device_id is passed via auth.properties from OAuthCredentialSource.
     auto it = auth.properties.find("device_id");
     if (it != auth.properties.end() && !it->second.empty()) {
-        core::logging::debug("KimiProtocol: Using device_id from OAuth token: {}", it->second);
         kimi_headers["X-Msh-Device-Id"] = it->second;
-    } else {
-        core::logging::debug("KimiProtocol: Using local device_id: {}", kimi_headers["X-Msh-Device-Id"]);
     }
     
     for (const auto& [key, value] : kimi_headers) {
@@ -630,16 +736,6 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     // Add auth headers (e.g., Authorization: Bearer <token>)
     for (const auto& [key, value] : auth.headers) {
         headers[key] = value;
-    }
-    
-    // Debug: log all headers
-    core::logging::debug("KimiProtocol: Headers:");
-    for (const auto& [key, value] : headers) {
-        if (key == "Authorization") {
-            core::logging::debug("  {}: Bearer ***", key);
-        } else {
-            core::logging::debug("  {}: {}", key, value);
-        }
     }
     
     return headers;
@@ -689,7 +785,7 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
         
         case 404:
             return "[Kimi API Error 404: Model or endpoint not found. Verify the model name "
-                   "is correct. Available models: kimi-k2-5, moonshot-v1-8k, etc.]";
+                   "is correct. Available models: kimi-k2.6, kimi-k2.5, moonshot-v1-8k, etc.]";
         
         case 429:
             return "[Kimi API Error 429: Rate limit exceeded. Please reduce request frequency. "
@@ -749,8 +845,16 @@ void KimiProtocol::enrich_rate_limit(std::string_view base_url,
             && last_rate_limit_.tokens_remaining <= 0);
     if (!needs_enrichment) return;
 
+    const std::string cache_key = usage_cache_key(base_url, request_headers);
+    if (const auto cached = load_cached_kimi_usage_snapshot(cache_key);
+        cached.has_value()) {
+        merge_kimi_usage_snapshot(last_rate_limit_, *cached);
+        return;
+    }
+
     if (const auto usage = fetch_kimi_usage_snapshot(base_url, request_headers);
         usage.has_value()) {
+        store_cached_kimi_usage_snapshot(cache_key, *usage);
         merge_kimi_usage_snapshot(last_rate_limit_, *usage);
     }
 }
@@ -767,36 +871,9 @@ ParseResult KimiProtocol::parse_event(std::string_view raw_event) {
     }
 
     ParseResult result;
-
-    // Extract usage.
-    // Kimi can emit usage either in top-level "usage" (OpenAI style) or in
-    // "choices[i].usage" (Kimi-specific stream chunks).
-    {
-        thread_local simdjson::dom::parser usage_parser;
-        simdjson::padded_string ps(json_sv);
-        simdjson::dom::element doc;
-        if (usage_parser.parse(ps).get(doc) == simdjson::SUCCESS) {
-            simdjson::dom::object usage_obj;
-            if (doc["usage"].get(usage_obj) == simdjson::SUCCESS
-                && read_usage_object(usage_obj, result.prompt_tokens, result.completion_tokens)) {
-            } else {
-                simdjson::dom::array choices;
-                if (doc["choices"].get(choices) == simdjson::SUCCESS) {
-                    for (simdjson::dom::element choice : choices) {
-                        simdjson::dom::object choice_usage;
-                        if (choice["usage"].get(choice_usage) == simdjson::SUCCESS
-                            && read_usage_object(choice_usage, result.prompt_tokens,
-                                                 result.completion_tokens)) {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Use Kimi-specific parsing that handles reasoning_content
     auto kimi_result = parse_kimi_sse_chunk(json_sv);
+    result.prompt_tokens = kimi_result.prompt_tokens;
+    result.completion_tokens = kimi_result.completion_tokens;
     
     // Create chunk with content, reasoning_content, and tools
     // Kimi can send both reasoning_content and content/tool_calls in the same or different deltas
