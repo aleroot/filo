@@ -108,6 +108,7 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpConnectionManager.cpp
     src/core/mcp/McpDynamicFeatureTools.cpp
     src/core/mcp/McpTaskManager.cpp
+    src/core/mcp/McpRoots.cpp
     src/core/mcp/McpSamplingBridge.cpp
     src/core/mcp/ToolCallResult.cpp
     src/tui/ActivityTimer.cpp

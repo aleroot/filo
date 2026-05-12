@@ -8,12 +8,12 @@
 #include "../core/llm/ProviderManager.hpp"
 #include "../core/llm/ProviderFactory.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
+#include "../core/mcp/McpRoots.hpp"
 #include "../core/tools/ToolManager.hpp"
 #include "../core/tools/ShellTool.hpp"
 #include "../core/context/SessionContext.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
-#include "../core/utils/UriUtils.hpp"
 #include "../core/workspace/Workspace.hpp"
 #include "../core/logging/Logger.hpp"
 #include <simdjson.h>
@@ -21,14 +21,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
-#include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
-#include <system_error>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -79,8 +77,6 @@ constexpr std::string_view kJsonRpcInvalidRequestPrefix{
 }
 
 using core::utils::JsonWriter;
-namespace uri = core::utils::uri;
-
 struct ResponseId {
     enum class Kind {
         none,
@@ -269,98 +265,9 @@ extract_initialize_protocol_version(std::string_view response_body) {
     return std::string("s:") + std::string(id);
 }
 
-[[nodiscard]] std::filesystem::path normalize_path(const std::filesystem::path& path) {
-    std::error_code ec;
-    auto normalized = std::filesystem::weakly_canonical(path, ec);
-    if (!ec) {
-        return normalized.lexically_normal();
-    }
-
-    ec.clear();
-    normalized = std::filesystem::absolute(path, ec);
-    if (!ec) {
-        return normalized.lexically_normal();
-    }
-
-    return path.lexically_normal();
-}
-
-[[nodiscard]] std::optional<std::filesystem::path>
-parse_local_file_uri(std::string_view uri_value, std::string& error_out) {
-    if (!to_lower_ascii(uri_value).starts_with("file://")) {
-        error_out = "Only file:// root URIs are supported";
-        return std::nullopt;
-    }
-
-    std::string_view rest = uri_value.substr(7);
-    std::string_view encoded_path;
-    if (rest.starts_with('/')) {
-        encoded_path = rest;
-    } else {
-        const auto slash = rest.find('/');
-        const std::string_view authority =
-            slash == std::string_view::npos ? rest : rest.substr(0, slash);
-        const auto lowered_authority = to_lower_ascii(authority);
-        if (!authority.empty() && lowered_authority != "localhost") {
-            error_out = "Unsupported file URI authority";
-            return std::nullopt;
-        }
-        encoded_path = slash == std::string_view::npos ? std::string_view{"/"} : rest.substr(slash);
-    }
-
-    if (encoded_path.find('?') != std::string_view::npos
-        || encoded_path.find('#') != std::string_view::npos) {
-        error_out = "File URI must not include query or fragment";
-        return std::nullopt;
-    }
-
-    std::string decoded_path;
-    if (!uri::percent_decode(encoded_path, decoded_path)) {
-        error_out = "Malformed percent-encoding in file URI";
-        return std::nullopt;
-    }
-
-    if (decoded_path.empty() || decoded_path.find('\0') != std::string::npos) {
-        error_out = "Invalid file URI path";
-        return std::nullopt;
-    }
-
-    return normalize_path(std::filesystem::path(decoded_path));
-}
-
-[[nodiscard]] std::pair<bool, bool>
-extract_initialize_roots_capability(std::string_view json_body) {
-    simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_body);
-    simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return {false, false};
-
-    simdjson::ondemand::object root;
-    if (doc.get_object().get(root) != simdjson::SUCCESS) return {false, false};
-
-    simdjson::ondemand::object params;
-    if (root["params"].get_object().get(params) != simdjson::SUCCESS) return {false, false};
-
-    simdjson::ondemand::object capabilities;
-    if (params["capabilities"].get_object().get(capabilities) != simdjson::SUCCESS) {
-        return {false, false};
-    }
-
-    simdjson::ondemand::object roots;
-    if (capabilities["roots"].get_object().get(roots) != simdjson::SUCCESS) {
-        return {false, false};
-    }
-
-    bool list_changed = false;
-    [[maybe_unused]] const auto ignored = roots["listChanged"].get(list_changed);
-    return {true, list_changed};
-}
-
 [[nodiscard]] bool request_needs_authoritative_workspace(const ParsedJsonRpcMessage& parsed) {
     return parsed.kind == ParsedJsonRpcMessage::Kind::request
-        && (parsed.method == "tools/call"
-            || parsed.method == "resources/list"
-            || parsed.method == "resources/read");
+        && core::mcp::is_workspace_sensitive_request(parsed.method);
 }
 
 [[nodiscard]] std::string build_sse_message(std::string_view payload) {
@@ -371,110 +278,6 @@ extract_initialize_roots_capability(std::string_view json_body) {
     event += payload;
     event += "\n\n";
     return event;
-}
-
-[[nodiscard]] std::string build_roots_list_request_body(std::string_view request_id) {
-    JsonWriter w(96);
-    {
-        auto _obj = w.object();
-        w.kv_str("jsonrpc", "2.0").comma()
-            .kv_str("id", request_id).comma()
-            .kv_str("method", "roots/list");
-    }
-    return std::move(w).take();
-}
-
-[[nodiscard]] std::optional<core::workspace::WorkspaceSnapshot>
-parse_roots_list_response(std::string_view response_body,
-                          std::string_view expected_request_id,
-                          std::uint64_t workspace_version,
-                          std::string& error_out) {
-    simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(response_body);
-    simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) {
-        error_out = "Client returned invalid JSON for roots/list";
-        return std::nullopt;
-    }
-
-    simdjson::ondemand::object root;
-    if (doc.get_object().get(root) != simdjson::SUCCESS) {
-        error_out = "Client returned invalid JSON-RPC response for roots/list";
-        return std::nullopt;
-    }
-
-    std::string_view jsonrpc;
-    if (root["jsonrpc"].get_string().get(jsonrpc) != simdjson::SUCCESS || jsonrpc != "2.0") {
-        error_out = "Client roots/list response used an invalid JSON-RPC version";
-        return std::nullopt;
-    }
-
-    std::string_view response_id;
-    if (root["id"].get_string().get(response_id) != simdjson::SUCCESS
-        || response_id != expected_request_id) {
-        error_out = "Client returned an unexpected roots/list response id";
-        return std::nullopt;
-    }
-
-    simdjson::ondemand::object error;
-    if (root["error"].get_object().get(error) == simdjson::SUCCESS) {
-        std::string_view message;
-        if (error["message"].get_string().get(message) == simdjson::SUCCESS && !message.empty()) {
-            error_out = std::string(message);
-        } else {
-            error_out = "Client rejected roots/list";
-        }
-        return std::nullopt;
-    }
-
-    simdjson::ondemand::object result;
-    if (root["result"].get_object().get(result) != simdjson::SUCCESS) {
-        error_out = "Client roots/list response was missing 'result'";
-        return std::nullopt;
-    }
-
-    simdjson::ondemand::array roots;
-    if (result["roots"].get_array().get(roots) != simdjson::SUCCESS) {
-        error_out = "Client roots/list response was missing 'roots'";
-        return std::nullopt;
-    }
-
-    core::workspace::WorkspaceSnapshot snapshot;
-    snapshot.enforce = true;
-    snapshot.version = workspace_version;
-
-    bool first_root = true;
-    for (auto root_item : roots) {
-        simdjson::ondemand::object root_object;
-        if (root_item.get_object().get(root_object) != simdjson::SUCCESS) {
-            error_out = "Client roots/list entry was not an object";
-            return std::nullopt;
-        }
-
-        std::string_view uri_value;
-        if (root_object["uri"].get_string().get(uri_value) != simdjson::SUCCESS) {
-            error_out = "Client roots/list entry was missing 'uri'";
-            return std::nullopt;
-        }
-
-        std::string uri_error;
-        auto parsed_path = parse_local_file_uri(uri_value, uri_error);
-        if (!parsed_path.has_value()) {
-            error_out = std::format("Invalid root URI '{}': {}",
-                                    std::string(uri_value),
-                                    uri_error);
-            return std::nullopt;
-        }
-
-        if (first_root) {
-            snapshot.primary = *parsed_path;
-            first_root = false;
-        } else {
-            snapshot.additional.push_back(*parsed_path);
-        }
-    }
-
-    return snapshot;
 }
 
 [[nodiscard]] std::optional<std::string> parse_origin_host(std::string_view origin) {
@@ -904,14 +707,14 @@ void handle_mcp_post(const std::string& host,
             if (init_result.status == 200 && !init_result.body.empty()) {
                 if (auto version = extract_initialize_protocol_version(init_result.body)) {
                     auto [new_session_id, new_session] = create_http_session(std::move(*version));
-                    const auto [supports_roots, supports_roots_list_changed] =
-                        extract_initialize_roots_capability(req.body);
+                    const auto roots_capability =
+                        core::mcp::extract_roots_capability_from_initialize(req.body);
                     {
                         std::lock_guard<std::mutex> lock(new_session->mutex);
-                        new_session->client_supports_roots = supports_roots;
+                        new_session->client_supports_roots = roots_capability.supported;
                         new_session->client_supports_roots_list_changed =
-                            supports_roots_list_changed;
-                        new_session->roots_dirty = supports_roots;
+                            roots_capability.list_changed;
+                        new_session->roots_dirty = roots_capability.supported;
                     }
                     res.set_header("MCP-Session-Id", new_session_id);
                 }
@@ -1080,7 +883,8 @@ void handle_mcp_post(const std::string& host,
         }
 
         const ResponseId request_id = parsed->id;
-        const std::string roots_request_body = build_roots_list_request_body(roots_request_id);
+        const std::string roots_request_body =
+            core::mcp::build_roots_list_request_body(roots_request_id);
         const std::string original_request_body = req.body;
         const std::string replay_key_value = *replay_key;
         auto inflight = decision.inflight;
@@ -1155,7 +959,7 @@ void handle_mcp_post(const std::string& host,
 
                     std::string roots_response_body = pending_roots_response->future.get();
                     std::string roots_error;
-                    auto snapshot = parse_roots_list_response(
+                    auto snapshot = core::mcp::parse_roots_list_response(
                         roots_response_body,
                         roots_request_id,
                         next_workspace_version,

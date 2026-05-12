@@ -1174,6 +1174,55 @@ TEST_CASE("MCP tools/call read_file with offset_line and limit_lines", "[mcp]") 
     std::filesystem::remove(path);
 }
 
+TEST_CASE("MCP tools/call read_file rejects working_dir argument", "[mcp]") {
+    const std::string path = "mcp_test_read_file_no_working_dir.txt";
+    {
+        std::ofstream ofs(path);
+        ofs << "content\n";
+    }
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":"mcp_test_read_file_no_working_dir.txt","working_dir":"/tmp"}},"id":71})");
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":true)"));
+    REQUIRE_THAT(resp, ContainsSubstring("Unknown argument"));
+    REQUIRE_THAT(resp, ContainsSubstring("working_dir"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MCP tools/call read_file resolves relative paths against scoped roots",
+          "[mcp][workspace]") {
+    WorkspaceResetToDefault workspace_reset;
+    const auto scoped_root = make_temp_dir("read_file_scoped_roots");
+    const auto nested_dir = scoped_root / "nested";
+    std::filesystem::create_directories(nested_dir);
+    write_test_file(nested_dir / "file.txt", "scoped-root-content\n");
+
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = scoped_root,
+            .additional = {},
+            .enforce = true,
+            .version = 17,
+        },
+        core::context::SessionTransport::mcp_stdio,
+        "mcp-stdio-roots");
+
+#undef dispatch
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":"nested/file.txt"}},"id":72})",
+        session_context);
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_THAT(resp, ContainsSubstring("scoped-root-content"));
+
+    std::filesystem::remove_all(scoped_root);
+}
+
 // ---------------------------------------------------------------------------
 // grep_search shell injection safety
 // ---------------------------------------------------------------------------
@@ -1184,6 +1233,35 @@ TEST_CASE("MCP tools/call grep_search with single-quote in pattern is safe", "[m
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+}
+
+TEST_CASE("MCP tools/call grep_search resolves relative paths against scoped roots",
+          "[mcp][workspace]") {
+    WorkspaceResetToDefault workspace_reset;
+    const auto scoped_root = make_temp_dir("grep_search_scoped_roots");
+    write_test_file(scoped_root / "search.txt", "needle-from-scoped-root\n");
+
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = scoped_root,
+            .additional = {},
+            .enforce = true,
+            .version = 18,
+        },
+        core::context::SessionTransport::mcp_stdio,
+        "mcp-stdio-roots");
+
+#undef dispatch
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_search","arguments":{"pattern":"needle-from-scoped-root","path":"."}},"id":81})",
+        session_context);
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_THAT(resp, ContainsSubstring("needle-from-scoped-root"));
+
+    std::filesystem::remove_all(scoped_root);
 }
 
 // ---------------------------------------------------------------------------
