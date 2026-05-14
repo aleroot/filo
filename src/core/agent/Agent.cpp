@@ -22,6 +22,7 @@
 #include <future>
 #include <format>
 #include <ranges>
+#include <utility>
 
 namespace core::agent {
 
@@ -536,12 +537,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
     auto assistant_response   = std::make_shared<std::string>();
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
+    auto tool_cost_attribution =
+        std::make_shared<std::vector<std::pair<int32_t, int64_t>>>();
     auto reasoning_accum      = std::make_shared<std::string>();  // For Kimi thinking mode
     auto already_stopped      = std::make_shared<std::atomic<bool>>(false);
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
-         text_callback, tool_callback, done_callback, turn_callbacks, already_stopped, turn_state](
+         tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
+         already_stopped, turn_state](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -608,6 +612,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             core::session::SessionStats::get_instance().record_turn(
                 model, usage, should_estimate_cost);
 
+            if (!tool_calls_accum->empty()) {
+                const std::size_t count = tool_calls_accum->size();
+                const int64_t completion_cost_micro =
+                    core::session::SessionStats::estimate_completion_cost_micro_usd(
+                        model, usage.completion_tokens, should_estimate_cost);
+                tool_cost_attribution->assign(count, {});
+                for (std::size_t i = 0; i < count; ++i) {
+                    (*tool_cost_attribution)[i] = {
+                        core::session::SessionStats::split_integer_share<int32_t>(
+                            usage.completion_tokens, count, i),
+                        core::session::SessionStats::split_integer_share<int64_t>(
+                            completion_cost_micro, count, i),
+                    };
+                }
+            }
+
             int max_context_size = provider ? provider->max_context_size() : 0;
             if (max_context_size == 0 && !model.empty()) {
                 max_context_size = core::llm::get_max_context_size(model);
@@ -667,7 +687,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         // ── Execute tool calls ───────────────────────────────────────────
-        std::thread([self, tool_calls_accum, text_callback, tool_callback, done_callback, turn_callbacks, turn_state]() {
+        std::thread([self, tool_calls_accum, tool_cost_attribution, text_callback,
+                     tool_callback, done_callback, turn_callbacks, turn_state]() {
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
@@ -809,13 +830,25 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 auto msg = f.get();
                 const bool tool_ok = !is_tool_error(msg.content);
                 if (!tool_ok) ++failure_count;
-                core::session::SessionStats::get_instance().record_tool_call(tool_ok);
+                const auto& tool_call = (*tool_calls_accum)[i];
+                core::session::SessionStats::get_instance().record_tool_call(
+                    tool_call.function.name,
+                    tool_ok,
+                    core::session::SessionStats::estimate_payload_tokens(
+                        tool_call.function.arguments),
+                    core::session::SessionStats::estimate_payload_tokens(msg.content),
+                    i < tool_cost_attribution->size()
+                        ? (*tool_cost_attribution)[i].first
+                        : 0,
+                    i < tool_cost_attribution->size()
+                        ? (*tool_cost_attribution)[i].second
+                        : 0);
                 {
                     std::lock_guard lock(self->history_mutex_);
                     self->history_.push_back(msg);
                 }
                 if (turn_callbacks.on_tool_finish) {
-                    turn_callbacks.on_tool_finish((*tool_calls_accum)[i], msg);
+                    turn_callbacks.on_tool_finish(tool_call, msg);
                 }
             }
 

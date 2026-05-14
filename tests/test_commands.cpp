@@ -3,9 +3,11 @@
 
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/budget/BudgetTracker.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/session/SessionStats.hpp"
 #include "core/tools/ToolManager.hpp"
 #include <algorithm>
 #include <functional>
@@ -180,6 +182,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/auth [provider]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/settings"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/tools [action]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/usage"));
 
         // Test alias
         *mock_history = "";
@@ -187,6 +190,49 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Filo Commands]"));
+    }
+
+    SECTION("/usage command shows totals, models, and tools") {
+        auto& stats = core::session::SessionStats::get_instance();
+        auto& budget = core::budget::BudgetTracker::get_instance();
+        stats.reset();
+        budget.reset_session();
+
+        const core::llm::TokenUsage usage{
+            .prompt_tokens = 1200,
+            .completion_tokens = 300,
+            .total_tokens = 1500,
+        };
+        budget.record(usage, "gpt-5.4", true);
+        stats.record_api_call(true);
+        stats.record_turn("gpt-5.4", usage, true);
+        stats.record_tool_call("read_file",
+                               true,
+                               core::session::SessionStats::estimate_payload_tokens(R"({"path":"src/main.cpp"})"),
+                               core::session::SessionStats::estimate_payload_tokens("file contents"),
+                               300,
+                               core::session::SessionStats::estimate_completion_cost_micro_usd(
+                                   "gpt-5.4", 300, true));
+
+        *mock_history = "";
+        ctx.text = "/usage";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Usage]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Tokens: input 1.2k"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[By Model]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("gpt-5.4"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[By Tool]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("read_file"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("$0.003"));
+
+        *mock_history = "";
+        ctx.text = "/toolcost";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Usage]"));
+
+        stats.reset();
+        budget.reset_session();
     }
 
     SECTION("/mcp add preserves quoted commands, args, and env values") {

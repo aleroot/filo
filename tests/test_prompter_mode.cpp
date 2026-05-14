@@ -43,6 +43,10 @@ public:
         callback(core::llm::StreamChunk::make_final());
     }
 
+    void publish_usage(int32_t prompt_tokens, int32_t completion_tokens) noexcept {
+        set_last_usage(prompt_tokens, completion_tokens);
+    }
+
     [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
         return caps;
     }
@@ -397,6 +401,59 @@ TEST_CASE("prompter json mode emits structured array", "[prompter][json]") {
     REQUIRE_THAT(out.str(), ContainsSubstring("\"type\":\"assistant\""));
     REQUIRE_THAT(out.str(), ContainsSubstring("\"type\":\"result\""));
     REQUIRE_THAT(out.str(), ContainsSubstring("Paris"));
+}
+
+TEST_CASE("prompter json stats include attributed per-tool cost table", "[prompter][json][toolcost]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    provider->on_stream = [provider, calls](const auto&, auto callback) {
+        const int call = calls->fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            provider->publish_usage(1000, 200);
+
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "tool-time-1";
+            tool_call.type = "function";
+            tool_call.function.name = "get_current_time";
+            tool_call.function.arguments = "{}";
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        provider->publish_usage(500, 50);
+        callback(core::llm::StreamChunk::make_content("done"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "Use a tool";
+    opts.prompt_was_provided = true;
+    opts.output_format = "json";
+    opts.output_format_was_provided = true;
+
+    exec::prompter::StreamInput input;
+
+    std::ostringstream out;
+    std::ostringstream err;
+    TempDir tmp{"filo_prompter_json_toolcost_test"};
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, tmp.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE(err.str().empty());
+    REQUIRE(calls->load(std::memory_order_acquire) >= 2);
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("per_tool":[{)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("name":"get_current_time")"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("output_tokens":200)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("cost_usd":0.001600)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("argument_tokens":1)"));
+    REQUIRE_THAT(out.str(), ContainsSubstring(R"("result_tokens":)"));
 }
 
 TEST_CASE("prompter stream-json emits partial events", "[prompter][stream-json]") {

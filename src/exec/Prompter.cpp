@@ -342,7 +342,7 @@ void register_default_tools(core::tools::ToolManager& tool_manager) {
                                            const core::llm::TokenUsage& totals,
                                            double cost_usd,
                                            const ToolStats& tool_stats) {
-    core::utils::JsonWriter writer(2048);
+    core::utils::JsonWriter writer(4096);
     {
         auto _obj = writer.object();
 
@@ -404,6 +404,30 @@ void register_default_tools(core::tools::ToolManager& tool_manager) {
                         writer.kv_num("calls", counts.calls).comma()
                               .kv_num("success", counts.success).comma()
                               .kv_num("failed", counts.failed);
+                    }
+                }
+            }
+
+            writer.comma().key("per_tool");
+            {
+                auto _per_tool = writer.array();
+                bool first_tool = true;
+                for (const auto& tool : snapshot.per_tool) {
+                    if (!first_tool) {
+                        writer.comma();
+                    }
+                    first_tool = false;
+
+                    {
+                        auto _tool = writer.object();
+                        writer.kv_str("name", tool.tool).comma()
+                              .kv_num("calls", tool.call_count).comma()
+                              .kv_num("success", tool.success_count).comma()
+                              .kv_num("failed", tool.call_count - tool.success_count).comma()
+                              .kv_num("output_tokens", tool.attributed_completion_tokens).comma()
+                              .key("cost_usd").raw(format_double(tool.attributed_cost_usd)).comma()
+                              .kv_num("argument_tokens", tool.argument_tokens).comma()
+                              .kv_num("result_tokens", tool.result_tokens);
                     }
                 }
             }

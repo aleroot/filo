@@ -8,6 +8,7 @@
 #include "core/session/TodoUtils.hpp"
 #include <ftxui/screen/string.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -394,13 +395,28 @@ TEST_CASE("SessionStats accumulates tool call success and failure", "[session][s
     auto& stats = core::session::SessionStats::get_instance();
     stats.reset();
 
-    stats.record_tool_call(true);
-    stats.record_tool_call(true);
-    stats.record_tool_call(false);
+    stats.record_tool_call("read_file", true, 3, 10, 40, 100);
+    stats.record_tool_call("read_file", true, 2, 6, 20, 50);
+    stats.record_tool_call("write_file", false, 8, 4, 10, 25);
 
     const auto snap = stats.snapshot();
     CHECK(snap.tool_calls_total   == 3);
     CHECK(snap.tool_calls_success == 2);
+    REQUIRE(snap.per_tool.size() == 2);
+    CHECK(snap.per_tool[0].tool == "read_file");
+    CHECK(snap.per_tool[0].call_count == 2);
+    CHECK(snap.per_tool[0].success_count == 2);
+    CHECK(snap.per_tool[0].argument_tokens == 5);
+    CHECK(snap.per_tool[0].result_tokens == 16);
+    CHECK(snap.per_tool[0].attributed_completion_tokens == 60);
+    CHECK(snap.per_tool[0].attributed_cost_usd > 0.000149);
+    CHECK(snap.per_tool[0].attributed_cost_usd < 0.000151);
+    CHECK(snap.per_tool[1].tool == "write_file");
+    CHECK(snap.per_tool[1].call_count == 1);
+    CHECK(snap.per_tool[1].success_count == 0);
+    CHECK(snap.per_tool[1].attributed_completion_tokens == 10);
+    CHECK(snap.per_tool[1].attributed_cost_usd > 0.000024);
+    CHECK(snap.per_tool[1].attributed_cost_usd < 0.000026);
 }
 
 TEST_CASE("SessionStats accumulates API call success and failure", "[session][stats]") {
@@ -432,6 +448,7 @@ TEST_CASE("SessionStats reset clears all counters", "[session][stats]") {
     CHECK(snap.api_calls_total   == 0);
     CHECK(snap.api_calls_success == 0);
     CHECK(snap.per_model.empty());
+    CHECK(snap.per_tool.empty());
 }
 
 TEST_CASE("SessionStats is safe for concurrent record_turn calls", "[session][stats][threading]") {
@@ -460,6 +477,49 @@ TEST_CASE("SessionStats is safe for concurrent record_turn calls", "[session][st
     int32_t total_calls = 0;
     for (const auto& m : snap.per_model) total_calls += m.call_count;
     CHECK(total_calls == kThreads * kPerThread);
+}
+
+TEST_CASE("SessionStats reset is safe while recorders are active", "[session][stats][threading]") {
+    auto& stats = core::session::SessionStats::get_instance();
+    stats.reset();
+
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 500;
+    std::atomic<bool> start{false};
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&stats, &start, t]() {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+
+            const std::string model = (t % 2 == 0) ? "model-a" : "model-b";
+            const std::string tool = (t % 2 == 0) ? "read_file" : "write_file";
+            const core::llm::TokenUsage u{10, 5, 15};
+            for (int i = 0; i < kPerThread; ++i) {
+                stats.record_turn(model, u);
+                stats.record_tool_call(tool, true, 1, 2, 3, 4);
+            }
+        });
+    }
+
+    std::thread resetter([&stats, &start]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 100; ++i) {
+            stats.reset();
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (auto& th : threads) th.join();
+    resetter.join();
+
+    CHECK_NOTHROW(static_cast<void>(stats.snapshot()));
+    stats.reset();
 }
 
 // ---------------------------------------------------------------------------

@@ -20,8 +20,10 @@
 #include <unistd.h>
 #endif
 #include "core/auth/AuthenticationManager.hpp"
+#include "core/budget/BudgetTracker.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/session/SessionStats.hpp"
 #include "core/utils/Base64.hpp"
 #include "ReviewExecutor.hpp"
 
@@ -420,6 +422,19 @@ std::string markdown_fence(std::string_view text, std::string_view language = {}
 
 std::string trim_copy(std::string_view input) {
     return std::string(trim(input));
+}
+
+std::string format_token_count(int32_t n) {
+    if (n >= 1'000'000) return std::format("{:.1f}M", n / 1'000'000.0);
+    if (n >= 1'000) return std::format("{:.1f}k", n / 1'000.0);
+    return std::to_string(n);
+}
+
+std::string format_usage_cost(double usd) {
+    if (usd < 0.0001) return "$0";
+    if (usd < 0.01) return std::format("${:.4f}", usd);
+    if (usd < 1.0) return std::format("${:.3f}", usd);
+    return std::format("${:.2f}", usd);
 }
 
 std::string summarize_tool_payload(std::string_view payload) {
@@ -1085,6 +1100,7 @@ public:
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /tools [action]     Manage session trust rules for sensitive tools\n"
+            "  /usage              Show token usage, cost, and tool payload breakdown\n"
             "  /copy               Copy the latest assistant response to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
             "  /review [target]    Open review menu or run Codex-style AI code review\n"
@@ -1666,6 +1682,88 @@ public:
         }
 
         usage();
+    }
+};
+
+class UsageCommand : public Command {
+public:
+    std::string get_name() const override { return "/usage"; }
+    std::vector<std::string> get_aliases() const override {
+        return {"/tokens", "/cost", "/toolcost"};
+    }
+    std::string get_description() const override {
+        return "Show token usage, estimated cost, and tool payload breakdown";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+
+        const auto snapshot = core::session::SessionStats::get_instance().snapshot();
+        const auto total = core::budget::BudgetTracker::get_instance().session_total();
+        const double cost = core::budget::BudgetTracker::get_instance().session_cost_usd();
+
+        if (snapshot.turn_count == 0 && !total.has_data()) {
+            ctx.append_history_fn(
+                "\n[Usage]\n"
+                "  No token usage recorded yet in this session.\n");
+            return;
+        }
+
+        std::ostringstream out;
+        out << "\n[Usage]\n";
+        out << "  Turns: " << snapshot.turn_count << "\n";
+
+        if (snapshot.api_calls_total > 0) {
+            out << "  API calls: " << snapshot.api_calls_total
+                << " (" << snapshot.api_calls_success << " ok, "
+                << (snapshot.api_calls_total - snapshot.api_calls_success) << " failed)\n";
+        }
+
+        if (snapshot.tool_calls_total > 0) {
+            out << "  Tool calls: " << snapshot.tool_calls_total
+                << " (" << snapshot.tool_calls_success << " ok, "
+                << (snapshot.tool_calls_total - snapshot.tool_calls_success) << " failed)\n";
+        }
+
+        out << "  Tokens: input " << format_token_count(total.prompt_tokens)
+            << ", output " << format_token_count(total.completion_tokens)
+            << ", total " << format_token_count(total.total_tokens) << "\n";
+        out << "  Estimated cost: " << format_usage_cost(cost) << "\n";
+
+        if (!snapshot.per_model.empty()) {
+            out << "\n[By Model]\n";
+            for (const auto& model : snapshot.per_model) {
+                out << std::format(
+                    "  {:<24} {:>3} calls  in {:>7}  out {:>7}  total {:>7}  {}\n",
+                    model.model,
+                    model.call_count,
+                    format_token_count(model.prompt_tokens),
+                    format_token_count(model.completion_tokens),
+                    format_token_count(model.prompt_tokens + model.completion_tokens),
+                    model.cost_usd > 0.0 ? format_usage_cost(model.cost_usd) : std::string("-"));
+            }
+        }
+
+        if (!snapshot.per_tool.empty()) {
+            out << "\n[By Tool]\n";
+            out << "  Cost is attributed from model completion tokens; args/results are estimated payload tokens.\n";
+            for (const auto& tool : snapshot.per_tool) {
+                out << std::format(
+                    "  {:<24} {:>3} calls  {:>3} ok  {:>3} failed  out {:>7}  cost {:>8}  args {:>7}  results {:>7}\n",
+                    tool.tool,
+                    tool.call_count,
+                    tool.success_count,
+                    tool.call_count - tool.success_count,
+                    format_token_count(tool.attributed_completion_tokens),
+                    tool.attributed_cost_usd > 0.0
+                        ? format_usage_cost(tool.attributed_cost_usd)
+                        : std::string("-"),
+                    format_token_count(tool.argument_tokens),
+                    format_token_count(tool.result_tokens));
+            }
+        }
+
+        ctx.append_history_fn(out.str());
     }
 };
 
@@ -2399,6 +2497,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<SettingsCommand>());
     register_command(std::make_unique<YoloCommand>());
     register_command(std::make_unique<ToolsCommand>());
+    register_command(std::make_unique<UsageCommand>());
     register_command(std::make_unique<CopyCommand>());
     register_command(std::make_unique<HistoryCommand>());
     register_command(std::make_unique<ReviewCommand>());
