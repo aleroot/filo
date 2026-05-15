@@ -99,6 +99,7 @@ private:
 ToolTestConfigEnvironment g_tool_test_config_environment;
 
 [[nodiscard]] core::context::SessionContext make_tool_test_context(std::string session_id = {}) {
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     return test_support::make_workspace_session_context(
         core::context::SessionTransport::cli,
         std::move(session_id));

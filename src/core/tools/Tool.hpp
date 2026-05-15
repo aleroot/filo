@@ -60,6 +60,16 @@ struct ToolAnnotations {
 };
 
 /**
+ * @brief Optional execution metadata advertised through MCP's `execution` field.
+ *
+ * This is currently used to declare support for MCP task-augmented execution.
+ */
+struct ToolExecution {
+    /// One of "", "forbidden", "optional", or "required".
+    std::string task_support = {};
+};
+
+/**
  * @brief Complete descriptor for one tool, returned by @c Tool::get_definition().
  *
  * The dispatcher serialises this struct into the JSON Schema object emitted by
@@ -88,6 +98,7 @@ struct ToolDefinition {
     std::string input_schema = {}; ///< Optional raw JSON Schema object overriding parameter-derived inputSchema
     std::string output_schema = {}; ///< Optional raw JSON Schema object for successful structuredContent
     ToolAnnotations annotations = {};            ///< Behavioral hints for MCP clients (all default to @c false)
+    ToolExecution execution = {};                ///< Optional execution metadata (e.g. task support)
 };
 
 /**

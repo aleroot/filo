@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/mcp/McpDispatcher.hpp"
+#include "core/config/ConfigManager.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
@@ -25,6 +26,7 @@ static core::mcp::McpDispatcher& disp() {
 }
 
 static core::context::SessionContext make_mcp_test_context() {
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     return test_support::make_workspace_session_context(
         core::context::SessionTransport::mcp_http,
         "mcp-test-session");
@@ -199,7 +201,8 @@ TEST_CASE("MCP initialize returns correct protocol version and server info", "[m
 }
 
 TEST_CASE("MCP initialize response includes instructions field", "[mcp]") {
-    auto resp = disp().dispatch(kInitRequest);
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}},"id":77})");
     // The instructions field must be present and non-empty.
     REQUIRE_THAT(resp, ContainsSubstring(R"("instructions")"));
     REQUIRE_THAT(resp, ContainsSubstring("filo-mcp"));
@@ -240,7 +243,8 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     ScopedEnvVar home("HOME", fake_home.string());
     ScopedCurrentPath cwd(project);
 
-    auto resp = disp().dispatch(kInitRequest);
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}},"id":77})");
 
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
@@ -249,6 +253,14 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     bool tools_list_changed = true;
     REQUIRE(doc["result"]["capabilities"]["tools"]["listChanged"].get(tools_list_changed) == simdjson::SUCCESS);
     REQUIRE_FALSE(tools_list_changed);
+
+    simdjson::dom::element task_list_cap;
+    simdjson::dom::element task_cancel_cap;
+    simdjson::dom::element task_call_cap;
+    REQUIRE(doc["result"]["capabilities"]["tasks"]["list"].get(task_list_cap) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["tasks"]["cancel"].get(task_cancel_cap) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["tasks"]["requests"]["tools"]["call"].get(task_call_cap)
+            == simdjson::SUCCESS);
 
     bool resources_subscribe = true;
     bool resources_list_changed = true;
@@ -367,7 +379,7 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
     for (const char* name : {
             "run_terminal_command", "read_file", "write_file", "list_directory",
             "replace", "file_search", "grep_search", "apply_patch", "search_replace",
-            "delete_file", "move_file", "create_directory", "get_workspace_config"
+            "delete_file", "move_file", "create_directory", "get_workspace_config", "delegate_task"
         }) {
         REQUIRE_THAT(resp, ContainsSubstring(name));
     }

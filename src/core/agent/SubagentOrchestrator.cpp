@@ -1,22 +1,18 @@
 #include "SubagentOrchestrator.hpp"
 
-#include "PermissionGate.hpp"
-#include "ToolOutputHistory.hpp"
-#include "../budget/BudgetTracker.hpp"
+#include "DelegatedAgentRunner.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../llm/ProviderFactory.hpp"
 #include "../llm/ProviderManager.hpp"
-#include "../session/SessionStats.hpp"
+#include "../tools/TaskTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <simdjson.h>
 
 #include <algorithm>
-#include <chrono>
-#include <condition_variable>
 #include <cctype>
 #include <format>
-#include <future>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -27,22 +23,11 @@ namespace core::agent {
 
 namespace {
 
-constexpr int kLoopBreakerThreshold = 3;
-constexpr auto kModelStepTimeout = std::chrono::minutes(10);
 constexpr int kMinSubagentSteps = 1;
 constexpr int kMaxSubagentSteps = 64;
 
 [[nodiscard]] bool is_write_destructive_tool(std::string_view tool_name) {
     return core::tools::names::is_write_destructive_tool(tool_name);
-}
-
-[[nodiscard]] std::string normalize_ascii_lower(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const unsigned char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
 }
 
 [[nodiscard]] int sanitize_max_steps(int value, int fallback) {
@@ -51,12 +36,38 @@ constexpr int kMaxSubagentSteps = 64;
     return value;
 }
 
+[[nodiscard]] DelegatedAgentRunner::PermissionCheck adapt_permission_check(
+    const SubagentOrchestrator::RunContext& context) {
+    if (!context.permission_check) return {};
+
+    return [permission_check = context.permission_check](
+               std::string_view tool_name,
+               std::string_view args) {
+        return permission_check(
+            std::string(tool_name),
+            std::string(args));
+    };
+}
+
 } // namespace
+
+std::vector<std::string> SubagentOrchestrator::ExecutionPlan::allowed_tool_names() const {
+    std::vector<std::string> names;
+    names.reserve(tools.size() + (allow_task_tool ? 1 : 0));
+    for (const auto& tool : tools) {
+        names.push_back(tool.function.name);
+    }
+    if (allow_task_tool) {
+        names.push_back(std::string(SubagentOrchestrator::kTaskToolName));
+    }
+    return names;
+}
 
 SubagentOrchestrator::SubagentOrchestrator(core::tools::ToolManager& tool_manager,
                                            const core::config::AppConfig* app_config)
     : tool_manager_(tool_manager)
-    , profiles_(make_default_profiles()) {
+    , profiles_(make_default_profiles())
+    , app_config_(app_config) {
     if (app_config != nullptr) {
         std::lock_guard lock(profiles_mutex_);
         apply_config_overrides_unlocked(*app_config);
@@ -181,88 +192,101 @@ std::string SubagentOrchestrator::execute_task(
         return render_error_json("Missing required 'subagent_type' for task.");
     }
 
-    const std::optional<Profile> profile = find_profile(subagent_type);
-    if (!profile) {
-        return render_error_json(std::format(
-            "Unknown subagent_type '{}'. Available: {}.",
-            subagent_type,
-            available_profile_names()));
+    const auto plan = build_execution_plan(ExecutionRequest{
+        .worker = subagent_type,
+        .worker_label = "subagent_type",
+        .parent_mode = context.parent_mode,
+        .inherited_provider = provider,
+        .inherited_model = context.active_model,
+        .prefer_inherited_provider = true,
+    });
+    if (!plan) {
+        return render_error_json(plan.error());
     }
 
-    std::shared_ptr<core::llm::LLMProvider> delegated_provider = provider;
-    if (!profile->provider_override.empty()) {
-        try {
-            delegated_provider =
-                core::llm::ProviderManager::get_instance().get_provider(profile->provider_override);
-        } catch (const std::exception& e) {
-            return render_error_json(std::format(
-                "Subagent '{}' is configured with provider '{}' but it is unavailable: {}",
-                profile->name,
-                profile->provider_override,
-                e.what()));
-        }
-        if (!delegated_provider) {
-            return render_error_json(std::format(
-                "Subagent '{}' could not resolve provider '{}'.",
-                profile->name,
-                profile->provider_override));
-        }
-    }
-    if (!delegated_provider) {
-        return render_error_json("No LLM provider is available for delegated task execution.");
-    }
-
-    const std::string initial_model = !profile->model_override.empty()
-        ? profile->model_override
-        : (profile->provider_override.empty() ? context.active_model : std::string{});
+    const Profile session_profile{
+        .name = plan->worker_name,
+        .description = plan->worker_description,
+        .prompt = plan->worker_prompt,
+        .provider_override = {},
+        .model_override = {},
+        .allowed_tools = {},
+        .use_allow_list = false,
+        .allow_task_tool = false,
+        .max_steps = plan->max_steps,
+        .enabled = true,
+    };
 
     std::string session_error;
     auto session = get_or_create_session(
         description,
-        *profile,
+        session_profile,
         task_id,
-        context.parent_mode,
-        initial_model,
+        plan->model_name,
         session_error);
     if (!session) {
         return render_error_json(session_error.empty() ? "Failed to create task session." : session_error);
     }
 
-    std::lock_guard session_lock(session->mutex);
-
-    if (session->history.empty() || session->history.front().role != "system") {
-        session->history.insert(
-            session->history.begin(),
-            core::llm::Message{
-                .role = "system",
-                .content = build_system_prompt(*profile, context.parent_mode),
-                .name = "",
-                .tool_call_id = "",
-                .tool_calls = {},
-            });
-    }
-    if (session->model.empty()) {
-        session->model = initial_model;
+    std::optional<DelegatedAgentRunner::ResumeState> resume_state;
+    {
+        std::lock_guard session_lock(session->mutex);
+        if (session->model.empty()) {
+            session->model = plan->model_name;
+        }
+        if (!session->history.empty() || !session->context_summary.empty()) {
+            resume_state = DelegatedAgentRunner::ResumeState{
+                .messages = session->history,
+                .context_summary = session->context_summary,
+                .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
+            };
+        }
     }
 
-    session->history.push_back(
-        core::llm::Message{
-            .role = "user",
-            .content = prompt,
-            .name = "",
-            .tool_call_id = "",
-            .tool_calls = {},
-        });
-
-    LoopResult result = run_task_loop(*session, *profile, delegated_provider, context);
-    if (!result.ok) {
-        const std::string error = result.error.empty()
-            ? "Delegated task failed for an unknown reason."
-            : result.error;
-        return render_error_json(error);
+    const auto result = DelegatedAgentRunner::run({
+        .provider = plan->provider,
+        .tool_manager = tool_manager_,
+        .session_context = context.session_context,
+        .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
+        .model = plan->model_name,
+        .allowed_tools = plan->allowed_tool_names(),
+        .max_steps = plan->max_steps,
+        .prompt = prompt,
+        .worker_name = plan->worker_name,
+        .worker_description = plan->worker_description,
+        .worker_prompt = plan->worker_prompt,
+        .resume_state = std::move(resume_state),
+        .timeout = std::chrono::minutes(30),
+        .permission_check = adapt_permission_check(context),
+    });
+    if (result.timed_out) {
+        return render_error_json("Delegated task timed out while waiting for the worker response.");
     }
 
-    return render_success_json(*session, *profile, result);
+    std::string final_text = result.streamed_text;
+    if (!result.history.empty()) {
+        for (auto it = result.history.rbegin(); it != result.history.rend(); ++it) {
+            if (it->role == "assistant" && !it->content.empty()) {
+                final_text = it->content;
+                break;
+            }
+        }
+    }
+
+    {
+        std::lock_guard session_lock(session->mutex);
+        session->model = plan->model_name;
+        session->history = result.history;
+        session->context_summary = result.context_summary;
+    }
+
+    return render_success_json(
+        *session,
+        *plan,
+        final_text,
+        result.steps,
+        result.tool_calls_total,
+        result.tool_calls_total - result.tool_calls_success);
 }
 
 void SubagentOrchestrator::clear_sessions() {
@@ -271,6 +295,7 @@ void SubagentOrchestrator::clear_sessions() {
 }
 
 void SubagentOrchestrator::reload_profiles(const core::config::AppConfig& app_config) {
+    app_config_ = &app_config;
     {
         std::lock_guard lock(profiles_mutex_);
         profiles_ = make_default_profiles();
@@ -291,7 +316,7 @@ std::optional<SubagentOrchestrator::Profile> SubagentOrchestrator::find_profile(
     return std::nullopt;
 }
 
-std::string SubagentOrchestrator::available_profile_names() const {
+std::string SubagentOrchestrator::available_worker_names() const {
     std::lock_guard lock(profiles_mutex_);
     if (profiles_.empty()) return "none";
 
@@ -301,6 +326,90 @@ std::string SubagentOrchestrator::available_profile_names() const {
         names += profiles_[i].name;
     }
     return names;
+}
+
+std::expected<SubagentOrchestrator::ExecutionPlan, std::string>
+SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) const {
+    const std::optional<Profile> profile = find_profile(request.worker.empty() ? "general" : request.worker);
+    if (!profile) {
+        return std::unexpected(std::format(
+            "Unknown {} '{}'. Available workers: {}.",
+            request.worker_label.empty() ? "worker" : request.worker_label,
+            request.worker.empty() ? "general" : std::string(request.worker),
+            available_worker_names()));
+    }
+
+    const core::config::AppConfig& config = app_config_ != nullptr
+        ? *app_config_
+        : core::config::ConfigManager::get_instance().get_config();
+
+    std::string provider_name = request.provider_override.empty()
+        ? profile->provider_override
+        : std::string(request.provider_override);
+    if (provider_name.empty() && !request.prefer_inherited_provider) {
+        provider_name = config.default_provider;
+    }
+    if (provider_name.empty() && !request.prefer_inherited_provider && !config.providers.empty()) {
+        provider_name = config.providers.begin()->first;
+    }
+
+    std::shared_ptr<core::llm::LLMProvider> resolved_provider = request.inherited_provider;
+    if (!provider_name.empty()) {
+        try {
+            resolved_provider =
+                core::llm::ProviderManager::get_instance().get_provider(provider_name);
+        } catch (const std::exception&) {
+            const auto it = config.providers.find(provider_name);
+            if (it == config.providers.end()) {
+                return std::unexpected(std::format("Unknown provider '{}'.", provider_name));
+            }
+            resolved_provider = core::llm::ProviderFactory::create_provider(provider_name, it->second);
+            if (!resolved_provider) {
+                return std::unexpected(std::format(
+                    "Provider '{}' is configured but unavailable.",
+                    provider_name));
+            }
+            core::llm::ProviderManager::get_instance().register_provider(provider_name, resolved_provider);
+        }
+    }
+
+    if (!resolved_provider) {
+        return std::unexpected("No provider is available for delegated task execution.");
+    }
+
+    std::string model_name = request.model_override.empty()
+        ? profile->model_override
+        : std::string(request.model_override);
+    if (model_name.empty() && request.prefer_inherited_provider) {
+        model_name = std::string(request.inherited_model);
+    }
+    if (model_name.empty()) {
+        if (!provider_name.empty()) {
+            if (const auto it = config.providers.find(provider_name); it != config.providers.end()) {
+                model_name = it->second.model;
+            }
+        }
+    }
+    if (model_name.empty()) {
+        model_name = std::string(request.inherited_model);
+    }
+
+    auto tools = build_tools_for_profile(*profile, request.parent_mode);
+    const int max_steps = sanitize_max_steps(
+        request.max_steps_override.value_or(0),
+        profile->max_steps);
+
+    return ExecutionPlan{
+        .worker_name = profile->name,
+        .worker_description = profile->description,
+        .worker_prompt = profile->prompt,
+        .provider = std::move(resolved_provider),
+        .provider_name = std::move(provider_name),
+        .model_name = std::move(model_name),
+        .tools = std::move(tools),
+        .allow_task_tool = profile->allow_task_tool,
+        .max_steps = max_steps,
+    };
 }
 
 void SubagentOrchestrator::apply_config_overrides_unlocked(
@@ -401,7 +510,6 @@ std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_
     const std::string& description,
     const Profile& profile,
     std::string_view requested_task_id,
-    std::string_view parent_mode,
     std::string_view initial_model,
     std::string& error_out) {
 
@@ -430,13 +538,6 @@ std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_
     session->profile_name = profile.name;
     session->description = description;
     session->model = std::string(initial_model);
-    session->history.push_back(core::llm::Message{
-        .role = "system",
-        .content = build_system_prompt(profile, parent_mode),
-        .name = "",
-        .tool_call_id = "",
-        .tool_calls = {},
-    });
 
     sessions_.emplace(session->id, session);
     return session;
@@ -456,7 +557,8 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
 
     if (!profile.allow_task_tool) {
         std::erase_if(tools, [](const core::llm::Tool& tool) {
-            return tool.function.name == kTaskToolName;
+            return tool.function.name == kTaskToolName
+                || tool.function.name == core::tools::TaskTool::kToolName;
         });
     }
 
@@ -470,293 +572,37 @@ std::vector<core::llm::Tool> SubagentOrchestrator::build_tools_for_profile(
     return tools;
 }
 
-SubagentOrchestrator::StepResult SubagentOrchestrator::run_model_step(
-    TaskSession& session,
-    const Profile& profile,
-    const std::shared_ptr<core::llm::LLMProvider>& provider,
-    std::string_view parent_mode) {
-    StepResult step;
-
-    core::llm::ChatRequest request;
-    request.messages = session.history;
-    request.model = session.model;
-    if (provider->capabilities().supports_tool_calls) {
-        request.tools = build_tools_for_profile(profile, parent_mode);
-    }
-
-    struct StreamState {
-        std::mutex done_mutex;
-        std::condition_variable done_cv;
-        bool done = false;
-
-        std::mutex accum_mutex;
-        std::vector<core::llm::ToolCall> tool_calls_accum;
-        std::string assistant_text;
-        std::string reasoning_content_accum;
-    };
-    auto state = std::make_shared<StreamState>();
-
-    try {
-        provider->stream_response(
-            request,
-            [state](const core::llm::StreamChunk& chunk) {
-                {
-                    std::lock_guard lock(state->accum_mutex);
-
-                    if (!chunk.content.empty()) {
-                        state->assistant_text += chunk.content;
-                    }
-                    if (!chunk.reasoning_content.empty()) {
-                        state->reasoning_content_accum += chunk.reasoning_content;
-                    }
-
-                    for (const auto& t : chunk.tools) {
-                        bool found = false;
-                        for (auto& acc : state->tool_calls_accum) {
-                            const bool same = (t.index != -1 && acc.index == t.index)
-                                           || (t.index == -1 && !t.id.empty() && acc.id == t.id)
-                                           || (t.index == -1 && t.id.empty()
-                                               && state->tool_calls_accum.size() == 1);
-                            if (same) {
-                                if (!t.id.empty()) acc.id = t.id;
-                                if (!t.type.empty()) acc.type = t.type;
-                                if (!t.function.name.empty()) acc.function.name = t.function.name;
-                                acc.function.arguments += t.function.arguments;
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) state->tool_calls_accum.push_back(t);
-                    }
-                }
-
-                if (chunk.is_final) {
-                    // Record API call outcome (is_error is true for HTTP 4XX/5XX or connection errors)
-                    core::session::SessionStats::get_instance().record_api_call(!chunk.is_error);
-                    {
-                        std::lock_guard lock(state->done_mutex);
-                        state->done = true;
-                    }
-                    state->done_cv.notify_one();
-                }
-            });
-    } catch (const std::exception& e) {
-        core::session::SessionStats::get_instance().record_api_call(false);
-        step.error = std::format("Subagent model call failed: {}", e.what());
-        return step;
-    }
-
-    {
-        std::unique_lock lock(state->done_mutex);
-        if (!state->done_cv.wait_for(lock, kModelStepTimeout, [&]() { return state->done; })) {
-            step.error = "Subagent model call timed out waiting for completion.";
-            return step;
-        }
-    }
-
-    {
-        std::lock_guard lock(state->accum_mutex);
-        step.text = state->assistant_text;
-        step.tool_calls = state->tool_calls_accum;
-        step.reasoning_content = state->reasoning_content_accum;
-    }
-
-    {
-        auto usage = provider->get_last_usage();
-        std::string model = provider->get_last_model();
-        const bool should_estimate_cost = provider->should_estimate_cost();
-        if (model.empty()) model = request.model;
-        core::budget::BudgetTracker::get_instance().record(usage, model, should_estimate_cost);
-        core::session::SessionStats::get_instance().record_turn(
-            model, usage, should_estimate_cost);
-    }
-
-    session.history.push_back(core::llm::Message{
-        .role = "assistant",
-        .content = step.text,
-        .name = "",
-        .tool_call_id = "",
-        .tool_calls = step.tool_calls,
-        .reasoning_content = step.reasoning_content,
-    });
-
-    step.ok = true;
-    return step;
-}
-
-SubagentOrchestrator::LoopResult SubagentOrchestrator::run_task_loop(
-    TaskSession& session,
-    const Profile& profile,
-    const std::shared_ptr<core::llm::LLMProvider>& provider,
-    const RunContext& context) {
-    LoopResult loop;
-
-    for (int step_idx = 0; step_idx < profile.max_steps; ++step_idx) {
-        StepResult model_step = run_model_step(session, profile, provider, context.parent_mode);
-        if (!model_step.ok) {
-            loop.error = model_step.error;
-            return loop;
-        }
-
-        ++loop.steps;
-
-        if (model_step.tool_calls.empty()) {
-            loop.ok = true;
-            loop.text = model_step.text;
-            return loop;
-        }
-
-        std::vector<bool> approved(model_step.tool_calls.size(), true);
-        std::vector<std::string> denied_payloads(model_step.tool_calls.size());
-        bool denied_any = false;
-
-        for (std::size_t i = 0; i < model_step.tool_calls.size(); ++i) {
-            const auto& tc = model_step.tool_calls[i];
-
-            if (denied_any) {
-                approved[i] = false;
-                denied_payloads[i] =
-                    R"({"error":"Tool call skipped after a previous denial in this delegated task step."})";
-                continue;
-            }
-
-            if (tc.function.name == kTaskToolName && !profile.allow_task_tool) {
-                approved[i] = false;
-                denied_any = true;
-                denied_payloads[i] =
-                    R"({"error":"Nested task delegation is disabled for this subagent profile."})";
-                continue;
-            }
-
-            const bool requires_permission = needs_permission(tc.function.name);
-            if (!requires_permission || !context.permission_check) {
-                approved[i] = true;
-                continue;
-            }
-
-            approved[i] = context.permission_check(tc.function.name, tc.function.arguments);
-            if (!approved[i]) {
-                denied_any = true;
-                denied_payloads[i] = R"({"error":"Tool call denied by user."})";
-            }
-        }
-
-        std::vector<std::future<core::llm::Message>> futures;
-        futures.reserve(model_step.tool_calls.size());
-
-        for (std::size_t i = 0; i < model_step.tool_calls.size(); ++i) {
-            const auto tc = model_step.tool_calls[i];
-
-            if (!approved[i]) {
-                const std::string payload = denied_payloads[i].empty()
-                    ? R"({"error":"Tool call denied."})"
-                    : denied_payloads[i];
-                futures.push_back(std::async(std::launch::deferred, [tc, payload]() {
-                    return core::llm::Message{
-                        .role = "tool",
-                        .content = payload,
-                        .name = tc.function.name,
-                        .tool_call_id = tc.id,
-                        .tool_calls = {},
-                    };
-                }));
-                continue;
-            }
-
-            futures.push_back(std::async(
-                std::launch::async,
-                [this, tc, &context]() {
-                    std::string output = tool_manager_.execute_tool(
-                        tc.function.name,
-                        tc.function.arguments,
-                        context.session_context);
-                    output = tool_output_history::clamp_for_history(tc.function.name, output);
-                    return core::llm::Message{
-                        .role = "tool",
-                        .content = output,
-                        .name = tc.function.name,
-                        .tool_call_id = tc.id,
-                        .tool_calls = {},
-                    };
-                }));
-        }
-
-        int failures_in_step = 0;
-        for (auto& future : futures) {
-            auto tool_message = future.get();
-            const bool ok = !is_tool_error_payload(tool_message.content);
-            if (!ok) ++failures_in_step;
-
-            ++loop.tool_calls;
-            if (!ok) ++loop.failed_tool_calls;
-            core::session::SessionStats::get_instance().record_tool_call(ok);
-
-            session.history.push_back(std::move(tool_message));
-        }
-
-        const bool all_failed = !futures.empty() && failures_in_step == static_cast<int>(futures.size());
-        if (all_failed) {
-            ++session.consecutive_failure_rounds;
-        } else {
-            session.consecutive_failure_rounds = 0;
-        }
-
-        if (session.consecutive_failure_rounds >= kLoopBreakerThreshold) {
-            loop.error = std::format(
-                "Subagent '{}' paused after {} consecutive fully-failed tool rounds.",
-                profile.name,
-                kLoopBreakerThreshold);
-            session.consecutive_failure_rounds = 0;
-            return loop;
-        }
-
-        if (denied_any) {
-            loop.ok = true;
-            if (!model_step.text.empty()) {
-                loop.text = model_step.text + "\\n\\nPaused because a required tool call was denied.";
-            } else {
-                loop.text = "Paused because a required tool call was denied.";
-            }
-            return loop;
-        }
-    }
-
-    loop.ok = true;
-    loop.text = std::format(
-        "Subagent '{}' reached its step limit ({}). Returning the best available intermediate result.",
-        profile.name,
-        profile.max_steps);
-    return loop;
-}
-
 std::string SubagentOrchestrator::render_success_json(
     const TaskSession& session,
-    const Profile& profile,
-    const LoopResult& result) const {
+    const ExecutionPlan& plan,
+    std::string_view result_text,
+    int steps,
+    int tool_calls,
+    int failed_tool_calls) const {
 
     const std::string output = std::format(
         "task_id: {}\\n\\n<task_result>\\n{}\\n</task_result>",
         session.id,
-        result.text);
+        result_text);
 
-    core::utils::JsonWriter writer(1024 + result.text.size() + output.size());
+    core::utils::JsonWriter writer(1024 + result_text.size() + output.size());
     {
         auto _obj = writer.object();
         writer.kv_str("task_id", session.id);
         writer.comma();
-        writer.kv_str("subagent_type", profile.name);
+        writer.kv_str("subagent_type", plan.worker_name);
         writer.comma();
         writer.kv_str("description", session.description);
         writer.comma();
-        writer.kv_str("result", result.text);
+        writer.kv_str("result", result_text);
         writer.comma();
         writer.kv_str("output", output);
         writer.comma();
-        writer.kv_num("steps", result.steps);
+        writer.kv_num("steps", steps);
         writer.comma();
-        writer.kv_num("tool_calls", result.tool_calls);
+        writer.kv_num("tool_calls", tool_calls);
         writer.comma();
-        writer.kv_num("failed_tool_calls", result.failed_tool_calls);
+        writer.kv_num("failed_tool_calls", failed_tool_calls);
     }
 
     return std::move(writer).take();
@@ -802,31 +648,6 @@ std::string SubagentOrchestrator::normalize_mode(std::string_view mode) {
     }
     if (out.empty()) out = "BUILD";
     return out;
-}
-
-bool SubagentOrchestrator::is_tool_error_payload(std::string_view payload) {
-    return payload.find("\"error\"") != std::string_view::npos;
-}
-
-std::string SubagentOrchestrator::build_system_prompt(const Profile& profile,
-                                                       std::string_view parent_mode) {
-    const std::string mode = normalize_ascii_lower(normalize_mode(parent_mode));
-
-    std::string prompt =
-        "You are a specialized Filo subagent running in background worker mode.\\n"
-        "Your intermediate reasoning and tool logs are not shown to the end user.\\n"
-        "Solve the delegated task end-to-end, then provide a concise final result for the parent agent.\\n\\n";
-
-    prompt += "Subagent profile: @" + profile.name + "\\n";
-    prompt += profile.prompt;
-
-    if (mode == "plan" || mode == "research") {
-        prompt +=
-            "\\n\\nParent mode is read-focused (plan/research). "
-            "Do not perform file edits or destructive operations.";
-    }
-
-    return prompt;
 }
 
 } // namespace core::agent

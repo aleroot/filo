@@ -238,6 +238,38 @@ TEST_CASE("SubagentOrchestrator applies model override from subagent profile con
     REQUIRE(requests.front().model == "model-from-subagent-profile");
 }
 
+TEST_CASE("SubagentOrchestrator sends profile prompt to delegated worker", "[agent][orchestration]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+
+    core::config::AppConfig config;
+    core::config::SubagentConfig general;
+    general.prompt = "Use the custom worker rubric before answering.";
+    config.subagents["general"] = std::move(general);
+
+    core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"profile prompt","prompt":"inspect the queue","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "parent-model",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    REQUIRE_FALSE(requests.front().messages.empty());
+    const auto& user_message = requests.front().messages.back().content;
+    REQUIRE_THAT(user_message, Catch::Matchers::ContainsSubstring("Use the custom worker rubric before answering."));
+    REQUIRE_THAT(user_message, Catch::Matchers::ContainsSubstring("inspect the queue"));
+}
+
 TEST_CASE("SubagentOrchestrator reloads profile overrides live", "[agent][orchestration]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

@@ -107,7 +107,9 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpClientSession.cpp
     src/core/mcp/McpConnectionManager.cpp
     src/core/mcp/McpDynamicFeatureTools.cpp
+    src/core/mcp/McpTaskManager.cpp
     src/core/mcp/McpSamplingBridge.cpp
+    src/core/mcp/ToolCallResult.cpp
     src/tui/ActivityTimer.cpp
     src/tui/Autocomplete.cpp
     src/tui/Conversation.cpp
@@ -152,6 +154,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/AuthenticationManager.cpp
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
+    src/core/agent/DelegatedAgentRunner.cpp
     src/core/agent/ToolOutputHistory.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/scm/GitProvider.cpp
@@ -183,10 +186,13 @@ set(FILO_CORE_SOURCES
     src/core/commands/ReviewExecutor.cpp
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
+    src/core/tools/TaskTool.cpp
     src/core/session/SessionStore.cpp
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp
+    src/core/task/TaskService.cpp
+    src/core/task/WorkStore.cpp
     src/core/history/PromptHistoryStore.cpp
     src/core/permissions/PermissionSystem.cpp
     src/core/cli/TrustFlagResolver.cpp
@@ -350,6 +356,7 @@ add_executable(filo_tests
     tests/test_ollama_provider.cpp
     tests/test_llamacpp_provider.cpp
     tests/test_mcp_server.cpp
+    tests/test_mcp_tasks.cpp
     tests/test_oauth.cpp
     tests/test_tier1.cpp
     tests/test_routing.cpp
@@ -455,6 +462,7 @@ source_group(
         tests/test_ollama_provider.cpp
         tests/test_llamacpp_provider.cpp
         tests/test_mcp_server.cpp
+        tests/test_mcp_tasks.cpp
         tests/test_oauth.cpp
         tests/test_tier1.cpp
         tests/test_routing.cpp

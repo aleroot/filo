@@ -24,6 +24,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/budget/BudgetTracker.hpp"
+#include "core/tools/ShellTool.hpp"
 
 using namespace Catch::Matchers;
 
@@ -129,6 +130,8 @@ TEST_CASE("SessionReport displays tool call success/failure counts", "[exit][sum
  * the MCP thread.
  */
 TEST_CASE("MCP server exits cleanly on stdin EOF", "[exit][mcp]") {
+    core::tools::ShellTool::clear_mcp_session("mcp-test-session");
+
     // Create a pipe to simulate stdin
     int pipe_fds[2];
     REQUIRE(pipe(pipe_fds) == 0);
@@ -257,6 +260,8 @@ TEST_CASE("BudgetTracker accessible on exit for summary display", "[exit][budget
  * Test that verifies the fix for the hanging issue - closing stdin unblocks getline.
  */
 TEST_CASE("Closing stdin unblocks blocking read for clean exit", "[exit][regression]") {
+    core::tools::ShellTool::clear_mcp_session("mcp-test-session");
+
     // This test verifies the specific fix: fclose(stdin) allows the MCP thread to exit
     int pipe_fds[2];
     REQUIRE(pipe(pipe_fds) == 0);
@@ -270,16 +275,12 @@ TEST_CASE("Closing stdin unblocks blocking read for clean exit", "[exit][regress
         dup2(pipe_fds[0], STDIN_FILENO);
         close(pipe_fds[0]);
         
-        // Simulate what happens in main() - the MCP server blocks on getline
-        std::string line;
-        bool got_eof = false;
-        
-        // First read should block until we close the pipe
-        if (!std::getline(std::cin, line)) {
-            got_eof = true;
-        }
-        
-        exit(got_eof ? 0 : 1);
+        // Avoid C++ iostream/atexit locks in a forked child after the full
+        // suite has started other threads; the behavior under test is the
+        // pipe EOF unblocking the stdin reader.
+        char byte = '\0';
+        const ssize_t n = read(STDIN_FILENO, &byte, 1);
+        _exit(n == 0 ? 0 : 1);
     } else {
         close(pipe_fds[0]);
         
