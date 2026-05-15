@@ -496,8 +496,8 @@ TEST_CASE("Delegated subagents do not inherit the persistent delegate task tool 
     REQUIRE(plan.has_value());
 
     const auto names = plan->allowed_tool_names();
-    REQUIRE(std::ranges::find(names, "task") == names.end());
-    REQUIRE(std::ranges::find(names, "delegate_task") == names.end());
+    REQUIRE(std::ranges::find(names, std::string("task")) == names.end());
+    REQUIRE(std::ranges::find(names, std::string("delegate_task")) == names.end());
 }
 
 TEST_CASE("MCP rejects task-augmented execution for tools that do not opt in",
