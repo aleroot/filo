@@ -33,6 +33,13 @@ TEST_CASE("uri percent encode/decode round-trip for path text", "[utils][uri]") 
     REQUIRE(decoded == raw);
 }
 
+TEST_CASE("uri::percent_encode_uri_query_component escapes query delimiters",
+          "[utils][uri]") {
+    const auto encoded =
+        core::utils::uri::percent_encode_uri_query_component("page token&after=model/1");
+    REQUIRE(encoded == "page%20token%26after%3Dmodel%2F1");
+}
+
 TEST_CASE("uri::extract_http_host parses authority safely", "[utils][uri]") {
     REQUIRE(core::utils::uri::extract_http_host("https://localhost:11434/v1").value() == "localhost");
     REQUIRE(core::utils::uri::extract_http_host("http://[::1]:8080").value() == "::1");

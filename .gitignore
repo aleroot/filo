@@ -19,6 +19,9 @@ Icon?
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# JetBrains IDEs
+.idea/
+
 # Claude / local assistant settings
 .claude/
 

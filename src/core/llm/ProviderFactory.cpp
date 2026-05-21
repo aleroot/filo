@@ -295,7 +295,12 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     }
 
     return std::make_shared<HttpLLMProvider>(
-        base_url, std::move(cred), config.model, std::move(protocol));
+        base_url,
+        std::move(cred),
+        config.model,
+        std::move(protocol),
+        api_type,
+        std::string(name));
 }
 
 } // namespace core::llm

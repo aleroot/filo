@@ -544,8 +544,8 @@ TEST_CASE("ModelRegistry - qwen3-plus alias qwen-plus-latest resolves correctly"
 TEST_CASE("ModelRegistry - all Qwen models belong to provider qwen", "[qwen][registry]") {
     auto models = ModelRegistry::instance().get_by_provider("qwen");
     REQUIRE(!models.empty());
-    for (const auto* m : models) {
-        REQUIRE(m->provider == "qwen");
+    for (const auto& m : models) {
+        REQUIRE(m.provider == "qwen");
     }
 }
 

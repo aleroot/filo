@@ -21,6 +21,7 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
+#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
@@ -1929,19 +1930,6 @@ RunResult run(RunOptions opts) {
     };
 
     auto describe_models = [&]() -> std::string {
-        std::vector<std::string> provider_names;
-        provider_names.reserve(config.providers.size());
-        for (const auto& [name, provider_cfg] : config.providers) {
-            std::string entry = name;
-            if (!provider_cfg.model.empty()) {
-                entry += " (" + provider_cfg.model + ")";
-            }
-            provider_names.push_back(std::move(entry));
-        }
-        std::ranges::sort(provider_names);
-
-        const auto policy_names = router_engine->list_policies();
-
         auto join_values = [](const std::vector<std::string>& values) {
             std::string out;
             for (std::size_t i = 0; i < values.size(); ++i) {
@@ -1950,6 +1938,49 @@ RunResult run(RunOptions opts) {
             }
             return out.empty() ? std::string("<none>") : out;
         };
+
+        std::vector<std::string> provider_names;
+        std::vector<std::string> live_provider_models;
+        provider_names.reserve(config.providers.size());
+        for (const auto& [name, provider_cfg] : config.providers) {
+            std::string entry = name;
+            if (!provider_cfg.model.empty()) {
+                entry += " (" + provider_cfg.model + ")";
+            }
+            provider_names.push_back(std::move(entry));
+
+            auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(name);
+            if (!core::llm::is_local_provider(registered_providers, name)
+                && snapshot.refresh_due()) {
+                try {
+                    if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
+                            provider_manager.get_provider(name))) {
+                        http_provider->discover_models({.timeout_ms = 1000});
+                        snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(name);
+                    }
+                } catch (const std::exception&) {
+                }
+            }
+            if (!snapshot.models.empty()) {
+                std::vector<std::string> ids;
+                ids.reserve(std::min<std::size_t>(snapshot.models.size(), 12));
+                for (const auto& model : snapshot.models) {
+                    if (ids.size() == 12) break;
+                    ids.push_back(model.canonical_id);
+                }
+                std::string live = name + ": " + join_values(ids);
+                if (snapshot.models.size() > ids.size()) {
+                    live += std::format(", +{} more", snapshot.models.size() - ids.size());
+                }
+                live_provider_models.push_back(std::move(live));
+            } else if (snapshot.refresh_in_progress) {
+                live_provider_models.push_back(name + ": discovery running");
+            }
+        }
+        std::ranges::sort(provider_names);
+        std::ranges::sort(live_provider_models);
+
+        const auto policy_names = router_engine->list_policies();
 
         const std::string mode =
             model_selection_mode == ModelSelectionMode::Router ? "Router" :
@@ -1967,11 +1998,13 @@ RunResult run(RunOptions opts) {
             "        Manual: {}\n"
             "        Router: {}\n"
             "        Providers: {}\n"
+            "        Live models: {}\n"
             "        Policies: {}",
             mode,
             manual_info,
             router_info,
             join_values(provider_names),
+            join_values(live_provider_models),
             join_values(policy_names));
     };
 

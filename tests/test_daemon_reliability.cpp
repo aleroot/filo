@@ -3,8 +3,10 @@
 #include <httplib.h>
 
 #include "core/config/ConfigManager.hpp"
+#include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "exec/ApiGateway.hpp"
+#include "exec/ApiGatewayModelList.hpp"
 #include "exec/Daemon.hpp"
 
 #include <chrono>
@@ -204,6 +206,45 @@ extract_negotiated_protocol_version(std::string_view response_body) {
         }
     }
     return ids;
+}
+
+struct ModelListEntryStats {
+    int count = 0;
+    bool discovered = false;
+};
+
+[[nodiscard]] ModelListEntryStats model_list_entry_stats(std::string_view response_body,
+                                                         std::string_view target_id,
+                                                         std::string_view target_provider) {
+    ModelListEntryStats stats;
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(response_body).get(doc) != simdjson::SUCCESS) {
+        return stats;
+    }
+
+    simdjson::dom::array models;
+    if (doc["data"].get(models) != simdjson::SUCCESS) {
+        return stats;
+    }
+
+    for (simdjson::dom::element model_el : models) {
+        std::string_view id;
+        std::string_view provider;
+        if (model_el["id"].get(id) != simdjson::SUCCESS
+            || model_el["filo_provider"].get(provider) != simdjson::SUCCESS
+            || id != target_id
+            || provider != target_provider) {
+            continue;
+        }
+
+        ++stats.count;
+        bool discovered = false;
+        if (model_el["filo_discovered"].get(discovered) == simdjson::SUCCESS) {
+            stats.discovered = stats.discovered || discovered;
+        }
+    }
+    return stats;
 }
 
 [[nodiscard]] std::size_t count_lines(const std::filesystem::path& path) {
@@ -756,6 +797,96 @@ TEST_CASE("API gateway /v1/models advertises only initialized providers",
     REQUIRE_FALSE(model_ids.contains("broken-custom"));
     REQUIRE_FALSE(model_ids.contains("broken-model"));
     REQUIRE_FALSE(model_ids.contains("broken-custom/broken-model"));
+}
+
+TEST_CASE("Gateway model list entries merge discovery state without duplicates",
+          "[api_gateway][models]") {
+    exec::gateway::GatewayModelList models;
+
+    exec::gateway::upsert_gateway_model_list_entry(
+        models,
+        "dup-model",
+        "dup-provider",
+        false);
+    exec::gateway::upsert_gateway_model_list_entry(
+        models,
+        "dup-model",
+        "dup-provider",
+        true);
+    exec::gateway::upsert_gateway_model_list_entry(
+        models,
+        "dup-provider/dup-model",
+        "dup-provider",
+        false);
+    exec::gateway::upsert_gateway_model_list_entry(
+        models,
+        "dup-provider/dup-model",
+        "dup-provider",
+        true);
+
+    REQUIRE(models.size() == 2);
+    CHECK(models.at({"dup-model", "dup-provider"}).discovered);
+    CHECK(models.at({"dup-provider/dup-model", "dup-provider"}).discovered);
+}
+
+TEST_CASE("API gateway /v1/models deduplicates configured models discovered live",
+          "[daemon][api_gateway]") {
+    constexpr std::string_view kProvider = "dedupe-provider";
+    constexpr std::string_view kModel = "dedupe-model";
+
+    core::config::AppConfig config;
+    config.default_provider = std::string(kProvider);
+    config.default_model_selection = "manual";
+    config.providers[std::string(kProvider)].api_type = core::config::ApiType::OpenAI;
+    config.providers[std::string(kProvider)].model = std::string(kModel);
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.providers.insert({std::string(kProvider), false});
+    provider_catalog.provider_default_models[std::string(kProvider)] = std::string(kModel);
+
+    core::llm::ModelCatalogDiscoveryResult discovery;
+    discovery.attempted = true;
+    discovery.fetched = 1;
+    discovery.updated = 1;
+
+    core::llm::ModelInfo live_model;
+    live_model.canonical_id = std::string(kModel);
+    live_model.provider = std::string(kProvider);
+    core::llm::ModelCatalogAvailability::instance().record_result(
+        kProvider,
+        discovery,
+        {std::move(live_model)});
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    auto models = get_request(port, "/v1/models");
+    REQUIRE(models);
+    REQUIRE(models->status == 200);
+
+    const auto default_entry =
+        model_list_entry_stats(models->body, kModel, kProvider);
+    CHECK(default_entry.count == 1);
+    CHECK(default_entry.discovered);
+
+    const auto qualified_entry = model_list_entry_stats(
+        models->body,
+        std::format("{}/{}", kProvider, kModel),
+        kProvider);
+    CHECK(qualified_entry.count == 1);
+    CHECK(qualified_entry.discovered);
 }
 
 TEST_CASE("API gateway streams OpenAI-compatible chat completion chunks",

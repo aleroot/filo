@@ -1,12 +1,12 @@
 #pragma once
 
-#include <cstdint>
+#include <array>
+#include <memory>
+#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace core::llm {
@@ -52,6 +52,51 @@ using ModelCapabilities = uint32_t;
 
 [[nodiscard]] constexpr ModelCapabilities operator|(ModelCapabilities a, ModelCapability b) noexcept {
     return a | static_cast<uint32_t>(b);
+}
+
+struct ModelCapabilityName {
+    ModelCapability cap;
+    std::string_view name;
+};
+
+inline constexpr std::array<ModelCapabilityName, 13> kModelCapabilityNames{{
+    {ModelCapability::TextInput, "text_input"},
+    {ModelCapability::TextOutput, "text_output"},
+    {ModelCapability::Vision, "vision"},
+    {ModelCapability::FunctionCalling, "function_calling"},
+    {ModelCapability::JsonMode, "json_mode"},
+    {ModelCapability::Streaming, "streaming"},
+    {ModelCapability::Reasoning, "reasoning"},
+    {ModelCapability::SystemPrompts, "system_prompts"},
+    {ModelCapability::ParallelToolCalls, "parallel_tool_calls"},
+    {ModelCapability::TokenCounting, "token_counting"},
+    {ModelCapability::PromptCaching, "prompt_caching"},
+    {ModelCapability::Logprobs, "logprobs"},
+    {ModelCapability::Embeddings, "embeddings"},
+}};
+
+inline constexpr std::array<ModelCapabilityName, 3> kModelCapabilityAliases{{
+    {ModelCapability::TextInput, "text"},
+    {ModelCapability::FunctionCalling, "tools"},
+    {ModelCapability::JsonMode, "json"},
+}};
+
+[[nodiscard]] constexpr std::string_view to_string(ModelCapability cap) noexcept {
+    for (const auto& entry : kModelCapabilityNames) {
+        if (entry.cap == cap) return entry.name;
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::optional<ModelCapability>
+model_capability_from_string(std::string_view value) noexcept {
+    for (const auto& entry : kModelCapabilityNames) {
+        if (entry.name == value) return entry.cap;
+    }
+    for (const auto& entry : kModelCapabilityAliases) {
+        if (entry.name == value) return entry.cap;
+    }
+    return std::nullopt;
 }
 
 // ============================================================================
@@ -263,9 +308,9 @@ public:
     
     /**
      * @brief Look up a model by ID or alias.
-     * @return Pointer to ModelInfo, or nullptr if not found.
+     * @return Shared immutable model info, or nullptr if not found.
      */
-    [[nodiscard]] const ModelInfo* lookup(std::string_view model_id) const;
+    [[nodiscard]] std::shared_ptr<const ModelInfo> lookup(std::string_view model_id) const;
     
     /**
      * @brief Check if a model is registered.
@@ -329,12 +374,12 @@ public:
     /**
      * @brief Get all models in a specific tier.
      */
-    [[nodiscard]] std::vector<const ModelInfo*> filter_by_tier(ModelTier tier) const;
+    [[nodiscard]] std::vector<ModelInfo> filter_by_tier(ModelTier tier) const;
     
     /**
      * @brief Get all models with a specific capability.
      */
-    [[nodiscard]] std::vector<const ModelInfo*> filter_by_capability(ModelCapability cap) const;
+    [[nodiscard]] std::vector<ModelInfo> filter_by_capability(ModelCapability cap) const;
     
     /**
      * @brief Get all registered model IDs (canonical).
@@ -344,7 +389,7 @@ public:
     /**
      * @brief Get all models for a provider.
      */
-    [[nodiscard]] std::vector<const ModelInfo*> get_by_provider(std::string_view provider) const;
+    [[nodiscard]] std::vector<ModelInfo> get_by_provider(std::string_view provider) const;
     
     // ------------------------------------------------------------------------
     // Cost Estimation
@@ -367,6 +412,17 @@ public:
      * @brief Register a new model or update existing.
      */
     void register_model(ModelInfo info);
+
+    /**
+     * @brief Merge provider-discovered metadata into an existing model card.
+     *
+     * Discovery responses often prove availability but omit capability, pricing,
+     * or token-limit details. Merge keeps existing catalog metadata and applies
+     * only concrete fields from the discovered card.
+     *
+     * @return true if this inserted a new canonical model, false if it updated one.
+     */
+    bool merge_model(ModelInfo info);
     
     /**
      * @brief Register multiple models.
@@ -429,18 +485,19 @@ public:
     [[nodiscard]] size_t size() const;
 
 private:
+    struct RegistryState;
+
     ModelRegistry();
-    ~ModelRegistry() = default;
+    ~ModelRegistry();
     
     // Non-copyable, non-movable
     ModelRegistry(const ModelRegistry&) = delete;
     ModelRegistry& operator=(const ModelRegistry&) = delete;
     
-    void register_aliases(const ModelInfo& info);
+    static void register_aliases(RegistryState& state, const ModelInfo& info);
     
-    mutable std::shared_mutex mutex_;
-    std::unordered_map<std::string, ModelInfo> models_;      ///< canonical_id -> info
-    std::unordered_map<std::string, std::string> alias_map_; ///< alias -> canonical_id
+    std::shared_ptr<const RegistryState> state_;
+    mutable std::mutex write_mutex_;
     bool defaults_loaded_ = false;
 };
 

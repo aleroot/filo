@@ -1,13 +1,17 @@
 #include "ApiGateway.hpp"
+#include "ApiGatewayModelList.hpp"
 
 #include "http/SseStream.hpp"
 #include "openai/OpenAIChatCompletionStreamEncoder.hpp"
 
 #include "../core/config/ConfigManager.hpp"
+#include "../core/llm/HttpLLMProvider.hpp"
+#include "../core/llm/ModelCatalogDiscovery.hpp"
 #include "../core/llm/Models.hpp"
 #include "../core/llm/ProviderManager.hpp"
 #include "../core/llm/providers/RouterProvider.hpp"
 #include "../core/llm/routing/RouterEngine.hpp"
+#include "../core/logging/Logger.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
 #include "../core/utils/UriUtils.hpp"
@@ -23,7 +27,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -1270,42 +1273,95 @@ void write_openai_usage(JsonWriter& writer, const core::llm::TokenUsage& usage) 
     return std::move(writer).take();
 }
 
-[[nodiscard]] std::string build_models_list_body(const GatewayRuntime& runtime) {
-    std::set<std::string> model_ids;
+void request_model_discovery_if_needed(const GatewayRuntime& runtime,
+                                       const core::llm::ProviderDescriptor& provider) {
+    if (provider.is_local) {
+        return;
+    }
+
+    const auto snapshot =
+        core::llm::ModelCatalogAvailability::instance().snapshot(provider.name);
+    if (!snapshot.refresh_due()) {
+        return;
+    }
+
+    try {
+        auto llm_provider = runtime.provider_manager.get_provider(provider.name);
+        if (auto http_provider =
+                std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(llm_provider)) {
+            http_provider->discover_models({.timeout_ms = 1000});
+        }
+    } catch (const std::exception& ex) {
+        core::logging::debug(
+            "Model discovery unavailable for provider '{}': {}",
+            provider.name,
+            ex.what());
+    }
+}
+
+[[nodiscard]] std::string build_models_list_body(const GatewayRuntime& runtime,
+                                                 std::string_view provider_filter = {}) {
+    GatewayModelList models;
+    const bool filtered = !provider_filter.empty();
+    auto include_provider = [&](std::string_view provider_name) {
+        return !filtered || provider_name == provider_filter;
+    };
+    auto add_model = [&](std::string id, std::string provider, bool discovered) {
+        if (id.empty() || !include_provider(provider)) return;
+        upsert_gateway_model_list_entry(
+            models,
+            std::move(id),
+            std::move(provider),
+            discovered);
+    };
+
     for (const auto& provider : runtime.providers) {
         const auto& provider_name = provider.name;
-        model_ids.insert(provider_name);
+        if (!include_provider(provider_name)) continue;
+
+        request_model_discovery_if_needed(runtime, provider);
+
+        add_model(provider_name, provider_name, false);
         if (const auto it = runtime.provider_default_models.find(provider_name);
             it != runtime.provider_default_models.end() && !it->second.empty()) {
-            model_ids.insert(it->second);
-            model_ids.insert(provider_name + "/" + it->second);
+            add_model(it->second, provider_name, false);
+            add_model(provider_name + "/" + it->second, provider_name, false);
+        }
+
+        const auto snapshot =
+            core::llm::ModelCatalogAvailability::instance().snapshot(provider_name);
+        for (const auto& model : snapshot.models) {
+            add_model(model.canonical_id, provider_name, true);
+            add_model(provider_name + "/" + model.canonical_id, provider_name, true);
         }
     }
 
-    if (runtime.router_available && runtime.router_engine) {
-        model_ids.insert("router");
-        model_ids.insert("auto");
+    if (!filtered && runtime.router_available && runtime.router_engine) {
+        add_model("router", "filo", false);
+        add_model("auto", "filo", false);
         for (const auto& policy_name : runtime.router_engine->list_policies()) {
-            model_ids.insert("policy/" + policy_name);
+            add_model("policy/" + policy_name, "filo", false);
         }
     }
 
-    JsonWriter writer(512 + model_ids.size() * 64);
+    JsonWriter writer(512 + models.size() * 96);
     {
         auto _root = writer.object();
         writer.kv_str("object", "list").comma().key("data");
         {
             auto _data = writer.array();
             bool first = true;
-            for (const auto& model_id : model_ids) {
+            for (const auto& [_, model] : models) {
                 if (!first) writer.comma();
                 first = false;
 
                 auto _entry = writer.object();
-                writer.kv_str("id", model_id).comma()
+                writer.kv_str("id", model.id).comma()
                     .kv_str("object", "model").comma()
                     .kv_num("created", 0).comma()
-                    .kv_str("owned_by", "filo");
+                    .kv_str("owned_by", model.provider).comma()
+                    .kv_str("filo_provider", model.provider).comma()
+                    .kv_bool("filo_discovered", model.discovered);
             }
         }
     }
@@ -1506,9 +1562,13 @@ struct ApiGateway::Impl {
             config.router.enabled && !runtime.router_engine->list_policies().empty();
     }
 
-    void handle_openai_models(const httplib::Request&, httplib::Response& res) const {
+    void handle_openai_models(const httplib::Request& req, httplib::Response& res) const {
+        std::string provider_filter;
+        if (req.has_param("provider")) {
+            provider_filter = req.get_param_value("provider");
+        }
         res.status = 200;
-        res.set_content(build_models_list_body(runtime), "application/json");
+        res.set_content(build_models_list_body(runtime, provider_filter), "application/json");
     }
 
     void handle_openai_chat_completions(const httplib::Request& req, httplib::Response& res) const {

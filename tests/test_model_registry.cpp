@@ -6,6 +6,10 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 
+#include <atomic>
+#include <thread>
+#include <vector>
+
 using namespace core::llm;
 
 // =============================================================================
@@ -82,7 +86,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
 TEST_CASE("ModelRegistry::lookup - finds models by canonical ID", "[llm][registry]") {
     auto& registry = ModelRegistry::instance();
     
-    const auto* info = registry.lookup("gpt-4o-2024-08-06");
+    const auto info = registry.lookup("gpt-4o-2024-08-06");
     REQUIRE(info != nullptr);
     REQUIRE(info->canonical_id == "gpt-4o-2024-08-06");
     REQUIRE(info->context_window == 128000);
@@ -92,19 +96,19 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     auto& registry = ModelRegistry::instance();
     
     // Should find "gpt-4o" as an alias for "gpt-4o-2024-08-06"
-    const auto* info = registry.lookup("gpt-4o");
+    const auto info = registry.lookup("gpt-4o");
     REQUIRE(info != nullptr);
     REQUIRE(info->canonical_id == "gpt-4o-2024-08-06");
 
-    const auto* gemini = registry.lookup("gemini-flash-latest");
+    const auto gemini = registry.lookup("gemini-flash-latest");
     REQUIRE(gemini != nullptr);
     REQUIRE(gemini->canonical_id == "gemini-2.5-flash");
 
-    const auto* gemini_auto = registry.lookup("auto-gemini-3");
+    const auto gemini_auto = registry.lookup("auto-gemini-3");
     REQUIRE(gemini_auto != nullptr);
     REQUIRE(gemini_auto->canonical_id == "gemini-3.1-pro-preview");
 
-    const auto* kimi_for_coding = registry.lookup("kimi-for-coding");
+    const auto kimi_for_coding = registry.lookup("kimi-for-coding");
     REQUIRE(kimi_for_coding != nullptr);
     REQUIRE(kimi_for_coding->canonical_id == "kimi-for-coding");
 }
@@ -112,7 +116,7 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
 TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {
     auto& registry = ModelRegistry::instance();
 
-    const auto* info = registry.lookup("gemini-3.1-pro-preview");
+    const auto info = registry.lookup("gemini-3.1-pro-preview");
     REQUIRE(info != nullptr);
     REQUIRE(info->context_window == 1048576);
     REQUIRE(info->max_output_tokens == 65536);
@@ -196,8 +200,8 @@ TEST_CASE("ModelRegistry::filter_by_tier - returns models in tier", "[llm][regis
     auto fast_models = registry.filter_by_tier(ModelTier::Fast);
     REQUIRE(fast_models.size() > 0);
     
-    for (const auto* model : fast_models) {
-        REQUIRE(model->tier == ModelTier::Fast);
+    for (const auto& model : fast_models) {
+        REQUIRE(model.tier == ModelTier::Fast);
     }
     
     auto reasoning_models = registry.filter_by_tier(ModelTier::Reasoning);
@@ -210,8 +214,8 @@ TEST_CASE("ModelRegistry::filter_by_capability - returns models with capability"
     auto vision_models = registry.filter_by_capability(ModelCapability::Vision);
     REQUIRE(vision_models.size() > 0);
     
-    for (const auto* model : vision_models) {
-        REQUIRE(model->supports(ModelCapability::Vision));
+    for (const auto& model : vision_models) {
+        REQUIRE(model.supports(ModelCapability::Vision));
     }
 }
 
@@ -341,8 +345,8 @@ TEST_CASE("ModelRegistry::get_by_provider - returns provider models", "[llm][reg
     auto openai_models = registry.get_by_provider("openai");
     REQUIRE(openai_models.size() >= 4);  // GPT-4o, GPT-4o-mini, o3-mini, o1, etc.
     
-    for (const auto* model : openai_models) {
-        REQUIRE(model->provider == "openai");
+    for (const auto& model : openai_models) {
+        REQUIRE(model.provider == "openai");
     }
     
     auto anthropic_models = registry.get_by_provider("anthropic");
@@ -520,9 +524,65 @@ TEST_CASE("ModelRegistry::register_model adds new model", "[llm][registry]") {
     REQUIRE(registry.has_model("custom-model-v1"));
     REQUIRE(registry.has_model("custom-model"));  // via alias
     
-    const auto* info = registry.lookup("custom-model");
+    const auto info = registry.lookup("custom-model");
     REQUIRE(info != nullptr);
     REQUIRE(info->provider == "custom");
+}
+
+TEST_CASE("ModelRegistry snapshot lookups remain stable across concurrent merges",
+          "[llm][registry][concurrency]") {
+    auto& registry = ModelRegistry::instance();
+
+    ModelInfo stable;
+    stable.canonical_id = "snapshot-stable-model";
+    stable.display_name = "Snapshot Stable Model";
+    stable.provider = "test";
+    stable.context_window = 1;
+    registry.register_model(stable);
+
+    const auto held = registry.lookup("snapshot-stable-model");
+    REQUIRE(held);
+
+    stable.context_window = 2;
+    registry.merge_model(stable);
+
+    CHECK(held->context_window == 1);
+    const auto latest = registry.get_info("snapshot-stable-model");
+    REQUIRE(latest.has_value());
+    CHECK(latest->context_window == 2);
+
+    std::atomic_bool stop{false};
+    std::atomic_bool failed{false};
+    std::vector<std::thread> readers;
+    readers.reserve(4);
+    for (int reader = 0; reader < 4; ++reader) {
+        readers.emplace_back([&] {
+            while (!stop.load(std::memory_order_acquire)) {
+                const auto info = registry.lookup("snapshot-stable-model");
+                if (!info || info->canonical_id != "snapshot-stable-model") {
+                    failed.store(true, std::memory_order_release);
+                    return;
+                }
+                (void)registry.get_info("gpt-4o");
+                (void)registry.filter_by_capability(ModelCapability::Vision);
+            }
+        });
+    }
+
+    for (int i = 0; i < 200; ++i) {
+        ModelInfo discovered;
+        discovered.canonical_id = "snapshot-live-model-" + std::to_string(i);
+        discovered.display_name = discovered.canonical_id;
+        discovered.provider = "test";
+        discovered.context_window = 1024 + i;
+        registry.merge_model(std::move(discovered));
+    }
+
+    stop.store(true, std::memory_order_release);
+    for (auto& reader : readers) {
+        reader.join();
+    }
+    CHECK_FALSE(failed.load(std::memory_order_acquire));
 }
 
 TEST_CASE("ModelRegistry::clear removes all models", "[llm][registry]") {
@@ -569,9 +629,14 @@ TEST_CASE("ModelRegistry JSON round-trip", "[llm][registry]") {
     CHECK(json.find("{") == 0);
     CHECK(json.find("}") != std::string::npos);  // Contains closing brace
     CHECK(json.find("\"models\"") != std::string::npos);
-    
-    // The load_from_json is a stub for now, so we just verify export works
-    // Full round-trip test would require complete JSON parsing implementation
+
+    // Re-importing exported JSON should merge the same model cards without
+    // dropping aliases, pricing, tiers, or capabilities.
+    const auto before = registry.size();
+    const int loaded = registry.load_from_json(json);
+    REQUIRE(loaded >= static_cast<int>(before));
+    REQUIRE(registry.size() == before);
+    REQUIRE(registry.has_model("gpt-4o"));
 }
 
 // =============================================================================
@@ -593,6 +658,14 @@ TEST_CASE("to_string - ModelTier conversion", "[llm][registry]") {
     REQUIRE(to_string(ModelTier::Balanced) == "balanced");
     REQUIRE(to_string(ModelTier::Powerful) == "powerful");
     REQUIRE(to_string(ModelTier::Reasoning) == "reasoning");
+}
+
+TEST_CASE("ModelCapability string conversion uses shared mapping", "[llm][registry]") {
+    REQUIRE(to_string(ModelCapability::FunctionCalling) == "function_calling");
+    REQUIRE(model_capability_from_string("function_calling") == ModelCapability::FunctionCalling);
+    REQUIRE(model_capability_from_string("tools") == ModelCapability::FunctionCalling);
+    REQUIRE(model_capability_from_string("json") == ModelCapability::JsonMode);
+    REQUIRE_FALSE(model_capability_from_string("not-a-capability").has_value());
 }
 
 TEST_CASE("tier_from_string - ModelTier parsing", "[llm][registry]") {

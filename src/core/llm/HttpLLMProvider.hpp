@@ -27,8 +27,10 @@
  */
 
 #include "LLMProvider.hpp"
+#include "ModelCatalogDiscovery.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
+#include "../config/ConfigManager.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include <memory>
 #include <mutex>
@@ -72,7 +74,9 @@ public:
     HttpLLMProvider(std::string                                    base_url,
                     std::shared_ptr<core::auth::ICredentialSource> cred_source,
                     std::string                                    default_model,
-                    std::unique_ptr<protocols::ApiProtocolBase>    protocol);
+                    std::unique_ptr<protocols::ApiProtocolBase>    protocol,
+                    core::config::ApiType                          api_type = core::config::ApiType::Unknown,
+                    std::string                                    provider_name = {});
 
     void stream_response(const ChatRequest&                    request,
                          std::function<void(const StreamChunk&)> callback) override;
@@ -125,6 +129,12 @@ public:
      */
     [[nodiscard]] double estimate_cost(int input_tokens, int output_tokens) const;
 
+    /**
+     * @brief Start model discovery on a detached background worker.
+     */
+    void discover_models(
+        const ModelCatalogDiscoveryOptions& options = {}) const;
+
 private:
     std::string                                    base_url_;
     std::shared_ptr<core::auth::ICredentialSource> cred_source_;
@@ -132,6 +142,8 @@ private:
     mutable std::mutex                             state_mutex_;
     std::string                                    last_model_;
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
+    core::config::ApiType                          api_type_;
+    std::string                                    provider_name_;
 };
 
 } // namespace core::llm

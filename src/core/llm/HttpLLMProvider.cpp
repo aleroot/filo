@@ -105,11 +105,15 @@ namespace {
 HttpLLMProvider::HttpLLMProvider(std::string                                    base_url,
                                  std::shared_ptr<core::auth::ICredentialSource> cred_source,
                                  std::string                                    default_model,
-                                 std::unique_ptr<protocols::ApiProtocolBase>    protocol)
+                                 std::unique_ptr<protocols::ApiProtocolBase>    protocol,
+                                 core::config::ApiType                          api_type,
+                                 std::string                                    provider_name)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
     , protocol_(std::move(protocol))
+    , api_type_(api_type)
+    , provider_name_(std::move(provider_name))
 {}
 
 int HttpLLMProvider::max_context_size() const noexcept {
@@ -120,6 +124,21 @@ int HttpLLMProvider::max_context_size() const noexcept {
 std::optional<ModelInfo> HttpLLMProvider::get_model_info() const {
     return ModelRegistry::instance().get_info(
         normalize_metadata_model(default_model_, protocol_.get()));
+}
+
+void HttpLLMProvider::discover_models(
+    const ModelCatalogDiscoveryOptions& options) const {
+    if (!protocol_ || provider_name_.empty()) {
+        return;
+    }
+
+    discover_and_register_models_in_background(
+        provider_name_,
+        api_type_,
+        base_url_,
+        cred_source_,
+        protocol_->clone(),
+        options);
 }
 
 std::string HttpLLMProvider::get_last_model() const {
@@ -133,13 +152,15 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     const std::string model = normalize_metadata_model(
         request.model.empty() ? std::string_view(default_model_) : std::string_view(request.model),
         protocol_.get());
-    const auto* info = ModelRegistry::instance().lookup(model);
+    const auto info = ModelRegistry::instance().lookup(model);
     
     if (!info) {
         // Unknown model - can't validate, but not necessarily an error
         // (could be a new model not yet in registry)
         return errors;
     }
+
+    const bool has_declared_capabilities = info->capabilities != 0;
     
     // Validate max_tokens
     if (request.max_tokens.has_value()) {
@@ -165,16 +186,22 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     }
     
     // Validate tool support
-    if (!request.tools.empty() && !info->supports(ModelCapability::FunctionCalling)) {
+    if (has_declared_capabilities
+        && !request.tools.empty()
+        && !info->supports(ModelCapability::FunctionCalling)) {
         errors.push_back("model does not support function calling");
     }
     
     // Validate JSON mode support
-    if (request.response_format.is_structured() && !info->supports(ModelCapability::JsonMode)) {
+    if (has_declared_capabilities
+        && request.response_format.is_structured()
+        && !info->supports(ModelCapability::JsonMode)) {
         errors.push_back("model does not support structured outputs (JSON mode)");
     }
 
-    if (request_has_image_input(request) && !info->supports(ModelCapability::Vision)) {
+    if (has_declared_capabilities
+        && request_has_image_input(request)
+        && !info->supports(ModelCapability::Vision)) {
         errors.push_back("model does not support image input");
     }
     
@@ -234,7 +261,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 ? std::string_view(default_model_)
                 : std::string_view(effective_request.model),
             protocol_.get());
-        if (!ModelRegistry::instance().supports(metadata_model, ModelCapability::Vision)) {
+        const auto metadata_info = ModelRegistry::instance().get_info(metadata_model);
+        if (metadata_info.has_value()
+            && metadata_info->capabilities != 0
+            && !metadata_info->supports(ModelCapability::Vision)) {
             degrade_historical_image_inputs(effective_request);
         }
 

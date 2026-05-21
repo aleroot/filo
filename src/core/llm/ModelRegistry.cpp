@@ -1,14 +1,23 @@
 #include "ModelRegistry.hpp"
 
+#include "../utils/JsonWriter.hpp"
+#include "../utils/StringUtils.hpp"
+
+#include <simdjson.h>
+
 #include <algorithm>
-#include <cctype>
-#include <cstring>
-#include <format>
+#include <unordered_map>
 #include <fstream>
 #include <limits>
 #include <mutex>
+#include <utility>
 
 namespace core::llm {
+
+struct ModelRegistry::RegistryState {
+    std::unordered_map<std::string, ModelInfo> models;
+    std::unordered_map<std::string, std::string> aliases;
+};
 
 // ============================================================================
 // ModelInfo Implementation
@@ -890,7 +899,10 @@ ModelRegistry& ModelRegistry::instance() {
     return *instance;
 }
 
-ModelRegistry::ModelRegistry() = default;
+ModelRegistry::ModelRegistry()
+    : state_(std::make_shared<RegistryState>()) {}
+
+ModelRegistry::~ModelRegistry() = default;
 
 void ModelRegistry::load_defaults() {
     // Load all built-in catalogs
@@ -910,21 +922,120 @@ void ModelRegistry::load_defaults() {
 }
 
 void ModelRegistry::register_model(ModelInfo info) {
-    std::unique_lock lock(mutex_);
-    
-    std::string canonical = info.canonical_id;
-    
+    std::lock_guard lock(write_mutex_);
+
+    if (info.canonical_id.empty()) return;
+
+    auto next = std::make_shared<RegistryState>(
+        *std::atomic_load_explicit(&state_, std::memory_order_acquire));
+    const std::string canonical = info.canonical_id;
+    if (auto existing = next->models.find(canonical); existing != next->models.end()) {
+        for (const auto& alias : existing->second.aliases) {
+            if (const auto alias_it = next->aliases.find(alias);
+                alias_it != next->aliases.end() && alias_it->second == canonical) {
+                next->aliases.erase(alias_it);
+            }
+        }
+    }
+
     // Register the canonical entry
-    models_[canonical] = info;
-    
+    next->models[canonical] = std::move(info);
+
     // Register aliases
-    register_aliases(info);
+    register_aliases(*next, next->models.at(canonical));
+    std::shared_ptr<const RegistryState> published = std::move(next);
+    std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
 }
 
-void ModelRegistry::register_aliases(const ModelInfo& info) {
-    // This is called with lock already held
+bool ModelRegistry::merge_model(ModelInfo info) {
+    std::lock_guard lock(write_mutex_);
+
+    if (info.canonical_id.empty()) return false;
+
+    auto next = std::make_shared<RegistryState>(
+        *std::atomic_load_explicit(&state_, std::memory_order_acquire));
+    const std::string discovered_id = info.canonical_id;
+    auto existing = next->models.find(discovered_id);
+    if (existing == next->models.end()) {
+        if (const auto alias = next->aliases.find(discovered_id);
+            alias != next->aliases.end()) {
+            existing = next->models.find(alias->second);
+        }
+    }
+    if (existing == next->models.end()) {
+        next->models[discovered_id] = std::move(info);
+        register_aliases(*next, next->models.at(discovered_id));
+        std::shared_ptr<const RegistryState> published = std::move(next);
+        std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
+        return true;
+    }
+
+    const std::string canonical = existing->second.canonical_id;
+    ModelInfo merged = existing->second;
+    if (!info.display_name.empty()
+        && (merged.display_name.empty() || info.display_name != info.canonical_id)) {
+        merged.display_name = std::move(info.display_name);
+    }
+    if (!info.provider.empty() && merged.provider.empty()) {
+        merged.provider = std::move(info.provider);
+    }
+    if (info.context_window > 0) merged.context_window = info.context_window;
+    if (info.max_output_tokens > 0) merged.max_output_tokens = info.max_output_tokens;
+    if (info.max_reasoning_tokens > 0) merged.max_reasoning_tokens = info.max_reasoning_tokens;
+    if (info.capabilities != 0) merged.capabilities |= info.capabilities;
+    if (info.tier != ModelTier::Balanced || merged.tier == ModelTier::Balanced) {
+        merged.tier = info.tier;
+    }
+    if (info.pricing.input_per_mtok > 0.0) merged.pricing.input_per_mtok = info.pricing.input_per_mtok;
+    if (info.pricing.output_per_mtok > 0.0) merged.pricing.output_per_mtok = info.pricing.output_per_mtok;
+    if (info.pricing.cached_input_per_mtok >= 0.0) {
+        merged.pricing.cached_input_per_mtok = info.pricing.cached_input_per_mtok;
+    }
+    if (info.pricing.prompt_caching_write_per_mtok >= 0.0) {
+        merged.pricing.prompt_caching_write_per_mtok = info.pricing.prompt_caching_write_per_mtok;
+    }
+    if (!info.knowledge_cutoff.empty()) merged.knowledge_cutoff = std::move(info.knowledge_cutoff);
+    if (!info.deprecation_date.empty()) merged.deprecation_date = std::move(info.deprecation_date);
+    if (!info.expected_completion_date.empty()) {
+        merged.expected_completion_date = std::move(info.expected_completion_date);
+    }
+    if (info.constraints.temperature) merged.constraints.temperature = info.constraints.temperature;
+    if (info.constraints.top_p) merged.constraints.top_p = info.constraints.top_p;
+    if (info.constraints.frequency_penalty) {
+        merged.constraints.frequency_penalty = info.constraints.frequency_penalty;
+    }
+    if (info.constraints.presence_penalty) {
+        merged.constraints.presence_penalty = info.constraints.presence_penalty;
+    }
+    if (info.constraints.max_tokens_min != 1) {
+        merged.constraints.max_tokens_min = info.constraints.max_tokens_min;
+    }
+    if (info.constraints.max_tokens_max > 0) {
+        merged.constraints.max_tokens_max = info.constraints.max_tokens_max;
+    }
+    if (info.max_tool_calls != 32) merged.max_tool_calls = info.max_tool_calls;
+    for (auto& alias : info.aliases) {
+        if (std::ranges::find(merged.aliases, alias) == merged.aliases.end()) {
+            merged.aliases.push_back(std::move(alias));
+        }
+    }
+
+    for (const auto& alias : existing->second.aliases) {
+        if (const auto alias_it = next->aliases.find(alias);
+            alias_it != next->aliases.end() && alias_it->second == canonical) {
+            next->aliases.erase(alias_it);
+        }
+    }
+    existing->second = std::move(merged);
+    register_aliases(*next, existing->second);
+    std::shared_ptr<const RegistryState> published = std::move(next);
+    std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
+    return false;
+}
+
+void ModelRegistry::register_aliases(RegistryState& state, const ModelInfo& info) {
     for (const auto& alias : info.aliases) {
-        alias_map_[alias] = info.canonical_id;
+        state.aliases[alias] = info.canonical_id;
     }
 }
 
@@ -934,21 +1045,21 @@ void ModelRegistry::register_models(std::span<const ModelInfo> models) {
     }
 }
 
-const ModelInfo* ModelRegistry::lookup(std::string_view model_id) const {
-    std::shared_lock lock(mutex_);
+std::shared_ptr<const ModelInfo> ModelRegistry::lookup(std::string_view model_id) const {
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
     
     // Try canonical ID first
-    auto it = models_.find(std::string(model_id));
-    if (it != models_.end()) {
-        return &it->second;
+    auto it = state->models.find(std::string(model_id));
+    if (it != state->models.end()) {
+        return {std::move(state), &it->second};
     }
     
     // Try alias lookup
-    auto alias_it = alias_map_.find(std::string(model_id));
-    if (alias_it != alias_map_.end()) {
-        auto canon_it = models_.find(alias_it->second);
-        if (canon_it != models_.end()) {
-            return &canon_it->second;
+    auto alias_it = state->aliases.find(std::string(model_id));
+    if (alias_it != state->aliases.end()) {
+        auto canon_it = state->models.find(alias_it->second);
+        if (canon_it != state->models.end()) {
+            return {std::move(state), &canon_it->second};
         }
     }
     
@@ -960,7 +1071,7 @@ bool ModelRegistry::has_model(std::string_view model_id) const {
 }
 
 int ModelRegistry::get_max_context_size(std::string_view model_id) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return info->context_window;
     }
     return 0;
@@ -971,7 +1082,7 @@ int ModelRegistry::get_max_context_size_legacy(std::string_view model_name) noex
 }
 
 ModelCapabilities ModelRegistry::get_capabilities(std::string_view model_id) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return info->capabilities;
     }
     return 0;
@@ -982,14 +1093,14 @@ bool ModelRegistry::supports(std::string_view model_id, ModelCapability cap) con
 }
 
 std::optional<ModelTier> ModelRegistry::get_tier(std::string_view model_id) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return info->tier;
     }
     return std::nullopt;
 }
 
 std::optional<ModelInfo> ModelRegistry::get_info(std::string_view model_id) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return *info;
     }
     return std::nullopt;
@@ -998,14 +1109,14 @@ std::optional<ModelInfo> ModelRegistry::get_info(std::string_view model_id) cons
 bool ModelRegistry::validate_parameter(std::string_view model_id,
                                        std::string_view param_name,
                                        double value) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return info->validate_parameter(param_name, value);
     }
     return false;  // Unknown model
 }
 
 bool ModelRegistry::validate_max_tokens(std::string_view model_id, int max_tokens) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         int limit = info->effective_max_tokens();
         if (limit > 0 && max_tokens > limit) return false;
         if (max_tokens < info->constraints.max_tokens_min) return false;
@@ -1014,48 +1125,48 @@ bool ModelRegistry::validate_max_tokens(std::string_view model_id, int max_token
     return false;
 }
 
-std::vector<const ModelInfo*> ModelRegistry::filter_by_tier(ModelTier tier) const {
-    std::shared_lock lock(mutex_);
+std::vector<ModelInfo> ModelRegistry::filter_by_tier(ModelTier tier) const {
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
     
-    std::vector<const ModelInfo*> result;
-    for (const auto& [_, info] : models_) {
+    std::vector<ModelInfo> result;
+    for (const auto& [_, info] : state->models) {
         if (info.tier == tier) {
-            result.push_back(&info);
+            result.push_back(info);
         }
     }
     return result;
 }
 
-std::vector<const ModelInfo*> ModelRegistry::filter_by_capability(ModelCapability cap) const {
-    std::shared_lock lock(mutex_);
+std::vector<ModelInfo> ModelRegistry::filter_by_capability(ModelCapability cap) const {
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
     
-    std::vector<const ModelInfo*> result;
-    for (const auto& [_, info] : models_) {
+    std::vector<ModelInfo> result;
+    for (const auto& [_, info] : state->models) {
         if (info.supports(cap)) {
-            result.push_back(&info);
+            result.push_back(info);
         }
     }
     return result;
 }
 
 std::vector<std::string> ModelRegistry::list_models() const {
-    std::shared_lock lock(mutex_);
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
     
     std::vector<std::string> result;
-    result.reserve(models_.size());
-    for (const auto& [id, _] : models_) {
+    result.reserve(state->models.size());
+    for (const auto& [id, _] : state->models) {
         result.push_back(id);
     }
     return result;
 }
 
-std::vector<const ModelInfo*> ModelRegistry::get_by_provider(std::string_view provider) const {
-    std::shared_lock lock(mutex_);
+std::vector<ModelInfo> ModelRegistry::get_by_provider(std::string_view provider) const {
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
     
-    std::vector<const ModelInfo*> result;
-    for (const auto& [_, info] : models_) {
+    std::vector<ModelInfo> result;
+    for (const auto& [_, info] : state->models) {
         if (info.provider == provider) {
-            result.push_back(&info);
+            result.push_back(info);
         }
     }
     return result;
@@ -1065,57 +1176,194 @@ double ModelRegistry::estimate_cost(std::string_view model_id,
                                     int input_tokens,
                                     int output_tokens,
                                     bool use_cached_input) const {
-    if (const auto* info = lookup(model_id)) {
+    if (const auto info = lookup(model_id)) {
         return info->estimate_cost(input_tokens, output_tokens, use_cached_input);
     }
     return -1.0;  // Unknown model
 }
 
 void ModelRegistry::clear() {
-    std::unique_lock lock(mutex_);
-    models_.clear();
-    alias_map_.clear();
+    std::lock_guard lock(write_mutex_);
+    std::shared_ptr<const RegistryState> empty = std::make_shared<RegistryState>();
+    std::atomic_store_explicit(&state_, std::move(empty), std::memory_order_release);
     defaults_loaded_ = false;
 }
 
 size_t ModelRegistry::size() const {
-    std::shared_lock lock(mutex_);
-    return models_.size();
+    return std::atomic_load_explicit(&state_, std::memory_order_acquire)->models.size();
 }
 
 // ============================================================================
 // JSON Serialization
 // ============================================================================
 
-// Helper to convert capability enum to string
-[[nodiscard]] static const char* capability_to_string(ModelCapability cap) {
-    switch (cap) {
-        case ModelCapability::TextInput: return "text_input";
-        case ModelCapability::TextOutput: return "text_output";
-        case ModelCapability::Vision: return "vision";
-        case ModelCapability::FunctionCalling: return "function_calling";
-        case ModelCapability::JsonMode: return "json_mode";
-        case ModelCapability::Streaming: return "streaming";
-        case ModelCapability::Reasoning: return "reasoning";
-        case ModelCapability::SystemPrompts: return "system_prompts";
-        case ModelCapability::ParallelToolCalls: return "parallel_tool_calls";
-        case ModelCapability::TokenCounting: return "token_counting";
-        case ModelCapability::PromptCaching: return "prompt_caching";
-        case ModelCapability::Logprobs: return "logprobs";
-        case ModelCapability::Embeddings: return "embeddings";
-        default: return "unknown";
+static bool get_json_string(simdjson::dom::object object,
+                            const char* key,
+                            std::string& out) {
+    std::string_view value;
+    if (object[key].get(value) != simdjson::SUCCESS) {
+        return false;
     }
+    out.assign(value.data(), value.size());
+    return true;
+}
+
+[[nodiscard]] static int32_t clamp_json_i32(int64_t value) {
+    if (value < 0) return 0;
+    if (value > std::numeric_limits<int32_t>::max()) {
+        return std::numeric_limits<int32_t>::max();
+    }
+    return static_cast<int32_t>(value);
+}
+
+static bool get_json_int(simdjson::dom::object object,
+                         const char* key,
+                         int32_t& out) {
+    int64_t value = 0;
+    if (object[key].get(value) != simdjson::SUCCESS) {
+        return false;
+    }
+    out = clamp_json_i32(value);
+    return true;
+}
+
+static bool get_json_double(simdjson::dom::object object,
+                            const char* key,
+                            double& out) {
+    double value = 0.0;
+    if (object[key].get(value) != simdjson::SUCCESS) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+static void parse_constraints_range(simdjson::dom::object constraints_obj,
+                                    const char* key,
+                                    std::optional<ParameterConstraints::Range>& out) {
+    simdjson::dom::array range;
+    if (constraints_obj[key].get(range) != simdjson::SUCCESS || range.size() != 2) {
+        return;
+    }
+
+    auto it = range.begin();
+    double min = 0.0;
+    double max = 0.0;
+    if ((*it).get(min) != simdjson::SUCCESS) return;
+    ++it;
+    if ((*it).get(max) != simdjson::SUCCESS) return;
+    out = ParameterConstraints::Range{min, max};
 }
 
 int ModelRegistry::load_from_json(std::string_view json_data) {
-    // Simple JSON parsing without external library dependency
-    // This is a minimal implementation for demonstration
-    // In production, use simdjson or nlohmann/json
-    
-    // For now, return 0 to indicate no models loaded (feature stub)
-    // Full implementation would parse the JSON and register models
-    (void)json_data;
-    return 0;
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(json_data.data(), json_data.size()).get(doc) != simdjson::SUCCESS) {
+        return -1;
+    }
+
+    simdjson::dom::array models;
+    if (doc["models"].get(models) != simdjson::SUCCESS) {
+        if (doc.get(models) != simdjson::SUCCESS) {
+            return -1;
+        }
+    }
+
+    int loaded = 0;
+    for (simdjson::dom::element element : models) {
+        simdjson::dom::object model_obj;
+        if (element.get(model_obj) != simdjson::SUCCESS) {
+            continue;
+        }
+
+        std::string canonical_id;
+        if (!get_json_string(model_obj, "canonical_id", canonical_id)) {
+            get_json_string(model_obj, "id", canonical_id);
+        }
+        if (canonical_id.empty()) {
+            continue;
+        }
+
+        ModelInfo info;
+        if (const auto existing = lookup(canonical_id)) {
+            info = *existing;
+        }
+        info.canonical_id = canonical_id;
+
+        std::string display_name;
+        if (get_json_string(model_obj, "display_name", display_name)) {
+            info.display_name = display_name;
+        }
+        if (info.display_name.empty()) {
+            info.display_name = info.canonical_id;
+        }
+        get_json_string(model_obj, "provider", info.provider);
+        get_json_int(model_obj, "context_window", info.context_window);
+        get_json_int(model_obj, "max_output_tokens", info.max_output_tokens);
+        get_json_int(model_obj, "max_reasoning_tokens", info.max_reasoning_tokens);
+        get_json_string(model_obj, "knowledge_cutoff", info.knowledge_cutoff);
+        get_json_string(model_obj, "deprecation_date", info.deprecation_date);
+        get_json_string(model_obj, "expected_completion_date", info.expected_completion_date);
+        get_json_int(model_obj, "max_tool_calls", info.max_tool_calls);
+
+        simdjson::dom::array aliases;
+        if (model_obj["aliases"].get(aliases) == simdjson::SUCCESS) {
+            info.aliases.clear();
+            for (simdjson::dom::element alias_el : aliases) {
+                std::string_view alias;
+                if (alias_el.get(alias) == simdjson::SUCCESS && !alias.empty()) {
+                    info.aliases.emplace_back(alias.data(), alias.size());
+                }
+            }
+        }
+
+        std::string tier;
+        if (get_json_string(model_obj, "tier", tier)) {
+            if (auto parsed = tier_from_string(tier)) {
+                info.tier = *parsed;
+            }
+        }
+
+        simdjson::dom::array capabilities;
+        if (model_obj["capabilities"].get(capabilities) == simdjson::SUCCESS) {
+            info.capabilities = 0;
+            for (simdjson::dom::element cap_el : capabilities) {
+                std::string_view cap;
+                if (cap_el.get(cap) == simdjson::SUCCESS) {
+                    if (auto parsed = model_capability_from_string(cap)) {
+                        info.capabilities |= static_cast<uint32_t>(*parsed);
+                    }
+                }
+            }
+        }
+
+        simdjson::dom::object pricing_obj;
+        if (model_obj["pricing"].get(pricing_obj) == simdjson::SUCCESS) {
+            get_json_double(pricing_obj, "input", info.pricing.input_per_mtok);
+            get_json_double(pricing_obj, "input_per_mtok", info.pricing.input_per_mtok);
+            get_json_double(pricing_obj, "output", info.pricing.output_per_mtok);
+            get_json_double(pricing_obj, "output_per_mtok", info.pricing.output_per_mtok);
+            get_json_double(pricing_obj, "cached_input", info.pricing.cached_input_per_mtok);
+            get_json_double(pricing_obj, "cached_input_per_mtok", info.pricing.cached_input_per_mtok);
+            get_json_double(pricing_obj, "prompt_caching_write", info.pricing.prompt_caching_write_per_mtok);
+            get_json_double(pricing_obj, "prompt_caching_write_per_mtok", info.pricing.prompt_caching_write_per_mtok);
+        }
+
+        simdjson::dom::object constraints_obj;
+        if (model_obj["constraints"].get(constraints_obj) == simdjson::SUCCESS) {
+            parse_constraints_range(constraints_obj, "temperature", info.constraints.temperature);
+            parse_constraints_range(constraints_obj, "top_p", info.constraints.top_p);
+            parse_constraints_range(constraints_obj, "frequency_penalty", info.constraints.frequency_penalty);
+            parse_constraints_range(constraints_obj, "presence_penalty", info.constraints.presence_penalty);
+            get_json_int(constraints_obj, "max_tokens_min", info.constraints.max_tokens_min);
+            get_json_int(constraints_obj, "max_tokens_max", info.constraints.max_tokens_max);
+        }
+
+        register_model(std::move(info));
+        ++loaded;
+    }
+
+    return loaded;
 }
 
 int ModelRegistry::load_from_json_file(const std::string& file_path) {
@@ -1132,75 +1380,77 @@ int ModelRegistry::load_from_json_file(const std::string& file_path) {
 }
 
 std::string ModelRegistry::export_to_json() const {
-    std::shared_lock lock(mutex_);
-    
-    std::string json = "{\n  \"models\": [\n";
-    bool first_model = true;
-    
-    for (const auto& [id, info] : models_) {
-        if (!first_model) json += ",\n";
-        first_model = false;
-        
-        json += "    {\n";
-        json += std::format("      \"canonical_id\": \"{}\",\n", id);
-        json += std::format("      \"display_name\": \"{}\",\n", info.display_name);
-        json += std::format("      \"provider\": \"{}\",\n", info.provider);
-        
-        // Aliases
-        json += "      \"aliases\": [";
-        for (size_t i = 0; i < info.aliases.size(); ++i) {
-            if (i > 0) json += ", ";
-            json += std::format("\"{}\"", info.aliases[i]);
-        }
-        json += "],\n";
-        
-        // Token limits
-        json += std::format("      \"context_window\": {},\n", info.context_window);
-        json += std::format("      \"max_output_tokens\": {},\n", info.max_output_tokens);
-        if (info.max_reasoning_tokens > 0) {
-            json += std::format("      \"max_reasoning_tokens\": {},\n", info.max_reasoning_tokens);
-        }
-        
-        // Tier
-        json += std::format("      \"tier\": \"{}\",\n", std::string(to_string(info.tier)));
-        
-        // Capabilities
-        json += "      \"capabilities\": [";
-        bool first_cap = true;
-        for (uint32_t i = 0; i < 32; ++i) {
-            ModelCapability cap = static_cast<ModelCapability>(1u << i);
-            if (has_capability(info.capabilities, cap)) {
-                if (!first_cap) json += ", ";
-                first_cap = false;
-                json += std::format("\"{}\"", capability_to_string(cap));
+    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+
+    core::utils::JsonWriter writer;
+    {
+        auto root = writer.object();
+        writer.key("models");
+        {
+            auto models = writer.array();
+            bool first_model = true;
+
+            for (const auto& [id, info] : state->models) {
+                if (!first_model) writer.comma();
+                first_model = false;
+
+                auto model = writer.object();
+                writer.kv_str("canonical_id", id).comma();
+                writer.kv_str("display_name", info.display_name).comma();
+                writer.kv_str("provider", info.provider).comma();
+
+                writer.key("aliases");
+                {
+                    auto aliases = writer.array();
+                    for (size_t i = 0; i < info.aliases.size(); ++i) {
+                        if (i > 0) writer.comma();
+                        writer.str(info.aliases[i]);
+                    }
+                }
+                writer.comma();
+
+                writer.kv_num("context_window", info.context_window).comma();
+                writer.kv_num("max_output_tokens", info.max_output_tokens).comma();
+                if (info.max_reasoning_tokens > 0) {
+                    writer.kv_num("max_reasoning_tokens", info.max_reasoning_tokens).comma();
+                }
+
+                writer.kv_str("tier", to_string(info.tier)).comma();
+
+                writer.key("capabilities");
+                {
+                    auto capabilities = writer.array();
+                    bool first_cap = true;
+                    for (const auto& [cap, name] : kModelCapabilityNames) {
+                        if (!has_capability(info.capabilities, cap)) continue;
+                        if (!first_cap) writer.comma();
+                        first_cap = false;
+                        writer.str(name);
+                    }
+                }
+                writer.comma();
+
+                writer.key("pricing");
+                {
+                    auto pricing = writer.object();
+                    writer.kv_float("input", info.pricing.input_per_mtok, 3).comma();
+                    writer.kv_float("output", info.pricing.output_per_mtok, 3);
+                    if (info.pricing.has_cached_pricing()) {
+                        writer.comma().kv_float("cached_input", info.pricing.cached_input_per_mtok, 3);
+                    }
+                }
+
+                if (!info.knowledge_cutoff.empty()) {
+                    writer.comma().kv_str("knowledge_cutoff", info.knowledge_cutoff);
+                }
+                if (!info.deprecation_date.empty()) {
+                    writer.comma().kv_str("deprecation_date", info.deprecation_date);
+                }
             }
         }
-        json += "],\n";
-        
-        // Pricing
-        json += "      \"pricing\": {\n";
-        json += std::format("        \"input\": {:.2f},\n", info.pricing.input_per_mtok);
-        json += std::format("        \"output\": {:.2f}", info.pricing.output_per_mtok);
-        if (info.pricing.has_cached_pricing()) {
-            json += std::format(",\n        \"cached_input\": {:.2f}", info.pricing.cached_input_per_mtok);
-        }
-        json += "\n      },\n";
-        
-        // Knowledge cutoff
-        if (!info.knowledge_cutoff.empty()) {
-            json += std::format("      \"knowledge_cutoff\": \"{}\"\n", info.knowledge_cutoff);
-        }
-        
-        // Deprecation
-        if (!info.deprecation_date.empty()) {
-            json += std::format(",\n      \"deprecation_date\": \"{}\"\n", info.deprecation_date);
-        }
-        
-        json += "    }";
     }
-    
-    json += "\n  ]\n}";
-    return json;
+
+    return std::move(writer).take();
 }
 
 // ============================================================================
@@ -1226,12 +1476,7 @@ std::string trim_ascii(std::string_view input) {
 }
 
 std::string to_lower_ascii(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-    for (const char ch : input) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-    }
-    return out;
+    return core::utils::str::to_lower_ascii_copy(input);
 }
 
 bool has_1m_context_suffix(std::string_view model_id) {

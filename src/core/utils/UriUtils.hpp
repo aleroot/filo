@@ -63,6 +63,30 @@ namespace core::utils::uri {
     return out;
 }
 
+[[nodiscard]] inline std::string percent_encode_uri_query_component(std::string_view raw) {
+    std::string out;
+    out.reserve(raw.size() + 16);
+
+    constexpr char kHex[] = "0123456789ABCDEF";
+    for (const unsigned char ch : raw) {
+        const bool safe = ascii::is_alnum(ch)
+            || ch == '-'
+            || ch == '.'
+            || ch == '_'
+            || ch == '~';
+
+        if (safe) {
+            out.push_back(static_cast<char>(ch));
+            continue;
+        }
+
+        out.push_back('%');
+        out.push_back(kHex[(ch >> 4) & 0x0F]);
+        out.push_back(kHex[ch & 0x0F]);
+    }
+    return out;
+}
+
 [[nodiscard]] inline std::optional<std::string_view> extract_http_host(std::string_view url) noexcept {
     std::size_t scheme_len = 0;
     if (ascii::istarts_with(url, "http://")) {
