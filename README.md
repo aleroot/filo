@@ -197,6 +197,18 @@ Config files are layered in this order:
 Use `config.json` for providers/router/subagents.
 Use `settings.json` for managed UI/workflow preferences.
 
+Optional context compression can be enabled in `config.json`:
+
+```json
+{
+  "context_compression": "light"
+}
+```
+
+`light` keeps exact small tool results, but stores oversized `read_file` and shell outputs in the agent history as compact summaries with size, digest, signal lines, and head/tail excerpts. The default is `off`.
+
+Use `"full"` for the native context-cache mode: first or changed `read_file` calls stay exact, repeated unchanged reads collapse to small path-based cache stubs, instruction files are always preserved, and common shell outputs such as `git status`, `git diff`, build, and test logs are retained as signal-focused summaries. Diff summaries preserve structural diff lines verbatim.
+
 ### Profiles
 
 Profiles let you keep multiple named configuration overlays and switch between them instantly.

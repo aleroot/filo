@@ -389,6 +389,7 @@ AppConfig make_default_config() {
     config.ui_timestamps = "show";
     config.ui_spinner = "show";
     config.auto_compact_threshold = 25000;
+    config.context_compression = "off";
     config.router = core::llm::routing::make_default_router_config();
 
     auto add_provider = [&](std::string name, std::string model,
@@ -466,6 +467,7 @@ std::string default_config_json() {
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
     "auto_compact_threshold": 25000,
+    "context_compression": "off",
     "providers": {
         "grok":           { "model": "grok-code-fast-1" },
         "grok-4":         { "model": "grok-4" },
@@ -964,6 +966,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     if (!doc["ui_spinner"].get(value)) {
         parsed.ui_spinner = std::string(value);
     }
+    if (!doc["context_compression"].get(value)) {
+        parsed.context_compression = std::string(value);
+    }
     int64_t threshold = 0;
     if (!doc["auto_compact_threshold"].get(threshold)) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
@@ -1173,6 +1178,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;
+    }
+    if (!overlay.context_compression.empty()) {
+        base.context_compression = overlay.context_compression;
     }
     for (const auto& [name, provider] : overlay.providers) {
         auto it = base.providers.find(name);

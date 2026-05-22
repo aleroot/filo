@@ -2022,7 +2022,8 @@ public:
     "default_model_selection": "manual",
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
-    "auto_compact_threshold": 25000
+    "auto_compact_threshold": 25000,
+    "context_compression": "off"
 }}
 )", default_provider);
 

@@ -100,6 +100,27 @@ TEST_CASE("ConfigManager prefers project config and merges provider overrides", 
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("ConfigManager parses context compression setting", "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_context_compression");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path local_config = project_dir / ".filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(local_config, R"({
+        "context_compression": "light"
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& config = manager.get_config();
+
+    REQUIRE(config.context_compression == "light");
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_subagents");
     const fs::path xdg_home = sandbox / "xdg";

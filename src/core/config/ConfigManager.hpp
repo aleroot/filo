@@ -217,6 +217,7 @@ struct AppConfig {
     std::string ui_timestamps;
     std::string ui_spinner;
     int         auto_compact_threshold = 0;
+    std::string context_compression;
     std::unordered_map<std::string, ProviderConfig> providers;
     std::unordered_map<std::string, SubagentConfig> subagents;
     std::unordered_map<std::string, ToolPolicyConfig> tool_policies;

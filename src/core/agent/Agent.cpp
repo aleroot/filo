@@ -777,7 +777,16 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 tc.function.arguments,
                                 self->session_context());
                         }
-                        result = tool_output_history::clamp_for_history(tc.function.name, result);
+                        result = tool_output_history::clamp_for_history(
+                            tc.function.name,
+                            result,
+                            core::config::ConfigManager::get_instance()
+                                .get_config()
+                                .context_compression,
+                            core::agent::tool_output_history::Context{
+                                .tool_arguments = tc.function.arguments,
+                                .session_id = self->session_context().session_id,
+                            });
                         core::llm::Message message{
                             .role         = "tool",
                             .content      = result,
