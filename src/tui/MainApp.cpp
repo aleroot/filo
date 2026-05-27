@@ -2056,6 +2056,13 @@ RunResult run(RunOptions opts) {
             || lowered.starts_with("o4");
     };
 
+    auto model_supports_kimi_effort = [&](std::string_view model_name) -> bool {
+        const std::string lowered = lower_ascii_copy(model_name);
+        return lowered == "kimi-for-coding"
+            || lowered.starts_with("kimi-k2")
+            || lowered.find("thinking") != std::string::npos;
+    };
+
     auto provider_supports_effort = [&](std::string_view provider_name,
                                         std::string_view model_name_override = {}) -> bool {
         const auto it = config.providers.find(std::string(provider_name));
@@ -2071,6 +2078,9 @@ RunResult run(RunOptions opts) {
         if (it->second.api_type == core::config::ApiType::OpenAI) {
             return model_supports_openai_effort(model_name);
         }
+        if (it->second.api_type == core::config::ApiType::Kimi) {
+            return model_supports_kimi_effort(model_name);
+        }
         if (it->second.api_type != core::config::ApiType::Unknown) {
             return false;
         }
@@ -2081,6 +2091,9 @@ RunResult run(RunOptions opts) {
         }
         if (lowered.starts_with("openai")) {
             return model_supports_openai_effort(model_name);
+        }
+        if (lowered.starts_with("kimi")) {
+            return model_supports_kimi_effort(model_name);
         }
         return false;
     };
@@ -2112,14 +2125,14 @@ RunResult run(RunOptions opts) {
             session_effort_value,
             model_for_status);
 
-        std::string applies_note = "Applies on Anthropic and OpenAI reasoning-capable models.";
+        std::string applies_note = "Applies on Anthropic, Kimi thinking-capable, and OpenAI reasoning-capable models.";
         if (model_selection_mode == ModelSelectionMode::Manual
             && !provider_supports_effort(manual_provider_name, model_for_status)) {
             applies_note = std::format(
-                "Current manual provider '{}' does not support effort; switch to Claude or an OpenAI reasoning model to apply it.",
+                "Current manual provider '{}' does not support effort; switch to Claude, Kimi Code/K2, or an OpenAI reasoning model to apply it.",
                 manual_provider_name);
         } else if (model_selection_mode != ModelSelectionMode::Manual) {
-            applies_note = "Router/auto mode may choose providers that ignore effort; it applies only on supported Anthropic/OpenAI reasoning turns.";
+            applies_note = "Router/auto mode may choose providers that ignore effort; it applies only on supported Anthropic/Kimi/OpenAI reasoning turns.";
         }
 
         return std::format(

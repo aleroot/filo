@@ -88,6 +88,77 @@ TEST_CASE("KimiProtocol - stream_options included for streaming by default", "[k
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("include_usage":true)"));
 }
 
+TEST_CASE("KimiProtocol - effort enables Kimi thinking for kimi-for-coding",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    req.effort = "medium";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"medium")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+}
+
+TEST_CASE("KimiProtocol - effort enables Kimi thinking for K2 models",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-k2.6");
+    req.effort = "low";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+}
+
+TEST_CASE("KimiProtocol - max effort maps to high", "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    req.effort = "max";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+}
+
+TEST_CASE("KimiProtocol - auto effort omits Kimi thinking fields",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    req.effort = "auto";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+}
+
+TEST_CASE("KimiProtocol - effort is omitted on legacy Moonshot models",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("moonshot-v1-128k");
+    req.effort = "high";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+}
+
+TEST_CASE("KimiProtocol - off effort disables Kimi thinking",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    req.effort = "off";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+}
+
 TEST_CASE("KimiSerializer - user message content appears in payload", "[kimi][serializer]") {
     auto payload = Serializer::serialize(make_simple_request("moonshot-v1-8k", "Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Tell me a joke"));

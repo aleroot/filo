@@ -167,6 +167,16 @@ public:
      */
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
 
+protected:
+    /**
+     * @brief Append Kimi thinking controls for reasoning-capable Kimi models.
+     *
+     * Filo carries effort as a provider-neutral request hint.  This protocol
+     * translates that hint into Kimi's OpenAI-compatible extension fields:
+     * `reasoning_effort` plus top-level `thinking`.
+     */
+    void append_extra_fields(std::string& payload, const ChatRequest& req) const override;
+
 private:
     RateLimitInfo last_rate_limit_;
 };

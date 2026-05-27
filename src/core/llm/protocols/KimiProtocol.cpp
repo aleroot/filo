@@ -2,6 +2,7 @@
 #include "SseUtils.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../logging/Logger.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -265,6 +266,35 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
         out.push_back(static_cast<char>(std::tolower(ch)));
     }
     return out;
+}
+
+[[nodiscard]] std::string normalize_kimi_effort(std::string_view raw_effort) {
+    std::string effort = lower_ascii(raw_effort);
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch) || ch == '-' || ch == '_';
+    });
+
+    if (effort.empty() || effort == "auto" || effort == "unset" || effort == "default") {
+        return {};
+    }
+    if (effort == "off" || effort == "none" || effort == "disable" || effort == "disabled") {
+        return "off";
+    }
+    if (effort == "low" || effort == "medium" || effort == "high") {
+        return effort;
+    }
+    if (effort == "max" || effort == "xhigh") {
+        // Kimi's public control surface caps effort at "high".
+        return "high";
+    }
+    return {};
+}
+
+[[nodiscard]] bool model_supports_kimi_thinking(std::string_view model) {
+    const std::string lowered = lower_ascii(model);
+    return lowered == "kimi-for-coding"
+        || lowered.starts_with("kimi-k2")
+        || lowered.find("thinking") != std::string::npos;
 }
 
 [[nodiscard]] std::string sanitize_os_version(std::string version) {
@@ -708,6 +738,26 @@ std::string KimiProtocol::serialize(const ChatRequest& req) const {
         payload += '}';
     }
     return payload;
+}
+
+void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& req) const {
+    if (!model_supports_kimi_thinking(req.model)) {
+        return;
+    }
+
+    const std::string effort = normalize_kimi_effort(req.effort);
+    if (effort.empty()) {
+        return;
+    }
+
+    if (effort == "off") {
+        payload += R"(,"thinking":{"type":"disabled"})";
+        return;
+    }
+
+    payload += R"(,"reasoning_effort":")";
+    payload += core::utils::escape_json_string(effort);
+    payload += R"(","thinking":{"type":"enabled"})";
 }
 
 cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const {
