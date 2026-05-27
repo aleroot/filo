@@ -826,6 +826,13 @@ Limits limits_for_tool(std::string_view tool_name) {
         || tool_name == core::tools::names::kListDirectory) {
         return Limits{.max_chars = 10 * 1024, .head_chars = 7 * 1024, .tail_chars = 3 * 1024};
     }
+    if (tool_name == core::tools::names::kActivateSkill) {
+        return Limits{
+            .max_chars = 2 * 1024 * 1024,
+            .head_chars = 2 * 1024 * 1024,
+            .tail_chars = 0,
+        };
+    }
     return Limits{};
 }
 

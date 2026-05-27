@@ -8,14 +8,20 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/ProviderManager.hpp"
+#include "core/tools/ActivateSkillTool.hpp"
 #include "core/tools/SkillLoader.hpp"
 #include "core/tools/SkillManifest.hpp"
+#include "core/tools/SkillRegistry.hpp"
+#include "TestSessionContext.hpp"
 
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <ranges>
+#include <simdjson.h>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace core::commands;
@@ -57,6 +63,20 @@ struct ScopedEnvVar {
         } else {
             ::unsetenv(name.c_str());
         }
+    }
+};
+
+struct ScopedCurrentPath {
+    fs::path old_path;
+
+    explicit ScopedCurrentPath(const fs::path& new_path)
+        : old_path(fs::current_path()) {
+        fs::current_path(new_path);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code ec;
+        fs::current_path(old_path, ec);
     }
 };
 
@@ -674,8 +694,413 @@ TEST_CASE("SkillCommandLoader: project-local skill overrides global by last-regi
     // Last descriptor seen is the project-local one (loaded last).
     CHECK(last_description == "project version");
 
+    std::string sent_prompt;
+    auto ctx = make_null_ctx();
+    ctx.text = "/summarise";
+    ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
+    REQUIRE(executor.try_execute("/summarise", ctx));
+    CHECK(sent_prompt == "Project body.");
+
     fs::remove_all(global_root);
     fs::remove_all(project_root);
+}
+
+TEST_CASE("SkillRegistry discovers compatibility paths and native Filo skills win",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("agent_skill_paths");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(fake_home / ".claude" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: User Claude-compatible review skill.
+---
+User Claude-compatible body.
+)");
+        write_file(fake_home / ".agents" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: User agent-compatible review skill.
+---
+User agent-compatible body.
+)");
+        write_file(fake_home / ".config" / "filo" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: User Filo review skill.
+---
+User Filo body.
+)");
+        write_file(project / ".claude" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Project Claude-compatible review skill.
+---
+Project Claude-compatible body.
+)");
+        write_file(project / ".agents" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Project agent-compatible review skill.
+---
+Project agent-compatible body.
+)");
+        write_file(project / ".filo" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Project Filo review skill.
+---
+Project Filo body.
+)");
+
+        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        REQUIRE(skills.size() == 1);
+        CHECK(skills.front().name == "review");
+        CHECK(skills.front().description == "Project Filo review skill.");
+        CHECK_THAT(
+            SkillRegistry::build_catalog_prompt(project),
+            Catch::Matchers::ContainsSubstring("activate_skill"));
+
+        core::tools::ActivateSkillTool tool;
+        const auto activated = tool.execute(
+            R"({"name":"review"})",
+            test_support::make_session_context({
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+            }));
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("Project Filo body.") != std::string_view::npos);
+        CHECK(content.find("Project agent-compatible body.") == std::string_view::npos);
+        CHECK(content.find("Project Claude-compatible body.") == std::string_view::npos);
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("SkillRegistry search roots keep compatibility paths as fallbacks",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("skill_search_root_order");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        const auto paths = SkillRegistry::default_search_paths(project);
+        REQUIRE(paths.size() == 6);
+        CHECK(paths[0] == fake_home / ".claude" / "skills");
+        CHECK(paths[1] == fake_home / ".agents" / "skills");
+        CHECK(paths[2] == project / ".claude" / "skills");
+        CHECK(paths[3] == project / ".agents" / "skills");
+        CHECK(paths[4] == fake_home / ".config" / "filo" / "skills");
+        CHECK(paths[5] == project / ".filo" / "skills");
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("SkillRegistry gives Filo-native roots precedence over compatibility roots",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("native_skill_precedence");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(project / ".agents" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Project Agent-compatible review skill.
+---
+Project compatibility body.
+)");
+        write_file(fake_home / ".config" / "filo" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: User Filo-native review skill.
+---
+User Filo body.
+)");
+
+        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        REQUIRE(skills.size() == 1);
+        CHECK(skills.front().description == "User Filo-native review skill.");
+
+        CommandExecutor executor;
+        SkillCommandLoader::discover_and_register(executor);
+
+        std::string sent_prompt;
+        auto ctx = make_null_ctx();
+        ctx.text = "/review";
+        ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
+        REQUIRE(executor.try_execute("/review", ctx));
+        CHECK(sent_prompt == "User Filo body.");
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("SkillRegistry uses Claude-compatible skills as a fallback",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("claude_skill_fallback");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(project / ".claude" / "skills" / "debug-flow" / "SKILL.md", R"(---
+name: debug-flow
+description: Claude-compatible debugging workflow.
+---
+# Debug flow
+
+Reproduce, localize, fix, and guard.
+)");
+
+        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        REQUIRE(skills.size() == 1);
+        CHECK(skills.front().name == "debug-flow");
+        CHECK(skills.front().description == "Claude-compatible debugging workflow.");
+
+        core::tools::ActivateSkillTool tool;
+        const auto activated = tool.execute(
+            R"({"name":"debug-flow"})",
+            test_support::make_session_context({
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+            }));
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("<skill_content name=\"debug-flow\">") != std::string_view::npos);
+        CHECK(content.find("Reproduce, localize, fix, and guard.") != std::string_view::npos);
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Agent Skill catalog and activation escape tag-like metadata",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("agent_skill_xml_escape");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(project / ".filo" / "skills" / "docs" / "SKILL.md", R"(---
+name: docs&guide
+description: Use <docs> "carefully" & consistently.
+---
+# Docs
+
+Body.
+)");
+
+        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("<name>docs&amp;guide</name>"));
+        CHECK_THAT(
+            catalog,
+            Catch::Matchers::ContainsSubstring(
+                "<description>Use &lt;docs&gt; &quot;carefully&quot; &amp; consistently.</description>"));
+
+        core::tools::ActivateSkillTool tool;
+        const auto activated = tool.execute(
+            R"({"name":"docs&guide"})",
+            test_support::make_session_context({
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+            }));
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("<skill_content name=\"docs&amp;guide\">") != std::string_view::npos);
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ActivateSkillTool returns instructions and listed resources",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("activate_skill");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(project / ".agents" / "skills" / "docs" / "SKILL.md", R"(---
+name: docs
+description: Write project documentation. Use when creating docs.
+compatibility: Requires markdown.
+---
+# Docs workflow
+
+Read references/STYLE.md before writing.
+)");
+        write_file(project / ".agents" / "skills" / "docs" / "references" / "STYLE.md",
+                   "Use short headings.\n");
+
+        core::tools::ActivateSkillTool tool;
+        const auto activated = tool.execute(
+            R"({"name":"docs"})",
+            test_support::make_session_context({
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+            }));
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("<skill_content name=\"docs\">") != std::string_view::npos);
+        CHECK(content.find("references/STYLE.md") != std::string_view::npos);
+
+        const auto resource = tool.execute(
+            R"({"name":"docs","resource_path":"references/STYLE.md"})",
+            test_support::make_session_context({
+                .primary = project,
+                .additional = {},
+                .enforce = true,
+            }));
+        simdjson::dom::element resource_doc;
+        REQUIRE(parser.parse(resource).get(resource_doc) == simdjson::SUCCESS);
+        std::string_view resource_content;
+        REQUIRE(resource_doc["content"].get(resource_content) == simdjson::SUCCESS);
+        CHECK(resource_content == "Use short headings.\n");
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Agent Skills upstream collection shape is discoverable and activatable",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("upstream_agent_skills");
+    const auto fake_home = sandbox / "home";
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    ScopedEnvVar home("HOME", fake_home.string());
+    {
+        ScopedCurrentPath cwd(project);
+
+        const std::vector<std::string> upstream_skill_names = {
+            "api-and-interface-design",
+            "browser-testing-with-devtools",
+            "ci-cd-and-automation",
+            "code-review-and-quality",
+            "code-simplification",
+            "context-engineering",
+            "debugging-and-error-recovery",
+            "deprecation-and-migration",
+            "documentation-and-adrs",
+            "doubt-driven-development",
+            "frontend-ui-engineering",
+            "git-workflow-and-versioning",
+            "idea-refine",
+            "incremental-implementation",
+            "interview-me",
+            "performance-optimization",
+            "planning-and-task-breakdown",
+            "security-and-hardening",
+            "shipping-and-launch",
+            "source-driven-development",
+            "spec-driven-development",
+            "test-driven-development",
+            "using-agent-skills",
+        };
+
+        for (const auto& name : upstream_skill_names) {
+            write_file(
+                project / ".filo" / "skills" / name / "SKILL.md",
+                "---\nname: " + name + "\ndescription: Upstream fixture for " + name + ".\n---\n\n# "
+                    + name + "\n\nInstructions for " + name + ".\n");
+        }
+        write_file(project / ".claude" / "skills" / "using-agent-skills" / "SKILL.md", R"(---
+name: using-agent-skills
+description: Claude-compatible fallback should lose.
+---
+Compatibility body should not win.
+)");
+        write_file(project / ".agents" / "skills" / "using-agent-skills" / "SKILL.md", R"(---
+name: using-agent-skills
+description: Agent-compatible fallback should lose.
+---
+Compatibility body should not win.
+)");
+        write_file(
+            project / ".filo" / "skills" / "idea-refine" / "scripts" / "idea-refine.sh",
+            "#!/bin/bash\nset -e\necho ready\n");
+
+        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        REQUIRE(skills.size() == upstream_skill_names.size());
+        for (const auto& name : upstream_skill_names) {
+            REQUIRE(std::ranges::any_of(skills, [&](const SkillManifest& skill) {
+                return skill.name == name;
+            }));
+        }
+
+        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("using-agent-skills"));
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("code-review-and-quality"));
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("activate_skill"));
+
+        core::tools::ActivateSkillTool tool;
+        const auto definition = tool.get_definition();
+        CHECK_THAT(definition.input_schema,
+                   Catch::Matchers::ContainsSubstring("using-agent-skills"));
+        CHECK_THAT(definition.input_schema,
+                   Catch::Matchers::ContainsSubstring("code-review-and-quality"));
+        CHECK_THAT(definition.input_schema,
+                   Catch::Matchers::ContainsSubstring("idea-refine"));
+
+        const auto ctx = test_support::make_session_context({
+            .primary = project,
+            .additional = {},
+            .enforce = true,
+        });
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        const auto activated = tool.execute(R"({"name":"using-agent-skills"})", ctx);
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("<skill_content name=\"using-agent-skills\">")
+              != std::string_view::npos);
+        CHECK(content.find("Instructions for using-agent-skills.")
+              != std::string_view::npos);
+        CHECK(content.find("Compatibility body should not win.") == std::string_view::npos);
+
+        simdjson::dom::element resource_doc;
+        const auto resource = tool.execute(
+            R"({"name":"idea-refine","resource_path":"scripts/idea-refine.sh"})",
+            ctx);
+        REQUIRE(parser.parse(resource).get(resource_doc) == simdjson::SUCCESS);
+        std::string_view resource_content;
+        REQUIRE(resource_doc["content"].get(resource_content) == simdjson::SUCCESS);
+        CHECK(resource_content.find("echo ready") != std::string_view::npos);
+    }
+
+    fs::remove_all(sandbox);
 }
 
 // ---------------------------------------------------------------------------

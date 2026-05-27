@@ -27,6 +27,8 @@
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolPolicy.hpp"
 #include "core/tools/WriteFileTool.hpp"
+#include "core/tools/ActivateSkillTool.hpp"
+#include "core/tools/SkillRegistry.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/JsonUtils.hpp"
 #ifdef FILO_ENABLE_PYTHON
@@ -327,6 +329,9 @@ void register_default_tools(core::tools::ToolManager& tool_manager) {
         }
     });
     tool_manager.register_tool(ask_user_tool);
+    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
+        tool_manager.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
+    }
 
 #ifdef FILO_ENABLE_PYTHON
     tool_manager.register_tool(std::make_shared<core::tools::PythonInterpreterTool>());

@@ -41,6 +41,8 @@
 #include "core/tools/DeleteFileTool.hpp"
 #include "core/tools/MoveFileTool.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
+#include "core/tools/ActivateSkillTool.hpp"
+#include "core/tools/SkillRegistry.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonInterpreterTool.hpp"
 #include "core/tools/SkillLoader.hpp"
@@ -628,6 +630,9 @@ RunResult run(RunOptions opts) {
     // AskUserQuestion tool - needs callback for UI
     auto ask_user_tool = std::make_shared<core::tools::AskUserQuestionTool>();
     tool_manager.register_tool(ask_user_tool);
+    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
+        tool_manager.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
+    }
     
 #ifdef FILO_ENABLE_PYTHON
     tool_manager.register_tool(std::make_shared<core::tools::PythonInterpreterTool>());

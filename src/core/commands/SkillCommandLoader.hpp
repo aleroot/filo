@@ -15,13 +15,18 @@ namespace core::commands {
  *
  * ## Layered precedence (lowest → highest)
  *
- *  1. @c ~/.config/filo/skills/  — global, available in every project
- *  2. @c ./.filo/skills/         — project-local, overrides globals of the same name
+ *  1. @c ~/.claude/skills/       — Claude-compatible global fallback
+ *  2. @c ~/.agents/skills/       — Agent Skills-compatible global fallback
+ *  3. @c ./.claude/skills/       — Claude-compatible project fallback
+ *  4. @c ./.agents/skills/       — Agent Skills-compatible project fallback
+ *  5. @c ~/.config/filo/skills/  — Filo-native global skills
+ *  6. @c ./.filo/skills/         — Filo-native project skills
  *
  * Because @c CommandExecutor::register_command() appends to the registry and
  * @c try_execute() iterates in registration order, the last registration wins on
- * name collisions.  Loading global skills before project-local skills therefore
- * gives project-level overrides higher precedence.
+ * name collisions.  Compatibility roots load first as fallbacks; Filo-native
+ * roots load last so native skills always override compatibility skills, with
+ * project-local Filo skills taking the highest precedence.
  *
  * ## Skill format
  *

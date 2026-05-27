@@ -8,6 +8,7 @@
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/tools/ToolNames.hpp"
 #include "TestSessionContext.hpp"
 
 #include <chrono>
@@ -611,6 +612,16 @@ TEST_CASE("ToolOutputHistory preserves error semantics when truncating", "[agent
     CHECK(clamped.size() < large_error.size());
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("error":"Tool output truncated for history)"));
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("original_chars":)"));
+}
+
+TEST_CASE("ToolOutputHistory preserves large activate_skill payloads", "[agent][tool-history]") {
+    const std::string large_skill =
+        std::string(R"({"content":")") + std::string(300 * 1024, 's') + R"("})";
+    const std::string clamped = core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kActivateSkill,
+        large_skill);
+
+    CHECK(clamped == large_skill);
 }
 
 TEST_CASE("Agent stores oversized tool output in compact history format", "[agent][tool-history]") {

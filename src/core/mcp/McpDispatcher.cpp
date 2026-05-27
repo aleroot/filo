@@ -18,6 +18,8 @@
 #include "../tools/GetWorkspaceConfigTool.hpp"
 #include "../tools/SkillLoader.hpp"
 #include "../tools/TaskTool.hpp"
+#include "../tools/SkillRegistry.hpp"
+#include "../tools/ActivateSkillTool.hpp"
 #include "../workspace/Workspace.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/Base64.hpp"
@@ -754,6 +756,9 @@ void McpDispatcher::register_tools() {
     sm.register_tool(std::make_shared<core::tools::CreateDirectoryTool>());
     sm.register_tool(std::make_shared<core::tools::GetWorkspaceConfigTool>());
     sm.register_tool(std::make_shared<core::tools::TaskTool>());
+    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
+        sm.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
+    }
 }
 
 namespace {

@@ -42,6 +42,7 @@ Filo focuses on speed, control, and local-first workflows without giving up mult
 - C++26 core with streaming-first provider protocols
 - TUI built with FTXUI
 - Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
+- Agent Skills support with `.filo/skills` and on-demand activation
 - `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
 - Session persistence and resume
 - Global + workspace config layering
@@ -260,6 +261,54 @@ Commands:
 ```
 
 Precedence note: `FILO_PROFILE=<name>` forces a profile for that process and overrides the persisted selection until unset.
+
+### Agent Skills
+
+Filo supports Agent Skills-style instruction packages. Each skill is a directory
+with a `SKILL.md` file containing YAML frontmatter with at least `name` and
+`description`, followed by Markdown instructions.
+
+The official project-local location is `./.filo/skills/<name>/SKILL.md`.
+Filo-native skill roots have precedence over compatibility roots such as
+`.claude/skills` and `.agents/skills`; project-local `.filo/skills` has the
+highest precedence. Use `.filo/skills` for skills that are specific to Filo or
+this repository.
+
+Instruction skills are disclosed to the model as a compact catalog and loaded
+on demand through the `activate_skill` tool. Bundled `scripts/`, `references/`,
+and `assets/` files are listed during activation and can be read by calling
+`activate_skill` again with `resource_path`.
+
+To use the public Agent Skills collection in one project:
+
+```bash
+mkdir -p .filo
+git clone https://github.com/addyosmani/agent-skills.git .filo/agent-skills
+ln -s agent-skills/skills .filo/skills
+```
+
+To install it globally instead:
+
+```bash
+mkdir -p ~/.config/filo
+git clone https://github.com/addyosmani/agent-skills.git ~/.config/filo/agent-skills
+ln -s agent-skills/skills ~/.config/filo/skills
+```
+
+If `.filo/skills` or `~/.config/filo/skills` already exists, copy individual
+skill directories into it instead of replacing the directory.
+
+After installation, start Filo from the project. The model will see skill names
+such as `using-agent-skills`, `code-review-and-quality`, and
+`frontend-ui-engineering` in its system catalog and should call `activate_skill`
+before using the matching workflow. When a skill references a bundled resource,
+for example `scripts/idea-refine.sh`, the model can load it with
+`activate_skill` and the same `resource_path`.
+
+Skills without `entry_point` are also available as slash commands in the TUI:
+`/<skill-name> [arguments]`. The body may use `$ARGUMENTS` as a placeholder.
+Filo-specific Python tool skills continue to use `entry_point` and the existing
+`get_schema()` / `execute()` Python contract.
 
 ### Smart router with local-first policy example
 

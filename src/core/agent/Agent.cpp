@@ -9,6 +9,7 @@
 #include "../scm/ScmFactory.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
+#include "../tools/SkillRegistry.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/FileSystemUtils.hpp"
 #include "../logging/Logger.hpp"
@@ -134,6 +135,29 @@ struct HookFieldPayload {
     return core::tools::policy::is_tool_allowed(tool_name, turn_callbacks.allowed_tools);
 }
 
+[[nodiscard]] std::string collect_active_skill_context(
+    const std::vector<core::llm::Message>& messages) {
+    std::string collected;
+    for (const auto& message : messages) {
+        const std::string_view content = message.content;
+        std::size_t cursor = 0;
+        while (true) {
+            const auto start = content.find("<skill_content name=", cursor);
+            if (start == std::string_view::npos) break;
+            const auto end = content.find("</skill_content>", start);
+            if (end == std::string_view::npos) break;
+            const auto after_end = end + std::string_view("</skill_content>").size();
+            const auto block = content.substr(start, after_end - start);
+            if (collected.find(block) == std::string::npos) {
+                if (!collected.empty()) collected += "\n\n";
+                collected += block;
+            }
+            cursor = after_end;
+        }
+    }
+    return collected;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -249,6 +273,11 @@ std::string Agent::build_stable_prompt_prefix() const {
             prompt += steering;
         }
 
+        if (const auto skill_catalog = core::tools::SkillRegistry::build_catalog_prompt(project_root);
+            !skill_catalog.empty()) {
+            prompt += skill_catalog;
+        }
+
         // Detect SCM (Git, etc.) or fallback to NoOp
         auto scm = core::scm::ScmFactory::create(project_root);
         
@@ -329,7 +358,13 @@ void Agent::clear_history() {
 
 void Agent::compact_history(std::string summary) {
     std::lock_guard lock(history_mutex_);
+    const auto active_skill_context = collect_active_skill_context(history_);
     context_summary_ = trim_copy(std::move(summary));
+    if (!active_skill_context.empty()) {
+        if (!context_summary_.empty()) context_summary_ += "\n\n";
+        context_summary_ += "Active Agent Skill instructions preserved from earlier context:\n";
+        context_summary_ += active_skill_context;
+    }
     history_.clear();
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();

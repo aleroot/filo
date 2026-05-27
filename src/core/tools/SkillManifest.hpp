@@ -22,9 +22,10 @@ enum class SkillType {
 /**
  * @brief Parsed contents of a @c SKILL.md frontmatter block.
  *
- * A skill lives in its own subdirectory inside a skills root
- * (@c ~/.config/filo/skills/ or @c ./.filo/skills/).  The subdirectory
- * must contain a @c SKILL.md file whose YAML frontmatter describes the skill.
+ * A skill lives in its own subdirectory inside a skills root such as
+ * @c ./.filo/skills/, @c ~/.config/filo/skills/, @c ./.agents/skills/, or
+ * @c ./.claude/skills/. The subdirectory must contain a @c SKILL.md file whose
+ * YAML frontmatter describes the skill.
  *
  * ## Tool skill (entry_point present)
  *
@@ -115,6 +116,19 @@ struct SkillManifest {
     /// Markdown body of the skill file (everything after the closing @c ---).
     /// May contain @c $ARGUMENTS placeholder, which is substituted at invocation time.
     std::string body;
+
+    /// Absolute path to the SKILL.md file. Used by Agent Skills activation.
+    std::filesystem::path manifest_path;
+
+    /// Optional Agent Skills standard metadata.
+    std::string license;
+    std::string compatibility;
+
+    /// True when the skill has no Filo-specific Python entry point and can be
+    /// activated as a standard Agent Skill instruction package.
+    [[nodiscard]] bool is_agent_instruction_skill() const noexcept {
+        return type == SkillType::Prompt;
+    }
 };
 
 } // namespace core::tools

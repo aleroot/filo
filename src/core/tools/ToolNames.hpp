@@ -22,6 +22,7 @@ inline constexpr std::string_view kGetCurrentTime = "get_current_time";
 inline constexpr std::string_view kGetWorkspaceConfig = "get_workspace_config";
 inline constexpr std::string_view kAskUserQuestion = "AskUserQuestion";
 inline constexpr std::string_view kPython = "python";
+inline constexpr std::string_view kActivateSkill = "activate_skill";
 
 inline constexpr std::array<std::string_view, 5> kExploreAllowedTools{
     kReadFile,

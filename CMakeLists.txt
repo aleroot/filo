@@ -182,7 +182,9 @@ set(FILO_CORE_SOURCES
     src/core/tools/CreateDirectoryTool.cpp
     src/core/tools/SearchReplaceTool.cpp
     src/core/tools/AskUserQuestionTool.cpp
+    src/core/tools/ActivateSkillTool.cpp
     src/core/tools/ToolPolicy.cpp
+    src/core/tools/SkillRegistry.cpp
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp

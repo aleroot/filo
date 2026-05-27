@@ -5,9 +5,12 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/tools/ToolNames.hpp"
+#include "core/workspace/Workspace.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -34,7 +37,11 @@ public:
 
     void stream_response(const core::llm::ChatRequest& request,
                          std::function<void(const core::llm::StreamChunk&)> callback) override {
-        last_request = request;
+        {
+            std::lock_guard lock(mutex_);
+            last_request = request;
+            requests_.push_back(request);
+        }
         if (on_stream) {
             on_stream(request, callback);
             return;
@@ -50,6 +57,15 @@ public:
     [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
         return caps;
     }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
 };
 
 class RotatingPrompterProvider final : public core::llm::LLMProvider {
@@ -123,6 +139,63 @@ struct TempDir {
         std::filesystem::remove_all(path, ec);
     }
 };
+
+struct ScopedCurrentPath {
+    std::filesystem::path old_path;
+
+    explicit ScopedCurrentPath(const std::filesystem::path& new_path)
+        : old_path(std::filesystem::current_path()) {
+        std::filesystem::current_path(new_path);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code ec;
+        std::filesystem::current_path(old_path, ec);
+    }
+};
+
+struct ScopedEnvVar {
+    std::string name;
+    std::optional<std::string> old_value;
+
+    ScopedEnvVar(std::string name_in, std::string value)
+        : name(std::move(name_in)) {
+        if (const char* current = std::getenv(name.c_str())) {
+            old_value = std::string(current);
+        }
+        ::setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value.has_value()) {
+            ::setenv(name.c_str(), old_value->c_str(), 1);
+        } else {
+            ::unsetenv(name.c_str());
+        }
+    }
+};
+
+struct ScopedWorkspace {
+    core::workspace::WorkspaceSnapshot old_snapshot;
+
+    explicit ScopedWorkspace(const std::filesystem::path& primary)
+        : old_snapshot(core::workspace::Workspace::get_instance().snapshot()) {
+        core::workspace::Workspace::get_instance().initialize(primary, {}, true);
+    }
+
+    ~ScopedWorkspace() {
+        core::workspace::Workspace::get_instance().initialize(
+            old_snapshot.primary,
+            old_snapshot.additional,
+            old_snapshot.enforce);
+    }
+};
+
+void write_text_file(const std::filesystem::path& path, std::string_view content) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path);
+    out << content;
+}
 
 exec::prompter::RuntimeContext make_runtime(std::shared_ptr<core::llm::LLMProvider> provider) {
     exec::prompter::RuntimeContext runtime;
@@ -212,6 +285,105 @@ TEST_CASE("prompter text mode streams response", "[prompter][text]") {
     REQUIRE_THAT(out.str(), ContainsSubstring("hello"));
     REQUIRE(err.str().empty());
     REQUIRE_FALSE(diag.session_id.empty());
+}
+
+TEST_CASE("prompter exposes and uses project .filo Agent Skills",
+          "[prompter][agent_skills]") {
+    TempDir project{"filo_prompter_agent_skills_project"};
+    TempDir home{"filo_prompter_agent_skills_home"};
+    ScopedEnvVar scoped_home("HOME", home.path.string());
+    ScopedCurrentPath cwd(project.path);
+    ScopedWorkspace workspace(project.path);
+
+    write_text_file(project.path / ".filo" / "skills" / "docs" / "SKILL.md", R"(---
+name: docs
+description: Write project documentation using the official Filo skill path.
+---
+# Docs
+
+Official Filo docs workflow.
+Read references/STYLE.md before writing.
+)");
+    write_text_file(project.path / ".filo" / "skills" / "docs" / "references" / "STYLE.md",
+                    "Use short headings.\n");
+
+    auto provider = std::make_shared<MockProvider>();
+    int calls = 0;
+    provider->on_stream = [&](const core::llm::ChatRequest&, auto callback) {
+        ++calls;
+        if (calls == 1) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "activate-docs";
+            tool_call.type = "function";
+            tool_call.function.name = std::string(core::tools::names::kActivateSkill);
+            tool_call.function.arguments = R"({"name":"docs"})";
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {tool_call};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content("ready after skill"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    exec::prompter::RunOptions opts;
+    opts.prompt = "Write docs";
+    opts.prompt_was_provided = true;
+
+    exec::prompter::StreamInput input;
+    std::ostringstream out;
+    std::ostringstream err;
+    TempDir sessions{"filo_prompter_agent_skills_sessions"};
+
+    const auto diag = exec::prompter::run_for_test(
+        opts, make_runtime(provider), input, out, err, sessions.path);
+
+    REQUIRE(diag.exit_code == 0);
+    REQUIRE_THAT(diag.final_text_response, ContainsSubstring("ready after skill"));
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() >= 2);
+
+    bool saw_activate_skill_tool = false;
+    for (const auto& tool : requests.front().tools) {
+        if (tool.function.name == core::tools::names::kActivateSkill) {
+            saw_activate_skill_tool = true;
+            CHECK_THAT(tool.function.input_schema, ContainsSubstring("docs"));
+            break;
+        }
+    }
+    REQUIRE(saw_activate_skill_tool);
+
+    bool saw_skill_catalog = false;
+    for (const auto& message : requests.front().messages) {
+        if (message.content.find("[Agent Skills]") != std::string::npos
+            && message.content.find("<name>docs</name>") != std::string::npos
+            && message.content.find("activate_skill") != std::string::npos) {
+            saw_skill_catalog = true;
+            break;
+        }
+    }
+    REQUIRE(saw_skill_catalog);
+
+    bool saw_activated_skill_result = false;
+    for (const auto& request : requests) {
+        for (const auto& message : request.messages) {
+            if (message.role == "tool"
+                && message.name == core::tools::names::kActivateSkill
+                && message.content.find("skill_content name=\\\"docs\\\"") != std::string::npos
+                && message.content.find("Official Filo docs workflow.") != std::string::npos
+                && message.content.find("references/STYLE.md") != std::string::npos) {
+                saw_activated_skill_result = true;
+                break;
+            }
+        }
+        if (saw_activated_skill_result) break;
+    }
+    REQUIRE(saw_activated_skill_result);
 }
 
 TEST_CASE("prompter uses stdin when prompt is omitted", "[prompter][stdin]") {

@@ -20,11 +20,16 @@ namespace core::tools {
  *
  * ## Directory layout
  *
- * Two locations are scanned in order.  Because @c ToolManager::register_tool
- * silently overwrites on name collision, project-local skills take precedence:
+ * Compatibility paths are scanned before native Filo paths. Because
+ * @c ToolManager::register_tool silently overwrites on name collision, later
+ * roots take precedence:
  *
- *  1. @c ~/.config/filo/skills/  — global, available in every project
- *  2. @c ./.filo/skills/         — project-local, overrides globals of the same name
+ *  1. @c ~/.claude/skills/
+ *  2. @c ~/.agents/skills/
+ *  3. @c ./.claude/skills/
+ *  4. @c ./.agents/skills/
+ *  5. @c ~/.config/filo/skills/
+ *  6. @c ./.filo/skills/
  *
  * Each immediate subdirectory of a skills root is one skill candidate.
  * A valid Tool-skill candidate contains:
@@ -109,9 +114,13 @@ public:
     /**
      * @brief Returns the ordered list of skill directories to scan.
      *
-     * Order:
-     *  1. @c $HOME/.config/filo/skills/  (global)
-     *  2. @c $PWD/.filo/skills/          (project-local)
+     * Order is compatibility fallback first, then native Filo roots:
+     *  1. @c $HOME/.claude/skills/
+     *  2. @c $HOME/.agents/skills/
+     *  3. @c $PWD/.claude/skills/
+     *  4. @c $PWD/.agents/skills/
+     *  5. @c $HOME/.config/filo/skills/
+     *  6. @c $PWD/.filo/skills/
      *
      * Directories that do not exist are silently skipped by
      * @ref load_from_directory().

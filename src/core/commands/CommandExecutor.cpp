@@ -2510,6 +2510,20 @@ CommandExecutor::CommandExecutor() {
 }
 
 void CommandExecutor::register_command(std::unique_ptr<Command> cmd) {
+    const auto name = cmd->get_name();
+    const auto aliases = cmd->get_aliases();
+    std::erase_if(commands_, [&](const std::unique_ptr<Command>& existing) {
+        if (existing->get_name() == name) return true;
+        const auto existing_aliases = existing->get_aliases();
+        const auto overlaps = [&](const std::string& alias) {
+            return alias == name
+                || std::ranges::find(existing_aliases, alias) != existing_aliases.end();
+        };
+        if (std::ranges::find(aliases, existing->get_name()) != aliases.end()) {
+            return true;
+        }
+        return std::ranges::any_of(aliases, overlaps);
+    });
     commands_.push_back(std::move(cmd));
 }
 

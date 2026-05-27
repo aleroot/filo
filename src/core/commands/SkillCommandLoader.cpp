@@ -39,7 +39,8 @@ int SkillCommandLoader::load_from_directory(const fs::path& root,
 
 int SkillCommandLoader::discover_and_register(CommandExecutor& executor) {
     int total = 0;
-    // Reuse SkillLoader's canonical search-path ordering (global → project-local).
+    // Reuse SkillLoader's canonical search-path ordering: compatibility
+    // fallbacks first, then Filo-native roots.
     for (const auto& root : core::tools::SkillLoader::default_search_paths()) {
         total += load_from_directory(root, executor);
     }
