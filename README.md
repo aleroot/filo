@@ -117,6 +117,8 @@ Daemon transport notes:
 - `--mcp` without a value defaults to `stdio`.
 - `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
 - `--daemon` is still accepted as a deprecated alias for `--mcp tcp`.
+- Set `FILO_MCP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on `/mcp`.
+- For LAN worker deployments, use `--host 0.0.0.0` only with a bearer token and network access controls.
 - The API gateway is off by default to keep daemon startup minimal and local-first.
 - `--api` starts the same HTTP daemon and exposes OpenAI/Anthropic-compatible proxy endpoints:
   - `GET /v1/models`

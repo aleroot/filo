@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -358,6 +359,33 @@ private:
     std::thread thread_;
 };
 
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(std::string name, std::string value)
+        : name_(std::move(name))
+    {
+        if (const char* current = std::getenv(name_.c_str())) {
+            old_value_ = std::string(current);
+        }
+        ::setenv(name_.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value_.has_value()) {
+            ::setenv(name_.c_str(), old_value_->c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    std::string name_;
+    std::optional<std::string> old_value_;
+};
+
 } // namespace
 
 TEST_CASE("Daemon replays duplicate completed requests instead of re-running tools",
@@ -537,6 +565,45 @@ TEST_CASE("Daemon rejects unsupported MCP protocol version",
     REQUIRE(res);
     REQUIRE(res->status == 400);
     REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring("Unsupported MCP-Protocol-Version"));
+}
+
+TEST_CASE("Daemon requires bearer authorization for MCP when configured",
+          "[daemon][reliability][auth]") {
+    ScopedEnvVar bearer_token("FILO_MCP_BEARER_TOKEN", "daemon-test-token");
+
+    const int port = next_test_port();
+    DaemonRunner daemon(port);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    httplib::Headers missing_auth_headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"Origin", "http://localhost:3000"},
+    };
+    auto missing_auth = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"auth-test","version":"1.0"}}})",
+        std::move(missing_auth_headers));
+    REQUIRE(missing_auth);
+    REQUIRE(missing_auth->status == 401);
+    REQUIRE(missing_auth->has_header("WWW-Authenticate"));
+    REQUIRE(missing_auth->get_header_value("Access-Control-Allow-Origin") == "http://localhost:3000");
+    REQUIRE_THAT(missing_auth->body, Catch::Matchers::ContainsSubstring("Unauthorized MCP request"));
+
+    httplib::Headers valid_auth_headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"Authorization", "Bearer daemon-test-token"},
+    };
+    auto authorized = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"auth-test","version":"1.0"}}})",
+        std::move(valid_auth_headers));
+    REQUIRE(authorized);
+    REQUIRE(authorized->status == 200);
+    REQUIRE(authorized->has_header("MCP-Session-Id"));
 }
 
 TEST_CASE("Daemon enforces same-host or loopback origin policy",

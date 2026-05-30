@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <future>
@@ -74,6 +75,39 @@ constexpr std::string_view kJsonRpcInvalidRequestPrefix{
 [[nodiscard]] detail::RequestReplayCache& replay_cache() {
     static detail::RequestReplayCache cache;
     return cache;
+}
+
+[[nodiscard]] std::string configured_mcp_bearer_token() {
+    const char* token = std::getenv("FILO_MCP_BEARER_TOKEN");
+    if (token == nullptr) return {};
+    return std::string(token);
+}
+
+[[nodiscard]] bool constant_time_equal(std::string_view lhs,
+                                       std::string_view rhs) noexcept {
+    if (lhs.size() != rhs.size()) return false;
+
+    unsigned char diff = 0;
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        diff |= static_cast<unsigned char>(lhs[i]) ^ static_cast<unsigned char>(rhs[i]);
+    }
+    return diff == 0;
+}
+
+[[nodiscard]] bool has_valid_mcp_authorization(const httplib::Request& req,
+                                               std::string_view token) {
+    if (token.empty()) return true;
+    if (!req.has_header("Authorization")) return false;
+
+    const std::string authorization = req.get_header_value("Authorization");
+    constexpr std::string_view prefix = "Bearer ";
+    if (!authorization.starts_with(prefix)) return false;
+
+    const std::string_view presented_token{
+        authorization.data() + prefix.size(),
+        authorization.size() - prefix.size(),
+    };
+    return constant_time_equal(presented_token, token);
 }
 
 using core::utils::JsonWriter;
@@ -578,6 +612,19 @@ void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
     return false;
 }
 
+[[nodiscard]] bool enforce_mcp_authorization(const httplib::Request& req,
+                                             httplib::Response& res) {
+    const std::string token = configured_mcp_bearer_token();
+    if (has_valid_mcp_authorization(req, token)) return true;
+
+    res.status = 401;
+    res.set_header("WWW-Authenticate", R"(Bearer realm="filo-mcp")");
+    res.set_content(
+        R"({"jsonrpc":"2.0","error":{"code":-32001,"message":"Unauthorized MCP request"},"id":null})",
+        "application/json");
+    return false;
+}
+
 void handle_daemon_exception(const httplib::Request& /*req*/,
                              httplib::Response& res,
                              std::exception_ptr ep) {
@@ -614,6 +661,7 @@ void handle_mcp_get(const std::string& host,
                     httplib::Response& res) {
     if (!enforce_origin_policy(req, res, host)) return;
     set_cors_headers(req, res);
+    if (!enforce_mcp_authorization(req, res)) return;
     res.status = 405;
     res.set_header("Allow", "POST, GET, OPTIONS, DELETE");
     res.set_content(R"({"error":"Method Not Allowed — use POST /mcp"})",
@@ -625,6 +673,7 @@ void handle_mcp_delete(const std::string& host,
                        httplib::Response& res) {
     if (!enforce_origin_policy(req, res, host)) return;
     set_cors_headers(req, res);
+    if (!enforce_mcp_authorization(req, res)) return;
 
     if (!req.has_header("MCP-Session-Id")) {
         res.status = 400;
@@ -661,6 +710,7 @@ void handle_mcp_post(const std::string& host,
                      httplib::Response& res) {
     if (!enforce_origin_policy(req, res, host)) return;
     set_cors_headers(req, res);
+    if (!enforce_mcp_authorization(req, res)) return;
 
     if (req.body.empty()) {
         res.status = 400;
@@ -1187,6 +1237,12 @@ void run_server(int port,
     core::logging::info("Filo daemon listening on {}:{}.", host, port);
     core::logging::info("Health check : http://{}:{}/ping", host, port);
     if (enable_mcp_http) {
+        if (!is_loopback_host(host) && configured_mcp_bearer_token().empty()) {
+            core::logging::warn(
+                "Filo MCP is listening on non-loopback host '{}' without FILO_MCP_BEARER_TOKEN. "
+                "Remote clients can access shell and filesystem tools; set a bearer token or restrict network access.",
+                host);
+        }
         core::logging::info("MCP endpoint : http://{}:{}/mcp", host, port);
     }
     if (enable_api_gateway) {
