@@ -166,6 +166,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/FileSystemUtils.cpp
     src/core/hooks/HookManager.cpp
     src/core/workspace/Workspace.cpp
+    src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
     src/core/context/SessionContext.cpp
     src/core/context/SteeringLoader.cpp
@@ -345,6 +346,7 @@ add_executable(filo_tests
     tests/test_history.cpp
     tests/test_config_manager.cpp
     tests/test_context_mentions.cpp
+    tests/test_context_builder.cpp
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp

@@ -3,15 +3,12 @@
 #include "ToolOutputHistory.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
-#include "../context/SteeringLoader.hpp"
+#include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../session/SessionStats.hpp"
-#include "../scm/ScmFactory.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
-#include "../tools/SkillRegistry.hpp"
 #include "../utils/JsonWriter.hpp"
-#include "../utils/FileSystemUtils.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include <iostream>
@@ -51,12 +48,6 @@ namespace {
         return 0.0;
     }
     return std::clamp(value, 0.0, 1.0);
-}
-
-[[nodiscard]] std::filesystem::path resolve_agent_project_root(
-    const core::context::SessionContext& session_context)
-{
-    return session_context.workspace_view().primary();
 }
 
 struct HookFieldPayload {
@@ -236,80 +227,9 @@ int Agent::sanitize_max_steps_per_turn(int value) noexcept {
 }
 
 std::string Agent::build_stable_prompt_prefix() const {
-    std::string prompt =
-        "You are Filo, an advanced AI coding assistant running in " + current_mode_ + " mode.\n\n";
-    if (current_mode_ == "PLAN" || current_mode_ == "RESEARCH") {
-        prompt += "Analyse, research, and plan. Do NOT modify files (avoid apply_patch / write_file). "
-                  "Use read and search tools to understand the codebase, then propose a plan.";
-    } else if (current_mode_ == "EXECUTE") {
-        prompt += "Execute instructions autonomously. Use tools to modify files and run commands "
-                  "immediately without asking permission.";
-    } else { // BUILD (default)
-        prompt += "Build software methodically. Search, read, edit, and run commands. "
-                  "Verify your changes where possible. Ask clarifying questions only when truly needed.";
-    }
-
-    prompt += "\n\nYou can delegate complex background work via the `task` tool.";
-    prompt += " Use the `subagent_type` values listed in the task tool schema/description.";
-    prompt += " Default profiles are `general` (broad multi-step work) and";
-    prompt += " `explore` (fast read-only codebase search).";
-    prompt += " If the user asks with `@general` or `@explore`, map that request to a `task` call.";
-
-    if (current_mode_ == "DEBUG") {
-        prompt += "\nRun a tight reproduce -> inspect -> fix -> verify loop. "
-                  "Collect concrete diagnostics before editing, prefer the smallest fix that resolves the root cause, "
-                  "and finish by rerunning the failing command or test.";
-    }
-
-    // ─── Project Context Injection ──────────────────────────────────────────
-    try {
-        const auto project_root = resolve_agent_project_root(session_context_);
-        if (project_root.empty()) {
-            return prompt;
-        }
-
-        if (const auto steering = core::context::load_project_steering_block(project_root);
-            !steering.empty()) {
-            prompt += steering;
-        }
-
-        if (const auto skill_catalog = core::tools::SkillRegistry::build_catalog_prompt(project_root);
-            !skill_catalog.empty()) {
-            prompt += skill_catalog;
-        }
-
-        // Detect SCM (Git, etc.) or fallback to NoOp
-        auto scm = core::scm::ScmFactory::create(project_root);
-        
-        std::string context_section = "\n\n[Project Context]\n";
-        bool has_context = false;
-
-        // 1. SCM Status
-        std::string status = scm->get_status_summary();
-        if (!status.empty()) {
-            context_section += "Status:\n" + status + "\n";
-            has_context = true;
-        }
-
-        // 2. File Tree
-        // Limit depth to 2 levels to avoid token bloat, but give high-level map
-        std::string tree = core::utils::get_file_tree(project_root, *scm, 2);
-        if (!tree.empty()) {
-            context_section += "Structure:\n" + tree + "\n";
-            has_context = true;
-        }
-        
-        if (has_context) {
-            prompt += context_section;
-        }
-
-    } catch (const std::exception& e) {
-        // Fallback: ignore context injection errors, don't crash agent init
-        // std::cerr << "Context injection failed: " << e.what() << "\n";
-    }
-    // ────────────────────────────────────────────────────────────────────────
-
-    return prompt;
+    return core::context::ContextBuilder(session_context_)
+        .with_mode(current_mode_)
+        .build();
 }
 
 std::string Agent::build_dynamic_prompt_suffix() const {
