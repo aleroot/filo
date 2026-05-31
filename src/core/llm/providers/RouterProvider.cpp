@@ -1,5 +1,5 @@
 #include "RouterProvider.hpp"
-#include "../../budget/BudgetTracker.hpp"
+#include "../../budget/TokenLedger.hpp"
 #include "../../logging/Logger.hpp"
 
 #include <algorithm>
@@ -88,7 +88,8 @@ void backoff_sleep(int attempt) {
 
 [[nodiscard]] std::optional<std::string> evaluate_guardrails(
     const core::llm::routing::RouterGuardrails& guardrails,
-    const core::llm::LLMProvider& provider) {
+    const core::llm::LLMProvider& provider,
+    std::string_view session_id) {
     if (!guardrails.enabled()) return std::nullopt;
 
     const auto caps = provider.capabilities();
@@ -97,7 +98,12 @@ void backoff_sleep(int attempt) {
     }
 
     if (guardrails.max_session_cost_usd > 0.0 && provider.should_estimate_cost()) {
-        const double spent = core::budget::BudgetTracker::get_instance().session_cost_usd();
+        const double spent = core::budget::TokenLedger::get_instance()
+                                 .snapshot(core::budget::TokenLedgerFilter{
+                                     .session_id = std::string(session_id),
+                                     .kind = core::budget::TokenLedgerEventKind::Actual,
+                                 })
+                                 .cost_usd();
         if (spent >= guardrails.max_session_cost_usd) {
             return std::format("session spend ${:.4f} hit cap ${:.4f}",
                                spent,
@@ -237,7 +243,10 @@ void RouterProvider::stream_response(
         decision.model = delegated_request.model;
 
         if (guardrails.has_value()) {
-            if (auto block_reason = evaluate_guardrails(*guardrails, *target_provider);
+            if (auto block_reason = evaluate_guardrails(
+                    *guardrails,
+                    *target_provider,
+                    request.session_id);
                 block_reason.has_value()) {
                 const std::string blocked_summary = std::format("{}: {}",
                                                                 decision.provider,

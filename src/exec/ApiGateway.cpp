@@ -5,6 +5,7 @@
 #include "openai/OpenAIChatCompletionStreamEncoder.hpp"
 
 #include "../core/config/ConfigManager.hpp"
+#include "../core/budget/TokenLedger.hpp"
 #include "../core/llm/HttpLLMProvider.hpp"
 #include "../core/llm/ModelCatalogDiscovery.hpp"
 #include "../core/llm/Models.hpp"
@@ -18,12 +19,14 @@
 
 #include <simdjson.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -185,6 +188,72 @@ struct CompletionResult {
     static std::atomic<uint64_t> counter{1};
     const uint64_t sequence = counter.fetch_add(1, std::memory_order_relaxed);
     return std::format("{}-{:x}", prefix, sequence);
+}
+
+[[nodiscard]] std::string sanitize_gateway_scope_component(std::string_view value) {
+    std::string out;
+    out.reserve(std::min<std::size_t>(value.size(), 128));
+    for (const unsigned char ch : value) {
+        if (out.size() >= 128) break;
+        if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == ':') {
+            out.push_back(static_cast<char>(ch));
+        } else if (!std::iscntrl(ch)) {
+            out.push_back('_');
+        }
+    }
+    return trim_copy(out);
+}
+
+[[nodiscard]] std::string hashed_gateway_scope(std::string_view prefix,
+                                               std::string_view value) {
+    return std::format(
+        "gateway:{}:{:016x}",
+        prefix,
+        static_cast<unsigned long long>(std::hash<std::string_view>{}(value)));
+}
+
+[[nodiscard]] std::string gateway_session_id_for_request(const httplib::Request& request) {
+    std::string explicit_session;
+    for (const std::string_view header_name : {
+             "X-Filo-Session-Id",
+             "X-Gateway-Session-Id",
+             "OpenAI-Session-Id",
+             "MCP-Session-Id",
+         }) {
+        const std::string header_value =
+            trim_copy(request.get_header_value(std::string(header_name)));
+        if (header_value.empty()) continue;
+        const std::string sanitized = sanitize_gateway_scope_component(header_value);
+        if (!sanitized.empty()) {
+            explicit_session = sanitized;
+            break;
+        }
+    }
+
+    const std::string authorization = trim_copy(request.get_header_value("Authorization"));
+    if (!authorization.empty()) {
+        std::string auth_scope = hashed_gateway_scope("auth", authorization);
+        if (!explicit_session.empty()) {
+            auth_scope += ":session:";
+            auth_scope += explicit_session;
+        }
+        return auth_scope;
+    }
+
+    if (!explicit_session.empty()) {
+        return "gateway:session:" + explicit_session;
+    }
+
+    if (!request.remote_addr.empty()) {
+        return hashed_gateway_scope("remote", request.remote_addr);
+    }
+
+    return "gateway:anonymous";
+}
+
+void assign_gateway_session_scope(const httplib::Request& http_request,
+                                  GatewayRequest& gateway_request) {
+    gateway_request.request.session_id = gateway_session_id_for_request(http_request);
 }
 
 void append_message_text(core::llm::Message& message, std::string_view text) {
@@ -1021,7 +1090,8 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
 
 [[nodiscard]] CompletionResult run_completion_sync(
     const GatewaySelection& selection,
-    const core::llm::ChatRequest& request) {
+    const core::llm::ChatRequest& request,
+    std::string_view response_id) {
     struct SyncState {
         std::mutex mutex;
         std::condition_variable cv;
@@ -1087,6 +1157,21 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
     result.model = selection.provider->get_last_model();
     if (result.model.empty()) {
         result.model = request.model;
+    }
+    if (result.usage.has_data()) {
+        const bool should_estimate_cost = selection.provider->should_estimate_cost();
+        core::budget::TokenLedger::get_instance().record({
+            .kind = core::budget::TokenLedgerEventKind::Actual,
+            .source = core::budget::TokenLedgerSource::Gateway,
+            .session_id = request.session_id,
+            .request_id = std::string(response_id),
+            .actor = "api_gateway",
+            .provider = selection.provider_name,
+            .model = result.model,
+            .usage = result.usage,
+            .should_estimate_cost = should_estimate_cost,
+            .billable = should_estimate_cost,
+        });
     }
     return result;
 }
@@ -1399,6 +1484,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
     const std::string model = choose_stream_model_label(selection, gateway_request);
     const bool include_usage = gateway_request.stream_include_usage;
     const auto provider = selection.provider;
+    const std::string provider_name = selection.provider_name;
     const auto request = gateway_request.request;
 
     res.status = 200;
@@ -1413,6 +1499,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
          response_id,
          created,
          model,
+         provider_name,
          include_usage,
          started = false](std::size_t, httplib::DataSink& sink) mutable -> bool {
             if (started) {
@@ -1443,6 +1530,8 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                     request,
                     [state,
                      provider,
+                     provider_name,
+                     gateway_session_id = request.session_id,
                      response_id,
                      created,
                      model,
@@ -1485,6 +1574,26 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                         }
 
                         if (chunk.is_final) {
+                            const auto usage = provider->get_last_usage();
+                            std::string actual_model = provider->get_last_model();
+                            if (actual_model.empty()) {
+                                actual_model = model;
+                            }
+                            if (usage.has_data()) {
+                                const bool should_estimate_cost = provider->should_estimate_cost();
+                                core::budget::TokenLedger::get_instance().record({
+                                    .kind = core::budget::TokenLedgerEventKind::Actual,
+                                    .source = core::budget::TokenLedgerSource::Gateway,
+                                    .session_id = gateway_session_id,
+                                    .request_id = response_id,
+                                    .actor = "api_gateway",
+                                    .provider = provider_name,
+                                    .model = actual_model,
+                                    .usage = usage,
+                                    .should_estimate_cost = should_estimate_cost,
+                                    .billable = should_estimate_cost,
+                                });
+                            }
                             const std::string_view finish_reason =
                                 state->saw_tool_calls.load(std::memory_order_relaxed)
                                     ? "tool_calls"
@@ -1497,7 +1606,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                                 state->queue.push_data(
                                     exec::gateway::openai::usage_chunk(
                                         chunk_context,
-                                        provider->get_last_usage()));
+                                        usage));
                             }
                             state->queue.push_data("[DONE]");
                             state->queue.close();
@@ -1579,6 +1688,7 @@ struct ApiGateway::Impl {
             res.set_content(build_openai_error_body(parse_error), "application/json");
             return;
         }
+        assign_gateway_session_scope(req, gateway_request);
 
         std::string selection_error;
         auto selection = resolve_gateway_selection(runtime, gateway_request, selection_error);
@@ -1599,7 +1709,9 @@ struct ApiGateway::Impl {
             return;
         }
 
-        CompletionResult completion = run_completion_sync(*selection, gateway_request.request);
+        const std::string response_id = make_gateway_id("chatcmpl");
+        CompletionResult completion =
+            run_completion_sync(*selection, gateway_request.request, response_id);
         if (completion.has_error) {
             const std::string message = trim_copy(
                 completion.error_message.empty()
@@ -1616,7 +1728,7 @@ struct ApiGateway::Impl {
 
         res.status = 200;
         res.set_content(
-            build_openai_chat_completion_body(completion, make_gateway_id("chatcmpl")),
+            build_openai_chat_completion_body(completion, response_id),
             "application/json");
     }
 
@@ -1628,6 +1740,7 @@ struct ApiGateway::Impl {
             res.set_content(build_anthropic_error_body(parse_error), "application/json");
             return;
         }
+        assign_gateway_session_scope(req, gateway_request);
 
         if (gateway_request.stream) {
             res.status = 400;
@@ -1652,7 +1765,9 @@ struct ApiGateway::Impl {
             gateway_request.request.model = selection->model_override;
         }
 
-        CompletionResult completion = run_completion_sync(*selection, gateway_request.request);
+        const std::string response_id = make_gateway_id("msg");
+        CompletionResult completion =
+            run_completion_sync(*selection, gateway_request.request, response_id);
         if (completion.has_error) {
             const std::string message = trim_copy(
                 completion.error_message.empty()
@@ -1669,7 +1784,7 @@ struct ApiGateway::Impl {
 
         res.status = 200;
         res.set_content(
-            build_anthropic_message_body(completion, make_gateway_id("msg")),
+            build_anthropic_message_body(completion, response_id),
             "application/json");
     }
 

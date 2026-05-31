@@ -123,6 +123,7 @@ set(FILO_CORE_SOURCES
     src/tui/Text.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
+    src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
     src/core/llm/providers/RouterProvider.cpp
     src/core/llm/HttpLLMProvider.cpp
@@ -376,6 +377,7 @@ add_executable(filo_tests
     tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp
     tests/test_budget_tracker.cpp
+    tests/test_token_ledger.cpp
     tests/test_agent_permissions.cpp
     tests/test_safety_policy.cpp
     tests/test_subagent_orchestrator.cpp

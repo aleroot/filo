@@ -1045,6 +1045,10 @@ RunResult run(RunOptions opts) {
     }
 
     compute_session_path();
+    core::budget::BudgetTracker::get_instance().set_session_id(session_id);
+    core::budget::BudgetTracker::get_instance().reset_session();
+    core::session::SessionStats::get_instance().reset();
+    agent->set_session_id(session_id);
 
     // ── Helper lambdas ───────────────────────────────────────────────────────
 
@@ -1081,6 +1085,8 @@ RunResult run(RunOptions opts) {
         // Start a fresh session after /clear.
         session_id         = core::session::SessionStore::generate_id();
         session_created_at = core::session::SessionStore::now_iso8601();
+        core::budget::BudgetTracker::get_instance().set_session_id(session_id);
+        agent->set_session_id(session_id);
         compute_session_path();
     };
 
@@ -1541,6 +1547,8 @@ RunResult run(RunOptions opts) {
             session_created_at = new_created_at;
             session_file_path = session_store->compute_path(data).string();
         }
+        core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
+        agent->set_session_id(new_session_id);
         screen.PostEvent(Event::Custom);
         return std::format("Forked session {} into {}.", old_session_id, new_session_id);
     };
@@ -1603,6 +1611,8 @@ RunResult run(RunOptions opts) {
             const std::string old_session_id = archived.session_id;
             const std::string new_session_id = core::session::SessionStore::generate_id();
             const std::string new_created_at = core::session::SessionStore::now_iso8601();
+            core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
+            agent->set_session_id(new_session_id);
 
             {
                 std::lock_guard lock(ui_mutex);

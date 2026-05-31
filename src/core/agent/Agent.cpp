@@ -1,7 +1,7 @@
 #include "Agent.hpp"
 #include "PermissionGate.hpp"
 #include "ToolOutputHistory.hpp"
-#include "../budget/BudgetTracker.hpp"
+#include "../budget/TokenLedger.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
@@ -214,6 +214,19 @@ void Agent::set_mode(const std::string& mode) {
     }
 }
 
+void Agent::set_session_id(std::string session_id) {
+    std::lock_guard lock(history_mutex_);
+    if (session_context_.session_id != session_id) {
+        session_context_.session_id = std::move(session_id);
+        mark_stable_prompt_prefix_dirty();
+    }
+}
+
+core::context::SessionContext Agent::session_context_snapshot() const {
+    std::lock_guard lock(history_mutex_);
+    return session_context_;
+}
+
 void Agent::reload_subagent_profiles(const core::config::AppConfig& app_config) {
     std::lock_guard lock(history_mutex_);
     orchestrator_.reload_profiles(app_config);
@@ -402,6 +415,7 @@ void Agent::send_message(core::llm::Message user_message,
     }
     const core::llm::Message hook_message = user_message;
     std::string mode_snapshot;
+    const auto session_context = session_context_snapshot();
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
@@ -413,7 +427,7 @@ void Agent::send_message(core::llm::Message user_message,
     core::hooks::dispatch(
         core::hooks::HookEvent::UserPromptSubmit,
         build_user_prompt_hook_payload(hook_message, mode_snapshot),
-        session_context_);
+        session_context);
     step(text_callback, tool_callback, done_callback, std::move(turn_callbacks), std::move(turn_state));
 }
 
@@ -449,6 +463,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     ++turn_state->steps_taken;
 
     auto self = shared_from_this();
+    const auto step_session_context = session_context_snapshot();
     core::llm::ChatRequest request;
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string mode_snapshot;
@@ -459,6 +474,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? active_model_
             : turn_callbacks.model_override;
         request.effort = effort_level_;
+        request.session_id = step_session_context.session_id;
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
     }
@@ -500,7 +516,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
-         already_stopped, turn_state](
+         already_stopped, turn_state, step_session_context](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -554,7 +570,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // Record API call outcome (is_error is true for HTTP 4XX/5XX or connection errors)
         core::session::SessionStats::get_instance().record_api_call(!chunk.is_error);
 
-        // Record token usage in the budget tracker and session stats.
+        // Record token usage in the ledger and session stats.
         {
             auto usage = provider->get_last_usage();
             std::string model = provider->get_last_model();
@@ -563,7 +579,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 std::lock_guard lock(self->history_mutex_);
                 model = self->active_model_;
             }
-            core::budget::BudgetTracker::get_instance().record(usage, model, should_estimate_cost);
+            const std::string ledger_actor = turn_callbacks.ledger_actor.empty()
+                ? std::string("agent")
+                : turn_callbacks.ledger_actor;
+            if (usage.has_data()) {
+                core::budget::TokenLedger::get_instance().record({
+                    .kind = core::budget::TokenLedgerEventKind::Actual,
+                    .source = ledger_actor.starts_with("subagent:")
+                        ? core::budget::TokenLedgerSource::Subagent
+                        : core::budget::TokenLedgerSource::ModelCall,
+                    .session_id = step_session_context.session_id,
+                    .actor = ledger_actor,
+                    .model = model,
+                    .usage = usage,
+                    .should_estimate_cost = should_estimate_cost,
+                    .billable = should_estimate_cost,
+                });
+            }
             core::session::SessionStats::get_instance().record_turn(
                 model, usage, should_estimate_cost);
 
@@ -643,7 +675,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // ── Execute tool calls ───────────────────────────────────────────
         std::thread([self, tool_calls_accum, tool_cost_attribution, text_callback,
-                     tool_callback, done_callback, turn_callbacks, turn_state]() {
+                     tool_callback, done_callback, turn_callbacks, turn_state,
+                     step_session_context]() {
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
@@ -723,6 +756,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
                     futures.push_back(std::async(std::launch::async,
                     [self, tc, &tool_callback,
+                     session_context = step_session_context,
                      provider_for_task,
                      active_model_for_task,
                      parent_mode_for_task]() -> core::llm::Message {
@@ -730,13 +764,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         core::hooks::dispatch(
                             core::hooks::HookEvent::PreToolUse,
                             build_tool_hook_payload(tc),
-                            self->session_context());
+                            session_context);
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                             SubagentOrchestrator::RunContext run_context{
                                 .active_model = active_model_for_task,
                                 .parent_mode = parent_mode_for_task,
-                                .session_context = self->session_context(),
+                                .session_context = session_context,
                                 .permission_check = [self](const std::string& tool_name,
                                                            const std::string& args) {
                                     return self->check_permission(tool_name, args);
@@ -751,7 +785,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,
                                 tc.function.arguments,
-                                self->session_context());
+                                session_context);
                         }
                         result = tool_output_history::clamp_for_history(
                             tc.function.name,
@@ -761,7 +795,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 .context_compression,
                             core::agent::tool_output_history::Context{
                                 .tool_arguments = tc.function.arguments,
-                                .session_id = self->session_context().session_id,
+                                .session_id = session_context.session_id,
                             });
                         core::llm::Message message{
                             .role         = "tool",
@@ -773,7 +807,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         core::hooks::dispatch(
                             core::hooks::HookEvent::PostToolUse,
                             build_tool_hook_payload(tc, &message),
-                            self->session_context());
+                            session_context);
                         return message;
                     }));
             }
@@ -786,18 +820,41 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 const bool tool_ok = !is_tool_error(msg.content);
                 if (!tool_ok) ++failure_count;
                 const auto& tool_call = (*tool_calls_accum)[i];
+                const int32_t argument_tokens =
+                    core::session::SessionStats::estimate_payload_tokens(
+                        tool_call.function.arguments);
+                const int32_t result_tokens =
+                    core::session::SessionStats::estimate_payload_tokens(msg.content);
                 core::session::SessionStats::get_instance().record_tool_call(
                     tool_call.function.name,
                     tool_ok,
-                    core::session::SessionStats::estimate_payload_tokens(
-                        tool_call.function.arguments),
-                    core::session::SessionStats::estimate_payload_tokens(msg.content),
+                    argument_tokens,
+                    result_tokens,
                     i < tool_cost_attribution->size()
                         ? (*tool_cost_attribution)[i].first
                         : 0,
                     i < tool_cost_attribution->size()
                         ? (*tool_cost_attribution)[i].second
                         : 0);
+                const std::string ledger_actor = turn_callbacks.ledger_actor.empty()
+                    ? std::string("agent")
+                    : turn_callbacks.ledger_actor;
+                core::budget::TokenLedger::get_instance().record({
+                    .kind = core::budget::TokenLedgerEventKind::Estimate,
+                    .source = core::budget::TokenLedgerSource::ToolPayload,
+                    .session_id = step_session_context.session_id,
+                    .actor = ledger_actor,
+                    .tool_name = tool_call.function.name,
+                    .note = tool_ok ? std::string{} : std::string("tool_error"),
+                    .usage = core::llm::TokenUsage{
+                        .prompt_tokens = argument_tokens,
+                        .completion_tokens = result_tokens,
+                        .total_tokens = argument_tokens + result_tokens,
+                    },
+                    .should_estimate_cost = false,
+                    .billable = false,
+                    .cost_micro_usd = 0,
+                });
                 {
                     std::lock_guard lock(self->history_mutex_);
                     self->history_.push_back(msg);

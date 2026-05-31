@@ -3,6 +3,7 @@
 #include <httplib.h>
 
 #include "core/config/ConfigManager.hpp"
+#include "core/budget/TokenLedger.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "exec/ApiGateway.hpp"
@@ -187,6 +188,22 @@ extract_negotiated_protocol_version(std::string_view response_body) {
     return client.Post(std::string(path), std::string(payload), "application/json");
 }
 
+[[nodiscard]] httplib::Result post_json_request(int port,
+                                                std::string_view path,
+                                                httplib::Headers headers,
+                                                std::string_view payload) {
+    httplib::Client client("127.0.0.1", port);
+    client.set_connection_timeout(std::chrono::seconds{1});
+    client.set_read_timeout(std::chrono::seconds{10});
+    client.set_write_timeout(std::chrono::seconds{10});
+    headers.emplace("Content-Type", "application/json");
+    return client.Post(
+        std::string(path),
+        headers,
+        std::string(payload),
+        "application/json");
+}
+
 [[nodiscard]] std::unordered_set<std::string> extract_model_ids(std::string_view response_body) {
     std::unordered_set<std::string> ids;
     simdjson::dom::parser parser;
@@ -303,6 +320,60 @@ private:
     bool emit_tool_call_ = false;
     mutable std::mutex mutex_;
     std::string last_model_ = "stream-model";
+};
+
+class GatewayRoutingTestProvider final : public core::llm::LLMProvider {
+public:
+    GatewayRoutingTestProvider(std::string content,
+                               std::string model,
+                               bool should_estimate_cost,
+                               bool is_local)
+        : content_(std::move(content)),
+          model_(std::move(model)),
+          should_estimate_cost_(should_estimate_cost),
+          is_local_(is_local) {}
+
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        ++call_count_;
+        {
+            std::lock_guard lock(mutex_);
+            last_model_ = request.model.empty() ? model_ : request.model;
+        }
+        callback(core::llm::StreamChunk::make_content(content_));
+        set_last_usage(3, 5);
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] std::string get_last_model() const override {
+        std::lock_guard lock(mutex_);
+        return last_model_;
+    }
+
+    [[nodiscard]] bool should_estimate_cost() const override {
+        return should_estimate_cost_;
+    }
+
+    [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
+        return core::llm::ProviderCapabilities{
+            .supports_tool_calls = true,
+            .is_local = is_local_,
+        };
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return call_count_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::string content_;
+    std::string model_;
+    bool should_estimate_cost_;
+    bool is_local_;
+    mutable std::mutex mutex_;
+    std::string last_model_;
+    std::atomic<int> call_count_{0};
 };
 
 class DaemonRunner {
@@ -1052,6 +1123,128 @@ TEST_CASE("API gateway streams OpenAI-compatible tool call chunks",
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("name":"lookup","arguments":"{\"query\":\"filo\"}")"));
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("finish_reason":"tool_calls")"));
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring("data: [DONE]\n\n"));
+}
+
+TEST_CASE("API gateway scopes router spend guardrails by gateway session",
+          "[daemon][api_gateway][guardrails]") {
+    auto& ledger = core::budget::TokenLedger::get_instance();
+    ledger.reset();
+
+    const std::string suffix =
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::string remote_name = "gateway-remote-" + suffix;
+    const std::string local_name = "gateway-local-" + suffix;
+
+    auto remote = std::make_shared<GatewayRoutingTestProvider>(
+        "remote-ok",
+        "gpt-4o",
+        true,
+        false);
+    auto local = std::make_shared<GatewayRoutingTestProvider>(
+        "local-ok",
+        "local-model",
+        false,
+        true);
+
+    core::llm::ProviderManager::get_instance().register_provider(remote_name, remote);
+    core::llm::ProviderManager::get_instance().register_provider(local_name, local);
+
+    core::config::AppConfig config;
+    config.default_provider = remote_name;
+    config.default_model_selection = "router";
+    config.providers[remote_name].model = "gpt-4o";
+    config.providers[local_name].model = "local-model";
+    config.router.enabled = true;
+    config.router.default_policy = "gateway-test";
+    config.router.guardrails = core::llm::routing::RouterGuardrails{
+        .max_session_cost_usd = 0.00001,
+    };
+    config.router.policies.emplace(
+        "gateway-test",
+        core::llm::routing::PolicyDefinition{
+            .name = "gateway-test",
+            .strategy = core::llm::routing::Strategy::Fallback,
+            .defaults = {
+                core::llm::routing::RouteCandidate{
+                    .provider = remote_name,
+                    .model = "gpt-4o",
+                },
+                core::llm::routing::RouteCandidate{
+                    .provider = local_name,
+                    .model = "local-model",
+                },
+            },
+        });
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.providers.insert({remote_name, false});
+    provider_catalog.providers.insert({local_name, true});
+    provider_catalog.provider_default_models[remote_name] = "gpt-4o";
+    provider_catalog.provider_default_models[local_name] = "local-model";
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        ledger.reset();
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    const std::string payload =
+        R"({"model":"router","messages":[{"role":"user","content":"hi"}]})";
+    auto first = post_json_request(
+        port,
+        "/v1/chat/completions",
+        httplib::Headers{{"X-Filo-Session-Id", "client-a"}},
+        payload);
+    REQUIRE(first);
+    REQUIRE(first->status == 200);
+    REQUIRE_THAT(first->body, Catch::Matchers::ContainsSubstring("remote-ok"));
+
+    auto same_session = post_json_request(
+        port,
+        "/v1/chat/completions",
+        httplib::Headers{{"X-Filo-Session-Id", "client-a"}},
+        payload);
+    REQUIRE(same_session);
+    REQUIRE(same_session->status == 200);
+    REQUIRE_THAT(same_session->body, Catch::Matchers::ContainsSubstring("local-ok"));
+
+    auto other_session = post_json_request(
+        port,
+        "/v1/chat/completions",
+        httplib::Headers{{"X-Filo-Session-Id", "client-b"}},
+        payload);
+    REQUIRE(other_session);
+    REQUIRE(other_session->status == 200);
+    REQUIRE_THAT(other_session->body, Catch::Matchers::ContainsSubstring("remote-ok"));
+
+    CHECK(remote->call_count() == 2);
+    CHECK(local->call_count() == 1);
+
+    const auto client_a = ledger.snapshot({
+        .session_id = "gateway:session:client-a",
+        .kind = core::budget::TokenLedgerEventKind::Actual,
+    });
+    CHECK(client_a.event_count == 2);
+    CHECK(client_a.cost_usd() > 0.0);
+
+    const auto client_b = ledger.snapshot({
+        .session_id = "gateway:session:client-b",
+        .kind = core::budget::TokenLedgerEventKind::Actual,
+    });
+    CHECK(client_b.event_count == 1);
+    CHECK(client_b.cost_usd() > 0.0);
+
+    ledger.reset();
 }
 
 TEST_CASE("API gateway validates OpenAI-compatible payloads locally",

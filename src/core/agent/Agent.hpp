@@ -38,6 +38,7 @@ public:
         std::shared_ptr<core::llm::LLMProvider> provider_override = {};
         std::string model_override;
         std::vector<std::string> allowed_tools;
+        std::string ledger_actor = "agent";
         bool allow_efficiency_rotation = true;
         // Rotate only when current context usage reaches this fraction [0.0, 1.0].
         double min_context_utilization_for_rotation = 0.0;
@@ -61,6 +62,7 @@ public:
     void clear_stop_request();
 
     void set_mode(const std::string& mode);
+    void set_session_id(std::string session_id);
 
     // Set the permission profile (Interactive, Standard, Autonomous).
     void set_permission_profile(PermissionProfile profile) {
@@ -192,9 +194,7 @@ private:
     void run_efficiency_rotation_if_needed(double min_context_utilization_for_rotation);
 
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
-    [[nodiscard]] const core::context::SessionContext& session_context() const noexcept {
-        return session_context_;
-    }
+    [[nodiscard]] core::context::SessionContext session_context_snapshot() const;
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
     core::tools::ToolManager& skill_manager_;

@@ -742,7 +742,9 @@ RunDiagnostics run_for_test(const RunOptions& options,
             });
     }
 
-    core::budget::BudgetTracker::get_instance().reset_session();
+    auto& budget_tracker = core::budget::BudgetTracker::get_instance();
+    budget_tracker.set_session_id({});
+    budget_tracker.reset_session();
     core::session::SessionStats::get_instance().reset();
 
     const auto session_dir = session_dir_override.value_or(
@@ -789,6 +791,9 @@ RunDiagnostics run_for_test(const RunOptions& options,
                 resumed_session->mode);
         }
     }
+
+    budget_tracker.set_session_id(session_id);
+    agent->set_session_id(session_id);
 
     // Keep one stable external session id for the entire prompter run even if
     // the internal persisted session rotates between tool-loop steps.
@@ -839,6 +844,8 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
             session_id = core::session::SessionStore::generate_id();
             created_at = core::session::SessionStore::now_iso8601();
+            core::budget::BudgetTracker::get_instance().set_session_id(session_id);
+            agent->set_session_id(session_id);
         });
 
     std::mutex emit_mutex;

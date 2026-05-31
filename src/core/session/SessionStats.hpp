@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/llm/Models.hpp"
-#include "core/budget/BudgetTracker.hpp"
+#include "core/budget/TokenAccounting.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -47,7 +47,7 @@ struct ToolCallStats {
 
 // ---------------------------------------------------------------------------
 // SessionStats — rich, session-wide metrics singleton.
-// Augments BudgetTracker with per-model breakdowns and turn/tool counters.
+// Tracks per-model breakdowns and turn/tool counters.
 // All public methods are thread-safe.
 // ---------------------------------------------------------------------------
 class SessionStats {

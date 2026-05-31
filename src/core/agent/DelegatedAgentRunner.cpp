@@ -94,6 +94,9 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
 
     auto run_state = std::make_shared<RunState>();
     const std::string delegated_prompt = build_delegated_prompt(request);
+    std::string ledger_actor = request.worker_name.empty()
+        ? std::string("subagent")
+        : std::string("subagent:") + request.worker_name;
 
     std::thread turn_thread(
         [agent,
@@ -101,7 +104,8 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          delegated_prompt,
          provider = request.provider,
          model = request.model,
-         allowed_tools = std::move(request.allowed_tools)]() mutable {
+         allowed_tools = std::move(request.allowed_tools),
+         ledger_actor = std::move(ledger_actor)]() mutable {
             agent->send_message(
                 delegated_prompt,
                 [run_state](const std::string& chunk) {
@@ -128,6 +132,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                     .provider_override = std::move(provider),
                     .model_override = std::move(model),
                     .allowed_tools = std::move(allowed_tools),
+                    .ledger_actor = std::move(ledger_actor),
                     .allow_efficiency_rotation = false,
                 });
         });
