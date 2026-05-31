@@ -3,7 +3,6 @@
 #include "TokenAccounting.hpp"
 
 #include <algorithm>
-#include <mutex>
 #include <ranges>
 #include <unordered_map>
 #include <utility>
@@ -11,17 +10,6 @@
 namespace core::budget {
 
 namespace {
-
-struct LedgerState {
-    mutable std::mutex mutex;
-    uint64_t next_sequence = 1;
-    std::vector<TokenLedgerEvent> events;
-};
-
-LedgerState& state() {
-    static LedgerState s;
-    return s;
-}
 
 [[nodiscard]] bool matches_filter(const TokenLedgerEvent& event,
                                   const TokenLedgerFilter& filter) {
@@ -107,11 +95,6 @@ std::string_view to_string(TokenLedgerSource source) noexcept {
     return "unknown";
 }
 
-TokenLedger& TokenLedger::get_instance() noexcept {
-    static TokenLedger ledger;
-    return ledger;
-}
-
 int64_t estimate_cost_micro_usd(const core::llm::TokenUsage& usage,
                                 std::string_view model,
                                 bool should_estimate_cost) noexcept {
@@ -148,28 +131,25 @@ uint64_t TokenLedger::record(TokenLedgerRecordOptions options) {
 
 uint64_t TokenLedger::record_event(TokenLedgerEvent event) {
     normalize_event(event);
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    event.sequence = s.next_sequence++;
+    std::lock_guard lock(mutex_);
+    event.sequence = next_sequence_++;
     const uint64_t sequence = event.sequence;
-    s.events.push_back(std::move(event));
+    events_.push_back(std::move(event));
     return sequence;
 }
 
 void TokenLedger::reset() noexcept {
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    s.events.clear();
-    s.next_sequence = 1;
+    std::lock_guard lock(mutex_);
+    events_.clear();
+    next_sequence_ = 1;
 }
 
 void TokenLedger::reset_session(std::string_view session_id) {
     if (session_id.empty()) {
         return;
     }
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    std::erase_if(s.events, [&](const TokenLedgerEvent& event) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(events_, [&](const TokenLedgerEvent& event) {
         return event.session_id == session_id;
     });
 }
@@ -180,9 +160,8 @@ TokenLedgerSnapshot TokenLedger::snapshot(const TokenLedgerFilter& filter) const
     std::unordered_map<std::string, TokenLedgerBucketSnapshot> by_model;
     std::unordered_map<std::string, TokenLedgerBucketSnapshot> by_actor;
 
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    for (const auto& event : s.events) {
+    std::lock_guard lock(mutex_);
+    for (const auto& event : events_) {
         if (!matches_filter(event, filter)) continue;
 
         ++snapshot.event_count;
@@ -210,9 +189,8 @@ std::vector<TokenLedgerEvent> TokenLedger::recent_events(
         return out;
     }
 
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    for (auto it = s.events.rbegin(); it != s.events.rend(); ++it) {
+    std::lock_guard lock(mutex_);
+    for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
         if (!matches_filter(*it, filter)) continue;
         out.push_back(*it);
         if (out.size() >= limit) break;
@@ -221,9 +199,8 @@ std::vector<TokenLedgerEvent> TokenLedger::recent_events(
 }
 
 std::size_t TokenLedger::event_count() const noexcept {
-    auto& s = state();
-    std::lock_guard lock(s.mutex);
-    return s.events.size();
+    std::lock_guard lock(mutex_);
+    return events_.size();
 }
 
 } // namespace core::budget

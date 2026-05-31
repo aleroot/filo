@@ -1,7 +1,7 @@
 #include "Agent.hpp"
 #include "PermissionGate.hpp"
 #include "ToolOutputHistory.hpp"
-#include "../budget/TokenLedger.hpp"
+#include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
@@ -583,7 +583,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 ? std::string("agent")
                 : turn_callbacks.ledger_actor;
             if (usage.has_data()) {
-                core::budget::TokenLedger::get_instance().record({
+                core::budget::BudgetTracker::get_instance().record_event({
                     .kind = core::budget::TokenLedgerEventKind::Actual,
                     .source = ledger_actor.starts_with("subagent:")
                         ? core::budget::TokenLedgerSource::Subagent
@@ -839,7 +839,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 const std::string ledger_actor = turn_callbacks.ledger_actor.empty()
                     ? std::string("agent")
                     : turn_callbacks.ledger_actor;
-                core::budget::TokenLedger::get_instance().record({
+                core::budget::BudgetTracker::get_instance().record_event({
                     .kind = core::budget::TokenLedgerEventKind::Estimate,
                     .source = core::budget::TokenLedgerSource::ToolPayload,
                     .session_id = step_session_context.session_id,

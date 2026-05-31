@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -111,7 +112,7 @@ struct TokenLedgerSnapshot {
 
 class TokenLedger {
 public:
-    static TokenLedger& get_instance() noexcept;
+    TokenLedger() = default;
 
     uint64_t record(TokenLedgerRecordOptions options);
     uint64_t record_event(TokenLedgerEvent event);
@@ -129,7 +130,9 @@ public:
     [[nodiscard]] std::size_t event_count() const noexcept;
 
 private:
-    TokenLedger() = default;
+    mutable std::mutex mutex_;
+    uint64_t next_sequence_ = 1;
+    std::vector<TokenLedgerEvent> events_;
 };
 
 [[nodiscard]] int64_t estimate_cost_micro_usd(

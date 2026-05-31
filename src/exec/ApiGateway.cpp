@@ -5,7 +5,7 @@
 #include "openai/OpenAIChatCompletionStreamEncoder.hpp"
 
 #include "../core/config/ConfigManager.hpp"
-#include "../core/budget/TokenLedger.hpp"
+#include "../core/budget/BudgetTracker.hpp"
 #include "../core/llm/HttpLLMProvider.hpp"
 #include "../core/llm/ModelCatalogDiscovery.hpp"
 #include "../core/llm/Models.hpp"
@@ -1160,7 +1160,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
     }
     if (result.usage.has_data()) {
         const bool should_estimate_cost = selection.provider->should_estimate_cost();
-        core::budget::TokenLedger::get_instance().record({
+        core::budget::BudgetTracker::get_instance().record_event({
             .kind = core::budget::TokenLedgerEventKind::Actual,
             .source = core::budget::TokenLedgerSource::Gateway,
             .session_id = request.session_id,
@@ -1581,7 +1581,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                             }
                             if (usage.has_data()) {
                                 const bool should_estimate_cost = provider->should_estimate_cost();
-                                core::budget::TokenLedger::get_instance().record({
+                                core::budget::BudgetTracker::get_instance().record_event({
                                     .kind = core::budget::TokenLedgerEventKind::Actual,
                                     .source = core::budget::TokenLedgerSource::Gateway,
                                     .session_id = gateway_session_id,

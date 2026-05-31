@@ -3,7 +3,7 @@
 #include <httplib.h>
 
 #include "core/config/ConfigManager.hpp"
-#include "core/budget/TokenLedger.hpp"
+#include "core/budget/BudgetTracker.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "exec/ApiGateway.hpp"
@@ -1127,8 +1127,9 @@ TEST_CASE("API gateway streams OpenAI-compatible tool call chunks",
 
 TEST_CASE("API gateway scopes router spend guardrails by gateway session",
           "[daemon][api_gateway][guardrails]") {
-    auto& ledger = core::budget::TokenLedger::get_instance();
-    ledger.reset();
+    auto& budget = core::budget::BudgetTracker::get_instance();
+    budget.set_session_id({});
+    budget.reset_session();
 
     const std::string suffix =
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -1194,7 +1195,7 @@ TEST_CASE("API gateway scopes router spend guardrails by gateway session",
         std::this_thread::sleep_for(std::chrono::milliseconds{25});
     }
     if (!ready) {
-        ledger.reset();
+        budget.reset_session();
         SKIP("Local socket bind/listen is unavailable in this environment.");
     }
 
@@ -1230,21 +1231,21 @@ TEST_CASE("API gateway scopes router spend guardrails by gateway session",
     CHECK(remote->call_count() == 2);
     CHECK(local->call_count() == 1);
 
-    const auto client_a = ledger.snapshot({
+    const auto client_a = budget.snapshot({
         .session_id = "gateway:session:client-a",
         .kind = core::budget::TokenLedgerEventKind::Actual,
     });
     CHECK(client_a.event_count == 2);
     CHECK(client_a.cost_usd() > 0.0);
 
-    const auto client_b = ledger.snapshot({
+    const auto client_b = budget.snapshot({
         .session_id = "gateway:session:client-b",
         .kind = core::budget::TokenLedgerEventKind::Actual,
     });
     CHECK(client_b.event_count == 1);
     CHECK(client_b.cost_usd() > 0.0);
 
-    ledger.reset();
+    budget.reset_session();
 }
 
 TEST_CASE("API gateway validates OpenAI-compatible payloads locally",

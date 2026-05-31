@@ -1,5 +1,5 @@
 #include "RouterProvider.hpp"
-#include "../../budget/TokenLedger.hpp"
+#include "../../budget/BudgetTracker.hpp"
 #include "../../logging/Logger.hpp"
 
 #include <algorithm>
@@ -98,7 +98,7 @@ void backoff_sleep(int attempt) {
     }
 
     if (guardrails.max_session_cost_usd > 0.0 && provider.should_estimate_cost()) {
-        const double spent = core::budget::TokenLedger::get_instance()
+        const double spent = core::budget::BudgetTracker::get_instance()
                                  .snapshot(core::budget::TokenLedgerFilter{
                                      .session_id = std::string(session_id),
                                      .kind = core::budget::TokenLedgerEventKind::Actual,

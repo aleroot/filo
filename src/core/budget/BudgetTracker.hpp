@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace core::budget {
 
@@ -26,9 +27,9 @@ struct BudgetRecordContext {
     std::string note;
 };
 
-// BudgetTracker is the legacy presentation facade. TokenLedger is the source
-// of truth for token movement, attribution, and cost. New accounting writes
-// should record directly to TokenLedger.
+// BudgetTracker is the process-wide accounting facade. TokenLedger is owned
+// here as regular state so token movement can be attributed without adding
+// another singleton.
 class BudgetTracker {
 public:
     static BudgetTracker& get_instance() noexcept {
@@ -46,8 +47,7 @@ public:
         return session_id_;
     }
 
-    // Compatibility shim for older tests/callers. Production accounting writes
-    // directly to TokenLedger.
+    // Compatibility shim for older tests/callers.
     void record(const core::llm::TokenUsage& usage,
                 std::string_view model = "",
                 bool should_estimate_cost = true) noexcept {
@@ -65,7 +65,7 @@ public:
             if (!context.session_id.empty()) {
                 set_session_id(context.session_id);
             }
-            TokenLedger::get_instance().record({
+            ledger_.record({
                 .kind = TokenLedgerEventKind::Actual,
                 .source = context.source,
                 .session_id = std::move(context.session_id),
@@ -84,13 +84,36 @@ public:
         }
     }
 
+    uint64_t record_event(TokenLedgerRecordOptions options) noexcept {
+        try {
+            return ledger_.record(std::move(options));
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    [[nodiscard]] TokenLedgerSnapshot snapshot(
+        const TokenLedgerFilter& filter = {}) const {
+        return ledger_.snapshot(filter);
+    }
+
+    [[nodiscard]] std::vector<TokenLedgerEvent> recent_events(
+        std::size_t limit,
+        const TokenLedgerFilter& filter = {}) const {
+        return ledger_.recent_events(limit, filter);
+    }
+
+    [[nodiscard]] std::size_t event_count() const noexcept {
+        return ledger_.event_count();
+    }
+
     void reset_session() noexcept {
         try {
             const std::string scoped_session = session_id();
             if (scoped_session.empty()) {
-                TokenLedger::get_instance().reset();
+                ledger_.reset();
             } else {
-                TokenLedger::get_instance().reset_session(scoped_session);
+                ledger_.reset_session(scoped_session);
             }
         } catch (...) {
         }
@@ -113,7 +136,7 @@ public:
 
     [[nodiscard]] core::llm::TokenUsage last_turn() const noexcept {
         try {
-            const auto events = TokenLedger::get_instance().recent_events(
+            const auto events = ledger_.recent_events(
                 1,
                 actual_filter());
             if (events.empty()) {
@@ -169,11 +192,11 @@ private:
     }
 
     [[nodiscard]] TokenLedgerSnapshot actual_snapshot() const {
-        return TokenLedger::get_instance().snapshot(
-            actual_filter());
+        return ledger_.snapshot(actual_filter());
     }
 
     mutable std::mutex mutex_;
+    TokenLedger ledger_;
     std::string session_id_;
 };
 

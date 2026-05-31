@@ -12,8 +12,7 @@ using namespace core::budget;
 
 TEST_CASE("TokenLedger records actual model usage with cost attribution",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
-    ledger.reset();
+    TokenLedger ledger;
 
     const uint64_t sequence = ledger.record({
         .kind = TokenLedgerEventKind::Actual,
@@ -43,8 +42,7 @@ TEST_CASE("TokenLedger records actual model usage with cost attribution",
 
 TEST_CASE("TokenLedger supports source and actor breakdowns",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
-    ledger.reset();
+    TokenLedger ledger;
 
     ledger.record({
         .source = TokenLedgerSource::ModelCall,
@@ -90,8 +88,7 @@ TEST_CASE("TokenLedger supports source and actor breakdowns",
 
 TEST_CASE("TokenLedger recent events are newest first and filterable",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
-    ledger.reset();
+    TokenLedger ledger;
 
     ledger.record({
         .session_id = "a",
@@ -125,8 +122,7 @@ TEST_CASE("TokenLedger recent events are newest first and filterable",
 
 TEST_CASE("TokenLedger is safe for concurrent recorders",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
-    ledger.reset();
+    TokenLedger ledger;
 
     std::vector<std::thread> threads;
     for (int t = 0; t < 4; ++t) {
@@ -156,8 +152,8 @@ TEST_CASE("TokenLedger is safe for concurrent recorders",
 
 TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
     auto& tracker = BudgetTracker::get_instance();
+    tracker.set_session_id({});
     tracker.reset_session();
 
     tracker.record(
@@ -174,7 +170,7 @@ TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters"
     CHECK(total.completion_tokens == 30);
     CHECK(total.total_tokens == 150);
 
-    const auto snapshot = ledger.snapshot({
+    const auto snapshot = tracker.snapshot({
         .session_id = "session-budget",
         .kind = TokenLedgerEventKind::Actual,
     });
@@ -183,24 +179,24 @@ TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters"
     CHECK(snapshot.completion_tokens == total.completion_tokens);
 
     tracker.set_session_id({});
-    ledger.reset();
+    tracker.reset_session();
 }
 
 TEST_CASE("BudgetTracker presentation scope excludes gateway usage from active sessions",
           "[budget][token_ledger]") {
-    auto& ledger = TokenLedger::get_instance();
     auto& tracker = BudgetTracker::get_instance();
-    ledger.reset();
+    tracker.set_session_id({});
+    tracker.reset_session();
     tracker.set_session_id("interactive-session");
 
-    ledger.record({
+    tracker.record_event({
         .kind = TokenLedgerEventKind::Actual,
         .source = TokenLedgerSource::Gateway,
         .actor = "api_gateway",
         .model = "gpt-5.4",
         .usage = {.prompt_tokens = 1000, .completion_tokens = 500},
     });
-    ledger.record({
+    tracker.record_event({
         .kind = TokenLedgerEventKind::Actual,
         .source = TokenLedgerSource::ModelCall,
         .session_id = "interactive-session",
@@ -215,7 +211,7 @@ TEST_CASE("BudgetTracker presentation scope excludes gateway usage from active s
     CHECK(total.total_tokens == 150);
 
     tracker.reset_session();
-    const auto gateway = ledger.snapshot({
+    const auto gateway = tracker.snapshot({
         .source = TokenLedgerSource::Gateway,
         .kind = TokenLedgerEventKind::Actual,
     });
@@ -223,5 +219,5 @@ TEST_CASE("BudgetTracker presentation scope excludes gateway usage from active s
     CHECK(gateway.prompt_tokens == 1000);
 
     tracker.set_session_id({});
-    ledger.reset();
+    tracker.reset_session();
 }
