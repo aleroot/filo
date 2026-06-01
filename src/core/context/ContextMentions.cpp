@@ -1,4 +1,5 @@
 #include "ContextMentions.hpp"
+#include "MentionPathUtils.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../utils/MimeUtils.hpp"
 
@@ -31,33 +32,6 @@ struct ParsedUnquotedMention {
     std::size_t token_end = 0;
 };
 
-bool is_shell_escaped_character(char ch) {
-    const unsigned char uch = static_cast<unsigned char>(ch);
-    if (std::isspace(uch)) {
-        return true;
-    }
-    switch (ch) {
-        case '\\':
-        case '"':
-        case '\'':
-        case '(':
-        case ')':
-        case '[':
-        case ']':
-        case '{':
-        case '}':
-        case ',':
-        case '.':
-        case ';':
-        case ':':
-        case '!':
-        case '?':
-            return true;
-        default:
-            return false;
-    }
-}
-
 ParsedUnquotedMention parse_unquoted_mention(std::string_view input, std::size_t start) {
     ParsedUnquotedMention parsed;
     parsed.raw_path.reserve(input.size() - start);
@@ -69,7 +43,7 @@ ParsedUnquotedMention parse_unquoted_mention(std::string_view input, std::size_t
         const unsigned char ch = static_cast<unsigned char>(input[cursor]);
         if (ch == '\\'
             && cursor + 1 < input.size()
-            && is_shell_escaped_character(input[cursor + 1])) {
+            && should_escape_unquoted_mention_path_char(input[cursor + 1])) {
             parsed.raw_path.push_back(input[cursor + 1]);
             parsed.source_ends.push_back(cursor + 2);
             parsed.escaped.push_back(true);

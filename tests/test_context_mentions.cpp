@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/context/ContextMentions.hpp"
+#include "core/context/MentionPathUtils.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -23,24 +24,6 @@ void write_text(const fs::path& path, const std::string& text) {
     fs::create_directories(path.parent_path());
     std::ofstream out(path);
     out << text;
-}
-
-std::string shell_escape_dragged_path(std::string_view path) {
-    std::string escaped;
-    escaped.reserve(path.size() * 2);
-    for (const char ch : path) {
-        const unsigned char uch = static_cast<unsigned char>(ch);
-        if (ch == '\\'
-            || std::isspace(uch)
-            || ch == '(' || ch == ')' || ch == '[' || ch == ']'
-            || ch == '{' || ch == '}'
-            || ch == ',' || ch == '.' || ch == ';' || ch == ':' || ch == '!'
-            || ch == '?') {
-            escaped.push_back('\\');
-        }
-        escaped.push_back(ch);
-    }
-    return escaped;
 }
 
 } // namespace
@@ -78,7 +61,8 @@ TEST_CASE("Context mentions expand shell-escaped absolute paths from drag-drop",
     const fs::path external_file = sandbox / "external folder" / "report (v1).txt";
     write_text(external_file, "dragdrop line\n");
 
-    const std::string escaped = shell_escape_dragged_path(external_file.string());
+    const std::string escaped =
+        core::context::escape_unquoted_mention_path(external_file.string());
     const std::string expanded = core::context::expand_mentions(
         "Inspect @" + escaped + " please",
         fs::current_path());

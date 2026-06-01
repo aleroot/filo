@@ -1,10 +1,12 @@
 #include "PromptInput.hpp"
 #include "StringUtils.hpp"
+#include "core/context/MentionPathUtils.hpp"
+#include "core/utils/AsciiUtils.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,7 +68,7 @@ bool is_word_character(const std::string& input, size_t iter) {
         return false;
     }
     const auto ch = static_cast<unsigned char>(input[iter]);
-    return std::isalnum(ch) != 0 || ch == '_';
+    return core::utils::ascii::is_alnum(ch) || ch == '_';
 }
 
 Element place_cursor_at_origin(Element child, Screen::Cursor::Shape shape) {
@@ -515,6 +517,37 @@ private:
         return true;
     }
 
+    bool FinalizePaste() {
+        paste_mode_ = false;
+        if (!paste_start_position_.has_value()) {
+            return true;
+        }
+
+        const int start = std::clamp(*paste_start_position_, 0,
+                                     static_cast<int>(content->size()));
+        const int end = std::clamp(cursor_position(), start,
+                                   static_cast<int>(content->size()));
+        paste_start_position_.reset();
+        if (end <= start) {
+            return true;
+        }
+
+        const std::string pasted = content->substr(
+            static_cast<std::size_t>(start),
+            static_cast<std::size_t>(end - start));
+        const auto replacement = core::context::pasted_paths_to_mentions(pasted);
+        if (!replacement.has_value()) {
+            return true;
+        }
+
+        content->replace(static_cast<std::size_t>(start),
+                         static_cast<std::size_t>(end - start),
+                         *replacement);
+        cursor_position() = start + static_cast<int>(replacement->size());
+        on_change();
+        return true;
+    }
+
     // ── Mouse ─────────────────────────────────────────────────────────────────
 
     bool HandleMouse(Event event) {
@@ -575,11 +608,11 @@ private:
         // Bracketed paste sequences (ESC[200~ ... ESC[201~).
         if (event == Event::Special("\x1B[200~")) {
             paste_mode_ = true;
+            paste_start_position_ = cursor_position();
             return true;
         }
         if (event == Event::Special("\x1B[201~")) {
-            paste_mode_ = false;
-            return true;
+            return FinalizePaste();
         }
         if (paste_mode_) {
             if (event == Event::Return)      return HandleCharacter("\n");
@@ -646,6 +679,7 @@ private:
     Box  box_;
     Box  cursor_box_;
     bool paste_mode_ = false;
+    std::optional<int> paste_start_position_;
     using Clock = std::chrono::steady_clock;
     static constexpr auto kFastReturnThreshold = std::chrono::milliseconds(30);
     Clock::time_point last_character_event_ = Clock::time_point::min();

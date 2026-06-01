@@ -1,16 +1,21 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/context/MentionPathUtils.hpp"
+#include "core/utils/UriUtils.hpp"
 #include "tui/PromptInput.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <chrono>
 
 using namespace ftxui;
+namespace fs = std::filesystem;
 
 // Helper: build a PromptInput component with a shared content string and cursor
 static ftxui::Component make_input(std::string& content,
@@ -21,6 +26,29 @@ static ftxui::Component make_input(std::string& content,
     opt.cursor_position = &cursor;
     opt.multiline = multiline;
     return tui::PromptInput(&content, "", opt);
+}
+
+static void paste_text(ftxui::Component& comp, std::string_view text) {
+    comp->OnEvent(Event::Special("\x1B[200~"));
+    for (const char ch : text) {
+        if (ch == '\n') {
+            comp->OnEvent(Event::Return);
+        } else {
+            comp->OnEvent(Event::Character(ch));
+        }
+    }
+    comp->OnEvent(Event::Special("\x1B[201~"));
+}
+
+static fs::path make_prompt_input_temp_file(std::string_view filename) {
+    const auto dir = fs::temp_directory_path()
+        / ("filo_prompt_input_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(dir);
+    const auto file = dir / filename;
+    std::ofstream out(file);
+    out << "x";
+    return file;
 }
 
 // ── Cursor movement ───────────────────────────────────────────────────────────
@@ -356,6 +384,50 @@ TEST_CASE("PromptInput - bracketed multiline paste inserts newlines without subm
     REQUIRE(content == "a\nb");
     REQUIRE(cursor == 3);
     REQUIRE(!entered);
+}
+
+TEST_CASE("PromptInput - bracketed pasted file path becomes mention",
+          "[prompt_input][paste][file]") {
+    const auto file = make_prompt_input_temp_file("drag image.png");
+
+    std::string content = "See ";
+    int cursor = static_cast<int>(content.size());
+    auto comp = make_input(content, cursor);
+
+    paste_text(comp, core::context::escape_unquoted_mention_path(file.string()));
+
+    REQUIRE(content == "See " + core::context::format_unquoted_mention(file.string()));
+    REQUIRE(cursor == static_cast<int>(content.size()));
+
+    fs::remove_all(file.parent_path());
+}
+
+TEST_CASE("PromptInput - bracketed pasted file URI becomes mention",
+          "[prompt_input][paste][file]") {
+    const auto file = make_prompt_input_temp_file("drag uri.png");
+
+    std::string content;
+    int cursor = 0;
+    auto comp = make_input(content, cursor);
+
+    paste_text(comp, "file://" + core::utils::uri::percent_encode_uri_path(file.string()));
+
+    REQUIRE(content == core::context::format_unquoted_mention(file.string()));
+    REQUIRE(cursor == static_cast<int>(content.size()));
+
+    fs::remove_all(file.parent_path());
+}
+
+TEST_CASE("PromptInput - ordinary bracketed paste stays plain text",
+          "[prompt_input][paste][file]") {
+    std::string content;
+    int cursor = 0;
+    auto comp = make_input(content, cursor);
+
+    paste_text(comp, "Look at /not/a/real/file.png please");
+
+    REQUIRE(content == "Look at /not/a/real/file.png please");
+    REQUIRE(cursor == static_cast<int>(content.size()));
 }
 
 TEST_CASE("PromptInput - fast return after typed character inserts newline without submit",

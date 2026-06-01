@@ -178,6 +178,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/Workspace.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
     src/core/context/SteeringLoader.cpp
     src/core/tools/ShellTool.cpp
