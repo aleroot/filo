@@ -2,6 +2,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
@@ -10,14 +14,51 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/auth/KimiOAuthFlow.hpp"
 #include "core/tools/Tool.hpp"
 
 using namespace core::llm;
 using namespace core::llm::protocols;
 
+namespace fs = std::filesystem;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+struct ScopedEnvVar {
+    std::string name;
+    std::string old_value;
+    bool had_value = false;
+
+    ScopedEnvVar(std::string env_name, const std::string& value)
+        : name(std::move(env_name)) {
+        if (const char* existing = std::getenv(name.c_str())) {
+            had_value = true;
+            old_value = existing;
+        }
+        setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value) {
+            setenv(name.c_str(), old_value.c_str(), 1);
+        } else {
+            unsetenv(name.c_str());
+        }
+    }
+};
+
+fs::path make_temp_dir(const std::string& label) {
+    const auto path = fs::temp_directory_path()
+        / (label + "_" + core::auth::KimiOAuthFlow::generateDeviceId());
+    fs::create_directories(path);
+    return path;
+}
+
+} // namespace
 
 static ChatRequest make_simple_request(std::string model = "moonshot-v1-8k",
                                        std::string user_text = "Hello") {
@@ -199,6 +240,18 @@ TEST_CASE("KimiSerializer - max_tokens included when set", "[kimi][serializer]")
     REQUIRE_THAT(Serializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("max_tokens":4096)"));
 }
 
+TEST_CASE("KimiProtocol - max_tokens is sent as max_completion_tokens",
+          "[kimi][serializer]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    req.max_tokens = 4096;
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_completion_tokens":4096)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("max_tokens":4096)"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // KimiSerializer — multi-turn conversation roles
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +417,144 @@ TEST_CASE("KimiSerializer - multiple tools serialized without trailing comma", "
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("write_file")"));
     // No trailing comma before closing bracket (rudimentary check)
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",]"));
+}
+
+TEST_CASE("KimiProtocol - tool input_schema is normalized for Kimi",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "complex_tool";
+    def.description = "Complex schema";
+    def.input_schema = R"({"type":"object","properties":{"mode":{"enum":["a","b"]}},"required":["mode"]})";
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("mode":{"enum":["a","b"],"type":"string"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("required":["mode"])"));
+}
+
+TEST_CASE("KimiProtocol - tool input_schema normalization matches Kimi CLI fallbacks",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "schema_fallbacks";
+    def.description = "Schema fallbacks";
+    def.input_schema =
+        R"({"type":"object","properties":{"payload":{},"values":{"items":{}},"config":{"additionalProperties":{}},"choice":{"anyOf":[{"enum":["a"]},{"const":1}]}}})";
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("payload":{"type":"string"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("values":{"items":{"type":"string"},"type":"array"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("config":{"additionalProperties":{"type":"string"},"type":"object"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("choice":{"anyOf":[{"enum":["a"],"type":"string"},{"const":1,"type":"integer"}]})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("choice":{"anyOf":[{"enum":["a"],"type":"string"},{"const":1,"type":"integer"}],"type")"));
+}
+
+TEST_CASE("KimiProtocol - root input_schema is treated as a container",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "untyped_root";
+    def.description = "Untyped root";
+    def.input_schema = R"({})";
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("parameters":{})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("parameters":{"type":"string"})"));
+}
+
+TEST_CASE("KimiProtocol - parameter schema roots are normalized as properties",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "parameter_schema";
+    def.description = "Parameter schema";
+    def.parameters.push_back({
+        .name = "mode",
+        .type = "string",
+        .description = "Mode",
+        .required = true,
+        .schema = R"({"enum":["smart","full"]})",
+    });
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("mode":{"enum":["smart","full"],"type":"string"})"));
+}
+
+TEST_CASE("KimiProtocol - tool input_schema local refs are preserved",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "choose_mode";
+    def.description = "Choose a mode";
+    def.input_schema =
+        R"({"type":"object","properties":{"mode":{"$ref":"#/definitions/Mode"}},"definitions":{"Mode":{"enum":["fast","safe"]}}})";
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("mode":{"$ref":"#/definitions/Mode"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("definitions":{"Mode":{"enum":["fast","safe"]}})"));
+}
+
+TEST_CASE("KimiProtocol - builtin tools use Kimi builtin_function format",
+          "[kimi][serializer][tools]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-for-coding");
+    core::tools::ToolDefinition def;
+    def.name = "$web_search";
+
+    Tool tool;
+    tool.type = "function";
+    tool.function = def;
+    req.tools.push_back(tool);
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"builtin_function")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"$web_search")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("parameters")"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -891,6 +1082,71 @@ TEST_CASE("KimiProvider - reports correct capabilities", "[kimi][provider]") {
     auto caps = provider.capabilities();
     REQUIRE(caps.supports_tool_calls == true);
     REQUIRE(caps.is_local == false);
+}
+
+TEST_CASE("KimiOAuthFlow - device id uses UUID format", "[kimi][oauth]") {
+    const std::string id = core::auth::KimiOAuthFlow::generateDeviceId();
+    REQUIRE(id.size() == 36);
+    REQUIRE(id[8] == '-');
+    REQUIRE(id[13] == '-');
+    REQUIRE(id[14] == '4');
+    REQUIRE(id[18] == '-');
+    REQUIRE(id[23] == '-');
+    REQUIRE((id[19] == '8' || id[19] == '9' || id[19] == 'a' || id[19] == 'b'));
+}
+
+TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
+          "[kimi][oauth][headers]") {
+    const fs::path sandbox = make_temp_dir("filo_kimi_headers");
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", sandbox.string());
+
+    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
+
+    REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
+    REQUIRE(headers.at("X-Msh-Version") == "kimi-code-cli/1.46.0");
+    REQUIRE_FALSE(headers.at("X-Msh-Device-Name").empty());
+    REQUIRE_FALSE(headers.at("X-Msh-Device-Model").empty());
+    REQUIRE_FALSE(headers.at("X-Msh-Os-Version").empty());
+    REQUIRE(headers.contains("X-Msh-Device-Id"));
+    REQUIRE(headers.at("X-Msh-Device-Id").size() == 36);
+    REQUIRE(fs::exists(sandbox / "filo" / "kimi_device_id"));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("KimiOAuthFlow - common headers preserve legacy 32-hex device id",
+          "[kimi][oauth][headers]") {
+    const fs::path sandbox = make_temp_dir("filo_kimi_legacy_headers");
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", sandbox.string());
+    const fs::path config_dir = sandbox / "filo";
+    fs::create_directories(config_dir);
+
+    const std::string legacy_id = "0123456789abcdef0123456789abcdef";
+    {
+        std::ofstream file(config_dir / "kimi_device_id");
+        file << legacy_id;
+    }
+
+    const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
+
+    REQUIRE(headers.at("X-Msh-Device-Id") == legacy_id);
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("KimiProtocol - headers identify Kimi CLI and preserve OAuth device id",
+          "[kimi][oauth][headers]") {
+    KimiProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.headers["Authorization"] = "Bearer token";
+    auth.properties["device_id"] = "device-from-jwt";
+
+    const auto headers = protocol.build_headers(auth);
+
+    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/1.46.0");
+    REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
+    REQUIRE(headers.at("X-Msh-Device-Id") == "device-from-jwt");
+    REQUIRE(headers.at("Authorization") == "Bearer token");
 }
 
 TEST_CASE("ProviderFactory - kimi oauth disables synthetic cost estimation", "[kimi][factory][oauth]") {

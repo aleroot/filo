@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <charconv>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include "../tools/Tool.hpp"
 #include "../utils/Base64.hpp"
@@ -184,7 +185,7 @@ struct EncodedImagePart {
 // ---------------------------------------------------------------------------
 struct StreamChunk {
     std::string content;           // Text content from the model
-    std::string reasoning_content; // Thinking/reasoning content (Kimi K2.5)
+    std::string reasoning_content; // Provider-specific thinking/reasoning content
     std::vector<ToolCall> tools;   // Tool calls (if any)
     bool is_final = false;         // True if this is the last chunk
     bool is_error = false;         // True if this chunk represents an API/HTTP error
@@ -213,7 +214,7 @@ struct Message {
     std::string name = {};                 // Optional, for tool role
     std::string tool_call_id = {};         // Optional, for tool role
     std::vector<ToolCall> tool_calls = {}; // Optional, for assistant role
-    std::string reasoning_content = {};    // Optional, for Kimi thinking mode
+    std::string reasoning_content = {};    // Optional provider-specific reasoning text
     std::vector<ContentPart> content_parts = {}; // Optional, for multimodal user input
 };
 
@@ -313,10 +314,17 @@ inline void degrade_historical_image_inputs(ChatRequest& req) {
 
 struct Serializer {
     struct Options {
-        // Vendor extension: Kimi thinking models require assistant.reasoning_content
-        // to be echoed back on follow-up tool turns. Disabled by default so the
-        // base OpenAI serializer remains spec-clean.
+        // Vendor extension: some providers require assistant.reasoning_content
+        // to be echoed back on follow-up tool turns. Disabled by default.
         bool include_reasoning_content = false;
+        // OpenAI-compatible providers do not all agree on completion-budget
+        // spelling.
+        std::string max_tokens_field = "max_tokens";
+        // Some providers accept raw tool input schemas and/or need provider-
+        // specific schema normalization.
+        bool use_tool_input_schema = false;
+        std::function<std::string(std::string_view, bool)> transform_tool_schema;
+        std::function<std::optional<std::string>(const Tool&)> serialize_tool_override;
     };
 
     static std::string serialize(const ChatRequest& req) {
@@ -342,7 +350,9 @@ struct Serializer {
             }
         }
         if (req.max_tokens.has_value()) {
-            payload += R"(,"max_tokens":)";
+            payload += R"(,")";
+            payload += core::utils::escape_json_string(options.max_tokens_field);
+            payload += R"(":)";
             char tmp[32];
             auto [ptr, _] = std::to_chars(tmp, tmp + sizeof(tmp), req.max_tokens.value());
             payload.append(tmp, ptr);
@@ -361,15 +371,45 @@ struct Serializer {
             payload += R"(,"tools":[)";
             for (size_t i = 0; i < req.tools.size(); ++i) {
                 const auto& def = req.tools[i].function;
-                payload += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":{"type":"object","properties":{)";
+                if (options.serialize_tool_override) {
+                    if (auto serialized = options.serialize_tool_override(req.tools[i]);
+                        serialized.has_value()) {
+                        payload += *serialized;
+                        if (i < req.tools.size() - 1) payload += ",";
+                        continue;
+                    }
+                }
+
+                const auto transform_schema = [&options](std::string_view schema,
+                                                         bool root_is_property) {
+                    if (options.transform_tool_schema) {
+                        return options.transform_tool_schema(schema, root_is_property);
+                    }
+                    return std::string(schema);
+                };
+
+                payload += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":)";
+                if (options.use_tool_input_schema && !def.input_schema.empty()) {
+                    payload += transform_schema(def.input_schema, false);
+                    payload += "}}";
+                    if (i < req.tools.size() - 1) payload += ",";
+                    continue;
+                }
+
+                payload += R"({"type":"object","properties":{)";
                 
                 for (size_t j = 0; j < def.parameters.size(); ++j) {
                     const auto& p = def.parameters[j];
-                    payload += "\"" + core::utils::escape_json_string(p.name) + R"(":{"type":")" + core::utils::escape_json_string(p.type) + R"(","description":")" + core::utils::escape_json_string(p.description) + "\"";
-                    if (!p.items_schema.empty()) {
-                        payload += R"(,"items":)" + p.items_schema;
+                    payload += "\"" + core::utils::escape_json_string(p.name) + R"(":)";
+                    if (options.use_tool_input_schema && !p.schema.empty()) {
+                        payload += transform_schema(p.schema, true);
+                    } else {
+                        payload += R"({"type":")" + core::utils::escape_json_string(p.type) + R"(","description":")" + core::utils::escape_json_string(p.description) + "\"";
+                        if (!p.items_schema.empty()) {
+                            payload += R"(,"items":)" + p.items_schema;
+                        }
+                        payload += "}";
                     }
-                    payload += "}";
                     if (j < def.parameters.size() - 1) payload += ",";
                 }
                 
@@ -453,7 +493,7 @@ struct Serializer {
                 payload += "]";
             }
 
-            // Vendor extension (Kimi): only emitted when explicitly enabled.
+            // Vendor extension: only emitted when explicitly enabled.
             if (options.include_reasoning_content
                 && !req.messages[i].reasoning_content.empty()) {
                 payload += ",\"reasoning_content\":\"" + core::utils::escape_json_string(req.messages[i].reasoning_content) + "\"";

@@ -1,4 +1,5 @@
 #include "OpenAIOAuthFlow.hpp"
+#include "AuthBrowserLauncher.hpp"
 #include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
@@ -14,9 +15,6 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace core::auth {
 
@@ -134,23 +132,6 @@ static std::string generate_random_state() {
     state.reserve(32u);
     for (int i = 0; i < 32; ++i) state += chars[dist(gen)];
     return state;
-}
-
-static void open_browser(const std::string& url) {
-    pid_t pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        if (fork() == 0) {
-#if defined(__linux__)
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-#elif defined(__APPLE__)
-            execlp("open", "open", url.c_str(), nullptr);
-#endif
-            _exit(1);
-        }
-        _exit(0);
-    }
-    waitpid(pid, nullptr, 0);
 }
 
 static int64_t now_unix_seconds() {

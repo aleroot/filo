@@ -33,23 +33,26 @@ public:
     // Exposed for unit testing and protocol use
     static std::string generateDeviceId();
     static std::string getDeviceModel();
+    static std::string getUserAgent();
     
     /**
-     * @brief Generate common headers required for Kimi API requests.
+     * @brief Generate common Kimi metadata headers.
      *
-     * These headers are required for both OAuth token operations AND
-     * API calls to api.moonshot.cn. The official Kimi CLI sends these
-     * headers with every request for device identification.
+     * The no-argument form matches the official Kimi Code client: it reads or
+     * creates a stable local device id and includes it as X-Msh-Device-Id.
+     * Callers with an OAuth token device id may pass it explicitly.
      *
      * @return Map of header names to values:
-     *   - X-Msh-Platform: "kimi_cli"
+     *   - X-Msh-Platform: "kimi_code_cli"
      *   - X-Msh-Version: CLI version
      *   - X-Msh-Device-Name: hostname
      *   - X-Msh-Device-Model: OS and architecture info
      *   - X-Msh-Os-Version: OS version
-     *   - X-Msh-Device-Id: unique device identifier
+     *   - X-Msh-Device-Id: stable local or caller-provided device id
      */
     static std::unordered_map<std::string, std::string> getCommonHeaders();
+    static std::unordered_map<std::string, std::string> getCommonHeaders(
+        std::string_view device_id);
 
 private:
     struct DeviceAuthorization {
@@ -63,12 +66,12 @@ private:
 
     std::string device_id_;
 
+    static std::string loadOrCreatePersistentDeviceId();
+
     DeviceAuthorization requestDeviceAuthorization();
     OAuthToken pollForToken(const DeviceAuthorization& auth);
     OAuthToken exchangeRefreshToken(std::string_view refresh_token);
     
-    // Common headers required by Kimi OAuth
-    std::string getUserAgent() const;
     std::string getDeviceName() const;
 };
 

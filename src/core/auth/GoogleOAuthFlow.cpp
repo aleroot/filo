@@ -1,4 +1,5 @@
 #include "GoogleOAuthFlow.hpp"
+#include "AuthBrowserLauncher.hpp"
 #include "GoogleCodeAssist.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include <cpr/cpr.h>
@@ -16,9 +17,6 @@
 #include <stdexcept>
 #include <thread>
 #include <iostream>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #include "../logging/Logger.hpp"
 
 namespace core::auth {
@@ -169,26 +167,6 @@ static std::optional<int> oauth_requested_port() {
             "Invalid value for OAUTH_CALLBACK_PORT: \"" + text + "\"");
     }
     return port;
-}
-
-static void open_browser(const std::string& url) {
-    // Double-fork so the grandchild is reparented to init and we avoid zombies.
-    pid_t pid = fork();
-    if (pid < 0) return; // fork failed — browser just won't open
-    if (pid == 0) {
-        // Intermediate child
-        if (fork() == 0) {
-            // Grandchild: exec the browser
-#if defined(__linux__)
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-#elif defined(__APPLE__)
-            execlp("open", "open", url.c_str(), nullptr);
-#endif
-            _exit(1);
-        }
-        _exit(0);
-    }
-    waitpid(pid, nullptr, 0); // reap intermediate child immediately
 }
 
 // ── GoogleOAuthFlow ───────────────────────────────────────────────────────────

@@ -94,9 +94,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
 
     auto run_state = std::make_shared<RunState>();
     const std::string delegated_prompt = build_delegated_prompt(request);
-    std::string ledger_actor = request.worker_name.empty()
-        ? std::string("subagent")
-        : std::string("subagent:") + request.worker_name;
+    std::string ledger_actor = request.worker_name.empty() ? std::string("subagent") : std::string("subagent:") + request.worker_name;
 
     std::thread turn_thread(
         [agent,

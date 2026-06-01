@@ -617,7 +617,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and kimi-k2.6 default",
+TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and kimi-for-coding default",
           "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_login_kimi_profile");
     const fs::path xdg_home = sandbox / "xdg";
@@ -646,7 +646,7 @@ TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and ki
     REQUIRE(config.default_model_selection == "manual");
     REQUIRE(config.providers.contains("kimi"));
     REQUIRE(config.providers.at("kimi").auth_type == "oauth_kimi");
-    REQUIRE(config.providers.at("kimi").model == "kimi-k2.6");
+    REQUIRE(config.providers.at("kimi").model == "kimi-for-coding");
 
     fs::remove_all(sandbox);
 }

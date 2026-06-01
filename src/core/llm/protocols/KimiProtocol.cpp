@@ -297,6 +297,28 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
         || lowered.find("thinking") != std::string::npos;
 }
 
+[[nodiscard]] std::string normalize_kimi_tool_schema(
+    std::string_view schema,
+    bool normalize_root_property) {
+    namespace schema_utils = core::utils::json::schema;
+    return schema_utils::ensure_property_types(
+        schema,
+        normalize_root_property ? schema_utils::RootRole::Property
+                                : schema_utils::RootRole::Container);
+}
+
+[[nodiscard]] std::optional<std::string> serialize_kimi_builtin_tool(const Tool& tool) {
+    const auto& def = tool.function;
+    if (!def.name.starts_with('$')) return std::nullopt;
+
+    std::string payload;
+    payload.reserve(def.name.size() + 48);
+    payload += R"({"type":"builtin_function","function":{"name":")";
+    payload += core::utils::escape_json_string(def.name);
+    payload += R"("}})";
+    return payload;
+}
+
 [[nodiscard]] std::string sanitize_os_version(std::string version) {
     std::string sanitized;
     sanitized.reserve(version.size());
@@ -727,6 +749,10 @@ struct KimiParseResult {
 std::string KimiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
     options.include_reasoning_content = true;
+    options.max_tokens_field = "max_completion_tokens";
+    options.use_tool_input_schema = true;
+    options.transform_tool_schema = normalize_kimi_tool_schema;
+    options.serialize_tool_override = serialize_kimi_builtin_tool;
 
     std::string payload = Serializer::serialize(req, options);
     if (payload.ends_with('}')) {
@@ -764,7 +790,7 @@ cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const 
     cpr::Header headers{
         {"Content-Type", "application/json"},
         {"Accept",       "text/event-stream"},
-        {"User-Agent",   "KimiCLI/1.41.0"},
+        {"User-Agent",   core::auth::KimiOAuthFlow::getUserAgent()},
     };
     
     // Add Kimi-specific X-Msh-* headers for device identification.

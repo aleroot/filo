@@ -1,4 +1,5 @@
 #include "ClaudeOAuthFlow.hpp"
+#include "AuthBrowserLauncher.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/Base64.hpp"
@@ -19,9 +20,6 @@
 #include <stdexcept>
 #include <thread>
 #include <iostream>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -96,23 +94,6 @@ std::string generate_code_verifier() {
         b = static_cast<unsigned char>(dist(gen));
     }
     return core::utils::Base64::encode_url(bytes);
-}
-
-void open_browser(const std::string& url) {
-    pid_t pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        if (fork() == 0) {
-#if defined(__linux__)
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-#elif defined(__APPLE__)
-            execlp("open", "open", url.c_str(), nullptr);
-#endif
-            _exit(1);
-        }
-        _exit(0);
-    }
-    waitpid(pid, nullptr, 0);
 }
 
 std::vector<std::string> parse_scope_list(std::string_view scopes) {

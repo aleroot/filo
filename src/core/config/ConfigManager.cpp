@@ -227,7 +227,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "kimi",
             .auth_type = "oauth_kimi",
-            .default_model = "kimi-k2.6",
+            .default_model = "kimi-for-coding",
         };
     }
     if (normalized == "qwen") {
@@ -1768,7 +1768,10 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
 
     ProviderConfig& provider_overlay = overlay.providers[mapping->provider_name];
     provider_overlay.auth_type = mapping->auth_type;
-    if (provider_overlay.model.empty()) {
+    const bool force_login_default_model = mapping->auth_type == "oauth_kimi";
+    if (force_login_default_model) {
+        provider_overlay.model = mapping->default_model;
+    } else if (provider_overlay.model.empty()) {
         if (const auto it = config_.providers.find(mapping->provider_name);
             it != config_.providers.end() && !it->second.model.empty()) {
             provider_overlay.model = it->second.model;
@@ -1789,7 +1792,7 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
     config_.default_model_selection = "manual";
     ProviderConfig& provider = config_.providers[mapping->provider_name];
     provider.auth_type = mapping->auth_type;
-    if (provider.model.empty()) {
+    if (force_login_default_model || provider.model.empty()) {
         provider.model = provider_overlay.model;
     }
 

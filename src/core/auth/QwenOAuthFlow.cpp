@@ -1,4 +1,5 @@
 #include "QwenOAuthFlow.hpp"
+#include "AuthBrowserLauncher.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
@@ -8,10 +9,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
-#if !defined(_WIN32)
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 #include "../logging/Logger.hpp"
 
 namespace core::auth {
@@ -32,38 +29,6 @@ cpr::Header make_qwen_headers() {
         {"Accept",       "application/json"},
         {"x-request-id", QwenOAuthFlow::generate_request_id()},
     };
-}
-
-void open_browser_best_effort(const std::string& url) {
-#if defined(_WIN32)
-    (void)url;
-    return;
-#else
-    if (url.empty()) {
-        return;
-    }
-
-    // Double-fork so the browser launcher is detached and we avoid zombies.
-    pid_t pid = fork();
-    if (pid < 0) {
-        return;
-    }
-    if (pid == 0) {
-        if (fork() == 0) {
-#if defined(__linux__)
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-            execlp("open", "open", url.c_str(), nullptr);
-#elif defined(__APPLE__)
-            execlp("open", "open", url.c_str(), nullptr);
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-#endif
-            _exit(1);
-        }
-        _exit(0);
-    }
-
-    waitpid(pid, nullptr, 0);
-#endif
 }
 
 } // namespace
@@ -290,7 +255,7 @@ OAuthToken QwenOAuthFlow::login() {
     core::logging::info("Waiting for authorization...");
 
     // Best-effort browser open; failures are non-fatal.
-    open_browser_best_effort(open_url);
+    open_browser(open_url);
 
     return poll_for_token(auth);
 }

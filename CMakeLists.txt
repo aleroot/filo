@@ -146,6 +146,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/routing/RouterEngine.cpp
     src/core/llm/routing/AutoClassifier.cpp
     src/core/auth/FileTokenStore.cpp
+    src/core/auth/AuthBrowserLauncher.cpp
     src/core/auth/GoogleCodeAssist.cpp
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/GoogleOAuthCredentialSource.cpp

@@ -44,4 +44,17 @@ void append_escaped(std::string& out, std::string_view sv);
     return out;
 }
 
+namespace json::schema {
+
+enum class RootRole {
+    Container,
+    Property,
+};
+
+[[nodiscard]] std::string ensure_property_types(
+    std::string_view schema,
+    RootRole root_role = RootRole::Container);
+
+} // namespace json::schema
+
 } // namespace core::utils

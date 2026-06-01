@@ -1,8 +1,10 @@
 #include "KimiOAuthFlow.hpp"
+#include "AuthBrowserLauncher.hpp"
 #include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -12,7 +14,6 @@
 #include <thread>
 #if !defined(_WIN32)
 #include <sys/utsname.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include "../logging/Logger.hpp"
@@ -25,39 +26,9 @@ namespace {
 
 constexpr std::string_view KIMI_OAUTH_HOST = "https://auth.kimi.com";
 constexpr std::string_view KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-constexpr std::string_view KIMI_VERSION = "1.41.0";
-
-void open_browser_best_effort(const std::string& url) {
-#if defined(_WIN32)
-    (void)url;
-    return;
-#else
-    if (url.empty()) {
-        return;
-    }
-
-    // Double-fork so the browser launcher is detached and we avoid zombies.
-    pid_t pid = fork();
-    if (pid < 0) {
-        return;
-    }
-    if (pid == 0) {
-        if (fork() == 0) {
-#if defined(__linux__)
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-            execlp("open", "open", url.c_str(), nullptr);
-#elif defined(__APPLE__)
-            execlp("open", "open", url.c_str(), nullptr);
-            execlp("xdg-open", "xdg-open", url.c_str(), nullptr);
-#endif
-            _exit(1);
-        }
-        _exit(0);
-    }
-
-    waitpid(pid, nullptr, 0);
-#endif
-}
+constexpr std::string_view KIMI_PLATFORM = "kimi_code_cli";
+constexpr std::string_view KIMI_USER_AGENT = "kimi-code-cli/1.46.0";
+constexpr int KIMI_OAUTH_TIMEOUT_MS = 30'000;
 
 /**
  * @brief Extract device_id from a Kimi JWT token payload.
@@ -117,36 +88,50 @@ std::filesystem::path getDeviceIdPath() {
     return config_dir / "kimi_device_id";
 }
 
-std::string loadOrCreateDeviceId() {
-    auto path = getDeviceIdPath();
-    if (std::filesystem::exists(path)) {
-        std::ifstream file(path);
-        std::string id;
-        if (std::getline(file, id)) {
-            // Validate: should be 32 hex chars
-            if (id.size() == 32) {
-                bool valid = true;
-                for (char c : id) {
-                    if (!std::isxdigit(static_cast<unsigned char>(c))) {
-                        valid = false;
-                        break;
-                    }
-                }
-                if (valid) return id;
-            }
+[[nodiscard]] std::string ascii_header(std::string_view value,
+                                       std::string_view fallback = "unknown") {
+    std::string cleaned;
+    cleaned.reserve(value.size());
+    for (const unsigned char c : value) {
+        if (c >= 32 && c < 127) {
+            cleaned.push_back(static_cast<char>(c));
         }
     }
-    // Generate new device ID
-    std::string new_id = KimiOAuthFlow::generateDeviceId();
-    std::ofstream file(path);
-    if (file) {
-        file << new_id;
-        // Set restrictive permissions (owner read/write only)
-        std::filesystem::permissions(path, 
-            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-            std::filesystem::perm_options::replace);
+
+    const auto start = cleaned.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return std::string(fallback);
+    const auto end = cleaned.find_last_not_of(" \t\r\n");
+    return cleaned.substr(start, end - start + 1);
+}
+
+[[nodiscard]] bool is_uuid_device_id(std::string_view id) {
+    if (id.size() != 36) return false;
+    for (std::size_t i = 0; i < id.size(); ++i) {
+        const bool dash = (i == 8 || i == 13 || i == 18 || i == 23);
+        if (dash) {
+            if (id[i] != '-') return false;
+            continue;
+        }
+        if (!std::isxdigit(static_cast<unsigned char>(id[i]))) return false;
     }
-    return new_id;
+    return true;
+}
+
+[[nodiscard]] bool is_legacy_device_id(std::string_view id) {
+    if (id.size() != 32) return false;
+    for (const char c : id) {
+        if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool is_retryable_oauth_failure(const cpr::Response& response) {
+    if (response.error.code != cpr::ErrorCode::OK) return true;
+    return response.status_code == 429
+        || response.status_code == 500
+        || response.status_code == 502
+        || response.status_code == 503
+        || response.status_code == 504;
 }
 
 } // namespace
@@ -160,8 +145,20 @@ std::string KimiOAuthFlow::generateDeviceId() {
     const char hex[] = "0123456789abcdef";
     
     std::string id;
-    id.reserve(32);
-    for (int i = 0; i < 32; ++i) {
+    id.reserve(36);
+    for (int i = 0; i < 36; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            id += '-';
+            continue;
+        }
+        if (i == 14) {
+            id += '4';
+            continue;
+        }
+        if (i == 19) {
+            id += hex[8 + (dist(gen) % 4)];
+            continue;
+        }
         id += hex[dist(gen)];
     }
     return id;
@@ -176,6 +173,11 @@ std::string KimiOAuthFlow::getDeviceModel() {
 }
 
 std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders() {
+    return getCommonHeaders(loadOrCreatePersistentDeviceId());
+}
+
+std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
+    std::string_view device_id) {
     std::unordered_map<std::string, std::string> headers;
     
     // Get device name (hostname)
@@ -185,17 +187,6 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders() {
         device_name = hostname;
     }
     
-    // ASCII-sanitize device name (same as official CLI)
-    std::string sanitized_name;
-    for (char c : device_name) {
-        if (c >= 32 && c < 127) {  // Printable ASCII
-            sanitized_name += c;
-        }
-    }
-    if (sanitized_name.empty()) {
-        sanitized_name = "unknown";
-    }
-    
     // Get OS version
     struct utsname buf{};
     std::string os_version = "unknown";
@@ -203,18 +194,20 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders() {
         os_version = buf.release;
     }
     
-    headers["X-Msh-Platform"] = "kimi_cli";
-    headers["X-Msh-Version"] = std::string(KIMI_VERSION);
-    headers["X-Msh-Device-Name"] = sanitized_name;
-    headers["X-Msh-Device-Model"] = getDeviceModel();
-    headers["X-Msh-Os-Version"] = os_version;
-    headers["X-Msh-Device-Id"] = loadOrCreateDeviceId();
+    headers["X-Msh-Platform"] = std::string(KIMI_PLATFORM);
+    headers["X-Msh-Version"] = std::string(KIMI_USER_AGENT);
+    headers["X-Msh-Device-Name"] = ascii_header(device_name);
+    headers["X-Msh-Device-Model"] = ascii_header(getDeviceModel());
+    headers["X-Msh-Os-Version"] = ascii_header(os_version);
+    if (!device_id.empty()) {
+        headers["X-Msh-Device-Id"] = std::string(device_id);
+    }
     
     return headers;
 }
 
-std::string KimiOAuthFlow::getUserAgent() const {
-    return "KimiCLI/" + std::string(KIMI_VERSION);
+std::string KimiOAuthFlow::getUserAgent() {
+    return std::string(KIMI_USER_AGENT);
 }
 
 std::string KimiOAuthFlow::getDeviceName() const {
@@ -225,11 +218,32 @@ std::string KimiOAuthFlow::getDeviceName() const {
     return "unknown";
 }
 
+std::string KimiOAuthFlow::loadOrCreatePersistentDeviceId() {
+    auto path = getDeviceIdPath();
+    if (std::filesystem::exists(path)) {
+        std::ifstream file(path);
+        std::string id;
+        if (std::getline(file, id)) {
+            if (is_uuid_device_id(id) || is_legacy_device_id(id)) return id;
+        }
+    }
+
+    std::string new_id = KimiOAuthFlow::generateDeviceId();
+    std::ofstream file(path);
+    if (file) {
+        file << new_id;
+        std::filesystem::permissions(path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace);
+    }
+    return new_id;
+}
+
 // ── KimiOAuthFlow ─────────────────────────────────────────────────────────────
 
 KimiOAuthFlow::KimiOAuthFlow() {
     // Load or create persistent device_id
-    device_id_ = loadOrCreateDeviceId();
+    device_id_ = loadOrCreatePersistentDeviceId();
 }
 
 OAuthToken KimiOAuthFlow::login() {
@@ -245,14 +259,14 @@ OAuthToken KimiOAuthFlow::login() {
     core::logging::info("Waiting for authorization...");
     
     // Try to open browser (best-effort, non-fatal on failure).
-    open_browser_best_effort(auth.verification_uri_complete);
+    open_browser(auth.verification_uri_complete);
 
     return pollForToken(auth);
 }
 
 KimiOAuthFlow::DeviceAuthorization KimiOAuthFlow::requestDeviceAuthorization() {
     // Build headers using the common function + User-Agent
-    auto common_headers = getCommonHeaders();
+    auto common_headers = getCommonHeaders(device_id_);
     cpr::Header headers;
     for (const auto& [k, v] : common_headers) {
         headers[k] = v;
@@ -266,7 +280,8 @@ KimiOAuthFlow::DeviceAuthorization KimiOAuthFlow::requestDeviceAuthorization() {
     cpr::Response r = cpr::Post(
         cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/device_authorization"},
         std::move(headers),
-        std::move(payload)
+        std::move(payload),
+        cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
     );
     
     if (r.status_code != 200) {
@@ -316,7 +331,7 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
         std::this_thread::sleep_for(std::chrono::seconds(interval));
         
         // Build headers using the common function + User-Agent
-        auto common_headers = getCommonHeaders();
+        auto common_headers = getCommonHeaders(device_id_);
         cpr::Header headers;
         for (const auto& [k, v] : common_headers) {
             headers[k] = v;
@@ -332,7 +347,8 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
         cpr::Response r = cpr::Post(
             cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/token"},
             std::move(headers),
-            std::move(payload)
+            std::move(payload),
+            cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
         );
         
         if (r.status_code == 200) {
@@ -412,7 +428,7 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
         std::chrono::system_clock::now().time_since_epoch()).count();
     
     // Build headers using the common function + User-Agent
-    auto common_headers = getCommonHeaders();
+    auto common_headers = getCommonHeaders(device_id_);
     cpr::Header headers;
     for (const auto& [k, v] : common_headers) {
         headers[k] = v;
@@ -425,11 +441,20 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
         {"refresh_token", std::string(refresh_token)},
     };
     
-    cpr::Response r = cpr::Post(
-        cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/token"},
-        std::move(headers),
-        std::move(payload)
-    );
+    cpr::Response r;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        r = cpr::Post(
+            cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/token"},
+            headers,
+            payload,
+            cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
+        );
+
+        if (!is_retryable_oauth_failure(r) || attempt == 2) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1 << attempt));
+    }
     
     if (r.status_code == 401 || r.status_code == 403) {
         throw std::runtime_error("Token refresh unauthorized. Please login again.");
