@@ -55,10 +55,18 @@ CPMAddPackage(
     VERSION 1.13.0
 )
 
-# Add cpp-httplib for HTTP server support
+# Add cpp-httplib for HTTP server support.
+#
+# On AppleClang/Xcode, FindZLIB exposes the SDK's usr/include directory as a
+# system include. Passing that path explicitly breaks libc++'s include_next
+# checks for C library wrappers such as <cctype> and <cstdio>.
+if(APPLE)
+    set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+endif()
 CPMAddPackage("gh:yhirose/cpp-httplib@0.28.0")
 
 if(FILO_ENABLE_PYTHON)
+    set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
     CPMAddPackage(
         NAME pybind11
         GITHUB_REPOSITORY pybind/pybind11
