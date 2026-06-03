@@ -205,6 +205,38 @@ TEST_CASE("SessionStore round-trips messages with special JSON characters", "[se
     CHECK(loaded->messages[0].content == "He said \"hello\"\nLine2\\nBackslash");
 }
 
+TEST_CASE("SessionStore round-trips video content parts", "[session][json][video]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_video_rt"};
+    core::session::SessionStore store{tmp.path};
+
+    auto original = make_test_session("video1234");
+    original.messages.clear();
+    original.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "[Attached video: /tmp/flow.mp4]",
+        .content_parts = {
+            core::llm::ContentPart::make_text("Inspect this recording: "),
+            core::llm::ContentPart::make_video("/tmp/flow.mp4", "video/mp4"),
+            core::llm::ContentPart::make_video_url("ms://file_kimi_video_123",
+                                                   "file_kimi_video_123"),
+        },
+    });
+
+    REQUIRE(store.save(original));
+    const auto loaded = store.load_by_id("video1234");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 1);
+    REQUIRE(loaded->messages[0].content_parts.size() == 3);
+    CHECK(loaded->messages[0].content_parts[0].type == core::llm::ContentPartType::Text);
+    CHECK(loaded->messages[0].content_parts[1].type == core::llm::ContentPartType::Video);
+    CHECK(loaded->messages[0].content_parts[1].path == "/tmp/flow.mp4");
+    CHECK(loaded->messages[0].content_parts[1].mime_type == "video/mp4");
+    CHECK(loaded->messages[0].content_parts[2].type == core::llm::ContentPartType::Video);
+    CHECK(loaded->messages[0].content_parts[2].path.empty());
+    CHECK(loaded->messages[0].content_parts[2].url == "ms://file_kimi_video_123");
+    CHECK(loaded->messages[0].content_parts[2].media_id == "file_kimi_video_123");
+}
+
 TEST_CASE("SessionStore round-trips session todos", "[session][json]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_todos"};
     core::session::SessionStore store{tmp.path};

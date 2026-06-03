@@ -100,6 +100,12 @@ public:
      */
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
 
+    [[nodiscard]] bool supports_video_upload() const noexcept override { return true; }
+
+    void prepare_media_uploads(ChatRequest& request,
+                               std::string_view base_url,
+                               const core::auth::AuthInfo& auth) override;
+
     /**
      * @brief Build HTTP headers, adding Kimi-specific X-Msh-* headers.
      *

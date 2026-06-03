@@ -217,12 +217,14 @@ TEST_CASE("KimiModelCatalogProvider parses Moonshot enriched models response", "
     CHECK(thinking.supports(ModelCapability::JsonMode));
     CHECK(thinking.supports(ModelCapability::Reasoning));
     CHECK(thinking.supports(ModelCapability::Vision));
+    CHECK(thinking.supports(ModelCapability::VideoInput));
 
     const auto& legacy = result.models[1];
     CHECK(legacy.canonical_id == "moonshot-v1-32k");
     CHECK(legacy.context_window == 32768);
     CHECK_FALSE(legacy.supports(ModelCapability::Reasoning));
     CHECK_FALSE(legacy.supports(ModelCapability::Vision));
+    CHECK_FALSE(legacy.supports(ModelCapability::VideoInput));
 }
 
 TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[llm][model-catalog]") {

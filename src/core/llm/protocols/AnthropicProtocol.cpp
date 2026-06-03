@@ -536,7 +536,8 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
                         continue;
                     }
 
-                    if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                    if (const auto encoded = encode_image_part(part);
+                        encoded.has_value() && !encoded->is_url_reference()) {
                         payload += R"({"type":"image","source":{"type":"base64","media_type":")";
                         payload += core::utils::escape_json_string(encoded->mime_type);
                         payload += R"(","data":")";
@@ -545,7 +546,7 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
                     } else {
                         payload += R"({"type":"text","text":")";
                         payload += core::utils::escape_json_string(
-                            unavailable_image_attachment_text(part.path));
+                            unavailable_media_attachment_text(part.type, media_reference(part)));
                         payload += R"("})";
                     }
                 }

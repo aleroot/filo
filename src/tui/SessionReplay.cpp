@@ -44,8 +44,11 @@ std::vector<UiMessage> build_resumed_ui_messages(
                         if (!user_text.empty() && !user_text.ends_with('\n')) {
                             user_text += '\n';
                         }
-                        user_text += core::llm::describe_image_attachment(
-                            part.path.empty() ? "<image>" : part.path);
+                        user_text += core::llm::describe_media_attachment(
+                            part.type,
+                            core::llm::media_reference(part).empty()
+                                ? (part.type == core::llm::ContentPartType::Video ? "<video>" : "<image>")
+                                : std::string(core::llm::media_reference(part)));
                     }
                 }
             }

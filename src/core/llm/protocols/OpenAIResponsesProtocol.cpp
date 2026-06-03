@@ -114,7 +114,7 @@ void append_message_item(std::string& payload,
                 payload += core::utils::escape_json_string(encoded->data_url());
                 payload += R"("})";
             } else {
-                append_text_part(unavailable_image_attachment_text(part.path));
+                append_text_part(unavailable_media_attachment_text(part.type, media_reference(part)));
             }
         }
     } else if (!msg.content.empty()) {

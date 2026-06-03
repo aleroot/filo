@@ -124,6 +124,33 @@ TEST_CASE("Context mentions attach image files without inlining binary content",
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("Context mentions attach video files without inlining binary content", "[context][video]") {
+    const fs::path sandbox = make_temp_dir("filo_context_video");
+    const fs::path video = sandbox / "recordings" / "flow.mp4";
+    write_text(video, "mp4-bytes");
+
+    const auto expanded = core::context::expand_prompt(
+        R"(Please inspect @"recordings/flow.mp4".)",
+        sandbox);
+
+    REQUIRE_THAT(
+        expanded.display_text,
+        Catch::Matchers::ContainsSubstring("[Attached video: recordings/flow.mp4]."));
+    REQUIRE(expanded.content_parts.size() == 3);
+    REQUIRE(expanded.content_parts[0].type == core::llm::ContentPartType::Text);
+    REQUIRE(expanded.content_parts[1].type == core::llm::ContentPartType::Video);
+    REQUIRE(expanded.content_parts[1].path == video.string());
+    REQUIRE_THAT(expanded.content_parts[1].mime_type, Catch::Matchers::StartsWith("video/"));
+    REQUIRE(expanded.content_parts[2].text == ".");
+
+    const std::string text_only = core::context::expand_mentions(
+        R"(Please inspect @"recordings/flow.mp4".)",
+        sandbox);
+    REQUIRE(text_only == "Please inspect .");
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("Context mentions detect the active unquoted mention under the cursor", "[context]") {
     const auto mention = core::context::find_active_mention("Inspect @src/ma please", 15);
     REQUIRE(mention.has_value());

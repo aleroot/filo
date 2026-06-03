@@ -35,6 +35,7 @@ enum class ModelCapability : uint32_t {
     PromptCaching       = 1 << 10,  ///< Supports prompt caching for cost reduction
     Logprobs            = 1 << 11,  ///< Can return log probabilities
     Embeddings          = 1 << 12,  ///< Has embedding variant
+    VideoInput          = 1 << 13,  ///< Video understanding (multimodal)
 };
 
 using ModelCapabilities = uint32_t;
@@ -59,7 +60,7 @@ struct ModelCapabilityName {
     std::string_view name;
 };
 
-inline constexpr std::array<ModelCapabilityName, 13> kModelCapabilityNames{{
+inline constexpr std::array<ModelCapabilityName, 14> kModelCapabilityNames{{
     {ModelCapability::TextInput, "text_input"},
     {ModelCapability::TextOutput, "text_output"},
     {ModelCapability::Vision, "vision"},
@@ -73,12 +74,14 @@ inline constexpr std::array<ModelCapabilityName, 13> kModelCapabilityNames{{
     {ModelCapability::PromptCaching, "prompt_caching"},
     {ModelCapability::Logprobs, "logprobs"},
     {ModelCapability::Embeddings, "embeddings"},
+    {ModelCapability::VideoInput, "video_input"},
 }};
 
-inline constexpr std::array<ModelCapabilityName, 3> kModelCapabilityAliases{{
+inline constexpr std::array<ModelCapabilityName, 4> kModelCapabilityAliases{{
     {ModelCapability::TextInput, "text"},
     {ModelCapability::FunctionCalling, "tools"},
     {ModelCapability::JsonMode, "json"},
+    {ModelCapability::VideoInput, "video"},
 }};
 
 [[nodiscard]] constexpr std::string_view to_string(ModelCapability cap) noexcept {

@@ -233,6 +233,12 @@ bool get_string_field(simdjson::dom::object object,
         contains_ascii(model_id, "kimi-code")) {
         caps |= static_cast<uint32_t>(ModelCapability::Vision);
     }
+    if (supports_video_in ||
+        contains_ascii(model_id, "kimi-k2") ||
+        contains_ascii(model_id, "kimi-for-coding") ||
+        contains_ascii(model_id, "kimi-code")) {
+        caps |= static_cast<uint32_t>(ModelCapability::VideoInput);
+    }
     return caps;
 }
 

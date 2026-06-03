@@ -415,10 +415,10 @@ void LlamaCppProvider::stream_response(
         req.model = default_model_;
     }
 
-    degrade_historical_image_inputs(req);
-    if (latest_user_message_has_image_input(req)) {
+    degrade_historical_media_inputs(req);
+    if (latest_user_message_has_media_input(req)) {
         callback(StreamChunk::make_error(
-            "\n[llama.cpp error: image input is not supported by the embedded llama.cpp provider]"));
+            "\n[llama.cpp error: media input is not supported by the embedded llama.cpp provider]"));
         return;
     }
 

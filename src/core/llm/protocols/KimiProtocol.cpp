@@ -10,13 +10,17 @@
 #include <charconv>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 namespace core::llm::protocols {
 
@@ -200,6 +204,133 @@ struct CachedUsageSnapshot {
 };
 
 constexpr auto kUsageSnapshotTtl = std::chrono::seconds(20);
+constexpr int kVideoUploadTimeoutMs = 10 * 60 * 1000;
+constexpr std::size_t kVideoUploadCacheMaxEntries = 128;
+
+[[nodiscard]] std::string append_path(std::string_view base_url, std::string_view path) {
+    std::string out(base_url);
+    while (!out.empty() && out.back() == '/') {
+        out.pop_back();
+    }
+    out += path;
+    return out;
+}
+
+[[nodiscard]] cpr::Header multipart_headers(cpr::Header headers) {
+    headers.erase("Content-Type");
+    headers.erase("content-type");
+    headers["Accept"] = "application/json";
+    return headers;
+}
+
+[[nodiscard]] std::string parse_uploaded_file_id(std::string_view body) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(body);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        return {};
+    }
+    std::string_view id;
+    if (doc["id"].get(id) == simdjson::SUCCESS) {
+        return std::string(id);
+    }
+    if (doc["data"]["id"].get(id) == simdjson::SUCCESS) {
+        return std::string(id);
+    }
+    return {};
+}
+
+[[nodiscard]] std::string kimi_upload_error(const cpr::Response& response) {
+    std::string message;
+    if (!response.text.empty()) {
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(response.text);
+        simdjson::dom::element doc;
+        if (parser.parse(padded).get(doc) == simdjson::SUCCESS) {
+            std::string_view value;
+            if (doc["error"]["message"].get(value) == simdjson::SUCCESS
+                || doc["message"].get(value) == simdjson::SUCCESS) {
+                message = std::string(value);
+            }
+        }
+    }
+    if (message.empty()) {
+        message = response.text.empty() ? response.error.message : response.text;
+    }
+    return message.empty() ? std::format("HTTP {}", response.status_code) : message;
+}
+
+[[nodiscard]] std::string hash_for_cache(std::string_view value) {
+    return std::to_string(std::hash<std::string_view>{}(value));
+}
+
+[[nodiscard]] std::string auth_upload_cache_scope(
+    std::string_view base_url,
+    const core::auth::AuthInfo& auth) {
+    std::string scope(base_url);
+
+    if (auto it = auth.headers.find("Authorization");
+        it != auth.headers.end() && !it->second.empty()) {
+        scope += "|authorization=" + hash_for_cache(it->second);
+    }
+    if (auto it = auth.properties.find("account_id");
+        it != auth.properties.end() && !it->second.empty()) {
+        scope += "|account_id=" + it->second;
+    }
+    if (auto it = auth.properties.find("organization_uuid");
+        it != auth.properties.end() && !it->second.empty()) {
+        scope += "|organization_uuid=" + it->second;
+    }
+    if (auto it = auth.properties.find("device_id");
+        it != auth.properties.end() && !it->second.empty()) {
+        scope += "|device_id=" + it->second;
+    }
+
+    return scope;
+}
+
+[[nodiscard]] std::string video_upload_cache_key(const std::string& path,
+                                                 std::uintmax_t size,
+                                                 std::string_view base_url,
+                                                 const core::auth::AuthInfo& auth) {
+    std::error_code ec;
+    auto normalized = std::filesystem::weakly_canonical(path, ec);
+    if (ec) {
+        normalized = std::filesystem::absolute(path, ec);
+    }
+
+    std::int64_t mtime = 0;
+    ec.clear();
+    const auto modified = std::filesystem::last_write_time(path, ec);
+    if (!ec) {
+        mtime = static_cast<std::int64_t>(modified.time_since_epoch().count());
+    }
+
+    return auth_upload_cache_scope(base_url, auth)
+        + "|" + normalized.string()
+        + "|" + std::to_string(size)
+        + "|" + std::to_string(mtime);
+}
+
+std::mutex g_video_upload_cache_mutex;
+std::unordered_map<std::string, std::string> g_video_upload_cache;
+
+[[nodiscard]] std::optional<std::string> cached_video_upload_id(const std::string& key) {
+    std::lock_guard lock(g_video_upload_cache_mutex);
+    if (const auto it = g_video_upload_cache.find(key); it != g_video_upload_cache.end()) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
+void cache_video_upload_id(std::string key, std::string id) {
+    std::lock_guard lock(g_video_upload_cache_mutex);
+    if (!g_video_upload_cache.contains(key)
+        && g_video_upload_cache.size() >= kVideoUploadCacheMaxEntries) {
+        g_video_upload_cache.erase(g_video_upload_cache.begin());
+    }
+    g_video_upload_cache[std::move(key)] = std::move(id);
+}
 
 [[nodiscard]] std::optional<int32_t>
 parse_int_string(std::string_view value) noexcept {
@@ -764,6 +895,79 @@ std::string KimiProtocol::serialize(const ChatRequest& req) const {
         payload += '}';
     }
     return payload;
+}
+
+void KimiProtocol::prepare_media_uploads(ChatRequest& request,
+                                         std::string_view base_url,
+                                         const core::auth::AuthInfo& auth) {
+    for (auto& msg : request.messages) {
+        for (auto& part : msg.content_parts) {
+            if (part.type != ContentPartType::Video || part.path.empty() || !part.url.empty()) {
+                continue;
+            }
+
+            std::error_code ec;
+            const auto size = std::filesystem::file_size(part.path, ec);
+            if (ec) {
+                throw std::runtime_error("Video input file is not readable: " + part.path);
+            }
+            if (size == 0) {
+                throw std::runtime_error("Video input file is empty: " + part.path);
+            }
+            if (size > kMaxLocalVideoBytes) {
+                throw std::runtime_error(std::format(
+                    "Video input file '{}' is {} bytes, which exceeds the {} MB limit.",
+                    part.path,
+                    size,
+                    kMaxLocalVideoBytes / (1024ULL * 1024ULL)));
+            }
+
+            std::string mime_type = part.mime_type.empty()
+                ? core::utils::mime::guess_type(part.path, false)
+                : part.mime_type;
+            if (!is_video_mime(mime_type)) {
+                throw std::runtime_error("Video input file does not have a video MIME type: " + part.path);
+            }
+
+            const std::string cache_key = video_upload_cache_key(part.path, size, base_url, auth);
+            if (auto cached_id = cached_video_upload_id(cache_key); cached_id.has_value()) {
+                part.url = "ms://" + *cached_id;
+                part.media_id = *cached_id;
+                part.mime_type = std::move(mime_type);
+                continue;
+            }
+
+            cpr::Header headers = multipart_headers(build_headers(auth));
+            cpr::Response response = cpr::Post(
+                cpr::Url{append_path(base_url, "/files")},
+                headers,
+                cpr::Timeout{kVideoUploadTimeoutMs},
+                cpr::Multipart{
+                    {"file", cpr::File{part.path}},
+                    {"purpose", "video"},
+                });
+
+            if (response.error) {
+                throw std::runtime_error("Kimi video upload failed: " + response.error.message);
+            }
+            if (response.status_code < 200 || response.status_code >= 300) {
+                throw std::runtime_error(std::format(
+                    "Kimi video upload failed with HTTP {}: {}",
+                    response.status_code,
+                    kimi_upload_error(response)));
+            }
+
+            std::string file_id = parse_uploaded_file_id(response.text);
+            if (file_id.empty()) {
+                throw std::runtime_error("Kimi video upload response did not include a file id.");
+            }
+
+            part.url = "ms://" + file_id;
+            part.media_id = file_id;
+            part.mime_type = std::move(mime_type);
+            cache_video_upload_id(cache_key, std::move(file_id));
+        }
+    }
 }
 
 void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& req) const {

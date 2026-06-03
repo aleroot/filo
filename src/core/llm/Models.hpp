@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 #include <charconv>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
@@ -16,6 +17,9 @@
 #include "../utils/MimeUtils.hpp"
 
 namespace core::llm {
+
+inline constexpr std::uintmax_t kMaxLocalVideoBytes = 100ULL * 1024ULL * 1024ULL;
+inline constexpr std::uintmax_t kMaxInlineVideoBytes = 20ULL * 1024ULL * 1024ULL;
 
 // ---------------------------------------------------------------------------
 // TokenUsage — populated by each provider after every LLM call.
@@ -52,12 +56,15 @@ struct ToolCall {
 enum class ContentPartType {
     Text,
     Image,
+    Video,
 };
 
 struct ContentPart {
     ContentPartType type = ContentPartType::Text;
     std::string text = {};
     std::string path = {};
+    std::string url = {};
+    std::string media_id = {};
     std::string mime_type = {};
     std::string detail = "auto";
 
@@ -78,30 +85,165 @@ struct ContentPart {
             .detail = std::move(level),
         };
     }
+
+    [[nodiscard]] static ContentPart make_video(std::string value,
+                                                std::string mime = {}) {
+        return ContentPart{
+            .type = ContentPartType::Video,
+            .path = std::move(value),
+            .mime_type = std::move(mime),
+        };
+    }
+
+    [[nodiscard]] static ContentPart make_image_url(std::string value,
+                                                    std::string id = {},
+                                                    std::string level = "auto") {
+        return ContentPart{
+            .type = ContentPartType::Image,
+            .url = std::move(value),
+            .media_id = std::move(id),
+            .detail = std::move(level),
+        };
+    }
+
+    [[nodiscard]] static ContentPart make_video_url(std::string value,
+                                                    std::string id = {}) {
+        return ContentPart{
+            .type = ContentPartType::Video,
+            .url = std::move(value),
+            .media_id = std::move(id),
+        };
+    }
 };
+
+[[nodiscard]] inline std::string_view media_kind(ContentPartType type) noexcept {
+    switch (type) {
+        case ContentPartType::Image:
+            return "image";
+        case ContentPartType::Video:
+            return "video";
+        case ContentPartType::Text:
+            break;
+    }
+    return "text";
+}
+
+[[nodiscard]] inline bool is_media_part(ContentPartType type) noexcept {
+    return type == ContentPartType::Image || type == ContentPartType::Video;
+}
+
+[[nodiscard]] inline bool is_video_mime(std::string_view mime_type) noexcept {
+    return mime_type.starts_with("video/");
+}
+
+[[nodiscard]] inline bool is_data_url_for_media(ContentPartType type,
+                                                std::string_view url) noexcept {
+    if (type == ContentPartType::Image) {
+        return url.starts_with("data:image/");
+    }
+    if (type == ContentPartType::Video) {
+        return url.starts_with("data:video/");
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool is_media_reference_url(ContentPartType type,
+                                                 std::string_view url) noexcept {
+    if (url.empty() || type == ContentPartType::Text) {
+        return false;
+    }
+    return is_data_url_for_media(type, url)
+        || url.starts_with("ms://")
+        || url.starts_with("http://")
+        || url.starts_with("https://");
+}
+
+[[nodiscard]] inline std::string_view media_reference(const ContentPart& part) noexcept {
+    if (!part.path.empty()) {
+        return part.path;
+    }
+    if (!part.url.empty()) {
+        return part.url;
+    }
+    return {};
+}
 
 [[nodiscard]] inline std::string describe_image_attachment(std::string_view path) {
     return "[Attached image: " + std::string(path) + "]";
+}
+
+[[nodiscard]] inline std::string describe_video_attachment(std::string_view path) {
+    return "[Attached video: " + std::string(path) + "]";
+}
+
+[[nodiscard]] inline std::string describe_media_attachment(ContentPartType type,
+                                                           std::string_view path) {
+    if (type == ContentPartType::Video) {
+        return describe_video_attachment(path);
+    }
+    return describe_image_attachment(path);
 }
 
 [[nodiscard]] inline std::string unavailable_image_attachment_text(std::string_view path) {
     return "[Attached image unavailable: " + std::string(path) + "]";
 }
 
-struct EncodedImagePart {
+[[nodiscard]] inline std::string unavailable_video_attachment_text(std::string_view path) {
+    return "[Attached video unavailable: " + std::string(path) + "]";
+}
+
+[[nodiscard]] inline std::string unavailable_media_attachment_text(ContentPartType type,
+                                                                   std::string_view path) {
+    if (type == ContentPartType::Video) {
+        return unavailable_video_attachment_text(path);
+    }
+    return unavailable_image_attachment_text(path);
+}
+
+struct EncodedMediaPart {
+    ContentPartType type = ContentPartType::Image;
     std::string path = {};
+    std::string url = {};
+    std::string media_id = {};
     std::string mime_type = {};
     std::string base64_data = {};
     std::string detail = "auto";
 
     [[nodiscard]] std::string data_url() const {
+        if (!url.empty()) {
+            return url;
+        }
         return "data:" + mime_type + ";base64," + base64_data;
+    }
+
+    [[nodiscard]] bool is_url_reference() const noexcept {
+        return !url.empty();
     }
 };
 
-[[nodiscard]] inline std::optional<EncodedImagePart> encode_image_part(
+using EncodedImagePart = EncodedMediaPart;
+
+[[nodiscard]] inline std::optional<EncodedMediaPart> encode_media_part(
     const ContentPart& part) {
-    if (part.type != ContentPartType::Image || part.path.empty()) {
+    if (!is_media_part(part.type)) {
+        return std::nullopt;
+    }
+
+    if (!part.url.empty()) {
+        if (!is_media_reference_url(part.type, part.url)) {
+            return std::nullopt;
+        }
+        return EncodedMediaPart{
+            .type = part.type,
+            .path = part.path,
+            .url = part.url,
+            .media_id = part.media_id,
+            .mime_type = part.mime_type,
+            .detail = part.detail.empty() ? "auto" : part.detail,
+        };
+    }
+
+    if (part.path.empty()) {
         return std::nullopt;
     }
 
@@ -121,6 +263,10 @@ struct EncodedImagePart {
     if (size < 0) {
         return std::nullopt;
     }
+    if (part.type == ContentPartType::Video
+        && static_cast<std::uintmax_t>(size) > kMaxInlineVideoBytes) {
+        return std::nullopt;
+    }
     input.seekg(0, std::ios::beg);
 
     std::string bytes(static_cast<std::size_t>(size), '\0');
@@ -134,21 +280,53 @@ struct EncodedImagePart {
     std::string mime_type = part.mime_type.empty()
         ? core::utils::mime::guess_type(path, false)
         : part.mime_type;
-    if (!mime_type.starts_with("image/")) {
+    if (part.type == ContentPartType::Image && !mime_type.starts_with("image/")) {
+        return std::nullopt;
+    }
+    if (part.type == ContentPartType::Video && !is_video_mime(mime_type)) {
         return std::nullopt;
     }
 
-    return EncodedImagePart{
+    return EncodedMediaPart{
+        .type = part.type,
         .path = part.path,
+        .url = part.url,
+        .media_id = part.media_id,
         .mime_type = std::move(mime_type),
         .base64_data = core::utils::Base64::encode(bytes),
         .detail = part.detail.empty() ? "auto" : part.detail,
     };
 }
 
+[[nodiscard]] inline std::optional<EncodedImagePart> encode_image_part(
+    const ContentPart& part) {
+    if (part.type != ContentPartType::Image) {
+        return std::nullopt;
+    }
+    return encode_media_part(part);
+}
+
 [[nodiscard]] inline bool message_has_image_input(const std::vector<ContentPart>& parts) noexcept {
     for (const auto& part : parts) {
         if (part.type == ContentPartType::Image) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool message_has_video_input(const std::vector<ContentPart>& parts) noexcept {
+    for (const auto& part : parts) {
+        if (part.type == ContentPartType::Video) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool message_has_media_input(const std::vector<ContentPart>& parts) noexcept {
+    for (const auto& part : parts) {
+        if (is_media_part(part.type)) {
             return true;
         }
     }
@@ -164,8 +342,11 @@ struct EncodedImagePart {
             continue;
         }
 
-        text += describe_image_attachment(
-            part.path.empty() ? std::string_view{"<image>"} : std::string_view{part.path});
+        text += describe_media_attachment(
+            part.type,
+            media_reference(part).empty()
+                ? std::string_view{part.type == ContentPartType::Video ? "<video>" : "<image>"}
+                : media_reference(part));
     }
     return text;
 }
@@ -266,9 +447,35 @@ struct ChatRequest {
     return message_has_image_input(msg.content_parts);
 }
 
+[[nodiscard]] inline bool message_has_video_input(const Message& msg) noexcept {
+    return message_has_video_input(msg.content_parts);
+}
+
+[[nodiscard]] inline bool message_has_media_input(const Message& msg) noexcept {
+    return message_has_media_input(msg.content_parts);
+}
+
 [[nodiscard]] inline bool request_has_image_input(const ChatRequest& req) noexcept {
     for (const auto& msg : req.messages) {
         if (message_has_image_input(msg)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool request_has_video_input(const ChatRequest& req) noexcept {
+    for (const auto& msg : req.messages) {
+        if (message_has_video_input(msg)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool request_has_media_input(const ChatRequest& req) noexcept {
+    for (const auto& msg : req.messages) {
+        if (message_has_media_input(msg)) {
             return true;
         }
     }
@@ -279,6 +486,24 @@ struct ChatRequest {
     for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
         if (it->role == "user") {
             return message_has_image_input(*it);
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool latest_user_message_has_video_input(const ChatRequest& req) noexcept {
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == "user") {
+            return message_has_video_input(*it);
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool latest_user_message_has_media_input(const ChatRequest& req) noexcept {
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == "user") {
+            return message_has_media_input(*it);
         }
     }
     return false;
@@ -298,7 +523,26 @@ inline void degrade_message_to_text_only(Message& msg) {
     msg.content_parts.clear();
 }
 
-inline void degrade_historical_image_inputs(ChatRequest& req) {
+struct MediaDegradationOptions {
+    bool images = true;
+    bool videos = true;
+};
+
+[[nodiscard]] inline bool message_has_degradable_media_input(
+    const Message& msg,
+    const MediaDegradationOptions options) noexcept {
+    for (const auto& part : msg.content_parts) {
+        if ((options.images && part.type == ContentPartType::Image)
+            || (options.videos && part.type == ContentPartType::Video)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void degrade_historical_media_inputs(
+    ChatRequest& req,
+    MediaDegradationOptions options = {}) {
     bool kept_latest_user = false;
     for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
         if (it->role == "user" && !kept_latest_user) {
@@ -306,10 +550,18 @@ inline void degrade_historical_image_inputs(ChatRequest& req) {
             continue;
         }
 
-        if (message_has_image_input(*it)) {
+        if (message_has_degradable_media_input(*it, options)) {
             degrade_message_to_text_only(*it);
         }
     }
+}
+
+inline void degrade_historical_image_inputs(ChatRequest& req) {
+    degrade_historical_media_inputs(req, {.images = true, .videos = false});
+}
+
+inline void degrade_historical_video_inputs(ChatRequest& req) {
+    degrade_historical_media_inputs(req, {.images = false, .videos = true});
 }
 
 struct Serializer {
@@ -454,19 +706,33 @@ struct Serializer {
                         continue;
                     }
 
-                    if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                    if (const auto encoded = encode_media_part(part); encoded.has_value()) {
                         if (!first_part) payload += ",";
-                        payload += R"({"type":"image_url","image_url":{"url":")";
+                        const std::string_view kind = media_kind(encoded->type);
+                        payload += R"({"type":")";
+                        payload += kind;
+                        payload += R"(_url",")";
+                        payload += kind;
+                        payload += R"(_url":{"url":")";
                         payload += core::utils::escape_json_string(encoded->data_url());
-                        payload += R"(","detail":")";
-                        payload += core::utils::escape_json_string(encoded->detail);
-                        payload += R"("}})";
+                        payload += R"(")";
+                        if (!encoded->media_id.empty()) {
+                            payload += R"(,"id":")";
+                            payload += core::utils::escape_json_string(encoded->media_id);
+                            payload += R"(")";
+                        }
+                        if (encoded->type == ContentPartType::Image) {
+                            payload += R"(,"detail":")";
+                            payload += core::utils::escape_json_string(encoded->detail);
+                            payload += R"(")";
+                        }
+                        payload += "}}";
                         first_part = false;
                     } else {
                         if (!first_part) payload += ",";
                         payload += R"({"type":"text","text":")";
                         payload += core::utils::escape_json_string(
-                            unavailable_image_attachment_text(part.path));
+                            unavailable_media_attachment_text(part.type, media_reference(part)));
                         payload += R"("})";
                         first_part = false;
                     }

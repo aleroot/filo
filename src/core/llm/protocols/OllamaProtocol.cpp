@@ -57,7 +57,7 @@ OllamaNdJsonResult parse_ollama_ndjson_line(std::string_view json_str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::string OllamaProtocol::serialize(const ChatRequest& req) const {
-    if (!request_has_image_input(req)) {
+    if (!request_has_media_input(req)) {
         return Serializer::serialize(req);
     }
 
@@ -164,14 +164,22 @@ std::string OllamaProtocol::serialize(const ChatRequest& req) const {
         std::vector<std::string> images;
         for (const auto& part : msg.content_parts) {
             if (part.type != ContentPartType::Image) continue;
-            if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+            if (const auto encoded = encode_image_part(part);
+                encoded.has_value() && !encoded->is_url_reference()) {
                 images.push_back(encoded->base64_data);
             } else {
                 if (!content.empty() && !content.ends_with('\n')) {
                     content.push_back('\n');
                 }
-                content += unavailable_image_attachment_text(part.path);
+                content += unavailable_media_attachment_text(part.type, media_reference(part));
             }
+        }
+        for (const auto& part : msg.content_parts) {
+            if (part.type != ContentPartType::Video) continue;
+            if (!content.empty() && !content.ends_with('\n')) {
+                content.push_back('\n');
+            }
+            content += unavailable_video_attachment_text(media_reference(part));
         }
 
         if (!content.empty()) {

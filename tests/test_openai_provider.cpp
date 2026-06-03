@@ -25,6 +25,13 @@ std::filesystem::path make_temp_image_file(std::string_view filename = "filo-tes
     return path;
 }
 
+std::filesystem::path make_temp_video_file(std::string_view filename = "filo-test-video.mp4") {
+    const auto path = std::filesystem::temp_directory_path() / filename;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-video";
+    return path;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +108,65 @@ TEST_CASE("Serializer - user image content becomes image_url parts", "[openai][s
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image_url")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"What does this screenshot show?")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
+}
+
+TEST_CASE("Serializer - user video content becomes video_url parts", "[openai][serializer][video]") {
+    const auto video = make_temp_video_file();
+
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_video_attachment(video.string()),
+        .content_parts = {
+            ContentPart::make_text("What happens in this screen recording?"),
+            ContentPart::make_video(video.string(), "video/mp4"),
+        },
+    });
+
+    const auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"video_url")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("video_url":{"url":"data:video/mp4;base64,)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"What happens in this screen recording?")"));
+}
+
+TEST_CASE("Serializer - URL-backed video content is passed through without base64",
+          "[openai][serializer][video]") {
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_video_attachment("ms://file_kimi_video_123"),
+        .content_parts = {
+            ContentPart::make_text("What happens in this uploaded recording?"),
+            ContentPart::make_video_url("ms://file_kimi_video_123", "file_kimi_video_123"),
+        },
+    });
+
+    const auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"video_url")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("video_url":{"url":"ms://file_kimi_video_123","id":"file_kimi_video_123"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("data:video/"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("base64"));
+}
+
+TEST_CASE("Serializer - data URL video content is passed through without re-encoding",
+          "[openai][serializer][video]") {
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = describe_video_attachment("data:video/mp4;base64,AAAA"),
+        .content_parts = {
+            ContentPart::make_video_url("data:video/mp4;base64,AAAA"),
+        },
+    });
+
+    const auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("video_url":{"url":"data:video/mp4;base64,AAAA"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("[Attached video unavailable"));
 }
 
 TEST_CASE("Serializer - empty messages produces valid JSON array", "[openai][serializer]") {

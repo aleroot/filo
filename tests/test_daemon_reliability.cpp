@@ -376,6 +376,29 @@ private:
     std::atomic<int> call_count_{0};
 };
 
+class GatewayCaptureRequestProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(mutex_);
+            last_request_ = request;
+        }
+        callback(core::llm::StreamChunk::make_content("ok"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] std::optional<core::llm::ChatRequest> last_request() const {
+        std::lock_guard lock(mutex_);
+        return last_request_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::optional<core::llm::ChatRequest> last_request_;
+};
+
 class DaemonRunner {
 public:
     explicit DaemonRunner(int port,
@@ -1076,6 +1099,73 @@ TEST_CASE("API gateway streams OpenAI-compatible chat completion chunks",
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("finish_reason":"stop")"));
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring(R"("choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8})"));
     REQUIRE_THAT(streamed->body, Catch::Matchers::ContainsSubstring("data: [DONE]\n\n"));
+}
+
+TEST_CASE("API gateway accepts documented Kimi video_url reference formats",
+          "[daemon][api_gateway][video]") {
+    const std::string provider_name =
+        std::format("video-gateway-test-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    auto provider = std::make_shared<GatewayCaptureRequestProvider>();
+    core::llm::ProviderManager::get_instance().register_provider(provider_name, provider);
+
+    core::config::AppConfig config;
+    config.default_provider = provider_name;
+    config.default_model_selection = "manual";
+    config.providers[provider_name].model = "video-model";
+
+    exec::gateway::ProviderCatalog provider_catalog;
+    provider_catalog.providers.insert({provider_name, true});
+    provider_catalog.provider_default_models[provider_name] = "video-model";
+
+    const int port = next_test_port();
+    GatewayServerRunner gateway_server(port, config, std::move(provider_catalog));
+
+    bool ready = false;
+    for (int attempt = 0; attempt < 120; ++attempt) {
+        if (auto probe = get_request(port, "/v1/models"); probe) {
+            ready = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    const std::string payload =
+        R"({"model":")" + provider_name + R"(","stream":true,"messages":[{"role":"user","content":[)"
+        R"({"type":"text","text":"inspect these recordings"},)"
+        R"({"type":"video_url","video_url":"ms://file_short"},)"
+        R"({"type":"video_url","video_url":{"url":"data:video/mp4;base64,AAAA"}},)"
+        R"({"type":"video_url","video_url":{"url":"ms://file_object","id":"file_explicit"}})"
+        R"(]}]})";
+
+    auto streamed = post_json_request(port, "/v1/chat/completions", payload);
+    REQUIRE(streamed);
+    REQUIRE(streamed->status == 200);
+
+    const auto captured = provider->last_request();
+    REQUIRE(captured.has_value());
+    REQUIRE(captured->messages.size() == 1);
+    CHECK(captured->messages[0].content == "inspect these recordings");
+    REQUIRE(captured->messages[0].content_parts.size() == 3);
+
+    const auto& shorthand = captured->messages[0].content_parts[0];
+    CHECK(shorthand.type == core::llm::ContentPartType::Video);
+    CHECK(shorthand.url == "ms://file_short");
+    CHECK(shorthand.media_id == "file_short");
+
+    const auto& data_url = captured->messages[0].content_parts[1];
+    CHECK(data_url.type == core::llm::ContentPartType::Video);
+    CHECK(data_url.url == "data:video/mp4;base64,AAAA");
+    CHECK(data_url.media_id.empty());
+
+    const auto& object_ref = captured->messages[0].content_parts[2];
+    CHECK(object_ref.type == core::llm::ContentPartType::Video);
+    CHECK(object_ref.url == "ms://file_object");
+    CHECK(object_ref.media_id == "file_explicit");
+    CHECK_THAT(captured->messages[0].content,
+               !Catch::Matchers::ContainsSubstring("[Video input omitted]"));
 }
 
 TEST_CASE("API gateway streams OpenAI-compatible tool call chunks",

@@ -400,6 +400,8 @@ std::vector<ModelInfo> build_openai_catalog() {
 
 // Kimi models (Moonshot AI)
 std::vector<ModelInfo> build_kimi_catalog() {
+    constexpr ModelCapabilities CAP_KIMI_MULTIMODAL =
+        CAP_FULL | static_cast<uint32_t>(ModelCapability::VideoInput);
     return {
         {
             .canonical_id = "kimi-k2.6",
@@ -408,7 +410,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .provider = "kimi",
             .context_window = 256000,
             .max_output_tokens = 8192,
-            .capabilities = CAP_FULL,
+            .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
             .knowledge_cutoff = "2026-04",
@@ -421,7 +423,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .provider = "kimi",
             .context_window = 256000,
             .max_output_tokens = 8192,
-            .capabilities = CAP_FULL,
+            .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-06",
@@ -434,7 +436,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .provider = "kimi",
             .context_window = 256000,
             .max_output_tokens = 8192,
-            .capabilities = CAP_FULL,
+            .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-06",
@@ -447,7 +449,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .provider = "kimi",
             .context_window = 256000,
             .max_output_tokens = 8192,
-            .capabilities = CAP_FULL,
+            .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-06",
@@ -461,7 +463,7 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .provider = "kimi",
             .context_window = 128000,
             .max_output_tokens = 4096,
-            .capabilities = CAP_FULL,
+            .capabilities = CAP_KIMI_MULTIMODAL,
             .tier = ModelTier::Balanced,
             .pricing = {3.0, 12.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-01",

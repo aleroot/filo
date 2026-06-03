@@ -3231,7 +3231,7 @@ RunResult run(RunOptions opts) {
         core::llm::Message user_message;
         user_message.role = "user";
         user_message.content = expanded_prompt.display_text;
-        if (core::llm::message_has_image_input(expanded_prompt.content_parts)) {
+        if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
             user_message.content_parts = expanded_prompt.content_parts;
         }
 

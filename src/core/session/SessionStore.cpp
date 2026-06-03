@@ -142,16 +142,28 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
             const auto& part = msg.content_parts[i];
             if (i > 0) out += ',';
             out += "{\"type\":\"";
-            out += part.type == core::llm::ContentPartType::Image ? "image" : "text";
+            out += core::llm::media_kind(part.type);
             out += '"';
             if (part.type == core::llm::ContentPartType::Text) {
                 out += ",\"text\":\"";
                 core::utils::append_escaped(out, part.text);
                 out += '"';
             } else {
-                out += ",\"path\":\"";
-                core::utils::append_escaped(out, part.path);
-                out += '"';
+                if (!part.path.empty()) {
+                    out += ",\"path\":\"";
+                    core::utils::append_escaped(out, part.path);
+                    out += '"';
+                }
+                if (!part.url.empty()) {
+                    out += ",\"url\":\"";
+                    core::utils::append_escaped(out, part.url);
+                    out += '"';
+                }
+                if (!part.media_id.empty()) {
+                    out += ",\"media_id\":\"";
+                    core::utils::append_escaped(out, part.media_id);
+                    out += '"';
+                }
                 if (!part.mime_type.empty()) {
                     out += ",\"mime_type\":\"";
                     core::utils::append_escaped(out, part.mime_type);
@@ -302,15 +314,24 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                 if (msg_el["content_parts"].get(parts_arr) == simdjson::SUCCESS) {
                     for (simdjson::dom::element part_el : parts_arr) {
                         core::llm::ContentPart part;
-                        if (part_el["type"].get(sv) == simdjson::SUCCESS
-                            && sv == "image") {
-                            part.type = core::llm::ContentPartType::Image;
+                        if (part_el["type"].get(sv) == simdjson::SUCCESS) {
+                            if (sv == "image") {
+                                part.type = core::llm::ContentPartType::Image;
+                            } else if (sv == "video") {
+                                part.type = core::llm::ContentPartType::Video;
+                            }
                         }
                         if (part_el["text"].get(sv) == simdjson::SUCCESS) {
                             part.text = std::string(sv);
                         }
                         if (part_el["path"].get(sv) == simdjson::SUCCESS) {
                             part.path = std::string(sv);
+                        }
+                        if (part_el["url"].get(sv) == simdjson::SUCCESS) {
+                            part.url = std::string(sv);
+                        }
+                        if (part_el["media_id"].get(sv) == simdjson::SUCCESS) {
+                            part.media_id = std::string(sv);
                         }
                         if (part_el["mime_type"].get(sv) == simdjson::SUCCESS) {
                             part.mime_type = std::string(sv);

@@ -377,6 +377,29 @@ public:
      */
     virtual void prepare_request([[maybe_unused]] ChatRequest& request) {}
 
+    /**
+     * @brief Whether this protocol can upload local video files and replace
+     *        them with provider file references before serialization.
+     *
+     * Kimi/Moonshot supports this through `/v1/files` with purpose `video`,
+     * returning `ms://<file-id>` references. Other protocols default to false
+     * and must keep video inputs within the inline payload cap.
+     */
+    [[nodiscard]] virtual bool supports_video_upload() const noexcept {
+        return false;
+    }
+
+    /**
+     * @brief Prepare local media inputs before JSON serialization.
+     *
+     * Called after auth resolution and `prepare_request()`, before
+     * `serialize()`. Protocols may upload local files and mutate content parts
+     * into provider-native URL references.
+     */
+    virtual void prepare_media_uploads([[maybe_unused]] ChatRequest& request,
+                                       [[maybe_unused]] std::string_view base_url,
+                                       [[maybe_unused]] const core::auth::AuthInfo& auth) {}
+
     // ── Response lifecycle hooks ─────────────────────────────────────────────
     //
     // These three methods form the *response lifecycle* contract.  Together

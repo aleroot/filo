@@ -280,6 +280,58 @@ TEST_CASE("Latest user image turn is preserved during history degradation", "[ti
     REQUIRE(core::llm::latest_user_message_has_image_input(req));
 }
 
+TEST_CASE("Historical video turns degrade to text-only placeholders", "[tier1][multimodal][video]") {
+    core::llm::ChatRequest req;
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content_parts = {
+            core::llm::ContentPart::make_text("Look at "),
+            core::llm::ContentPart::make_video("/tmp/old.mp4", "video/mp4"),
+            core::llm::ContentPart::make_text(" please."),
+        },
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "assistant",
+        .content = "I watched it.",
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "Now summarize the issue in text.",
+    });
+
+    core::llm::degrade_historical_media_inputs(req);
+
+    REQUIRE(req.messages[0].content_parts.empty());
+    REQUIRE(req.messages[0].content == "Look at [Attached video: /tmp/old.mp4] please.");
+    REQUIRE_FALSE(core::llm::request_has_media_input(req));
+}
+
+TEST_CASE("Historical media degradation can target only video inputs", "[tier1][multimodal][video]") {
+    core::llm::ChatRequest req;
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content_parts = {
+            core::llm::ContentPart::make_image("/tmp/old.png", "image/png"),
+        },
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content_parts = {
+            core::llm::ContentPart::make_video("/tmp/old.mp4", "video/mp4"),
+        },
+    });
+    req.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "Continue in text.",
+    });
+
+    core::llm::degrade_historical_video_inputs(req);
+
+    REQUIRE(core::llm::message_has_image_input(req.messages[0]));
+    REQUIRE(req.messages[1].content_parts.empty());
+    REQUIRE(req.messages[1].content == "[Attached video: /tmp/old.mp4]");
+}
+
 // ============================================================================
 // TokenUsage operators
 // ============================================================================

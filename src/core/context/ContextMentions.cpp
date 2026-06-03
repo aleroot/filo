@@ -202,6 +202,14 @@ bool is_image_file(const std::filesystem::path& resolved) {
     return core::utils::mime::guess_type(resolved, false).starts_with("image/");
 }
 
+bool is_video_file(const std::filesystem::path& resolved) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(resolved, ec)) {
+        return false;
+    }
+    return core::llm::is_video_mime(core::utils::mime::guess_type(resolved, false));
+}
+
 void append_text_part(std::vector<core::llm::ContentPart>& parts, std::string_view text) {
     if (text.empty()) return;
 
@@ -397,6 +405,17 @@ ExpandedPrompt expand_prompt(std::string_view input,
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;
             output.content_parts.push_back(core::llm::ContentPart::make_image(
+                resolved.string(),
+                core::utils::mime::guess_type(resolved, false)));
+            append_text_part(output.content_parts, trailing_suffix);
+            i = cursor;
+            continue;
+        }
+
+        if (is_video_file(resolved)) {
+            output.display_text += core::llm::describe_video_attachment(raw_path);
+            output.display_text += trailing_suffix;
+            output.content_parts.push_back(core::llm::ContentPart::make_video(
                 resolved.string(),
                 core::utils::mime::guess_type(resolved, false)));
             append_text_part(output.content_parts, trailing_suffix);

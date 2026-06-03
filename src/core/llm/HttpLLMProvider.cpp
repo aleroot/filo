@@ -7,7 +7,9 @@
 #include <cpr/cpr.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <random>
 #include <thread>
@@ -57,6 +59,7 @@ namespace {
         }
         req.auth_properties = auth.properties;
         prepared.protocol->prepare_request(req);
+        prepared.protocol->prepare_media_uploads(req, base_url, auth);
         prepared.model = req.model;
         prepared.payload = prepared.protocol->serialize(req);
         prepared.delimiter = std::string(prepared.protocol->event_delimiter());
@@ -71,6 +74,16 @@ namespace {
         prepared.headers = prepared.protocol->build_headers(auth);
         prepared.headers["Accept"] = "text/event-stream";
         return prepared;
+    }
+
+    [[nodiscard]] std::optional<std::uintmax_t> local_file_size(
+        const std::string& path) noexcept {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) {
+            return std::nullopt;
+        }
+        return size;
     }
 
     // Exponential backoff with jitter for rate limit retries.
@@ -204,6 +217,41 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
         && !info->supports(ModelCapability::Vision)) {
         errors.push_back("model does not support image input");
     }
+
+    if (has_declared_capabilities
+        && request_has_video_input(request)
+        && !info->supports(ModelCapability::VideoInput)) {
+        errors.push_back("model does not support video input");
+    }
+
+    const bool can_upload_video = protocol_ && protocol_->supports_video_upload();
+    for (const auto& msg : request.messages) {
+        for (const auto& part : msg.content_parts) {
+            if (part.type != ContentPartType::Video || part.path.empty()) {
+                continue;
+            }
+            const auto size = local_file_size(part.path);
+            if (!size.has_value()) {
+                errors.push_back("video input file is not readable: " + part.path);
+                continue;
+            }
+            if (*size == 0) {
+                errors.push_back("video input file is empty: " + part.path);
+            } else if (*size > kMaxLocalVideoBytes) {
+                errors.push_back(std::format(
+                    "video input file '{}' is {} bytes, which exceeds the {} MB limit",
+                    part.path,
+                    *size,
+                    kMaxLocalVideoBytes / (1024ULL * 1024ULL)));
+            } else if (!can_upload_video && *size > kMaxInlineVideoBytes) {
+                errors.push_back(std::format(
+                    "video input file '{}' is {} bytes; this provider can only inline videos up to {} MB",
+                    part.path,
+                    *size,
+                    kMaxInlineVideoBytes / (1024ULL * 1024ULL)));
+            }
+        }
+    }
     
     return errors;
 }
@@ -263,9 +311,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             protocol_.get());
         const auto metadata_info = ModelRegistry::instance().get_info(metadata_model);
         if (metadata_info.has_value()
-            && metadata_info->capabilities != 0
-            && !metadata_info->supports(ModelCapability::Vision)) {
-            degrade_historical_image_inputs(effective_request);
+            && metadata_info->capabilities != 0) {
+            degrade_historical_media_inputs(
+                effective_request,
+                {
+                    .images = !metadata_info->supports(ModelCapability::Vision),
+                    .videos = !metadata_info->supports(ModelCapability::VideoInput),
+                });
         }
 
         if (const auto errors = validate_request(effective_request); !errors.empty()) {

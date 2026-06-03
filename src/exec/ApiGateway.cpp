@@ -125,6 +125,49 @@ parse_local_file_uri(std::string_view uri_value, std::string& error_out) {
     return normalize_path(std::filesystem::path(decoded_path));
 }
 
+[[nodiscard]] bool parse_media_url_field(simdjson::dom::object part_obj,
+                                         const char* field_name,
+                                         std::string& url_out,
+                                         std::string& id_out,
+                                         std::optional<std::string_view>& detail_out) {
+    simdjson::dom::element media_el;
+    if (part_obj[field_name].get(media_el) != simdjson::SUCCESS) {
+        return false;
+    }
+
+    std::string_view value;
+    if (media_el.type() == simdjson::dom::element_type::STRING) {
+        if (media_el.get(value) != simdjson::SUCCESS) {
+            return false;
+        }
+        url_out = std::string(value);
+        return true;
+    }
+
+    simdjson::dom::object media_obj;
+    if (media_el.get(media_obj) != simdjson::SUCCESS) {
+        return false;
+    }
+    if (media_obj["url"].get(value) != simdjson::SUCCESS) {
+        return false;
+    }
+    url_out = std::string(value);
+    if (media_obj["id"].get(value) == simdjson::SUCCESS) {
+        id_out = std::string(value);
+    }
+    if (media_obj["detail"].get(value) == simdjson::SUCCESS) {
+        detail_out = value;
+    }
+    return true;
+}
+
+[[nodiscard]] std::string media_id_from_url(std::string_view url) {
+    if (url.starts_with("ms://") && url.size() > 5) {
+        return std::string(url.substr(5));
+    }
+    return {};
+}
+
 struct GatewayRequest {
     core::llm::ChatRequest request;
     std::string requested_model;
@@ -473,20 +516,17 @@ bool parse_openai_message(simdjson::dom::object message_obj,
                     }
 
                     if (part_type == "image_url") {
-                        simdjson::dom::object image_obj;
-                        if (part_obj["image_url"].get(image_obj) != simdjson::SUCCESS) {
+                        std::string image_url;
+                        std::string image_id;
+                        std::optional<std::string_view> detail_value;
+                        if (!parse_media_url_field(part_obj, "image_url", image_url, image_id, detail_value)) {
                             append_message_marker(message, "[Image input omitted]");
                             continue;
                         }
 
-                        std::string_view image_url;
-                        if (image_obj["url"].get(image_url) != simdjson::SUCCESS) {
-                            append_message_marker(message, "[Image input omitted]");
-                            continue;
-                        }
-
-                        std::string_view detail = "auto";
-                        [[maybe_unused]] const auto ignored_detail = image_obj["detail"].get(detail);
+                        const std::string detail = detail_value.has_value()
+                            ? std::string(*detail_value)
+                            : std::string{"auto"};
 
                         std::string local_path;
                         if (image_url.starts_with("file://")) {
@@ -496,20 +536,77 @@ bool parse_openai_message(simdjson::dom::object message_obj,
                                 local_path = resolved->string();
                             }
                         } else if (!image_url.empty() && image_url.front() == '/') {
-                            local_path = std::string(image_url);
+                                local_path = std::string(image_url);
                         }
 
                         if (!local_path.empty()) {
                             message.content_parts.push_back(core::llm::ContentPart::make_image(
                                 std::move(local_path),
                                 {},
-                                std::string(detail)));
+                                detail));
+                            continue;
+                        }
+
+                        if (core::llm::is_media_reference_url(
+                                core::llm::ContentPartType::Image,
+                                image_url)) {
+                            if (image_id.empty()) {
+                                image_id = media_id_from_url(image_url);
+                            }
+                            message.content_parts.push_back(core::llm::ContentPart::make_image_url(
+                                std::move(image_url),
+                                std::move(image_id),
+                                detail));
                             continue;
                         }
 
                         append_message_marker(
                             message,
-                            "[Image input omitted: only local file:// or absolute-path image URLs are supported]");
+                            "[Image input omitted: only local file://, absolute-path, data:, ms://, or http(s) image URLs are supported]");
+                        continue;
+                    }
+
+                    if (part_type == "video_url") {
+                        std::string video_url;
+                        std::string video_id;
+                        std::optional<std::string_view> ignored_detail;
+                        if (!parse_media_url_field(part_obj, "video_url", video_url, video_id, ignored_detail)) {
+                            append_message_marker(message, "[Video input omitted]");
+                            continue;
+                        }
+
+                        std::string local_path;
+                        if (video_url.starts_with("file://")) {
+                            std::string parse_error;
+                            if (auto resolved = parse_local_file_uri(video_url, parse_error);
+                                resolved.has_value()) {
+                                local_path = resolved->string();
+                            }
+                        } else if (!video_url.empty() && video_url.front() == '/') {
+                            local_path = std::string(video_url);
+                        }
+
+                        if (!local_path.empty()) {
+                            message.content_parts.push_back(core::llm::ContentPart::make_video(
+                                std::move(local_path)));
+                            continue;
+                        }
+
+                        if (core::llm::is_media_reference_url(
+                                core::llm::ContentPartType::Video,
+                                video_url)) {
+                            if (video_id.empty()) {
+                                video_id = media_id_from_url(video_url);
+                            }
+                            message.content_parts.push_back(core::llm::ContentPart::make_video_url(
+                                std::move(video_url),
+                                std::move(video_id)));
+                            continue;
+                        }
+
+                        append_message_marker(
+                            message,
+                            "[Video input omitted: only local file://, absolute-path, data:, ms://, or http(s) video URLs are supported]");
                     }
                 }
             }

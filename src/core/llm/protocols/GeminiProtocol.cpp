@@ -423,7 +423,8 @@ std::string serialize_gemini_request(const ChatRequest& req,
                 }
 
                 if (!first_part) payload += ',';
-                if (const auto encoded = encode_image_part(part); encoded.has_value()) {
+                if (const auto encoded = encode_media_part(part);
+                    encoded.has_value() && !encoded->is_url_reference()) {
                     payload += R"({"inlineData":{"mimeType":")";
                     payload += core::utils::escape_json_string(encoded->mime_type);
                     payload += R"(","data":")";
@@ -432,7 +433,7 @@ std::string serialize_gemini_request(const ChatRequest& req,
                 } else {
                     payload += R"({"text":")";
                     payload += core::utils::escape_json_string(
-                        unavailable_image_attachment_text(part.path));
+                        unavailable_media_attachment_text(part.type, media_reference(part)));
                     payload += R"("})";
                 }
                 first_part = false;
