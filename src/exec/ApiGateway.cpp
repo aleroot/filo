@@ -301,7 +301,6 @@ void assign_gateway_session_scope(const httplib::Request& http_request,
 
 void append_message_text(core::llm::Message& message, std::string_view text) {
     if (text.empty()) return;
-    message.content_parts.push_back(core::llm::ContentPart::make_text(std::string(text)));
     message.content += std::string(text);
 }
 

@@ -169,6 +169,25 @@ TEST_CASE("Serializer - data URL video content is passed through without re-enco
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("[Attached video unavailable"));
 }
 
+TEST_CASE("Serializer - media-only content parts keep message text",
+          "[openai][serializer][video]") {
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Inspect this uploaded recording.",
+        .content_parts = {
+            ContentPart::make_video_url("ms://file_kimi_video_123", "file_kimi_video_123"),
+        },
+    });
+
+    const auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("type":"text","text":"Inspect this uploaded recording.")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("video_url":{"url":"ms://file_kimi_video_123","id":"file_kimi_video_123"})"));
+}
+
 TEST_CASE("Serializer - empty messages produces valid JSON array", "[openai][serializer]") {
     ChatRequest req;
     req.model  = "gpt-4o";

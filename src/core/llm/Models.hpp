@@ -695,6 +695,21 @@ struct Serializer {
             if (!req.messages[i].content_parts.empty()) {
                 payload += R"(,"content":[)";
                 bool first_part = true;
+                bool has_text_part = false;
+                for (const auto& part : req.messages[i].content_parts) {
+                    if (part.type == ContentPartType::Text && !part.text.empty()) {
+                        has_text_part = true;
+                        break;
+                    }
+                }
+                if (!has_text_part && !req.messages[i].content.empty()
+                    && req.messages[i].content
+                        != render_content_parts_as_text(req.messages[i].content_parts)) {
+                    payload += R"({"type":"text","text":")";
+                    payload += core::utils::escape_json_string(req.messages[i].content);
+                    payload += R"("})";
+                    first_part = false;
+                }
                 for (const auto& part : req.messages[i].content_parts) {
                     if (part.type == ContentPartType::Text) {
                         if (part.text.empty()) continue;
