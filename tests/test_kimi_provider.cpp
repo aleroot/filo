@@ -1287,7 +1287,7 @@ TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
     const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
 
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
-    REQUIRE(headers.at("X-Msh-Version") == "kimi-code-cli/1.46.0");
+    REQUIRE(headers.at("X-Msh-Version") == "1.46.0");
     REQUIRE_FALSE(headers.at("X-Msh-Device-Name").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Device-Model").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Os-Version").empty());

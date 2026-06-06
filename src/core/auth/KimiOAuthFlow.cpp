@@ -27,7 +27,8 @@ namespace {
 constexpr std::string_view KIMI_OAUTH_HOST = "https://auth.kimi.com";
 constexpr std::string_view KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 constexpr std::string_view KIMI_PLATFORM = "kimi_code_cli";
-constexpr std::string_view KIMI_USER_AGENT = "kimi-code-cli/1.46.0";
+constexpr std::string_view KIMI_USER_AGENT_PRODUCT = "kimi-code-cli";
+constexpr std::string_view KIMI_CLIENT_VERSION = "1.46.0";
 constexpr int KIMI_OAUTH_TIMEOUT_MS = 30'000;
 
 /**
@@ -195,7 +196,7 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
     }
     
     headers["X-Msh-Platform"] = std::string(KIMI_PLATFORM);
-    headers["X-Msh-Version"] = std::string(KIMI_USER_AGENT);
+    headers["X-Msh-Version"] = std::string(KIMI_CLIENT_VERSION);
     headers["X-Msh-Device-Name"] = ascii_header(device_name);
     headers["X-Msh-Device-Model"] = ascii_header(getDeviceModel());
     headers["X-Msh-Os-Version"] = ascii_header(os_version);
@@ -207,7 +208,7 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
 }
 
 std::string KimiOAuthFlow::getUserAgent() {
-    return std::string(KIMI_USER_AGENT);
+    return std::string(KIMI_USER_AGENT_PRODUCT) + "/" + std::string(KIMI_CLIENT_VERSION);
 }
 
 std::string KimiOAuthFlow::getDeviceName() const {

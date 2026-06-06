@@ -44,7 +44,7 @@ public:
      *
      * @return Map of header names to values:
      *   - X-Msh-Platform: "kimi_code_cli"
-     *   - X-Msh-Version: CLI version
+     *   - X-Msh-Version: bare CLI version
      *   - X-Msh-Device-Name: hostname
      *   - X-Msh-Device-Model: OS and architecture info
      *   - X-Msh-Os-Version: OS version
