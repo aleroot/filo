@@ -1092,6 +1092,7 @@ public:
             "  /sessions           List and manage conversation sessions\n"
             "  /resume [id]        Restore a saved session by ID or index\n"
             "  /compact            Summarise and compress the conversation history\n"
+            "  /compress [mode]    Open/set tool output compression (off|light|full|ultra)\n"
             "  /undo               Remove the last user message from history\n"
             "  /retry              Re-send the last user message\n"
             "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
@@ -1129,7 +1130,6 @@ public:
 class CompactCommand : public Command {
 public:
     std::string get_name() const override { return "/compact"; }
-    std::vector<std::string> get_aliases() const override { return {"/compress"}; }
     std::string get_description() const override { return "Compress conversation history into a summary"; }
 
     void execute(const CommandContext& ctx) override {
@@ -1169,6 +1169,46 @@ public:
                 append_fn("\n✓  History compacted and summary preserved.\n");
             }
         );
+    }
+};
+
+class CompressionCommand : public Command {
+public:
+    std::string get_name() const override { return "/compression"; }
+    std::vector<std::string> get_aliases() const override {
+        return {"/compress"};
+    }
+    std::string get_description() const override {
+        return "Open or set tool output compression mode";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        const std::string arg_text = trailing_arguments(ctx.text);
+        std::string_view arg = trim(arg_text);
+
+        if (arg.empty()) {
+            if (ctx.open_compression_picker_fn && ctx.open_compression_picker_fn()) {
+                return;
+            }
+            const std::string body = ctx.compression_status_fn
+                ? ctx.compression_status_fn()
+                : "Use /compression off, /compression light, /compression full, or /compression ultra.";
+            ctx.append_history_fn(std::format("\nℹ  {}\n", body));
+            return;
+        }
+
+        const std::string mode = to_lower_ascii(arg);
+        const std::string body = ctx.switch_compression_fn
+            ? ctx.switch_compression_fn(mode)
+            : "Compression switching is not available in this session.";
+        const bool success = body.starts_with("Set");
+        ctx.append_history_fn(std::format(
+            "\n{}\n",
+            success
+                ? "✓  " + body
+                : "✗  " + body));
     }
 };
 
@@ -2489,6 +2529,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<SessionsCommand>());
     register_command(std::make_unique<ResumeCommand>());
     register_command(std::make_unique<CompactCommand>());
+    register_command(std::make_unique<CompressionCommand>());
     register_command(std::make_unique<UndoCommand>());
     register_command(std::make_unique<RetryCommand>());
     register_command(std::make_unique<ModelCommand>());

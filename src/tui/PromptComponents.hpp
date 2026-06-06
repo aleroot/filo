@@ -72,6 +72,9 @@ ftxui::Element render_model_selection_panel(int selected_index,
                                             bool router_available,
                                             bool local_model_available);
 
+ftxui::Element render_compression_selection_panel(int selected_index,
+                                                  std::string_view current_mode);
+
 ftxui::Element render_provider_selection_panel(const std::vector<std::string>& providers,
                                                int selected_index);
 

@@ -293,6 +293,37 @@ TEST_CASE("ToolOutputHistory full mode summarizes oversized first read",
     CHECK_THAT(first, Catch::Matchers::ContainsSubstring("Tail:"));
 }
 
+TEST_CASE("ToolOutputHistory ultra mode summarizes moderately sized first read",
+          "[agent][tool-history]") {
+    std::string source;
+    for (int i = 0; i < 300; ++i) {
+        source += "int ultra_helper_" + std::to_string(i)
+            + "() { return " + std::to_string(i) + "; }\n";
+    }
+    const std::string raw = std::string(R"({"content":")")
+        + core::utils::escape_json_string(source)
+        + R"("})";
+
+    const std::string result = core::agent::tool_output_history::clamp_for_history(
+        "read_file",
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 12 * 1024,
+            .head_chars = 8 * 1024,
+            .tail_chars = 4 * 1024,
+        },
+        "ultra",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"path":"src/ultra.cpp"})",
+            .session_id = "ultra-read-file-test-session",
+        });
+
+    CHECK(result.size() < raw.size());
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring(R"("compression":"ultra")"));
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("[full read_file summary]"));
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("src/ultra.cpp"));
+}
+
 TEST_CASE("ToolOutputHistory full mode never cache-stubs instruction files",
           "[agent][tool-history]") {
     std::string instructions;
@@ -395,6 +426,42 @@ TEST_CASE("ToolOutputHistory full mode compresses known shell command output",
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Command family: git-status"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("modified:   src/core/agent/ToolOutputHistory.cpp"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Untracked files:"));
+}
+
+TEST_CASE("ToolOutputHistory ultra mode uses tighter shell context packs",
+          "[agent][tool-history]") {
+    std::string output;
+    for (int i = 0; i < 260; ++i) {
+        output += "ERROR: repeated failing test shard " + std::to_string(i) + "\n";
+    }
+    for (int i = 0; i < 260; ++i) {
+        output += "progress line " + std::to_string(i) + "\n";
+    }
+
+    const std::string raw = std::string(R"({"output":")")
+        + core::utils::escape_json_string(output)
+        + R"(","exit_code":0})";
+
+    const std::string compressed = core::agent::tool_output_history::clamp_for_history(
+        "run_terminal_command",
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 10 * 1024,
+            .head_chars = 7 * 1024,
+            .tail_chars = 3 * 1024,
+        },
+        "ultra",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"command":"custom-check"})",
+            .session_id = "ultra-shell-test-session",
+        });
+
+    CHECK(compressed.size() < raw.size());
+    CHECK(compressed.size() < 6 * 1024);
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("compression":"ultra")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[full shell context pack]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("ERROR: repeated failing test shard 0"));
+    CHECK_THAT(compressed, !Catch::Matchers::ContainsSubstring("Head:"));
 }
 
 TEST_CASE("ToolOutputHistory full mode preserves git status porcelain entries",

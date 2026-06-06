@@ -818,6 +818,12 @@ RunResult run(RunOptions opts) {
     };
     ModelPickerState model_picker_state;
 
+    struct CompressionPickerState {
+        bool active = false;
+        int selected = 0; // 0=off, 1=light, 2=full, 3=ultra
+    };
+    CompressionPickerState compression_picker_state;
+
     struct ProviderPickerState {
         bool active = false;
         int selected = 0;
@@ -1006,6 +1012,17 @@ RunResult run(RunOptions opts) {
                 SettingsChoice{.value = "50000",  .label = "50k (Balanced)"},
                 SettingsChoice{.value = "100000", .label = "100k (Long)"},
                 SettingsChoice{.value = "200000", .label = "200k (Pro)"},
+            },
+        });
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::ContextCompression,
+            .label = "Session · Tool Compression",
+            .description = "How aggressively tool outputs are compacted before entering context.",
+            .choices = {
+                SettingsChoice{.value = "off",   .label = "Off"},
+                SettingsChoice{.value = "light", .label = "Light"},
+                SettingsChoice{.value = "full",  .label = "Full"},
+                SettingsChoice{.value = "ultra", .label = "Ultra"},
             },
         });
     }
@@ -2564,6 +2581,8 @@ RunResult run(RunOptions opts) {
                 return settings.ui_spinner;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return settings.auto_compact_threshold;
+            case core::config::ManagedSettingKey::ContextCompression:
+                return settings.context_compression;
         }
         return std::nullopt;
     };
@@ -2593,6 +2612,10 @@ RunResult run(RunOptions opts) {
                 return effective.ui_spinner;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return std::to_string(effective.auto_compact_threshold);
+            case core::config::ManagedSettingKey::ContextCompression:
+                return effective.context_compression.empty()
+                    ? std::string("off")
+                    : effective.context_compression;
         }
         return {};
     };
@@ -2625,6 +2648,7 @@ RunResult run(RunOptions opts) {
         config.ui_context_usage = after.ui_context_usage;
         config.ui_timestamps = after.ui_timestamps;
         config.ui_spinner = after.ui_spinner;
+        config.context_compression = after.context_compression;
 
         if (before.default_mode != after.default_mode) {
             const std::string desired_mode = normalize_mode(after.default_mode);
@@ -2709,6 +2733,98 @@ RunResult run(RunOptions opts) {
         screen.PostEvent(Event::Custom);
     };
 
+    static constexpr std::array<std::string_view, 4> kCompressionModes{
+        "off", "light", "full", "ultra"
+    };
+    static constexpr std::string_view kCompressionModeList = "off, light, full, ultra";
+
+    auto normalize_compression_mode = [&](std::string_view requested)
+        -> std::optional<std::string> {
+        std::string normalized;
+        normalized.reserve(requested.size());
+        for (const char ch : requested) {
+            if (ch == '-' || ch == '_' || std::isspace(static_cast<unsigned char>(ch))) {
+                continue;
+            }
+            normalized.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch))));
+        }
+        if (normalized == "none" || normalized == "disabled") {
+            normalized = "off";
+        } else if (normalized == "on") {
+            normalized = "light";
+        } else if (normalized == "max") {
+            normalized = "ultra";
+        }
+
+        if (std::ranges::find(kCompressionModes, normalized) != kCompressionModes.end()) {
+            return normalized;
+        }
+        return std::nullopt;
+    };
+
+    auto compression_mode_index = [&](std::string_view mode) {
+        const auto normalized = normalize_compression_mode(mode).value_or("off");
+        for (std::size_t i = 0; i < kCompressionModes.size(); ++i) {
+            if (kCompressionModes[i] == normalized) {
+                return static_cast<int>(i);
+            }
+        }
+        return 0;
+    };
+
+    auto describe_compression = [&]() -> std::string {
+        const auto& effective = config_manager.get_config();
+        const std::string mode = effective.context_compression.empty()
+            ? std::string("off")
+            : effective.context_compression;
+        return std::format(
+            "Compression: {}\n"
+            "        Modes: {}\n"
+            "        Use /compression <mode> or /compression to open the selector.",
+            mode,
+            kCompressionModeList);
+    };
+
+    auto switch_compression = [&](std::string_view requested) -> std::string {
+        const auto normalized = normalize_compression_mode(requested);
+        if (!normalized.has_value()) {
+            return std::format("Unknown compression mode. Use one of: {}.", kCompressionModeList);
+        }
+
+        const auto before = config_manager.get_config();
+        std::string error;
+        if (!config_manager.persist_managed_setting(
+                core::config::SettingsScope::Workspace,
+                core::config::ManagedSettingKey::ContextCompression,
+                *normalized,
+                settings_working_dir,
+                &error)) {
+            return std::format("Could not save compression mode: {}", error);
+        }
+
+        const auto after = config_manager.get_config();
+        if (const auto live_apply_warning = apply_effective_settings(before, after);
+            live_apply_warning.has_value()) {
+            return std::format(
+                "Set compression to {}. Warning: {}",
+                *normalized,
+                *live_apply_warning);
+        }
+        return std::format(
+            "Set compression to {}. Future tool outputs will use this mode.",
+            *normalized);
+    };
+
+    auto open_compression_picker = [&]() -> bool {
+        std::lock_guard lock(ui_mutex);
+        compression_picker_state.active = true;
+        compression_picker_state.selected =
+            compression_mode_index(config_manager.get_config().context_compression);
+        screen.PostEvent(Event::Custom);
+        return true;
+    };
+
     auto open_settings_picker = [&]() -> bool {
         if (settings_definitions.empty()) {
             return false;
@@ -2747,6 +2863,7 @@ RunResult run(RunOptions opts) {
             "Footer context meter: {}\n"
             "Message timestamps: {}\n"
             "Activity spinner: {}\n"
+            "Tool compression: {}\n"
             "User settings file: {}\n"
             "Workspace settings file: {}\n"
             "Model defaults are managed separately via `/model`.",
@@ -2761,6 +2878,8 @@ RunResult run(RunOptions opts) {
             effective.ui_context_usage,
             effective.ui_timestamps,
             effective.ui_spinner,
+            effective.context_compression.empty() ? std::string("off")
+                                                  : effective.context_compression,
             user_path.string(),
             workspace_path.string());
     };
@@ -3377,6 +3496,7 @@ RunResult run(RunOptions opts) {
             if (perm_state.active
                 || question_dialog_state.active
                 || model_picker_state.active
+                || compression_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
@@ -3401,7 +3521,10 @@ RunResult run(RunOptions opts) {
             .switch_profile_fn = switch_profile,
             .effort_status_fn = describe_effort,
             .switch_effort_fn = switch_effort,
+            .compression_status_fn = describe_compression,
+            .switch_compression_fn = switch_compression,
             .open_model_picker_fn = open_model_picker,
+            .open_compression_picker_fn = open_compression_picker,
             .open_settings_picker_fn = open_settings_picker,
             .open_sessions_picker_fn = open_sessions_picker,
             .resume_session_fn = [&](std::string_view id_or_idx) {
@@ -3488,6 +3611,7 @@ RunResult run(RunOptions opts) {
             if (perm_state.active
                 || question_dialog_state.active
                 || model_picker_state.active
+                || compression_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
@@ -3997,6 +4121,51 @@ RunResult run(RunOptions opts) {
                         *settings_selected_index,
                         definition.choices[static_cast<std::size_t>(next_index)].value);
                 }
+            }
+            return true;
+        }
+
+        bool compression_picker_was_active = false;
+        std::optional<int> compression_choice;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (compression_picker_state.active) {
+                compression_picker_was_active = true;
+                const int mode_count = static_cast<int>(kCompressionModes.size());
+                if (event == Event::ArrowUp) {
+                    compression_picker_state.selected =
+                        (compression_picker_state.selected + mode_count - 1) % mode_count;
+                } else if (event == Event::ArrowDown) {
+                    compression_picker_state.selected =
+                        (compression_picker_state.selected + 1) % mode_count;
+                } else if (event == Event::Character('1')) {
+                    compression_choice = 0;
+                    compression_picker_state.active = false;
+                } else if (event == Event::Character('2')) {
+                    compression_choice = 1;
+                    compression_picker_state.active = false;
+                } else if (event == Event::Character('3')) {
+                    compression_choice = 2;
+                    compression_picker_state.active = false;
+                } else if (event == Event::Character('4')) {
+                    compression_choice = 3;
+                    compression_picker_state.active = false;
+                } else if (event == Event::Return) {
+                    compression_choice = compression_picker_state.selected;
+                    compression_picker_state.active = false;
+                } else if (event == Event::Escape) {
+                    compression_picker_state.active = false;
+                }
+            }
+        }
+        if (compression_picker_was_active) {
+            if (compression_choice.has_value()) {
+                const std::string result = switch_compression(
+                    kCompressionModes[static_cast<std::size_t>(*compression_choice)]);
+                const bool success = result.starts_with("Set");
+                append_history(std::format(
+                    "\n{}\n",
+                    success ? "✓  " + result : "✗  " + result));
             }
             return true;
         }
@@ -4522,6 +4691,7 @@ RunResult run(RunOptions opts) {
         
         bool                   perm_active = false;
         bool                   model_picker_active = false;
+        bool                   compression_picker_active = false;
         bool                   provider_picker_active = false;
         bool                   review_picker_active = false;
         bool                   review_activity_active = false;
@@ -4532,10 +4702,12 @@ RunResult run(RunOptions opts) {
         ToolDiffPreview        perm_diff;
         int                    perm_selected = 0;
         int                    model_picker_selected = 0;
+        int                    compression_picker_selected = 0;
         int                    provider_picker_selected = 0;
         int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
         std::vector<std::string> provider_picker_providers;
+        std::string            compression_mode;
         ReviewPickerMode       review_picker_mode = ReviewPickerMode::SelectTarget;
         std::string            review_picker_input;
         std::chrono::steady_clock::time_point review_activity_started_at =
@@ -4565,6 +4737,9 @@ RunResult run(RunOptions opts) {
             perm_allow_label  = perm_state.allow_label;
             model_picker_active   = model_picker_state.active;
             model_picker_selected = model_picker_state.selected;
+            compression_picker_active = compression_picker_state.active;
+            compression_picker_selected = compression_picker_state.selected;
+            compression_mode = config_manager.get_config().context_compression;
             provider_picker_active    = provider_picker_state.active;
             provider_picker_selected  = provider_picker_state.selected;
             provider_picker_providers = provider_picker_state.providers;
@@ -4658,6 +4833,11 @@ RunResult run(RunOptions opts) {
                 local_model_picker_dir,
                 local_model_picker_entries,
                 local_model_picker_selected);
+        } else if (compression_picker_active) {
+            bottom_el = render_compression_selection_panel(
+                compression_picker_selected,
+                compression_mode.empty() ? std::string_view("off")
+                                         : std::string_view(compression_mode));
         } else if (model_picker_active) {
             const std::string manual_description = std::format(
                 "Use a fixed preset: {} ({})",

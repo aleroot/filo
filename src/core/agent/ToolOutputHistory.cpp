@@ -87,18 +87,60 @@ constexpr auto kDiffSignalPrefixes = std::to_array<std::string_view>({
     "commit ", "Author:", "Date:",
 });
 
-[[nodiscard]] bool light_compression_enabled(std::string_view mode) {
+enum class CompressionMode {
+    Off,
+    Light,
+    Full,
+    Ultra,
+};
+
+enum class ShellSummaryDetail {
+    WithGenericPreview,
+    SignalsOnly,
+};
+
+struct CompressionProfile {
+    CompressionMode mode = CompressionMode::Off;
+    Limits limits{};
+    std::string_view label = "off";
+    std::size_t max_shell_signals = 160;
+    ShellSummaryDetail shell_summary_detail = ShellSummaryDetail::WithGenericPreview;
+};
+
+[[nodiscard]] CompressionMode parse_compression_mode(std::string_view mode) {
     const std::string normalized = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(mode));
-    return normalized == "light"
+    if (normalized == "light"
         || normalized == "on"
         || normalized == "true"
-        || normalized == "1";
+        || normalized == "1") {
+        return CompressionMode::Light;
+    }
+    if (normalized == "full") {
+        return CompressionMode::Full;
+    }
+    if (normalized == "ultra") {
+        return CompressionMode::Ultra;
+    }
+    return CompressionMode::Off;
 }
 
-[[nodiscard]] bool full_compression_enabled(std::string_view mode) {
-    return core::utils::str::to_lower_ascii_copy(
-        core::utils::str::trim_ascii_view(mode)) == "full";
+[[nodiscard]] bool uses_full_compression(CompressionMode mode) {
+    return mode == CompressionMode::Full || mode == CompressionMode::Ultra;
+}
+
+[[nodiscard]] std::string_view compression_label(CompressionMode mode) {
+    switch (mode) {
+        case CompressionMode::Light:
+            return "light";
+        case CompressionMode::Full:
+            return "full";
+        case CompressionMode::Ultra:
+            return "ultra";
+        case CompressionMode::Off:
+            return "off";
+    }
+    return "off";
 }
 
 [[nodiscard]] Limits sanitize(Limits limits) {
@@ -118,6 +160,41 @@ constexpr auto kDiffSignalPrefixes = std::to_array<std::string_view>({
         limits.tail_chars = maxc - limits.head_chars;
     }
     return limits;
+}
+
+[[nodiscard]] CompressionProfile compression_profile(std::string_view tool_name,
+                                                     Limits limits,
+                                                     CompressionMode mode) {
+    CompressionProfile profile{
+        .mode = mode,
+        .limits = sanitize(limits),
+        .label = compression_label(mode),
+    };
+    if (mode != CompressionMode::Ultra) {
+        return profile;
+    }
+
+    if (tool_name == core::tools::names::kReadFile) {
+        profile.limits = sanitize(Limits{
+            .max_chars = std::min<std::size_t>(profile.limits.max_chars, 4 * 1024),
+            .head_chars = std::min<std::size_t>(profile.limits.head_chars, 2200),
+            .tail_chars = std::min<std::size_t>(profile.limits.tail_chars, 1200),
+        });
+        return profile;
+    }
+
+    if (tool_name == core::tools::names::kRunTerminalCommand) {
+        profile.limits = sanitize(Limits{
+            .max_chars = std::min<std::size_t>(profile.limits.max_chars, 5 * 1024),
+            .head_chars = std::min<std::size_t>(profile.limits.head_chars, 2600),
+            .tail_chars = std::min<std::size_t>(profile.limits.tail_chars, 1400),
+        });
+        profile.max_shell_signals = 48;
+        profile.shell_summary_detail = ShellSummaryDetail::SignalsOnly;
+        return profile;
+    }
+
+    return profile;
 }
 
 [[nodiscard]] std::pair<std::string_view, std::string_view>
@@ -459,12 +536,13 @@ FullCompressionCache& full_cache() {
                                                std::string_view field_name,
                                                std::string_view path_or_command,
                                                std::string_view original_payload,
-                                               std::string_view compressed_payload) {
+                                               std::string_view compressed_payload,
+                                               std::string_view compression) {
     core::utils::JsonWriter writer(768 + compressed_payload.size());
     {
         auto object = writer.object();
         writer.kv_bool("compressed", true).comma()
-              .kv_str("compression", "full").comma()
+              .kv_str("compression", compression).comma()
               .kv_str("tool", tool_name).comma()
               .kv_num("original_chars", static_cast<int64_t>(original_payload.size())).comma()
               .kv_num("kept_chars", static_cast<int64_t>(compressed_payload.size())).comma()
@@ -496,8 +574,8 @@ FullCompressionCache& full_cache() {
 
 [[nodiscard]] std::optional<std::string> full_compress_read_file(
     std::string_view raw_output,
-    Limits limits,
-    Context context) {
+    Context context,
+    const CompressionProfile& profile) {
     const auto content = json_string_field(raw_output, "content");
     if (!content.has_value()) {
         return std::nullopt;
@@ -529,18 +607,21 @@ FullCompressionCache& full_cache() {
             "content",
             path,
             *content,
-            stub);
+            stub,
+            profile.label);
     }
 
-    if (raw_output.size() > limits.max_chars) {
-        const std::string summary = oversized_full_file_summary(*content, limits.max_chars);
+    if (raw_output.size() > profile.limits.max_chars) {
+        const std::string summary =
+            oversized_full_file_summary(*content, profile.limits.max_chars);
         if (summary.size() < raw_output.size()) {
             return wrapped_full_payload(
                 core::tools::names::kReadFile,
                 "content",
                 path,
                 *content,
-                summary);
+                summary,
+                profile.label);
         }
     }
 
@@ -657,10 +738,14 @@ FullCompressionCache& full_cache() {
 [[nodiscard]] std::string pattern_shell_summary(std::string_view output,
                                                 std::string_view command,
                                                 int64_t exit_code,
-                                                std::size_t max_chars) {
+                                                const CompressionProfile& profile) {
     const std::string family = command_family(command);
     if (family == "git-diff") {
-        return diff_shell_summary(output, command, exit_code, max_chars);
+        return diff_shell_summary(
+            output,
+            command,
+            exit_code,
+            profile.limits.max_chars);
     }
 
     std::vector<std::string> signals;
@@ -696,17 +781,17 @@ FullCompressionCache& full_cache() {
         if (preserve_duplicates || std::ranges::find(signals, kept) == signals.end()) {
             signals.push_back(std::move(kept));
         }
-        if (signals.size() >= 160) break;
+        if (signals.size() >= profile.max_shell_signals) break;
     }
 
     if (signals.empty()) {
-        return shell_output_summary(output, exit_code, max_chars);
+        return shell_output_summary(output, exit_code, profile.limits.max_chars);
     }
 
     const auto [head, tail] = split_preview(output, Limits{
-        .max_chars = std::min<std::size_t>(max_chars / 2, 4800),
-        .head_chars = std::min<std::size_t>(max_chars / 4, 2400),
-        .tail_chars = std::min<std::size_t>(max_chars / 4, 2400),
+        .max_chars = std::min<std::size_t>(profile.limits.max_chars / 2, 4800),
+        .head_chars = std::min<std::size_t>(profile.limits.max_chars / 4, 2400),
+        .tail_chars = std::min<std::size_t>(profile.limits.max_chars / 4, 2400),
     });
 
     std::ostringstream out;
@@ -715,7 +800,9 @@ FullCompressionCache& full_cache() {
     out << "Exit code: " << exit_code << "\n";
     out << "Original chars: " << output.size() << "\n\n";
     out << "Signal lines:\n";
-    const std::size_t signal_budget = max_chars > 1024 ? max_chars - 1024 : max_chars;
+    const std::size_t signal_budget = profile.limits.max_chars > 1024
+        ? profile.limits.max_chars - 1024
+        : profile.limits.max_chars;
     for (const auto& signal : signals) {
         out << "- " << signal << "\n";
         if (out.tellp() > static_cast<std::streampos>(signal_budget)) {
@@ -723,14 +810,15 @@ FullCompressionCache& full_cache() {
             break;
         }
     }
-    if (family == "generic") {
+    if (family == "generic"
+        && profile.shell_summary_detail == ShellSummaryDetail::WithGenericPreview) {
         out << "\nHead:\n" << head;
         if (!tail.empty()) out << "\n\nTail:\n" << tail;
     }
 
     std::string result = out.str();
-    if (result.size() > max_chars) {
-        result.resize(max_chars);
+    if (result.size() > profile.limits.max_chars) {
+        result.resize(profile.limits.max_chars);
         result += "\n[full shell context pack truncated]\n";
     }
     return result;
@@ -738,8 +826,8 @@ FullCompressionCache& full_cache() {
 
 [[nodiscard]] std::optional<std::string> full_compress_shell_output(
     std::string_view raw_output,
-    Limits limits,
-    Context context) {
+    Context context,
+    const CompressionProfile& profile) {
     const auto output = json_string_field(raw_output, "output");
     if (!output.has_value()) {
         return std::nullopt;
@@ -753,12 +841,12 @@ FullCompressionCache& full_cache() {
     }
 
     const bool known_family = family != "generic";
-    if (!known_family && output->size() <= limits.max_chars) {
+    if (!known_family && output->size() <= profile.limits.max_chars) {
         return std::nullopt;
     }
 
     const std::string summary =
-        pattern_shell_summary(*output, command, exit_code, limits.max_chars);
+        pattern_shell_summary(*output, command, exit_code, profile);
     if (summary.size() >= raw_output.size()) {
         return std::nullopt;
     }
@@ -767,7 +855,8 @@ FullCompressionCache& full_cache() {
         "output",
         command,
         *output,
-        summary);
+        summary,
+        profile.label);
 }
 
 [[nodiscard]] std::optional<std::string> light_compress_tool_output(
@@ -806,13 +895,13 @@ FullCompressionCache& full_cache() {
 [[nodiscard]] std::optional<std::string> full_compress_tool_output(
     std::string_view tool_name,
     std::string_view raw_output,
-    Limits limits,
-    Context context) {
+    Context context,
+    const CompressionProfile& profile) {
     if (tool_name == core::tools::names::kReadFile) {
-        return full_compress_read_file(raw_output, limits, context);
+        return full_compress_read_file(raw_output, context, profile);
     }
     if (tool_name == core::tools::names::kRunTerminalCommand) {
-        return full_compress_shell_output(raw_output, limits, context);
+        return full_compress_shell_output(raw_output, context, profile);
     }
     return std::nullopt;
 }
@@ -890,7 +979,8 @@ std::string clamp_for_history(
     Limits limits,
     std::string_view compression_mode,
     Context context) {
-    limits = sanitize(limits);
+    const CompressionProfile profile =
+        compression_profile(tool_name, limits, parse_compression_mode(compression_mode));
     if (tool_name == core::tools::names::kReadFile) {
         const auto path = json_string_field(context.tool_arguments, "path").value_or("");
         if (is_instruction_file(path)) {
@@ -898,9 +988,13 @@ std::string clamp_for_history(
         }
     }
 
-    if (raw_output.size() <= limits.max_chars) {
-        if (full_compression_enabled(compression_mode)) {
-            if (auto compressed = full_compress_tool_output(tool_name, raw_output, limits, context);
+    if (raw_output.size() <= profile.limits.max_chars) {
+        if (uses_full_compression(profile.mode)) {
+            if (auto compressed = full_compress_tool_output(
+                    tool_name,
+                    raw_output,
+                    context,
+                    profile);
                 compressed.has_value() && compressed->size() < raw_output.size()) {
                 return *compressed;
             }
@@ -908,22 +1002,26 @@ std::string clamp_for_history(
         return std::string(raw_output);
     }
 
-    if (full_compression_enabled(compression_mode)) {
-        if (auto compressed = full_compress_tool_output(tool_name, raw_output, limits, context);
+    if (uses_full_compression(profile.mode)) {
+        if (auto compressed = full_compress_tool_output(
+                tool_name,
+                raw_output,
+                context,
+                profile);
             compressed.has_value() && compressed->size() < raw_output.size()) {
             return *compressed;
         }
     }
 
-    if (light_compression_enabled(compression_mode)) {
-        if (auto compressed = light_compress_tool_output(tool_name, raw_output, limits);
+    if (profile.mode == CompressionMode::Light) {
+        if (auto compressed = light_compress_tool_output(tool_name, raw_output, profile.limits);
             compressed.has_value() && compressed->size() < raw_output.size()) {
             return *compressed;
         }
     }
 
     const bool is_error = looks_like_error_payload(raw_output);
-    const auto [head, tail] = split_preview(raw_output, limits);
+    const auto [head, tail] = split_preview(raw_output, profile.limits);
 
     core::utils::JsonWriter writer(256 + head.size() + tail.size());
     {

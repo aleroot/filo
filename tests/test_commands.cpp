@@ -52,7 +52,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto profile_target = std::make_shared<std::string>();
     auto effort_target  = std::make_shared<std::string>();
     auto effort_value   = std::make_shared<std::string>("auto");
+    auto compression_target = std::make_shared<std::string>();
+    auto compression_value = std::make_shared<std::string>("off");
     auto picker_opened  = std::make_shared<bool>(false);
+    auto compression_picker_opened = std::make_shared<bool>(false);
     auto settings_picker_opened = std::make_shared<bool>(false);
     auto review_picker_opened = std::make_shared<bool>(false);
     auto review_activity_events =
@@ -95,9 +98,23 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *effort_value = std::string(level);
             return std::string("Set effort to ") + std::string(level);
         },
+        .compression_status_fn = [compression_value]() {
+            return std::string("Compression: ") + *compression_value
+                + "\n        Modes: off, light, full, ultra";
+        },
+        .switch_compression_fn =
+            [compression_target, compression_value](std::string_view mode) {
+                *compression_target = std::string(mode);
+                *compression_value = std::string(mode);
+                return std::string("Set compression to ") + std::string(mode);
+            },
         .open_model_picker_fn = [picker_opened]() {
             *picker_opened = true;
             return false;
+        },
+        .open_compression_picker_fn = [compression_picker_opened]() {
+            *compression_picker_opened = true;
+            return true;
         },
         .open_review_picker_fn = [review_picker_opened](std::function<void(std::optional<std::string>)>) {
             *review_picker_opened = true;
@@ -532,6 +549,45 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Set effort to low"));
     }
 
+    SECTION("/compression opens picker when callback handles it") {
+        *mock_history = "";
+        *compression_picker_opened = false;
+        ctx.text = "/compression";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*compression_picker_opened == true);
+        REQUIRE(mock_history->empty());
+    }
+
+    SECTION("/compression falls back to status text without picker") {
+        *mock_history = "";
+        ctx.open_compression_picker_fn = {};
+        *compression_value = "full";
+        ctx.text = "/compression";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Compression: full"));
+    }
+
+    SECTION("/compression sets mode") {
+        *mock_history = "";
+        *compression_target = "";
+        ctx.text = "/compression ultra";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*compression_target == "ultra");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Set compression to ultra"));
+    }
+
+    SECTION("/compress alias sets compression mode") {
+        *mock_history = "";
+        *compression_target = "";
+        ctx.text = "/compress light";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*compression_target == "light");
+    }
+
     SECTION("/settings opens picker when callback handles it") {
         *settings_picker_opened = false;
         ctx.open_settings_picker_fn = [settings_picker_opened]() {
@@ -909,6 +965,13 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         });
         REQUIRE(profile_it != commands.end());
         REQUIRE(profile_it->accepts_arguments);
+
+        const auto compression_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
+            return cmd.name == "/compression";
+        });
+        REQUIRE(compression_it != commands.end());
+        REQUIRE(compression_it->accepts_arguments);
+        REQUIRE(compression_it->aliases == std::vector<std::string>{"/compress"});
 
         const auto settings_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/settings";

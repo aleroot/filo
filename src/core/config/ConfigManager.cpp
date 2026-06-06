@@ -71,6 +71,8 @@ std::optional<std::string>& managed_setting_slot(ManagedSettings& settings,
             return settings.ui_spinner;
         case ManagedSettingKey::AutoCompactThreshold:
             return settings.auto_compact_threshold;
+        case ManagedSettingKey::ContextCompression:
+            return settings.context_compression;
     }
     return settings.default_mode;
 }
@@ -856,6 +858,9 @@ ManagedSettings parse_managed_settings_file(const fs::path& settings_path) {
     if (!doc["auto_compact_threshold"].get(value)) {
         parsed.auto_compact_threshold = std::string(value);
     }
+    if (!doc["context_compression"].get(value)) {
+        parsed.context_compression = std::string(value);
+    }
     return parsed;
 }
 
@@ -886,6 +891,7 @@ std::string serialize_managed_settings(const ManagedSettings& settings) {
         append_field("ui_timestamps", settings.ui_timestamps);
         append_field("ui_spinner", settings.ui_spinner);
         append_field("auto_compact_threshold", settings.auto_compact_threshold);
+        append_field("context_compression", settings.context_compression);
     }
 
     std::string output = std::move(writer).take();
@@ -925,6 +931,9 @@ void apply_managed_settings(const ManagedSettings& settings, AppConfig& config) 
         try {
             config.auto_compact_threshold = std::stoi(*settings.auto_compact_threshold);
         } catch (...) {}
+    }
+    if (settings.context_compression.has_value()) {
+        config.context_compression = *settings.context_compression;
     }
 }
 

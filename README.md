@@ -212,6 +212,10 @@ Optional context compression can be enabled in `config.json`:
 
 Use `"full"` for the native context-cache mode: first or changed `read_file` calls stay exact, repeated unchanged reads collapse to small path-based cache stubs, instruction files are always preserved, and common shell outputs such as `git status`, `git diff`, build, and test logs are retained as signal-focused summaries. Diff summaries preserve structural diff lines verbatim.
 
+Use `"ultra"` when token pressure matters more than keeping broad excerpts: it applies the same native cache and command-family summaries as `full`, but with tighter budgets for `read_file` and shell output. Instruction files are still preserved exactly.
+
+In the interactive TUI, use `/compression` to pick a mode from a menu, or `/compression ultra` / `/compress ultra` to switch directly.
+
 ### Profiles
 
 Profiles let you keep multiple named configuration overlays and switch between them instantly.

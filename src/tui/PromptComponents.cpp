@@ -838,6 +838,52 @@ Element render_model_selection_panel(int selected_index,
     }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 14);
 }
 
+Element render_compression_selection_panel(int selected_index,
+                                           std::string_view current_mode) {
+    struct CompressionOption {
+        std::string_view value;
+        std::string_view label;
+        std::string_view description;
+    };
+    static constexpr std::array<CompressionOption, 4> kOptions{{
+        {"off", "Off", "Keep tool outputs exact until the hard history-size clamp."},
+        {"light", "Light", "Summarize only oversized read_file and shell outputs."},
+        {"full", "Full", "Use read caching plus command-family summaries for common shell output."},
+        {"ultra", "Ultra", "Use the tightest built-in budgets for high token pressure."},
+    }};
+
+    std::vector<Element> rows;
+    rows.reserve(kOptions.size());
+    for (std::size_t i = 0; i < kOptions.size(); ++i) {
+        const auto& option = kOptions[i];
+        std::string label = std::format("[{}] {}", i + 1, option.label);
+        if (option.value == current_mode) {
+            label += " (active)";
+        }
+        rows.push_back(make_selection_row(
+            label,
+            option.description,
+            selected_index == static_cast<int>(i),
+            ColorYellowDark));
+    }
+
+    return vbox({
+        hbox({
+            text(" COMPRESSION ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            filler(),
+            text("Up/Down: select  Enter: confirm  1/2/3/4: quick choose")
+                | color(Color::GrayDark)
+        }),
+        separator(),
+        text(std::format("Current mode: {}", current_mode.empty() ? "off" : std::string(current_mode)))
+            | color(Color::White),
+        filler(),
+        vbox(std::move(rows)),
+        filler(),
+        text("Esc closes this panel.") | dim,
+    }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 13);
+}
+
 Element render_provider_selection_panel(const std::vector<std::string>& providers,
                                         int selected_index) {
     std::vector<Element> rows;

@@ -538,7 +538,8 @@ TEST_CASE("ConfigManager merges managed user and workspace settings with expecte
 
     write_text(user_settings, R"({
         "default_approval_mode": "yolo",
-        "ui_footer": "hide"
+        "ui_footer": "hide",
+        "context_compression": "light"
     })");
 
     write_text(local_config, R"({
@@ -547,7 +548,8 @@ TEST_CASE("ConfigManager merges managed user and workspace settings with expecte
 
     write_text(local_settings, R"({
         "default_router_policy": "deep",
-        "ui_banner": "hide"
+        "ui_banner": "hide",
+        "context_compression": "ultra"
     })");
 
     auto& manager = core::config::ConfigManager::get_instance();
@@ -561,10 +563,15 @@ TEST_CASE("ConfigManager merges managed user and workspace settings with expecte
     REQUIRE(config.router.default_policy == "deep");
     REQUIRE(config.ui_footer == "hide");
     REQUIRE(config.ui_banner == "hide");
+    REQUIRE(config.context_compression == "ultra");
     REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::User).ui_footer
             == std::optional<std::string>{"hide"});
+    REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::User).context_compression
+            == std::optional<std::string>{"light"});
     REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::Workspace).default_router_policy
             == std::optional<std::string>{"deep"});
+    REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::Workspace).context_compression
+            == std::optional<std::string>{"ultra"});
 
     fs::remove_all(sandbox);
 }
@@ -872,7 +879,7 @@ TEST_CASE("ConfigManager persists specific model flavour across reloads", "[conf
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager persists managed UI settings and reset removes empty settings file",
+TEST_CASE("ConfigManager persists managed settings and reset removes empty settings file",
           "[config]") {
     const fs::path sandbox = make_temp_dir("filo_managed_settings_persist");
     const fs::path xdg_home = sandbox / "xdg";
@@ -906,12 +913,32 @@ TEST_CASE("ConfigManager persists managed UI settings and reset removes empty se
     REQUIRE(fs::exists(user_settings));
 
     REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::ContextCompression,
+                                            std::string("ultra"),
+                                            project_dir,
+                                            &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().context_compression == "ultra");
+    const std::string persisted_settings = read_text(user_settings);
+    REQUIRE(persisted_settings.find("\"context_compression\"") != std::string::npos);
+    REQUIRE(persisted_settings.find("\"ultra\"") != std::string::npos);
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
                                             core::config::ManagedSettingKey::UiFooter,
                                             std::nullopt,
                                             project_dir,
                                             &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().ui_footer == "show");
+    REQUIRE(fs::exists(user_settings));
+
+    REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                            core::config::ManagedSettingKey::ContextCompression,
+                                            std::nullopt,
+                                            project_dir,
+                                            &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().context_compression == "off");
     REQUIRE_FALSE(fs::exists(user_settings));
 
     fs::remove_all(sandbox);

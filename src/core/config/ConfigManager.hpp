@@ -26,6 +26,7 @@ enum class ManagedSettingKey {
     UiTimestamps,
     UiSpinner,
     AutoCompactThreshold,
+    ContextCompression,
 };
 
 struct ManagedSettings {
@@ -39,6 +40,7 @@ struct ManagedSettings {
     std::optional<std::string> ui_timestamps;
     std::optional<std::string> ui_spinner;
     std::optional<std::string> auto_compact_threshold;
+    std::optional<std::string> context_compression;
 
     [[nodiscard]] bool empty() const {
         return !default_mode.has_value()
@@ -50,7 +52,8 @@ struct ManagedSettings {
             && !ui_context_usage.has_value()
             && !ui_timestamps.has_value()
             && !ui_spinner.has_value()
-            && !auto_compact_threshold.has_value();
+            && !auto_compact_threshold.has_value()
+            && !context_compression.has_value();
     }
 };
 
