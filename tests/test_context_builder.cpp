@@ -3,6 +3,7 @@
 
 #include "core/context/ContextBuilder.hpp"
 #include "core/context/SessionContext.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/workspace/Workspace.hpp"
@@ -141,6 +142,37 @@ TEST_CASE("ContextBuilder renders project steering before project facts",
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Structure:\n"));
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("src/"));
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("main.cpp"));
+}
+
+TEST_CASE("SteeringLoader reports loaded project steering source labels",
+          "[context][steering]") {
+    auto workspace = make_temp_workspace("filo_steering_sources");
+    write_text(workspace.path() / "AGENTS.md", "Root instructions\n");
+    write_text(workspace.path() / "FILO.md", "Filo instructions\n");
+    write_text(workspace.path() / ".filo" / "steering" / "backend.md", "Backend instructions\n");
+
+    const auto result = core::context::load_project_steering_context(workspace.path());
+
+    REQUIRE(result.source_labels.size() == 3);
+    CHECK(result.source_labels[0] == "AGENTS.md");
+    CHECK(result.source_labels[1] == "FILO.md");
+    CHECK(result.source_labels[2] == ".filo/steering/backend.md");
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Source: AGENTS.md"));
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Source: FILO.md"));
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Source: .filo/steering/backend.md"));
+}
+
+TEST_CASE("SteeringLoader finds GEMINI.MD case-insensitively",
+          "[context][steering]") {
+    auto workspace = make_temp_workspace("filo_steering_gemini");
+    write_text(workspace.path() / "GEMINI.MD", "Gemini instructions\n");
+
+    const auto result = core::context::load_project_steering_context(workspace.path());
+
+    REQUIRE(result.source_labels.size() == 1);
+    CHECK(result.source_labels[0] == "GEMINI.MD");
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Source: GEMINI.MD"));
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Gemini instructions"));
 }
 
 TEST_CASE("OpenAI Responses request renders ContextBuilder prompt as instructions",

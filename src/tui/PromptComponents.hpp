@@ -61,6 +61,7 @@ ftxui::Element render_permission_prompt_panel(std::string_view tool_name,
 ftxui::Element render_startup_banner_panel(std::string_view provider_name,
                                            std::string_view model_name,
                                            int mcp_server_count,
+                                           std::string_view context_sources_label,
                                            std::string_view provider_setup_hint);
 
 ftxui::Element render_model_selection_panel(int selected_index,

@@ -54,6 +54,7 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/mcp/McpConnectionManager.hpp"
 #include "core/context/ContextMentions.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
@@ -145,6 +146,20 @@ std::optional<PromptActivitySnapshot> active_prompt_activity(
         };
     }
     return std::nullopt;
+}
+
+std::string join_context_source_labels(const std::vector<std::string>& source_labels) {
+    std::string joined;
+    for (const auto& label : source_labels) {
+        if (label.empty()) {
+            continue;
+        }
+        if (!joined.empty()) {
+            joined += ", ";
+        }
+        joined += label;
+    }
+    return compact_single_line(joined, 120);
 }
 
 class TerminalInputModeGuard {
@@ -650,6 +665,10 @@ RunResult run(RunOptions opts) {
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
+    const auto steering_context = core::context::load_project_steering_context(
+        agent_session_context.workspace_view().primary());
+    const std::string context_sources_label =
+        join_context_source_labels(steering_context.source_labels);
     auto agent = std::make_shared<core::agent::Agent>(
         llm_provider,
         tool_manager,
@@ -681,12 +700,18 @@ RunResult run(RunOptions opts) {
         if (ui_show_banner) {
             return std::string{};
         }
-        return std::format(
-            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}\n{}",
+        std::string summary = std::format(
+            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}",
             active_provider_name,
             active_model_name.empty() ? "<provider default>" : active_model_name,
-            core::mcp::McpConnectionManager::get_instance().connected_count(),
-            provider_setup_hint(active_provider_name));
+            core::mcp::McpConnectionManager::get_instance().connected_count());
+        if (!context_sources_label.empty()) {
+            summary += "  —  ";
+            summary += context_sources_label;
+        }
+        summary.push_back('\n');
+        summary += provider_setup_hint(active_provider_name);
+        return summary;
     };
 
     std::vector<UiMessage> ui_messages;
@@ -4582,6 +4607,7 @@ RunResult run(RunOptions opts) {
                 active_provider_name,
                 active_model_name.empty() ? "<provider default>" : active_model_name,
                 core::mcp::McpConnectionManager::get_instance().connected_count(),
+                context_sources_label,
                 provider_setup_hint(active_provider_name));
         }
 

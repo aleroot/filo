@@ -612,6 +612,7 @@ Element render_picker_panel(std::string_view tag,
 Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view model_name,
                                     int mcp_server_count,
+                                    std::string_view context_sources_label,
                                     std::string_view provider_setup_hint) {
     static constexpr std::array<std::string_view, 6> kBannerLogoLines = {
         "  ███████╗██╗██╗      ██████╗",
@@ -630,14 +631,22 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }
 
     rows.push_back(text(""));
-    rows.push_back(
-        paragraph(std::format(
-            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}",
-            provider_name,
-            model_name.empty() ? "<provider default>" : std::string(model_name),
-            mcp_server_count))
-            | color(Color::White)
-            | xflex);
+    std::string summary = std::format(
+        "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}",
+        provider_name,
+        model_name.empty() ? "<provider default>" : std::string(model_name),
+        mcp_server_count);
+
+    if (!context_sources_label.empty()) {
+        rows.push_back(hbox({
+            text(summary) | color(Color::White),
+            filler(),
+            text(" " + std::string(context_sources_label) + " ")
+                | color(Color::GrayLight),
+        }));
+    } else {
+        rows.push_back(paragraph(summary) | color(Color::White) | xflex);
+    }
 
     const auto hint_lines = split_lines(std::string(provider_setup_hint));
     for (const auto& line : hint_lines) {

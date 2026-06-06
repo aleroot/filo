@@ -1,10 +1,13 @@
 #include "SteeringLoader.hpp"
 
+#include "core/utils/StringUtils.hpp"
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace core::context {
@@ -126,9 +129,25 @@ void append_hierarchical_agents_files(const std::filesystem::path& start_dir,
     }
 }
 
+[[nodiscard]] std::filesystem::path find_file_case_insensitive(
+    const std::filesystem::path& dir,
+    std::string_view name) {
+    const std::string target_lower = core::utils::str::to_lower_ascii_copy(name);
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        if (entry.is_regular_file()) {
+            const std::string filename_lower =
+                core::utils::str::to_lower_ascii_copy(entry.path().filename().string());
+            if (filename_lower == target_lower) {
+                return entry.path();
+            }
+        }
+    }
+    return {};
+}
+
 } // namespace
 
-std::string load_project_steering_block(const std::filesystem::path& project_root) {
+SteeringLoadResult load_project_steering_context(const std::filesystem::path& project_root) {
     if (project_root.empty() || !std::filesystem::exists(project_root)) {
         return {};
     }
@@ -139,9 +158,12 @@ std::string load_project_steering_block(const std::filesystem::path& project_roo
     std::vector<std::filesystem::path> files;
     append_hierarchical_agents_files(normalized_root, files);
 
-    const auto filo_path = normalized_root / "FILO.md";
-    if (std::filesystem::is_regular_file(filo_path)) {
-        files.push_back(filo_path);
+    for (const auto& name : {"FILO.md", "GEMINI.md", "CLAUDE.md", "SYSTEM.md",
+                              "CURSOR.md", "COPILOT.md"}) {
+        const auto found = find_file_case_insensitive(normalized_root, name);
+        if (!found.empty()) {
+            files.push_back(found);
+        }
     }
 
     const auto steering_dir = normalized_root / ".filo" / "steering";
@@ -151,7 +173,9 @@ std::string load_project_steering_block(const std::filesystem::path& project_roo
             if (!entry.is_regular_file()) {
                 continue;
             }
-            if (entry.path().extension() == ".md") {
+            const std::string ext_lower =
+                core::utils::str::to_lower_ascii_copy(entry.path().extension().string());
+            if (ext_lower == ".md") {
                 steering_files.push_back(entry.path());
             }
         }
@@ -163,6 +187,7 @@ std::string load_project_steering_block(const std::filesystem::path& project_roo
         return {};
     }
 
+    SteeringLoadResult result;
     std::string block = "\n\n[Project Steering]\n";
     std::size_t bytes_remaining = kMaxSteeringBytesTotal;
     for (const auto& file : files) {
@@ -176,7 +201,9 @@ std::string load_project_steering_block(const std::filesystem::path& project_roo
             continue;
         }
 
-        block += "Source: " + relative_label(label_root, file) + "\n";
+        const std::string label = relative_label(label_root, file);
+        result.source_labels.push_back(label);
+        block += "Source: " + label + "\n";
         block += content;
         if (!block.empty() && block.back() != '\n') {
             block.push_back('\n');
@@ -187,7 +214,16 @@ std::string load_project_steering_block(const std::filesystem::path& project_roo
         bytes_remaining = consumed >= bytes_remaining ? 0 : bytes_remaining - consumed;
     }
 
-    return block;
+    if (result.source_labels.empty()) {
+        return {};
+    }
+
+    result.block = std::move(block);
+    return result;
+}
+
+std::string load_project_steering_block(const std::filesystem::path& project_root) {
+    return load_project_steering_context(project_root).block;
 }
 
 } // namespace core::context

@@ -206,6 +206,9 @@ split_preview(std::string_view text, Limits limits) {
         || lower.ends_with("filo.md")
         || lower.ends_with("skill.md")
         || lower.ends_with("rules.md")
+        || lower.ends_with("gemini.md")
+        || lower.ends_with("claude.md")
+        || lower.ends_with("system.md")
         || lower.ends_with(".cursorrules")
         || lower.contains("/.filo/steering/")
         || lower.contains("/skills/");
