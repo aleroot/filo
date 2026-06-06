@@ -1,5 +1,7 @@
 #include "Agent.hpp"
 #include "PermissionGate.hpp"
+#include "ToolCallPlanner.hpp"
+#include "ToolCallScheduler.hpp"
 #include "ToolOutputHistory.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
@@ -714,7 +716,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
             }
 
-            // 2. Execute approved calls in parallel
+            // 2. Execute approved calls through a resource-aware scheduler.
             std::shared_ptr<core::llm::LLMProvider> provider_for_task;
             std::string active_model_for_task;
             std::string parent_mode_for_task;
@@ -729,7 +731,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 parent_mode_for_task = self->current_mode_;
             }
 
-            std::vector<std::future<core::llm::Message>> futures;
+            turn_state->deduplicator.begin_step();
+            auto dedup_stop_requested = std::make_shared<std::atomic<bool>>(false);
+            std::vector<ScheduledToolTask<core::llm::Message>> scheduled_tasks;
+            scheduled_tasks.reserve(tool_calls_accum->size());
+            std::vector<std::size_t> original_task_index_by_dedup_index;
+            original_task_index_by_dedup_index.reserve(tool_calls_accum->size());
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
                 const auto& tc = (*tool_calls_accum)[i];
                 if (!approved[i]) {
@@ -742,20 +749,59 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         : blocked_by_turn_allow_list
                             ? R"({"error":"Tool call blocked by the turn tool allow-list."})"
                             : R"({"error":"Tool call denied by user."})";
-                    // Inject a denied message directly
-                    futures.push_back(std::async(std::launch::deferred, [tc, error_payload]() {
-                        return core::llm::Message{
+                    scheduled_tasks.push_back({
+                        .accesses = no_tool_access(),
+                        .run = [tc, error_payload]() {
+                            return core::llm::Message{
                             .role        = "tool",
                             .content     = error_payload,
                             .name        = tc.function.name,
                             .tool_call_id = tc.id,
                             .tool_calls   = {}
-                        };
-                    }));
+                            };
+                        },
+                    });
                     continue;
                 }
-                    futures.push_back(std::async(std::launch::async,
-                    [self, tc, &tool_callback,
+
+                const auto dedup_decision = turn_state->deduplicator.register_call(tc);
+                if (dedup_decision.duplicate_in_step) {
+                    const std::size_t original_task_index =
+                        dedup_decision.original_index < original_task_index_by_dedup_index.size()
+                            ? original_task_index_by_dedup_index[dedup_decision.original_index]
+                            : i;
+                    scheduled_tasks.push_back({
+                        .accesses = no_tool_access(),
+                        .after = {original_task_index},
+                        .run = [tc,
+                                original_index = dedup_decision.original_index,
+                                deduplicator = &turn_state->deduplicator]() {
+                            auto result = deduplicator->duplicate_result(original_index)
+                                .value_or(R"({"error":"Tool call deduplicated before the original result was available."})");
+                            return core::llm::Message{
+                                .role         = "tool",
+                                .content      = std::move(result),
+                                .name         = tc.function.name,
+                                .tool_call_id = tc.id,
+                                .tool_calls   = {}
+                            };
+                        },
+                    });
+                    continue;
+                }
+
+                if (dedup_decision.original_index >= original_task_index_by_dedup_index.size()) {
+                    original_task_index_by_dedup_index.resize(dedup_decision.original_index + 1);
+                }
+                original_task_index_by_dedup_index[dedup_decision.original_index] =
+                    scheduled_tasks.size();
+                auto planned = plan_tool_call(tc, step_session_context);
+                scheduled_tasks.push_back({
+                    .accesses = std::move(planned.accesses),
+                    .run = [self, tc, &tool_callback,
+                     dedup_index = dedup_decision.original_index,
+                     deduplicator = &turn_state->deduplicator,
+                     dedup_stop_requested,
                      session_context = step_session_context,
                      provider_for_task,
                      active_model_for_task,
@@ -797,6 +843,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 .tool_arguments = tc.function.arguments,
                                 .session_id = session_context.session_id,
                             });
+                        auto dedup_final = deduplicator->finalize_for_model(
+                            dedup_index,
+                            std::move(result));
+                        if (dedup_final.stop_turn) {
+                            dedup_stop_requested->store(true, std::memory_order_release);
+                        }
+                        result = std::move(dedup_final.result);
+                        deduplicator->complete_original(dedup_index, result);
                         core::llm::Message message{
                             .role         = "tool",
                             .content      = result,
@@ -809,14 +863,20 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             build_tool_hook_payload(tc, &message),
                             session_context);
                         return message;
-                    }));
+                    },
+                });
             }
+
+            ToolCallScheduler<core::llm::Message> scheduler;
+            auto tool_messages = scheduler.run(std::move(scheduled_tasks));
+            turn_state->deduplicator.end_step();
 
             // 3. Collect results and assess failures
             int failure_count = 0;
-            for (std::size_t i = 0; i < futures.size(); ++i) {
-                auto& f = futures[i];
-                auto msg = f.get();
+            const bool dedup_requested_stop =
+                dedup_stop_requested->load(std::memory_order_acquire);
+            for (std::size_t i = 0; i < tool_messages.size(); ++i) {
+                auto msg = std::move(tool_messages[i]);
                 const bool tool_ok = !is_tool_error(msg.content);
                 if (!tool_ok) ++failure_count;
                 const auto& tool_call = (*tool_calls_accum)[i];
@@ -865,8 +925,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
 
             // 4. Loop-breaker: stop if all tools failed for N rounds in a row
-            const bool all_failed = (failure_count == static_cast<int>(futures.size()))
-                                 && !futures.empty();
+            const bool all_failed = (failure_count == static_cast<int>(tool_messages.size()))
+                                 && !tool_messages.empty();
             {
                 std::lock_guard lock(self->history_mutex_);
                 if (all_failed) {
@@ -891,6 +951,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     self->consecutive_failure_rounds_ = 0;
                 }
                 if (break_fn) break_fn(rounds);
+                done_callback();
+                return;
+            }
+
+            if (dedup_requested_stop) {
+                if (!turn_state->final_response_after_repeat_stop_requested) {
+                    turn_state->final_response_after_repeat_stop_requested = true;
+                    auto final_callbacks = turn_callbacks;
+                    final_callbacks.allowed_tools = {"__filo_no_tools__"};
+                    self->step(
+                        text_callback,
+                        tool_callback,
+                        done_callback,
+                        std::move(final_callbacks),
+                        turn_state);
+                    return;
+                }
                 done_callback();
                 return;
             }

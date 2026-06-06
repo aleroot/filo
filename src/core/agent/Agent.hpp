@@ -6,6 +6,7 @@
 #include "../tools/ToolManager.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "PermissionGate.hpp"
+#include "ToolCallDeduplicator.hpp"
 #include <memory>
 #include <vector>
 #include <string>
@@ -169,6 +170,8 @@ private:
     struct TurnState {
         int steps_taken = 0;
         int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
+        ToolCallDeduplicator deduplicator;
+        bool final_response_after_repeat_stop_requested = false;
     };
 
     void step(std::function<void(const std::string&)> text_callback,

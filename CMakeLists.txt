@@ -168,6 +168,8 @@ set(FILO_CORE_SOURCES
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
     src/core/agent/DelegatedAgentRunner.cpp
+    src/core/agent/ToolCallDeduplicator.cpp
+    src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/scm/GitProvider.cpp
@@ -411,6 +413,7 @@ add_executable(filo_tests
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
     tests/test_agent_loop_control.cpp
+    tests/test_tool_loop_efficiency.cpp
     tests/test_tool_output_history.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
