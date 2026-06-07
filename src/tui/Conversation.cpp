@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <format>
 #include <limits>
 #include <optional>
@@ -569,9 +570,19 @@ Element render_tool_group_container(const UiMessage& msg,
 // Public API Implementation
 // ============================================================================
 
+auto local_time_str(std::chrono::system_clock::time_point time) -> std::string {
+    const auto tt = std::chrono::system_clock::to_time_t(time);
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+    return std::format("{:02d}:{:02d}:{:02d}", tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
 auto current_time_str() -> std::string {
-    auto now = std::chrono::system_clock::now();
-    return std::format("{:%H:%M:%S}", std::chrono::floor<std::chrono::seconds>(now));
+    return local_time_str(std::chrono::system_clock::now());
 }
 
 // ============================================================================

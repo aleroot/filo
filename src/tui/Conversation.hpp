@@ -4,6 +4,7 @@
 #include "Constants.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -216,6 +217,7 @@ ToolActivity make_tool_activity(std::string id,
 // Utility Functions
 // ============================================================================
 
+auto local_time_str(std::chrono::system_clock::time_point time) -> std::string;
 auto current_time_str() -> std::string;
 
 std::string summarize_tool_arguments(std::string_view tool_name, std::string_view tool_args);

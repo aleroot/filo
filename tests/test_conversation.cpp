@@ -20,6 +20,13 @@
 #include "tui/TuiTheme.hpp"
 
 #include <ftxui/screen/screen.hpp>
+#include <chrono>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#if !defined(_WIN32)
+#include <ctime>
+#endif
 
 using namespace tui;
 using Catch::Matchers::ContainsSubstring;
@@ -47,11 +54,50 @@ std::string strip_ansi(std::string_view input) {
 
     return out;
 }
+
+#if !defined(_WIN32)
+class ScopedTimezone {
+public:
+    explicit ScopedTimezone(const char* timezone) {
+        if (const char* current = std::getenv("TZ")) {
+            previous_ = std::string(current);
+        }
+        setenv("TZ", timezone, 1);
+        tzset();
+    }
+
+    ~ScopedTimezone() {
+        if (previous_.has_value()) {
+            setenv("TZ", previous_->c_str(), 1);
+        } else {
+            unsetenv("TZ");
+        }
+        tzset();
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
+#endif
 } // namespace
 
 // ============================================================================
 // Message Factory Tests
 // ============================================================================
+
+TEST_CASE("local_time_str formats system clock using local timezone", "[tui][conversation][time]") {
+#if defined(_WIN32)
+    SUCCEED("Timezone override test is POSIX-only.");
+#else
+    ScopedTimezone timezone("CET-1CEST,M3.5.0/2,M10.5.0/3");
+
+    using namespace std::chrono;
+    const auto utc_time =
+        sys_days{year{2026} / June / 6} + 16h + 57min + 53s;
+
+    REQUIRE(local_time_str(utc_time) == "18:57:53");
+#endif
+}
 
 TEST_CASE("make_user_message — basic creation", "[tui][conversation][factory]") {
     auto msg = make_user_message("Hello, world!", "12:00:00");
