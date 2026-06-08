@@ -88,6 +88,7 @@
 #include "../Models.hpp"
 #include "../../auth/ICredentialSource.hpp"
 #include <cpr/cpr.h>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -399,6 +400,64 @@ public:
     virtual void prepare_media_uploads([[maybe_unused]] ChatRequest& request,
                                        [[maybe_unused]] std::string_view base_url,
                                        [[maybe_unused]] const core::auth::AuthInfo& auth) {}
+
+    /**
+     * @brief Mutate HTTP headers after auth/protocol headers are built.
+     *
+     * Provider variants that need request-scoped transport headers can override
+     * this without adding provider-specific branches to HttpLLMProvider.
+     */
+    virtual void prepare_headers([[maybe_unused]] cpr::Header& headers,
+                                 [[maybe_unused]] const ChatRequest& request,
+                                 [[maybe_unused]] std::string_view base_url) {}
+
+    /**
+     * @brief Observe response headers as soon as they arrive.
+     *
+     * This hook is earlier than on_response(): streaming providers may emit the
+     * final chunk from the body callback before the HTTP request object returns.
+     */
+    virtual void observe_response_headers([[maybe_unused]] const cpr::Header& headers,
+                                          [[maybe_unused]] const ChatRequest& request) {}
+
+    [[nodiscard]] virtual bool supports_websocket_transport() const noexcept {
+        return false;
+    }
+
+    [[nodiscard]] virtual std::string build_websocket_url(
+        [[maybe_unused]] std::string_view base_url,
+        [[maybe_unused]] std::string_view model) const {
+        return {};
+    }
+
+    virtual void prepare_websocket_headers([[maybe_unused]] cpr::Header& headers,
+                                           [[maybe_unused]] const ChatRequest& request,
+                                           [[maybe_unused]] std::string_view base_url) {}
+
+    [[nodiscard]] virtual std::string serialize_websocket_request(
+        [[maybe_unused]] const ChatRequest& request) const {
+        return {};
+    }
+
+    virtual void abandon_websocket_request(
+        [[maybe_unused]] const ChatRequest& request) {}
+
+    [[nodiscard]] virtual std::string websocket_connection_key(
+        std::string_view url,
+        const cpr::Header& headers,
+        [[maybe_unused]] const ChatRequest& request) const {
+        std::string key(url);
+        std::vector<std::pair<std::string, std::string>> fingerprint{
+            headers.begin(), headers.end()};
+        std::sort(fingerprint.begin(), fingerprint.end());
+        for (const auto& [name, value] : fingerprint) {
+            key += '\n';
+            key += name;
+            key += ':';
+            key += value;
+        }
+        return key;
+    }
 
     // ── Response lifecycle hooks ─────────────────────────────────────────────
     //

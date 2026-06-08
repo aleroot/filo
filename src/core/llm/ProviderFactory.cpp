@@ -241,9 +241,16 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     "Provider '{}': reasoning_effort is ignored for wire_api='responses'.",
                     name);
             }
-            protocol = std::make_unique<protocols::OpenAIResponsesProtocol>(
-                /*include_reasoning_encrypted=*/false,
-                config.service_tier);
+            if (base_url == "https://chatgpt.com/backend-api/codex") {
+                protocol = std::make_unique<protocols::CodexResponsesProtocol>(
+                    /*include_reasoning_encrypted=*/false,
+                    config.service_tier,
+                    core::config::ConfigManager::get_instance().get_config_dir());
+            } else {
+                protocol = std::make_unique<protocols::OpenAIResponsesProtocol>(
+                    /*include_reasoning_encrypted=*/false,
+                    config.service_tier);
+            }
         } else {
             // Use GrokProtocol for grok-prefixed providers with reasoning_effort.
             if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {

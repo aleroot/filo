@@ -439,6 +439,7 @@ struct ChatRequest {
     std::string service_tier = {};         ///< Responses API service_tier (e.g. "priority")
     std::string effort = {};               ///< Optional effort hint ("low"/"medium"/"high"/"max")
     std::string session_id = {};            ///< Internal session scope for accounting/routing decisions
+    std::string transport_turn_id = {};     ///< Short-lived provider transport scope for one agent turn
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
 };

@@ -2,6 +2,8 @@
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "protocols/GeminiProtocol.hpp"
+#include "transport/CurlWebSocketTransport.hpp"
+#include "transport/HttpHeaderUtils.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/UriUtils.hpp"
 #include <cpr/cpr.h>
@@ -24,6 +26,15 @@ namespace {
         std::string                                  model;
         std::string                                  url;
         cpr::Header                                  headers;
+        ChatRequest                                  request;
+        core::auth::AuthInfo                         auth;
+    };
+
+    struct PreparedWebSocketStreamRequest {
+        std::string websocket_url;
+        std::string websocket_payload;
+        cpr::Header websocket_headers;
+        std::string websocket_connection_key;
     };
 
     [[nodiscard]] std::string normalize_metadata_model(
@@ -73,6 +84,35 @@ namespace {
 
         prepared.headers = prepared.protocol->build_headers(auth);
         prepared.headers["Accept"] = "text/event-stream";
+        prepared.protocol->prepare_headers(prepared.headers, req, base_url);
+        prepared.request = req;
+        prepared.auth = std::move(auth);
+        return prepared;
+    }
+
+    [[nodiscard]] std::optional<PreparedWebSocketStreamRequest> prepare_websocket_stream_request(
+        protocols::ApiProtocolBase& protocol,
+        const ChatRequest& request,
+        std::string_view base_url,
+        const core::auth::AuthInfo& auth) {
+        PreparedWebSocketStreamRequest prepared;
+        prepared.websocket_url = protocol.build_websocket_url(base_url, request.model);
+        if (prepared.websocket_url.empty()
+            || !transport::CurlWebSocketTransport::runtime_supports_url(
+                prepared.websocket_url)) {
+            return std::nullopt;
+        }
+
+        prepared.websocket_headers = protocol.build_headers(auth);
+        protocol.prepare_websocket_headers(prepared.websocket_headers, request, base_url);
+        prepared.websocket_payload = protocol.serialize_websocket_request(request);
+        if (prepared.websocket_payload.empty()) {
+            protocol.abandon_websocket_request(request);
+            return std::nullopt;
+        }
+
+        prepared.websocket_connection_key = protocol.websocket_connection_key(
+            prepared.websocket_url, prepared.websocket_headers, request);
         return prepared;
     }
 
@@ -128,6 +168,28 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
     , api_type_(api_type)
     , provider_name_(std::move(provider_name))
 {}
+
+HttpLLMProvider::~HttpLLMProvider() = default;
+
+HttpLLMProvider::WebSocketTransportState::WebSocketTransportState()
+    : client(std::make_unique<transport::CurlWebSocketTransport>()) {}
+
+HttpLLMProvider::WebSocketTransportState::~WebSocketTransportState() = default;
+
+bool HttpLLMProvider::WebSocketTransportState::available() const noexcept {
+    return enabled.load(std::memory_order_relaxed) && client != nullptr;
+}
+
+void HttpLLMProvider::WebSocketTransportState::disable() noexcept {
+    enabled.store(false, std::memory_order_relaxed);
+}
+
+void HttpLLMProvider::WebSocketTransportState::reset() {
+    if (client) {
+        client->reset();
+    }
+    enabled.store(true, std::memory_order_relaxed);
+}
 
 int HttpLLMProvider::max_context_size() const noexcept {
     return core::llm::get_max_context_size(
@@ -285,6 +347,7 @@ void HttpLLMProvider::reset_conversation_state() {
     if (protocol_) {
         protocol_->reset_state();
     }
+    websocket_.reset();
 }
 
 void HttpLLMProvider::stream_response(const ChatRequest&                      request,
@@ -353,9 +416,96 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                  payload   = std::move(prepared.payload),
                  delimiter = std::move(prepared.delimiter),
                  protocol  = std::move(prepared.protocol),
+                 request_metadata = std::move(prepared.request),
+                 auth = std::move(prepared.auth),
                  callback] () mutable {
 
         try {
+            if (self->websocket_.available() && protocol->supports_websocket_transport()) {
+                std::optional<PreparedWebSocketStreamRequest> websocket_request;
+                try {
+                    websocket_request = prepare_websocket_stream_request(
+                        *protocol, request_metadata, self->base_url_, auth);
+                } catch (const std::exception& e) {
+                    core::logging::debug(
+                        "[WebSocket] Failed to prepare request; falling back to HTTP: {}",
+                        e.what());
+                    protocol->abandon_websocket_request(request_metadata);
+                } catch (...) {
+                    core::logging::debug(
+                        "[WebSocket] Failed to prepare request; falling back to HTTP: unknown exception");
+                    protocol->abandon_websocket_request(request_metadata);
+                }
+
+                if (websocket_request.has_value()
+                    && !websocket_request->websocket_payload.empty()) {
+                    bool websocket_done = false;
+                    self->set_last_usage(0, 0);
+
+                    auto websocket_result = self->websocket_.client->stream_text(
+                        websocket_request->websocket_url,
+                        websocket_request->websocket_connection_key,
+                        websocket_request->websocket_headers,
+                        websocket_request->websocket_payload,
+                        [&](std::string_view event_payload) {
+                            protocols::ParseResult result = protocol->parse_event(event_payload);
+
+                            for (auto& chunk : result.chunks) {
+                                callback(chunk);
+                                if (chunk.is_final) websocket_done = true;
+                            }
+
+                            if (websocket_done) {
+                                return true;
+                            }
+
+                            if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
+                                self->set_last_usage(
+                                    result.prompt_tokens, result.completion_tokens);
+                            }
+
+                            if (result.done) {
+                                websocket_done = true;
+                                callback(StreamChunk::make_final());
+                            }
+                            return websocket_done;
+                        });
+
+                    protocol->observe_response_headers(
+                        websocket_result.response_headers, request_metadata);
+
+                    if (websocket_result.completed()) {
+                        const protocols::HttpResponse websocket_response{
+                            200, "", websocket_result.response_headers};
+                        protocol->on_response(websocket_response);
+                        self->set_last_rate_limit_info(protocol->last_rate_limit());
+                        return;
+                    }
+
+                    self->websocket_.client->reset();
+                    self->websocket_.disable();
+                    protocol->abandon_websocket_request(request_metadata);
+
+                    if (websocket_result.request_sent) {
+                        core::logging::debug(
+                            "[WebSocket] Stream failed after request send status={} reason={}",
+                            websocket_result.http_status,
+                            websocket_result.message);
+                        callback(StreamChunk::make_error(
+                            "\n[WebSocket stream failed after the request was sent: "
+                            + websocket_result.message + "]"));
+                        callback(StreamChunk::make_final());
+                        return;
+                    }
+
+                    core::logging::debug(
+                        "[WebSocket] Falling back to HTTP status={} reason={}",
+                        websocket_result.http_status,
+                        websocket_result.message);
+                    protocol = protocol->clone();
+                }
+            }
+
             // Retry configuration for 429/529 errors
             constexpr int max_retries = 3;
             int retry_attempt = 0;
@@ -375,6 +525,28 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetUrl(cpr::Url{url});
                 session.SetHeader(headers);
                 session.SetBody(cpr::Body{payload});
+
+                cpr::Header response_headers_seen;
+                bool observed_transport_headers = false;
+                session.SetHeaderCallback(cpr::HeaderCallback(
+                    [&protocol, &response_headers_seen,
+                     &observed_transport_headers, &request_metadata]
+                    (std::string_view line, intptr_t /*userdata*/) -> bool {
+                        if (core::utils::str::trim_ascii_view(line).empty()) {
+                            if (!observed_transport_headers) {
+                                observed_transport_headers = true;
+                                protocol->observe_response_headers(
+                                    response_headers_seen, request_metadata);
+                            }
+                            return true;
+                        }
+
+                        if (auto header = transport::parse_header_line(line); header.has_value()) {
+                            response_headers_seen[std::move(header->first)] =
+                                std::move(header->second);
+                        }
+                        return true;
+                    }));
 
                 auto forward_parsed_event = [&] (std::string_view event_payload) {
                     if (event_payload.empty()) return;
@@ -469,6 +641,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 // The hook is a no-op for protocols that do not override it.
                 const protocols::HttpResponse http_resp{
                     static_cast<int>(r.status_code), r.text, r.header};
+                protocol->observe_response_headers(r.header, request_metadata);
                 protocol->on_response(http_resp);
 
                 // Attempt one forced credential refresh on auth failures (OAuth providers).
@@ -484,6 +657,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             auto refreshed_auth = self->cred_source_->get_auth();
                             headers = protocol->build_headers(refreshed_auth);
                             headers["Accept"] = "text/event-stream";
+                            protocol->prepare_headers(headers, request_metadata, self->base_url_);
                             callback(StreamChunk::make_error(
                                 "\n[Authentication expired. Retrying with refreshed credentials...]"));
                             continue;

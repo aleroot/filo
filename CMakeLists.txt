@@ -138,6 +138,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
     src/core/llm/ModelRegistry.cpp
+    src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
     src/core/llm/protocols/KimiProtocol.cpp
@@ -363,6 +364,7 @@ add_executable(filo_tests
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
+    tests/test_curl_websocket_transport.cpp
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp
@@ -474,6 +476,7 @@ source_group(
         tests/test_openai_provider.cpp
         tests/test_openai_stream_encoder.cpp
         tests/test_openai_responses_protocol.cpp
+        tests/test_curl_websocket_transport.cpp
         tests/test_model_catalog_provider.cpp
         tests/test_grok_provider.cpp
         tests/test_grok_enhanced.cpp

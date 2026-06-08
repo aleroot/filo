@@ -14,6 +14,7 @@
 #include <mutex>
 #include <atomic>
 #include <optional>
+#include <cstdint>
 
 namespace core::config {
 struct AppConfig;
@@ -170,6 +171,7 @@ private:
     struct TurnState {
         int steps_taken = 0;
         int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
+        std::string transport_turn_id;
         ToolCallDeduplicator deduplicator;
         bool final_response_after_repeat_stop_requested = false;
     };
@@ -229,6 +231,7 @@ private:
 
     // Cancellation support
     std::atomic<bool> stop_requested_{false};
+    std::atomic<std::uint64_t> next_transport_turn_id_{1};
 };
 
 } // namespace core::agent

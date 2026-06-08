@@ -449,6 +449,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
 
+    if (turn_state->transport_turn_id.empty()) {
+        const auto sequence = next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed);
+        turn_state->transport_turn_id = std::format("{}:{}", session_context_snapshot().session_id, sequence);
+    }
+
     if (turn_state->max_steps > 0 && turn_state->steps_taken >= turn_state->max_steps) {
         const std::string message = std::format(
             "Stopped after reaching the per-turn step limit ({} model steps) without a final response.",
@@ -477,6 +482,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             : turn_callbacks.model_override;
         request.effort = effort_level_;
         request.session_id = step_session_context.session_id;
+        request.transport_turn_id = turn_state->transport_turn_id;
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
     }

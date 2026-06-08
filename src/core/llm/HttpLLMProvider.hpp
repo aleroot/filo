@@ -32,6 +32,7 @@
 #include "protocols/ApiProtocol.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../auth/ICredentialSource.hpp"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,10 @@
 #include <vector>
 
 namespace core::llm {
+
+namespace transport {
+class CurlWebSocketTransport;
+}
 
 /**
  * @brief Generic HTTP LLM provider driven by an ApiProtocolBase.
@@ -77,6 +82,7 @@ public:
                     std::unique_ptr<protocols::ApiProtocolBase>    protocol,
                     core::config::ApiType                          api_type = core::config::ApiType::Unknown,
                     std::string                                    provider_name = {});
+    ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
                          std::function<void(const StreamChunk&)> callback) override;
@@ -136,6 +142,21 @@ public:
         const ModelCatalogDiscoveryOptions& options = {}) const;
 
 private:
+    struct WebSocketTransportState {
+        WebSocketTransportState();
+        ~WebSocketTransportState();
+
+        WebSocketTransportState(const WebSocketTransportState&) = delete;
+        WebSocketTransportState& operator=(const WebSocketTransportState&) = delete;
+
+        [[nodiscard]] bool available() const noexcept;
+        void disable() noexcept;
+        void reset();
+
+        std::unique_ptr<transport::CurlWebSocketTransport> client;
+        std::atomic_bool enabled{true};
+    };
+
     std::string                                    base_url_;
     std::shared_ptr<core::auth::ICredentialSource> cred_source_;
     std::string                                    default_model_;
@@ -144,6 +165,7 @@ private:
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;
+    WebSocketTransportState                        websocket_;
 };
 
 } // namespace core::llm

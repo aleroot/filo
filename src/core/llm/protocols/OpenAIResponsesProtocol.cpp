@@ -1,13 +1,17 @@
 #include "OpenAIResponsesProtocol.hpp"
 #include "SseUtils.hpp"
 #include "../Models.hpp"
+#include "../transport/HttpHeaderUtils.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "../../utils/StringUtils.hpp"
+#include "../../utils/Uuid.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdint>
+#include <fstream>
 #include <format>
 #include <random>
 
@@ -15,12 +19,62 @@ namespace core::llm::protocols {
 
 namespace {
 
+[[nodiscard]] std::string extract_assistant_output_text(simdjson::dom::object item);
+
 [[nodiscard]] std::string generate_prompt_cache_key() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
     std::uniform_int_distribution<uint64_t> dist;
     const uint64_t hi = dist(rng);
     const uint64_t lo = dist(rng);
     return std::format("filo-{0:016x}{1:016x}", hi, lo);
+}
+
+[[nodiscard]] std::string load_or_create_codex_installation_id(
+    const std::filesystem::path& config_dir) {
+    const std::string generated = core::utils::random_uuid_v4();
+    if (config_dir.empty()) return generated;
+
+    try {
+        const auto path = config_dir / "codex_installation_id";
+
+        {
+            std::ifstream in(path);
+            std::string value;
+            if (in && std::getline(in, value)) {
+                value = core::utils::str::trim_ascii_copy(value);
+                if (!value.empty()) return value;
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(config_dir, ec);
+        std::ofstream out(path, std::ios::trunc);
+        if (out) {
+            out << generated << '\n';
+        }
+    } catch (...) {
+        // Identity persistence should never make the transport unusable.
+    }
+
+    return generated;
+}
+
+void append_member_before_object_end(std::string& object_json, std::string_view member_json) {
+    if (object_json.empty() || object_json.back() != '}') return;
+    object_json.pop_back();
+    object_json += ',';
+    object_json += member_json;
+    object_json += '}';
+}
+
+[[nodiscard]] std::string websocket_url_for_responses(std::string_view base_url) {
+    std::string url(base_url);
+    if (url.starts_with("https://")) {
+        url.replace(0, std::string("https://").size(), "wss://");
+    } else if (url.starts_with("http://")) {
+        url.replace(0, std::string("http://").size(), "ws://");
+    }
+    return url + "/responses";
 }
 
 void append_tool_schema(std::string& payload, const std::vector<Tool>& tools) {
@@ -156,41 +210,119 @@ void append_function_call_output_item(std::string& payload,
     payload += R"("})";
 }
 
-void append_input_items(std::string& payload, const std::vector<Message>& messages) {
-    payload += R"(,"input":[)";
-    bool first = true;
+[[nodiscard]] std::vector<std::string> build_input_items(
+    const std::vector<Message>& messages) {
+    std::vector<std::string> items;
     std::size_t fallback_idx = 0;
-
-    const auto append_sep = [&]() {
-        if (!first) payload += ",";
-        first = false;
-    };
 
     for (const auto& msg : messages) {
         if (msg.role == "system") continue;
 
         if (msg.role == "tool") {
             if (msg.content.empty() && msg.tool_call_id.empty()) continue;
-            append_sep();
-            append_function_call_output_item(payload, msg, ++fallback_idx);
+            std::string item;
+            append_function_call_output_item(item, msg, ++fallback_idx);
+            items.push_back(std::move(item));
             continue;
         }
 
         if (!msg.content.empty() || !msg.content_parts.empty()) {
-            append_sep();
-            append_message_item(payload, msg);
+            std::string item;
+            append_message_item(item, msg);
+            items.push_back(std::move(item));
         }
 
         if (msg.role == "assistant" && !msg.tool_calls.empty()) {
             for (const auto& tc : msg.tool_calls) {
                 if (tc.function.name.empty()) continue;
-                append_sep();
-                append_function_call_item(payload, tc, ++fallback_idx);
+                std::string item;
+                append_function_call_item(item, tc, ++fallback_idx);
+                items.push_back(std::move(item));
             }
         }
     }
 
+    return items;
+}
+
+void append_input_items(std::string& payload, const std::vector<std::string>& input_items) {
+    payload += R"(,"input":[)";
+    for (std::size_t i = 0; i < input_items.size(); ++i) {
+        if (i > 0) payload += ',';
+        payload += input_items[i];
+    }
     payload += "]";
+}
+
+[[nodiscard]] std::vector<Message> system_messages_only(const std::vector<Message>& messages) {
+    std::vector<Message> system_messages;
+    for (const auto& message : messages) {
+        if (message.role == "system") {
+            system_messages.push_back(message);
+        }
+    }
+    return system_messages;
+}
+
+[[nodiscard]] bool has_prefix(const std::vector<std::string>& values,
+                              const std::vector<std::string>& prefix) {
+    return values.size() >= prefix.size()
+        && std::equal(prefix.begin(), prefix.end(), values.begin());
+}
+
+[[nodiscard]] std::string serialize_assistant_output_item(simdjson::dom::object item) {
+    std::string_view item_type;
+    if (item["type"].get(item_type) != simdjson::SUCCESS) return {};
+
+    if (item_type == "function_call") {
+        ToolCall call;
+        call.type = "function";
+
+        std::string_view call_id;
+        if (item["call_id"].get(call_id) == simdjson::SUCCESS) {
+            call.id = std::string(call_id);
+        } else {
+            std::string_view id;
+            if (item["id"].get(id) == simdjson::SUCCESS) {
+                call.id = std::string(id);
+            }
+        }
+
+        std::string_view name;
+        if (item["name"].get(name) == simdjson::SUCCESS) {
+            call.function.name = std::string(name);
+        }
+        if (call.function.name.empty()) return {};
+
+        std::string_view arguments;
+        if (item["arguments"].get(arguments) == simdjson::SUCCESS) {
+            call.function.arguments = std::string(arguments);
+        }
+
+        std::string serialized;
+        append_function_call_item(serialized, call, 0);
+        return serialized;
+    }
+
+    if (item_type == "message") {
+        std::string_view role;
+        if (item["role"].get(role) != simdjson::SUCCESS || role != "assistant") {
+            return {};
+        }
+
+        const std::string text = extract_assistant_output_text(item);
+        if (text.empty()) return {};
+
+        Message message;
+        message.role = "assistant";
+        message.content = text;
+
+        std::string serialized;
+        append_message_item(serialized, message);
+        return serialized;
+    }
+
+    return {};
 }
 
 [[nodiscard]] std::string lower_ascii(std::string_view value) {
@@ -343,27 +475,34 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
 void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
     std::scoped_lock lock(shared_state_->mutex);
 
-    if (shared_state_->prompt_cache_key.empty()) {
-        shared_state_->prompt_cache_key = generate_prompt_cache_key();
+    active_session_id_ = req.session_id;
+    auto& session = shared_state_->sessions[active_session_id_];
+    if (session.prompt_cache_key.empty()) {
+        session.prompt_cache_key = req.session_id.empty()
+            ? generate_prompt_cache_key()
+            : req.session_id;
     }
     if (req.prompt_cache_key.empty()) {
-        req.prompt_cache_key = shared_state_->prompt_cache_key;
+        req.prompt_cache_key = session.prompt_cache_key;
     }
-    if (req.previous_response_id.empty() && !shared_state_->previous_response_id.empty()) {
-        req.previous_response_id = shared_state_->previous_response_id;
+    if (req.previous_response_id.empty() && !session.previous_response_id.empty()) {
+        req.previous_response_id = session.previous_response_id;
     }
 }
 
 void OpenAIResponsesProtocol::reset_state() {
     std::scoped_lock lock(shared_state_->mutex);
-    shared_state_->previous_response_id.clear();
-    shared_state_->prompt_cache_key.clear();
+    shared_state_->sessions.clear();
+    active_session_id_.clear();
     in_progress_response_id_.clear();
     last_response_id_.clear();
     saw_text_delta_ = false;
 }
 
-std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
+std::string OpenAIResponsesProtocol::serialize_with_input_items(
+    const ChatRequest& req,
+    const std::vector<std::string>& input_items,
+    std::optional<std::string_view> previous_response_id_override) const {
     std::string payload;
     payload.reserve(8192);
 
@@ -375,9 +514,12 @@ std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
     payload += req.stream ? "true" : "false";
     payload += R"(,"store":false)";
 
-    if (!req.previous_response_id.empty()) {
+    const std::string_view previous_response_id = previous_response_id_override.has_value()
+        ? *previous_response_id_override
+        : std::string_view{req.previous_response_id};
+    if (!previous_response_id.empty()) {
         payload += R"(,"previous_response_id":")";
-        payload += core::utils::escape_json_string(req.previous_response_id);
+        payload += core::utils::escape_json_string(previous_response_id);
         payload += '"';
     }
 
@@ -398,7 +540,7 @@ std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
         }
     }
 
-    append_input_items(payload, req.messages);
+    append_input_items(payload, input_items);
 
     payload += R"(,"tool_choice":"auto","parallel_tool_calls":)";
     payload += req.tools.empty() ? "false" : "true";
@@ -440,6 +582,10 @@ std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
     return payload;
 }
 
+std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
+    return serialize_with_input_items(req, build_input_items(req.messages));
+}
+
 cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& auth) const {
     cpr::Header headers{
         {"Content-Type", "application/json"},
@@ -462,6 +608,285 @@ cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& a
 std::string OpenAIResponsesProtocol::build_url(std::string_view base_url,
                                                [[maybe_unused]] std::string_view model) const {
     return std::string(base_url) + "/responses";
+}
+
+CodexResponsesProtocol::CodexResponsesProtocol(bool include_reasoning_encrypted,
+                                               std::string default_service_tier,
+                                               std::filesystem::path config_dir)
+    : OpenAIResponsesProtocol(include_reasoning_encrypted, std::move(default_service_tier))
+    , config_dir_(std::move(config_dir)) {}
+
+std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const {
+    return serialize_codex_with_input_items(request, build_input_items(request.messages));
+}
+
+std::string CodexResponsesProtocol::serialize_codex_with_input_items(
+    const ChatRequest& request,
+    const std::vector<std::string>& input_items,
+    std::optional<std::string_view> previous_response_id_override) const {
+    std::string payload = serialize_with_input_items(
+        request, input_items, previous_response_id_override);
+    const std::string window_id = (request.session_id.empty() ? std::string("filo") : request.session_id) + ":0";
+    std::string metadata = R"("client_metadata":{"x-codex-installation-id":")";
+    metadata += core::utils::escape_json_string(installation_id());
+    metadata += R"(","x-codex-window-id":")";
+    metadata += core::utils::escape_json_string(window_id);
+    metadata += R"("})";
+    append_member_before_object_end(payload, metadata);
+    return payload;
+}
+
+void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
+                                             const ChatRequest& request,
+                                             [[maybe_unused]] std::string_view base_url) {
+    const std::string thread_id = request.session_id.empty()
+        ? std::string("filo")
+        : request.session_id;
+
+    std::string turn_state;
+    {
+        std::lock_guard lock(transport_state_->mutex);
+        if (!request.transport_turn_id.empty()) {
+            if (auto it = transport_state_->turn_states.find(request.transport_turn_id);
+                it != transport_state_->turn_states.end()) {
+                turn_state = it->second;
+            }
+        }
+    }
+
+    headers["x-client-request-id"] = thread_id;
+    headers["x-codex-installation-id"] = installation_id();
+    headers["x-codex-window-id"] = thread_id + ":0";
+    headers["x-responsesapi-include-timing-metrics"] = "true";
+    if (!turn_state.empty()) {
+        headers["x-codex-turn-state"] = turn_state;
+    } else {
+        headers.erase("x-codex-turn-state");
+    }
+}
+
+std::string CodexResponsesProtocol::build_websocket_url(
+    std::string_view base_url,
+    [[maybe_unused]] std::string_view model) const {
+    return websocket_url_for_responses(base_url);
+}
+
+void CodexResponsesProtocol::prepare_websocket_headers(cpr::Header& headers,
+                                                       const ChatRequest& request,
+                                                       std::string_view base_url) {
+    headers.erase("Content-Type");
+    headers.erase("Accept");
+    prepare_headers(headers, request, base_url);
+    headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
+}
+
+std::string CodexResponsesProtocol::serialize_websocket_request(
+    const ChatRequest& request) const {
+    const auto full_input_items = build_input_items(request.messages);
+
+    ChatRequest signature_request = request;
+    signature_request.messages = system_messages_only(request.messages);
+    signature_request.previous_response_id.clear();
+    const std::string request_signature = serialize_codex_with_input_items(
+        signature_request, build_input_items(signature_request.messages), std::string_view{});
+
+    std::string incremental_previous_response_id;
+    std::vector<std::string> incremental_input_items;
+    if (!request.transport_turn_id.empty()) {
+        std::lock_guard lock(transport_state_->mutex);
+        if (auto last = transport_state_->last_ws_requests.find(request.transport_turn_id);
+            last != transport_state_->last_ws_requests.end()
+            && last->second.request_signature == request_signature
+            && !last->second.response_id.empty()) {
+            std::vector<std::string> baseline = last->second.request_input_items;
+            baseline.insert(
+                baseline.end(),
+                last->second.response_items_added.begin(),
+                last->second.response_items_added.end());
+
+            if (has_prefix(full_input_items, baseline)
+                && full_input_items.size() > baseline.size()) {
+                incremental_input_items = std::vector<std::string>{
+                    full_input_items.begin() + static_cast<std::ptrdiff_t>(baseline.size()),
+                    full_input_items.end()};
+                incremental_previous_response_id = last->second.response_id;
+            }
+        }
+
+        transport_state_->pending_ws_requests[request.transport_turn_id] =
+            TransportState::PendingWebSocketRequest{
+                .request_signature = request_signature,
+                .request_input_items = full_input_items,
+            };
+    }
+
+    std::string payload = incremental_input_items.empty()
+        ? serialize_codex_with_input_items(request, full_input_items)
+        : serialize_codex_with_input_items(
+            request, incremental_input_items, std::string_view{incremental_previous_response_id});
+
+    active_transport_turn_id_ = request.transport_turn_id;
+    active_response_items_.clear();
+
+    if (payload.empty() || payload.front() != '{') {
+        return {};
+    }
+    payload.erase(payload.begin());
+    return std::string{R"({"type":"response.create",)"} + payload;
+}
+
+void CodexResponsesProtocol::abandon_websocket_request(const ChatRequest& request) {
+    if (request.transport_turn_id.empty()) {
+        return;
+    }
+
+    std::lock_guard lock(transport_state_->mutex);
+    transport_state_->pending_ws_requests.erase(request.transport_turn_id);
+    if (active_transport_turn_id_ == request.transport_turn_id) {
+        active_transport_turn_id_.clear();
+        active_response_items_.clear();
+    }
+}
+
+ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
+    sse::ParsedEventView parsed;
+    std::string data_scratch;
+    std::string event_type;
+    std::string serialized_output_item;
+
+    if (sse::parse_event_payload(raw_event, parsed, data_scratch)) {
+        event_type = std::string(parsed.event);
+        if (!parsed.is_done) {
+            thread_local simdjson::dom::parser parser;
+            simdjson::padded_string padded(parsed.data);
+            simdjson::dom::element doc;
+            if (parser.parse(padded).get(doc) == simdjson::SUCCESS) {
+                if (event_type.empty()) {
+                    std::string_view type_from_payload;
+                    if (doc["type"].get(type_from_payload) == simdjson::SUCCESS) {
+                        event_type = std::string(type_from_payload);
+                    }
+                }
+
+                if (event_type == "response.output_item.done") {
+                    simdjson::dom::object item;
+                    if (doc["item"].get(item) == simdjson::SUCCESS) {
+                        serialized_output_item = serialize_assistant_output_item(item);
+                    }
+                }
+            }
+        }
+    }
+
+    ParseResult result = OpenAIResponsesProtocol::parse_event(raw_event);
+
+    if (!serialized_output_item.empty()) {
+        active_response_items_.push_back(std::move(serialized_output_item));
+    }
+
+    if (result.done
+        && event_type == "response.completed"
+        && !active_transport_turn_id_.empty()
+        && !last_response_id().empty()) {
+        std::lock_guard lock(transport_state_->mutex);
+        if (auto pending = transport_state_->pending_ws_requests.find(active_transport_turn_id_);
+            pending != transport_state_->pending_ws_requests.end()) {
+            transport_state_->last_ws_requests[active_transport_turn_id_] =
+                TransportState::LastWebSocketRequest{
+                    .response_id = last_response_id(),
+                    .request_signature = std::move(pending->second.request_signature),
+                    .request_input_items = std::move(pending->second.request_input_items),
+                    .response_items_added = std::move(active_response_items_),
+                };
+            transport_state_->pending_ws_requests.erase(pending);
+            while (transport_state_->last_ws_requests.size() > 32) {
+                transport_state_->last_ws_requests.erase(
+                    transport_state_->last_ws_requests.begin());
+            }
+        }
+        active_transport_turn_id_.clear();
+        active_response_items_.clear();
+    }
+
+    if (result.done && !active_transport_turn_id_.empty()) {
+        std::lock_guard lock(transport_state_->mutex);
+        transport_state_->pending_ws_requests.erase(active_transport_turn_id_);
+        active_transport_turn_id_.clear();
+        active_response_items_.clear();
+    }
+
+    return result;
+}
+
+std::string CodexResponsesProtocol::websocket_connection_key(
+    std::string_view url,
+    const cpr::Header& headers,
+    const ChatRequest& request) const {
+    std::string key(url);
+    key += "\nsession=";
+    key += request.session_id;
+    key += "\nturn=";
+    key += request.transport_turn_id;
+
+    for (std::string_view name : {
+             std::string_view{"Authorization"},
+             std::string_view{"chatgpt-account-id"},
+             std::string_view{"OpenAI-Beta"}}) {
+        if (auto value = transport::find_header(headers, name);
+            value.has_value() && !value->empty()) {
+            key += '\n';
+            key += name;
+            key += ':';
+            key += *value;
+        }
+    }
+    return key;
+}
+
+void CodexResponsesProtocol::observe_response_headers(const cpr::Header& headers,
+                                                      const ChatRequest& request) {
+    if (request.transport_turn_id.empty()) {
+        return;
+    }
+
+    auto turn_state = transport::find_header(headers, "x-codex-turn-state");
+    if (!turn_state.has_value() || turn_state->empty()) {
+        return;
+    }
+
+    std::lock_guard lock(transport_state_->mutex);
+    transport_state_->turn_states[request.transport_turn_id] = *turn_state;
+    while (transport_state_->turn_states.size() > 32) {
+        transport_state_->turn_states.erase(transport_state_->turn_states.begin());
+    }
+}
+
+void CodexResponsesProtocol::reset_state() {
+    OpenAIResponsesProtocol::reset_state();
+    std::lock_guard lock(transport_state_->mutex);
+    transport_state_->turn_states.clear();
+    transport_state_->last_ws_requests.clear();
+    transport_state_->pending_ws_requests.clear();
+    active_response_items_.clear();
+    active_transport_turn_id_.clear();
+}
+
+std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
+    auto cloned = std::make_unique<CodexResponsesProtocol>(
+        include_reasoning_encrypted_,
+        default_service_tier_,
+        config_dir_);
+    share_continuity_state_with(*cloned);
+    cloned->transport_state_ = transport_state_;
+    return cloned;
+}
+
+std::string CodexResponsesProtocol::installation_id() const {
+    std::lock_guard lock(transport_state_->mutex);
+    if (transport_state_->installation_id.empty()) {
+        transport_state_->installation_id = load_or_create_codex_installation_id(config_dir_);
+    }
+    return transport_state_->installation_id;
 }
 
 ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
@@ -650,7 +1075,7 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
 
     if (response.status_code == 200 && !last_response_id_.empty()) {
         std::scoped_lock lock(shared_state_->mutex);
-        shared_state_->previous_response_id = last_response_id_;
+        shared_state_->sessions[active_session_id_].previous_response_id = last_response_id_;
     }
 }
 
