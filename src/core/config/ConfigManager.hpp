@@ -42,19 +42,7 @@ struct ManagedSettings {
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
 
-    [[nodiscard]] bool empty() const {
-        return !default_mode.has_value()
-            && !default_approval_mode.has_value()
-            && !default_router_policy.has_value()
-            && !ui_banner.has_value()
-            && !ui_footer.has_value()
-            && !ui_model_info.has_value()
-            && !ui_context_usage.has_value()
-            && !ui_timestamps.has_value()
-            && !ui_spinner.has_value()
-            && !auto_compact_threshold.has_value()
-            && !context_compression.has_value();
-    }
+    [[nodiscard]] bool empty() const;
 };
 
 // ---------------------------------------------------------------------------

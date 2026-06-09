@@ -3,7 +3,9 @@
 
 #include "core/config/ConfigManager.hpp"
 
+#include <array>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -52,6 +54,65 @@ std::string read_text(const fs::path& path) {
     std::ostringstream buffer;
     buffer << in.rdbuf();
     return buffer.str();
+}
+
+const std::optional<std::string>& managed_overlay_value(
+    const core::config::ManagedSettings& settings,
+    core::config::ManagedSettingKey key) {
+    switch (key) {
+        case core::config::ManagedSettingKey::DefaultMode:
+            return settings.default_mode;
+        case core::config::ManagedSettingKey::DefaultApprovalMode:
+            return settings.default_approval_mode;
+        case core::config::ManagedSettingKey::DefaultRouterPolicy:
+            return settings.default_router_policy;
+        case core::config::ManagedSettingKey::UiBanner:
+            return settings.ui_banner;
+        case core::config::ManagedSettingKey::UiFooter:
+            return settings.ui_footer;
+        case core::config::ManagedSettingKey::UiModelInfo:
+            return settings.ui_model_info;
+        case core::config::ManagedSettingKey::UiContextUsage:
+            return settings.ui_context_usage;
+        case core::config::ManagedSettingKey::UiTimestamps:
+            return settings.ui_timestamps;
+        case core::config::ManagedSettingKey::UiSpinner:
+            return settings.ui_spinner;
+        case core::config::ManagedSettingKey::AutoCompactThreshold:
+            return settings.auto_compact_threshold;
+        case core::config::ManagedSettingKey::ContextCompression:
+            return settings.context_compression;
+    }
+    return settings.default_mode;
+}
+
+std::string effective_managed_value(const core::config::AppConfig& config,
+                                    core::config::ManagedSettingKey key) {
+    switch (key) {
+        case core::config::ManagedSettingKey::DefaultMode:
+            return config.default_mode;
+        case core::config::ManagedSettingKey::DefaultApprovalMode:
+            return config.default_approval_mode;
+        case core::config::ManagedSettingKey::DefaultRouterPolicy:
+            return config.router.default_policy;
+        case core::config::ManagedSettingKey::UiBanner:
+            return config.ui_banner;
+        case core::config::ManagedSettingKey::UiFooter:
+            return config.ui_footer;
+        case core::config::ManagedSettingKey::UiModelInfo:
+            return config.ui_model_info;
+        case core::config::ManagedSettingKey::UiContextUsage:
+            return config.ui_context_usage;
+        case core::config::ManagedSettingKey::UiTimestamps:
+            return config.ui_timestamps;
+        case core::config::ManagedSettingKey::UiSpinner:
+            return config.ui_spinner;
+        case core::config::ManagedSettingKey::AutoCompactThreshold:
+            return std::to_string(config.auto_compact_threshold);
+        case core::config::ManagedSettingKey::ContextCompression:
+            return config.context_compression;
+    }
+    return config.default_mode;
 }
 
 } // namespace
@@ -939,6 +1000,159 @@ TEST_CASE("ConfigManager persists managed settings and reset removes empty setti
                                             &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().context_compression == "off");
+    REQUIRE_FALSE(fs::exists(user_settings));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager managed settings table covers every persisted setting",
+          "[config]") {
+    struct ManagedSettingCase {
+        core::config::ManagedSettingKey key;
+        const char* json_key;
+        const char* value;
+    };
+
+    static constexpr std::array kCases{
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::DefaultMode,
+            "default_mode",
+            "REVIEW",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::DefaultApprovalMode,
+            "default_approval_mode",
+            "yolo",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::DefaultRouterPolicy,
+            "default_router_policy",
+            "deep",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiBanner,
+            "ui_banner",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiFooter,
+            "ui_footer",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiModelInfo,
+            "ui_model_info",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiContextUsage,
+            "ui_context_usage",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiTimestamps,
+            "ui_timestamps",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiSpinner,
+            "ui_spinner",
+            "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::AutoCompactThreshold,
+            "auto_compact_threshold",
+            "12345",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::ContextCompression,
+            "context_compression",
+            "light",
+        },
+    };
+
+    const fs::path sandbox = make_temp_dir("filo_managed_settings_table");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path user_settings = xdg_home / "filo" / "settings.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    for (const auto& item : kCases) {
+        const std::string baseline =
+            effective_managed_value(manager.get_config(), item.key);
+
+        REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                                item.key,
+                                                std::string(item.value),
+                                                project_dir,
+                                                &error));
+        REQUIRE(error.empty());
+        REQUIRE(managed_overlay_value(
+                    manager.get_settings_overlay(core::config::SettingsScope::User),
+                    item.key)
+                == std::optional<std::string>{item.value});
+        REQUIRE(effective_managed_value(manager.get_config(), item.key) == item.value);
+
+        const std::string persisted_settings = read_text(user_settings);
+        REQUIRE(persisted_settings.find(std::format("\"{}\"", item.json_key))
+                != std::string::npos);
+        REQUIRE(persisted_settings.find(std::format("\"{}\"", item.value))
+                != std::string::npos);
+
+        REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                                item.key,
+                                                std::nullopt,
+                                                project_dir,
+                                                &error));
+        REQUIRE(error.empty());
+        REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::User).empty());
+        REQUIRE(effective_managed_value(manager.get_config(), item.key) == baseline);
+        REQUIRE_FALSE(fs::exists(user_settings));
+    }
+
+    for (const auto& item : kCases) {
+        REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                                item.key,
+                                                std::string(item.value),
+                                                project_dir,
+                                                &error));
+        REQUIRE(error.empty());
+    }
+
+    const std::string complete_settings = read_text(user_settings);
+    for (const auto& item : kCases) {
+        REQUIRE(complete_settings.find(std::format("\"{}\"", item.json_key))
+                != std::string::npos);
+        REQUIRE(managed_overlay_value(
+                    manager.get_settings_overlay(core::config::SettingsScope::User),
+                    item.key)
+                == std::optional<std::string>{item.value});
+        REQUIRE(effective_managed_value(manager.get_config(), item.key) == item.value);
+    }
+
+    manager.load(project_dir);
+    for (const auto& item : kCases) {
+        REQUIRE(managed_overlay_value(
+                    manager.get_settings_overlay(core::config::SettingsScope::User),
+                    item.key)
+                == std::optional<std::string>{item.value});
+        REQUIRE(effective_managed_value(manager.get_config(), item.key) == item.value);
+    }
+
+    for (const auto& item : kCases) {
+        REQUIRE(manager.persist_managed_setting(core::config::SettingsScope::User,
+                                                item.key,
+                                                std::nullopt,
+                                                project_dir,
+                                                &error));
+        REQUIRE(error.empty());
+    }
+    REQUIRE(manager.get_settings_overlay(core::config::SettingsScope::User).empty());
     REQUIRE_FALSE(fs::exists(user_settings));
 
     fs::remove_all(sandbox);

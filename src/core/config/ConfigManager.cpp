@@ -11,6 +11,7 @@
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include <algorithm>
+#include <array>
 #include <format>
 #include <stdexcept>
 
@@ -48,37 +49,105 @@ fs::path workspace_mcp_overlay_path(const fs::path& working_dir) {
     return working_dir / ".filo" / "mcp_servers.json";
 }
 
+struct ManagedSettingDescriptor {
+    ManagedSettingKey key;
+    std::string_view json_key;
+    std::optional<std::string> ManagedSettings::*slot;
+};
+
+static constexpr std::array<ManagedSettingDescriptor, 11> kManagedSettingDescriptors{{
+    { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
+    { ManagedSettingKey::DefaultApprovalMode,
+      "default_approval_mode",
+      &ManagedSettings::default_approval_mode },
+    { ManagedSettingKey::DefaultRouterPolicy,
+      "default_router_policy",
+      &ManagedSettings::default_router_policy },
+    { ManagedSettingKey::UiBanner, "ui_banner", &ManagedSettings::ui_banner },
+    { ManagedSettingKey::UiFooter, "ui_footer", &ManagedSettings::ui_footer },
+    { ManagedSettingKey::UiModelInfo, "ui_model_info", &ManagedSettings::ui_model_info },
+    { ManagedSettingKey::UiContextUsage,
+      "ui_context_usage",
+      &ManagedSettings::ui_context_usage },
+    { ManagedSettingKey::UiTimestamps, "ui_timestamps", &ManagedSettings::ui_timestamps },
+    { ManagedSettingKey::UiSpinner, "ui_spinner", &ManagedSettings::ui_spinner },
+    { ManagedSettingKey::AutoCompactThreshold,
+      "auto_compact_threshold",
+      &ManagedSettings::auto_compact_threshold },
+    { ManagedSettingKey::ContextCompression,
+      "context_compression",
+      &ManagedSettings::context_compression },
+}};
+
+const ManagedSettingDescriptor* managed_setting_descriptor(ManagedSettingKey key) {
+    for (const auto& descriptor : kManagedSettingDescriptors) {
+        if (descriptor.key == key) {
+            return &descriptor;
+        }
+    }
+    return nullptr;
+}
+
 std::optional<std::string>& managed_setting_slot(ManagedSettings& settings,
                                                  ManagedSettingKey key) {
-    switch (key) {
-        case ManagedSettingKey::DefaultMode:
-            return settings.default_mode;
-        case ManagedSettingKey::DefaultApprovalMode:
-            return settings.default_approval_mode;
-        case ManagedSettingKey::DefaultRouterPolicy:
-            return settings.default_router_policy;
-        case ManagedSettingKey::UiBanner:
-            return settings.ui_banner;
-        case ManagedSettingKey::UiFooter:
-            return settings.ui_footer;
-        case ManagedSettingKey::UiModelInfo:
-            return settings.ui_model_info;
-        case ManagedSettingKey::UiContextUsage:
-            return settings.ui_context_usage;
-        case ManagedSettingKey::UiTimestamps:
-            return settings.ui_timestamps;
-        case ManagedSettingKey::UiSpinner:
-            return settings.ui_spinner;
-        case ManagedSettingKey::AutoCompactThreshold:
-            return settings.auto_compact_threshold;
-        case ManagedSettingKey::ContextCompression:
-            return settings.context_compression;
+    if (const auto* descriptor = managed_setting_descriptor(key)) {
+        return settings.*(descriptor->slot);
     }
     return settings.default_mode;
 }
 
+void apply_managed_setting_value(ManagedSettingKey key,
+                                 const std::string& value,
+                                 AppConfig& config) {
+    switch (key) {
+        case ManagedSettingKey::DefaultMode:
+            config.default_mode = value;
+            break;
+        case ManagedSettingKey::DefaultApprovalMode:
+            config.default_approval_mode = value;
+            break;
+        case ManagedSettingKey::DefaultRouterPolicy:
+            config.router.default_policy = value;
+            break;
+        case ManagedSettingKey::UiBanner:
+            config.ui_banner = value;
+            break;
+        case ManagedSettingKey::UiFooter:
+            config.ui_footer = value;
+            break;
+        case ManagedSettingKey::UiModelInfo:
+            config.ui_model_info = value;
+            break;
+        case ManagedSettingKey::UiContextUsage:
+            config.ui_context_usage = value;
+            break;
+        case ManagedSettingKey::UiTimestamps:
+            config.ui_timestamps = value;
+            break;
+        case ManagedSettingKey::UiSpinner:
+            config.ui_spinner = value;
+            break;
+        case ManagedSettingKey::AutoCompactThreshold:
+            try {
+                config.auto_compact_threshold = std::stoi(value);
+            } catch (...) {}
+            break;
+        case ManagedSettingKey::ContextCompression:
+            config.context_compression = value;
+            break;
+    }
+}
+
 
 } // namespace
+
+bool ManagedSettings::empty() const {
+    return std::ranges::none_of(
+        kManagedSettingDescriptors,
+        [this](const ManagedSettingDescriptor& descriptor) {
+            return (this->*(descriptor.slot)).has_value();
+        });
+}
 
 [[nodiscard]] std::string_view to_string(ApiType type) noexcept {
     switch (type) {
@@ -828,38 +897,10 @@ ManagedSettings parse_managed_settings_file(const fs::path& settings_path) {
 
     ManagedSettings parsed;
     std::string_view value;
-    if (!doc["default_mode"].get(value)) {
-        parsed.default_mode = std::string(value);
-    }
-    if (!doc["default_approval_mode"].get(value)) {
-        parsed.default_approval_mode = std::string(value);
-    }
-    if (!doc["default_router_policy"].get(value)) {
-        parsed.default_router_policy = std::string(value);
-    }
-    if (!doc["ui_banner"].get(value)) {
-        parsed.ui_banner = std::string(value);
-    }
-    if (!doc["ui_footer"].get(value)) {
-        parsed.ui_footer = std::string(value);
-    }
-    if (!doc["ui_model_info"].get(value)) {
-        parsed.ui_model_info = std::string(value);
-    }
-    if (!doc["ui_context_usage"].get(value)) {
-        parsed.ui_context_usage = std::string(value);
-    }
-    if (!doc["ui_timestamps"].get(value)) {
-        parsed.ui_timestamps = std::string(value);
-    }
-    if (!doc["ui_spinner"].get(value)) {
-        parsed.ui_spinner = std::string(value);
-    }
-    if (!doc["auto_compact_threshold"].get(value)) {
-        parsed.auto_compact_threshold = std::string(value);
-    }
-    if (!doc["context_compression"].get(value)) {
-        parsed.context_compression = std::string(value);
+    for (const auto& descriptor : kManagedSettingDescriptors) {
+        if (!doc[descriptor.json_key].get(value)) {
+            parsed.*(descriptor.slot) = std::string(value);
+        }
     }
     return parsed;
 }
@@ -881,17 +922,9 @@ std::string serialize_managed_settings(const ManagedSettings& settings) {
             needs_comma = true;
         };
 
-        append_field("default_mode", settings.default_mode);
-        append_field("default_approval_mode", settings.default_approval_mode);
-        append_field("default_router_policy", settings.default_router_policy);
-        append_field("ui_banner", settings.ui_banner);
-        append_field("ui_footer", settings.ui_footer);
-        append_field("ui_model_info", settings.ui_model_info);
-        append_field("ui_context_usage", settings.ui_context_usage);
-        append_field("ui_timestamps", settings.ui_timestamps);
-        append_field("ui_spinner", settings.ui_spinner);
-        append_field("auto_compact_threshold", settings.auto_compact_threshold);
-        append_field("context_compression", settings.context_compression);
+        for (const auto& descriptor : kManagedSettingDescriptors) {
+            append_field(descriptor.json_key, settings.*(descriptor.slot));
+        }
     }
 
     std::string output = std::move(writer).take();
@@ -900,40 +933,11 @@ std::string serialize_managed_settings(const ManagedSettings& settings) {
 }
 
 void apply_managed_settings(const ManagedSettings& settings, AppConfig& config) {
-    if (settings.default_mode.has_value()) {
-        config.default_mode = *settings.default_mode;
-    }
-    if (settings.default_approval_mode.has_value()) {
-        config.default_approval_mode = *settings.default_approval_mode;
-    }
-    if (settings.default_router_policy.has_value()) {
-        config.router.default_policy = *settings.default_router_policy;
-    }
-    if (settings.ui_banner.has_value()) {
-        config.ui_banner = *settings.ui_banner;
-    }
-    if (settings.ui_footer.has_value()) {
-        config.ui_footer = *settings.ui_footer;
-    }
-    if (settings.ui_model_info.has_value()) {
-        config.ui_model_info = *settings.ui_model_info;
-    }
-    if (settings.ui_context_usage.has_value()) {
-        config.ui_context_usage = *settings.ui_context_usage;
-    }
-    if (settings.ui_timestamps.has_value()) {
-        config.ui_timestamps = *settings.ui_timestamps;
-    }
-    if (settings.ui_spinner.has_value()) {
-        config.ui_spinner = *settings.ui_spinner;
-    }
-    if (settings.auto_compact_threshold.has_value()) {
-        try {
-            config.auto_compact_threshold = std::stoi(*settings.auto_compact_threshold);
-        } catch (...) {}
-    }
-    if (settings.context_compression.has_value()) {
-        config.context_compression = *settings.context_compression;
+    for (const auto& descriptor : kManagedSettingDescriptors) {
+        const auto& value = settings.*(descriptor.slot);
+        if (value.has_value()) {
+            apply_managed_setting_value(descriptor.key, *value, config);
+        }
     }
 }
 
