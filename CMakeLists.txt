@@ -376,6 +376,7 @@ add_executable(filo_tests
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
+    tests/test_zai_provider.cpp
     tests/test_ollama_provider.cpp
     tests/test_llamacpp_provider.cpp
     tests/test_mcp_server.cpp
@@ -486,6 +487,7 @@ source_group(
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp
         tests/test_qwen_oauth.cpp
+        tests/test_zai_provider.cpp
         tests/test_ollama_provider.cpp
         tests/test_llamacpp_provider.cpp
         tests/test_mcp_server.cpp

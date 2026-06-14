@@ -18,6 +18,9 @@ namespace core::auth {
 class ApiKeyCredentialSource : public ICredentialSource {
 public:
     AuthInfo get_auth() override { return auth_info_; }
+    [[nodiscard]] bool uses_subscription_billing() const noexcept override {
+        return subscription_billing_;
+    }
 
     static std::shared_ptr<ApiKeyCredentialSource>
     as_query_param(std::string key, std::string param_name = "key") {
@@ -29,12 +32,13 @@ public:
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
-    as_bearer(std::string key) {
+    as_bearer(std::string key, bool subscription_billing = false) {
         AuthInfo ai;
         if (!key.empty()) {
             ai.headers["Authorization"] = "Bearer " + std::move(key);
         }
-        return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(std::move(ai)));
+        return std::shared_ptr<ApiKeyCredentialSource>(
+            new ApiKeyCredentialSource(std::move(ai), subscription_billing));
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
@@ -52,8 +56,11 @@ public:
     }
 
 private:
-    explicit ApiKeyCredentialSource(AuthInfo ai) : auth_info_(std::move(ai)) {}
+    explicit ApiKeyCredentialSource(AuthInfo ai, bool subscription_billing = false)
+        : auth_info_(std::move(ai))
+        , subscription_billing_(subscription_billing) {}
     AuthInfo auth_info_;
+    bool subscription_billing_ = false;
 };
 
 } // namespace core::auth

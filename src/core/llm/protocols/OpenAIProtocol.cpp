@@ -3,10 +3,12 @@
 #include "../Models.hpp"
 #include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
+#include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace core::llm::protocols {
 
@@ -48,6 +50,14 @@ namespace {
         || lowered.starts_with("o1")
         || lowered.starts_with("o3")
         || lowered.starts_with("o4");
+}
+
+[[nodiscard]] bool is_zai_coding_model(std::string_view model) {
+    std::string normalized = lower_ascii(core::utils::str::trim_ascii_view(model));
+    return normalized == "glm-5.2"
+        || normalized == "glm-5-turbo"
+        || normalized == "glm-4.7"
+        || normalized == "glm-4.5-air";
 }
 
 } // namespace
@@ -252,6 +262,16 @@ void OpenAIProtocol::on_response(const HttpResponse& response) {
     }
 
     last_rate_limit_ = info;
+}
+
+void ZaiCodingProtocol::prepare_request(ChatRequest& req) {
+    if (is_zai_coding_model(req.model)) {
+        return;
+    }
+
+    throw std::invalid_argument(
+        "Z.ai Coding Plan supports only glm-5.2, glm-5-turbo, "
+        "glm-4.7, and glm-4.5-air; got '" + req.model + "'");
 }
 
 } // namespace core::llm::protocols

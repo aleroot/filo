@@ -109,6 +109,17 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     { "kimi-",             128000 },
 
     // -----------------------------------------------------------------------
+    // Z.ai GLM Models
+    // -----------------------------------------------------------------------
+    { "glm-5.2",          1000000 },
+    { "glm-5-turbo",     200000 },
+    { "glm-5.1",         200000 },
+    { "glm-5",           200000 },
+    { "glm-4.7",         200000 },
+    { "glm-4.5-air",     200000 },
+    { "glm-",            200000 },
+
+    // -----------------------------------------------------------------------
     // Anthropic Claude Models (Updated March 2026)
     // -----------------------------------------------------------------------
     { "claude-opus-4-6",   1000000 },
@@ -467,6 +478,84 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .tier = ModelTier::Balanced,
             .pricing = {3.0, 12.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-01",
+            .constraints = kStandardConstraints,
+        },
+    };
+}
+
+// Z.ai GLM models.
+std::vector<ModelInfo> build_zai_catalog() {
+    constexpr ModelCapabilities CAP_GLM =
+        CAP_TOOLS | CAP_JSON |
+        static_cast<uint32_t>(ModelCapability::Reasoning);
+
+    return {
+        {
+            .canonical_id = "glm-5.2",
+            .aliases = {},
+            .display_name = "GLM-5.2",
+            .provider = "zai",
+            .context_window = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 64'000,
+            .capabilities = CAP_GLM,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2026-04",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "glm-5-turbo",
+            .aliases = {"glm-5-turbo-latest"},
+            .display_name = "GLM-5 Turbo",
+            .provider = "zai",
+            .context_window = 200'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 64'000,
+            .capabilities = CAP_GLM,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2026-04",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "glm-5.1",
+            .aliases = {},
+            .display_name = "GLM-5.1",
+            .provider = "zai",
+            .context_window = 200'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 64'000,
+            .capabilities = CAP_GLM,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2026-04",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "glm-4.7",
+            .aliases = {},
+            .display_name = "GLM-4.7",
+            .provider = "zai",
+            .context_window = 200'000,
+            .max_output_tokens = 64'000,
+            .capabilities = CAP_TOOLS | CAP_JSON,
+            .tier = ModelTier::Balanced,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2025-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "glm-4.5-air",
+            .aliases = {"glm-4.5-air-latest"},
+            .display_name = "GLM-4.5 Air",
+            .provider = "zai",
+            .context_window = 200'000,
+            .max_output_tokens = 64'000,
+            .capabilities = CAP_TOOLS | CAP_JSON,
+            .tier = ModelTier::Fast,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2025-07",
             .constraints = kStandardConstraints,
         },
     };
@@ -917,6 +1006,7 @@ void ModelRegistry::load_defaults() {
     register_all(build_anthropic_catalog());
     register_all(build_openai_catalog());
     register_all(build_kimi_catalog());
+    register_all(build_zai_catalog());
     register_all(build_gemini_catalog());
     register_all(build_grok_catalog());
     register_all(build_qwen_catalog());

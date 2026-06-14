@@ -115,4 +115,18 @@ private:
     RateLimitInfo last_rate_limit_;
 };
 
+class ZaiCodingProtocol final : public OpenAIProtocol {
+public:
+    explicit ZaiCodingProtocol(bool stream_usage = false)
+        : OpenAIProtocol(stream_usage) {}
+
+    void prepare_request(ChatRequest& req) override;
+
+    [[nodiscard]] std::string_view name() const noexcept override { return "zai_coding"; }
+
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
+        return std::make_unique<ZaiCodingProtocol>(stream_usage_);
+    }
+};
+
 } // namespace core::llm::protocols

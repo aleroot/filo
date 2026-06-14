@@ -49,6 +49,8 @@ static constexpr BuiltinDef kBuiltins[] = {
     { "mistral", ApiType::OpenAI,     "https://api.mistral.ai/v1",                                      "MISTRAL_API_KEY",     AuthStyle::Bearer,     "chat_completions" },
     { "kimi",    ApiType::Kimi,       "https://api.moonshot.cn/v1",                                     "KIMI_API_KEY",        AuthStyle::Bearer,     "" },
     { "ollama",  ApiType::Ollama,     "http://localhost:11434",                                          "",                    AuthStyle::None,       "" },
+    { "zai-coding", ApiType::OpenAI,  "https://api.z.ai/api/coding/paas/v4",                            "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
+    { "zai",     ApiType::OpenAI,     "https://api.z.ai/api/paas/v4",                                   "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
     { "qwen",    ApiType::DashScope,  "https://dashscope.aliyuncs.com/compatible-mode/v1",               "DASHSCOPE_API_KEY",   AuthStyle::Bearer,     "" },
 };
 
@@ -206,7 +208,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 && openai_endpoint::is_azure_openai_base_url(base_url)) {
                 cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "api-key");
             } else {
-                cred = core::auth::ApiKeyCredentialSource::as_bearer(key);
+                cred = core::auth::ApiKeyCredentialSource::as_bearer(
+                    key,
+                    canonical_type == "zai-coding");
             }
             break;
         case AuthStyle::QueryParam:
@@ -253,7 +257,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             }
         } else {
             // Use GrokProtocol for grok-prefixed providers with reasoning_effort.
-            if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
+            if (canonical_type == "zai-coding") {
+                protocol = std::make_unique<protocols::ZaiCodingProtocol>(
+                    config.stream_usage);
+            } else if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
                 protocols::GrokReasoningEffort effort = protocols::GrokReasoningEffort::None;
                 if (config.reasoning_effort == "low")    effort = protocols::GrokReasoningEffort::Low;
                 if (config.reasoning_effort == "medium") effort = protocols::GrokReasoningEffort::Medium;

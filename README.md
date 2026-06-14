@@ -179,6 +179,7 @@ export ANTHROPIC_API_KEY="..."
 export GEMINI_API_KEY="..."
 export MISTRAL_API_KEY="..."
 export KIMI_API_KEY="..."
+export ZAI_API_KEY="..."
 export DASHSCOPE_API_KEY="..."
 ```
 
