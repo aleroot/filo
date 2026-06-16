@@ -428,6 +428,11 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
         || lowered.find("thinking") != std::string::npos;
 }
 
+[[nodiscard]] bool model_requires_kimi_thinking(std::string_view model) {
+    const std::string lowered = lower_ascii(model);
+    return lowered == "kimi-k2.7-code";
+}
+
 [[nodiscard]] std::string normalize_kimi_tool_schema(
     std::string_view schema,
     bool normalize_root_property) {
@@ -975,7 +980,10 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         return;
     }
 
-    const std::string effort = normalize_kimi_effort(req.effort);
+    std::string effort = normalize_kimi_effort(req.effort);
+    if (model_requires_kimi_thinking(req.model) && effort.empty()) {
+        effort = "high";
+    }
     if (effort.empty()) {
         return;
     }
@@ -1065,7 +1073,7 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
         
         case 404:
             return "[Kimi API Error 404: Model or endpoint not found. Verify the model name "
-                   "is correct. Available models: kimi-k2.6, kimi-k2.5, moonshot-v1-8k, etc.]";
+                   "is correct. Available models: kimi-k2.7-code, kimi-k2.6, moonshot-v1-8k, etc.]";
         
         case 429:
             return "[Kimi API Error 429: Rate limit exceeded. Please reduce request frequency. "

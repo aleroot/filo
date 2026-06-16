@@ -662,7 +662,8 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.contains("grok-reasoning"));
     REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.20-reasoning");
     REQUIRE(config.providers.contains("kimi"));
-    REQUIRE(config.providers.at("kimi").model == "kimi-k2.6");
+    REQUIRE(config.providers.at("kimi").model == "kimi-k2.7-code");
+    REQUIRE(config.providers.at("kimi").reasoning_effort == "high");
     REQUIRE(config.providers.contains("kimi-k2-6"));
     REQUIRE(config.providers.at("kimi-k2-6").model == "kimi-k2.6");
     REQUIRE(config.providers.contains("kimi-k2-5"));
@@ -685,7 +686,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and kimi-for-coding default",
+TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K2.7 Code default",
           "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_login_kimi_profile");
     const fs::path xdg_home = sandbox / "xdg";
@@ -714,7 +715,7 @@ TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and ki
     REQUIRE(config.default_model_selection == "manual");
     REQUIRE(config.providers.contains("kimi"));
     REQUIRE(config.providers.at("kimi").auth_type == "oauth_kimi");
-    REQUIRE(config.providers.at("kimi").model == "kimi-for-coding");
+    REQUIRE(config.providers.at("kimi").model == "kimi-k2.7-code");
 
     fs::remove_all(sandbox);
 }

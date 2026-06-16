@@ -415,6 +415,19 @@ std::vector<ModelInfo> build_kimi_catalog() {
         CAP_FULL | static_cast<uint32_t>(ModelCapability::VideoInput);
     return {
         {
+            .canonical_id = "kimi-k2.7-code",
+            .aliases = {"k2.7-code"},
+            .display_name = "Kimi K2.7 Code",
+            .provider = "kimi",
+            .context_window = 256000,
+            .max_output_tokens = 8192,
+            .capabilities = CAP_KIMI_MULTIMODAL | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Balanced,
+            .pricing = {0.95, 4.0, 0.19, -1.0},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kStandardConstraints,
+        },
+        {
             .canonical_id = "kimi-k2.6",
             .aliases = {"kimi-k2-6", "k2.6"},
             .display_name = "Kimi K2.6",

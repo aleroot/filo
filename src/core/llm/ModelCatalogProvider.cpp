@@ -202,7 +202,8 @@ bool get_string_field(simdjson::dom::object object,
     if (contains_ascii(model_id, "moonshot-v1-8k")) return 8192;
     if (contains_ascii(model_id, "moonshot-v1-32k")) return 32768;
     if (contains_ascii(model_id, "moonshot-v1-128k")) return 128000;
-    if (contains_ascii(model_id, "kimi-k2.6") ||
+    if (contains_ascii(model_id, "kimi-k2.7-code") ||
+        contains_ascii(model_id, "kimi-k2.6") ||
         contains_ascii(model_id, "kimi-k2-6") ||
         contains_ascii(model_id, "kimi-k2.5") ||
         contains_ascii(model_id, "kimi-k2-5") ||

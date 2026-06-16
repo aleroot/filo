@@ -36,6 +36,25 @@ public:
     }
 };
 
+class CapturingReviewProvider : public core::llm::LLMProvider {
+public:
+    void stream_response(const core::llm::ChatRequest& request,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        requests.push_back(request);
+
+        core::llm::StreamChunk content;
+        content.content =
+            R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"No blocking issues found in the supplied patch.","overall_confidence_score":0.9})";
+        callback(content);
+
+        core::llm::StreamChunk final_chunk;
+        final_chunk.is_final = true;
+        callback(final_chunk);
+    }
+
+    std::vector<core::llm::ChatRequest> requests;
+};
+
 } // namespace
 
 TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
@@ -812,6 +831,146 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(review_activity_events->front().second == "custom review prompt");
         REQUIRE(review_activity_events->back().first == false);
         REQUIRE(review_activity_events->back().second.empty());
+    }
+
+    SECTION("/review --uncommitted sends precomputed patch without tools") {
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.text = "/review --uncommitted";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(provider->requests.size() == 1);
+
+        const auto& request = provider->requests.front();
+        REQUIRE(request.tools.empty());
+        REQUIRE(request.effort == "off");
+        REQUIRE(request.max_tokens == 8192);
+        REQUIRE(request.response_format.type == core::llm::ResponseFormat::Type::JsonObject);
+        REQUIRE_FALSE(request.messages.empty());
+        const std::string& prompt = request.messages.back().content;
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("The relevant git context is already included"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("## Git Status"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("## Diff Stat"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("## Patch"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("<git_context>"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("Review only the git context supplied below"));
+        const auto review_task_pos = prompt.find("[Review task]");
+        REQUIRE(review_task_pos != std::string::npos);
+        const std::string prompt_header = prompt.substr(0, review_task_pos);
+        REQUIRE_THAT(prompt_header, !Catch::Matchers::ContainsSubstring("Use available tools to inspect"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("No blocking issues found"));
+    }
+
+    SECTION("/review --uncommitted includes untracked file contents") {
+        namespace fs = std::filesystem;
+        struct CwdGuard {
+            fs::path old;
+            ~CwdGuard() {
+                std::error_code ec;
+                fs::current_path(old, ec);
+            }
+        } guard{fs::current_path()};
+
+        const fs::path temp_dir =
+            fs::temp_directory_path() / std::format("filo-test-review-{}", std::rand());
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+        fs::create_directories(temp_dir, ec);
+        REQUIRE_FALSE(ec);
+        fs::current_path(temp_dir);
+
+        REQUIRE(std::system("git init -q") == 0);
+        {
+            std::ofstream tracked("tracked.txt");
+            tracked << "base\n";
+        }
+        REQUIRE(std::system("git add tracked.txt") == 0);
+        REQUIRE(std::system(
+            "git -c user.name=Filo -c user.email=filo@example.invalid commit -qm initial")
+            == 0);
+        {
+            std::ofstream untracked("new_feature.cpp");
+            untracked << "int answer() { return 42; }\n";
+        }
+
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.text = "/review --uncommitted";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(provider->requests.size() == 1);
+
+        const auto& request = provider->requests.front();
+        REQUIRE(request.tools.empty());
+        REQUIRE(request.effort == "off");
+        REQUIRE_FALSE(request.messages.empty());
+        const std::string& prompt = request.messages.back().content;
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("## Untracked Files"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("new_feature.cpp"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("# Untracked file patches"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("int answer() { return 42; }"));
+
+        fs::current_path(guard.old, ec);
+        fs::remove_all(temp_dir, ec);
+    }
+
+    SECTION("/review --uncommitted works before the first commit") {
+        namespace fs = std::filesystem;
+        struct CwdGuard {
+            fs::path old;
+            ~CwdGuard() {
+                std::error_code ec;
+                fs::current_path(old, ec);
+            }
+        } guard{fs::current_path()};
+
+        const fs::path temp_dir =
+            fs::temp_directory_path() / std::format("filo-test-review-unborn-{}", std::rand());
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+        fs::create_directories(temp_dir, ec);
+        REQUIRE_FALSE(ec);
+        fs::current_path(temp_dir);
+
+        REQUIRE(std::system("git init -q") == 0);
+        {
+            std::ofstream staged("initial.cpp");
+            staged << "int boot() { return 1; }\n";
+        }
+        REQUIRE(std::system("git add initial.cpp") == 0);
+
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.text = "/review --uncommitted";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(provider->requests.size() == 1);
+
+        const std::string& prompt = provider->requests.front().messages.back().content;
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("initial.cpp"));
+        REQUIRE_THAT(prompt, Catch::Matchers::ContainsSubstring("int boot() { return 1; }"));
+        REQUIRE_THAT(*mock_history, !Catch::Matchers::ContainsSubstring("Could not start review"));
+
+        fs::current_path(guard.old, ec);
+        fs::remove_all(temp_dir, ec);
     }
 
     SECTION("/review --help shows usage without needing an agent") {

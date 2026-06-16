@@ -299,7 +299,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "kimi",
             .auth_type = "oauth_kimi",
-            .default_model = "kimi-for-coding",
+            .default_model = "kimi-k2.7-code",
         };
     }
     if (normalized == "qwen") {
@@ -492,7 +492,7 @@ AppConfig make_default_config() {
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
     add_provider("claude",         "claude-sonnet-4-6");
     add_provider("gemini",         "gemini-2.5-flash");
-    add_provider("kimi",           "kimi-k2.6");
+    add_provider("kimi",           "kimi-k2.7-code", "high");
     add_provider("kimi-k2-6",      "kimi-k2.6");
     add_provider("kimi-k2-5",      "kimi-k2.5");
     add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.com/coding/v1");
@@ -556,7 +556,7 @@ std::string default_config_json() {
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
-        "kimi":           { "model": "kimi-k2.6" },
+        "kimi":           { "model": "kimi-k2.7-code", "reasoning_effort": "high" },
         "kimi-k2-6":      { "model": "kimi-k2.6" },
         "kimi-k2-5":      { "model": "kimi-k2.5" },
         "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.com/coding/v1" },

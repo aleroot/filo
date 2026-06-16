@@ -64,6 +64,7 @@ constexpr std::array<std::string_view, 2> kSupportedProtocolVersions{
 /// Default version announced and used when no matching version is negotiated.
 constexpr std::string_view kDefaultProtocolVersion = kSupportedProtocolVersions.front();
 constexpr std::string_view kTaskProtocolVersion = "2025-11-25";
+constexpr const char* kTasksExtensionIdentifier = "io.modelcontextprotocol/tasks";
 
 /// Human-readable instructions embedded in the initialize response.
 /// Lampo's local model reads these to understand the server's capabilities and
@@ -121,14 +122,22 @@ struct RequestId {
     return protocols;
 }
 
+[[nodiscard]] std::unordered_map<std::string, bool>& negotiated_task_clients() {
+    static std::unordered_map<std::string, bool> clients;
+    return clients;
+}
+
 [[nodiscard]] std::string session_protocol_key(const core::context::SessionContext& context) {
     return context.session_id.empty() ? std::string("__default__") : context.session_id;
 }
 
-void remember_negotiated_protocol(const core::context::SessionContext& context,
-                                  std::string_view protocol) {
+void remember_negotiated_session(const core::context::SessionContext& context,
+                                 std::string_view protocol,
+                                 bool client_supports_tasks) {
     std::lock_guard lock(negotiated_protocols_mutex());
-    negotiated_protocols()[session_protocol_key(context)] = std::string(protocol);
+    const auto key = session_protocol_key(context);
+    negotiated_protocols()[key] = std::string(protocol);
+    negotiated_task_clients()[key] = client_supports_tasks;
 }
 
 [[nodiscard]] std::string negotiated_protocol_for_session(
@@ -143,6 +152,12 @@ void remember_negotiated_protocol(const core::context::SessionContext& context,
 
 [[nodiscard]] bool session_supports_tasks(const core::context::SessionContext& context) {
     return negotiated_protocol_for_session(context) == kTaskProtocolVersion;
+}
+
+[[nodiscard]] bool session_client_supports_tasks(const core::context::SessionContext& context) {
+    std::lock_guard lock(negotiated_protocols_mutex());
+    const auto it = negotiated_task_clients().find(session_protocol_key(context));
+    return it != negotiated_task_clients().end() && it->second;
 }
 
 /**
@@ -220,32 +235,46 @@ void write_response_id(JsonWriter& w, const RequestId& id) {
     }
 }
 
+struct InitializeInfo {
+    std::string protocol_version;
+    bool client_supports_tasks = false;
+};
+
+[[nodiscard]] bool has_tasks_extension_capability(
+    simdjson::ondemand::object& capabilities)
+{
+    simdjson::ondemand::object extensions;
+    if (capabilities["extensions"].get_object().get(extensions) != simdjson::SUCCESS) {
+        return false;
+    }
+
+    simdjson::ondemand::value tasks_extension;
+    return extensions[kTasksExtensionIdentifier].get(tasks_extension) == simdjson::SUCCESS;
+}
+
 /**
- * @brief Selects the best protocol version to use for this session.
- *
- * If the client's requested version is in @c kSupportedProtocolVersions
- * it is echoed back (exact match wins).  Otherwise the server defaults to
- * @c kDefaultProtocolVersion (the newest supported version) per the MCP
- * 2025-11-25 negotiation rules.
- *
- * @param root  Top-level JSON object of the @c initialize request.
- * @return The negotiated protocol version string.
+ * @brief Parses initialize params and selects the best protocol version.
  */
-[[nodiscard]] std::string negotiate_protocol_version(simdjson::ondemand::object& root) {
+[[nodiscard]] InitializeInfo parse_initialize_info(simdjson::ondemand::object& root) {
+    InitializeInfo info{.protocol_version = std::string(kDefaultProtocolVersion)};
+
     simdjson::ondemand::object params;
     if (root["params"].get_object().get(params) != simdjson::SUCCESS) {
-        return std::string(kDefaultProtocolVersion);
+        return info;
     }
 
     std::string_view requested;
-    if (params["protocolVersion"].get_string().get(requested) != simdjson::SUCCESS) {
-        return std::string(kDefaultProtocolVersion);
+    if (params["protocolVersion"].get_string().get(requested) == simdjson::SUCCESS
+        && is_supported_protocol_version(requested)) {
+        info.protocol_version = std::string(requested);
     }
 
-    if (is_supported_protocol_version(requested)) {
-        return std::string(requested);
+    simdjson::ondemand::object capabilities;
+    if (params["capabilities"].get_object().get(capabilities) == simdjson::SUCCESS) {
+        info.client_supports_tasks = has_tasks_extension_capability(capabilities);
     }
-    return std::string(kDefaultProtocolVersion);
+
+    return info;
 }
 
 /**
@@ -620,63 +649,8 @@ static constexpr std::string_view kInvalidRequest{
  *
  * @return A const reference to the cached JSON result string.
  */
-static const std::string& tools_list_result(bool include_execution_metadata) {
-    static const std::string result_with_execution = [] {
-        auto& sm    = core::tools::ToolManager::get_instance();
-        auto  tools = sm.get_all_tools();
-
-        JsonWriter w(8192);
-        {
-            auto _root = w.object();
-            w.key("tools");
-            {
-                auto _arr = w.array();
-                bool first_tool = true;
-
-                for (const auto& tool : tools) {
-                    if (!first_tool) w.comma();
-                    first_tool = false;
-
-                    const auto& def = tool.function;
-                    {
-                        auto _tool = w.object();
-
-                        // name (required), title (optional display name for Lampo)
-                        w.kv_str("name", def.name).comma()
-                         .kv_str("title", def.title).comma()
-                         .kv_str("description", def.description).comma()
-                         .kv_raw("inputSchema", build_input_schema_json(def));
-
-                        if (!def.output_schema.empty()) {
-                            w.comma().kv_raw("outputSchema", def.output_schema);
-                        }
-
-                        if (!def.execution.task_support.empty()) {
-                            w.comma().key("execution");
-                            {
-                                auto _execution = w.object();
-                                w.kv_str("taskSupport", def.execution.task_support);
-                            }
-                        }
-
-                        // annotations — behavioral hints for the MCP client (MCP 2025-11-25 §Tools)
-                        // Always emit all four fields so Lampo can rely on their presence.
-                        w.comma().key("annotations");
-                        {
-                            auto _ann = w.object();
-                            const auto& ann = def.annotations;
-                            w.kv_bool("readOnlyHint",   ann.read_only_hint).comma()
-                             .kv_bool("destructiveHint", ann.destructive_hint).comma()
-                             .kv_bool("idempotentHint",  ann.idempotent_hint).comma()
-                             .kv_bool("openWorldHint",   ann.open_world_hint);
-                        }
-                    }
-                }
-            }
-        }
-        return std::move(w).take();
-    }();
-    static const std::string result_without_execution = [] {
+static const std::string& tools_list_result() {
+    static const std::string result = [] {
         auto& sm    = core::tools::ToolManager::get_instance();
         auto  tools = sm.get_all_tools();
 
@@ -720,7 +694,7 @@ static const std::string& tools_list_result(bool include_execution_metadata) {
         }
         return std::move(w).take();
     }();
-    return include_execution_metadata ? result_with_execution : result_without_execution;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,8 +748,7 @@ using RpcExpected = std::expected<T, RpcError>;
 struct ParsedToolCallRequest {
     std::string name;
     std::string arguments_json{"{}"};
-    bool task_requested = false;
-    std::optional<int64_t> task_ttl_ms;
+    bool client_supports_tasks = false;
 };
 
 struct ParsedPromptGetRequest {
@@ -800,13 +773,16 @@ struct ParsedPromptGetRequest {
 [[nodiscard]] std::string build_initialize_result(simdjson::ondemand::object& root,
                                                   const core::context::SessionContext& context) {
     const bool has_prompts = !discover_prompt_templates().empty();
-    const std::string negotiated_protocol = negotiate_protocol_version(root);
-    remember_negotiated_protocol(context, negotiated_protocol);
+    const InitializeInfo initialize = parse_initialize_info(root);
+    remember_negotiated_session(
+        context,
+        initialize.protocol_version,
+        initialize.client_supports_tasks);
     JsonWriter rw(1024);
     {
         auto _res = rw.object();
 
-        rw.kv_str("protocolVersion", negotiated_protocol).comma()
+        rw.kv_str("protocolVersion", initialize.protocol_version).comma()
             .key("capabilities");
         {
             auto _cap = rw.object();
@@ -815,30 +791,12 @@ struct ParsedPromptGetRequest {
                 auto _tools = rw.object();
                 rw.kv_bool("listChanged", false);
             }
-            if (negotiated_protocol == kTaskProtocolVersion) {
-                rw.comma().key("tasks");
+            if (initialize.protocol_version == kTaskProtocolVersion) {
+                rw.comma().key("extensions");
                 {
+                    auto _extensions = rw.object();
+                    rw.key(kTasksExtensionIdentifier);
                     auto _tasks = rw.object();
-                    rw.key("list");
-                    {
-                        auto _list = rw.object();
-                    }
-                    rw.comma().key("cancel");
-                    {
-                        auto _cancel = rw.object();
-                    }
-                    rw.comma().key("requests");
-                    {
-                        auto _requests = rw.object();
-                        rw.key("tools");
-                        {
-                            auto _tools = rw.object();
-                            rw.key("call");
-                            {
-                                auto _call = rw.object();
-                            }
-                        }
-                    }
                 }
             }
             rw.comma().key("resources");
@@ -1165,31 +1123,14 @@ struct ParsedPromptGetRequest {
         parsed.arguments_json = std::string(raw_json);
     }
 
-    simdjson::ondemand::value task_value;
-    if (params["task"].get(task_value) == simdjson::SUCCESS) {
-        simdjson::ondemand::json_type task_type;
-        if (task_value.type().get(task_type) != simdjson::SUCCESS
-            || task_type != simdjson::ondemand::json_type::object) {
-            return std::unexpected(
-                RpcError{-32602, "Invalid params: 'task' must be an object"});
-        }
-
-        parsed.task_requested = true;
-        simdjson::ondemand::object task_object;
-        if (task_value.get_object().get(task_object) != simdjson::SUCCESS) {
-            return std::unexpected(
-                RpcError{-32602, "Invalid params: could not parse 'task'"});
-        }
-
-        int64_t ttl_ms = 0;
-        if (task_object["ttl"].get(ttl_ms) == simdjson::SUCCESS) {
-            parsed.task_ttl_ms = ttl_ms;
-        } else {
-            simdjson::ondemand::value ttl_value;
-            if (task_object["ttl"].get(ttl_value) == simdjson::SUCCESS) {
-                return std::unexpected(
-                    RpcError{-32602, "Invalid params: task.ttl must be an integer"});
-            }
+    simdjson::ondemand::object meta;
+    if (params["_meta"].get_object().get(meta) == simdjson::SUCCESS) {
+        simdjson::ondemand::object client_capabilities;
+        if (meta["io.modelcontextprotocol/clientCapabilities"]
+                .get_object()
+                .get(client_capabilities) == simdjson::SUCCESS) {
+            parsed.client_supports_tasks =
+                has_tasks_extension_capability(client_capabilities);
         }
     }
 
@@ -1264,6 +1205,19 @@ struct ParsedPromptGetRequest {
     return build_call_tool_result_from_payload(tool_result);
 }
 
+[[nodiscard]] bool is_long_running_delegate_task_call(const ParsedToolCallRequest& request) {
+    if (request.name != core::tools::TaskTool::kToolName) return false;
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(request.arguments_json).get(doc) != simdjson::SUCCESS) return false;
+
+    std::string_view action;
+    if (doc["action"].get(action) != simdjson::SUCCESS) return false;
+
+    return action == "start" || action == "resume";
+}
+
 [[nodiscard]] RpcExpected<std::string> build_prompt_get_result(
     const ParsedPromptGetRequest& request)
 {
@@ -1299,8 +1253,10 @@ struct ParsedPromptGetRequest {
     return std::move(rw).take();
 }
 
-[[nodiscard]] std::string build_task_state_json(const core::mcp::McpTaskManager::TaskState& task) {
-    JsonWriter writer(384);
+[[nodiscard]] std::string build_task_state_json(
+    const core::mcp::McpTaskManager::TaskState& task,
+    const std::optional<core::mcp::McpTaskManager::ResultPayload>& payload = std::nullopt) {
+    JsonWriter writer(512 + (payload.has_value() ? payload->result_json.size() + payload->error_message.size() : 0));
     {
         auto root = writer.object();
         writer.kv_str("taskId", task.task_id).comma();
@@ -1309,10 +1265,22 @@ struct ParsedPromptGetRequest {
         writer.kv_str("createdAt", task.created_at).comma();
         writer.kv_str("lastUpdatedAt", task.last_updated_at);
         if (task.ttl_ms.has_value()) {
-            writer.comma().kv_num("ttl", *task.ttl_ms);
+            writer.comma().kv_num("ttlMs", *task.ttl_ms);
         }
         if (task.poll_interval_ms.has_value()) {
-            writer.comma().kv_num("pollInterval", *task.poll_interval_ms);
+            writer.comma().kv_num("pollIntervalMs", *task.poll_interval_ms);
+        }
+        if (payload.has_value()) {
+            if (task.status == "completed" && !payload->has_error) {
+                writer.comma().kv_raw("result", payload->result_json);
+            } else if (task.status == "failed") {
+                writer.comma().key("error");
+                {
+                    auto error = writer.object();
+                    writer.kv_num("code", payload->error_code).comma()
+                        .kv_str("message", payload->error_message);
+                }
+            }
         }
     }
     return std::move(writer).take();
@@ -1324,6 +1292,7 @@ struct ParsedPromptGetRequest {
     JsonWriter writer(512 + create_result.immediate_response.size());
     {
         auto root = writer.object();
+        writer.kv_str("resultType", "task").comma();
         writer.kv_raw("task", build_task_state_json(create_result.task));
         if (!create_result.immediate_response.empty()) {
             writer.comma().key("_meta");
@@ -1332,26 +1301,6 @@ struct ParsedPromptGetRequest {
                 writer.kv_str(
                     "io.modelcontextprotocol/model-immediate-response",
                     create_result.immediate_response);
-            }
-        }
-    }
-    return std::move(writer).take();
-}
-
-[[nodiscard]] std::string build_tasks_list_result(
-    const std::vector<core::mcp::McpTaskManager::TaskState>& tasks)
-{
-    JsonWriter writer(512 + tasks.size() * 256);
-    {
-        auto root = writer.object();
-        writer.key("tasks");
-        {
-            auto array = writer.array();
-            bool first = true;
-            for (const auto& task : tasks) {
-                if (!first) writer.comma();
-                first = false;
-                writer.raw(build_task_state_json(task));
             }
         }
     }
@@ -1441,9 +1390,9 @@ using MethodHandler = std::string (*)(
 [[nodiscard]] std::string handle_tools_list(
     const RequestId& id,
     simdjson::ondemand::object&,
-    const core::context::SessionContext& context)
+    [[maybe_unused]] const core::context::SessionContext& context)
 {
-    return make_response(id, tools_list_result(session_supports_tasks(context)));
+    return make_response(id, tools_list_result());
 }
 
 [[nodiscard]] std::string handle_tools_call(
@@ -1460,23 +1409,10 @@ using MethodHandler = std::string (*)(
         return make_error(id, -32602, std::format("Unknown tool: {}", request->name));
     }
 
-    const std::string_view task_support = tool_def->execution.task_support;
-    const bool task_supported = task_support == "optional" || task_support == "required";
-    if (request->task_requested) {
-        if (!session_supports_tasks(context)) {
-            return make_error(
-                id,
-                -32601,
-                "Task-augmented tool execution is not available for the negotiated MCP protocol.");
-        }
-        if (!task_supported) {
-            return make_error(
-                id,
-                -32601,
-                std::format(
-                    "Tool '{}' does not support task-augmented execution.",
-                    request->name));
-        }
+    if (request->client_supports_tasks
+        && session_client_supports_tasks(context)
+        && session_supports_tasks(context)
+        && is_long_running_delegate_task_call(*request)) {
         if (auto validation_error = validate_tool_arguments(*tool_def, request->arguments_json)) {
             return make_error(id, -32602, *validation_error);
         }
@@ -1485,17 +1421,8 @@ using MethodHandler = std::string (*)(
             request->name,
             request->arguments_json,
             context,
-            request->task_ttl_ms);
+            std::nullopt);
         return make_response(id, build_create_task_result(create_result));
-    }
-
-    if (task_support == "required") {
-        return make_error(
-            id,
-            -32601,
-            std::format(
-                "Tool '{}' requires task-augmented execution.",
-                request->name));
     }
 
     auto result = build_tool_call_result(*request, context);
@@ -1516,46 +1443,13 @@ using MethodHandler = std::string (*)(
     auto task_id = parse_task_id_param(root);
     if (!task_id) return make_rpc_error(id, task_id.error());
 
-    const auto task = McpTaskManager::get_instance().get(*task_id, context.session_id);
-    if (!task.has_value()) {
+    const auto snapshot = McpTaskManager::get_instance().get(*task_id, context.session_id);
+    if (!snapshot.has_value()) {
         return make_error(id, -32602, std::format("Task not found: {}", *task_id));
     }
-    return make_response(id, build_task_state_json(*task));
-}
-
-[[nodiscard]] std::string handle_tasks_list(
-    const RequestId& id,
-    simdjson::ondemand::object&,
-    const core::context::SessionContext& context)
-{
-    if (!session_supports_tasks(context)) {
-        return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
-    }
-
-    return make_response(id, build_tasks_list_result(
-        McpTaskManager::get_instance().list(context.session_id)));
-}
-
-[[nodiscard]] std::string handle_tasks_result(
-    const RequestId& id,
-    simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
-{
-    if (!session_supports_tasks(context)) {
-        return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
-    }
-
-    auto task_id = parse_task_id_param(root);
-    if (!task_id) return make_rpc_error(id, task_id.error());
-
-    const auto result = McpTaskManager::get_instance().await_result(*task_id, context.session_id);
-    if (!result.has_value()) {
-        return make_error(id, -32602, std::format("Task not found: {}", *task_id));
-    }
-    if (result->has_error) {
-        return make_error(id, result->error_code, result->error_message);
-    }
-    return make_response(id, result->result_json);
+    return make_response(
+        id,
+        build_task_state_json(snapshot->task, snapshot->result));
 }
 
 [[nodiscard]] std::string handle_tasks_cancel(
@@ -1576,13 +1470,29 @@ using MethodHandler = std::string (*)(
         case McpTaskManager::CancelError::not_found:
             return make_error(id, -32602, std::format("Task not found: {}", *task_id));
         case McpTaskManager::CancelError::already_terminal:
-            return make_error(
-                id,
-                -32602,
-                std::format("Task is already in a terminal state: {}", *task_id));
+            return make_response(id, "{}");
         }
     }
-    return make_response(id, build_task_state_json(*task));
+    return make_response(id, "{}");
+}
+
+[[nodiscard]] std::string handle_tasks_update(
+    const RequestId& id,
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context)
+{
+    if (!session_supports_tasks(context)) {
+        return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
+    }
+
+    auto task_id = parse_task_id_param(root);
+    if (!task_id) return make_rpc_error(id, task_id.error());
+
+    const auto snapshot = McpTaskManager::get_instance().get(*task_id, context.session_id);
+    if (!snapshot.has_value()) {
+        return make_error(id, -32602, std::format("Task not found: {}", *task_id));
+    }
+    return make_response(id, "{}");
 }
 
 [[nodiscard]] std::string handle_ping(
@@ -1598,7 +1508,7 @@ struct MethodRoute {
     MethodHandler handler;
 };
 
-constexpr std::array<MethodRoute, 13> kMethodRoutes{{
+constexpr std::array<MethodRoute, 12> kMethodRoutes{{
     {"initialize", &handle_initialize},
     {"prompts/list", &handle_prompts_list},
     {"prompts/get", &handle_prompts_get},
@@ -1608,8 +1518,7 @@ constexpr std::array<MethodRoute, 13> kMethodRoutes{{
     {"tools/list", &handle_tools_list},
     {"tools/call", &handle_tools_call},
     {"tasks/get", &handle_tasks_get},
-    {"tasks/list", &handle_tasks_list},
-    {"tasks/result", &handle_tasks_result},
+    {"tasks/update", &handle_tasks_update},
     {"tasks/cancel", &handle_tasks_cancel},
     {"ping", &handle_ping},
 }};

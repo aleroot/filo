@@ -24,6 +24,9 @@ namespace core::mcp {
  * | @c prompts/get                | Request     | Expands one prompt skill into MCP prompt messages  |
  * | @c tools/list                 | Request     | Returns all registered tools (cached, no cursor)   |
  * | @c tools/call                 | Request     | Validates args, executes tool, wraps result        |
+ * | @c tasks/get                  | Request     | Polls an MCP task and returns terminal result/error|
+ * | @c tasks/update               | Request     | Acknowledges task input responses                  |
+ * | @c tasks/cancel               | Request     | Requests cooperative task cancellation             |
  * | @c ping                       | Request     | Returns @c {}                                      |
  * | @c notifications/initialized  | Notification| Silently ignored (no response per spec)            |
  * | @c notifications/cancelled    | Notification| Silently ignored (sync execution, nothing to cancel)|

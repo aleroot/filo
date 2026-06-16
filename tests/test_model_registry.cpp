@@ -18,6 +18,7 @@ using namespace core::llm;
 
 TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known models", "[llm][registry]") {
     // Kimi (via new registry)
+    REQUIRE(get_max_context_size("kimi-k2.7-code") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.6") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.5") == 256000);
     REQUIRE(get_max_context_size("kimi-for-coding") == 256000);
@@ -76,6 +77,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("gpt-5.4"));
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-3-7-sonnet"));
+    REQUIRE(registry.has_model("kimi-k2.7-code"));
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
     REQUIRE(registry.has_model("kimi-for-coding"));

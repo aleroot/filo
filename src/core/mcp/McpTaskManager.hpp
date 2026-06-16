@@ -31,16 +31,21 @@ public:
         std::optional<int64_t> poll_interval_ms;
     };
 
-    struct CreateResult {
-        TaskState task;
-        std::string immediate_response;
-    };
-
     struct ResultPayload {
         bool has_error = false;
         int error_code = -32603;
         std::string error_message;
         std::string result_json;
+    };
+
+    struct TaskSnapshot {
+        TaskState task;
+        std::optional<ResultPayload> result;
+    };
+
+    struct CreateResult {
+        TaskState task;
+        std::string immediate_response;
     };
 
     enum class CancelError {
@@ -56,8 +61,8 @@ public:
         const core::context::SessionContext& context,
         std::optional<int64_t> requested_ttl_ms);
 
-    [[nodiscard]] std::optional<TaskState> get(std::string_view task_id,
-                                               std::string_view session_scope);
+    [[nodiscard]] std::optional<TaskSnapshot> get(std::string_view task_id,
+                                                  std::string_view session_scope);
     [[nodiscard]] std::vector<TaskState> list(std::string_view session_scope);
     [[nodiscard]] std::expected<TaskState, CancelError> cancel(
         std::string_view task_id,

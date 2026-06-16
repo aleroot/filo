@@ -111,6 +111,11 @@ TEST_CASE("KimiSerializer - k2-5-thinking model is serialized correctly", "[kimi
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"kimi-k2-5-thinking")"));
 }
 
+TEST_CASE("KimiSerializer - k2.7 code model is serialized correctly", "[kimi][serializer]") {
+    auto payload = Serializer::serialize(make_simple_request("kimi-k2.7-code"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"kimi-k2.7-code")"));
+}
+
 TEST_CASE("KimiSerializer - stream true is included", "[kimi][serializer]") {
     auto req = make_simple_request();
     req.stream = true;
@@ -187,6 +192,30 @@ TEST_CASE("KimiProtocol - auto effort omits Kimi thinking fields",
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+}
+
+TEST_CASE("KimiProtocol - K2.7 Code enables thinking on auto effort",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-k2.7-code");
+    req.effort = "auto";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+}
+
+TEST_CASE("KimiProtocol - K2.7 Code respects disabled thinking",
+          "[kimi][serializer][effort]") {
+    KimiProtocol protocol;
+    auto req = make_simple_request("kimi-k2.7-code");
+    req.effort = "off";
+
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
 }
 
 TEST_CASE("KimiProtocol - effort is omitted on legacy Moonshot models",

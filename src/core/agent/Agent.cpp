@@ -481,6 +481,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? active_model_
             : turn_callbacks.model_override;
         request.effort = effort_level_;
+        if (!turn_callbacks.effort_override.empty()) {
+            request.effort = turn_callbacks.effort_override;
+        }
+        if (turn_callbacks.max_tokens_override.has_value()) {
+            request.max_tokens = turn_callbacks.max_tokens_override;
+        }
+        if (turn_callbacks.response_format_override.has_value()) {
+            request.response_format = *turn_callbacks.response_format_override;
+        }
         request.session_id = step_session_context.session_id;
         request.transport_turn_id = turn_state->transport_turn_id;
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;

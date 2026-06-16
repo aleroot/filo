@@ -39,6 +39,9 @@ public:
             {};
         std::shared_ptr<core::llm::LLMProvider> provider_override = {};
         std::string model_override;
+        std::string effort_override;
+        std::optional<int> max_tokens_override;
+        std::optional<core::llm::ResponseFormat> response_format_override;
         std::vector<std::string> allowed_tools;
         std::string ledger_actor = "agent";
         bool allow_efficiency_rotation = true;

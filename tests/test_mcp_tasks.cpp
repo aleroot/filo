@@ -28,6 +28,7 @@
 #include <optional>
 #include <ranges>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -159,68 +160,6 @@ private:
     std::vector<core::llm::ChatRequest> requests_;
 };
 
-class HangingTaskTool final : public core::tools::Tool {
-public:
-    static constexpr std::string_view kName = "mcp_test_hanging_task_tool";
-
-    core::tools::ToolDefinition get_definition() const override {
-        return {
-            .name = std::string(kName),
-            .title = "Hanging Task Tool",
-            .description = "Blocks until released by the test.",
-            .input_schema = R"({"type":"object","additionalProperties":false})",
-            .output_schema = R"({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false})",
-            .execution = {
-                .task_support = "optional",
-            },
-        };
-    }
-
-    std::string execute(const std::string&,
-                        const core::context::SessionContext&) override {
-        {
-            std::lock_guard lock(mutex_);
-            started_ = true;
-            started_cv_.notify_all();
-        }
-
-        std::unique_lock lock(mutex_);
-        release_cv_.wait(lock, [&] { return released_; });
-        return R"({"ok":true})";
-    }
-
-    [[nodiscard]] bool wait_until_started(std::chrono::milliseconds timeout) {
-        std::unique_lock lock(mutex_);
-        return started_cv_.wait_for(lock, timeout, [&] { return started_; });
-    }
-
-    void release() {
-        std::lock_guard lock(mutex_);
-        released_ = true;
-        release_cv_.notify_all();
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable started_cv_;
-    std::condition_variable release_cv_;
-    bool started_ = false;
-    bool released_ = false;
-};
-
-struct ScopedToolRegistration {
-    explicit ScopedToolRegistration(std::shared_ptr<core::tools::Tool> tool)
-        : name(tool->get_definition().name) {
-        core::tools::ToolManager::get_instance().register_tool(std::move(tool));
-    }
-
-    ~ScopedToolRegistration() {
-        (void)core::tools::ToolManager::get_instance().unregister_tool(name);
-    }
-
-    std::string name;
-};
-
 class ScopedEnvVar {
 public:
     ScopedEnvVar(std::string name, std::string value)
@@ -340,6 +279,44 @@ void write_file(const fs::path& path, std::string_view content) {
     return value;
 }
 
+void initialize_task_capable_session(const core::context::SessionContext& context) {
+    const auto response = dispatch_json(
+        R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}},"id":100})",
+        context);
+    const auto doc = parse_json(response);
+    REQUIRE(string_at(doc, {"result", "protocolVersion"}) == "2025-11-25");
+    simdjson::dom::element extension;
+    REQUIRE(doc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"].get(extension)
+            == simdjson::SUCCESS);
+}
+
+[[nodiscard]] std::string task_client_meta() {
+    return R"("_meta":{"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}})";
+}
+
+[[nodiscard]] std::string wait_for_terminal_task_response(
+    std::string_view task_id,
+    const core::context::SessionContext& context,
+    int id)
+{
+    std::string response;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        response = dispatch_json(
+            std::format(
+                R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"{}"}},"id":{}}})",
+                task_id,
+                id),
+            context);
+        const auto doc = parse_json(response);
+        const auto status = string_at(doc, {"result", "status"});
+        if (status == "completed" || status == "failed" || status == "cancelled") {
+            return response;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return response;
+}
+
 struct TaskTestSandbox {
     fs::path root;
     fs::path project_dir;
@@ -366,7 +343,9 @@ struct TaskTestSandbox {
                 core::context::SessionTransport::mcp_http,
                 std::string("mcp-task-session-") + std::string(tag));
         }())
-    {}
+    {
+        initialize_task_capable_session(context);
+    }
 
     ~TaskTestSandbox() {
         if (cwd_guard) {
@@ -383,7 +362,7 @@ void load_project_config(const fs::path& project_dir, std::string_view json) {
 
 } // namespace
 
-TEST_CASE("MCP tools/list advertises task execution support for the delegate task tool", "[mcp][tasks]") {
+TEST_CASE("MCP tasks are advertised through the standard extension capability", "[mcp][tasks]") {
     const auto sandbox = make_temp_dir("tool_metadata");
     const auto project_dir = sandbox / "project";
     fs::create_directories(project_dir);
@@ -396,16 +375,17 @@ TEST_CASE("MCP tools/list advertises task execution support for the delegate tas
         },
         core::context::SessionTransport::mcp_http,
         "mcp-task-tool-metadata");
+    initialize_task_capable_session(context);
 
     const auto response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":201})",
         context);
 
     REQUIRE_THAT(response, ContainsSubstring(R"("name":"delegate_task")"));
-    REQUIRE_THAT(response, ContainsSubstring(R"("execution":{"taskSupport":"optional"})"));
+    REQUIRE(response.find(R"("execution")") == std::string::npos);
 }
 
-TEST_CASE("MCP task methods and task execution metadata require the task-capable protocol",
+TEST_CASE("MCP task methods require the task-capable protocol",
           "[mcp][tasks]") {
     TaskTestSandbox sandbox("legacy_protocol_tasks");
 
@@ -421,14 +401,17 @@ TEST_CASE("MCP task methods and task execution metadata require the task-capable
     REQUIRE(tools_response.find(R"("execution")") == std::string::npos);
 
     const auto task_method_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tasks/list","params":{},"id":213})",
+        R"({"jsonrpc":"2.0","method":"tasks/get","params":{"taskId":"missing-task"},"id":213})",
         sandbox.context);
     REQUIRE(int_at(parse_json(task_method_response), {"error", "code"}) == -32601);
 
     const auto task_call_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"list"},"task":{"ttl":5000}},"id":214})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"list"}},{}}},"id":214}})",
+            task_client_meta()),
         sandbox.context);
-    REQUIRE(int_at(parse_json(task_call_response), {"error", "code"}) == -32601);
+    REQUIRE(string_at(parse_json(task_call_response), {"result", "structuredContent", "action"})
+            == "list");
 }
 
 TEST_CASE("Delegated subagents honor the parent permission gate for destructive tools",
@@ -500,23 +483,22 @@ TEST_CASE("Delegated subagents do not inherit the persistent delegate task tool 
     REQUIRE(std::ranges::find(names, std::string("delegate_task")) == names.end());
 }
 
-TEST_CASE("MCP rejects task-augmented execution for tools that do not opt in",
+TEST_CASE("MCP keeps non-delegate tools synchronous when the client supports tasks",
           "[mcp][tasks]") {
     TaskTestSandbox sandbox("unsupported_task_execution");
     write_file(sandbox.project_dir / "notes.txt", "hello");
 
     const auto response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"file_path":"notes.txt"},"task":{"ttl":5000}},"id":251})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"read_file","arguments":{{"path":"notes.txt"}},{}}},"id":251}})",
+            task_client_meta()),
         sandbox.context);
     const auto doc = parse_json(response);
 
-    REQUIRE(int_at(doc, {"error", "code"}) == -32601);
-    REQUIRE_THAT(
-        string_at(doc, {"error", "message"}),
-        ContainsSubstring("does not support task-augmented execution"));
+    REQUIRE(string_at(doc, {"result", "structuredContent", "content"}) == "hello");
 }
 
-TEST_CASE("MCP task-augmented tools/call returns a CreateTaskResult and tasks/result returns the tool result",
+TEST_CASE("MCP task-capable tools/call returns a CreateTaskResult and tasks/get returns the tool result",
           "[mcp][tasks]") {
     TaskTestSandbox sandbox("task_augmented_roundtrip");
 
@@ -536,13 +518,17 @@ TEST_CASE("MCP task-augmented tools/call returns a CreateTaskResult and tasks/re
         })");
 
     const auto create_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"start","title":"Trace startup","instructions":"Inspect the startup sequence and summarize it.","worker":"general"},"task":{"ttl":5000}},"id":301})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Trace startup","instructions":"Inspect the startup sequence and summarize it.","worker":"general"}},{}}},"id":301}})",
+            task_client_meta()),
         sandbox.context);
     const auto create_doc = parse_json(create_response);
 
+    REQUIRE(string_at(create_doc, {"result", "resultType"}) == "task");
     const std::string task_id = string_at(create_doc, {"result", "task", "taskId"});
     REQUIRE_FALSE(task_id.empty());
-    REQUIRE(int_at(create_doc, {"result", "task", "ttl"}) == 5000);
+    REQUIRE(int_at(create_doc, {"result", "task", "ttlMs"}) > 0);
+    REQUIRE(int_at(create_doc, {"result", "task", "pollIntervalMs"}) > 0);
     REQUIRE_THAT(
         string_at(create_doc, {"result", "_meta", "io.modelcontextprotocol/model-immediate-response"}),
         ContainsSubstring("Task accepted"));
@@ -556,24 +542,25 @@ TEST_CASE("MCP task-augmented tools/call returns a CreateTaskResult and tasks/re
     const auto task_status = string_at(get_doc, {"result", "status"});
     REQUIRE((task_status == "working" || task_status == "completed"));
 
-    const auto tasks_list_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tasks/list","params":{},"id":304})",
-        sandbox.context);
-    REQUIRE_THAT(tasks_list_response, ContainsSubstring(task_id));
-
-    const auto result_response = dispatch_json(
+    const auto update_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/result","params":{{"taskId":"{}"}},"id":303}})",
+            R"({{"jsonrpc":"2.0","method":"tasks/update","params":{{"taskId":"{}","inputResponses":{{}}}},"id":304}})",
             task_id),
         sandbox.context);
+    REQUIRE(update_response.find(R"("result":{})") != std::string::npos);
+
+    const auto result_response = wait_for_terminal_task_response(
+        task_id,
+        sandbox.context,
+        303);
     const auto result_doc = parse_json(result_response);
 
-    REQUIRE(string_at(result_doc, {"result", "_meta", "io.modelcontextprotocol/related-task", "taskId"})
+    REQUIRE(string_at(result_doc, {"result", "result", "_meta", "io.modelcontextprotocol/related-task", "taskId"})
             == task_id);
-    REQUIRE(string_at(result_doc, {"result", "structuredContent", "status"}) == "completed");
-    REQUIRE(string_at(result_doc, {"result", "structuredContent", "worker"}) == "general");
-    REQUIRE(string_at(result_doc, {"result", "structuredContent", "provider"}) == "mcp-task-default");
-    REQUIRE(string_at(result_doc, {"result", "structuredContent", "model"}) == "model-from-config");
+    REQUIRE(string_at(result_doc, {"result", "result", "structuredContent", "status"}) == "completed");
+    REQUIRE(string_at(result_doc, {"result", "result", "structuredContent", "worker"}) == "general");
+    REQUIRE(string_at(result_doc, {"result", "result", "structuredContent", "provider"}) == "mcp-task-default");
+    REQUIRE(string_at(result_doc, {"result", "result", "structuredContent", "model"}) == "model-from-config");
 
     const auto sync_list_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"list"}},"id":305})",
@@ -589,38 +576,44 @@ TEST_CASE("MCP cancelled task results return promptly for non-cooperative tools"
           "[mcp][tasks][cancel]") {
     TaskTestSandbox sandbox("cancel_noncooperative_task");
 
-    auto tool = std::make_shared<HangingTaskTool>();
-    auto* tool_ptr = tool.get();
-    ScopedToolRegistration registration(std::move(tool));
+    auto provider = std::make_shared<BlockingProvider>(1, "cancelled-worker-finished");
+    core::llm::ProviderManager::get_instance().register_provider("mcp-task-cancel", provider);
+    load_project_config(
+        sandbox.project_dir,
+        R"({
+            "default_provider": "mcp-task-cancel",
+            "providers": {
+                "mcp-task-cancel": {
+                    "api_type": "openai",
+                    "base_url": "https://example.test/v1",
+                    "model": "cancel-model"
+                }
+            }
+        })");
 
     const auto create_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"{}","arguments":{{}},"task":{{"ttl":5000}}}},"id":351}})",
-            HangingTaskTool::kName),
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Cancelable","instructions":"Block until cancelled.","worker":"general"}},{}}},"id":351}})",
+            task_client_meta()),
         sandbox.context);
     const auto task_id = string_at(parse_json(create_response), {"result", "task", "taskId"});
-    REQUIRE(tool_ptr->wait_until_started(std::chrono::milliseconds(2000)));
+    REQUIRE(provider->wait_until_all_started(std::chrono::milliseconds(2000)));
 
     const auto cancel_response = dispatch_json(
         std::format(
             R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}"}},"id":352}})",
             task_id),
         sandbox.context);
-    REQUIRE(string_at(parse_json(cancel_response), {"result", "status"}) == "cancelled");
+    REQUIRE(cancel_response.find(R"("result":{})") != std::string::npos);
 
     const auto start = std::chrono::steady_clock::now();
-    const auto result_response = dispatch_json(
-        std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/result","params":{{"taskId":"{}"}},"id":353}})",
-            task_id),
-        sandbox.context);
+    const auto result_response = wait_for_terminal_task_response(task_id, sandbox.context, 353);
     const auto elapsed = std::chrono::steady_clock::now() - start;
-    tool_ptr->release();
+    provider->release_all();
 
     REQUIRE(elapsed < std::chrono::milliseconds(500));
     const auto result_doc = parse_json(result_response);
-    REQUIRE(int_at(result_doc, {"error", "code"}) == -32000);
-    REQUIRE_THAT(string_at(result_doc, {"error", "message"}), ContainsSubstring("cancelled"));
+    REQUIRE(string_at(result_doc, {"result", "status"}) == "cancelled");
 }
 
 TEST_CASE("Delegated agent runner observes cancellation while provider start is blocked",
@@ -723,10 +716,14 @@ TEST_CASE("MCP delegate tasks can run concurrently", "[mcp][tasks]") {
         })");
 
     const auto create_response_a = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"start","title":"Parallel A","instructions":"Do work item A.","worker":"general"},"task":{"ttl":5000}},"id":501})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Parallel A","instructions":"Do work item A.","worker":"general"}},{}}},"id":501}})",
+            task_client_meta()),
         sandbox.context);
     const auto create_response_b = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"start","title":"Parallel B","instructions":"Do work item B.","worker":"general"},"task":{"ttl":5000}},"id":502})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Parallel B","instructions":"Do work item B.","worker":"general"}},{}}},"id":502}})",
+            task_client_meta()),
         sandbox.context);
 
     const bool all_started =
@@ -737,20 +734,12 @@ TEST_CASE("MCP delegate tasks can run concurrently", "[mcp][tasks]") {
     const auto task_id_a = string_at(parse_json(create_response_a), {"result", "task", "taskId"});
     const auto task_id_b = string_at(parse_json(create_response_b), {"result", "task", "taskId"});
 
-    const auto result_response_a = dispatch_json(
-        std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/result","params":{{"taskId":"{}"}},"id":503}})",
-            task_id_a),
-        sandbox.context);
-    const auto result_response_b = dispatch_json(
-        std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/result","params":{{"taskId":"{}"}},"id":504}})",
-            task_id_b),
-        sandbox.context);
+    const auto result_response_a = wait_for_terminal_task_response(task_id_a, sandbox.context, 503);
+    const auto result_response_b = wait_for_terminal_task_response(task_id_b, sandbox.context, 504);
 
-    REQUIRE(string_at(parse_json(result_response_a), {"result", "structuredContent", "status"})
+    REQUIRE(string_at(parse_json(result_response_a), {"result", "result", "structuredContent", "status"})
             == "completed");
-    REQUIRE(string_at(parse_json(result_response_b), {"result", "structuredContent", "status"})
+    REQUIRE(string_at(parse_json(result_response_b), {"result", "result", "structuredContent", "status"})
             == "completed");
 }
 
@@ -883,16 +872,14 @@ TEST_CASE("MCP task operations use spec-compliant errors for invalid and termina
         })");
 
     const auto create_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"delegate_task","arguments":{"action":"start","title":"Task error codes","instructions":"Finish quickly.","worker":"general"},"task":{"ttl":5000}},"id":701})",
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Task error codes","instructions":"Finish quickly.","worker":"general"}},{}}},"id":701}})",
+            task_client_meta()),
         sandbox.context);
     const auto task_id = string_at(parse_json(create_response), {"result", "task", "taskId"});
 
-    const auto result_response = dispatch_json(
-        std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/result","params":{{"taskId":"{}"}},"id":702}})",
-            task_id),
-        sandbox.context);
-    REQUIRE(string_at(parse_json(result_response), {"result", "structuredContent", "status"})
+    const auto result_response = wait_for_terminal_task_response(task_id, sandbox.context, 702);
+    REQUIRE(string_at(parse_json(result_response), {"result", "result", "structuredContent", "status"})
             == "completed");
 
     const auto cancel_terminal_response = dispatch_json(
@@ -900,18 +887,17 @@ TEST_CASE("MCP task operations use spec-compliant errors for invalid and termina
             R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}"}},"id":703}})",
             task_id),
         sandbox.context);
-    const auto cancel_terminal_doc = parse_json(cancel_terminal_response);
-    REQUIRE(int_at(cancel_terminal_doc, {"error", "code"}) == -32602);
+    REQUIRE(cancel_terminal_response.find(R"("result":{})") != std::string::npos);
 
     const auto missing_get_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tasks/get","params":{"taskId":"missing-task"},"id":704})",
         sandbox.context);
     REQUIRE(int_at(parse_json(missing_get_response), {"error", "code"}) == -32602);
 
-    const auto missing_result_response = dispatch_json(
+    const auto removed_result_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tasks/result","params":{"taskId":"missing-task"},"id":705})",
         sandbox.context);
-    REQUIRE(int_at(parse_json(missing_result_response), {"error", "code"}) == -32602);
+    REQUIRE(int_at(parse_json(removed_result_response), {"error", "code"}) == -32601);
 
     const auto missing_cancel_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tasks/cancel","params":{"taskId":"missing-task"},"id":706})",

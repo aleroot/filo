@@ -254,13 +254,10 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     REQUIRE(doc["result"]["capabilities"]["tools"]["listChanged"].get(tools_list_changed) == simdjson::SUCCESS);
     REQUIRE_FALSE(tools_list_changed);
 
-    simdjson::dom::element task_list_cap;
-    simdjson::dom::element task_cancel_cap;
-    simdjson::dom::element task_call_cap;
-    REQUIRE(doc["result"]["capabilities"]["tasks"]["list"].get(task_list_cap) == simdjson::SUCCESS);
-    REQUIRE(doc["result"]["capabilities"]["tasks"]["cancel"].get(task_cancel_cap) == simdjson::SUCCESS);
-    REQUIRE(doc["result"]["capabilities"]["tasks"]["requests"]["tools"]["call"].get(task_call_cap)
-            == simdjson::SUCCESS);
+    simdjson::dom::element tasks_extension;
+    REQUIRE(doc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"]
+                .get(tasks_extension) == simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["tasks"].get(tasks_extension) != simdjson::SUCCESS);
 
     bool resources_subscribe = true;
     bool resources_list_changed = true;

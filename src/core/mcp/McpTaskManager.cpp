@@ -6,6 +6,8 @@
 #include "../tools/TaskTool.hpp"
 #include "../tools/ToolManager.hpp"
 
+#include <simdjson.h>
+
 #include <algorithm>
 #include <chrono>
 #include <exception>
@@ -28,6 +30,28 @@ constexpr int64_t kPollIntervalMs = 1'000;
 
 [[nodiscard]] bool is_terminal(std::string_view status) {
     return status == "completed" || status == "failed" || status == "cancelled";
+}
+
+[[nodiscard]] std::string payload_error_message(std::string_view payload) {
+    if (payload.empty()) return "Tool execution returned an empty result.";
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string padded(payload);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        return "Tool execution returned invalid JSON.";
+    }
+
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        return "Tool execution returned a non-object JSON result.";
+    }
+
+    std::string_view message;
+    if (object["error"].get(message) == simdjson::SUCCESS && !message.empty()) {
+        return std::string(message);
+    }
+    return "Tool execution failed.";
 }
 
 struct TaskRunner {
@@ -163,12 +187,18 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
                 {
                     std::lock_guard lock(entry->mutex);
                     if (!entry->finished) {
-                        entry->payload.has_error = false;
-                        entry->payload.result_json = final_result;
                         entry->state.status = classification.is_error ? "failed" : "completed";
                         entry->state.status_message = classification.is_error
                             ? "The delegated task finished with an execution error."
                             : "The delegated task completed successfully.";
+                        if (classification.is_error) {
+                            entry->payload.has_error = true;
+                            entry->payload.error_code = -32000;
+                            entry->payload.error_message = payload_error_message(payload_json);
+                        } else {
+                            entry->payload.has_error = false;
+                            entry->payload.result_json = final_result;
+                        }
                         entry->finished = true;
                     }
                     entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
@@ -216,18 +246,23 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
     return CreateResult{
         .task = std::move(accepted_state),
         .immediate_response =
-            "Task accepted. Poll tasks/get for status updates or call tasks/result to await completion.",
+            "Task accepted. Poll tasks/get for status updates and the final result.",
     };
 }
 
-std::optional<McpTaskManager::TaskState> McpTaskManager::get(std::string_view task_id,
-                                                             std::string_view session_scope) {
+std::optional<McpTaskManager::TaskSnapshot> McpTaskManager::get(
+    std::string_view task_id,
+    std::string_view session_scope) {
     std::lock_guard lock(mutex_);
     purge_expired_locked();
     const auto record = find_record_locked(task_id, session_scope);
     if (!record) return std::nullopt;
     std::lock_guard entry_lock(record->entry->mutex);
-    return record->entry->state;
+    TaskSnapshot snapshot{.task = record->entry->state};
+    if (record->entry->finished) {
+        snapshot.result = record->entry->payload;
+    }
+    return snapshot;
 }
 
 std::vector<McpTaskManager::TaskState> McpTaskManager::list(std::string_view session_scope) {
