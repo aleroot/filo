@@ -834,6 +834,37 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     }
 
     SECTION("/review --uncommitted sends precomputed patch without tools") {
+        namespace fs = std::filesystem;
+        struct CwdGuard {
+            fs::path old;
+            ~CwdGuard() {
+                std::error_code ec;
+                fs::current_path(old, ec);
+            }
+        } guard{fs::current_path()};
+
+        const fs::path temp_dir =
+            fs::temp_directory_path() / std::format("filo-test-review-context-{}", std::rand());
+        std::error_code ec;
+        fs::remove_all(temp_dir, ec);
+        fs::create_directories(temp_dir, ec);
+        REQUIRE_FALSE(ec);
+        fs::current_path(temp_dir);
+
+        REQUIRE(std::system("git init -q") == 0);
+        {
+            std::ofstream tracked("tracked.cpp");
+            tracked << "int value() { return 1; }\n";
+        }
+        REQUIRE(std::system("git add tracked.cpp") == 0);
+        REQUIRE(std::system(
+            "git -c user.name=Filo -c user.email=filo@example.invalid commit -qm initial")
+            == 0);
+        {
+            std::ofstream tracked("tracked.cpp");
+            tracked << "int value() { return 2; }\n";
+        }
+
         *mock_history = "";
         review_activity_events->clear();
         auto provider = std::make_shared<CapturingReviewProvider>();
@@ -865,6 +896,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         const std::string prompt_header = prompt.substr(0, review_task_pos);
         REQUIRE_THAT(prompt_header, !Catch::Matchers::ContainsSubstring("Use available tools to inspect"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("No blocking issues found"));
+
+        fs::current_path(guard.old, ec);
+        fs::remove_all(temp_dir, ec);
     }
 
     SECTION("/review --uncommitted includes untracked file contents") {
