@@ -39,6 +39,7 @@ struct CommandContext {
     std::string text;
     std::function<void()> clear_input_fn;
     std::function<void(const std::string&)> append_history_fn;
+    std::function<void(const std::string&)> append_assistant_output_fn = {};
     std::shared_ptr<core::agent::Agent> agent;
     std::function<void()> clear_screen_fn = {};
     std::function<void()> quit_fn = {};

@@ -1267,6 +1267,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
                                           ? std::string("current changes")
                                           : review_hint));
     const auto set_review_activity_fn = ctx.set_review_activity_fn;
+    const auto append_assistant_output_fn = ctx.append_assistant_output_fn;
     if (set_review_activity_fn) {
         set_review_activity_fn(
             true,
@@ -1300,7 +1301,11 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
         [](const std::string&, const std::string&) {
             // Keep /review output focused on final findings.
         },
-        [append_fn, collected_output, interrupted, set_review_activity_fn]() {
+        [append_fn,
+         collected_output,
+         interrupted,
+         set_review_activity_fn,
+         append_assistant_output_fn]() {
             if (set_review_activity_fn) {
                 set_review_activity_fn(false, "");
             }
@@ -1313,7 +1318,11 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
 
             const ReviewOutputRecord output = parse_review_output_event(raw);
             const std::string rendered = render_review_output_text(output);
-            append_fn(std::format("\n{}\n", rendered));
+            if (append_assistant_output_fn) {
+                append_assistant_output_fn(rendered);
+            } else {
+                append_fn(std::format("\n{}\n", rendered));
+            }
         },
         std::move(review_callbacks));
 }

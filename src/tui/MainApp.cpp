@@ -1142,6 +1142,12 @@ RunResult run(RunOptions opts) {
         screen.PostEvent(Event::Custom);
     };
 
+    auto append_assistant_output = [&](const std::string& str) {
+        std::lock_guard lock(ui_mutex);
+        append_ui_message(ui_messages, make_assistant_message(str, current_time_str(), false));
+        screen.PostEvent(Event::Custom);
+    };
+
     auto has_active_animation = [&]() -> bool {
         if (assistant_turn_active.load(std::memory_order_relaxed)) {
             return true;
@@ -3512,6 +3518,7 @@ RunResult run(RunOptions opts) {
             .text             = text,
             .clear_input_fn   = []() {},
             .append_history_fn = append_history,
+            .append_assistant_output_fn = append_assistant_output,
             .agent            = agent,
             .clear_screen_fn  = clear_screen,
             .quit_fn          = screen.ExitLoopClosure(),

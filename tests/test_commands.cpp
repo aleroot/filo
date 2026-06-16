@@ -867,6 +867,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
 
         *mock_history = "";
         review_activity_events->clear();
+        auto assistant_output = std::make_shared<std::string>();
+        ctx.append_assistant_output_fn = [assistant_output](const std::string& text) {
+            *assistant_output += text;
+        };
         auto provider = std::make_shared<CapturingReviewProvider>();
         ctx.agent = std::make_shared<core::agent::Agent>(
             provider,
@@ -895,7 +899,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(review_task_pos != std::string::npos);
         const std::string prompt_header = prompt.substr(0, review_task_pos);
         REQUIRE_THAT(prompt_header, !Catch::Matchers::ContainsSubstring("Use available tools to inspect"));
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("No blocking issues found"));
+        REQUIRE_THAT(*assistant_output, Catch::Matchers::ContainsSubstring("No blocking issues found"));
 
         fs::current_path(guard.old, ec);
         fs::remove_all(temp_dir, ec);
