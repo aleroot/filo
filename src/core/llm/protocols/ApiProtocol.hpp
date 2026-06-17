@@ -252,6 +252,11 @@ struct HttpResponse {
     const cpr::Header& headers;     ///< Response headers; reference into `cpr::Response::header`.
 };
 
+struct WebSocketRequestFrame {
+    std::string payload;
+    bool suppress_output = false;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ApiProtocolBase
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,6 +441,19 @@ public:
 
     [[nodiscard]] virtual std::string serialize_websocket_request(
         [[maybe_unused]] const ChatRequest& request) const {
+        return {};
+    }
+
+    [[nodiscard]] virtual WebSocketRequestFrame initial_websocket_request_frame(
+        const ChatRequest& request) const {
+        return WebSocketRequestFrame{
+            .payload = serialize_websocket_request(request),
+        };
+    }
+
+    [[nodiscard]] virtual WebSocketRequestFrame next_websocket_request_frame(
+        [[maybe_unused]] const ChatRequest& request,
+        [[maybe_unused]] const WebSocketRequestFrame& completed_frame) const {
         return {};
     }
 

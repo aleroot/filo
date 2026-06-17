@@ -32,7 +32,7 @@ namespace {
 
     struct PreparedWebSocketStreamRequest {
         std::string websocket_url;
-        std::string websocket_payload;
+        protocols::WebSocketRequestFrame websocket_frame;
         cpr::Header websocket_headers;
         std::string websocket_connection_key;
     };
@@ -105,8 +105,8 @@ namespace {
 
         prepared.websocket_headers = protocol.build_headers(auth);
         protocol.prepare_websocket_headers(prepared.websocket_headers, request, base_url);
-        prepared.websocket_payload = protocol.serialize_websocket_request(request);
-        if (prepared.websocket_payload.empty()) {
+        prepared.websocket_frame = protocol.initial_websocket_request_frame(request);
+        if (prepared.websocket_frame.payload.empty()) {
             protocol.abandon_websocket_request(request);
             return std::nullopt;
         }
@@ -438,71 +438,96 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
 
                 if (websocket_request.has_value()
-                    && !websocket_request->websocket_payload.empty()) {
-                    bool websocket_done = false;
-                    self->set_last_usage(0, 0);
+                    && !websocket_request->websocket_frame.payload.empty()) {
+                    protocols::WebSocketRequestFrame websocket_frame =
+                        std::move(websocket_request->websocket_frame);
 
-                    auto websocket_result = self->websocket_.client->stream_text(
-                        websocket_request->websocket_url,
-                        websocket_request->websocket_connection_key,
-                        websocket_request->websocket_headers,
-                        websocket_request->websocket_payload,
-                        [&](std::string_view event_payload) {
-                            protocols::ParseResult result = protocol->parse_event(event_payload);
+                    while (!websocket_frame.payload.empty()) {
+                        bool websocket_done = false;
+                        bool suppressed_error = false;
+                        self->set_last_usage(0, 0);
 
-                            for (auto& chunk : result.chunks) {
-                                callback(chunk);
-                                if (chunk.is_final) websocket_done = true;
+                        auto websocket_result = self->websocket_.client->stream_text(
+                            websocket_request->websocket_url,
+                            websocket_request->websocket_connection_key,
+                            websocket_request->websocket_headers,
+                            websocket_frame.payload,
+                            [&](std::string_view event_payload) {
+                                protocols::ParseResult result = protocol->parse_event(event_payload);
+
+                                for (auto& chunk : result.chunks) {
+                                    if (websocket_frame.suppress_output) {
+                                        suppressed_error = suppressed_error || chunk.is_error;
+                                        if (chunk.is_final) websocket_done = true;
+                                        continue;
+                                    }
+
+                                    callback(chunk);
+                                    if (chunk.is_final) websocket_done = true;
+                                }
+
+                                if (websocket_done) {
+                                    return true;
+                                }
+
+                                if (!websocket_frame.suppress_output
+                                    && (result.prompt_tokens > 0 || result.completion_tokens > 0)) {
+                                    self->set_last_usage(
+                                        result.prompt_tokens, result.completion_tokens);
+                                }
+
+                                if (result.done) {
+                                    websocket_done = true;
+                                    if (!websocket_frame.suppress_output) {
+                                        callback(StreamChunk::make_final());
+                                    }
+                                }
+                                return websocket_done;
+                            });
+
+                        protocol->observe_response_headers(
+                            websocket_result.response_headers, request_metadata);
+
+                        if (websocket_result.completed() && !suppressed_error) {
+                            if (!websocket_frame.suppress_output) {
+                                const protocols::HttpResponse websocket_response{
+                                    200, "", websocket_result.response_headers};
+                                protocol->on_response(websocket_response);
+                                self->set_last_rate_limit_info(protocol->last_rate_limit());
+                                return;
                             }
 
-                            if (websocket_done) {
-                                return true;
+                            websocket_frame = protocol->next_websocket_request_frame(
+                                request_metadata, websocket_frame);
+                            if (!websocket_frame.payload.empty()) {
+                                continue;
                             }
+                        }
 
-                            if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
-                                self->set_last_usage(
-                                    result.prompt_tokens, result.completion_tokens);
-                            }
+                        self->websocket_.client->reset();
+                        self->websocket_.disable();
+                        protocol->abandon_websocket_request(request_metadata);
 
-                            if (result.done) {
-                                websocket_done = true;
-                                callback(StreamChunk::make_final());
-                            }
-                            return websocket_done;
-                        });
+                        if (websocket_result.request_sent
+                            && !websocket_frame.suppress_output) {
+                            core::logging::debug(
+                                "[WebSocket] Stream failed after request send status={} reason={}",
+                                websocket_result.http_status,
+                                websocket_result.message);
+                            callback(StreamChunk::make_error(
+                                "\n[WebSocket stream failed after the request was sent: "
+                                + websocket_result.message + "]"));
+                            callback(StreamChunk::make_final());
+                            return;
+                        }
 
-                    protocol->observe_response_headers(
-                        websocket_result.response_headers, request_metadata);
-
-                    if (websocket_result.completed()) {
-                        const protocols::HttpResponse websocket_response{
-                            200, "", websocket_result.response_headers};
-                        protocol->on_response(websocket_response);
-                        self->set_last_rate_limit_info(protocol->last_rate_limit());
-                        return;
-                    }
-
-                    self->websocket_.client->reset();
-                    self->websocket_.disable();
-                    protocol->abandon_websocket_request(request_metadata);
-
-                    if (websocket_result.request_sent) {
                         core::logging::debug(
-                            "[WebSocket] Stream failed after request send status={} reason={}",
+                            "[WebSocket] Falling back to HTTP status={} reason={}",
                             websocket_result.http_status,
                             websocket_result.message);
-                        callback(StreamChunk::make_error(
-                            "\n[WebSocket stream failed after the request was sent: "
-                            + websocket_result.message + "]"));
-                        callback(StreamChunk::make_final());
-                        return;
+                        protocol = protocol->clone();
+                        break;
                     }
-
-                    core::logging::debug(
-                        "[WebSocket] Falling back to HTTP status={} reason={}",
-                        websocket_result.http_status,
-                        websocket_result.message);
-                    protocol = protocol->clone();
                 }
             }
 

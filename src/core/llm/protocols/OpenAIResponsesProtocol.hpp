@@ -107,6 +107,11 @@ public:
                                    std::string_view base_url) override;
     [[nodiscard]] std::string serialize_websocket_request(
         const ChatRequest& request) const override;
+    [[nodiscard]] WebSocketRequestFrame initial_websocket_request_frame(
+        const ChatRequest& request) const override;
+    [[nodiscard]] WebSocketRequestFrame next_websocket_request_frame(
+        const ChatRequest& request,
+        const WebSocketRequestFrame& completed_frame) const override;
     void abandon_websocket_request(const ChatRequest& request) override;
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string websocket_connection_key(
@@ -124,11 +129,13 @@ private:
             std::string request_signature;
             std::vector<std::string> request_input_items;
             std::vector<std::string> response_items_added;
+            bool from_prewarm = false;
         };
 
         struct PendingWebSocketRequest {
             std::string request_signature;
             std::vector<std::string> request_input_items;
+            bool prewarm = false;
         };
 
         std::mutex mutex;
@@ -143,6 +150,11 @@ private:
         const ChatRequest& request,
         const std::vector<std::string>& input_items,
         std::optional<std::string_view> previous_response_id_override = std::nullopt) const;
+    [[nodiscard]] std::string serialize_websocket_prewarm_request(
+        const ChatRequest& request) const;
+    [[nodiscard]] std::string serialize_websocket_request_impl(
+        const ChatRequest& request,
+        bool prewarm) const;
 
     std::filesystem::path config_dir_;
     std::shared_ptr<TransportState> transport_state_ = std::make_shared<TransportState>();

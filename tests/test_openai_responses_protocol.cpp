@@ -297,6 +297,53 @@ TEST_CASE("CodexResponsesProtocol - compresses incremental websocket input",
     REQUIRE_THAT(incremental_payload, !Catch::Matchers::ContainsSubstring(R"("type":"function_call","call_id":"call_123")"));
 }
 
+TEST_CASE("CodexResponsesProtocol - prewarm websocket request sends generate false",
+          "[openai][responses][codex][websocket][prewarm]") {
+    CodexResponsesProtocol protocol;
+
+    ChatRequest req;
+    req.model = "gpt-5";
+    req.session_id = "thread-123";
+    req.transport_turn_id = "turn-1";
+    req.messages.push_back(Message{.role = "user", .content = "run tests"});
+    protocol.prepare_request(req);
+
+    const auto prewarm_frame = protocol.initial_websocket_request_frame(req);
+    const auto& prewarm_payload = prewarm_frame.payload;
+
+    REQUIRE(prewarm_frame.suppress_output);
+    REQUIRE_THAT(prewarm_payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
+    REQUIRE_THAT(prewarm_payload, Catch::Matchers::ContainsSubstring(R"("generate":false)"));
+    REQUIRE_THAT(prewarm_payload, Catch::Matchers::ContainsSubstring(R"("run tests")"));
+}
+
+TEST_CASE("CodexResponsesProtocol - real websocket request can reuse prewarm response id",
+          "[openai][responses][codex][websocket][prewarm][continuity]") {
+    CodexResponsesProtocol protocol;
+
+    ChatRequest req;
+    req.model = "gpt-5";
+    req.session_id = "thread-123";
+    req.transport_turn_id = "turn-1";
+    req.messages.push_back(Message{.role = "user", .content = "run tests"});
+    protocol.prepare_request(req);
+
+    [[maybe_unused]] const auto prewarm_frame =
+        protocol.initial_websocket_request_frame(req);
+
+    auto completed = protocol.parse_event(
+        "event: response.completed\n"
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_prewarm_1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}");
+    REQUIRE(completed.done);
+
+    const auto real_payload = protocol.serialize_websocket_request(req);
+
+    REQUIRE_THAT(real_payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_prewarm_1")"));
+    REQUIRE_THAT(real_payload, Catch::Matchers::ContainsSubstring(R"("input":[])"));
+    REQUIRE_THAT(real_payload, !Catch::Matchers::ContainsSubstring(R"("generate":false)"));
+    REQUIRE_THAT(real_payload, !Catch::Matchers::ContainsSubstring(R"("run tests")"));
+}
+
 TEST_CASE("CodexResponsesProtocol - abandoned websocket request does not poison incremental state",
           "[openai][responses][codex][websocket][fallback]") {
     CodexResponsesProtocol protocol;

@@ -682,6 +682,53 @@ void CodexResponsesProtocol::prepare_websocket_headers(cpr::Header& headers,
 
 std::string CodexResponsesProtocol::serialize_websocket_request(
     const ChatRequest& request) const {
+    return serialize_websocket_request_impl(request, /*prewarm=*/false);
+}
+
+std::string CodexResponsesProtocol::serialize_websocket_prewarm_request(
+    const ChatRequest& request) const {
+    if (request.transport_turn_id.empty()) {
+        return {};
+    }
+    {
+        std::lock_guard lock(transport_state_->mutex);
+        if (transport_state_->last_ws_requests.contains(request.transport_turn_id)) {
+            return {};
+        }
+    }
+    return serialize_websocket_request_impl(request, /*prewarm=*/true);
+}
+
+WebSocketRequestFrame CodexResponsesProtocol::initial_websocket_request_frame(
+    const ChatRequest& request) const {
+    if (const std::string prewarm = serialize_websocket_prewarm_request(request);
+        !prewarm.empty()) {
+        return WebSocketRequestFrame{
+            .payload = prewarm,
+            .suppress_output = true,
+        };
+    }
+
+    return WebSocketRequestFrame{
+        .payload = serialize_websocket_request(request),
+    };
+}
+
+WebSocketRequestFrame CodexResponsesProtocol::next_websocket_request_frame(
+    const ChatRequest& request,
+    const WebSocketRequestFrame& completed_frame) const {
+    if (!completed_frame.suppress_output) {
+        return {};
+    }
+
+    return WebSocketRequestFrame{
+        .payload = serialize_websocket_request(request),
+    };
+}
+
+std::string CodexResponsesProtocol::serialize_websocket_request_impl(
+    const ChatRequest& request,
+    bool prewarm) const {
     const auto full_input_items = build_input_items(request.messages);
 
     ChatRequest signature_request = request;
@@ -705,7 +752,8 @@ std::string CodexResponsesProtocol::serialize_websocket_request(
                 last->second.response_items_added.end());
 
             if (has_prefix(full_input_items, baseline)
-                && full_input_items.size() > baseline.size()) {
+                && (full_input_items.size() > baseline.size()
+                    || last->second.from_prewarm)) {
                 incremental_input_items = std::vector<std::string>{
                     full_input_items.begin() + static_cast<std::ptrdiff_t>(baseline.size()),
                     full_input_items.end()};
@@ -717,13 +765,19 @@ std::string CodexResponsesProtocol::serialize_websocket_request(
             TransportState::PendingWebSocketRequest{
                 .request_signature = request_signature,
                 .request_input_items = full_input_items,
+                .prewarm = prewarm,
             };
     }
 
-    std::string payload = incremental_input_items.empty()
-        ? serialize_codex_with_input_items(request, full_input_items)
-        : serialize_codex_with_input_items(
-            request, incremental_input_items, std::string_view{incremental_previous_response_id});
+    const bool use_incremental = !incremental_previous_response_id.empty();
+    std::string payload = use_incremental
+        ? serialize_codex_with_input_items(
+            request, incremental_input_items, std::string_view{incremental_previous_response_id})
+        : serialize_codex_with_input_items(request, full_input_items);
+
+    if (prewarm) {
+        append_member_before_object_end(payload, R"("generate":false)");
+    }
 
     active_transport_turn_id_ = request.transport_turn_id;
     active_response_items_.clear();
@@ -797,6 +851,7 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     .request_signature = std::move(pending->second.request_signature),
                     .request_input_items = std::move(pending->second.request_input_items),
                     .response_items_added = std::move(active_response_items_),
+                    .from_prewarm = pending->second.prewarm,
                 };
             transport_state_->pending_ws_requests.erase(pending);
             while (transport_state_->last_ws_requests.size() > 32) {
