@@ -912,6 +912,74 @@ TEST_CASE("ShellTool session recovers cleanly after a timeout", "[tools]") {
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
+TEST_CASE("ShellTool preserves partial-line stdout and stderr", "[tools]") {
+    ShellTool tool;
+
+    auto res = tool.execute(
+        R"({"command":"printf partial_stdout; printf partial_stderr >&2"})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("partial_stdout"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("partial_stderr"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool returns when execed command exits but child keeps stdout open", "[tools]") {
+    ShellTool tool;
+
+    const auto started = std::chrono::steady_clock::now();
+    auto res = tool.execute(
+        R"({"command":"exec sh -c '(sleep 5) & exit 23'","timeout_seconds":2})");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":23"));
+    REQUIRE(elapsed < std::chrono::milliseconds{1500});
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_exec"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_exec"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool captures output and exit code when command replaces shell", "[tools]") {
+    ShellTool tool;
+
+    auto res = tool.execute(
+        R"({"command":"exec sh -c 'printf exec_stdout; printf exec_stderr >&2; exit 17'","timeout_seconds":2})");
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("exec_stdout"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("exec_stderr"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":17"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_exec_output"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_exec_output"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool reports signal exit for command that replaces shell", "[tools]") {
+    ShellTool tool;
+
+    auto res = tool.execute(
+        R"({"command":"exec sh -c 'kill -TERM $$'","timeout_seconds":2})");
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":143"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_signal"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_signal"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool resets after exit with child holding stdout open", "[tools]") {
+    ShellTool tool;
+
+    auto res = tool.execute(
+        R"({"command":"(sleep 5) & exit 7","timeout_seconds":2})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":7"));
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_exit"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_exit"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
 TEST_CASE("ShellTool kills child processes spawned by timed-out command", "[tools]") {
     ShellTool tool;
     // The background job creates a marker after 2 s; the foreground sleep keeps
@@ -932,6 +1000,48 @@ TEST_CASE("ShellTool kills child processes spawned by timed-out command", "[tool
     // Marker must not exist — the background job was killed with the process group.
     REQUIRE_FALSE(std::filesystem::exists(marker));
     std::filesystem::remove(marker);
+}
+
+TEST_CASE("ShellTool working_dir subshell preserves exit status and session cwd", "[tools]") {
+    ShellTool tool;
+
+    [[maybe_unused]] const auto initial_cd = tool.execute(R"({"command":"cd /tmp"})");
+
+    auto res = tool.execute(
+        R"({"command":"pwd; exit 12","working_dir":"/var"})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/var"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":12"));
+
+    auto next = tool.execute(R"({"command":"pwd"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("/tmp"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool timed-out command does not leak child output into next command", "[tools]") {
+    ShellTool tool;
+
+    [[maybe_unused]] const auto timeout_res = tool.execute(
+        R"({"command":"(sleep 2; echo should_not_leak_after_timeout) & sleep 60","timeout_seconds":1})");
+
+    ::sleep(3);
+
+    auto res = tool.execute(R"({"command":"echo clean_after_timeout"})");
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("clean_after_timeout"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("should_not_leak_after_timeout"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool recovers after output truncation drains to sentinel", "[tools]") {
+    ShellTool tool;
+
+    auto res = tool.execute(
+        R"({"command":"awk 'BEGIN{for (i=0;i<4300000;i++) printf \"x\"}'","timeout_seconds":10})");
+    REQUIRE(res.find("OUTPUT TRUNCATED AT 4MB") != std::string::npos);
+    REQUIRE(res.find("\"exit_code\":-1") != std::string::npos);
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_truncation"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_truncation"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
 TEST_CASE("ShellTool timeout_seconds defaults to 600 when not provided", "[tools]") {

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <format>
 #include <poll.h>
@@ -113,6 +115,9 @@ public:
      */
     Result run(std::string_view command,
                std::chrono::milliseconds timeout = kDefaultTimeout) {
+        int stale_exit_code = -1;
+        [[maybe_unused]] const bool reaped_stale =
+            reap_if_exited(stale_exit_code, true);
         if (!is_alive()) start();
         if (!is_alive()) {
             return {"[ShellSession] Failed to start bash process.\n", -1};
@@ -265,6 +270,46 @@ private:
         }
     }
 
+    [[nodiscard]] static int exit_code_from_status(int status) noexcept {
+        if (WIFEXITED(status)) return WEXITSTATUS(status);
+        if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+        return -1;
+    }
+
+    [[nodiscard]] bool reap_if_exited(int& exit_code, bool kill_process_group) {
+        if (pid_ <= 0) return false;
+
+        int status = 0;
+        pid_t ret = -1;
+        do {
+            ret = ::waitpid(pid_, &status, WNOHANG);
+        } while (ret < 0 && errno == EINTR);
+
+        if (ret == 0) return false;
+        if (ret < 0 && errno != ECHILD) return false;
+
+        exit_code = ret > 0 ? exit_code_from_status(status) : -1;
+        if (kill_process_group && pgid_ > 0) {
+            ::killpg(pgid_, SIGKILL);
+        }
+        if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
+        if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
+        pid_  = -1;
+        pgid_ = -1;
+        return true;
+    }
+
+    [[nodiscard]] bool reap_if_exited_for(int& exit_code,
+                                          bool kill_process_group,
+                                          std::chrono::milliseconds wait) {
+        const auto deadline = std::chrono::steady_clock::now() + wait;
+        while (true) {
+            if (reap_if_exited(exit_code, kill_process_group)) return true;
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            ::usleep(1'000);
+        }
+    }
+
     // Immediate hard-kill used after a timeout.
     // No grace period — the command already exceeded its allowed time.
     void kill_session() {
@@ -299,14 +344,27 @@ private:
                     deadline - std::chrono::steady_clock::now()).count();
             if (remaining_ms <= 0) break;
 
-            struct pollfd pfd{stdout_fd_, POLLIN, 0};
-            const int ret = ::poll(&pfd, 1, static_cast<int>(remaining_ms));
+            const int poll_ms = static_cast<int>(std::min<std::int64_t>(remaining_ms, 250));
+            struct pollfd pfd{stdout_fd_, POLLIN | POLLHUP, 0};
+            const int ret = ::poll(&pfd, 1, poll_ms);
             if (ret < 0 && errno == EINTR) continue;
-            if (ret <= 0) break;  // timed out waiting for sentinel
+            if (ret < 0) break;
+            if (ret == 0) {
+                int ignored_exit_code = -1;
+                if (reap_if_exited(ignored_exit_code, true)) break;
+                continue;
+            }
 
             std::array<char, 4096> buf{};
             const ssize_t n = ::read(stdout_fd_, buf.data(), buf.size());
-            if (n <= 0) break;  // bash closed its end (exited)
+            if (n <= 0) {
+                int ignored_exit_code = -1;
+                [[maybe_unused]] const bool reaped = reap_if_exited_for(
+                    ignored_exit_code,
+                    true,
+                    std::chrono::milliseconds{50});
+                break;  // bash closed its end (exited)
+            }
 
             tail.append(buf.data(), static_cast<std::size_t>(n));
             // Keep a rolling window just large enough to detect the sentinel
@@ -341,27 +399,12 @@ private:
 
                 std::string output = raw.substr(0, pos);
 
-                // Detect if bash exited after writing the sentinel (e.g. via
-                // `exit N`).  The EXIT trap writes the sentinel then bash
-                // calls _exit(), closing its stdout fd.  A brief poll catches
-                // the resulting EOF so the next run() call gets a fresh
-                // session rather than trying to write to a dead stdin pipe.
-                // For normal commands bash stays alive and the poll times out
-                // immediately with no data — adding only ~0 ms overhead.
-                {
-                    struct pollfd pfd_eof{stdout_fd_, POLLIN | POLLHUP, 0};
-                    if (::poll(&pfd_eof, 1, 50) > 0) {
-                        char probe;
-                        if (::read(stdout_fd_, &probe, 1) == 0) {
-                            // EOF confirmed: bash exited.
-                            ::waitpid(pid_, nullptr, 0);
-                            pid_  = -1;
-                            pgid_ = -1;
-                            ::close(stdin_fd_);  stdin_fd_  = -1;
-                            ::close(stdout_fd_); stdout_fd_ = -1;
-                        }
-                    }
-                }
+                // If the command exited the persistent shell, tear the session
+                // down now. Descendants can keep stdout open after bash exits,
+                // so EOF is not a reliable liveness signal.
+                int ignored_exit_code = -1;
+                [[maybe_unused]] const bool reaped =
+                    reap_if_exited(ignored_exit_code, true);
 
                 return {std::move(output), exit_code};
             }
@@ -382,27 +425,44 @@ private:
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - now).count();
 
-            struct pollfd pfd{stdout_fd_, POLLIN, 0};
-            const int ret = ::poll(&pfd, 1, static_cast<int>(remaining_ms));
+            const int poll_ms = static_cast<int>(std::min<std::int64_t>(remaining_ms, 250));
+            struct pollfd pfd{stdout_fd_, POLLIN | POLLHUP, 0};
+            const int ret = ::poll(&pfd, 1, poll_ms);
             if (ret < 0 && errno == EINTR) continue;
-            if (ret <= 0) {
-                // Poll timed out — deadline has passed (or signal interrupted
-                // and remaining_ms was already 0).
+            if (ret < 0) {
                 kill_session();
-                raw += "\n[TIMEOUT: command exceeded time limit]\n";
                 return {std::move(raw), -1};
+            }
+            if (ret == 0) {
+                int shell_exit_code = -1;
+                if (reap_if_exited(shell_exit_code, true)) {
+                    return {std::move(raw), shell_exit_code};
+                }
+                continue;
+            }
+
+            if ((pfd.revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
+                int shell_exit_code = -1;
+                if (reap_if_exited(shell_exit_code, true)) {
+                    return {std::move(raw), shell_exit_code};
+                }
+                continue;
             }
 
             std::array<char, 4096> buf{};
             const ssize_t n = ::read(stdout_fd_, buf.data(), buf.size());
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) {
-                // bash exited without printing our sentinel (crash / OOM-kill).
-                ::close(stdin_fd_);  stdin_fd_  = -1;
-                ::close(stdout_fd_); stdout_fd_ = -1;
-                ::waitpid(pid_, nullptr, 0);
-                pid_  = -1;
-                pgid_ = -1;
+                int shell_exit_code = -1;
+                if (reap_if_exited_for(
+                        shell_exit_code,
+                        true,
+                        std::chrono::milliseconds{50})) {
+                    return {std::move(raw), shell_exit_code};
+                }
+                // stdout closed before the sentinel while the shell still
+                // appears alive; reset instead of blocking in waitpid().
+                kill_session();
                 return {std::move(raw), -1};
             }
 
