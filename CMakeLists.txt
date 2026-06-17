@@ -47,7 +47,16 @@ endif()
 # Use the system-installed libcurl so it has the distro's CA bundle paths
 # already baked in — avoids "unable to get local issuer certificate" errors
 # that occur when CPR builds its own curl from source without a CA path.
-set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "" FORCE)
+if(APPLE)
+    find_library(FILO_SYSTEM_CURL_LIBRARY curl REQUIRED)
+    add_library(CURL::libcurl UNKNOWN IMPORTED GLOBAL)
+    set_target_properties(CURL::libcurl PROPERTIES
+        IMPORTED_LOCATION "${FILO_SYSTEM_CURL_LIBRARY}"
+    )
+    set(CPR_USE_EXISTING_CURL_TARGET ON CACHE BOOL "" FORCE)
+else()
+    set(CPR_USE_SYSTEM_CURL ON CACHE BOOL "" FORCE)
+endif()
 CPMAddPackage(
     NAME cpr
     GITHUB_REPOSITORY libcpr/cpr
