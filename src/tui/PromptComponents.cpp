@@ -488,7 +488,7 @@ Element make_selection_row(std::string_view label,
 Element make_command_selection_row(const CommandSuggestion& suggestion,
                                    bool selected) {
     const Color meta_color = selected ? Color::Black : Color::GrayDark;
-    const Color badge_color = selected ? Color::Black : ColorYellowDark;
+    const Color badge_color = selected ? Color{Color::Black} : static_cast<Color>(ColorYellowDark);
     const std::string description = suggestion.description.empty()
         ? "No description available."
         : suggestion.description;
@@ -705,8 +705,8 @@ Element render_mention_prompt_panel(const std::vector<MentionSuggestion>& sugges
         auto row = hbox({
             text(badge)
                 | color(s.is_directory
-                    ? (sel ? Color::Black : ColorYellowBright)
-                    : Color::GrayDark),
+                    ? (sel ? Color{Color::Black} : static_cast<Color>(ColorYellowBright))
+                    : Color{Color::GrayDark}),
             text(s.display_path)
                 | color(sel ? Color::Black : Color::White)
                 | xflex,
@@ -805,7 +805,7 @@ Element render_model_selection_panel(int selected_index,
         router_label,
         router_description,
         selected_index == 1,
-        router_available ? ColorYellowDark : Color::GrayDark);
+        router_available ? static_cast<Color>(ColorYellowDark) : Color{Color::GrayDark});
 
     const std::string auto_label = router_available
         ? "[3] Auto"
@@ -815,7 +815,7 @@ Element render_model_selection_panel(int selected_index,
         auto_label,
         auto_description,
         selected_index == 2,
-        router_available ? ColorYellowDark : Color::GrayDark);
+        router_available ? static_cast<Color>(ColorYellowDark) : Color{Color::GrayDark});
 
     return vbox({
         hbox({
@@ -989,8 +989,8 @@ Element render_local_model_picker_panel(std::string_view current_dir,
             const std::string badge = e.is_directory ? " d " : "   ";
             auto row = hbox({
                 text(badge) | color(e.is_directory
-                    ? (sel ? Color::Black : ColorYellowBright)
-                    : Color::GrayDark),
+                    ? (sel ? Color{Color::Black} : static_cast<Color>(ColorYellowBright))
+                    : Color{Color::GrayDark}),
                 text(e.name) | color(sel ? Color::Black : Color::White) | xflex,
             });
             visible_rows.push_back(sel ? (row | bgcolor(ColorYellowDark)) : row);
@@ -1050,11 +1050,11 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
 
         auto row = hbox({
             text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
-            text(std::format(" {} ", s.session_id)) | ftxui::bold | color(is_selected ? ColorYellowBright : Color::White),
+            text(std::format(" {} ", s.session_id)) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
             text(std::format(" {}  ", ts)) | color(is_selected ? Color::White : Color::GrayDark),
             text(std::format("{}/{:18} ", s.provider, s.model)) | color(is_selected ? Color::White : Color::GrayLight),
             text(std::format(" {:3d} turns ", s.turn_count)) | color(is_selected ? Color::White : Color::GrayDark),
-            text(std::format(" [{}] ", s.mode)) | color(is_selected ? ColorYellowBright : Color::GrayDark),
+            text(std::format(" [{}] ", s.mode)) | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::GrayDark}),
             filler(),
         });
 
@@ -1170,7 +1170,7 @@ Element render_conversation_search_panel(std::string_view query,
                 hbox({
                     text(selected ? " > " : "   ") | color(ColorYellowBright),
                     text(std::format("[{}] ", hit.message_index + 1)) | color(ColorYellowDark),
-                    text(hit.role) | ftxui::bold | color(selected ? ColorYellowBright : Color::White),
+                    text(hit.role) | ftxui::bold | color(selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
                 }),
                 hbox({
                     text("   "),
@@ -1222,8 +1222,8 @@ Element render_conversation_search_panel(std::string_view query,
 namespace {
 
 // Cyan color matching kimi-cli's question panel
-inline const auto ColorQuestionCyan = ftxui::Color::RGB(0, 180, 220);
-inline const auto ColorQuestionYellow = ftxui::Color::RGB(255, 200, 80);
+inline constexpr RgbColor ColorQuestionCyan{0, 180, 220};
+inline constexpr RgbColor ColorQuestionYellow{255, 200, 80};
 
 Element render_question_tabs(const QuestionDialogState& state) {
     if (state.questions.size() <= 1) {

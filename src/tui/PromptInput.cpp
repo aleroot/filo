@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,7 +30,7 @@ namespace {
 
 // ── UTF-8 glyph navigation ────────────────────────────────────────────────────
 
-size_t glyph_next(const std::string& input, size_t iter) {
+size_t glyph_next(std::string_view input, size_t iter) {
     if (iter >= input.size()) {
         return input.size();
     }
@@ -42,7 +43,7 @@ size_t glyph_next(const std::string& input, size_t iter) {
     return iter;
 }
 
-size_t glyph_previous(const std::string& input, size_t iter) {
+size_t glyph_previous(std::string_view input, size_t iter) {
     if (iter == 0) {
         return 0;
     }
@@ -55,7 +56,7 @@ size_t glyph_previous(const std::string& input, size_t iter) {
     return iter;
 }
 
-size_t glyph_width(const std::string& input, size_t iter) {
+size_t glyph_width(std::string_view input, size_t iter) {
     const size_t next = glyph_next(input, iter);
     if (next <= iter) {
         return 0;
@@ -63,7 +64,7 @@ size_t glyph_width(const std::string& input, size_t iter) {
     return static_cast<size_t>(string_width(input.substr(iter, next - iter)));
 }
 
-bool is_word_character(const std::string& input, size_t iter) {
+bool is_word_character(std::string_view input, size_t iter) {
     if (iter >= input.size()) {
         return false;
     }
@@ -110,11 +111,23 @@ public:
     explicit PromptInputBase(InputOption option) : InputOption(std::move(option)) {}
 
 private:
+    static constexpr std::string_view kBracketedPasteStart = "\x1B[200~";
+    static constexpr std::string_view kBracketedPasteEnd = "\x1B[201~";
+    static constexpr std::string_view kAltLeft = "\x1B[1;3D";
+    static constexpr std::string_view kAltRight = "\x1B[1;3C";
+    static constexpr std::string_view kAltBackspace = "\x1B\x7f";
+    static constexpr std::string_view kAltDelete = "\x1B[3;3~";
+    static constexpr std::string_view kCtrlDelete = "\x1B[3;5~";
+    static constexpr std::string_view kShiftEnter = "\x1B[27;2;13~";
+    static constexpr std::string_view kCtrlEnter = "\x1B[27;5;13~";
+    static constexpr std::string_view kAltEnterCsi = "\x1B[27;3;13~";
+    static constexpr std::string_view kAltEnterEscLf = "\x1B\n";
+
     // ── Rendering ─────────────────────────────────────────────────────────────
 
     /// Returns a password-masked version of the text, counting visual glyphs
     /// rather than raw bytes so that multi-byte characters each produce one '*'.
-    Element MaskedText(const std::string& input) {
+    Element MaskedText(std::string_view input) {
         std::string out;
         out.reserve(input.size());
         for (size_t i = 0; i < input.size(); i = glyph_next(input, i)) {
@@ -123,7 +136,7 @@ private:
         return text(out);
     }
 
-    Element Text(const std::string& input) {
+    Element Text(std::string_view input) {
         return password() ? MaskedText(input) : text(input);
     }
 
@@ -606,12 +619,12 @@ private:
         cursor_position() = std::clamp(cursor_position(), 0, static_cast<int>(content->size()));
 
         // Bracketed paste sequences (ESC[200~ ... ESC[201~).
-        if (event == Event::Special("\x1B[200~")) {
+        if (event == Event::Special(kBracketedPasteStart)) {
             paste_mode_ = true;
             paste_start_position_ = cursor_position();
             return true;
         }
-        if (event == Event::Special("\x1B[201~")) {
+        if (event == Event::Special(kBracketedPasteEnd)) {
             return FinalizePaste();
         }
         if (paste_mode_) {
@@ -624,7 +637,7 @@ private:
         if (event == Event::Return)          return HandleReturn();
         if (event.is_character())            return HandleCharacter(event.character());
         if (event.is_mouse())                return HandleMouse(event);
-        if (event == Event::Special({4}))    return HandleDelete();      // Ctrl+D
+        if (event == Event::CtrlD)            return HandleDelete();
         if (event == Event::Backspace)       return HandleBackspace();
         if (event == Event::Delete)          return HandleDelete();
         if (event == Event::ArrowLeft)       return HandleArrowLeft();
@@ -638,37 +651,37 @@ private:
 
         // ── Cursor movement (Gemini CLI compat) ──────────────────────────────
         // Ctrl+A → start of line
-        if (event == Event::Special({1}))    return HandleHome();
+        if (event == Event::CtrlA)            return HandleHome();
         // Ctrl+E → end of line
-        if (event == Event::Special({5}))    return HandleEnd();
+        if (event == Event::CtrlE)            return HandleEnd();
         // Ctrl+F → move right one character
-        if (event == Event::Special({6}))    return HandleArrowRight();
+        if (event == Event::CtrlF)            return HandleArrowRight();
         // Alt+Left / Alt+B → word left
-        if (event == Event::Special("\x1B[1;3D") ||
-            event == Event::Special("\x1B" "b"))  return HandleWordLeft();
+        if (event == Event::Special(kAltLeft) ||
+            event == Event::AltB)             return HandleWordLeft();
         // Alt+Right / Alt+F → word right
-        if (event == Event::Special("\x1B[1;3C") ||
-            event == Event::Special("\x1B" "f"))  return HandleWordRight();
+        if (event == Event::Special(kAltRight) ||
+            event == Event::AltF)             return HandleWordRight();
 
         // ── Editing (Gemini CLI compat) ──────────────────────────────────────
         // Ctrl+K → delete to end of line
-        if (event == Event::Special({11}))   return HandleDeleteToEnd();
+        if (event == Event::CtrlK)            return HandleDeleteToEnd();
         // Ctrl+U → delete to start of line
-        if (event == Event::Special({21}))   return HandleDeleteToStart();
+        if (event == Event::CtrlU)            return HandleDeleteToStart();
         // Ctrl+W / Alt+Backspace → delete word left
-        if (event == Event::Special({23}) ||
-            event == Event::Special("\x1B\x7f"))  return HandleDeleteWordLeft();
+        if (event == Event::CtrlW ||
+            event == Event::Special(kAltBackspace)) return HandleDeleteWordLeft();
         // Alt+D / Alt+Delete / Ctrl+Delete → delete word right
-        if (event == Event::Special("\x1B" "d") ||
-            event == Event::Special("\x1B[3;3~") ||
-            event == Event::Special("\x1B[3;5~")) return HandleDeleteWordRight();
+        if (event == Event::AltD ||
+            event == Event::Special(kAltDelete) ||
+            event == Event::Special(kCtrlDelete)) return HandleDeleteWordRight();
 
         // ── Newline insertion without submission (Gemini CLI compat) ─────────
         // Shift+Enter / Ctrl+Enter / Alt+Enter
-        if (event == Event::Special("\x1B[27;2;13~") ||
-            event == Event::Special("\x1B[27;5;13~") ||
-            event == Event::Special("\x1B[27;3;13~") ||
-            event == Event::Special("\x1B\n"))         return HandleInsertNewline();
+        if (event == Event::Special(kShiftEnter) ||
+            event == Event::Special(kCtrlEnter) ||
+            event == Event::Special(kAltEnterCsi) ||
+            event == Event::Special(kAltEnterEscLf)) return HandleInsertNewline();
 
         return false;
     }

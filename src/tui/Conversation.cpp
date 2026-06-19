@@ -384,7 +384,7 @@ Element render_tool_result(const ToolActivity& tool,
     
     const bool is_error = tool.status == ToolActivity::Status::Failed ||
                           tool.status == ToolActivity::Status::Denied;
-    const Color text_color = is_error ? ColorToolFail : Color::GrayLight;
+    const Color text_color = is_error ? static_cast<Color>(ColorToolFail) : Color{Color::GrayLight};
 
     const bool is_terminal_output = core::tools::names::is_terminal_tool(tool.name);
     std::vector<Element> rows;

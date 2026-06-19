@@ -18,7 +18,7 @@
 #include "core/session/TodoUtils.hpp"
 #include "core/history/PromptHistoryStore.hpp"
 #include <ftxui/component/component.hpp>
-#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/app.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
 #include "core/llm/HttpLLMProvider.hpp"
@@ -742,7 +742,7 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point last_update;
     };
     RateLimitState rate_limit_state;
-    auto screen = ScreenInteractive::Fullscreen();
+    auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
     screen.TrackMouse(true);
     // Auto-copy any text selected via left-click drag to the system clipboard.

@@ -44,7 +44,7 @@ std::string rep(std::string_view s, int n) {
 }
 
 int display_width(std::string_view s) {
-    return ftxui::string_width(std::string{s});
+    return ftxui::string_width(s);
 }
 
 std::size_t utf8_next_codepoint(std::string_view s, std::size_t pos) {

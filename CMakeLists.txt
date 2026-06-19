@@ -34,13 +34,20 @@ CPMAddPackage("gh:CLIutils/CLI11@2.6.2")
 CPMAddPackage("gh:simdjson/simdjson@4.2.4")
 
 # Terminal UI
-CPMAddPackage("gh:ArthurSonzogni/FTXUI@6.1.9")
+set(FILO_FTXUI_VERSION 7.0.0)
+string(REGEX REPLACE "[^0-9]" "" FILO_FTXUI_ABI_EPOCH "${FILO_FTXUI_VERSION}")
+CPMAddPackage("gh:ArthurSonzogni/FTXUI@${FILO_FTXUI_VERSION}")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     foreach(ftxui_target screen dom component)
         if(TARGET ${ftxui_target})
             target_compile_options(${ftxui_target} PRIVATE -Wno-shorten-64-to-32)
         endif()
     endforeach()
+endif()
+if(TARGET ftxui::ftxui)
+    set(FILO_FTXUI_TARGETS ftxui::ftxui)
+else()
+    set(FILO_FTXUI_TARGETS ftxui::screen ftxui::dom ftxui::component)
 endif()
 
 # Add CPR for HTTP requests.
@@ -296,13 +303,12 @@ endif()
 add_library(filo_core STATIC ${FILO_CORE_SOURCES})
 target_sources(filo_core PRIVATE ${FILO_HEADER_FILES})
 target_include_directories(filo_core PUBLIC src)
+target_compile_definitions(filo_core PUBLIC FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH})
 target_link_libraries(filo_core
     PUBLIC
         filo_build_options
         simdjson::simdjson
-        ftxui::screen
-        ftxui::dom
-        ftxui::component
+        ${FILO_FTXUI_TARGETS}
         cpr::cpr
         httplib::httplib
 )
@@ -455,6 +461,12 @@ set_target_properties(test_tui_freeze PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
+
+foreach(filo_ftxui_consumer filo filo_tests test_agent_freeze test_tui_freeze)
+    target_compile_definitions(${filo_ftxui_consumer}
+        PRIVATE FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH}
+    )
+endforeach()
 
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 include(Catch)

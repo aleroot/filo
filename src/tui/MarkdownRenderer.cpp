@@ -20,19 +20,19 @@ namespace {
 // Colours used only by the markdown renderer
 // ============================================================================
 
-inline const Color kMdCodeFg    = Color::RGB(255, 210, 100);
-inline const Color kMdCodeBg    = Color::RGB(32,  32,  40);
-inline const Color kMdCodeBorder= Color::RGB(72,  72,  88);
-inline const Color kMdLinkFg    = Color::RGB(100, 200, 255);
+inline constexpr RgbColor kMdCodeFg{255, 210, 100};
+inline constexpr RgbColor kMdCodeBg{32, 32, 40};
+inline constexpr RgbColor kMdCodeBorder{72, 72, 88};
+inline constexpr RgbColor kMdLinkFg{100, 200, 255};
 inline const Color kMdQuoteFg   = Color::GrayLight;
-inline const Color kMdQuoteBar  = Color::RGB(90, 90, 110);
+inline constexpr RgbColor kMdQuoteBar{90, 90, 110};
 inline const Color kMdH1Fg      = Color::White;
-inline const Color kMdH3Fg      = Color::RGB(255, 246, 61);   // ColorYellowBright
-inline const Color kMdH4Fg      = Color::RGB(255, 192, 32);   // ColorYellowDark
+inline constexpr RgbColor kMdH3Fg{255, 246, 61};   // ColorYellowBright
+inline constexpr RgbColor kMdH4Fg{255, 192, 32};   // ColorYellowDark
 inline const Color kMdTableHdrFg= Color::White;
 inline const Color kMdTableRowFg= Color::GrayLight;
-inline const Color kMdBulletFg  = Color::RGB(255, 192, 32);   // ColorYellowDark
-inline const Color kMdNumFg     = Color::RGB(255, 192, 32);
+inline constexpr RgbColor kMdBulletFg{255, 192, 32};   // ColorYellowDark
+inline constexpr RgbColor kMdNumFg{255, 192, 32};
 
 // ============================================================================
 // Text sanitization for FTXUI

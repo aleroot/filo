@@ -7,12 +7,22 @@
 
 namespace tui {
 
-inline const auto ColorYellowDark   = ftxui::Color::RGB(255, 192,  32);
-inline const auto ColorYellowBright = ftxui::Color::RGB(255, 246,  61);
-inline const auto ColorWarn         = ftxui::Color::RGB(255, 120,  30);
-inline const auto ColorToolDone     = ftxui::Color::RGB(255, 221,  92);
-inline const auto ColorToolFail     = ftxui::Color::RGB(255, 150,  92);
-inline const auto ColorToolPending  = ftxui::Color::RGB(255, 205, 110);
+struct RgbColor {
+    unsigned char red;
+    unsigned char green;
+    unsigned char blue;
+
+    operator ftxui::Color() const {
+        return ftxui::Color::RGB(red, green, blue);
+    }
+};
+
+inline constexpr RgbColor ColorYellowDark{255, 192, 32};
+inline constexpr RgbColor ColorYellowBright{255, 246, 61};
+inline constexpr RgbColor ColorWarn{255, 120, 30};
+inline constexpr RgbColor ColorToolDone{255, 221, 92};
+inline constexpr RgbColor ColorToolFail{255, 150, 92};
+inline constexpr RgbColor ColorToolPending{255, 205, 110};
 
 #if defined(__APPLE__)
 inline constexpr auto UiBorderStyle = ftxui::LIGHT;
