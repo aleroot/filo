@@ -60,6 +60,134 @@ namespace {
         || normalized == "glm-4.5-air";
 }
 
+[[nodiscard]] bool is_zai_glm_model(std::string_view model) {
+    std::string normalized = lower_ascii(core::utils::str::trim_ascii_view(model));
+    return normalized.starts_with("glm-");
+}
+
+[[nodiscard]] std::string normalize_zai_effort(std::string_view raw_effort) {
+    std::string effort = lower_ascii(raw_effort);
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch);
+    });
+    if (effort == "auto" || effort == "unset" || effort == "default") {
+        return {};
+    }
+    if (effort == "off" || effort == "disabled" || effort == "disable") {
+        return "off";
+    }
+    if (effort == "low" || effort == "medium" || effort == "high" || effort == "max") {
+        return effort;
+    }
+    return {};
+}
+
+struct ZaiParseResult {
+    std::string content;
+    std::string reasoning_content;
+    std::vector<ToolCall> tools;
+    int32_t prompt_tokens = 0;
+    int32_t completion_tokens = 0;
+};
+
+[[nodiscard]] bool read_usage_object(simdjson::dom::object usage,
+                                     int32_t& prompt_tokens,
+                                     int32_t& completion_tokens) {
+    int64_t pt = 0;
+    int64_t ct = 0;
+    const bool has_prompt = usage["prompt_tokens"].get(pt) == simdjson::SUCCESS;
+    const bool has_completion = usage["completion_tokens"].get(ct) == simdjson::SUCCESS;
+    if (!has_prompt && !has_completion) return false;
+    prompt_tokens = static_cast<int32_t>(pt);
+    completion_tokens = static_cast<int32_t>(ct);
+    return pt > 0 || ct > 0;
+}
+
+[[nodiscard]] ZaiParseResult parse_zai_sse_chunk(std::string_view json_str) {
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json_str);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
+        return {};
+    }
+
+    ZaiParseResult result;
+
+    simdjson::dom::object usage_obj;
+    bool has_usage = false;
+    if (doc["usage"].get(usage_obj) == simdjson::SUCCESS
+        && read_usage_object(usage_obj, result.prompt_tokens, result.completion_tokens)) {
+        has_usage = true;
+    }
+
+    simdjson::dom::array choices;
+    if (doc["choices"].get(choices) != simdjson::SUCCESS) {
+        return result;
+    }
+
+    for (simdjson::dom::element choice : choices) {
+        if (!has_usage) {
+            simdjson::dom::object choice_usage;
+            if (choice["usage"].get(choice_usage) == simdjson::SUCCESS
+                && read_usage_object(choice_usage, result.prompt_tokens,
+                                     result.completion_tokens)) {
+                has_usage = true;
+            }
+        }
+
+        simdjson::dom::object delta;
+        if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
+
+        std::string_view content;
+        if (delta["content"].get(content) == simdjson::SUCCESS) {
+            result.content = std::string(content);
+        }
+
+        std::string_view reasoning;
+        if (delta["reasoning_content"].get(reasoning) == simdjson::SUCCESS
+            && !reasoning.empty()) {
+            result.reasoning_content.append(reasoning.data(), reasoning.size());
+        }
+
+        simdjson::dom::array tool_calls_arr;
+        if (delta["tool_calls"].get(tool_calls_arr) == simdjson::SUCCESS) {
+            for (simdjson::dom::element tc : tool_calls_arr) {
+                ToolCall call;
+                int64_t index_v = -1;
+                if (tc["index"].get(index_v) == simdjson::SUCCESS) {
+                    call.index = static_cast<int>(index_v);
+                }
+
+                std::string_view id_v;
+                if (tc["id"].get(id_v) == simdjson::SUCCESS) {
+                    call.id = std::string(id_v);
+                }
+
+                std::string_view type_v;
+                if (tc["type"].get(type_v) == simdjson::SUCCESS) {
+                    call.type = std::string(type_v);
+                }
+
+                simdjson::dom::object func;
+                if (tc["function"].get(func) == simdjson::SUCCESS) {
+                    std::string_view name_v;
+                    if (func["name"].get(name_v) == simdjson::SUCCESS) {
+                        call.function.name = std::string(name_v);
+                    }
+                    std::string_view args_v;
+                    if (func["arguments"].get(args_v) == simdjson::SUCCESS) {
+                        call.function.arguments = std::string(args_v);
+                    }
+                }
+
+                result.tools.push_back(std::move(call));
+            }
+        }
+    }
+
+    return result;
+}
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +390,69 @@ void OpenAIProtocol::on_response(const HttpResponse& response) {
     }
 
     last_rate_limit_ = info;
+}
+
+std::string ZaiProtocol::serialize(const ChatRequest& req) const {
+    Serializer::Options options;
+    options.include_reasoning_content = true;
+
+    std::string payload = Serializer::serialize(req, options);
+    if (payload.ends_with('}')) {
+        payload.pop_back();
+        append_extra_fields(payload, req);
+        if ((stream_usage_ || req.stream_include_usage) && req.stream) {
+            payload += R"(,"stream_options":{"include_usage":true})";
+        }
+        payload += '}';
+    }
+    return payload;
+}
+
+ParseResult ZaiProtocol::parse_event(std::string_view raw_event) {
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed)) return {};
+
+    if (parsed.is_done) {
+        ParseResult result;
+        result.done = true;
+        return result;
+    }
+
+    ParseResult result;
+    auto zai_result = parse_zai_sse_chunk(parsed.data);
+    result.prompt_tokens = zai_result.prompt_tokens;
+    result.completion_tokens = zai_result.completion_tokens;
+
+    if (!zai_result.content.empty()
+        || !zai_result.reasoning_content.empty()
+        || !zai_result.tools.empty()) {
+        StreamChunk chunk;
+        chunk.content = std::move(zai_result.content);
+        chunk.reasoning_content = std::move(zai_result.reasoning_content);
+        chunk.tools = std::move(zai_result.tools);
+        result.chunks.push_back(std::move(chunk));
+    }
+
+    return result;
+}
+
+void ZaiProtocol::append_extra_fields(std::string& payload, const ChatRequest& req) const {
+    if (!is_zai_glm_model(req.model)) {
+        return;
+    }
+
+    const std::string effort = normalize_zai_effort(req.effort);
+    if (effort == "off") {
+        payload += R"(,"thinking":{"type":"disabled"})";
+        return;
+    }
+
+    payload += R"(,"thinking":{"type":"enabled","clear_thinking":false})";
+    if (!effort.empty()) {
+        payload += R"(,"reasoning_effort":")";
+        payload += core::utils::escape_json_string(effort);
+        payload += '"';
+    }
 }
 
 void ZaiCodingProtocol::prepare_request(ChatRequest& req) {

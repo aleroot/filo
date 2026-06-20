@@ -260,6 +260,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             if (canonical_type == "zai-coding") {
                 protocol = std::make_unique<protocols::ZaiCodingProtocol>(
                     config.stream_usage);
+            } else if (canonical_type == "zai") {
+                protocol = std::make_unique<protocols::ZaiProtocol>(
+                    config.stream_usage);
             } else if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
                 protocols::GrokReasoningEffort effort = protocols::GrokReasoningEffort::None;
                 if (config.reasoning_effort == "low")    effort = protocols::GrokReasoningEffort::Low;

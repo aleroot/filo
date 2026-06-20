@@ -54,6 +54,106 @@ TEST_CASE("Z.ai OpenAI-compatible protocol appends chat completions path",
             == "https://api.z.ai/api/coding/paas/v4/chat/completions");
 }
 
+TEST_CASE("Z.ai protocol enables preserved thinking for GLM models",
+          "[zai][protocol]") {
+    ZaiProtocol protocol;
+
+    ChatRequest request;
+    request.model = "glm-5.2";
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+    const std::string payload = protocol.serialize(request);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"enabled","clear_thinking":false})"));
+}
+
+TEST_CASE("Z.ai protocol serializes Z.ai reasoning effort",
+          "[zai][protocol][effort]") {
+    ZaiProtocol protocol;
+
+    ChatRequest request;
+    request.model = "glm-5.2";
+    request.effort = "max";
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+    const std::string payload = protocol.serialize(request);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
+}
+
+TEST_CASE("Z.ai protocol can disable thinking per turn",
+          "[zai][protocol][effort]") {
+    ZaiProtocol protocol;
+
+    ChatRequest request;
+    request.model = "glm-4.7";
+    request.effort = "off";
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+    const std::string payload = protocol.serialize(request);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("clear_thinking"));
+}
+
+TEST_CASE("Z.ai protocol echoes assistant reasoning_content for preserved thinking",
+          "[zai][protocol][thinking]") {
+    ZaiProtocol protocol;
+
+    ChatRequest request;
+    request.model = "glm-4.7";
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+    Message assistant;
+    assistant.role = "assistant";
+    assistant.content = "I will call a tool.";
+    assistant.reasoning_content = "Need weather first.";
+    assistant.tool_calls.push_back(ToolCall{
+        .id = "call_1",
+        .type = "function",
+        .function = {.name = "get_weather", .arguments = R"({"city":"Dubai"})"},
+    });
+    request.messages.push_back(std::move(assistant));
+    request.messages.push_back(Message{
+        .role = "tool",
+        .content = R"({"weather":"sunny"})",
+        .tool_call_id = "call_1",
+    });
+
+    const std::string payload = protocol.serialize(request);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"Need weather first.")"));
+}
+
+TEST_CASE("Z.ai protocol parses streamed reasoning_content",
+          "[zai][protocol][thinking]") {
+    ZaiProtocol protocol;
+
+    const auto result = protocol.parse_event(
+        R"(data: {"choices":[{"delta":{"reasoning_content":"think","content":"answer"},"index":0}]})");
+
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].reasoning_content == "think");
+    REQUIRE(result.chunks[0].content == "answer");
+}
+
+TEST_CASE("Z.ai Coding Plan protocol enables Z.ai thinking config",
+          "[zai][protocol][coding]") {
+    ZaiCodingProtocol protocol;
+
+    ChatRequest request;
+    request.model = "glm-5.2";
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+    const std::string payload = protocol.serialize(request);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"enabled","clear_thinking":false})"));
+}
+
 TEST_CASE("ModelRegistry includes Z.ai GLM coding models", "[zai][registry]") {
     auto& registry = ModelRegistry::instance();
 
