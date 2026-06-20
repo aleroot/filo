@@ -260,6 +260,137 @@ TEST_CASE("ReadFileTool reads files that contain spaces in their path", "[tools]
     std::filesystem::remove(path);
 }
 
+TEST_CASE("ReadFileTool can read temp files created by the same shell session",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 42,
+        },
+        core::context::SessionTransport::cli,
+        "temp-grant-created");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_created_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+
+#undef execute
+    ShellTool shell_tool;
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"printf 'temp grant content\n' > '{}'"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    ReadFileTool read_tool;
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp grant content"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("ReadFileTool still denies unchanged mentioned temp files",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 43,
+        },
+        core::context::SessionTransport::cli,
+        "temp-grant-mentioned");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_mentioned_" + std::to_string(getpid()) + ".txt");
+    {
+        std::ofstream ofs(temp_file);
+        ofs << "preexisting secret";
+    }
+
+#undef execute
+    ShellTool shell_tool;
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"printf '{}\n'"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    ReadFileTool read_tool;
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Access denied"));
+
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("ReadFileTool does not grant temp symlink reads",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 44,
+        },
+        core::context::SessionTransport::cli,
+        "temp-grant-symlink");
+
+    const auto temp_target = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_symlink_target_" + std::to_string(getpid()) + ".txt");
+    const auto temp_link = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_symlink_" + std::to_string(getpid()) + ".txt");
+
+    std::error_code ec;
+    std::filesystem::remove(temp_target, ec);
+    std::filesystem::remove(temp_link, ec);
+    {
+        std::ofstream ofs(temp_target);
+        ofs << "original";
+    }
+    std::filesystem::create_symlink(temp_target, temp_link, ec);
+    if (ec) {
+        std::filesystem::remove(temp_target, ec);
+        SKIP("Filesystem does not permit symlink creation in this environment.");
+    }
+
+#undef execute
+    ShellTool shell_tool;
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"printf 'changed through symlink\n' > '{}'"}})",
+            temp_link.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    ReadFileTool read_tool;
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_link.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Access denied"));
+
+    std::filesystem::remove(temp_link, ec);
+    std::filesystem::remove(temp_target, ec);
+}
+
 TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",
           "[tools][policy]") {
     const auto stamp = std::to_string(

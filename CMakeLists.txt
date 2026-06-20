@@ -216,6 +216,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ActivateSkillTool.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/SkillRegistry.cpp
+    src/core/tools/TempFileAccessRegistry.cpp
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp

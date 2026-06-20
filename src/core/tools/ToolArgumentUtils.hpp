@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "TempFileAccessRegistry.hpp"
+#include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -34,7 +36,11 @@ inline std::optional<std::string> check_workspace_access(
         *resolved_out = resolved;
     }
 
-    if (!context.is_path_allowed(resolved)) {
+    const bool has_temp_read_grant =
+        tool_name == names::kReadFile
+        && TempFileAccessRegistry::instance().can_read(context.session_id, resolved);
+
+    if (!context.is_path_allowed(resolved) && !has_temp_read_grant) {
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
