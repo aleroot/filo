@@ -265,6 +265,277 @@ split_preview(std::string_view text, Limits limits) {
     return fallback;
 }
 
+[[nodiscard]] std::string clipped(std::string_view text, std::size_t max_chars) {
+    if (text.size() <= max_chars) {
+        return std::string(text);
+    }
+    std::string out(text.substr(0, max_chars));
+    out += "...";
+    return out;
+}
+
+[[nodiscard]] std::string summary_label(CompressionMode mode, std::string_view kind) {
+    return std::format("[{} {} summary]", compression_label(mode), kind);
+}
+
+[[nodiscard]] std::string first_path_segment(std::string_view path) {
+    if (path.empty()) return ".";
+    const std::size_t start = path.starts_with('/') ? 1 : 0;
+    const std::size_t slash = path.find('/', start);
+    if (slash == std::string_view::npos) {
+        return std::string(path.substr(start));
+    }
+    return std::string(path.substr(start, slash - start));
+}
+
+void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
+                 std::string key) {
+    auto it = std::ranges::find_if(
+        buckets,
+        [&key](const auto& bucket) { return bucket.first == key; });
+    if (it != buckets.end()) {
+        ++it->second;
+        return;
+    }
+    buckets.emplace_back(std::move(key), 1);
+}
+
+[[nodiscard]] std::streampos soft_summary_budget(const CompressionProfile& profile) noexcept {
+    return static_cast<std::streampos>(
+        profile.limits.max_chars > 256 ? profile.limits.max_chars - 256
+                                       : profile.limits.max_chars);
+}
+
+[[nodiscard]] std::string grep_search_summary(simdjson::dom::array matches,
+                                              const CompressionProfile& profile) {
+    constexpr std::size_t kMaxFiles = 40;
+    constexpr std::size_t kMaxMatchesPerFile = 6;
+    constexpr std::size_t kMaxLineChars = 180;
+
+    std::ostringstream body;
+    std::string current_path;
+    bool has_current_path = false;
+    std::size_t files_seen = 0;
+    std::size_t match_count = 0;
+    std::size_t kept_for_file = 0;
+    bool omitted_for_file = false;
+    bool body_done = false;
+    for (simdjson::dom::element item : matches) {
+        simdjson::dom::object object;
+        std::string_view path;
+        std::string_view text;
+        int64_t line = 0;
+        if (item.get(object) != simdjson::SUCCESS
+            || object["path"].get(path) != simdjson::SUCCESS
+            || object["line"].get(line) != simdjson::SUCCESS
+            || object["text"].get(text) != simdjson::SUCCESS) {
+            continue;
+        }
+
+        ++match_count;
+        if (body_done) {
+            continue;
+        }
+        if (!has_current_path || path != current_path) {
+            if (omitted_for_file) {
+                body << "  [...more matches in this file]\n";
+            }
+            current_path = std::string(path);
+            has_current_path = true;
+            kept_for_file = 0;
+            omitted_for_file = false;
+            ++files_seen;
+            if (files_seen > kMaxFiles) {
+                body << "[remaining files omitted]\n";
+                body_done = true;
+                continue;
+            }
+            body << clipped(current_path, 180) << '\n';
+        }
+
+        if (kept_for_file >= kMaxMatchesPerFile) {
+            omitted_for_file = true;
+            continue;
+        }
+
+        body << std::format("  {:>5} | {}\n", line, clipped(text, kMaxLineChars));
+        ++kept_for_file;
+        if (body.tellp() > soft_summary_budget(profile)) {
+            body << "[grep summary truncated]\n";
+            body_done = true;
+        }
+    }
+    if (!body_done && omitted_for_file) {
+        body << "  [...more matches in this file]\n";
+    }
+
+    std::ostringstream out;
+    out << summary_label(profile.mode, "grep_search") << '\n';
+    out << "Matches: " << match_count << '\n';
+    out << "Use grep_search again for exact matching lines.\n\n";
+    out << "Grouped matches:\n" << body.str();
+
+    std::string result = out.str();
+    if (result.size() > profile.limits.max_chars) {
+        result.resize(profile.limits.max_chars);
+        result += "\n[grep summary truncated]\n";
+    }
+    return result;
+}
+
+[[nodiscard]] std::string file_search_summary(simdjson::dom::array files,
+                                              const CompressionProfile& profile) {
+    constexpr std::size_t kMaxBuckets = 24;
+    constexpr std::size_t kMaxPaths = 120;
+
+    std::vector<std::pair<std::string, std::size_t>> buckets;
+    std::vector<std::string> kept_paths;
+    kept_paths.reserve(kMaxPaths);
+    std::size_t file_count = 0;
+    for (simdjson::dom::element item : files) {
+        std::string_view path;
+        if (item.get(path) != simdjson::SUCCESS) continue;
+        ++file_count;
+        note_bucket(buckets, first_path_segment(path));
+        if (kept_paths.size() < kMaxPaths) {
+            kept_paths.emplace_back(path);
+        }
+    }
+    std::ranges::sort(buckets, [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+
+    std::ostringstream out;
+    out << summary_label(profile.mode, "file_search") << '\n';
+    out << "Files: " << file_count << '\n';
+    out << "Use file_search again for the exact complete path list.\n\n";
+    if (!buckets.empty()) {
+        out << "Top path groups:\n";
+        for (std::size_t i = 0; i < std::min(kMaxBuckets, buckets.size()); ++i) {
+            out << "- " << clipped(buckets[i].first, 120) << ": " << buckets[i].second << '\n';
+        }
+        out << '\n';
+    }
+
+    out << "Paths:\n";
+    for (const auto& path : kept_paths) {
+        out << "- " << clipped(path, 220) << '\n';
+        if (out.tellp() > soft_summary_budget(profile)) {
+            out << "[file_search summary truncated]\n";
+            break;
+        }
+    }
+    if (file_count > kMaxPaths) {
+        out << "[remaining paths omitted]\n";
+    }
+
+    std::string result = out.str();
+    if (result.size() > profile.limits.max_chars) {
+        result.resize(profile.limits.max_chars);
+        result += "\n[file_search summary truncated]\n";
+    }
+    return result;
+}
+
+[[nodiscard]] std::string list_directory_summary(simdjson::dom::array entries,
+                                                 const CompressionProfile& profile) {
+    constexpr std::size_t kMaxNamesPerKind = 120;
+
+    std::vector<std::string> dir_names;
+    std::vector<std::string> file_names;
+    dir_names.reserve(kMaxNamesPerKind);
+    file_names.reserve(kMaxNamesPerKind);
+    std::size_t dirs = 0;
+    std::size_t files = 0;
+    for (simdjson::dom::element item : entries) {
+        simdjson::dom::object object;
+        std::string_view type;
+        std::string_view name;
+        if (item.get(object) != simdjson::SUCCESS
+            || object["type"].get(type) != simdjson::SUCCESS
+            || object["name"].get(name) != simdjson::SUCCESS) {
+            continue;
+        }
+        if (type == "dir") {
+            ++dirs;
+            if (dir_names.size() < kMaxNamesPerKind) {
+                dir_names.emplace_back(name);
+            }
+        } else if (type == "file") {
+            ++files;
+            if (file_names.size() < kMaxNamesPerKind) {
+                file_names.emplace_back(name);
+            }
+        }
+    }
+
+    std::ostringstream out;
+    out << summary_label(profile.mode, "list_directory") << '\n';
+    out << "Entries: " << (dirs + files) << " (" << dirs << " dirs, " << files << " files)\n";
+    out << "Use list_directory again for the exact complete listing.\n\n";
+
+    const auto append_kind = [&](const std::vector<std::string>& names,
+                                 std::size_t total,
+                                 std::string_view heading) {
+        out << heading << ":\n";
+        for (const auto& name : names) {
+            out << "- " << clipped(name, 180) << '\n';
+            if (out.tellp() > soft_summary_budget(profile)) {
+                out << "[list_directory summary truncated]\n";
+                return;
+            }
+        }
+        if (total > names.size()) {
+            out << "[remaining " << heading << " omitted]\n";
+        }
+        if (total == 0) {
+            out << "- <none>\n";
+        }
+    };
+
+    append_kind(dir_names, dirs, "Directories");
+    out << '\n';
+    append_kind(file_names, files, "Files");
+
+    std::string result = out.str();
+    if (result.size() > profile.limits.max_chars) {
+        result.resize(profile.limits.max_chars);
+        result += "\n[list_directory summary truncated]\n";
+    }
+    return result;
+}
+
+[[nodiscard]] std::optional<std::string> structured_search_summary(
+    std::string_view tool_name,
+    std::string_view raw_output,
+    const CompressionProfile& profile) {
+    if (raw_output.size() <= profile.limits.max_chars) {
+        return std::nullopt;
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw_output.data(), raw_output.size()).get(doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+
+    simdjson::dom::array items;
+    if (tool_name == core::tools::names::kGrepSearch) {
+        if (doc["matches"].get(items) != simdjson::SUCCESS) return std::nullopt;
+        return grep_search_summary(items, profile);
+    }
+    if (tool_name == core::tools::names::kFileSearch) {
+        if (doc["files"].get(items) != simdjson::SUCCESS) return std::nullopt;
+        return file_search_summary(items, profile);
+    }
+    if (tool_name == core::tools::names::kListDirectory) {
+        if (doc["entries"].get(items) != simdjson::SUCCESS) return std::nullopt;
+        return list_directory_summary(items, profile);
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] bool is_code_signal_line(std::string_view trimmed) {
     if (trimmed.empty()) return false;
     const std::string lower = core::utils::str::to_lower_ascii_copy(trimmed);
@@ -863,12 +1134,18 @@ FullCompressionCache& full_cache() {
     std::string_view tool_name,
     std::string_view raw_output,
     Limits limits) {
+    const CompressionProfile profile = compression_profile(
+        tool_name,
+        limits,
+        CompressionMode::Light);
+
     if (tool_name == core::tools::names::kReadFile) {
         const auto content = json_string_field(raw_output, "content");
-        if (!content.has_value() || content->size() <= limits.max_chars) {
+        if (!content.has_value() || content->size() <= profile.limits.max_chars) {
             return std::nullopt;
         }
-        const std::string compressed = structural_file_summary(*content, limits.max_chars);
+        const std::string compressed =
+            structural_file_summary(*content, profile.limits.max_chars);
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
@@ -877,16 +1154,21 @@ FullCompressionCache& full_cache() {
 
     if (tool_name == core::tools::names::kRunTerminalCommand) {
         const auto output = json_string_field(raw_output, "output");
-        if (!output.has_value() || output->size() <= limits.max_chars) {
+        if (!output.has_value() || output->size() <= profile.limits.max_chars) {
             return std::nullopt;
         }
         const int64_t exit_code = json_int_field(raw_output, "exit_code");
         const std::string compressed =
-            shell_output_summary(*output, exit_code, limits.max_chars);
+            shell_output_summary(*output, exit_code, profile.limits.max_chars);
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
         return wrapped_light_payload(tool_name, "output", *output, compressed);
+    }
+
+    if (auto compressed = structured_search_summary(tool_name, raw_output, profile);
+        compressed.has_value() && compressed->size() < raw_output.size()) {
+        return wrapped_light_payload(tool_name, "summary", raw_output, *compressed);
     }
 
     return std::nullopt;
@@ -902,6 +1184,16 @@ FullCompressionCache& full_cache() {
     }
     if (tool_name == core::tools::names::kRunTerminalCommand) {
         return full_compress_shell_output(raw_output, context, profile);
+    }
+    if (auto compressed = structured_search_summary(tool_name, raw_output, profile);
+        compressed.has_value() && compressed->size() < raw_output.size()) {
+        return wrapped_full_payload(
+            tool_name,
+            "summary",
+            {},
+            raw_output,
+            *compressed,
+            profile.label);
     }
     return std::nullopt;
 }

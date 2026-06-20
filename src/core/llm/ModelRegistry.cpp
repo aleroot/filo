@@ -509,7 +509,7 @@ std::vector<ModelInfo> build_zai_catalog() {
             .display_name = "GLM-5.2",
             .provider = "zai",
             .context_window = 1'000'000,
-            .max_output_tokens = 64'000,
+            .max_output_tokens = 128'000,
             .max_reasoning_tokens = 64'000,
             .capabilities = CAP_GLM,
             .tier = ModelTier::Reasoning,

@@ -132,6 +132,63 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
     return count;
 }
 
+[[nodiscard]] std::string large_grep_output() {
+    std::string raw = R"({"matches":[)";
+    bool first = true;
+    for (int file = 0; file < 8; ++file) {
+        for (int line = 0; line < 14; ++line) {
+            if (!first) raw += ',';
+            first = false;
+            raw += R"({"path":"src/module_)";
+            raw += std::to_string(file);
+            raw += R"(/component.cpp","line":)";
+            raw += std::to_string(line + 1);
+            raw += R"(,"text":")";
+            raw += core::utils::escape_json_string(
+                "needle match with useful surrounding source context "
+                + std::string(80, static_cast<char>('a' + file)));
+            raw += R"("})";
+        }
+    }
+    raw += "]}";
+    return raw;
+}
+
+[[nodiscard]] std::string large_file_search_output() {
+    std::string raw = R"({"files":[)";
+    for (int i = 0; i < 180; ++i) {
+        if (i > 0) raw += ',';
+        raw += '"';
+        raw += core::utils::escape_json_string(
+            "/workspace/src/feature_" + std::to_string(i % 12)
+            + "/very_long_component_name_" + std::to_string(i) + ".cpp");
+        raw += '"';
+    }
+    raw += "]}";
+    return raw;
+}
+
+[[nodiscard]] std::string large_list_directory_output() {
+    std::string raw = R"({"entries":[)";
+    bool first = true;
+    for (int i = 0; i < 80; ++i) {
+        if (!first) raw += ',';
+        first = false;
+        raw += R"({"type":"dir","name":")";
+        raw += core::utils::escape_json_string("generated_directory_" + std::to_string(i));
+        raw += R"("})";
+    }
+    for (int i = 0; i < 160; ++i) {
+        if (!first) raw += ',';
+        first = false;
+        raw += R"({"type":"file","name":")";
+        raw += core::utils::escape_json_string("generated_file_" + std::to_string(i) + ".hpp");
+        raw += R"("})";
+    }
+    raw += "]}";
+    return raw;
+}
+
 } // namespace
 
 TEST_CASE("ToolOutputHistory leaves compact outputs unchanged", "[agent][tool-history]") {
@@ -215,6 +272,90 @@ TEST_CASE("ToolOutputHistory light-compresses oversized shell output", "[agent][
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[light shell summary]"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("ERROR: test_auth_flow failed"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Exit code: 1"));
+}
+
+TEST_CASE("ToolOutputHistory leaves compact search and list outputs unchanged",
+          "[agent][tool-history]") {
+    const std::string grep = R"({"matches":[{"path":"src/a.cpp","line":7,"text":"needle"}]})";
+    const std::string files = R"({"files":["src/a.cpp","src/b.cpp"]})";
+    const std::string entries =
+        R"({"entries":[{"type":"dir","name":"src"},{"type":"file","name":"README.md"}]})";
+
+    CHECK(core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kGrepSearch,
+        grep,
+        "full") == grep);
+    CHECK(core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kFileSearch,
+        files,
+        "light") == files);
+    CHECK(core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kListDirectory,
+        entries,
+        "ultra") == entries);
+}
+
+TEST_CASE("ToolOutputHistory full mode summarizes oversized grep_search output",
+          "[agent][tool-history]") {
+    const std::string raw = large_grep_output();
+    const std::string compressed = core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kGrepSearch,
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 2 * 1024,
+            .head_chars = 1200,
+            .tail_chars = 512,
+        },
+        "full");
+
+    CHECK(compressed.size() < raw.size());
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("compression":"full")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[full grep_search summary]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Grouped matches:"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("src/module_0/component.cpp"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("needle match with useful"));
+    CHECK_THAT(compressed, !Catch::Matchers::ContainsSubstring(R"("head":)"));
+}
+
+TEST_CASE("ToolOutputHistory light mode summarizes oversized file_search output",
+          "[agent][tool-history]") {
+    const std::string raw = large_file_search_output();
+    const std::string compressed = core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kFileSearch,
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 2 * 1024,
+            .head_chars = 1200,
+            .tail_chars = 512,
+        },
+        "light");
+
+    CHECK(compressed.size() < raw.size());
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("compression":"light")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[light file_search summary]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Top path groups:"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("feature_"));
+}
+
+TEST_CASE("ToolOutputHistory ultra mode summarizes oversized list_directory output",
+          "[agent][tool-history]") {
+    const std::string raw = large_list_directory_output();
+    const std::string compressed = core::agent::tool_output_history::clamp_for_history(
+        core::tools::names::kListDirectory,
+        raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 2 * 1024,
+            .head_chars = 1200,
+            .tail_chars = 512,
+        },
+        "ultra");
+
+    CHECK(compressed.size() < raw.size());
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("compression":"ultra")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[ultra list_directory summary]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("80 dirs, 160 files"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Directories:"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Files:"));
 }
 
 TEST_CASE("ToolOutputHistory full mode returns cached stubs for unchanged read_file output",

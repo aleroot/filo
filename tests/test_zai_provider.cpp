@@ -62,6 +62,7 @@ TEST_CASE("ModelRegistry includes Z.ai GLM coding models", "[zai][registry]") {
     REQUIRE(registry.has_model("glm-4.7"));
     REQUIRE(registry.has_model("glm-4.5-air"));
     REQUIRE(get_max_context_size("glm-5.2") == 1000000);
+    REQUIRE(registry.get_info("glm-5.2")->max_output_tokens == 128000);
     REQUIRE(get_max_context_size("glm-5-turbo") == 200000);
     REQUIRE(get_max_context_size("glm-4.7") == 200000);
     REQUIRE(get_max_context_size("glm-4.5-air") == 200000);
