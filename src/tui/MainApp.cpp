@@ -16,6 +16,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/TodoUtils.hpp"
+#include "core/scm/ScmFactory.hpp"
 #include "core/history/PromptHistoryStore.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/app.hpp>
@@ -225,6 +226,25 @@ std::optional<std::string> run_command_capture(std::string_view command) {
     }
     return output;
 #endif
+}
+
+std::vector<ReviewBaseRef> filter_review_base_refs(const std::vector<ReviewBaseRef>& refs,
+                                                   std::string_view query) {
+    const std::string lowered_query = to_lower_ascii(std::string(trim_ascii(query)));
+    if (lowered_query.empty()) {
+        return refs;
+    }
+
+    std::vector<ReviewBaseRef> filtered;
+    for (const auto& ref : refs) {
+        const std::string lowered_name = to_lower_ascii(ref.name);
+        const std::string lowered_description = to_lower_ascii(ref.description);
+        if (lowered_name.find(lowered_query) != std::string::npos
+            || lowered_description.find(lowered_query) != std::string::npos) {
+            filtered.push_back(ref);
+        }
+    }
+    return filtered;
 }
 
 bool file_has_content(const std::filesystem::path& path) {
@@ -837,9 +857,25 @@ RunResult run(RunOptions opts) {
         int selected = 0;
         ReviewPickerMode mode = ReviewPickerMode::SelectTarget;
         std::string input_text;
+        std::vector<ReviewBaseRef> base_refs;
+        std::vector<ReviewBaseRef> filtered_base_refs;
+        int selected_base_ref = 0;
         std::function<void(std::optional<std::string>)> on_select;
     };
     ReviewPickerState review_picker_state;
+
+    auto refresh_review_base_refs_locked = [&]() {
+        review_picker_state.filtered_base_refs =
+            filter_review_base_refs(review_picker_state.base_refs, review_picker_state.input_text);
+        if (review_picker_state.filtered_base_refs.empty()) {
+            review_picker_state.selected_base_ref = 0;
+        } else {
+            review_picker_state.selected_base_ref = std::clamp(
+                review_picker_state.selected_base_ref,
+                0,
+                static_cast<int>(review_picker_state.filtered_base_refs.size()) - 1);
+        }
+    };
 
     struct ReviewActivityState {
         bool active = false;
@@ -1510,12 +1546,16 @@ RunResult run(RunOptions opts) {
     };
 
     auto open_review_picker = [&](std::function<void(std::optional<std::string>)> on_select) {
+        auto base_refs = core::scm::ScmFactory::create(settings_working_dir)->list_branch_refs();
         {
             std::lock_guard lock(ui_mutex);
             review_picker_state.active = true;
             review_picker_state.selected = 0;
             review_picker_state.mode = ReviewPickerMode::SelectTarget;
             review_picker_state.input_text.clear();
+            review_picker_state.base_refs = std::move(base_refs);
+            review_picker_state.selected_base_ref = 0;
+            refresh_review_base_refs_locked();
             review_picker_state.on_select = std::move(on_select);
         }
         screen.PostEvent(Event::Custom);
@@ -3557,6 +3597,9 @@ RunResult run(RunOptions opts) {
                 screen.PostEvent(Event::Custom);
             },
             .open_review_picker_fn = open_review_picker,
+            .dispatch_async_fn = [](std::function<void()> task) {
+                std::thread(std::move(task)).detach();
+            },
             .settings_status_fn = settings_status,
             .yolo_mode_enabled_fn = is_yolo_mode_enabled,
             .set_yolo_mode_enabled_fn = set_yolo_mode_enabled,
@@ -4002,17 +4045,47 @@ RunResult run(RunOptions opts) {
                 } else if (event == Event::Escape) {
                     review_picker_state.mode = ReviewPickerMode::SelectTarget;
                     review_picker_state.input_text.clear();
+                    review_picker_state.selected_base_ref = 0;
+                    refresh_review_base_refs_locked();
+                } else if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch
+                           && event == Event::ArrowUp
+                           && !review_picker_state.filtered_base_refs.empty()) {
+                    review_picker_state.selected_base_ref =
+                        (review_picker_state.selected_base_ref
+                         + static_cast<int>(review_picker_state.filtered_base_refs.size()) - 1)
+                        % static_cast<int>(review_picker_state.filtered_base_refs.size());
+                } else if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch
+                           && event == Event::ArrowDown
+                           && !review_picker_state.filtered_base_refs.empty()) {
+                    review_picker_state.selected_base_ref =
+                        (review_picker_state.selected_base_ref + 1)
+                        % static_cast<int>(review_picker_state.filtered_base_refs.size());
                 } else if (event == Event::Backspace || event == Event::Delete) {
                     erase_last_utf8_codepoint(review_picker_state.input_text);
+                    if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch) {
+                        refresh_review_base_refs_locked();
+                    }
                 } else if (event == Event::Return) {
                     const std::string_view trimmed =
                         trim_ascii(review_picker_state.input_text);
-                    if (!trimmed.empty()) {
-                        if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch) {
+                    if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch) {
+                        if (!review_picker_state.filtered_base_refs.empty()) {
+                            const int selected_ref = std::clamp(
+                                review_picker_state.selected_base_ref,
+                                0,
+                                static_cast<int>(review_picker_state.filtered_base_refs.size()) - 1);
+                            review_picker_request = std::format(
+                                "--base {}",
+                                review_picker_state.filtered_base_refs[static_cast<std::size_t>(selected_ref)].name);
+                            review_picker_on_select = std::move(review_picker_state.on_select);
+                            review_picker_state.active = false;
+                        } else if (!trimmed.empty()) {
                             review_picker_request = std::format("--base {}", std::string(trimmed));
-                        } else {
-                            review_picker_request = std::string(trimmed);
+                            review_picker_on_select = std::move(review_picker_state.on_select);
+                            review_picker_state.active = false;
                         }
+                    } else if (!trimmed.empty()) {
+                        review_picker_request = std::string(trimmed);
                         review_picker_on_select = std::move(review_picker_state.on_select);
                         review_picker_state.active = false;
                     }
@@ -4024,6 +4097,10 @@ RunResult run(RunOptions opts) {
                         const bool is_control = input.size() == 1 && std::iscntrl(first);
                         if (!is_control) {
                             review_picker_state.input_text += input;
+                            if (review_picker_state.mode == ReviewPickerMode::EnterBaseBranch) {
+                                review_picker_state.selected_base_ref = 0;
+                                refresh_review_base_refs_locked();
+                            }
                         }
                     }
                 }
@@ -4717,6 +4794,8 @@ RunResult run(RunOptions opts) {
         std::string            compression_mode;
         ReviewPickerMode       review_picker_mode = ReviewPickerMode::SelectTarget;
         std::string            review_picker_input;
+        std::vector<ReviewBaseRef> review_picker_base_refs;
+        int                    review_picker_base_ref_selected = 0;
         std::chrono::steady_clock::time_point review_activity_started_at =
             std::chrono::steady_clock::time_point::min();
         core::config::SettingsScope settings_panel_scope = core::config::SettingsScope::User;
@@ -4754,6 +4833,8 @@ RunResult run(RunOptions opts) {
             review_picker_selected = review_picker_state.selected;
             review_picker_mode = review_picker_state.mode;
             review_picker_input = review_picker_state.input_text;
+            review_picker_base_refs = review_picker_state.filtered_base_refs;
+            review_picker_base_ref_selected = review_picker_state.selected_base_ref;
             review_activity_active = review_activity_state.active;
             review_activity_hint = review_activity_state.hint;
             review_activity_started_at = review_activity_state.started_at;
@@ -4834,7 +4915,9 @@ RunResult run(RunOptions opts) {
             bottom_el = render_review_picker_panel(
                 review_picker_mode,
                 review_picker_selected,
-                review_picker_input);
+                review_picker_input,
+                review_picker_base_refs,
+                review_picker_base_ref_selected);
         } else if (local_model_picker_active) {
             bottom_el = render_local_model_picker_panel(
                 local_model_picker_dir,

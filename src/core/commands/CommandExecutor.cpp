@@ -1959,13 +1959,23 @@ public:
         ctx.clear_input_fn();
 
         const std::string args = trailing_arguments(ctx.text);
+        auto run_review = [ctx](std::string selection) {
+            if (ctx.dispatch_async_fn) {
+                ctx.dispatch_async_fn([ctx, selection = std::move(selection)]() {
+                    ReviewExecutor::execute(ctx, selection);
+                });
+                return;
+            }
+            ReviewExecutor::execute(ctx, selection);
+        };
+
         if (!args.empty()) {
-            ReviewExecutor::execute(ctx, args);
+            run_review(args);
             return;
         }
 
         if (!ctx.agent) {
-            ReviewExecutor::execute(ctx, args);
+            run_review(args);
             return;
         }
 
@@ -1973,6 +1983,12 @@ public:
             const CommandContext picker_ctx = ctx;
             ctx.open_review_picker_fn([picker_ctx](std::optional<std::string> selection) {
                 if (!selection.has_value()) {
+                    return;
+                }
+                if (picker_ctx.dispatch_async_fn) {
+                    picker_ctx.dispatch_async_fn([picker_ctx, selection = std::move(*selection)]() {
+                        ReviewExecutor::execute(picker_ctx, selection);
+                    });
                     return;
                 }
                 ReviewExecutor::execute(picker_ctx, *selection);

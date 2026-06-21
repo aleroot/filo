@@ -1240,10 +1240,24 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
         return;
     }
 
+    const auto set_review_activity_fn = ctx.set_review_activity_fn;
+    const std::string initial_review_hint = review_user_hint(parsed.target);
+    if (set_review_activity_fn) {
+        set_review_activity_fn(
+            true,
+            initial_review_hint.empty() ? std::string("current changes") : initial_review_hint);
+    }
+    auto stop_review_activity = [&]() {
+        if (set_review_activity_fn) {
+            set_review_activity_fn(false, "");
+        }
+    };
+
     if (parsed.target.kind != ReviewTargetKind::Custom) {
         std::string git_error;
         if (!is_git_repository(git_error)) {
             const std::string detail = trim_copy(git_error);
+            stop_review_activity();
             ctx.append_history_fn(std::format(
                 "\n✗  /review requires a git repository. {}\n",
                 detail.empty() ? std::string() : std::format("({})", detail)));
@@ -1254,6 +1268,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
     std::string resolve_error;
     auto resolved = resolve_review_request(parsed.target, resolve_error);
     if (!resolved.has_value()) {
+        stop_review_activity();
         ctx.append_history_fn(std::format(
             "\n✗  Could not start review: {}\n",
             resolve_error.empty() ? std::string("unknown review setup error") : resolve_error));
@@ -1266,13 +1281,7 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
                                       review_hint.empty()
                                           ? std::string("current changes")
                                           : review_hint));
-    const auto set_review_activity_fn = ctx.set_review_activity_fn;
     const auto append_assistant_output_fn = ctx.append_assistant_output_fn;
-    if (set_review_activity_fn) {
-        set_review_activity_fn(
-            true,
-            review_hint.empty() ? std::string("current changes") : review_hint);
-    }
 
     auto append_fn = ctx.append_history_fn;
     auto collected_output = std::make_shared<std::string>();

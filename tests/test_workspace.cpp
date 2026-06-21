@@ -1,10 +1,16 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/context/SessionContext.hpp"
+#include "core/scm/ScmFactory.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
 
+#include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <filesystem>
+#include <format>
+#include <string_view>
 #include <system_error>
 
 TEST_CASE("Workspace bounds logic", "[Workspace]") {
@@ -126,4 +132,51 @@ TEST_CASE("SessionContext delegates to its owned SessionWorkspace", "[Workspace]
 
     std::filesystem::remove_all(primary, ec);
     std::filesystem::remove_all(extra, ec);
+}
+
+TEST_CASE("SourceControlProvider lists branch refs through abstraction", "[Workspace][SCM]") {
+    if (std::system("git --version >/dev/null 2>&1") != 0) {
+        SKIP("git is not available in this environment");
+    }
+
+    namespace fs = std::filesystem;
+    struct CwdGuard {
+        fs::path old;
+        ~CwdGuard() {
+            std::error_code ec;
+            fs::current_path(old, ec);
+        }
+    } guard{fs::current_path()};
+
+    std::error_code ec;
+    const fs::path temp_dir =
+        fs::temp_directory_path() / std::format("filo-test-scm-{}", std::rand());
+    fs::remove_all(temp_dir, ec);
+    fs::create_directories(temp_dir, ec);
+    REQUIRE_FALSE(ec);
+    fs::current_path(temp_dir);
+
+    REQUIRE(std::system("git init -q") == 0);
+    {
+        std::ofstream readme("README.md");
+        readme << "test\n";
+    }
+    REQUIRE(std::system("git add README.md") == 0);
+    REQUIRE(std::system(
+        "git -c user.name=Filo -c user.email=filo@example.invalid commit -qm initial")
+        == 0);
+    REQUIRE(std::system("git branch feature/ref-list") == 0);
+
+    auto scm = core::scm::ScmFactory::create(temp_dir);
+    const auto refs = scm->list_branch_refs();
+
+    const auto has_ref = [&refs](std::string_view name) {
+        return std::ranges::any_of(refs, [name](const core::scm::BranchRef& ref) {
+            return ref.name == name;
+        });
+    };
+    REQUIRE(has_ref("feature/ref-list"));
+
+    fs::current_path(guard.old, ec);
+    fs::remove_all(temp_dir, ec);
 }

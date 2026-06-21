@@ -814,6 +814,36 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(mock_history->find("Code review started") == std::string::npos);
     }
 
+    SECTION("/review picker selection dispatches review work asynchronously") {
+        *mock_history = "";
+        review_activity_events->clear();
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+
+        std::optional<std::function<void()>> deferred_task;
+        ctx.dispatch_async_fn = [&deferred_task](std::function<void()> task) {
+            deferred_task = std::move(task);
+        };
+        ctx.open_review_picker_fn =
+            [](std::function<void(std::optional<std::string>)> on_select) {
+                on_select(std::string("custom review prompt"));
+            };
+        ctx.text = "/review";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(deferred_task.has_value());
+        REQUIRE(provider->requests.empty());
+
+        (*deferred_task)();
+        REQUIRE(provider->requests.size() == 1);
+        REQUIRE_FALSE(review_activity_events->empty());
+        REQUIRE(review_activity_events->front().first == true);
+    }
+
     SECTION("/review with inline prompt toggles review activity callbacks") {
         *mock_history = "";
         review_activity_events->clear();

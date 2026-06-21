@@ -58,6 +58,7 @@ struct CommandContext {
     std::function<void(std::string_view)> resume_session_fn = {};
     std::function<void(std::vector<std::string>, std::function<void(std::optional<std::string>)>)> open_provider_picker_fn = {};
     std::function<void(std::function<void(std::optional<std::string>)>)> open_review_picker_fn = {};
+    std::function<void(std::function<void()>)> dispatch_async_fn = {};
     std::function<std::string()> settings_status_fn = {};
     std::function<bool()> yolo_mode_enabled_fn = {};
     std::function<void(bool)> set_yolo_mode_enabled_fn = {};

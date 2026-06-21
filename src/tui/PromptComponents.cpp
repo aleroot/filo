@@ -1088,7 +1088,9 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
 
 Element render_review_picker_panel(ReviewPickerMode mode,
                                    int selected_index,
-                                   std::string_view input_text) {
+                                   std::string_view input_text,
+                                   const std::vector<ReviewBaseRef>& base_refs,
+                                   int selected_base_ref) {
     const auto uncommitted_option = make_selection_row(
         "Uncommitted changes",
         "Review the current staged, unstaged, and untracked changes.",
@@ -1129,7 +1131,46 @@ Element render_review_picker_panel(ReviewPickerMode mode,
         children.push_back(separator());
         children.push_back(text("Base branch") | color(ColorYellowBright));
         children.push_back(text(std::format("  > {}█", display)) | color(Color::White));
-        children.push_back(text("Enter the branch name to diff against. Esc returns to the menu.") | dim);
+        if (!base_refs.empty()) {
+            children.push_back(text("Type to filter or enter a custom ref. Enter selects the highlighted ref.") | dim);
+
+            constexpr int kMaxVisibleBaseRefs = 6;
+            const int total = static_cast<int>(base_refs.size());
+            const int clamped_selected = std::clamp(selected_base_ref, 0, total - 1);
+            const int start_idx = std::max(0, std::min(
+                clamped_selected - kMaxVisibleBaseRefs / 2,
+                std::max(0, total - kMaxVisibleBaseRefs)));
+            const int end_idx = std::min(start_idx + kMaxVisibleBaseRefs, total);
+
+            Elements ref_rows;
+            for (int i = start_idx; i < end_idx; ++i) {
+                const auto& ref = base_refs[static_cast<std::size_t>(i)];
+                const bool is_selected = (i == clamped_selected);
+                auto row = hbox({
+                    text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
+                    text(ref.name) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
+                    ref.description.empty()
+                        ? text("")
+                        : (text(std::format("  {}", ref.description)) | color(Color::GrayDark)),
+                    filler(),
+                });
+                if (is_selected) {
+                    row = row | bgcolor(Color::GrayDark);
+                }
+                ref_rows.push_back(std::move(row));
+            }
+            if (start_idx > 0) {
+                ref_rows.insert(ref_rows.begin(),
+                    hbox({text(" \xe2\x86\x91 ") | color(ColorYellowDark), text("more above") | dim}));
+            }
+            if (end_idx < total) {
+                ref_rows.push_back(
+                    hbox({text(" \xe2\x86\x93 ") | color(ColorYellowDark), text("more below") | dim}));
+            }
+            children.push_back(vbox(std::move(ref_rows)));
+        } else {
+            children.push_back(text("No branches found. Type a branch name or ref manually. Esc returns to the menu.") | dim);
+        }
     } else if (mode == ReviewPickerMode::EnterCustomPrompt) {
         const std::string display =
             input_text.empty() ? "<custom review prompt>" : std::string(input_text);

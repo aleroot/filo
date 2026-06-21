@@ -275,6 +275,31 @@ TEST_CASE("render_permission_prompt_panel — keeps file header visible with lon
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("@@ -1,3 +1,40 @@"));
 }
 
+TEST_CASE("render_review_picker_panel — base branch mode renders selectable refs",
+          "[tui][picker][review]") {
+    std::vector<ReviewBaseRef> refs = {
+        {.name = "main", .description = "tracks origin/main"},
+        {.name = "release", .description = ""},
+    };
+
+    auto panel = render_review_picker_panel(
+        ReviewPickerMode::EnterBaseBranch,
+        1,
+        "",
+        refs,
+        0);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fixed(18));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Base branch"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("main"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("tracks origin/main"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("release"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Enter selects the highlighted ref"));
+}
+
 TEST_CASE("render_settings_panel — inherited and scoped rows render without crashing",
           "[tui][picker][settings]") {
     std::vector<SettingsPanelRow> rows = {

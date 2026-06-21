@@ -12,6 +12,11 @@ struct StatusItem {
   char status_code; // 'M'odified, 'A'dded, 'D'eleted, '?'Untracked, etc.
 };
 
+struct BranchRef {
+  std::string name;
+  std::string description;
+};
+
 /**
  * @brief Abstract interface for Source Control Management systems (Git, Hg,
  * etc.).
@@ -39,6 +44,13 @@ public:
    * files, branch). Designed for injection into LLM context.
    */
   [[nodiscard]] virtual std::string get_status_summary() const = 0;
+
+  /**
+   * @brief Returns branch-like refs that can be used as comparison bases.
+   */
+  [[nodiscard]] virtual std::vector<BranchRef> list_branch_refs() const {
+    return {};
+  }
 
   /**
    * @brief Returns the root directory of the repository.

@@ -1,10 +1,10 @@
 #include "GitProvider.hpp"
-#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
-#include <iostream>
 #include <memory>
 #include <sstream>
+#include <string_view>
 
 namespace core::scm {
 
@@ -26,21 +26,42 @@ std::string exec_cmd(const std::string &cmd) {
   }
   return result;
 }
+
+std::string shell_single_quote(std::string_view value) {
+  std::string out;
+  out.reserve(value.size() + 2);
+  out.push_back('\'');
+  for (const char ch : value) {
+    if (ch == '\'') {
+      out += "'\\''";
+    } else {
+      out.push_back(ch);
+    }
+  }
+  out.push_back('\'');
+  return out;
+}
+
+std::string git_command(const std::filesystem::path &root_dir,
+                        std::string_view args) {
+  return "git -C " + shell_single_quote(root_dir.string()) + " " + std::string(args);
+}
+
+std::string capture_git(const std::filesystem::path &root_dir,
+                        std::string_view args) {
+  return exec_cmd(git_command(root_dir, args));
+}
+
 } // namespace
 
 GitProvider::GitProvider(std::filesystem::path root_dir)
     : root_dir_(std::move(root_dir)) {}
 
-std::string GitProvider::run_git_command(const std::string &args) const {
-  // Ensure we run from the repo root
-  std::string cmd = "git -C \"" + root_dir_.string() + "\" " + args;
-  return exec_cmd(cmd);
-}
-
 bool GitProvider::is_ignored(const std::filesystem::path &path) const {
   // git check-ignore -q <path> returns 0 if ignored, 1 if not
-  std::string cmd = "git -C \"" + root_dir_.string() + "\" check-ignore -q \"" +
-                    path.string() + "\"";
+  const std::string cmd = git_command(
+      root_dir_,
+      "check-ignore -q -- " + shell_single_quote(path.string()));
   int ret = system(cmd.c_str());
   // check-ignore returns 0 if ignored
   // system returns status code (exit code in high bits usually, but strictly,
@@ -53,7 +74,8 @@ std::string GitProvider::get_status_summary() const {
   // --branch: Show branch info
   // --short: Concise output
   // --no-optional-locks: Avoid taking locks
-  std::string status = run_git_command(
+  std::string status = capture_git(
+      root_dir_,
       "status --short --branch --no-ahead-behind --no-optional-locks");
   if (status.empty())
     return "";
@@ -62,6 +84,37 @@ std::string GitProvider::get_status_summary() const {
   while (!status.empty() && std::isspace(status.back()))
     status.pop_back();
   return status;
+}
+
+std::vector<BranchRef> GitProvider::list_branch_refs() const {
+  const std::string output = capture_git(
+      root_dir_,
+      "for-each-ref --sort=refname --format='%(refname:short)%09%(upstream:short)' "
+      "refs/heads refs/remotes");
+  if (output.empty()) {
+    return {};
+  }
+
+  std::vector<BranchRef> refs;
+  std::stringstream lines(output);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    const std::size_t tab = line.find('\t');
+    std::string name = tab == std::string::npos ? line : line.substr(0, tab);
+    if (name.empty() || name.ends_with("/HEAD")) {
+      continue;
+    }
+    const std::string upstream = tab == std::string::npos ? std::string() : line.substr(tab + 1);
+    refs.push_back(BranchRef{
+        .name = std::move(name),
+        .description = upstream.empty() ? std::string() : "tracks " + upstream,
+    });
+  }
+
+  return refs;
 }
 
 } // namespace core::scm

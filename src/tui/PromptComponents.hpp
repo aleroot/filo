@@ -2,6 +2,7 @@
 
 #include "Autocomplete.hpp"
 #include "DiffPreview.hpp"
+#include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -32,6 +33,8 @@ struct ConversationSearchHit {
     std::string role;
     std::string snippet;
 };
+
+using ReviewBaseRef = core::scm::BranchRef;
 
 enum class ReviewPickerMode {
     SelectTarget,
@@ -93,7 +96,9 @@ ftxui::Element render_session_picker_panel(const std::vector<core::session::Sess
 
 ftxui::Element render_review_picker_panel(ReviewPickerMode mode,
                                           int selected_index,
-                                          std::string_view input_text);
+                                          std::string_view input_text,
+                                          const std::vector<ReviewBaseRef>& base_refs = {},
+                                          int selected_base_ref = 0);
 
 ftxui::Element render_conversation_search_panel(
     std::string_view query,
