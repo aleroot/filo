@@ -597,6 +597,7 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
     std::ostringstream out;
     out << "[light read_file summary]\n";
     out << "Original chars: " << content.size() << "\n";
+    out << "Original lines: " << count_lines(content) << "\n";
     out << "Use read_file with offset_line/limit_lines for exact source slices.\n";
     if (!signals.empty()) {
         out << "\nStructural lines:\n";
@@ -666,6 +667,7 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
     out << "[light shell summary]\n";
     out << "Exit code: " << exit_code << "\n";
     out << "Original chars: " << output.size() << "\n";
+    out << "Original lines: " << count_lines(output) << "\n";
     if (!signals.empty()) {
         out << "\nSignal lines:\n";
         const std::size_t signal_budget = max_chars > tail_chars + 512
@@ -705,15 +707,26 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
 [[nodiscard]] std::string wrapped_light_payload(std::string_view tool_name,
                                                 std::string_view field_name,
                                                 std::string_view original_payload,
-                                                std::string_view compressed_payload) {
+                                                std::string_view compressed_payload,
+                                                std::string_view path_or_command = {},
+                                                std::optional<std::size_t> original_lines = std::nullopt) {
     core::utils::JsonWriter writer(512 + compressed_payload.size());
     {
         auto object = writer.object();
         writer.kv_bool("compressed", true).comma()
               .kv_str("compression", "light").comma()
               .kv_str("tool", tool_name).comma()
-              .kv_num("original_chars", static_cast<int64_t>(original_payload.size())).comma()
-              .kv_num("kept_chars", static_cast<int64_t>(compressed_payload.size())).comma()
+              .kv_num("original_chars", static_cast<int64_t>(original_payload.size()));
+        if (original_lines.has_value()) {
+            writer.comma().kv_num("original_lines", static_cast<int64_t>(*original_lines));
+        }
+        writer.comma().kv_num("kept_chars", static_cast<int64_t>(compressed_payload.size()));
+        if (!path_or_command.empty()) {
+            writer.comma().kv_str(
+                tool_name == core::tools::names::kRunTerminalCommand ? "command" : "path",
+                path_or_command);
+        }
+        writer.comma()
               .kv_str("digest_fnv1a64", digest_hex(original_payload)).comma()
               .kv_str(field_name, compressed_payload);
     }
@@ -1133,7 +1146,8 @@ FullCompressionCache& full_cache() {
 [[nodiscard]] std::optional<std::string> light_compress_tool_output(
     std::string_view tool_name,
     std::string_view raw_output,
-    Limits limits) {
+    Limits limits,
+    Context context) {
     const CompressionProfile profile = compression_profile(
         tool_name,
         limits,
@@ -1149,7 +1163,14 @@ FullCompressionCache& full_cache() {
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
-        return wrapped_light_payload(tool_name, "content", *content, compressed);
+        const auto path = json_string_field(context.tool_arguments, "path").value_or("");
+        return wrapped_light_payload(
+            tool_name,
+            "content",
+            *content,
+            compressed,
+            path,
+            count_lines(*content));
     }
 
     if (tool_name == core::tools::names::kRunTerminalCommand) {
@@ -1163,7 +1184,14 @@ FullCompressionCache& full_cache() {
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
-        return wrapped_light_payload(tool_name, "output", *output, compressed);
+        const auto command = json_string_field(context.tool_arguments, "command").value_or("");
+        return wrapped_light_payload(
+            tool_name,
+            "output",
+            *output,
+            compressed,
+            command,
+            count_lines(*output));
     }
 
     if (auto compressed = structured_search_summary(tool_name, raw_output, profile);
@@ -1306,7 +1334,11 @@ std::string clamp_for_history(
     }
 
     if (profile.mode == CompressionMode::Light) {
-        if (auto compressed = light_compress_tool_output(tool_name, raw_output, profile.limits);
+        if (auto compressed = light_compress_tool_output(
+                tool_name,
+                raw_output,
+                profile.limits,
+                context);
             compressed.has_value() && compressed->size() < raw_output.size()) {
             return *compressed;
         }

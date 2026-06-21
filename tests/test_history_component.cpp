@@ -89,6 +89,191 @@ TEST_CASE("HistoryComponent scroll bounds", "[tui][history_component]") {
     // Should be clamped to 1.0f
 }
 
+// ============================================================================
+// Auto-scroll intent tests
+// ============================================================================
+
+TEST_CASE("HistoryComponent default state is FollowBottom",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    // A freshly created component must follow the bottom and show no badge.
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+    REQUIRE_FALSE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent ScrollUp suspends auto-follow",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    history.ScrollUp(0.1f);
+
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() < 1.0f);
+}
+
+TEST_CASE("HistoryComponent HandleWheel up suspends auto-follow",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::WheelUp;
+    mouse.motion = ftxui::Mouse::Pressed;
+    history.HandleWheel(ftxui::Event::Mouse("", mouse));
+
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+}
+
+TEST_CASE("HistoryComponent ScrollDown to bottom resumes auto-follow",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    // Scroll up to suspend follow.
+    history.ScrollUp(0.3f);
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+
+    // Scroll back all the way down.
+    history.ScrollDown(1.0f);
+
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+}
+
+TEST_CASE("HistoryComponent new message does not yank while user is reading",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages = mock_messages();
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    // Prime last_message_count_ by rendering once.
+    history.OnRender();
+
+    // User scrolls up to read.
+    history.ScrollUp(0.3f);
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    const float pos_before = history.ScrollPosition();
+
+    // A new message arrives.
+    messages.push_back(tui::make_info_message("New tool call"));
+    history.OnRender();
+
+    // Scroll position must NOT have been yanked to 1.0f.
+    REQUIRE(history.ScrollPosition() == pos_before);
+    // Badge must appear.
+    REQUIRE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent new message snaps to bottom when following",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages = mock_messages();
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    // Prime the component (default: FollowBottom).
+    history.OnRender();
+    REQUIRE(history.IsAutoScrollFollowing());
+
+    // Simulate a partial scroll down that keeps us in the "near bottom" zone.
+    // (Do NOT scroll up, so intent stays FollowBottom.)
+    messages.push_back(tui::make_info_message("Status update"));
+    history.OnRender();
+
+    REQUIRE(history.ScrollPosition() == 1.0f);
+    REQUIRE_FALSE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent ResetToBottom clears hold and indicator",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages = mock_messages();
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    // Put the component into a held + indicator state.
+    history.OnRender();
+    history.ScrollUp(0.4f);
+    messages.push_back(tui::make_info_message("New content"));
+    history.OnRender();
+    REQUIRE(history.HasNewContentIndicator());
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+
+    // ResetToBottom() must clear everything.
+    history.ResetToBottom();
+
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+    REQUIRE_FALSE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent transcript shrink resets stale hold state",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages = mock_messages();
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    history.OnRender();
+    history.ScrollUp(0.4f);
+    messages.push_back(tui::make_info_message("New content"));
+    history.OnRender();
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    REQUIRE(history.HasNewContentIndicator());
+
+    messages.clear();
+    messages.push_back(tui::make_system_message("Fresh transcript"));
+    history.OnRender();
+
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+    REQUIRE_FALSE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent JumpToMessage suspends follow when not at end",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    // Jump to the first of 5 messages => UserHeld.
+    history.JumpToMessage(0, 5);
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 0.0f);
+
+    // Jump to the last of 5 messages => FollowBottom.
+    history.JumpToMessage(4, 5);
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+}
+
+TEST_CASE("HistoryComponent End key resumes auto-follow",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(mock_messages, tick, mock_options);
+
+    history.ScrollUp(0.5f);
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+
+    // Synthesise the End key event.
+    history.OnEvent(ftxui::Event::End);
+
+    REQUIRE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() == 1.0f);
+}
+
 TEST_CASE("HistoryComponent toggles system disclosure by mouse click",
           "[tui][history_component]") {
     std::atomic<size_t> tick{0};

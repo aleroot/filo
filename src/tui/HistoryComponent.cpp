@@ -1,11 +1,19 @@
 #include "HistoryComponent.hpp"
 
 #include "Constants.hpp"
+#include "TuiTheme.hpp"
 
 #include <algorithm>
 
 namespace tui {
 namespace {
+
+// ── Auto-scroll threshold constants ──────────────────────────────────────────
+// "Near bottom" = within ~3 visual lines of the end.
+// The ratio cap ensures correctness for both tiny and large transcripts.
+constexpr float kBottomThresholdLines    = 3.0f;
+constexpr float kBottomThresholdMaxRatio = 0.05f;  // never treat >5% from end as "bottom"
+constexpr float kBottomThresholdMinRatio = 0.95f;  // threshold is at least 95% of content
 
 int estimate_wrapped_line_count(std::string_view text) {
     if (text.empty()) {
@@ -179,7 +187,7 @@ HistoryComponent::HistoryComponent(
       get_options_(std::move(get_options)) {}
 
 ftxui::Element HistoryComponent::OnRender() {
-    // Auto-scroll to bottom if new messages appeared.
+    // Snapshot messages and build render options.
     const auto messages = get_messages_();
     auto options = get_options_();
     options.scroll_pos = scroll_pos_;
@@ -201,11 +209,14 @@ ftxui::Element HistoryComponent::OnRender() {
         return seed;
     }();
 
+    // Recompute content-height estimate only when layout changes.
     std::size_t layout_fingerprint = history_layout_fingerprint(messages);
     layout_fingerprint = combine_hash(
         layout_fingerprint,
         static_cast<std::size_t>(options.expand_system_details));
     layout_fingerprint = combine_hash(layout_fingerprint, disclosure_hash);
+
+    const int prev_estimated_lines = estimated_content_lines_;
     if (layout_fingerprint != last_layout_fingerprint_) {
         estimated_content_lines_ = estimate_history_line_cost(
             messages,
@@ -213,15 +224,59 @@ ftxui::Element HistoryComponent::OnRender() {
             options.expand_system_details);
         last_layout_fingerprint_ = layout_fingerprint;
     }
-    if (messages.size() > last_message_count_) {
-        scroll_pos_ = 1.0f;
-        last_message_count_ = messages.size();
+
+    // ── Intent-aware auto-scroll ─────────────────────────────────────────────
+    const std::size_t prev_message_count = last_message_count_;
+    last_message_count_ = messages.size();
+
+    if (messages.size() < prev_message_count) {
+        // The transcript was cleared or replaced; any prior user-held scroll
+        // position belongs to the old content.
+        ResetToBottom();
+    } else if (messages.size() > prev_message_count) {
+        // A new message card was added (user turn, tool card, assistant card, etc.).
+        if (scroll_intent_ == ScrollIntent::FollowBottom) {
+            // User is watching — keep pinned to the bottom.
+            scroll_pos_ = 1.0f;
+        } else {
+            // User is reading — do NOT yank; show indicator instead.
+            new_content_while_held_ = true;
+        }
     }
 
-    return render_history_panel(
+    // Streaming / tool growth: content height grew while user is scrolled up.
+    if (estimated_content_lines_ > prev_estimated_lines
+            && scroll_intent_ == ScrollIntent::UserHeld) {
+        new_content_while_held_ = true;
+    }
+    // ───────────────────────────────────────────────────────────────────
+
+    // Update scroll_pos for the render options snapshot.
+    options.scroll_pos = scroll_pos_;
+
+    auto panel = render_history_panel(
         messages,
         animation_tick_.load(std::memory_order_relaxed),
         options);
+
+    // Overlay a "\u2193 new content" badge when new content arrived while the user
+    // was scrolled up. The badge disappears as soon as they return to the bottom.
+    if (!new_content_while_held_) {
+        return panel;
+    }
+
+    auto badge = ftxui::text(" \u2193 new content ")
+        | ftxui::bold
+        | ftxui::color(ftxui::Color::Black)
+        | ftxui::bgcolor(static_cast<ftxui::Color>(tui::ColorYellowBright));
+
+    return ftxui::dbox({
+        std::move(panel),
+        ftxui::vbox({
+            ftxui::filler(),
+            ftxui::hbox({ftxui::filler(), std::move(badge)})
+        })
+    });
 }
 
 bool HistoryComponent::Focusable() const {
@@ -252,10 +307,12 @@ bool HistoryComponent::OnEvent(ftxui::Event event) {
         }
         if (event == ftxui::Event::Home) {
             scroll_pos_ = 0.0f;
+            SetScrollIntent(ScrollIntent::UserHeld);
             return true;
         }
         if (event == ftxui::Event::End) {
             scroll_pos_ = 1.0f;
+            SetScrollIntent(ScrollIntent::FollowBottom);
             return true;
         }
         // Escape or Enter returns focus to the input.
@@ -268,10 +325,16 @@ bool HistoryComponent::OnEvent(ftxui::Event event) {
 
 void HistoryComponent::ScrollUp(float amount) {
     scroll_pos_ = std::max(0.0f, scroll_pos_ - amount);
+    SetScrollIntent(ScrollIntent::UserHeld);
 }
 
 void HistoryComponent::ScrollDown(float amount) {
     scroll_pos_ = std::min(1.0f, scroll_pos_ + amount);
+    // If the user scrolled back down to (or past) the bottom threshold,
+    // resume auto-following so new content keeps them pinned there.
+    if (IsNearBottom()) {
+        SetScrollIntent(ScrollIntent::FollowBottom);
+    }
 }
 
 void HistoryComponent::ScrollPageUp() {
@@ -285,11 +348,57 @@ void HistoryComponent::ScrollPageDown() {
 void HistoryComponent::JumpToMessage(std::size_t message_index, std::size_t message_count) {
     if (message_count <= 1) {
         scroll_pos_ = 1.0f;
+        SetScrollIntent(ScrollIntent::FollowBottom);
         return;
     }
     const float ratio = static_cast<float>(message_index)
         / static_cast<float>(message_count - 1);
     scroll_pos_ = std::clamp(ratio, 0.0f, 1.0f);
+    // Navigating to the last message resumes auto-follow; anything else is a
+    // deliberate user jump that suspends it.
+    SetScrollIntent(IsNearBottom() ? ScrollIntent::FollowBottom
+                                   : ScrollIntent::UserHeld);
+}
+
+// ── Scroll-intent state machine ───────────────────────────────────────────
+
+void HistoryComponent::ResetToBottom() {
+    scroll_pos_ = 1.0f;
+    SetScrollIntent(ScrollIntent::FollowBottom);
+}
+
+bool HistoryComponent::IsAutoScrollFollowing() const noexcept {
+    return scroll_intent_ == ScrollIntent::FollowBottom;
+}
+
+bool HistoryComponent::HasNewContentIndicator() const noexcept {
+    return new_content_while_held_;
+}
+
+float HistoryComponent::ScrollPosition() const noexcept {
+    return scroll_pos_;
+}
+
+void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
+    scroll_intent_ = intent;
+    // Returning to FollowBottom clears the indicator badge — the user
+    // has scrolled back down and will see the new content naturally.
+    if (intent == ScrollIntent::FollowBottom) {
+        new_content_while_held_ = false;
+    }
+}
+
+bool HistoryComponent::IsNearBottom() const noexcept {
+    return scroll_pos_ >= BottomThresholdRatio();
+}
+
+float HistoryComponent::BottomThresholdRatio() const {
+    // Threshold = 1.0 - (3 lines expressed as a ratio), clamped so that:
+    //   • for short transcripts: at least 95% of the way down counts as "bottom"
+    //   • for long transcripts: the ratio never shrinks below 5% of content
+    return std::max(
+        1.0f - line_based_ratio(kBottomThresholdLines, 0.0f, kBottomThresholdMaxRatio),
+        kBottomThresholdMinRatio);
 }
 
 bool HistoryComponent::HandleWheel(ftxui::Event event) {

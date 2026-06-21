@@ -234,11 +234,18 @@ TEST_CASE("ToolOutputHistory light-compresses oversized read_file output", "[age
             .head_chars = 2 * 1024,
             .tail_chars = 1024,
         },
-        "light");
+        "light",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"path":"src/widgets/WidgetController.cpp"})",
+            .session_id = "light-read-metadata-session",
+        });
 
     CHECK(compressed.size() < raw.size());
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("compressed":true)"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("path":"src/widgets/WidgetController.cpp")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("original_lines":)"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[light read_file summary]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Original lines:"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("class WidgetController"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("digest_fnv1a64":)"));
 }
@@ -266,10 +273,17 @@ TEST_CASE("ToolOutputHistory light-compresses oversized shell output", "[agent][
             .head_chars = 2 * 1024,
             .tail_chars = 1024,
         },
-        "light");
+        "light",
+        core::agent::tool_output_history::Context{
+            .tool_arguments = R"({"command":"pytest tests/test_auth.py"})",
+            .session_id = "light-shell-metadata-session",
+        });
 
     CHECK(compressed.size() < raw.size());
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("command":"pytest tests/test_auth.py")"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring(R"("original_lines":)"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("[light shell summary]"));
+    CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Original lines:"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("ERROR: test_auth_flow failed"));
     CHECK_THAT(compressed, Catch::Matchers::ContainsSubstring("Exit code: 1"));
 }

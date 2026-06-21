@@ -779,6 +779,7 @@ RunResult run(RunOptions opts) {
     std::atomic<std::size_t> animation_tick = 0;
     std::mutex animation_mutex;
     std::condition_variable animation_cv;
+    std::function<void()> reset_history_view = [] {};
     core::commands::CommandExecutor cmd_executor;
     // Load layered prompt skills (global → project-local) before describe_commands()
     // so skill commands appear in the autocomplete index.
@@ -1156,6 +1157,7 @@ RunResult run(RunOptions opts) {
             }
             session_todos.clear();
         }
+        reset_history_view();
         animation_cv.notify_one();
         agent->clear_history();
         core::budget::BudgetTracker::get_instance().reset_session();
@@ -1527,6 +1529,7 @@ RunResult run(RunOptions opts) {
             }
             refresh_status_labels();
         }
+        reset_history_view();
         animation_cv.notify_one();
         screen.PostEvent(Event::Custom);
     };
@@ -3402,6 +3405,7 @@ RunResult run(RunOptions opts) {
             assistant_index = ui_messages.size() - 1;
             assistant_message_id = ui_messages.back().id;
         }
+        reset_history_view();
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
 
@@ -3808,6 +3812,9 @@ RunResult run(RunOptions opts) {
             };
         }
     );
+    reset_history_view = [history_component]() {
+        history_component->ResetToBottom();
+    };
 
     // ── Event handling ───────────────────────────────────────────────────────
     auto component = CatchEvent(input_component, [&](Event event) {

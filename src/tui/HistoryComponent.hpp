@@ -30,10 +30,28 @@ public:
     void ScrollPageDown();
     void JumpToMessage(std::size_t message_index, std::size_t message_count);
 
+    // Unconditionally snap to bottom and resume auto-follow.
+    // Call this when the user submits a new turn.
+    void ResetToBottom();
+
     // Helper for external controllers (e.g. input forwarding wheel events).
     bool HandleWheel(ftxui::Event event);
 
+    // Read-only introspection (used by unit tests and diagnostics).
+    [[nodiscard]] bool  IsAutoScrollFollowing()  const noexcept;
+    [[nodiscard]] bool  HasNewContentIndicator() const noexcept;
+    [[nodiscard]] float ScrollPosition()         const noexcept;
+
 private:
+    // ── Scroll-intent state machine ──────────────────────────────────────
+    // FollowBottom: auto-scroll tracks new content (default).
+    // UserHeld:     user explicitly scrolled away; auto-scroll is suspended.
+    enum class ScrollIntent { FollowBottom, UserHeld };
+
+    void SetScrollIntent(ScrollIntent intent);
+    [[nodiscard]] bool  IsNearBottom()          const noexcept;
+    [[nodiscard]] float BottomThresholdRatio()  const;
+
     bool OnMouseEvent(ftxui::Event event);
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
     static std::size_t history_layout_fingerprint(const std::vector<UiMessage>& messages);
@@ -46,12 +64,14 @@ private:
     const std::atomic<size_t>& animation_tick_;
     std::function<ConversationRenderOptions()> get_options_;
 
-    float scroll_pos_ = 1.0f;
-    size_t last_message_count_ = 0;
-    int estimated_content_lines_ = 1;
-    std::size_t last_layout_fingerprint_ = 0;
-    std::unordered_map<std::string, bool> disclosure_expanded_;
-    std::unordered_map<std::string, ftxui::Box> disclosure_hitboxes_;
+    float          scroll_pos_              = 1.0f;
+    ScrollIntent   scroll_intent_           = ScrollIntent::FollowBottom;
+    bool           new_content_while_held_  = false;
+    size_t         last_message_count_      = 0;
+    int            estimated_content_lines_ = 1;
+    std::size_t    last_layout_fingerprint_ = 0;
+    std::unordered_map<std::string, bool>        disclosure_expanded_;
+    std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
 };
 
 } // namespace tui
