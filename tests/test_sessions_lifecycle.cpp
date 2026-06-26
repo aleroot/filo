@@ -7,8 +7,10 @@
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
+#include <atomic>
 #include <filesystem>
 #include <future>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -17,6 +19,7 @@ class MockProvider : public core::llm::LLMProvider {
 public:
     core::llm::ProviderCapabilities caps;
     std::function<void(const core::llm::ChatRequest&, std::function<void(const core::llm::StreamChunk&)>)> on_stream;
+    int max_context_tokens = 0;
 
     MockProvider() {
         caps.supports_tool_calls = true;
@@ -34,6 +37,10 @@ public:
         } else {
             callback(core::llm::StreamChunk::make_final());
         }
+    }
+
+    int max_context_size() const noexcept override {
+        return max_context_tokens;
     }
 };
 
@@ -104,6 +111,166 @@ TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][ses
     // Agent::compact_history clears history and calls ensure_system_prompt.
     // ensure_system_prompt adds the system message.
     REQUIRE(history.empty()); // get_history excludes system prompt
+}
+
+TEST_CASE("Agent auto-compaction default threshold follows known model context", "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    provider->max_context_tokens = 100000;
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->set_auto_compact_threshold(25000);
+
+    std::atomic<int> summary_requests{0};
+    provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
+        if (!req.messages.empty()
+            && req.messages.back().content.find("Summarise the conversation")
+                != std::string::npos) {
+            summary_requests.fetch_add(1, std::memory_order_relaxed);
+            callback(core::llm::StreamChunk::make_content("unexpected summary"));
+            callback(core::llm::StreamChunk::make_final());
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content(std::string(120000, 'x')));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::promise<void> turn_done;
+    agent->send_message(
+        "Hello",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() { turn_done.set_value(); });
+
+    turn_done.get_future().wait();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    CHECK(summary_requests.load(std::memory_order_relaxed) == 0);
+    CHECK(agent->get_context_summary().empty());
+}
+
+TEST_CASE("Agent context window snapshot follows live compacted history", "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    provider->max_context_tokens = 100000;
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    provider->on_stream = [&](const core::llm::ChatRequest&, auto callback) {
+        callback(core::llm::StreamChunk::make_content(std::string(80000, 'x')));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::promise<void> turn_done;
+    agent->send_message(
+        "Hello",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() { turn_done.set_value(); });
+    turn_done.get_future().wait();
+
+    const auto before = agent->context_window_snapshot();
+    REQUIRE(before.max_context_tokens == 100000);
+    REQUIRE(before.remaining_pct >= 0);
+
+    agent->compact_history("Short summary.");
+
+    const auto after = agent->context_window_snapshot();
+    CHECK(after.max_context_tokens == 100000);
+    CHECK(after.estimated_context_tokens < before.estimated_context_tokens);
+    CHECK(after.remaining_pct > before.remaining_pct);
+}
+
+TEST_CASE("Agent auto-compaction reports provider return without final chunk", "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->set_auto_compact_threshold(50);
+
+    provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
+        if (!req.messages.empty()
+            && req.messages.back().content.find("Summarise the conversation")
+                != std::string::npos) {
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content(
+            "This response is long enough to trigger compaction."));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::promise<void> turn_done;
+    std::promise<void> failure_reported;
+    std::atomic<bool> failure_set{false};
+
+    agent->send_message(
+        "Hello",
+        [&](const std::string& text) {
+            if (text.find("stream ended without a final response") != std::string::npos
+                && !failure_set.exchange(true)) {
+                failure_reported.set_value();
+            }
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() { turn_done.set_value(); });
+
+    turn_done.get_future().wait();
+    REQUIRE(failure_reported.get_future().wait_for(std::chrono::seconds(5))
+            == std::future_status::ready);
+    CHECK(agent->get_context_summary().empty());
+}
+
+TEST_CASE("Agent auto-compaction reports provider exceptions", "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->set_auto_compact_threshold(50);
+
+    provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
+        if (!req.messages.empty()
+            && req.messages.back().content.find("Summarise the conversation")
+                != std::string::npos) {
+            throw std::runtime_error("summary transport failed");
+        }
+
+        callback(core::llm::StreamChunk::make_content(
+            "This response is long enough to trigger compaction."));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::promise<void> turn_done;
+    std::promise<void> failure_reported;
+    std::atomic<bool> failure_set{false};
+
+    agent->send_message(
+        "Hello",
+        [&](const std::string& text) {
+            if (text.find("summary transport failed") != std::string::npos
+                && !failure_set.exchange(true)) {
+                failure_reported.set_value();
+            }
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() { turn_done.set_value(); });
+
+    turn_done.get_future().wait();
+    REQUIRE(failure_reported.get_future().wait_for(std::chrono::seconds(5))
+            == std::future_status::ready);
+    CHECK(agent->get_context_summary().empty());
 }
 
 TEST_CASE("SessionStore list/delete operations", "[session][store]") {

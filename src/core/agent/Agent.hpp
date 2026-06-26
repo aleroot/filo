@@ -1,9 +1,11 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../tools/ToolManager.hpp"
+#include "HistoryCompactor.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "PermissionGate.hpp"
 #include "ToolCallDeduplicator.hpp"
@@ -117,6 +119,7 @@ public:
 
     [[nodiscard]] std::string get_mode() const;
     [[nodiscard]] std::string get_context_summary() const;
+    [[nodiscard]] core::context::ContextWindowSnapshot context_window_snapshot() const;
     [[nodiscard]] std::string get_active_model_name() const;
     void set_effort_level(std::string effort);
     [[nodiscard]] std::string get_effort_level() const;
@@ -137,8 +140,16 @@ public:
     }
 
     void set_auto_compact_threshold(int threshold) {
+        set_auto_compact_threshold(
+            threshold,
+            threshold == core::context::CompactionTriggerPolicy::kDefaultFixedTokenThreshold);
+    }
+
+    void set_auto_compact_threshold(int threshold,
+                                    bool use_model_aware_default_threshold) {
         std::lock_guard lock(history_mutex_);
         auto_compact_threshold_ = threshold;
+        auto_compact_uses_model_window_default_ = use_model_aware_default_threshold;
     }
 
     void set_loop_limits(LoopLimits limits) {
@@ -155,11 +166,13 @@ public:
     void set_active_model(std::string model) {
         std::lock_guard lock(history_mutex_);
         active_model_ = std::move(model);
+        refresh_context_window_snapshot_unlocked();
     }
 
     void set_provider(std::shared_ptr<core::llm::LLMProvider> provider) {
         std::lock_guard lock(history_mutex_);
         provider_ = std::move(provider);
+        refresh_context_window_snapshot_unlocked();
     }
 
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
@@ -193,6 +206,7 @@ private:
     [[nodiscard]] std::string build_dynamic_prompt_suffix() const;
     void refresh_stable_prompt_prefix_unlocked();
     void mark_stable_prompt_prefix_dirty() noexcept { stable_prompt_prefix_dirty_ = true; }
+    void refresh_context_window_snapshot_unlocked() noexcept;
 
     // Returns true if the tool call was approved (or doesn't need permission).
     [[nodiscard]] bool check_permission(const std::string& tool_name,
@@ -217,6 +231,7 @@ private:
     static constexpr int kLoopBreakerThreshold = 3;
     int consecutive_failure_rounds_ = 0;
     int auto_compact_threshold_ = 0;
+    bool auto_compact_uses_model_window_default_ = false;
     LoopLimits loop_limits_{};
 
     // Callbacks set by the TUI
@@ -229,7 +244,9 @@ private:
     std::string context_summary_;
     std::string stable_prompt_prefix_;
     bool stable_prompt_prefix_dirty_ = true;
+    core::context::ContextWindowSnapshot context_window_snapshot_;
     core::session::SessionEfficiencyController efficiency_controller_;
+    HistoryCompactor history_compactor_;
     std::function<void(const core::session::SessionEfficiencyDecision&)> efficiency_decision_fn_;
 
     // Cancellation support

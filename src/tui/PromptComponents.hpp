@@ -105,6 +105,8 @@ ftxui::Element render_conversation_search_panel(
     const std::vector<ConversationSearchHit>& hits,
     int selected_index);
 
+ftxui::Element render_stderr_panel(const std::vector<std::string>& lines);
+
 // ---------------------------------------------------------------------------
 // Question Dialog (AskUserQuestion tool)
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 #include "exec/Daemon.hpp"
 #include "exec/Prompter.hpp"
 #include <format>
+#include <filesystem>
 #include <iostream>
 #include <cstdio>
 #include <signal.h>

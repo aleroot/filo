@@ -185,6 +185,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
     src/core/agent/DelegatedAgentRunner.cpp
+    src/core/agent/HistoryCompactor.cpp
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
@@ -197,6 +198,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/Workspace.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/ContextWindowTracker.cpp
     src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
     src/core/context/SteeringLoader.cpp
@@ -377,6 +379,7 @@ add_executable(filo_tests
     tests/test_config_manager.cpp
     tests/test_context_mentions.cpp
     tests/test_context_builder.cpp
+    tests/test_context_window.cpp
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
@@ -398,6 +401,7 @@ add_executable(filo_tests
     tests/test_mcp_server.cpp
     tests/test_mcp_tasks.cpp
     tests/test_oauth.cpp
+    tests/test_logger.cpp
     tests/test_tier1.cpp
     tests/test_routing.cpp
     tests/test_router_provider.cpp
@@ -496,6 +500,7 @@ source_group(
         tests/test_history.cpp
         tests/test_config_manager.cpp
         tests/test_context_mentions.cpp
+        tests/test_context_window.cpp
         tests/test_openai_provider.cpp
         tests/test_openai_stream_encoder.cpp
         tests/test_openai_responses_protocol.cpp
@@ -515,6 +520,7 @@ source_group(
         tests/test_mcp_server.cpp
         tests/test_mcp_tasks.cpp
         tests/test_oauth.cpp
+        tests/test_logger.cpp
         tests/test_tier1.cpp
         tests/test_routing.cpp
         tests/test_router_provider.cpp

@@ -72,10 +72,21 @@ bool Logger::use_file(const std::filesystem::path& path) {
     return true;
 }
 
+void Logger::use_callback_sink(std::function<void(Level, std::string)> callback) noexcept {
+    std::scoped_lock lock(mutex_);
+    callback_sink_ = std::move(callback);
+}
+
+void Logger::clear_callback_sink() noexcept {
+    std::scoped_lock lock(mutex_);
+    callback_sink_ = {};
+}
+
 void Logger::disable() noexcept {
     std::scoped_lock lock(mutex_);
     sink_ = Sink::Null;
     file_sink_.reset();
+    callback_sink_ = {};
 }
 
 void Logger::configure_from_env() {
@@ -160,19 +171,33 @@ std::string Logger::timestamp_now() {
 
 void Logger::log_formatted(Level level, std::string_view message) noexcept {
     try {
-        std::scoped_lock lock(mutex_);
+        std::function<void(Level, std::string)> callback;
+        std::string callback_line;
+        {
+            std::scoped_lock lock(mutex_);
 
-        if (!is_enabled(level) || sink_ == Sink::Null) {
-            return;
+            if (!is_enabled(level)) {
+                return;
+            }
+
+            if (sink_ == Sink::File && file_sink_) {
+                emit_line(file_sink_.get(), level, message);
+                std::fflush(file_sink_.get());
+            } else if (sink_ == Sink::Stderr) {
+                emit_line(stderr, level, message);
+            }
+
+            if (callback_sink_) {
+                callback = callback_sink_;
+                callback_line = timestamps_enabled_
+                    ? std::format("[{}] [{}] {}", timestamp_now(), level_name(level), message)
+                    : std::format("[{}] {}", level_name(level), message);
+            }
         }
 
-        if (sink_ == Sink::File && file_sink_) {
-            emit_line(file_sink_.get(), level, message);
-            std::fflush(file_sink_.get());
-            return;
+        if (callback) {
+            callback(level, std::move(callback_line));
         }
-
-        emit_line(stderr, level, message);
     } catch (...) {
         // Logging must never throw.
     }

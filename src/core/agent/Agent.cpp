@@ -166,6 +166,7 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config()) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +214,7 @@ void Agent::set_mode(const std::string& mode) {
         }
         mark_stable_prompt_prefix_dirty();
         ensure_system_prompt();
+        refresh_context_window_snapshot_unlocked();
     }
 }
 
@@ -274,6 +276,13 @@ void Agent::ensure_system_prompt() {
     }
 }
 
+void Agent::refresh_context_window_snapshot_unlocked() noexcept {
+    context_window_snapshot_ = core::context::ContextWindowTracker::snapshot(
+        history_,
+        provider_,
+        active_model_);
+}
+
 // ---------------------------------------------------------------------------
 // History manipulation
 // ---------------------------------------------------------------------------
@@ -289,6 +298,7 @@ void Agent::clear_history() {
         provider_->reset_conversation_state();
     }
     ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
 }
 
 void Agent::compact_history(std::string summary) {
@@ -308,6 +318,7 @@ void Agent::compact_history(std::string summary) {
         provider_->reset_conversation_state();
     }
     ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
 }
 
 void Agent::undo_last() {
@@ -315,6 +326,7 @@ void Agent::undo_last() {
     if (!history_.empty() && history_.back().role == "assistant") history_.pop_back();
     while (!history_.empty() && history_.back().role == "tool") history_.pop_back();
     if (history_.size() > 1 && history_.back().role == "user")  history_.pop_back();
+    refresh_context_window_snapshot_unlocked();
 }
 
 std::string Agent::last_user_message() {
@@ -423,6 +435,7 @@ void Agent::send_message(core::llm::Message user_message,
         ensure_system_prompt();
         mode_snapshot = current_mode_;
         history_.push_back(std::move(user_message));
+        refresh_context_window_snapshot_unlocked();
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
@@ -461,6 +474,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         {
             std::lock_guard lock(history_mutex_);
             history_.push_back({"assistant", message, "", "", {}});
+            refresh_context_window_snapshot_unlocked();
         }
         text_callback(message);
         check_auto_compact(text_callback);
@@ -632,25 +646,19 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 }
             }
 
-            int max_context_size = provider ? provider->max_context_size() : 0;
-            if (max_context_size == 0 && !model.empty()) {
-                max_context_size = core::llm::get_max_context_size(model);
-            }
-
-            std::size_t total_chars = 0;
+            core::context::ContextWindowSnapshot context_window;
             {
                 std::lock_guard lock(self->history_mutex_);
-                for (const auto& msg : self->history_) {
-                    total_chars += msg.content.size();
-                    for (const auto& tc : msg.tool_calls) {
-                        total_chars += tc.function.name.size() + tc.function.arguments.size();
-                    }
-                }
+                context_window = core::context::ContextWindowTracker::snapshot(
+                    self->history_,
+                    provider,
+                    model);
                 self->efficiency_controller_.record_turn({
                     .prompt_tokens = usage.prompt_tokens,
                     .completion_tokens = usage.completion_tokens,
-                    .estimated_history_tokens = total_chars / 4 + 1,
-                    .max_context_tokens = max_context_size,
+                    .estimated_history_tokens =
+                        context_window.estimated_context_tokens,
+                    .max_context_tokens = context_window.max_context_tokens,
                     .provider_is_local = provider ? provider->capabilities().is_local : false,
                     .provider_supports_prompt_caching =
                         !model.empty() && core::llm::ModelRegistry::instance().supports(
@@ -671,6 +679,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         {
             std::lock_guard lock(self->history_mutex_);
             self->history_.push_back(asst_msg);
+            self->refresh_context_window_snapshot_unlocked();
         }
 
         // Check if we were stopped - if so, don't proceed to tool execution
@@ -933,6 +942,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 {
                     std::lock_guard lock(self->history_mutex_);
                     self->history_.push_back(msg);
+                    self->refresh_context_window_snapshot_unlocked();
                 }
                 if (turn_callbacks.on_tool_finish) {
                     turn_callbacks.on_tool_finish(tool_call, msg);
@@ -1066,6 +1076,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     history_ = std::move(messages);
     mark_stable_prompt_prefix_dirty();
     ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
 }
 
 std::string Agent::get_mode() const {
@@ -1076,6 +1087,11 @@ std::string Agent::get_mode() const {
 std::string Agent::get_context_summary() const {
     std::lock_guard lock(history_mutex_);
     return context_summary_;
+}
+
+core::context::ContextWindowSnapshot Agent::context_window_snapshot() const {
+    std::lock_guard lock(history_mutex_);
+    return context_window_snapshot_;
 }
 
 std::string Agent::get_active_model_name() const {
@@ -1137,77 +1153,44 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> text_call
     std::vector<core::llm::Message> history_copy;
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string model;
-    int max_context_size = 0;
+    core::context::CompactionDecision compaction;
     {
         std::lock_guard lock(history_mutex_);
         threshold = auto_compact_threshold_;
+        const bool use_model_aware_default_threshold =
+            auto_compact_uses_model_window_default_;
         history_copy = history_;
         provider = provider_;
         model = active_model_;
-        // Get model-specific context window size
-        max_context_size = provider_->max_context_size();
-        
-        // Fallback to ModelRegistry if the provider (e.g. Router) doesn't know context size
-        if (max_context_size == 0 && !model.empty()) {
-            max_context_size = core::llm::get_max_context_size(model);
-        }
+        compaction = core::context::ContextWindowTracker::compaction_decision(
+            history_copy,
+            provider,
+            model,
+            core::context::CompactionTriggerPolicy{
+                .configured_token_threshold = threshold,
+                .use_model_aware_default_threshold =
+                    use_model_aware_default_threshold,
+            });
     }
 
     // Auto-compact disabled
     if (threshold <= 0) return;
-    
-    // Estimate total tokens (4 chars per token)
-    size_t total_chars = 0;
-    for (const auto& msg : history_copy) {
-        total_chars += msg.content.size();
-        for (const auto& tc : msg.tool_calls) {
-            total_chars += tc.function.name.size() + tc.function.arguments.size();
-        }
-    }
-    int estimated_tokens = static_cast<int>(total_chars / 4);
 
-    // Use model-aware ratio-based threshold if context size is known, otherwise fallback to fixed threshold
-    constexpr float kCompactionTriggerRatio = 0.75f;  // Compact at 75% of context window
-    int effective_threshold = threshold;
-    
-    if (max_context_size > 0) {
-        // Model-aware: trigger at ratio of context window (reference: kimi-cli behavior)
-        int ratio_threshold = static_cast<int>(max_context_size * kCompactionTriggerRatio);
-        // Use the more conservative of ratio-based or user-configured threshold
-        effective_threshold = std::min(threshold, ratio_threshold);
-    }
+    if (!compaction.should_compact) return;
 
-    if (estimated_tokens < effective_threshold) return;
-
-    // Trigger background compaction
     auto self = shared_from_this();
-    std::thread([self, provider, model, history_copy, text_callback]() {
-        text_callback("\n\n\xe2\x9a\x99  Auto-compacting history...\n");
-
-        core::llm::ChatRequest req;
-        req.model = model;
-        req.messages = history_copy;
-        req.messages.push_back({
-            "user",
-            "Summarise the conversation so far in a single, dense paragraph. "
-            "Focus on the technical context and the state of the task we are working on. "
-            "Maintain all critical facts, paths, and requirements."
+    history_compactor_.compact_async(
+        HistoryCompactionRequest{
+            .history = std::move(history_copy),
+            .provider = std::move(provider),
+            .model = std::move(model),
+        },
+        HistoryCompactionCallbacks{
+            .on_status = std::move(text_callback),
+            .on_summary = [self](std::string summary) {
+                self->compact_history(std::move(summary));
+            },
         });
-
-        auto summary = std::make_shared<std::string>();
-        provider->stream_response(req, [self, summary, text_callback](const core::llm::StreamChunk& chunk) {
-            if (!chunk.content.empty()) *summary += chunk.content;
-            if (!chunk.is_final) return;
-            
-            if (chunk.is_error) {
-                text_callback("\xe2\x9c\x97  History compaction failed.\n\n");
-                return;
-            }
-            
-            self->compact_history(*summary);
-            text_callback("\xe2\x9c\x93  History compacted.\n\n");
-        });
-    }).detach();
 }
 
 } // namespace core::agent

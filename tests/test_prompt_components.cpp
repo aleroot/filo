@@ -370,6 +370,22 @@ TEST_CASE("render_conversation_search_panel — handles empty query and no match
     REQUIRE_NOTHROW(render_conversation_search_panel("", {}, 0));
 }
 
+TEST_CASE("render_stderr_panel — renders dismissible error lines",
+          "[tui][picker][stderr]") {
+    auto panel = render_stderr_panel({
+        "[2026-06-25 10:00:00] [ERROR] provider failed",
+        "[2026-06-25 10:00:01] [ERROR] retry failed",
+    });
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("STDERR"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Esc/c/x close"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("provider failed"));
+}
+
 // ============================================================================
 // Viewport scrolling — render_mention_prompt_panel with many items
 // ============================================================================

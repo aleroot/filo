@@ -990,6 +990,7 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     int64_t threshold = 0;
     if (!doc["auto_compact_threshold"].get(threshold)) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
+        parsed.auto_compact_threshold_explicit = true;
     }
 
     simdjson::dom::object providers_obj;
@@ -1194,8 +1195,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (!overlay.ui_spinner.empty()) {
         base.ui_spinner = overlay.ui_spinner;
     }
-    if (overlay.auto_compact_threshold > 0) {
+    if (overlay.auto_compact_threshold_explicit || overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;
+        base.auto_compact_threshold_explicit = overlay.auto_compact_threshold_explicit;
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;

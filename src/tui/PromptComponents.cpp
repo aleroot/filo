@@ -1256,6 +1256,31 @@ Element render_conversation_search_panel(std::string_view query,
       | size(HEIGHT, GREATER_THAN, 12);
 }
 
+Element render_stderr_panel(const std::vector<std::string>& lines) {
+    constexpr std::size_t kMaxVisibleLines = 6;
+    const std::size_t start = lines.size() > kMaxVisibleLines
+        ? lines.size() - kMaxVisibleLines
+        : 0;
+
+    Elements rows;
+    rows.reserve(lines.size() - start);
+    for (std::size_t i = start; i < lines.size(); ++i) {
+        rows.push_back(paragraph(lines[i]) | color(Color::White) | xflex);
+    }
+    if (rows.empty()) {
+        rows.push_back(text("No stderr errors.") | dim);
+    }
+
+    return make_panel_shell(
+        "STDERR",
+        "Esc/c/x close",
+        vbox(std::move(rows)),
+        2,
+        Color::Red,
+        Color::White)
+        | size(HEIGHT, LESS_THAN, 9);
+}
+
 // ---------------------------------------------------------------------------
 // Question Dialog (AskUserQuestion tool) - kimi-cli style
 // ---------------------------------------------------------------------------

@@ -107,6 +107,7 @@ constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
 constexpr auto kStreamChunkPauseBreakThreshold = std::chrono::milliseconds(1500);
 constexpr std::string_view kStreamChunkResumeMarker = "💡";
 constexpr int kReviewActivitySpinnerCharset = 12; // Compact circle spinner (single-cell frames).
+constexpr std::size_t kMaxStderrPanelLines = 20;
 
 struct PromptActivitySnapshot {
     std::string message_id;
@@ -693,7 +694,9 @@ RunResult run(RunOptions opts) {
         llm_provider,
         tool_manager,
         agent_session_context);
-    agent->set_auto_compact_threshold(config.auto_compact_threshold);
+    agent->set_auto_compact_threshold(
+        config.auto_compact_threshold,
+        !config.auto_compact_threshold_explicit);
     agent->set_effort_level(session_effort_value);
 
     // Set the active model for budget tracking
@@ -762,6 +765,11 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point last_update;
     };
     RateLimitState rate_limit_state;
+    struct StderrPanelState {
+        bool active = false;
+        std::vector<std::string> lines;
+    };
+    StderrPanelState stderr_panel_state;
     auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
     screen.TrackMouse(true);
@@ -775,6 +783,27 @@ RunResult run(RunOptions opts) {
             core::commands::copy_text_to_clipboard(selection);
         }
     });
+    core::logging::Logger::get_instance().use_callback_sink(
+        [&ui_mutex, &stderr_panel_state, &screen](core::logging::Level level,
+                                                  std::string line) {
+            if (level < core::logging::Level::Error) {
+                return;
+            }
+            {
+                std::lock_guard lock(ui_mutex);
+                stderr_panel_state.active = true;
+                stderr_panel_state.lines.push_back(std::move(line));
+                if (stderr_panel_state.lines.size() > kMaxStderrPanelLines) {
+                    const auto excess =
+                        stderr_panel_state.lines.size() - kMaxStderrPanelLines;
+                    stderr_panel_state.lines.erase(
+                        stderr_panel_state.lines.begin(),
+                        stderr_panel_state.lines.begin()
+                            + static_cast<std::vector<std::string>::difference_type>(excess));
+                }
+            }
+            screen.PostEvent(Event::Custom);
+        });
     TerminalInputModeGuard terminal_input_mode_guard;
     std::atomic<std::size_t> animation_tick = 0;
     std::mutex animation_mutex;
@@ -1894,7 +1923,9 @@ RunResult run(RunOptions opts) {
         ui_show_context_usage = visibility_setting_enabled(config.ui_context_usage, true);
         ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
-        agent->set_auto_compact_threshold(config.auto_compact_threshold);
+        agent->set_auto_compact_threshold(
+            config.auto_compact_threshold,
+            !config.auto_compact_threshold_explicit);
         agent->reload_subagent_profiles(config);
 
         core::mcp::McpConnectionManager::get_instance().connect_all(
@@ -3818,6 +3849,18 @@ RunResult run(RunOptions opts) {
 
     // ── Event handling ───────────────────────────────────────────────────────
     auto component = CatchEvent(input_component, [&](Event event) {
+        if (event == Event::Escape
+            || event == Event::Character('c')
+            || event == Event::Character('C')
+            || event == Event::Character('x')
+            || event == Event::Character('X')) {
+            std::lock_guard lock(ui_mutex);
+            if (stderr_panel_state.active) {
+                stderr_panel_state.active = false;
+                return true;
+            }
+        }
+
         // ── Permission overlay keypresses ────────────────────────────────
         // Resolve the promise OUTSIDE the lock to avoid locking issues when
         // the worker thread wakes up and might try to re-acquire ui_mutex.
@@ -4817,6 +4860,8 @@ RunResult run(RunOptions opts) {
         int                             conversation_search_selected = 0;
         std::string                     conversation_search_query;
         std::vector<tui::ConversationSearchHit> conversation_search_hits;
+        bool                            stderr_panel_active = false;
+        std::vector<std::string>        stderr_panel_lines;
         {
             std::lock_guard lock(ui_mutex);
             if (conversation_search_state.active) {
@@ -4860,6 +4905,9 @@ RunResult run(RunOptions opts) {
             conversation_search_selected = conversation_search_state.selected;
             conversation_search_query = conversation_search_state.query;
             conversation_search_hits = conversation_search_state.hits;
+            stderr_panel_active = stderr_panel_state.active
+                && !stderr_panel_state.lines.empty();
+            stderr_panel_lines = stderr_panel_state.lines;
         }
         
         // Question dialog state (copy for rendering)
@@ -4990,12 +5038,8 @@ RunResult run(RunOptions opts) {
         // ── Status bar ───────────────────────────────────────────────────
         const std::size_t tick = animation_tick.load(std::memory_order_relaxed);
         std::string budget_str = core::budget::BudgetTracker::get_instance().status_string();
-        std::string context_model_name = llm_provider->get_last_model();
-        if (context_model_name.empty()) {
-            context_model_name = active_model_name;
-        }
-        const int32_t ctx_pct  = core::budget::BudgetTracker::get_instance()
-                                     .context_remaining_pct(context_model_name);
+        const auto context_window = agent->context_window_snapshot();
+        const int32_t ctx_pct = context_window.remaining_pct;
 
         Color ctx_color = Color::Green;
         if (ctx_pct >= 0 && ctx_pct < 25)       ctx_color = Color::Red;
@@ -5203,11 +5247,14 @@ RunResult run(RunOptions opts) {
             : text("");
 
         Elements window_rows;
-        window_rows.reserve(4);
+        window_rows.reserve(5);
         if (ui_show_banner) {
             window_rows.push_back(std::move(banner_el));
         }
         window_rows.push_back(std::move(history_el));
+        if (stderr_panel_active) {
+            window_rows.push_back(render_stderr_panel(stderr_panel_lines));
+        }
         window_rows.push_back(std::move(bottom_el));
         window_rows.push_back(std::move(status_el));
 
@@ -5240,6 +5287,7 @@ RunResult run(RunOptions opts) {
     });
 
     screen.Loop(renderer);
+    core::logging::Logger::get_instance().clear_callback_sink();
 
     animation_running.store(false, std::memory_order_relaxed);
     animation_cv.notify_one();

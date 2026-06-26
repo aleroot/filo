@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -31,6 +33,8 @@ public:
 
     void use_stderr() noexcept;
     bool use_file(const std::filesystem::path& path);
+    void use_callback_sink(std::function<void(Level, std::string)> callback) noexcept;
+    void clear_callback_sink() noexcept;
     void disable() noexcept;
 
     void configure_from_env();
@@ -75,6 +79,7 @@ private:
     bool timestamps_enabled_ = true;
     Sink sink_ = Sink::Stderr;
     std::unique_ptr<std::FILE, FileCloser> file_sink_{nullptr};
+    std::function<void(Level, std::string)> callback_sink_;
 };
 
 template <typename... Args>

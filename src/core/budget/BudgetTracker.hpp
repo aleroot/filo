@@ -156,16 +156,6 @@ public:
         }
     }
 
-    [[nodiscard]] int32_t context_remaining_pct(std::string_view model) const noexcept {
-        const int32_t used = last_turn().prompt_tokens;
-        if (used <= 0) return -1;
-        const int64_t window = context_window_for_model(model);
-        const int64_t remaining = window - static_cast<int64_t>(used);
-        if (remaining <= 0) return 0;
-        return static_cast<int32_t>(
-            (static_cast<double>(remaining) / static_cast<double>(window)) * 100.0);
-    }
-
     [[nodiscard]] std::string status_string() const {
         auto total = session_total();
         if (!total.has_data()) return "";
