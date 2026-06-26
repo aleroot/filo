@@ -21,11 +21,13 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fstream>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -52,6 +54,17 @@ struct ScopedEnvVar {
             unsetenv(name.c_str());
         }
     }
+};
+
+struct ScopedCinRedirect {
+    explicit ScopedCinRedirect(std::istream& replacement)
+        : old(std::cin.rdbuf(replacement.rdbuf())) {}
+
+    ~ScopedCinRedirect() {
+        std::cin.rdbuf(old);
+    }
+
+    std::streambuf* old;
 };
 
 static int64_t now_unix() {
@@ -1112,6 +1125,48 @@ TEST_CASE("AuthenticationManager login reports unknown providers", "[Authenticat
     REQUIRE_THROWS_AS(manager.login("unknown-provider"), std::runtime_error);
 }
 
+TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and coding endpoints",
+          "[AuthenticationManager][zai]") {
+    TempDir tmp;
+    {
+        std::ofstream existing(std::filesystem::path(tmp.path) / "auth_defaults.json");
+        existing << R"({
+            "default_provider": "claude",
+            "default_model_selection": "manual",
+            "providers": {
+                "claude": {
+                    "model": "claude-sonnet-4-6",
+                    "auth_type": "oauth_claude"
+                }
+            }
+        })";
+    }
+
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("test-zai-key\n");
+    ScopedCinRedirect redirect(input);
+
+    auto result = manager.login("zai");
+
+    REQUIRE(result.provider == "Z.AI");
+    REQUIRE(result.login_provider == "zai");
+    REQUIRE_FALSE(result.hints.empty());
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+
+    REQUIRE(overlay.find(R"("default_provider":"zai")") != std::string::npos);
+    REQUIRE(overlay.find(R"("claude":{"model":"claude-sonnet-4-6","auth_type":"oauth_claude"})")
+            != std::string::npos);
+    REQUIRE(overlay.find(R"("zai":{"model":"glm-5.1","api_key":"test-zai-key"})")
+            != std::string::npos);
+    REQUIRE(overlay.find(R"("zai-coding":{"model":"glm-5.2","api_key":"test-zai-key"})")
+            != std::string::npos);
+}
+
 // ── OpenAIOAuthFlow — static pure functions ───────────────────────────────────
 
 TEST_CASE("OpenAIOAuthFlow default constructor works without OPENAI_OAUTH_CLIENT_ID",
@@ -1261,6 +1316,8 @@ TEST_CASE("AuthenticationManager exposes openai login provider without legacy al
 
     const auto providers = manager.available_login_providers();
     REQUIRE(std::find(providers.begin(), providers.end(), "openai") != providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "zai") != providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "zai-coding") == providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-pkce") == providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-api-key") == providers.end());
 }

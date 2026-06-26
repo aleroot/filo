@@ -19,7 +19,7 @@
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <unistd.h>
 #endif
-#include "core/auth/AuthenticationManager.hpp"
+#include "core/auth/AuthLogin.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/config/ConfigManager.hpp"
@@ -644,55 +644,6 @@ void wait_for_enter() {
     std::getline(std::cin, line);
 }
 
-std::optional<std::string> choose_auth_provider_menu(const std::vector<std::string>& providers) {
-    if (providers.empty()) {
-        return std::nullopt;
-    }
-
-    while (true) {
-        std::cout << "\nAuthentication Providers\n";
-        for (std::size_t i = 0; i < providers.size(); ++i) {
-            std::cout << "  " << (i + 1) << ". " << providers[i] << "\n";
-        }
-        std::cout << "Select a provider [1-" << providers.size() << "] or press Enter to cancel: ";
-        std::cout.flush();
-
-        std::string line;
-        if (!std::getline(std::cin, line)) {
-            return std::nullopt;
-        }
-
-        const std::string_view input = trim(line);
-        if (input.empty()) {
-            return std::nullopt;
-        }
-
-        bool digits_only = true;
-        for (const char ch : input) {
-            if (!std::isdigit(static_cast<unsigned char>(ch))) {
-                digits_only = false;
-                break;
-            }
-        }
-        if (!digits_only) {
-            std::cout << "Invalid selection. Please enter a number.\n";
-            continue;
-        }
-
-        try {
-            const std::size_t selected = static_cast<std::size_t>(std::stoul(std::string(input)));
-            if (selected >= 1 && selected <= providers.size()) {
-                return providers[selected - 1];
-            }
-        } catch (...) {
-            // Fall through to generic invalid message below.
-        }
-
-        std::cout << "Invalid selection. Choose a number between 1 and "
-                  << providers.size() << ".\n";
-    }
-}
-
 std::optional<std::string> choose_review_menu_request() {
     while (true) {
         std::cout
@@ -771,24 +722,19 @@ void run_provider_auth(const std::string& provider,
     auto state = std::make_shared<AuthState>();
     suspend_fn([provider, config_dir, state, switch_model_fn]() {
         try {
-            auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
-            const auto result = auth_manager.login(provider);
+            const auto outcome = core::auth::login_and_persist(provider, config_dir);
 
             std::cout << "\nAuthentication successful!\n";
-            std::cout << "Provider: " << result.provider << "\n";
+            std::cout << "Provider: " << outcome.result.provider << "\n";
             std::cout << "Credentials saved in: " << config_dir << "\n";
 
-            std::string persist_error;
-            if (core::config::ConfigManager::get_instance().persist_login_profile(
-                    provider, &persist_error)) {
-                const auto& config =
-                    core::config::ConfigManager::get_instance().get_config();
+            if (outcome.profile_persisted) {
                 state->profile_persisted = true;
-                state->selected_provider = config.default_provider;
+                state->selected_provider = outcome.selected_provider;
                 std::cout << "Default provider switched to: "
-                          << state->selected_provider << " (OAuth enabled)\n";
+                          << state->selected_provider << "\n";
             } else {
-                state->profile_error = std::move(persist_error);
+                state->profile_error = outcome.profile_error;
                 std::cout << "Warning: authenticated, but couldn't update default profile: "
                           << state->profile_error << "\n";
             }
@@ -797,14 +743,14 @@ void run_provider_auth(const std::string& provider,
                 state->model_switch_message = switch_model_fn(state->selected_provider);
             }
 
-            for (const auto& hint : result.hints) {
+            for (const auto& hint : outcome.result.hints) {
                 std::cout << "Hint: " << hint << "\n";
             }
             wait_for_enter();
 
             state->success = true;
-            state->provider = result.provider;
-            state->hints = result.hints;
+            state->provider = outcome.result.provider;
+            state->hints = outcome.result.hints;
             state->completed = true;
         } catch (const std::exception& e) {
             std::cerr << "\nAuthentication failed: " << e.what() << "\n";
@@ -834,7 +780,7 @@ void run_provider_auth(const std::string& provider,
         state->provider.empty() ? provider : state->provider));
     if (state->profile_persisted) {
         append_fn(std::format(
-            "\xe2\x9c\x93  Selected provider is now {} with OAuth enabled.\n",
+            "\xe2\x9c\x93  Selected provider is now {}.\n",
             state->selected_provider));
     } else if (!state->profile_error.empty()) {
         append_fn(std::format(
@@ -944,8 +890,7 @@ public:
         ctx.clear_input_fn();
 
         const std::string config_dir = core::config::ConfigManager::get_instance().get_config_dir();
-        auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
-        const auto available = auth_manager.available_login_providers();
+        const auto available = core::auth::available_login_providers(config_dir);
 
         const bool interactive_mode = static_cast<bool>(ctx.suspend_tui_fn);
         const auto arg = first_argument(ctx.text);
@@ -984,7 +929,11 @@ public:
             // Fallback: text menu (no TUI picker available)
             auto chosen_provider = std::make_shared<std::optional<std::string>>();
             ctx.suspend_tui_fn([available, chosen_provider]() {
-                *chosen_provider = choose_auth_provider_menu(available);
+                *chosen_provider = core::auth::choose_login_provider_console(
+                    available,
+                    "Authentication Providers",
+                    std::cin,
+                    std::cout);
             });
             if (!chosen_provider->has_value()) {
                 ctx.append_history_fn("\n\xe2\x84\xb9  Authentication cancelled.\n");

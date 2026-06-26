@@ -11,6 +11,7 @@ namespace core::auth {
 
 struct LoginResult {
     std::string provider;
+    std::string login_provider;
     std::vector<std::string> hints;
 };
 

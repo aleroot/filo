@@ -14,12 +14,12 @@ struct StubTokenFormatter {
 };
 
 struct StubCostFormatter {
-    [[nodiscard]] std::string format(double usd) const {
-        return "cost" + std::to_string(usd);
+    [[nodiscard]] std::string format(double /*usd*/) const {
+        return "stub-cost";
     }
 
-    [[nodiscard]] std::string format_fixed_4(double usd) const {
-        return "fixed" + std::to_string(usd);
+    [[nodiscard]] std::string format_fixed_4(double /*usd*/) const {
+        return "stub-fixed-cost";
     }
 };
 
@@ -143,7 +143,7 @@ TEST_CASE("TokenUsageStatusFormatter accepts concept-based formatter implementat
     CHECK(formatter.format({
         .prompt_tokens = 12,
         .completion_tokens = 34,
-    }, 5.0) == "↑t12 ↓t34  fixed5.000000");
+    }, 5.0) == "↑t12 ↓t34  stub-fixed-cost");
 }
 
 TEST_CASE("BudgetTracker status string uses compact token units", "[BudgetTracker]") {

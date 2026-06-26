@@ -9,9 +9,14 @@
 #include "OAuthCredentialSource.hpp"
 #include "OAuthTokenManager.hpp"
 #include "ui/ConsoleAuthUI.hpp"
+#include "core/utils/JsonWriter.hpp"
+#include <simdjson.h>
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace core::auth {
 
@@ -34,6 +39,201 @@ std::string join(const std::vector<std::string>& values) {
     }
     return out;
 }
+
+struct AuthOverlayProvider {
+    std::string model;
+    std::string auth_type;
+    std::string api_key;
+};
+
+struct ApiKeyProviderSeed {
+    std::string provider_name;
+    std::string model;
+};
+
+void write_api_key_overlay(std::string_view config_dir,
+                           std::string_view default_provider,
+                           const std::vector<ApiKeyProviderSeed>& provider_seeds,
+                           std::string_view api_key) {
+    if (api_key.empty()) {
+        throw std::runtime_error("API key cannot be empty.");
+    }
+    if (default_provider.empty() || provider_seeds.empty()) {
+        throw std::runtime_error("Provider login is not configured correctly.");
+    }
+
+    const std::filesystem::path dir(config_dir);
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path path = dir / "auth_defaults.json";
+
+    std::unordered_map<std::string, AuthOverlayProvider> providers;
+    if (std::filesystem::exists(path)) {
+        try {
+            simdjson::padded_string json =
+                simdjson::padded_string::load(path.string());
+            simdjson::dom::parser parser;
+            simdjson::dom::element doc = parser.parse(json);
+            simdjson::dom::object providers_obj;
+            if (doc["providers"].get(providers_obj) == simdjson::SUCCESS) {
+                for (auto field : providers_obj) {
+                    simdjson::dom::object provider_obj;
+                    if (field.value.get(provider_obj) != simdjson::SUCCESS) {
+                        continue;
+                    }
+                    AuthOverlayProvider saved;
+                    std::string_view value;
+                    if (provider_obj["model"].get(value) == simdjson::SUCCESS) {
+                        saved.model = std::string(value);
+                    }
+                    if (provider_obj["auth_type"].get(value) == simdjson::SUCCESS) {
+                        saved.auth_type = std::string(value);
+                    }
+                    if (provider_obj["api_key"].get(value) == simdjson::SUCCESS) {
+                        saved.api_key = std::string(value);
+                    }
+                    providers[std::string(field.key)] = std::move(saved);
+                }
+            }
+        } catch (...) {
+            providers.clear();
+        }
+    }
+
+    for (const auto& seed : provider_seeds) {
+        if (seed.provider_name.empty()) continue;
+        AuthOverlayProvider& selected = providers[seed.provider_name];
+        selected.model = seed.model;
+        selected.auth_type.clear();
+        selected.api_key = std::string(api_key);
+    }
+
+    std::vector<std::string> names;
+    names.reserve(providers.size());
+    for (const auto& [name, provider] : providers) {
+        if (!provider.model.empty()
+            || !provider.auth_type.empty()
+            || !provider.api_key.empty()) {
+            names.push_back(name);
+        }
+    }
+    std::sort(names.begin(), names.end());
+
+    core::utils::JsonWriter writer(512);
+    {
+        auto root = writer.object();
+        writer.kv_str("default_provider", default_provider).comma();
+        writer.kv_str("default_model_selection", "manual").comma();
+        writer.key("providers");
+        auto providers_object = writer.object();
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (i > 0) writer.comma();
+            writer.key(names[i]);
+            auto provider_object = writer.object();
+            const auto& provider = providers.at(names[i]);
+            bool has_field = false;
+            if (!provider.model.empty()) {
+                writer.kv_str("model", provider.model);
+                has_field = true;
+            }
+            if (!provider.auth_type.empty()) {
+                if (has_field) writer.comma();
+                writer.kv_str("auth_type", provider.auth_type);
+                has_field = true;
+            }
+            if (!provider.api_key.empty()) {
+                if (has_field) writer.comma();
+                writer.kv_str("api_key", provider.api_key);
+            }
+        }
+    }
+
+    std::string payload = std::move(writer).take();
+    payload.push_back('\n');
+
+    const std::filesystem::path tmp = path.string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("Failed to open auth overlay for writing.");
+        }
+        out << payload;
+        if (!out) {
+            throw std::runtime_error("Failed to write auth overlay.");
+        }
+    }
+    std::filesystem::rename(tmp, path);
+}
+
+class ApiKeyPromptStrategy final : public IAuthStrategy {
+public:
+    ApiKeyPromptStrategy(std::string login_provider,
+                         std::string display_name,
+                         std::string provider_name,
+                         std::string default_model,
+                         std::vector<ApiKeyProviderSeed> additional_provider_seeds,
+                         std::string env_var,
+                         std::string docs_hint)
+        : login_provider_(std::move(login_provider))
+        , display_name_(std::move(display_name))
+        , provider_name_(std::move(provider_name))
+        , default_model_(std::move(default_model))
+        , additional_provider_seeds_(std::move(additional_provider_seeds))
+        , env_var_(std::move(env_var))
+        , docs_hint_(std::move(docs_hint)) {}
+
+    std::string_view login_provider() const noexcept override { return login_provider_; }
+    std::string_view display_name() const noexcept override { return display_name_; }
+
+    bool supports(std::string_view /*provider_type*/,
+                  std::string_view /*auth_type*/) const noexcept override {
+        return false;
+    }
+
+    std::shared_ptr<ICredentialSource> create_credential_source(
+        const core::config::ProviderConfig& /*provider_config*/,
+        std::string_view /*config_dir*/) const override {
+        return nullptr;
+    }
+
+    void login(std::string_view config_dir) const override {
+        ui::ConsoleAuthUI ui;
+        ui.show_header(display_name_ + " API Key Login");
+        ui.show_instructions(
+            "Paste an API key for this provider. It will be saved in Filo's "
+            "auth_defaults.json overlay and used as the default provider.");
+        const std::string key = ui.prompt_secret("API key:");
+        auto seeds = additional_provider_seeds_;
+        seeds.insert(seeds.begin(), ApiKeyProviderSeed{
+            .provider_name = provider_name_,
+            .model = default_model_,
+        });
+        write_api_key_overlay(config_dir, provider_name_, seeds, key);
+        ui.show_success(display_name_ + " credential saved.");
+    }
+
+    std::vector<std::string> post_login_hints() const override {
+        std::vector<std::string> hints;
+        hints.push_back("Default provider is set to '" + provider_name_
+                        + "' with model '" + default_model_ + "'.");
+        if (!env_var_.empty()) {
+            hints.push_back("For CI or one-off use, you can also export "
+                            + env_var_ + ".");
+        }
+        if (!docs_hint_.empty()) {
+            hints.push_back(docs_hint_);
+        }
+        return hints;
+    }
+
+private:
+    std::string login_provider_;
+    std::string display_name_;
+    std::string provider_name_;
+    std::string default_model_;
+    std::vector<ApiKeyProviderSeed> additional_provider_seeds_;
+    std::string env_var_;
+    std::string docs_hint_;
+};
 
 class GoogleOAuthStrategy final : public IAuthStrategy {
 public:
@@ -236,6 +436,18 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<OpenAIPkceStrategy>());
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "zai",
+        "Z.AI",
+        "zai",
+        "glm-5.1",
+        std::vector<ApiKeyProviderSeed>{{
+            .provider_name = "zai-coding",
+            .model = "glm-5.2",
+        }},
+        "ZAI_API_KEY",
+        "The same key is also saved for the Coding Plan endpoint "
+        "for glm-5.2, glm-5-turbo, glm-4.7, and glm-4.5-air."));
     return manager;
 }
 
@@ -253,12 +465,21 @@ LoginResult AuthenticationManager::login(std::string_view provider) const {
     if (requested == "openai-pkce" || requested == "openai_pkce" || requested == "openaipkce") {
         requested = "openai";
     }
+    if (requested == "z.ai" || requested == "z-ai" || requested == "zai-api") {
+        requested = "zai";
+    }
+    if (requested == "z.ai-coding" || requested == "z-ai-coding"
+        || requested == "zai_coding" || requested == "zai-coding-plan"
+        || requested == "z.aicodingplan") {
+        requested = "zai";
+    }
 
     for (const auto& strategy : strategies_) {
         if (normalize(strategy->login_provider()) == requested) {
             strategy->login(config_dir_);
             return {
                 .provider = std::string(strategy->display_name()),
+                .login_provider = std::string(strategy->login_provider()),
                 .hints = strategy->post_login_hints(),
             };
         }

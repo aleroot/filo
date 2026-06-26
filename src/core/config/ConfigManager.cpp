@@ -309,6 +309,22 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .default_model = "coder-model",
         };
     }
+    if (normalized == "zai" || normalized == "z.ai" || normalized == "z-ai") {
+        return LoginProfileMapping{
+            .provider_name = "zai",
+            .auth_type = "",
+            .default_model = "glm-5.1",
+        };
+    }
+    if (normalized == "zaicoding" || normalized == "zai-coding"
+        || normalized == "zai_coding" || normalized == "z.ai-coding"
+        || normalized == "z-ai-coding" || normalized == "zai-coding-plan") {
+        return LoginProfileMapping{
+            .provider_name = "zai",
+            .auth_type = "",
+            .default_model = "glm-5.1",
+        };
+    }
 
     return std::nullopt;
 }
@@ -324,7 +340,8 @@ std::string serialize_login_profile_overlay(const AppConfig& overlay) {
         std::vector<std::string> provider_names;
         provider_names.reserve(overlay.providers.size());
         for (const auto& [name, provider] : overlay.providers) {
-            if (!provider.auth_type.empty() || !provider.model.empty()) {
+            if (!provider.auth_type.empty() || !provider.model.empty()
+                || !provider.api_key.empty()) {
                 provider_names.push_back(name);
             }
         }
@@ -354,6 +371,11 @@ std::string serialize_login_profile_overlay(const AppConfig& overlay) {
                 if (!provider.auth_type.empty()) {
                     if (has_field) writer.comma();
                     writer.kv_str("auth_type", provider.auth_type);
+                    has_field = true;
+                }
+                if (!provider.api_key.empty()) {
+                    if (has_field) writer.comma();
+                    writer.kv_str("api_key", provider.api_key);
                 }
             }
         }
@@ -1812,8 +1834,24 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
     config_.default_model_selection = "manual";
     ProviderConfig& provider = config_.providers[mapping->provider_name];
     provider.auth_type = mapping->auth_type;
-    if (force_login_default_model || provider.model.empty()) {
+    if (!provider_overlay.api_key.empty()) {
+        provider.api_key = provider_overlay.api_key;
+    }
+    if (!provider_overlay.model.empty()) {
         provider.model = provider_overlay.model;
+    }
+
+    for (const auto& [name, overlay_provider] : overlay.providers) {
+        if (name == mapping->provider_name) {
+            continue;
+        }
+        ProviderConfig& configured_provider = config_.providers[name];
+        if (!overlay_provider.api_key.empty()) {
+            configured_provider.api_key = overlay_provider.api_key;
+        }
+        if (!overlay_provider.model.empty()) {
+            configured_provider.model = overlay_provider.model;
+        }
     }
 
     if (error) error->clear();

@@ -793,12 +793,36 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
 
+    write_text(auth_overlay, R"({
+        "default_provider": "zai",
+        "default_model_selection": "manual",
+        "providers": {
+            "zai": {
+                "model": "glm-5.1",
+                "api_key": "test-zai-key"
+            },
+            "zai-coding": {
+                "model": "glm-5.2",
+                "api_key": "test-zai-key"
+            }
+        }
+    })");
+
+    REQUIRE(manager.persist_login_profile("zai", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "zai");
+    REQUIRE(manager.get_config().providers.at("zai").model == "glm-5.1");
+    REQUIRE(manager.get_config().providers.at("zai").api_key == "test-zai-key");
+    REQUIRE(manager.get_config().providers.at("zai-coding").model == "glm-5.2");
+    REQUIRE(manager.get_config().providers.at("zai-coding").api_key == "test-zai-key");
+    REQUIRE(read_text(auth_overlay).find(R"("api_key":"test-zai-key")") != std::string::npos);
+
     manager.load(project_dir);
     const auto& reloaded = manager.get_config();
     REQUIRE(fs::exists(auth_overlay));
-    REQUIRE(reloaded.default_provider == "openai");
-    REQUIRE(reloaded.providers.at("openai").auth_type == "oauth_openai_pkce");
-    REQUIRE(reloaded.providers.at("claude").auth_type == "oauth_claude");
+    REQUIRE(reloaded.default_provider == "zai");
+    REQUIRE(reloaded.providers.at("zai").api_key == "test-zai-key");
+    REQUIRE(reloaded.providers.at("zai-coding").api_key == "test-zai-key");
 
     fs::remove_all(sandbox);
 }

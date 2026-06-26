@@ -182,6 +182,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/OAuthTokenManager.cpp
     src/core/auth/OAuthCredentialSource.cpp
     src/core/auth/AuthenticationManager.cpp
+    src/core/auth/AuthLogin.cpp
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
     src/core/agent/DelegatedAgentRunner.cpp

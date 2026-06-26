@@ -2,7 +2,7 @@
 #include <CLI/CLI.hpp>
 #include "core/config/ConfigManager.hpp"
 #include "core/workspace/Workspace.hpp"
-#include "core/auth/AuthenticationManager.hpp"
+#include "core/auth/AuthLogin.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/session/SessionReport.hpp"
@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
     int         port        = 8080;
     std::string host        = "127.0.0.1";
     std::string login_provider;
+    bool        auth_login_command = false;
     std::string prompter_prompt;
     std::string output_format = "text";
     std::string input_format = "text";
@@ -114,6 +115,15 @@ int main(int argc, char** argv) {
         "Starts the HTTP daemon even without --mcp.");
     app.add_option("--login", login_provider,
                    "Authenticate with a provider and exit (e.g. --login openai, --login claude)");
+    auto* auth_sub = app.add_subcommand("auth", "Authentication commands");
+    auth_sub->require_subcommand(1);
+    auto* auth_login_sub = auth_sub->add_subcommand(
+        "login",
+        "Authenticate with a provider and exit. If provider is omitted, show a selector.");
+    auth_login_sub->add_option(
+        "provider",
+        login_provider,
+        "Provider to authenticate (e.g. openai, claude, zai)");
     auto* resume_opt = app.add_option(
         "--resume", resume_session,
         "Resume a session by ID or 1-based index (see --list-sessions). "
@@ -122,6 +132,7 @@ int main(int argc, char** argv) {
     app.add_flag("--list-sessions", list_sessions, "List available sessions and exit");
 
     CLI11_PARSE(app, argc, argv);
+    auth_login_command = auth_login_sub->parsed();
 
     core::logging::Logger::get_instance().configure_from_env();
     const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
@@ -206,26 +217,37 @@ int main(int argc, char** argv) {
         core::logging::warn("Could not load configuration: {}", e.what());
     }
 
-    // --login: run provider auth flow and exit immediately
-    if (!login_provider.empty()) {
+    // --login / auth login: run provider auth flow and exit immediately.
+    if (!login_provider.empty() || auth_login_command) {
         auto config_dir = core::config::ConfigManager::get_instance().get_config_dir();
-        auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
         try {
-            const auto result = auth_manager.login(login_provider);
-            core::logging::info("Successfully authenticated with {}.", result.provider);
-            std::string persist_error;
-            if (!core::config::ConfigManager::get_instance().persist_login_profile(
-                    login_provider, &persist_error)) {
+            std::string selected_provider = login_provider;
+            if (selected_provider.empty()) {
+                auto available = core::auth::available_login_providers(config_dir);
+                auto chosen = core::auth::choose_login_provider_console(
+                    available,
+                    "Add credential",
+                    std::cin,
+                    std::cout);
+                if (!chosen.has_value()) {
+                    core::logging::info("Authentication cancelled.");
+                    return 0;
+                }
+                selected_provider = std::move(*chosen);
+            }
+
+            const auto outcome = core::auth::login_and_persist(selected_provider, config_dir);
+            core::logging::info("Successfully authenticated with {}.", outcome.result.provider);
+            if (!outcome.profile_persisted) {
                 core::logging::warn(
                     "Authenticated, but could not persist login profile: {}",
-                    persist_error);
+                    outcome.profile_error);
             } else {
-                const auto& config = core::config::ConfigManager::get_instance().get_config();
                 core::logging::info(
-                    "Updated default provider to '{}' with OAuth enabled.",
-                    config.default_provider);
+                    "Updated default provider to '{}'.",
+                    outcome.selected_provider);
             }
-            for (const auto& hint : result.hints) {
+            for (const auto& hint : outcome.result.hints) {
                 core::logging::info("{}", hint);
             }
         } catch (const std::exception& e) {
