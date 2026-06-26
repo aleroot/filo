@@ -1,4 +1,5 @@
 #include "SessionReport.hpp"
+#include "../budget/TokenUsageFormatters.hpp"
 #include <ftxui/screen/string.hpp>
 #include <algorithm>
 #include <chrono>
@@ -126,16 +127,11 @@ bool SessionReport::supports_color() noexcept {
 }
 
 std::string SessionReport::fmt_tokens(int32_t n) {
-    if (n >= 1'000'000) return std::format("{:.1f}M", n / 1'000'000.0);
-    if (n >= 1'000)     return std::format("{:.1f}k", n / 1'000.0);
-    return std::to_string(n);
+    return core::budget::formatters::CompactTokenCountFormatter{}.format(n);
 }
 
 std::string SessionReport::fmt_cost(double usd) {
-    if (usd < 0.0001) return "$0";
-    if (usd < 0.01)   return std::format("${:.4f}", usd);
-    if (usd < 1.0)    return std::format("${:.3f}", usd);
-    return std::format("${:.2f}", usd);
+    return core::budget::formatters::UsageCostFormatter{}.format(usd);
 }
 
 std::string SessionReport::fmt_duration(std::chrono::seconds s) {

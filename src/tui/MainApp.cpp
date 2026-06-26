@@ -53,6 +53,7 @@
 #include "core/agent/PermissionGate.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/budget/BudgetTracker.hpp"
+#include "core/budget/TokenUsageFormatters.hpp"
 #include "core/mcp/McpConnectionManager.hpp"
 #include "core/context/ContextMentions.hpp"
 #include "core/context/SteeringLoader.hpp"
@@ -5119,13 +5120,12 @@ RunResult run(RunOptions opts) {
             if (is_subscription) {
                 auto total = core::budget::BudgetTracker::get_instance().session_total();
                 if (total.has_data()) {
-                    auto fmt_k = [](int32_t n) -> std::string {
-                        if (n >= 1000) return std::format("{:.1f}k", n / 1000.0);
-                        return std::to_string(n);
-                    };
+                    const core::budget::formatters::CompactTokenCountFormatter token_formatter;
                     // ↑ = prompt tokens going UP to the LLM, ↓ = completion tokens coming DOWN from LLM
-                    budget_el = text("  \xe2\x86\x91" + fmt_k(total.prompt_tokens)
-                                     + " \xe2\x86\x93" + fmt_k(total.completion_tokens))
+                    budget_el = text("  \xe2\x86\x91"
+                                     + token_formatter.format(total.prompt_tokens)
+                                     + " \xe2\x86\x93"
+                                     + token_formatter.format(total.completion_tokens))
                                 | color(Color::GrayLight);
                 }
             } else {

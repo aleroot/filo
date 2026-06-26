@@ -2,11 +2,11 @@
 
 #include "TokenAccounting.hpp"
 #include "TokenLedger.hpp"
+#include "TokenUsageFormatters.hpp"
 
 #include "../llm/Models.hpp"
 
 #include <cstdint>
-#include <format>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -159,16 +159,7 @@ public:
     [[nodiscard]] std::string status_string() const {
         auto total = session_total();
         if (!total.has_data()) return "";
-        auto fmt_k = [](int32_t n) -> std::string {
-            if (n >= 1000) return std::format("{:.1f}k", n / 1000.0);
-            return std::to_string(n);
-        };
-        double cost = session_cost_usd();
-        if (cost > 0.0) {
-            return std::format("↑{} ↓{}  ${:.4f}",
-                fmt_k(total.prompt_tokens), fmt_k(total.completion_tokens), cost);
-        }
-        return std::format("↑{} ↓{}", fmt_k(total.prompt_tokens), fmt_k(total.completion_tokens));
+        return formatters::TokenUsageStatusFormatter<>{}.format(total, session_cost_usd());
     }
 
 private:

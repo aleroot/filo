@@ -1,7 +1,32 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/budget/BudgetTracker.hpp"
+#include "core/budget/TokenUsageFormatters.hpp"
 
 using namespace core::budget;
+using namespace core::budget::formatters;
+
+namespace {
+
+struct StubTokenFormatter {
+    [[nodiscard]] std::string format(std::int64_t value) const {
+        return "t" + std::to_string(value);
+    }
+};
+
+struct StubCostFormatter {
+    [[nodiscard]] std::string format(double usd) const {
+        return "cost" + std::to_string(usd);
+    }
+
+    [[nodiscard]] std::string format_fixed_4(double usd) const {
+        return "fixed" + std::to_string(usd);
+    }
+};
+
+static_assert(TokenCountFormatter<StubTokenFormatter>);
+static_assert(UsageCostFormatting<StubCostFormatter>);
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // context_window_for_model
@@ -81,4 +106,57 @@ TEST_CASE("BudgetTracker skips synthetic pricing for non-billable providers", "[
     CHECK(total.prompt_tokens == 1'000'000);
     CHECK(total.completion_tokens == 1'000'000);
     CHECK(tracker.session_cost_usd() == 0.0);
+}
+
+TEST_CASE("CompactTokenCountFormatter uses readable compact units", "[BudgetTracker]") {
+    const CompactTokenCountFormatter formatter;
+
+    CHECK(formatter.format(0) == "0");
+    CHECK(formatter.format(999) == "999");
+    CHECK(formatter.format(1'000) == "1k");
+    CHECK(formatter.format(90'500) == "90.5k");
+    CHECK(formatter.format(999'949) == "999.9k");
+    CHECK(formatter.format(999'950) == "1M");
+    CHECK(formatter.format(1'000'000) == "1M");
+    CHECK(formatter.format(9'861'200) == "9.9M");
+    CHECK(formatter.format(1'250'000'000) == "1.3B");
+}
+
+TEST_CASE("TokenUsageStatusFormatter renders token status lines", "[BudgetTracker]") {
+    const TokenUsageStatusFormatter<> formatter;
+
+    CHECK(formatter.format({}) == "");
+    CHECK(formatter.format({
+        .prompt_tokens = 9'861'200,
+        .completion_tokens = 90'500,
+    }) == "↑9.9M ↓90.5k");
+    CHECK(formatter.format({
+        .prompt_tokens = 1'000,
+        .completion_tokens = 2'000,
+    }, 0.123456) == "↑1k ↓2k  $0.1235");
+}
+
+TEST_CASE("TokenUsageStatusFormatter accepts concept-based formatter implementations",
+          "[BudgetTracker]") {
+    const TokenUsageStatusFormatter<StubTokenFormatter, StubCostFormatter> formatter;
+
+    CHECK(formatter.format({
+        .prompt_tokens = 12,
+        .completion_tokens = 34,
+    }, 5.0) == "↑t12 ↓t34  fixed5.000000");
+}
+
+TEST_CASE("BudgetTracker status string uses compact token units", "[BudgetTracker]") {
+    auto& tracker = BudgetTracker::get_instance();
+    tracker.set_session_id("test-compact-status");
+    tracker.reset_session();
+
+    tracker.record({.prompt_tokens = 9'861'200, .completion_tokens = 90'500},
+                   "kimi-for-coding",
+                   false);
+
+    CHECK(tracker.status_string() == "↑9.9M ↓90.5k");
+
+    tracker.reset_session();
+    tracker.set_session_id("");
 }
