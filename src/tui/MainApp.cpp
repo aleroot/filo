@@ -784,8 +784,19 @@ RunResult run(RunOptions opts) {
             core::commands::copy_text_to_clipboard(selection);
         }
     });
+    std::atomic_bool ui_accepting_events{true};
+    std::mutex ui_event_post_mutex;
+    auto wake_ui = [&]() {
+        if (!ui_accepting_events.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::lock_guard lock(ui_event_post_mutex);
+        if (ui_accepting_events.load(std::memory_order_relaxed)) {
+            screen.PostEvent(Event::Custom);
+        }
+    };
     core::logging::Logger::get_instance().use_callback_sink(
-        [&ui_mutex, &stderr_panel_state, &screen](core::logging::Level level,
+        [&ui_mutex, &stderr_panel_state, &wake_ui](core::logging::Level level,
                                                   std::string line) {
             if (level < core::logging::Level::Error) {
                 return;
@@ -803,7 +814,7 @@ RunResult run(RunOptions opts) {
                             + static_cast<std::vector<std::string>::difference_type>(excess));
                 }
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
         });
     TerminalInputModeGuard terminal_input_mode_guard;
     std::atomic<std::size_t> animation_tick = 0;
@@ -1207,13 +1218,13 @@ RunResult run(RunOptions opts) {
         } else {
             ui_messages.back().text += str;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto append_assistant_output = [&](const std::string& str) {
         std::lock_guard lock(ui_mutex);
         append_ui_message(ui_messages, make_assistant_message(str, current_time_str(), false));
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto has_active_animation = [&]() -> bool {
@@ -1359,7 +1370,7 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             approval_mode = enabled ? ApprovalMode::Yolo : ApprovalMode::Prompt;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto list_tool_rules = [&]() -> std::vector<std::string> {
@@ -1390,7 +1401,7 @@ RunResult run(RunOptions opts) {
             inserted = did_insert;
         }
 
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return {
             .ok = true,
             .message = inserted
@@ -1422,7 +1433,7 @@ RunResult run(RunOptions opts) {
             removed = session_allowed.erase(normalized) > 0;
         }
 
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return removed
             ? core::commands::CommandOperationResult{
                 .ok = true,
@@ -1446,7 +1457,7 @@ RunResult run(RunOptions opts) {
             removed = session_allowed.size();
             session_allowed.clear();
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return {
             .ok = true,
             .message = removed == 0
@@ -1561,7 +1572,7 @@ RunResult run(RunOptions opts) {
         }
         reset_history_view();
         animation_cv.notify_one();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto open_sessions_picker = [&]() -> bool {
@@ -1574,7 +1585,7 @@ RunResult run(RunOptions opts) {
             session_picker_state.active = true;
             session_picker_state.selected = 0;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -1591,7 +1602,7 @@ RunResult run(RunOptions opts) {
             refresh_review_base_refs_locked();
             review_picker_state.on_select = std::move(on_select);
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto set_review_activity = [&](bool active, const std::string& hint) {
@@ -1607,7 +1618,7 @@ RunResult run(RunOptions opts) {
             }
         }
         animation_cv.notify_one();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto fork_session = [&]() -> std::string {
@@ -1670,14 +1681,14 @@ RunResult run(RunOptions opts) {
         }
         core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
         agent->set_session_id(new_session_id);
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return std::format("Forked session {} into {}.", old_session_id, new_session_id);
     };
 
     agent->set_efficiency_decision_fn(
         [agent, session_store, &ui_mutex, &session_id, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &screen, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
+         &ui_messages, &wake_ui, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
             auto snap_context = agent->get_context_summary();
@@ -1721,7 +1732,7 @@ RunResult run(RunOptions opts) {
                         archived.session_id,
                         save_error.empty() ? std::string("unknown archival error.") : save_error)));
                 }
-                screen.PostEvent(ftxui::Event::Custom);
+                wake_ui();
                 return;
             }
 
@@ -1754,7 +1765,7 @@ RunResult run(RunOptions opts) {
                         new_session_id,
                         reason)));
             }
-            screen.PostEvent(ftxui::Event::Custom);
+            wake_ui();
         });
 
     std::function<std::string()> apply_active_profile_live;
@@ -1841,7 +1852,7 @@ RunResult run(RunOptions opts) {
 
         refresh_status_labels();
         animation_cv.notify_one();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return "Reloaded MCP servers live.";
     };
 
@@ -1939,7 +1950,7 @@ RunResult run(RunOptions opts) {
 
         refresh_status_labels();
         animation_cv.notify_one();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
 
         return "Applied profile live.";
     };
@@ -2015,7 +2026,7 @@ RunResult run(RunOptions opts) {
         input_cursor_position = static_cast<int>(completed.cursor);
         mention_picker.key.clear();
         mention_picker.selected = 0;
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -2039,7 +2050,7 @@ RunResult run(RunOptions opts) {
         }
         command_picker.key.clear();
         command_picker.selected = 0;
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -2534,7 +2545,7 @@ RunResult run(RunOptions opts) {
                 model_selection_mode == ModelSelectionMode::Manual ? 0 :
                 model_selection_mode == ModelSelectionMode::Auto   ? 2 : 1;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -2604,7 +2615,7 @@ RunResult run(RunOptions opts) {
             local_model_picker_state.active      = true;
             model_picker_state.active            = false; // close model picker
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto select_local_model = [&](const std::filesystem::path& gguf_path) -> std::string {
@@ -2790,7 +2801,7 @@ RunResult run(RunOptions opts) {
                 "Could not save {} setting: {}",
                 settings_scope_label(scope),
                 error);
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return;
         }
 
@@ -2811,7 +2822,7 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             settings_panel_state.status_message = std::move(status);
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     static constexpr std::array<std::string_view, 4> kCompressionModes{
@@ -2902,7 +2913,7 @@ RunResult run(RunOptions opts) {
         compression_picker_state.active = true;
         compression_picker_state.selected =
             compression_mode_index(config_manager.get_config().context_compression);
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -2920,7 +2931,7 @@ RunResult run(RunOptions opts) {
             settings_panel_state.status_message =
                 "Edit scoped app preferences here. Use /model for provider and session routing choices.";
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -2969,7 +2980,7 @@ RunResult run(RunOptions opts) {
 
     // Notify fn: called from the worker thread when a permission is requested.
     core::agent::PermissionGate::get_instance().set_notify_fn([&]() {
-        screen.PostEvent(Event::Custom);  // wake up the render loop
+        wake_ui();  // wake up the render loop
     });
 
     // Permission function given to the Agent.
@@ -3007,7 +3018,7 @@ RunResult run(RunOptions opts) {
                     }
                 }
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
 
@@ -3081,7 +3092,7 @@ RunResult run(RunOptions opts) {
             perm_state.allow_label  = make_allow_label(tool_name, args);
             perm_state.promise      = prom;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return fut.get();
     };
 
@@ -3113,7 +3124,7 @@ RunResult run(RunOptions opts) {
             question_dialog_state.other_input_text.clear();
             question_dialog_state.promise = request.promise;
         }
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         
         // Wait for the result (UI will resolve the promise)
     });
@@ -3142,7 +3153,7 @@ RunResult run(RunOptions opts) {
             updater(message);
         }
         animation_cv.notify_one();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
     };
 
     auto save_session_snapshot = [&, session_save_state]() {
@@ -3630,7 +3641,7 @@ RunResult run(RunOptions opts) {
                 provider_picker_state.selected  = 0;
                 provider_picker_state.providers = std::move(providers);
                 provider_picker_state.on_select = std::move(on_select);
-                screen.PostEvent(Event::Custom);
+                wake_ui();
             },
             .open_review_picker_fn = open_review_picker,
             .dispatch_async_fn = [](std::function<void()> task) {
@@ -3765,7 +3776,7 @@ RunResult run(RunOptions opts) {
         input_cursor_position = static_cast<int>(input_text.size());
 
         cleanup_temp_files();
-        screen.PostEvent(Event::Custom);
+        wake_ui();
         return true;
     };
 
@@ -4531,7 +4542,7 @@ RunResult run(RunOptions opts) {
                 local_model_picker_state.entries     = std::move(new_entries);
                 local_model_picker_state.selected    = 0;
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
         if (navigate_up) {
@@ -4546,7 +4557,7 @@ RunResult run(RunOptions opts) {
                 local_model_picker_state.entries     = std::move(new_entries);
                 local_model_picker_state.selected    = 0;
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
         if (local_model_picker_was_active) {
@@ -4623,7 +4634,7 @@ RunResult run(RunOptions opts) {
                     static_cast<std::size_t>(*search_jump_index),
                     message_count);
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
 
@@ -4634,7 +4645,7 @@ RunResult run(RunOptions opts) {
                 conversation_search_state.selected = 0;
                 refresh_conversation_search_locked();
             }
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
 
@@ -4714,7 +4725,7 @@ RunResult run(RunOptions opts) {
                 append_history(std::format(
                     "\n\xe2\x84\xb9  Pasted clipboard image as context: {}\n",
                     image_path->string()));
-                screen.PostEvent(Event::Custom);
+                wake_ui();
                 return true;
             }
 
@@ -4723,13 +4734,13 @@ RunResult run(RunOptions opts) {
                     input_text,
                     input_cursor_position,
                     normalize_newlines(*text));
-                screen.PostEvent(Event::Custom);
+                wake_ui();
                 return true;
             }
 
             append_history(
                 "\n\xe2\x9c\x97  Clipboard paste is unavailable (no compatible clipboard provider found).\n");
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
         if (is_ctrl_y_event(event)) {  // Ctrl+Y — toggle YOLO approvals
@@ -4786,7 +4797,7 @@ RunResult run(RunOptions opts) {
 
             ctrl_d_press_count = 1;
             ctrl_d_deadline = std::chrono::steady_clock::now() + kExitConfirmWindow;
-            screen.PostEvent(Event::Custom);
+            wake_ui();
             return true;
         }
 
@@ -5282,12 +5293,23 @@ RunResult run(RunOptions opts) {
                 continue;
             }
             animation_tick.fetch_add(1, std::memory_order_relaxed);
-            screen.PostEvent(Event::Custom);
+            wake_ui();
         }
     });
 
     screen.Loop(renderer);
+
+    ui_accepting_events.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock(ui_event_post_mutex);
+    }
+
     core::logging::Logger::get_instance().clear_callback_sink();
+    core::agent::PermissionGate::get_instance().set_notify_fn({});
+    ask_user_tool->setQuestionCallback({});
+    agent->set_permission_fn({});
+    agent->set_loop_break_fn({});
+    agent->set_efficiency_decision_fn({});
 
     animation_running.store(false, std::memory_order_relaxed);
     animation_cv.notify_one();
