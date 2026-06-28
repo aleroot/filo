@@ -45,7 +45,7 @@ TEST_CASE("ContextWindowTracker estimates live history snapshots", "[context][wi
 
     CHECK(snapshot.estimated_context_tokens == 101);
     CHECK(snapshot.max_context_tokens == 256'000);
-    CHECK(snapshot.remaining_pct == 99);
+    CHECK(snapshot.remaining_pct == 100);
 }
 
 TEST_CASE("ContextWindowTracker uses provider-reported context before model registry",
@@ -61,7 +61,36 @@ TEST_CASE("ContextWindowTracker uses provider-reported context before model regi
 
     CHECK(snapshot.max_context_tokens == 64'000);
     CHECK(snapshot.estimated_context_tokens == 1'001);
-    CHECK(snapshot.remaining_pct == 98);
+    CHECK(snapshot.remaining_pct == 99);
+}
+
+TEST_CASE("ContextWindowTracker ceils tiny Kimi 2.7 startup usage to full remaining display",
+          "[context][window]") {
+    const auto snapshot = core::context::ContextWindowTracker::snapshot(
+        {message_with_chars(4'000)},
+        nullptr,
+        "kimi-k2.7-code");
+
+    CHECK(snapshot.max_context_tokens == 256'000);
+    CHECK(snapshot.estimated_context_tokens == 1'001);
+    CHECK(snapshot.remaining_pct == 100);
+}
+
+TEST_CASE("ContextWindowTracker does not show 99 percent left before one percent is used",
+          "[context][window]") {
+    const auto just_under_one_percent = core::context::ContextWindowTracker::snapshot(
+        {message_with_chars(10'232)},
+        nullptr,
+        "kimi-k2.7-code");
+    const auto just_over_one_percent = core::context::ContextWindowTracker::snapshot(
+        {message_with_chars(10'240)},
+        nullptr,
+        "kimi-k2.7-code");
+
+    CHECK(just_under_one_percent.estimated_context_tokens == 2'559);
+    CHECK(just_under_one_percent.remaining_pct == 100);
+    CHECK(just_over_one_percent.estimated_context_tokens == 2'561);
+    CHECK(just_over_one_percent.remaining_pct == 99);
 }
 
 TEST_CASE("ContextWindowTracker falls back to provider last model for router-like providers",
@@ -75,7 +104,7 @@ TEST_CASE("ContextWindowTracker falls back to provider last model for router-lik
         "auto");
 
     CHECK(snapshot.max_context_tokens == 1'000'000);
-    CHECK(snapshot.remaining_pct == 99);
+    CHECK(snapshot.remaining_pct == 100);
 }
 
 TEST_CASE("ContextWindowTracker resolves representative provider model windows",
@@ -87,6 +116,7 @@ TEST_CASE("ContextWindowTracker resolves representative provider model windows",
 
     const std::vector<ModelCase> cases{
         {"kimi-for-coding", 256'000},
+        {"kimi-k2.7-code", 256'000},
         {"claude-sonnet-4-6[1m]", 1'000'000},
         {"gpt-4o", 128'000},
         {"qwen3-coder-plus", 1'000'000},

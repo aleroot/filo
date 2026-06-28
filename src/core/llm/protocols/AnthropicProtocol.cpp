@@ -3,8 +3,15 @@
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdio>
+#include <cctype>
 #include <limits>
+#include <mutex>
+#include <optional>
+#include <unordered_map>
 #include <utility>
 
 namespace core::llm::protocols {
@@ -18,9 +25,58 @@ namespace {
     constexpr std::string_view ANTHROPIC_BILLING_HEADER = "cc_version=2.1.78.13b; cc_entrypoint=cli; cch=0;";
 
     constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-4-6";
-    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-6";
+    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-8";
     constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
+    struct HeaderWindowDef {
+        std::string_view suffix;
+        std::string_view label;
+    };
+
+    struct ClaudeUsageSnapshot {
+        std::vector<UsageWindow> windows;
+    };
+
+    struct CachedClaudeUsageSnapshot {
+        ClaudeUsageSnapshot value;
+        std::chrono::steady_clock::time_point expires_at;
+    };
+
+    constexpr auto kClaudeUsageSnapshotTtl = std::chrono::seconds(20);
+
+    [[nodiscard]] std::string lower_header_key(std::string_view value) {
+        std::string out;
+        out.reserve(value.size());
+        for (char ch : value) {
+            out.push_back(static_cast<char>(
+                std::tolower(static_cast<unsigned char>(ch))));
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::optional<std::string_view>
+    find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
+        if (auto it = headers.find(std::string(key)); it != headers.end()) {
+            return it->second;
+        }
+
+        const std::string key_lower = lower_header_key(key);
+        for (const auto& [k, v] : headers) {
+            if (k.size() != key_lower.size()) continue;
+            bool equal = true;
+            for (std::size_t i = 0; i < k.size(); ++i) {
+                const char lhs = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(k[i])));
+                if (lhs != key_lower[i]) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) return v;
+        }
+        return std::nullopt;
+    }
+
     // Helper to safely convert string header to int32_t
     int32_t safe_stoi32(std::string_view sv, int32_t default_val = 0) {
         if (sv.empty()) return default_val;
@@ -57,6 +113,33 @@ namespace {
         } catch (...) {
             return false;
         }
+    }
+
+    [[nodiscard]] float normalize_utilization(float value, bool endpoint_percent) {
+        if (endpoint_percent || (value > 1.5f && value <= 100.0f)) {
+            value /= 100.0f;
+        }
+        return std::clamp(value, 0.0f, 1.5f);
+    }
+
+    [[nodiscard]] std::optional<float>
+    parse_float_element(simdjson::dom::element element) noexcept {
+        double as_double = 0.0;
+        if (element.get(as_double) == simdjson::SUCCESS) {
+            return static_cast<float>(as_double);
+        }
+
+        int64_t as_i64 = 0;
+        if (element.get(as_i64) == simdjson::SUCCESS) {
+            return static_cast<float>(as_i64);
+        }
+
+        std::string_view as_string;
+        if (element.get(as_string) == simdjson::SUCCESS) {
+            float value = 0.0f;
+            if (try_parse_float(as_string, value)) return value;
+        }
+        return std::nullopt;
     }
 
     bool safe_parse_bool(std::string_view sv, bool default_val = false) {
@@ -110,7 +193,7 @@ namespace {
     bool anthropic_model_supports_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
         return lowered.find("mythos") != std::string::npos
-            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("opus-4-8") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos
             || lowered.find("opus-4-5") != std::string::npos;
     }
@@ -118,7 +201,7 @@ namespace {
     bool anthropic_model_supports_max_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
         return lowered.find("mythos") != std::string::npos
-            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("opus-4-8") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
     }
 
@@ -225,34 +308,190 @@ namespace {
     // inside the class's own method body due to C++ name-lookup rules).
     // ─────────────────────────────────────────────────────────────────────────
 
+    [[nodiscard]] std::unordered_map<std::string, CachedClaudeUsageSnapshot>&
+    claude_usage_cache() {
+        static std::unordered_map<std::string, CachedClaudeUsageSnapshot> cache;
+        return cache;
+    }
+
+    [[nodiscard]] std::mutex& claude_usage_cache_mutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    [[nodiscard]] std::string trim_trailing_slash(std::string_view url) {
+        while (!url.empty() && url.back() == '/') {
+            url.remove_suffix(1);
+        }
+        return std::string(url);
+    }
+
+    [[nodiscard]] std::string usage_cache_key(std::string_view base_url,
+                                              const cpr::Header& request_headers) {
+        std::string key = trim_trailing_slash(base_url);
+        const auto auth_header = find_header_case_insensitive(request_headers, "Authorization");
+        const std::size_t auth_hash = std::hash<std::string_view>{}(
+            auth_header.has_value() ? *auth_header : std::string_view{});
+        key += "|auth:";
+        key += std::to_string(auth_hash);
+        return key;
+    }
+
+    [[nodiscard]] std::optional<ClaudeUsageSnapshot>
+    load_cached_claude_usage_snapshot(const std::string& key) {
+        const auto now = std::chrono::steady_clock::now();
+        std::scoped_lock lock(claude_usage_cache_mutex());
+        auto& cache = claude_usage_cache();
+        auto it = cache.find(key);
+        if (it == cache.end()) return std::nullopt;
+        if (it->second.expires_at <= now) {
+            cache.erase(it);
+            return std::nullopt;
+        }
+        return it->second.value;
+    }
+
+    void store_cached_claude_usage_snapshot(std::string key,
+                                            const ClaudeUsageSnapshot& snapshot) {
+        const auto expires_at = std::chrono::steady_clock::now() + kClaudeUsageSnapshotTtl;
+        std::scoped_lock lock(claude_usage_cache_mutex());
+        auto& cache = claude_usage_cache();
+        cache[std::move(key)] = CachedClaudeUsageSnapshot{snapshot, expires_at};
+    }
+
+    void merge_usage_window(RateLimitInfo& info, UsageWindow incoming) {
+        auto existing = std::find_if(
+            info.usage_windows.begin(),
+            info.usage_windows.end(),
+            [&](const UsageWindow& current) {
+                return current.label == incoming.label;
+            });
+        if (existing != info.usage_windows.end()) {
+            existing->utilization = incoming.utilization;
+        } else {
+            info.usage_windows.push_back(std::move(incoming));
+        }
+    }
+
+    void merge_claude_usage_snapshot(RateLimitInfo& info,
+                                     const ClaudeUsageSnapshot& snapshot) {
+        for (const auto& window : snapshot.windows) {
+            merge_usage_window(info, window);
+        }
+    }
+
+    [[nodiscard]] std::optional<ClaudeUsageSnapshot>
+    parse_claude_usage_payload(std::string_view payload) {
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        simdjson::padded_string padded(payload);
+        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+            return std::nullopt;
+        }
+
+        ClaudeUsageSnapshot snapshot;
+        static constexpr std::array kWindows{
+            HeaderWindowDef{"five_hour", "5h"},
+            HeaderWindowDef{"seven_day", "7d"},
+            HeaderWindowDef{"seven_day_oauth_apps", "oauth-apps"},
+            HeaderWindowDef{"seven_day_opus", "opus"},
+            HeaderWindowDef{"seven_day_sonnet", "sonnet"},
+        };
+
+        for (const auto& w : kWindows) {
+            simdjson::dom::object obj;
+            if (doc[w.suffix].get(obj) != simdjson::SUCCESS) continue;
+
+            simdjson::dom::element utilization_el;
+            if (obj["utilization"].get(utilization_el) != simdjson::SUCCESS) continue;
+            const auto utilization = parse_float_element(utilization_el);
+            if (!utilization.has_value()) continue;
+
+            snapshot.windows.push_back(UsageWindow{
+                .label = std::string(w.label),
+                .utilization = normalize_utilization(*utilization, true),
+            });
+        }
+
+        simdjson::dom::object extra_usage;
+        if (doc["extra_usage"].get(extra_usage) == simdjson::SUCCESS) {
+            simdjson::dom::element utilization_el;
+            if (extra_usage["utilization"].get(utilization_el) == simdjson::SUCCESS) {
+                if (const auto utilization = parse_float_element(utilization_el);
+                    utilization.has_value()) {
+                    snapshot.windows.push_back(UsageWindow{
+                        .label = "overage",
+                        .utilization = normalize_utilization(*utilization, true),
+                    });
+                }
+            }
+        }
+
+        if (snapshot.windows.empty()) return std::nullopt;
+        return snapshot;
+    }
+
+    [[nodiscard]] bool should_query_claude_usage_endpoint(const cpr::Header& request_headers,
+                                                          const HttpResponse& response) {
+        if (response.status_code != 200) return false;
+        if (!find_header_case_insensitive(request_headers, "Authorization").has_value()) {
+            return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] std::optional<ClaudeUsageSnapshot>
+    fetch_claude_usage_snapshot(std::string_view base_url,
+                                const cpr::Header& request_headers) {
+        std::string url = trim_trailing_slash(base_url);
+        url += "/api/oauth/usage";
+
+        cpr::Header headers = request_headers;
+        headers["Accept"] = "application/json";
+        headers["Content-Type"] = "application/json";
+
+        const cpr::Response response = cpr::Get(
+            cpr::Url{url},
+            headers,
+            cpr::Timeout{1500});
+
+        if (response.error.code != cpr::ErrorCode::OK) {
+            return std::nullopt;
+        }
+        if (response.status_code != 200 || response.text.empty()) {
+            return std::nullopt;
+        }
+        return parse_claude_usage_payload(response.text);
+    }
+
     RateLimitInfo impl_parse_rate_limit_headers(const cpr::Header& headers) {
         RateLimitInfo info;
 
         // Standard rate limit headers (requests per minute)
-        if (auto it = headers.find("anthropic-ratelimit-requests-limit"); it != headers.end()) {
-            info.requests_limit = safe_stoi32(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-requests-limit")) {
+            info.requests_limit = safe_stoi32(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-requests-remaining"); it != headers.end()) {
-            info.requests_remaining = safe_stoi32(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-requests-remaining")) {
+            info.requests_remaining = safe_stoi32(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-requests-reset"); it != headers.end()) {
-            info.requests_reset = parse_iso8601_timestamp(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-requests-reset")) {
+            info.requests_reset = parse_iso8601_timestamp(*value);
         }
 
         // Token-based rate limits (tokens per minute)
-        if (auto it = headers.find("anthropic-ratelimit-tokens-limit"); it != headers.end()) {
-            info.tokens_limit = safe_stoi32(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-tokens-limit")) {
+            info.tokens_limit = safe_stoi32(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-tokens-remaining"); it != headers.end()) {
-            info.tokens_remaining = safe_stoi32(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-tokens-remaining")) {
+            info.tokens_remaining = safe_stoi32(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-tokens-reset"); it != headers.end()) {
-            info.tokens_reset = parse_iso8601_timestamp(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-tokens-reset")) {
+            info.tokens_reset = parse_iso8601_timestamp(*value);
         }
 
         // Retry-after header (present on 429 responses)
-        if (auto it = headers.find("retry-after"); it != headers.end()) {
-            info.retry_after = safe_stoi32(it->second);
+        if (auto value = find_header_case_insensitive(headers, "retry-after")) {
+            info.retry_after = safe_stoi32(*value);
             if (info.retry_after > 0) {
                 info.is_rate_limited = true;
             }
@@ -262,43 +501,49 @@ namespace {
         // Anthropic returns two windows: a 5-hour rolling window and a 7-day window.
         // The representative-claim header indicates which is currently authoritative.
         // Add new labels here if Anthropic introduces additional windows.
-        for (const auto& [window, label] : {
-                 std::pair{"5h", "5h"},
-                 std::pair{"7d", "7d"},
-                 std::pair{"overage", "overage"},
+        for (const auto& [window, label] : std::array{
+                 HeaderWindowDef{"5h", "5h"},
+                 HeaderWindowDef{"7d", "7d"},
+                 HeaderWindowDef{"seven_day_oauth_apps", "oauth-apps"},
+                 HeaderWindowDef{"seven_day_opus", "opus"},
+                 HeaderWindowDef{"seven_day_sonnet", "sonnet"},
+                 HeaderWindowDef{"overage", "overage"},
              }) {
             const std::string header_name =
                 "anthropic-ratelimit-unified-" + std::string(window) + "-utilization";
-            if (auto it = headers.find(header_name); it != headers.end()) {
+            if (auto value = find_header_case_insensitive(headers, header_name)) {
                 float val = 0.0f;
-                if (try_parse_float(it->second, val) && val >= 0.0f) {
-                    info.usage_windows.push_back({std::string(label), val});
+                if (try_parse_float(*value, val) && val >= 0.0f) {
+                    info.usage_windows.push_back({
+                        std::string(label),
+                        normalize_utilization(val, false),
+                    });
                 }
             }
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-status"); it != headers.end()) {
-            info.unified_status = it->second;
-            if (it->second == "rate_limited" || it->second == "rejected") {
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-status")) {
+            info.unified_status = std::string(*value);
+            if (*value == "rate_limited" || *value == "rejected") {
                 info.is_rate_limited = true;
             }
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-representative-claim"); it != headers.end()) {
-            info.unified_representative_claim = it->second;
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-representative-claim")) {
+            info.unified_representative_claim = std::string(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-overage-status"); it != headers.end()) {
-            info.unified_overage_status = it->second;
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-overage-status")) {
+            info.unified_overage_status = std::string(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-overage-reset"); it != headers.end()) {
-            info.unified_overage_reset = safe_stoi64(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-overage-reset")) {
+            info.unified_overage_reset = safe_stoi64(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-overage-disabled-reason"); it != headers.end()) {
-            info.unified_overage_disabled_reason = it->second;
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-overage-disabled-reason")) {
+            info.unified_overage_disabled_reason = std::string(*value);
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-fallback"); it != headers.end()) {
-            info.unified_fallback_available = (it->second == "available");
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-fallback")) {
+            info.unified_fallback_available = (*value == "available");
         }
-        if (auto it = headers.find("anthropic-ratelimit-unified-fallback-available"); it != headers.end()) {
-            info.unified_fallback_available = safe_parse_bool(it->second);
+        if (auto value = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-fallback-available")) {
+            info.unified_fallback_available = safe_parse_bool(*value);
         }
 
         return info;
@@ -807,6 +1052,26 @@ std::unique_ptr<ApiProtocolBase> AnthropicProtocol::clone() const {
 
 void AnthropicProtocol::on_response(const HttpResponse& response) {
     last_rate_limit_ = impl_parse_rate_limit_headers(response.headers);
+}
+
+void AnthropicProtocol::enrich_rate_limit(std::string_view base_url,
+                                          const cpr::Header& request_headers,
+                                          const HttpResponse& response) {
+    if (!should_query_claude_usage_endpoint(request_headers, response)) return;
+    if (!last_rate_limit_.usage_windows.empty()) return;
+
+    const std::string cache_key = usage_cache_key(base_url, request_headers);
+    if (const auto cached = load_cached_claude_usage_snapshot(cache_key);
+        cached.has_value()) {
+        merge_claude_usage_snapshot(last_rate_limit_, *cached);
+        return;
+    }
+
+    if (const auto usage = fetch_claude_usage_snapshot(base_url, request_headers);
+        usage.has_value()) {
+        store_cached_claude_usage_snapshot(cache_key, *usage);
+        merge_claude_usage_snapshot(last_rate_limit_, *usage);
+    }
 }
 
 std::string AnthropicProtocol::format_error_message(const HttpResponse& response) const {

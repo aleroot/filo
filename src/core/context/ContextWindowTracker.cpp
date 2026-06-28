@@ -52,8 +52,8 @@ ContextWindowSnapshot ContextWindowTracker::snapshot(
             - static_cast<double>(estimated_context_tokens);
         remaining_pct = remaining <= 0.0
             ? 0
-            : static_cast<int32_t>(
-                (remaining / static_cast<double>(max_context_tokens)) * 100.0);
+            : static_cast<int32_t>(std::ceil(
+                (remaining / static_cast<double>(max_context_tokens)) * 100.0));
     }
 
     return ContextWindowSnapshot{

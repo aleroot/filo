@@ -29,7 +29,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("claude-3-5-haiku") == 200000);
     REQUIRE(get_max_context_size("claude-sonnet-4-6[1m]") == 1000000);
     REQUIRE(get_max_context_size("sonnet[1m]") == 1000000);
-    REQUIRE(get_max_context_size("opus") == 1000000);
+    REQUIRE(get_max_context_size("opus") == 200000);
     
     // OpenAI (via new registry)
     REQUIRE(get_max_context_size("gpt-5.4") == 200000);
@@ -113,6 +113,10 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto kimi_for_coding = registry.lookup("kimi-for-coding");
     REQUIRE(kimi_for_coding != nullptr);
     REQUIRE(kimi_for_coding->canonical_id == "kimi-for-coding");
+
+    const auto opus = registry.lookup("opus");
+    REQUIRE(opus != nullptr);
+    REQUIRE(opus->canonical_id == "claude-opus-4-8");
 }
 
 TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {

@@ -131,6 +131,24 @@ TEST_CASE("AnthropicProtocol::on_response - populates last_rate_limit from heade
     REQUIRE(info.tokens_remaining   == 12345);
 }
 
+TEST_CASE("AnthropicProtocol::on_response - parses headers case-insensitively", "[lifecycle][anthropic]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers = make_headers({
+        {"Anthropic-Ratelimit-Requests-Limit",     "100"},
+        {"Anthropic-Ratelimit-Requests-Remaining", "42"},
+        {"Retry-After",                            "5"},
+    });
+    const HttpResponse resp{429, "", headers};
+
+    protocol.on_response(resp);
+    const RateLimitInfo& info = protocol.last_rate_limit();
+
+    REQUIRE(info.requests_limit == 100);
+    REQUIRE(info.requests_remaining == 42);
+    REQUIRE(info.retry_after == 5);
+    REQUIRE(info.is_rate_limited == true);
+}
+
 TEST_CASE("AnthropicProtocol::on_response - detects rate-limited from retry-after header", "[lifecycle][anthropic]") {
     AnthropicProtocol protocol;
     const cpr::Header headers = make_headers({
@@ -215,6 +233,21 @@ TEST_CASE("AnthropicProtocol::on_response - keeps zero utilization windows and p
     REQUIRE(find_window(info, "5h") == Catch::Approx(0.0f));
     REQUIRE(find_window(info, "7d") == Catch::Approx(0.72f));
     REQUIRE(find_window(info, "overage") == Catch::Approx(0.33f));
+}
+
+TEST_CASE("AnthropicProtocol::on_response - parses Claude model-specific weekly windows", "[lifecycle][anthropic]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers = make_headers({
+        {"anthropic-ratelimit-unified-seven_day_opus-utilization", "0.61"},
+        {"anthropic-ratelimit-unified-seven_day_sonnet-utilization", "0.24"},
+    });
+    const HttpResponse resp{200, "", headers};
+
+    protocol.on_response(resp);
+    const RateLimitInfo& info = protocol.last_rate_limit();
+
+    REQUIRE(find_window(info, "opus") == Catch::Approx(0.61f));
+    REQUIRE(find_window(info, "sonnet") == Catch::Approx(0.24f));
 }
 
 TEST_CASE("AnthropicProtocol::on_response - empty headers yield zeroed RateLimitInfo", "[lifecycle][anthropic]") {

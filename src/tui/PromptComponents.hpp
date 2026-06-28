@@ -28,6 +28,20 @@ struct LocalModelEntry {
     bool is_directory;
 };
 
+struct ModelProviderPickerRow {
+    std::string name;
+    std::string description;
+    bool active = false;
+};
+
+struct ModelPickerRow {
+    std::string id;
+    std::string selector;
+    std::string description;
+    bool active = false;
+    bool provider_default = false;
+};
+
 struct ConversationSearchHit {
     int message_index = -1;
     std::string role;
@@ -74,6 +88,16 @@ ftxui::Element render_model_selection_panel(int selected_index,
                                             std::string_view router_policy,
                                             bool router_available,
                                             bool local_model_available);
+
+ftxui::Element render_model_provider_picker_panel(
+    const std::vector<ModelProviderPickerRow>& providers,
+    int selected_index,
+    bool local_model_available);
+
+ftxui::Element render_provider_model_picker_panel(
+    std::string_view provider_name,
+    const std::vector<ModelPickerRow>& models,
+    int selected_index);
 
 ftxui::Element render_compression_selection_panel(int selected_index,
                                                   std::string_view current_mode);

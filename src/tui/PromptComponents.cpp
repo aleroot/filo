@@ -838,6 +838,83 @@ Element render_model_selection_panel(int selected_index,
     }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 14);
 }
 
+Element render_model_provider_picker_panel(
+    const std::vector<ModelProviderPickerRow>& providers,
+    int selected_index,
+    bool local_model_available) {
+    std::vector<Element> rows;
+    rows.reserve(providers.size());
+    for (std::size_t i = 0; i < providers.size(); ++i) {
+        const auto& provider = providers[i];
+        std::string label = std::format("[{}] {}", i + 1, provider.name);
+        if (provider.active) {
+            label += " (active)";
+        }
+        rows.push_back(make_selection_row(
+            label,
+            provider.description,
+            selected_index == static_cast<int>(i),
+            ColorYellowDark));
+    }
+
+    return vbox({
+        hbox({
+            text(" MODEL PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            filler(),
+            text("Up/Down: select  Enter: models  1-9: quick choose")
+                | color(Color::GrayDark)
+        }),
+        separator(),
+        text("Select a provider to choose a model.") | color(Color::White),
+        filler(),
+        vbox(std::move(rows)),
+        filler(),
+        local_model_available
+            ? (text("L: browse local GGUF files   Esc: close") | dim)
+            : (text("Esc closes this panel.") | dim),
+    }) | UiBorder(ColorYellowBright)
+      | size(HEIGHT, GREATER_THAN, std::max(12, static_cast<int>(providers.size()) * 2 + 6));
+}
+
+Element render_provider_model_picker_panel(
+    std::string_view provider_name,
+    const std::vector<ModelPickerRow>& models,
+    int selected_index) {
+    std::vector<Element> rows;
+    rows.reserve(models.size());
+    for (std::size_t i = 0; i < models.size(); ++i) {
+        const auto& model = models[i];
+        std::string label = std::format("[{}] {}", i + 1, model.id);
+        if (model.active) {
+            label += " (active)";
+        } else if (model.provider_default) {
+            label += " (default)";
+        }
+        rows.push_back(make_selection_row(
+            label,
+            model.description,
+            selected_index == static_cast<int>(i),
+            ColorYellowDark));
+    }
+
+    return vbox({
+        hbox({
+            text(" MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text("  " + std::string(provider_name)) | ftxui::bold | color(ColorYellowBright),
+            filler(),
+            text("Up/Down: select  Enter: switch  Esc: providers")
+                | color(Color::GrayDark)
+        }),
+        separator(),
+        text(std::format("Select a {} model.", provider_name)) | color(Color::White),
+        filler(),
+        vbox(std::move(rows)),
+        filler(),
+        text("Esc returns to providers.") | dim,
+    }) | UiBorder(ColorYellowBright)
+      | size(HEIGHT, GREATER_THAN, std::max(12, static_cast<int>(models.size()) * 2 + 6));
+}
+
 Element render_compression_selection_panel(int selected_index,
                                            std::string_view current_mode) {
     struct CompressionOption {

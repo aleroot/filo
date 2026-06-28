@@ -176,6 +176,9 @@ public:
      * the lifetime of this clone (see `ApiProtocolBase::on_response`).
      */
     void on_response(const HttpResponse& response) override;
+    void enrich_rate_limit(std::string_view base_url,
+                           const cpr::Header& request_headers,
+                           const HttpResponse& response) override;
 
     /**
      * @brief Returns a provider-specific, actionable error message.

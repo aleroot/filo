@@ -325,6 +325,54 @@ TEST_CASE("render_settings_panel — inherited and scoped rows render without cr
         "Workspace setting saved."));
 }
 
+TEST_CASE("render_model_provider_picker_panel — renders providers and active marker",
+          "[tui][picker][model]") {
+    std::vector<ModelProviderPickerRow> rows = {
+        {.name = "claude", .description = "Default: claude-opus-4-8", .active = true},
+        {.name = "kimi", .description = "Default: kimi-k2.7-code", .active = false},
+    };
+
+    auto panel = render_model_provider_picker_panel(rows, 0, false);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fixed(16));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MODEL PROVIDER"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("claude (active)"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Default: claude-opus-4-8"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("kimi"));
+}
+
+TEST_CASE("render_provider_model_picker_panel — renders model choices",
+          "[tui][picker][model]") {
+    std::vector<ModelPickerRow> rows = {
+        {
+            .id = "claude-opus-4-8",
+            .selector = "claude-opus-4-8",
+            .description = "Claude Opus 4.8 · aliases: opus",
+            .active = true,
+            .provider_default = true,
+        },
+        {
+            .id = "claude-3-5-haiku-20241022",
+            .selector = "claude-3-5-haiku-20241022",
+            .description = "Claude 3.5 Haiku",
+        },
+    };
+
+    auto panel = render_provider_model_picker_panel("claude", rows, 0);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(110),
+                                        ftxui::Dimension::Fixed(16));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MODEL"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("claude"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("claude-opus-4-8 (active)"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Claude Opus 4.8"));
+}
+
 TEST_CASE("render_command_prompt_panel — preserves command metadata in tall rows",
           "[tui][picker][command]") {
     std::vector<CommandSuggestion> suggestions = {{

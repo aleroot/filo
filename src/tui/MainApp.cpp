@@ -23,6 +23,8 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
 #include "core/llm/HttpLLMProvider.hpp"
+#include "core/llm/ModelCatalogDiscovery.hpp"
+#include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
@@ -619,6 +621,14 @@ RunResult run(RunOptions opts) {
     std::string active_model_name;
     std::string session_effort_value; // empty => auto/provider default
 
+    struct ModelSelectionSnapshot {
+        ModelSelectionMode mode = ModelSelectionMode::Manual;
+        std::string manual_provider_name;
+        std::string manual_model_name;
+        std::string router_policy;
+    };
+    std::optional<ModelSelectionSnapshot> previous_model_selection;
+
     std::shared_ptr<core::llm::LLMProvider> llm_provider;
     if (model_selection_mode == ModelSelectionMode::Router
         || model_selection_mode == ModelSelectionMode::Auto) {
@@ -879,6 +889,21 @@ RunResult run(RunOptions opts) {
         int selected = 0; // 0=manual, 1=router, 2=auto
     };
     ModelPickerState model_picker_state;
+
+    struct ModelProviderPickerState {
+        bool active = false;
+        int selected = 0;
+        std::vector<tui::ModelProviderPickerRow> providers;
+    };
+    ModelProviderPickerState model_provider_picker_state;
+
+    struct ProviderModelPickerState {
+        bool active = false;
+        int selected = 0;
+        std::string provider_name;
+        std::vector<tui::ModelPickerRow> models;
+    };
+    ProviderModelPickerState provider_model_picker_state;
 
     struct CompressionPickerState {
         bool active = false;
@@ -2182,6 +2207,88 @@ RunResult run(RunOptions opts) {
         return message;
     };
 
+    auto current_model_selection_snapshot = [&]() -> ModelSelectionSnapshot {
+        return ModelSelectionSnapshot{
+            .mode = model_selection_mode,
+            .manual_provider_name = manual_provider_name,
+            .manual_model_name = manual_model_name,
+            .router_policy = active_router_policy,
+        };
+    };
+
+    auto same_model_selection = [](const ModelSelectionSnapshot& a,
+                                   const ModelSelectionSnapshot& b) {
+        return a.mode == b.mode
+            && a.manual_provider_name == b.manual_provider_name
+            && a.manual_model_name == b.manual_model_name
+            && a.router_policy == b.router_policy;
+    };
+
+    auto remember_previous_model_selection = [&](const ModelSelectionSnapshot& before) {
+        const ModelSelectionSnapshot after = current_model_selection_snapshot();
+        if (!same_model_selection(before, after)) {
+            previous_model_selection = before;
+        }
+    };
+
+    auto finalize_model_switch = [&](const ModelSelectionSnapshot& before,
+                                     std::string message) -> std::string {
+        if (message.starts_with("Switched")) {
+            remember_previous_model_selection(before);
+        }
+        return with_persisted_model_preferences(std::move(message));
+    };
+
+    auto restore_model_selection = [&](const ModelSelectionSnapshot& target) -> std::string {
+        switch (target.mode) {
+            case ModelSelectionMode::Manual: {
+                if (!core::llm::contains_provider(registered_providers, target.manual_provider_name)) {
+                    return std::format(
+                        "Previous provider '{}' is no longer available.",
+                        target.manual_provider_name);
+                }
+                manual_provider_name = target.manual_provider_name;
+                manual_model_name = target.manual_model_name;
+                return activate_manual_mode();
+            }
+            case ModelSelectionMode::Router: {
+                if (!target.router_policy.empty()
+                    && !router_engine->set_active_policy(target.router_policy)) {
+                    return std::format(
+                        "Previous router policy '{}' is no longer available.",
+                        target.router_policy);
+                }
+                active_router_policy = target.router_policy;
+                return activate_router_mode();
+            }
+            case ModelSelectionMode::Auto: {
+                if (!target.router_policy.empty()
+                    && !router_engine->set_active_policy(target.router_policy)) {
+                    return std::format(
+                        "Previous router policy '{}' is no longer available.",
+                        target.router_policy);
+                }
+                active_router_policy = target.router_policy;
+                return activate_auto_mode();
+            }
+        }
+        return "Previous model selection could not be restored.";
+    };
+
+    auto switch_to_previous_model_selection = [&]() -> std::string {
+        if (!previous_model_selection.has_value()) {
+            return "No previous model selection to restore.";
+        }
+
+        const ModelSelectionSnapshot before = current_model_selection_snapshot();
+        const ModelSelectionSnapshot target = *previous_model_selection;
+        std::string message = restore_model_selection(target);
+        if (message.starts_with("Switched")) {
+            previous_model_selection = before;
+        }
+        return with_persisted_model_preferences(std::move(message));
+    };
+
     auto lower_ascii_copy = [](std::string_view value) {
         std::string lowered;
         lowered.reserve(value.size());
@@ -2190,6 +2297,199 @@ RunResult run(RunOptions opts) {
                 std::tolower(static_cast<unsigned char>(ch))));
         }
         return lowered;
+    };
+
+    auto registry_provider_key = [&](std::string_view provider_name,
+                                     const core::config::ProviderConfig& provider_cfg) {
+        const std::string lowered = lower_ascii_copy(provider_name);
+        if (provider_cfg.api_type == core::config::ApiType::Anthropic
+            || lowered.starts_with("claude")
+            || lowered.find("anthropic") != std::string::npos) {
+            return std::string("anthropic");
+        }
+        if (provider_cfg.api_type == core::config::ApiType::Kimi
+            || lowered.starts_with("kimi")) {
+            return std::string("kimi");
+        }
+        if (provider_cfg.api_type == core::config::ApiType::Gemini
+            || lowered.starts_with("gemini")) {
+            return std::string("gemini");
+        }
+        if (provider_cfg.api_type == core::config::ApiType::DashScope
+            || lowered.starts_with("qwen")) {
+            return std::string("qwen");
+        }
+        if (lowered.starts_with("grok")) {
+            return std::string("grok");
+        }
+        if (lowered.starts_with("zai")) {
+            return std::string("zai");
+        }
+        if (lowered.starts_with("openai")) {
+            return std::string("openai");
+        }
+        if (provider_cfg.api_type == core::config::ApiType::LlamaCppLocal
+            || lowered.starts_with("local")
+            || lowered.starts_with("ollama")) {
+            return std::string("local");
+        }
+        return std::string(provider_name);
+    };
+
+    auto models_equivalent = [&](std::string_view lhs, std::string_view rhs) {
+        if (lhs == rhs) {
+            return true;
+        }
+        const auto& registry = core::llm::ModelRegistry::instance();
+        const auto lhs_info = registry.lookup(lhs);
+        const auto rhs_info = registry.lookup(rhs);
+        return lhs_info && rhs_info
+            && lhs_info->canonical_id == rhs_info->canonical_id;
+    };
+
+    auto compact_model_description = [](const core::llm::ModelInfo& info) {
+        std::string description = info.display_name.empty()
+            ? info.canonical_id
+            : info.display_name;
+        if (info.context_window > 0) {
+            description += std::format(" · {}k context", info.context_window / 1000);
+        }
+        if (!info.aliases.empty()) {
+            description += " · aliases: ";
+            const std::size_t limit = std::min<std::size_t>(info.aliases.size(), 4);
+            for (std::size_t i = 0; i < limit; ++i) {
+                if (i > 0) description += ", ";
+                description += info.aliases[i];
+            }
+            if (info.aliases.size() > limit) {
+                description += std::format(", +{}", info.aliases.size() - limit);
+            }
+        }
+        return description;
+    };
+
+    auto provider_model_rows = [&](std::string_view provider_name) {
+        std::vector<tui::ModelPickerRow> rows;
+        std::unordered_set<std::string> seen;
+
+        const auto provider_it = config.providers.find(std::string(provider_name));
+        if (provider_it == config.providers.end()) {
+            return rows;
+        }
+        const auto& provider_cfg = provider_it->second;
+        const std::string configured_default = provider_cfg.model;
+
+        auto add_row = [&](std::string id,
+                           std::string selector,
+                           std::string description,
+                           bool provider_default) {
+            if (id.empty()) {
+                id = "<provider default>";
+            }
+            if (!seen.insert(id).second) {
+                return;
+            }
+            const bool active = model_selection_mode == ModelSelectionMode::Manual
+                && manual_provider_name == provider_name
+                && (selector.empty()
+                    ? manual_model_name.empty()
+                    : models_equivalent(manual_model_name, selector));
+            if (provider_default && !description.empty()) {
+                description += " Configured default.";
+            } else if (provider_default) {
+                description = "Configured default.";
+            }
+            rows.push_back(tui::ModelPickerRow{
+                .id = std::move(id),
+                .selector = std::move(selector),
+                .description = std::move(description),
+                .active = active,
+                .provider_default = provider_default,
+            });
+        };
+
+        if (!configured_default.empty()) {
+            std::string description;
+            if (const auto info = core::llm::ModelRegistry::instance().lookup(configured_default)) {
+                description = compact_model_description(*info);
+            }
+            add_row(configured_default, configured_default, std::move(description), true);
+        }
+
+        auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(provider_name);
+        if (!core::llm::is_local_provider(registered_providers, provider_name)
+            && snapshot.refresh_due()) {
+            try {
+                if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
+                        provider_manager.get_provider(std::string(provider_name)))) {
+                    http_provider->discover_models({.timeout_ms = 1000});
+                    snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(provider_name);
+                }
+            } catch (const std::exception&) {
+            }
+        }
+
+        for (const auto& model : snapshot.models) {
+            add_row(model.canonical_id,
+                    model.canonical_id,
+                    compact_model_description(model),
+                    models_equivalent(configured_default, model.canonical_id));
+        }
+
+        if (rows.size() <= 1) {
+            const std::string registry_key = registry_provider_key(provider_name, provider_cfg);
+            auto registry_models = core::llm::ModelRegistry::instance().get_by_provider(registry_key);
+            std::ranges::sort(registry_models, {}, &core::llm::ModelInfo::canonical_id);
+            for (const auto& model : registry_models) {
+                add_row(model.canonical_id,
+                        model.canonical_id,
+                        compact_model_description(model),
+                        models_equivalent(configured_default, model.canonical_id));
+            }
+        }
+
+        if (rows.empty()) {
+            add_row("<provider default>",
+                    "",
+                    "Use the provider default configured by the backend.",
+                    true);
+        }
+
+        return rows;
+    };
+
+    auto model_provider_rows = [&]() {
+        std::vector<tui::ModelProviderPickerRow> rows;
+        rows.reserve(sorted_provider_names.size());
+        for (const auto& name : sorted_provider_names) {
+            const auto provider_it = config.providers.find(name);
+            if (provider_it == config.providers.end()) {
+                continue;
+            }
+            const std::string default_model =
+                provider_it->second.model.empty()
+                    ? std::string("<provider default>")
+                    : provider_it->second.model;
+
+            std::size_t known_count =
+                core::llm::ModelCatalogAvailability::instance().snapshot(name).models.size();
+            if (known_count == 0) {
+                const std::string registry_key = registry_provider_key(name, provider_it->second);
+                known_count = core::llm::ModelRegistry::instance().get_by_provider(registry_key).size();
+            }
+
+            std::string description = std::format("Default: {}", default_model);
+            if (known_count > 0) {
+                description += std::format(" · {} known model{}", known_count, known_count == 1 ? "" : "s");
+            }
+            rows.push_back(tui::ModelProviderPickerRow{
+                .name = name,
+                .description = std::move(description),
+                .active = model_selection_mode == ModelSelectionMode::Manual
+                    && manual_provider_name == name,
+            });
+        }
+        return rows;
     };
 
     auto model_supports_openai_effort = [&](std::string_view model_name) -> bool {
@@ -2245,7 +2545,7 @@ RunResult run(RunOptions opts) {
     auto model_supports_max_effort = [&](std::string_view model_name) -> bool {
         const std::string lowered = lower_ascii_copy(model_name);
         return lowered.find("mythos") != std::string::npos
-            || lowered.find("opus-4-6") != std::string::npos
+            || lowered.find("opus-4-8") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
     };
 
@@ -2347,6 +2647,9 @@ RunResult run(RunOptions opts) {
         if (trimmed.empty()) {
             return describe_models();
         }
+        if (trimmed == "-") {
+            return switch_to_previous_model_selection();
+        }
 
         std::string normalized;
         normalized.reserve(trimmed.size());
@@ -2355,19 +2658,28 @@ RunResult run(RunOptions opts) {
             normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
         }
 
-        auto finalize = [&](std::string message) {
-            return persist_selection ? with_persisted_model_preferences(std::move(message))
-                                     : message;
+        auto finalize = [&](const ModelSelectionSnapshot& before,
+                            std::string message) {
+            if (persist_selection) {
+                return finalize_model_switch(before, std::move(message));
+            }
+            if (message.starts_with("Switched")) {
+                remember_previous_model_selection(before);
+            }
+            return message;
         };
 
         if (normalized == "manual") {
-            return finalize(activate_manual_mode());
+            const ModelSelectionSnapshot before = current_model_selection_snapshot();
+            return finalize(before, activate_manual_mode());
         }
         if (normalized == "router") {
-            return finalize(activate_router_mode());
+            const ModelSelectionSnapshot before = current_model_selection_snapshot();
+            return finalize(before, activate_router_mode());
         }
         if (normalized == "auto") {
-            return finalize(activate_auto_mode());
+            const ModelSelectionSnapshot before = current_model_selection_snapshot();
+            return finalize(before, activate_auto_mode());
         }
 
         std::string policy_name(trimmed);
@@ -2381,14 +2693,15 @@ RunResult run(RunOptions opts) {
             if (!router_engine->set_active_policy(policy_name)) {
                 return std::format("Could not activate router policy '{}'.", policy_name);
             }
+            const ModelSelectionSnapshot before = current_model_selection_snapshot();
             active_router_policy = policy_name;
-            return finalize(activate_router_mode());
+            return finalize(before, activate_router_mode());
         }
 
         // Allow explicit provider + model overrides in a single command:
         //   /model claude sonnet
         //   /model claude opus
-        //   /model claude claude-opus-4-6
+        //   /model claude claude-opus-4-8
         if (const auto split = trimmed.find_first_of(" \t");
             split != std::string_view::npos) {
             const std::string_view provider_name = trim_ascii(trimmed.substr(0, split));
@@ -2396,9 +2709,10 @@ RunResult run(RunOptions opts) {
             if (!provider_name.empty() && !model_name.empty()) {
                 const auto provider_it = config.providers.find(std::string(provider_name));
                 if (provider_it != config.providers.end()) {
+                    const ModelSelectionSnapshot before = current_model_selection_snapshot();
                     manual_provider_name = provider_it->first;
                     manual_model_name = std::string(model_name);
-                    return finalize(activate_manual_mode());
+                    return finalize(before, activate_manual_mode());
                 }
             }
         }
@@ -2409,9 +2723,10 @@ RunResult run(RunOptions opts) {
                                trimmed, describe_models());
         }
 
+        const ModelSelectionSnapshot before = current_model_selection_snapshot();
         manual_provider_name = it->first;
         manual_model_name = it->second.model;
-        return finalize(activate_manual_mode());
+        return finalize(before, activate_manual_mode());
     };
 
     auto switch_provider = [&](std::string_view requested) -> std::string {
@@ -2538,12 +2853,47 @@ RunResult run(RunOptions opts) {
     };
 
     auto open_model_picker = [&]() -> bool {
+        auto providers = model_provider_rows();
+        if (providers.empty()) {
+            return false;
+        }
         {
             std::lock_guard lock(ui_mutex);
-            model_picker_state.active = true;
-            model_picker_state.selected =
-                model_selection_mode == ModelSelectionMode::Manual ? 0 :
-                model_selection_mode == ModelSelectionMode::Auto   ? 2 : 1;
+            model_provider_picker_state.providers = std::move(providers);
+            model_provider_picker_state.active = true;
+            model_provider_picker_state.selected = 0;
+            for (std::size_t i = 0; i < model_provider_picker_state.providers.size(); ++i) {
+                if (model_provider_picker_state.providers[i].active) {
+                    model_provider_picker_state.selected = static_cast<int>(i);
+                    break;
+                }
+            }
+            provider_model_picker_state.active = false;
+            model_picker_state.active = false;
+        }
+        wake_ui();
+        return true;
+    };
+
+    auto open_provider_model_picker = [&](std::string provider_name) -> bool {
+        auto rows = provider_model_rows(provider_name);
+        if (rows.empty()) {
+            return false;
+        }
+        {
+            std::lock_guard lock(ui_mutex);
+            provider_model_picker_state.active = true;
+            provider_model_picker_state.provider_name = std::move(provider_name);
+            provider_model_picker_state.models = std::move(rows);
+            provider_model_picker_state.selected = 0;
+            for (std::size_t i = 0; i < provider_model_picker_state.models.size(); ++i) {
+                if (provider_model_picker_state.models[i].active) {
+                    provider_model_picker_state.selected = static_cast<int>(i);
+                    break;
+                }
+            }
+            model_provider_picker_state.active = false;
+            model_picker_state.active = false;
         }
         wake_ui();
         return true;
@@ -2614,6 +2964,8 @@ RunResult run(RunOptions opts) {
             local_model_picker_state.selected    = 0;
             local_model_picker_state.active      = true;
             model_picker_state.active            = false; // close model picker
+            model_provider_picker_state.active   = false;
+            provider_model_picker_state.active   = false;
         }
         wake_ui();
     };
@@ -2636,11 +2988,13 @@ RunResult run(RunOptions opts) {
         provider_manager.register_provider("local", std::move(new_provider));
         config.providers["local"] = local_cfg;
 
+        const ModelSelectionSnapshot before = current_model_selection_snapshot();
         manual_provider_name = "local";
         manual_model_name    = model_label;
 
         std::string result = activate_manual_mode();
         if (result.starts_with("Switched")) {
+            remember_previous_model_selection(before);
             std::string persist_error;
             if (!config_manager.persist_local_provider(model_path_str, model_label, &persist_error)) {
                 result += std::format("\n        \xe2\x9a\xa0  Could not persist: {}", persist_error);
@@ -3589,6 +3943,8 @@ RunResult run(RunOptions opts) {
             if (perm_state.active
                 || question_dialog_state.active
                 || model_picker_state.active
+                || model_provider_picker_state.active
+                || provider_model_picker_state.active
                 || compression_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
@@ -3708,6 +4064,8 @@ RunResult run(RunOptions opts) {
             if (perm_state.active
                 || question_dialog_state.active
                 || model_picker_state.active
+                || model_provider_picker_state.active
+                || provider_model_picker_state.active
                 || compression_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
@@ -4388,6 +4746,125 @@ RunResult run(RunOptions opts) {
         bool model_picker_was_active = false;
         std::optional<int> model_choice;
         bool open_local_picker_from_model = false;
+
+        bool provider_model_picker_was_active = false;
+        std::optional<int> provider_model_choice;
+        std::string provider_model_provider_name;
+        std::vector<tui::ModelPickerRow> provider_model_rows_snapshot;
+        bool return_to_model_providers = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (provider_model_picker_state.active) {
+                provider_model_picker_was_active = true;
+                const int count = static_cast<int>(provider_model_picker_state.models.size());
+                if (event == Event::ArrowUp) {
+                    if (count > 0) {
+                        provider_model_picker_state.selected =
+                            (provider_model_picker_state.selected + count - 1) % count;
+                    }
+                } else if (event == Event::ArrowDown) {
+                    if (count > 0) {
+                        provider_model_picker_state.selected =
+                            (provider_model_picker_state.selected + 1) % count;
+                    }
+                } else if (event == Event::Return) {
+                    if (count > 0) {
+                        provider_model_choice = provider_model_picker_state.selected;
+                        provider_model_provider_name = provider_model_picker_state.provider_name;
+                        provider_model_rows_snapshot = provider_model_picker_state.models;
+                        provider_model_picker_state.active = false;
+                    }
+                } else if (event == Event::Escape) {
+                    provider_model_picker_state.active = false;
+                    return_to_model_providers = true;
+                } else {
+                    for (int n = 1; n <= std::min(count, 9); ++n) {
+                        if (event == Event::Character(static_cast<char>('0' + n))) {
+                            provider_model_choice = n - 1;
+                            provider_model_provider_name = provider_model_picker_state.provider_name;
+                            provider_model_rows_snapshot = provider_model_picker_state.models;
+                            provider_model_picker_state.active = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (return_to_model_providers) {
+            open_model_picker();
+            return true;
+        }
+        if (provider_model_picker_was_active) {
+            if (provider_model_choice.has_value()
+                && static_cast<std::size_t>(*provider_model_choice) < provider_model_rows_snapshot.size()) {
+                const auto& row = provider_model_rows_snapshot[static_cast<std::size_t>(*provider_model_choice)];
+                const std::string selector = row.selector.empty()
+                    ? provider_model_provider_name
+                    : provider_model_provider_name + " " + row.selector;
+                const std::string result = apply_model_selector(selector, true);
+                const bool success = result.starts_with("Switched");
+                append_history(std::format(
+                    "\n{}\n",
+                    success ? "\xe2\x9c\x93  " + result
+                            : "\xe2\x9c\x97  " + result));
+            }
+            return true;
+        }
+
+        bool model_provider_picker_was_active = false;
+        std::optional<int> model_provider_choice;
+        std::vector<tui::ModelProviderPickerRow> model_provider_rows_snapshot;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (model_provider_picker_state.active) {
+                model_provider_picker_was_active = true;
+                const int count = static_cast<int>(model_provider_picker_state.providers.size());
+                if (event == Event::ArrowUp) {
+                    if (count > 0) {
+                        model_provider_picker_state.selected =
+                            (model_provider_picker_state.selected + count - 1) % count;
+                    }
+                } else if (event == Event::ArrowDown) {
+                    if (count > 0) {
+                        model_provider_picker_state.selected =
+                            (model_provider_picker_state.selected + 1) % count;
+                    }
+                } else if (event == Event::Return) {
+                    if (count > 0) {
+                        model_provider_choice = model_provider_picker_state.selected;
+                        model_provider_rows_snapshot = model_provider_picker_state.providers;
+                        model_provider_picker_state.active = false;
+                    }
+                } else if (event == Event::Escape) {
+                    model_provider_picker_state.active = false;
+                } else if (event == Event::Character('l') || event == Event::Character('L')) {
+                    open_local_picker_from_model = true;
+                    model_provider_picker_state.active = false;
+                } else {
+                    for (int n = 1; n <= std::min(count, 9); ++n) {
+                        if (event == Event::Character(static_cast<char>('0' + n))) {
+                            model_provider_choice = n - 1;
+                            model_provider_rows_snapshot = model_provider_picker_state.providers;
+                            model_provider_picker_state.active = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (open_local_picker_from_model) {
+            open_local_model_picker();
+            return true;
+        }
+        if (model_provider_picker_was_active) {
+            if (model_provider_choice.has_value()
+                && static_cast<std::size_t>(*model_provider_choice) < model_provider_rows_snapshot.size()) {
+                open_provider_model_picker(
+                    model_provider_rows_snapshot[static_cast<std::size_t>(*model_provider_choice)].name);
+            }
+            return true;
+        }
+
         {
             std::lock_guard lock(ui_mutex);
             if (model_picker_state.active) {
@@ -4422,12 +4899,14 @@ RunResult run(RunOptions opts) {
         }
         if (model_picker_was_active) {
             if (model_choice.has_value()) {
+                const ModelSelectionSnapshot before = current_model_selection_snapshot();
                 std::string result =
                     (*model_choice == 0) ? activate_manual_mode() :
                     (*model_choice == 2) ? activate_auto_mode()   :
                                           activate_router_mode();
                 const bool success = result.starts_with("Switched");
                 if (success) {
+                    remember_previous_model_selection(before);
                     if (const auto persist_error = persist_model_preferences();
                         persist_error.has_value()) {
                         result += std::format("\n        \xe2\x9a\xa0  {}", *persist_error);
@@ -4837,6 +5316,8 @@ RunResult run(RunOptions opts) {
         
         bool                   perm_active = false;
         bool                   model_picker_active = false;
+        bool                   model_provider_picker_active = false;
+        bool                   provider_model_picker_active = false;
         bool                   compression_picker_active = false;
         bool                   provider_picker_active = false;
         bool                   review_picker_active = false;
@@ -4848,11 +5329,16 @@ RunResult run(RunOptions opts) {
         ToolDiffPreview        perm_diff;
         int                    perm_selected = 0;
         int                    model_picker_selected = 0;
+        int                    model_provider_picker_selected = 0;
+        int                    provider_model_picker_selected = 0;
         int                    compression_picker_selected = 0;
         int                    provider_picker_selected = 0;
         int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
         std::vector<std::string> provider_picker_providers;
+        std::vector<tui::ModelProviderPickerRow> model_provider_picker_providers;
+        std::vector<tui::ModelPickerRow> provider_model_picker_models;
+        std::string provider_model_picker_provider;
         std::string            compression_mode;
         ReviewPickerMode       review_picker_mode = ReviewPickerMode::SelectTarget;
         std::string            review_picker_input;
@@ -4887,6 +5373,13 @@ RunResult run(RunOptions opts) {
             perm_allow_label  = perm_state.allow_label;
             model_picker_active   = model_picker_state.active;
             model_picker_selected = model_picker_state.selected;
+            model_provider_picker_active = model_provider_picker_state.active;
+            model_provider_picker_selected = model_provider_picker_state.selected;
+            model_provider_picker_providers = model_provider_picker_state.providers;
+            provider_model_picker_active = provider_model_picker_state.active;
+            provider_model_picker_selected = provider_model_picker_state.selected;
+            provider_model_picker_provider = provider_model_picker_state.provider_name;
+            provider_model_picker_models = provider_model_picker_state.models;
             compression_picker_active = compression_picker_state.active;
             compression_picker_selected = compression_picker_state.selected;
             compression_mode = config_manager.get_config().context_compression;
@@ -4975,6 +5468,22 @@ RunResult run(RunOptions opts) {
                 conversation_search_selected);
         } else if (session_picker_active) {
             bottom_el = render_session_picker_panel(session_picker_sessions, session_picker_selected);
+        } else if (provider_model_picker_active) {
+            bottom_el = render_provider_model_picker_panel(
+                provider_model_picker_provider,
+                provider_model_picker_models,
+                provider_model_picker_selected);
+        } else if (model_provider_picker_active) {
+            constexpr bool kLocalModelAvailable =
+#ifdef FILO_ENABLE_LLAMACPP
+                true;
+#else
+                false;
+#endif
+            bottom_el = render_model_provider_picker_panel(
+                model_provider_picker_providers,
+                model_provider_picker_selected,
+                kLocalModelAvailable);
         } else if (provider_picker_active) {
             bottom_el = render_provider_selection_panel(provider_picker_providers,
                                                         provider_picker_selected);

@@ -120,9 +120,9 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     { "glm-",            200000 },
 
     // -----------------------------------------------------------------------
-    // Anthropic Claude Models (Updated March 2026)
+    // Anthropic Claude Models
     // -----------------------------------------------------------------------
-    { "claude-opus-4-6",   1000000 },
+    { "claude-opus-4-8",    200000 },
     { "claude-sonnet-4-6", 1000000 },
     { "claude-opus-4-5",    200000 },
     { "claude-sonnet-4-5",  200000 },
@@ -221,10 +221,29 @@ const ParameterConstraints kClaudeConstraints = [] {
     return c;
 }();
 
-// Anthropic models (updated March 2026)
+// Anthropic models
 std::vector<ModelInfo> build_anthropic_catalog() {
     return {
-        // Claude 3.7 Sonnet (latest as of March 2026)
+        // Claude Opus 4.8
+        {
+            .canonical_id = "claude-opus-4-8",
+            .aliases = {"opus", "claude-opus", "opus-4.8", "opus-4-8"},
+            .display_name = "Claude Opus 4.8",
+            .provider = "anthropic",
+            .context_window = 200000,
+            .max_output_tokens = 32000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Powerful,
+            .pricing = {5.0, 25.0, 0.50, 6.25},
+            .knowledge_cutoff = "2026-03",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
+        // Claude 3.7 Sonnet
         {
             .canonical_id = "claude-3-7-sonnet-20250219",
             .aliases = {"claude-3-7-sonnet", "claude-3.7-sonnet", "sonnet-3.7"},
@@ -260,7 +279,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
         // Claude 3 Opus
         {
             .canonical_id = "claude-3-opus-20240229",
-            .aliases = {"claude-3-opus", "opus", "claude-opus"},
+            .aliases = {"claude-3-opus"},
             .display_name = "Claude 3 Opus",
             .provider = "anthropic",
             .context_window = 200000,
@@ -1609,7 +1628,7 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
         return "claude-sonnet-4-6";
     }
     if (lowered == "opus") {
-        return "claude-opus-4-6";
+        return "claude-opus-4-8";
     }
     if (lowered == "haiku") {
         return "claude-haiku-4-5";

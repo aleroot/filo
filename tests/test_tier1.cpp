@@ -379,10 +379,14 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_fast.input_per_m  == Catch::Approx(0.20));
     REQUIRE(r_fast.output_per_m == Catch::Approx(0.50));
 
-    // Claude 4.6 Opus: $5.00/$25.00 per MTok (reduced from earlier 4.0 pricing)
-    auto r_opus = rates_for_model("claude-opus-4-6");
+    // Claude Opus 4.8: $5.00/$25.00 per MTok
+    auto r_opus = rates_for_model("claude-opus-4-8");
     REQUIRE(r_opus.input_per_m  == Catch::Approx(5.00));
     REQUIRE(r_opus.output_per_m == Catch::Approx(25.00));
+
+    auto r_opus_alias = rates_for_model("opus");
+    REQUIRE(r_opus_alias.input_per_m  == Catch::Approx(5.00));
+    REQUIRE(r_opus_alias.output_per_m == Catch::Approx(25.00));
 
     auto r_sonnet = rates_for_model("claude-sonnet-4-6");
     REQUIRE(r_sonnet.input_per_m  == Catch::Approx(3.00));

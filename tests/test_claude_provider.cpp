@@ -55,8 +55,8 @@ static core::tools::ToolParameter make_param(std::string name,
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ClaudeSerializer - model is serialized correctly", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-6"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"claude-opus-4-6")"));
+    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-8"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"claude-opus-4-8")"));
 }
 
 TEST_CASE("ClaudeSerializer - stream true is included", "[claude][serializer]") {
@@ -476,7 +476,7 @@ TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][se
 }
 
 TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][serializer]") {
-    for (const auto* model : {"claude-opus-4-6", "claude-sonnet-4-6",
+    for (const auto* model : {"claude-opus-4-8", "claude-sonnet-4-6",
                                "claude-haiku-4-5", "claude-3-5-sonnet-20241022",
                                "claude-3-5-haiku-20241022"}) {
         auto payload = AnthropicSerializer::serialize(make_simple_request(model));
@@ -568,6 +568,14 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Claude alias + [1m]", "[c
     auto headers = protocol.build_headers(auth);
     REQUIRE(headers.count("anthropic-beta") == 1);
     REQUIRE_THAT(headers.at("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request resolves Opus alias to current Opus", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("opus");
+    protocol.prepare_request(req);
+
+    REQUIRE(req.model == "claude-opus-4-8");
 }
 
 TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {

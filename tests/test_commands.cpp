@@ -520,6 +520,14 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to claude opus"));
     }
 
+    SECTION("/model dash forwards previous-model selector") {
+        ctx.text = "/model -";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*switch_target == "-");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to -"));
+    }
+
     SECTION("/profile shows profile status by default") {
         *mock_history = "";
         ctx.text = "/profile";
