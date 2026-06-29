@@ -488,6 +488,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     core::llm::ChatRequest request;
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string mode_snapshot;
+    std::string provider_name_snapshot;
     {
         std::lock_guard lock(history_mutex_);
         request.messages = history_;
@@ -508,6 +509,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         request.transport_turn_id = turn_state->transport_turn_id;
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
+        provider_name_snapshot = turn_callbacks.provider_name_override.empty()
+            ? active_provider_name_
+            : turn_callbacks.provider_name_override;
     }
     if (!provider) {
         text_callback("\n[Error: no active provider configured]\n");
@@ -547,7 +551,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
-         already_stopped, turn_state, step_session_context](
+         already_stopped, turn_state, step_session_context, provider_name_snapshot](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
@@ -702,7 +706,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // ── Execute tool calls ───────────────────────────────────────────
         std::thread([self, tool_calls_accum, tool_cost_attribution, text_callback,
                      tool_callback, done_callback, turn_callbacks, turn_state,
-                     step_session_context]() {
+                     step_session_context, provider_name_snapshot]() {
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
@@ -742,6 +746,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
             // 2. Execute approved calls through a resource-aware scheduler.
             std::shared_ptr<core::llm::LLMProvider> provider_for_task;
+            std::string active_provider_name_for_task;
             std::string active_model_for_task;
             std::string parent_mode_for_task;
             {
@@ -749,6 +754,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 provider_for_task = turn_callbacks.provider_override
                     ? turn_callbacks.provider_override
                     : self->provider_;
+                active_provider_name_for_task = turn_callbacks.provider_name_override.empty()
+                    ? self->active_provider_name_
+                    : turn_callbacks.provider_name_override;
+                if (active_provider_name_for_task.empty()) {
+                    active_provider_name_for_task = provider_name_snapshot;
+                }
                 active_model_for_task = turn_callbacks.model_override.empty()
                     ? self->active_model_
                     : turn_callbacks.model_override;
@@ -828,6 +839,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      dedup_stop_requested,
                      session_context = step_session_context,
                      provider_for_task,
+                     active_provider_name_for_task,
                      active_model_for_task,
                      parent_mode_for_task]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
@@ -838,6 +850,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                             SubagentOrchestrator::RunContext run_context{
+                                .active_provider_name = active_provider_name_for_task,
                                 .active_model = active_model_for_task,
                                 .parent_mode = parent_mode_for_task,
                                 .session_context = session_context,
@@ -855,7 +868,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,
                                 tc.function.arguments,
-                                session_context);
+                                core::tools::ToolInvocationContext{
+                                    .session_context = session_context,
+                                    .tool_call_id = tc.id,
+                                    .provider_name = active_provider_name_for_task,
+                                    .model_name = active_model_for_task,
+                                    .provider = provider_for_task,
+                                });
                         }
                         result = tool_output_history::clamp_for_history(
                             tc.function.name,

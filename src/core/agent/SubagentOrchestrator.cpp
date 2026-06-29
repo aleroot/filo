@@ -197,6 +197,7 @@ std::string SubagentOrchestrator::execute_task(
         .worker_label = "subagent_type",
         .parent_mode = context.parent_mode,
         .inherited_provider = provider,
+        .inherited_provider_name = context.active_provider_name,
         .inherited_model = context.active_model,
         .prefer_inherited_provider = true,
     });
@@ -245,6 +246,7 @@ std::string SubagentOrchestrator::execute_task(
 
     const auto result = DelegatedAgentRunner::run({
         .provider = plan->provider,
+        .provider_name = plan->provider_name,
         .tool_manager = tool_manager_,
         .session_context = context.session_context,
         .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
@@ -351,6 +353,9 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
     }
     if (provider_name.empty() && !request.prefer_inherited_provider && !config.providers.empty()) {
         provider_name = config.providers.begin()->first;
+    }
+    if (provider_name.empty() && request.prefer_inherited_provider) {
+        provider_name = std::string(request.inherited_provider_name);
     }
 
     std::shared_ptr<core::llm::LLMProvider> resolved_provider = request.inherited_provider;

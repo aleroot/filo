@@ -40,6 +40,7 @@ public:
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
         std::shared_ptr<core::llm::LLMProvider> provider_override = {};
+        std::string provider_name_override;
         std::string model_override;
         std::string effort_override;
         std::optional<int> max_tokens_override;
@@ -175,6 +176,11 @@ public:
         refresh_context_window_snapshot_unlocked();
     }
 
+    void set_active_provider_name(std::string provider_name) {
+        std::lock_guard lock(history_mutex_);
+        active_provider_name_ = std::move(provider_name);
+    }
+
     void reload_subagent_profiles(const core::config::AppConfig& app_config);
 
     void set_efficiency_decision_fn(
@@ -239,6 +245,7 @@ private:
     std::function<void(int)> on_loop_break_;
 
     // Model name for budget tracking
+    std::string active_provider_name_;
     std::string active_model_;
     std::string effort_level_;
     std::string context_summary_;

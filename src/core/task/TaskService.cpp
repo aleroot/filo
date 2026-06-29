@@ -550,6 +550,7 @@ std::string TaskService::execute(std::string_view json_args,
 
     const auto run_result = core::agent::DelegatedAgentRunner::run({
         .provider = plan->provider,
+        .provider_name = plan->provider_name,
         .tool_manager = tool_manager,
         .session_context = *worker_context,
         .mode = item.mode,

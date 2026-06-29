@@ -23,14 +23,22 @@ inline constexpr std::string_view kGetWorkspaceConfig = "get_workspace_config";
 inline constexpr std::string_view kAskUserQuestion = "AskUserQuestion";
 inline constexpr std::string_view kPython = "python";
 inline constexpr std::string_view kActivateSkill = "activate_skill";
+inline constexpr std::string_view kWebSearch = "web_search";
+inline constexpr std::string_view kFetchUrl = "fetch_url";
 
-inline constexpr std::array<std::string_view, 5> kExploreAllowedTools{
+inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
     kReadFile,
     kFileSearch,
     kGrepSearch,
     kListDirectory,
     kGetCurrentTime,
+    kWebSearch,
+    kFetchUrl,
 };
+
+[[nodiscard]] constexpr bool is_web_access_tool(std::string_view tool_name) noexcept {
+    return tool_name == kWebSearch || tool_name == kFetchUrl;
+}
 
 [[nodiscard]] constexpr bool is_replace_tool(std::string_view tool_name) noexcept {
     return tool_name == kReplace || tool_name == kReplaceInFile;

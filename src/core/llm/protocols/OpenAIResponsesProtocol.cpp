@@ -1,17 +1,15 @@
 #include "OpenAIResponsesProtocol.hpp"
 #include "SseUtils.hpp"
 #include "../Models.hpp"
+#include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
-#include "../../utils/StringUtils.hpp"
-#include "../../utils/Uuid.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdint>
-#include <fstream>
 #include <format>
 #include <random>
 
@@ -27,36 +25,6 @@ namespace {
     const uint64_t hi = dist(rng);
     const uint64_t lo = dist(rng);
     return std::format("filo-{0:016x}{1:016x}", hi, lo);
-}
-
-[[nodiscard]] std::string load_or_create_codex_installation_id(
-    const std::filesystem::path& config_dir) {
-    const std::string generated = core::utils::random_uuid_v4();
-    if (config_dir.empty()) return generated;
-
-    try {
-        const auto path = config_dir / "codex_installation_id";
-
-        {
-            std::ifstream in(path);
-            std::string value;
-            if (in && std::getline(in, value)) {
-                value = core::utils::str::trim_ascii_copy(value);
-                if (!value.empty()) return value;
-            }
-        }
-
-        std::error_code ec;
-        std::filesystem::create_directories(config_dir, ec);
-        std::ofstream out(path, std::ios::trunc);
-        if (out) {
-            out << generated << '\n';
-        }
-    } catch (...) {
-        // Identity persistence should never make the transport unusable.
-    }
-
-    return generated;
 }
 
 void append_member_before_object_end(std::string& object_json, std::string_view member_json) {
@@ -612,9 +580,10 @@ std::string OpenAIResponsesProtocol::build_url(std::string_view base_url,
 
 CodexResponsesProtocol::CodexResponsesProtocol(bool include_reasoning_encrypted,
                                                std::string default_service_tier,
-                                               std::filesystem::path config_dir)
+                                               std::shared_ptr<IProviderClientIdentitySource>
+                                                   client_identity_source)
     : OpenAIResponsesProtocol(include_reasoning_encrypted, std::move(default_service_tier))
-    , config_dir_(std::move(config_dir)) {}
+    , client_identity_source_(std::move(client_identity_source)) {}
 
 std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const {
     return serialize_codex_with_input_items(request, build_input_items(request.messages));
@@ -930,7 +899,7 @@ std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
     auto cloned = std::make_unique<CodexResponsesProtocol>(
         include_reasoning_encrypted_,
         default_service_tier_,
-        config_dir_);
+        client_identity_source_);
     share_continuity_state_with(*cloned);
     cloned->transport_state_ = transport_state_;
     return cloned;
@@ -939,7 +908,9 @@ std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
 std::string CodexResponsesProtocol::installation_id() const {
     std::lock_guard lock(transport_state_->mutex);
     if (transport_state_->installation_id.empty()) {
-        transport_state_->installation_id = load_or_create_codex_installation_id(config_dir_);
+        transport_state_->installation_id = client_identity_source_
+            ? client_identity_source_->installation_id()
+            : std::string("filo");
     }
     return transport_state_->installation_id;
 }

@@ -68,6 +68,16 @@ public:
         const std::string& json_args,
         const core::context::SessionContext& context)
     {
+        return execute_tool(name, json_args, ToolInvocationContext{
+            .session_context = context,
+        });
+    }
+
+    std::string execute_tool(
+        const std::string& name,
+        const std::string& json_args,
+        const ToolInvocationContext& invocation)
+    {
         std::shared_ptr<Tool> tool;
         {
             std::lock_guard lock(mutex_);
@@ -77,7 +87,7 @@ public:
             tool = it->second;
         }
         try {
-            return tool->execute(json_args, context);
+            return tool->execute(json_args, invocation);
         } catch (const std::exception& e) {
             return "{\"error\": \"Exception executing tool: " + std::string(e.what()) + "\"}";
         }

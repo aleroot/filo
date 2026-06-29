@@ -31,6 +31,7 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/routing/RouterEngine.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/BuiltinToolRegistry.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
@@ -661,30 +662,10 @@ RunResult run(RunOptions opts) {
 
     // ── Tool registration ───────────────────────────────────────────────────
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    tool_manager.register_tool(std::make_shared<core::tools::GetTimeTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ApplyPatchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReadFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReplaceTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::SearchReplaceTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::DeleteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::MoveFileTool>());
-    
-    // AskUserQuestion tool - needs callback for UI
-    auto ask_user_tool = std::make_shared<core::tools::AskUserQuestionTool>();
-    tool_manager.register_tool(ask_user_tool);
-    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
-        tool_manager.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
-    }
-    
-#ifdef FILO_ENABLE_PYTHON
-    tool_manager.register_tool(std::make_shared<core::tools::PythonInterpreterTool>());
-    core::tools::SkillLoader::discover_and_register(tool_manager);
-#endif
+    std::shared_ptr<core::tools::AskUserQuestionTool> ask_user_tool;
+    auto tool_options = core::tools::agent_builtin_tool_options();
+    tool_options.ask_user_question_tool_out = &ask_user_tool;
+    core::tools::register_builtin_tools(tool_manager, std::move(tool_options));
 
     // ── MCP client connections ───────────────────────────────────────────────
     core::mcp::McpConnectionManager::get_instance().connect_all(
@@ -705,6 +686,7 @@ RunResult run(RunOptions opts) {
         llm_provider,
         tool_manager,
         agent_session_context);
+    agent->set_active_provider_name(active_provider_name);
     agent->set_auto_compact_threshold(
         config.auto_compact_threshold,
         !config.auto_compact_threshold_explicit);
@@ -1588,6 +1570,7 @@ RunResult run(RunOptions opts) {
                 try {
                     auto p = provider_manager.get_provider(data.provider);
                     agent->set_provider(p);
+                    agent->set_active_provider_name(data.provider);
                     agent->set_active_model(data.model);
                     model_selection_mode = ModelSelectionMode::Manual;
                     sync_mcp_sampling_backend(p, data.model);
@@ -1800,6 +1783,7 @@ RunResult run(RunOptions opts) {
         try {
             auto provider = provider_manager.get_provider(manual_provider_name);
             agent->set_provider(provider);
+            agent->set_active_provider_name(manual_provider_name);
             llm_provider = provider;
             model_selection_mode = ModelSelectionMode::Manual;
             agent->set_active_model(manual_model_name);
@@ -1834,6 +1818,7 @@ RunResult run(RunOptions opts) {
         model_selection_mode = ModelSelectionMode::Router;
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
+        agent->set_active_provider_name("router");
         llm_provider = router_provider;
         agent->set_active_model(router_policy_label());
         sync_mcp_sampling_backend(router_provider, {});
@@ -1855,6 +1840,7 @@ RunResult run(RunOptions opts) {
         model_selection_mode = ModelSelectionMode::Auto;
         active_router_policy = router_provider->active_policy();
         agent->set_provider(router_provider);
+        agent->set_active_provider_name("auto");
         llm_provider = router_provider;
         agent->set_active_model("auto");
         sync_mcp_sampling_backend(router_provider, {});

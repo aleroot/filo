@@ -2,6 +2,7 @@
 #include "McpTaskManager.hpp"
 #include "ToolCallResult.hpp"
 #include "../context/SessionContext.hpp"
+#include "../tools/BuiltinToolRegistry.hpp"
 #include "../tools/ToolManager.hpp"
 #include "../tools/ShellTool.hpp"
 #include "../tools/ApplyPatchTool.hpp"
@@ -716,23 +717,7 @@ McpDispatcher::McpDispatcher() { register_tools(); }
  */
 void McpDispatcher::register_tools() {
     auto& sm = core::tools::ToolManager::get_instance();
-    sm.register_tool(std::make_shared<core::tools::ShellTool>());
-    sm.register_tool(std::make_shared<core::tools::ApplyPatchTool>());
-    sm.register_tool(std::make_shared<core::tools::FileSearchTool>());
-    sm.register_tool(std::make_shared<core::tools::ReadFileTool>());
-    sm.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    sm.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
-    sm.register_tool(std::make_shared<core::tools::ReplaceTool>());
-    sm.register_tool(std::make_shared<core::tools::GrepSearchTool>());
-    sm.register_tool(std::make_shared<core::tools::SearchReplaceTool>());
-    sm.register_tool(std::make_shared<core::tools::DeleteFileTool>());
-    sm.register_tool(std::make_shared<core::tools::MoveFileTool>());
-    sm.register_tool(std::make_shared<core::tools::CreateDirectoryTool>());
-    sm.register_tool(std::make_shared<core::tools::GetWorkspaceConfigTool>());
-    sm.register_tool(std::make_shared<core::tools::TaskTool>());
-    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
-        sm.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
-    }
+    core::tools::register_builtin_tools(sm, core::tools::mcp_builtin_tool_options());
 }
 
 namespace {

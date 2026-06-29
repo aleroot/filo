@@ -71,6 +71,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
         request.provider,
         request.tool_manager,
         request.session_context);
+    agent->set_active_provider_name(request.provider_name);
     agent->set_mode(request.mode);
     if (!request.model.empty()) {
         agent->set_active_model(request.model);
@@ -101,6 +102,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          run_state,
          delegated_prompt,
          provider = request.provider,
+         provider_name = std::move(request.provider_name),
          model = request.model,
          allowed_tools = std::move(request.allowed_tools),
          ledger_actor = std::move(ledger_actor)]() mutable {
@@ -128,6 +130,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                         }
                     },
                     .provider_override = std::move(provider),
+                    .provider_name_override = std::move(provider_name),
                     .model_override = std::move(model),
                     .allowed_tools = std::move(allowed_tools),
                     .ledger_actor = std::move(ledger_actor),

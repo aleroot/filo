@@ -1146,6 +1146,7 @@ void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
         core::context::make_session_context(
             core::workspace::Workspace::get_instance().snapshot(),
             core::context::SessionTransport::unspecified));
+    agent->set_active_provider_name(config.default_provider);
 
     std::string final_response;
     agent->send_message(

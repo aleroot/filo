@@ -81,7 +81,8 @@ public:
                     std::string                                    default_model,
                     std::unique_ptr<protocols::ApiProtocolBase>    protocol,
                     core::config::ApiType                          api_type = core::config::ApiType::Unknown,
-                    std::string                                    provider_name = {});
+                    std::string                                    provider_name = {},
+                    std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {});
     ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
@@ -89,6 +90,7 @@ public:
     [[nodiscard]] std::string get_last_model() const override;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
+    [[nodiscard]] std::optional<ProviderMetadata> metadata() const override;
 
     /**
      * @brief Return whether synthetic token-cost estimation should run.
@@ -165,6 +167,7 @@ private:
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;
+    std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
     WebSocketTransportState                        websocket_;
 };
 

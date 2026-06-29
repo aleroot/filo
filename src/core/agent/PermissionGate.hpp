@@ -146,11 +146,13 @@ enum class PermissionProfile {
 
     const bool is_task = (tool_name == "task");
     const bool is_shell = core::tools::names::is_terminal_tool(tool_name);
+    const bool is_web_access = core::tools::names::is_web_access_tool(tool_name);
 
     // 3. Standard mode: Allow file mods, gate shell/task.
     if (profile == PermissionProfile::Standard) {
         if (is_file_mod) return false;
         if (is_task)    return true;
+        if (is_web_access) return true;
         if (is_shell) {
             // Even in Standard mode, purely read-only shell commands are safe.
             if (!tool_args.empty()) {
@@ -165,12 +167,12 @@ enum class PermissionProfile {
 
     // 4. Restricted: Ask for everything.
     if (profile == PermissionProfile::Restricted) {
-        return is_file_mod || is_shell || is_task;
+        return is_file_mod || is_shell || is_task || is_web_access;
     }
 
     // 5. Interactive: Ask for all side-effects, but apply SafetyPolicy to shell
     //    commands so purely read-only commands are auto-approved.
-    if (is_file_mod || is_task) return true;
+    if (is_file_mod || is_task || is_web_access) return true;
     if (is_shell) {
         if (!tool_args.empty()) {
             const auto cmd = CommandSafetyPolicy::extract_shell_command(tool_args);

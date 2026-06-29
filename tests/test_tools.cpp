@@ -1,7 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <httplib.h>
 
 #include "core/config/ConfigManager.hpp"
+#include "core/auth/ICredentialSource.hpp"
+#include "core/llm/LLMProvider.hpp"
+#include "core/llm/ProviderClientIdentity.hpp"
 #include "core/tools/ReadFileTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
@@ -16,6 +20,9 @@
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/WebBackendAdapters.hpp"
+#include "core/tools/WebFetchTool.hpp"
+#include "core/tools/WebSearchTool.hpp"
 #include "core/tools/shell/ShellSession.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/workspace/Workspace.hpp"
@@ -32,6 +39,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #ifdef FILO_ENABLE_PYTHON
 #include <future>
@@ -98,6 +106,26 @@ private:
 
 ToolTestConfigEnvironment g_tool_test_config_environment;
 
+class ScopedServerStop {
+public:
+    explicit ScopedServerStop(httplib::Server& server)
+        : server_(server) {}
+
+    ~ScopedServerStop() {
+        server_.stop();
+    }
+
+private:
+    httplib::Server& server_;
+};
+
+class ScopedConfigReload {
+public:
+    ~ScopedConfigReload() {
+        core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    }
+};
+
 [[nodiscard]] core::context::SessionContext make_tool_test_context(std::string session_id = {}) {
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     return test_support::make_workspace_session_context(
@@ -125,6 +153,96 @@ public:
 private:
     std::string name_;
 };
+
+class ToolManagerContextProbeTool final : public core::tools::Tool {
+public:
+    core::tools::ToolDefinition get_definition() const override {
+        return core::tools::ToolDefinition{
+            .name = "context_probe",
+            .description = "Probe tool for provider-aware ToolManager tests.",
+        };
+    }
+
+    std::string execute(const std::string&,
+                        const core::context::SessionContext&) override {
+        return R"({"legacy":true})";
+    }
+
+    std::string execute(const std::string&,
+                        const core::tools::ToolInvocationContext& invocation) override {
+        return std::format(
+            R"({{"tool_call_id":"{}","provider":"{}","model":"{}"}})",
+            invocation.tool_call_id,
+            invocation.provider_name,
+            invocation.model_name);
+    }
+};
+
+class StaticCredentialSource final : public core::auth::ICredentialSource {
+public:
+    core::auth::AuthInfo get_auth() override {
+        core::auth::AuthInfo auth;
+        auth.headers["Authorization"] = "Bearer test-token";
+        auth.properties["account_id"] = "acct_test";
+        return auth;
+    }
+};
+
+class StaticClientIdentitySource final
+    : public core::llm::IProviderClientIdentitySource {
+public:
+    [[nodiscard]] std::string installation_id() const override {
+        return "test-installation-id";
+    }
+};
+
+class StaticMetadataProvider final : public core::llm::LLMProvider {
+public:
+    explicit StaticMetadataProvider(core::llm::ProviderMetadata metadata)
+        : metadata_(std::move(metadata)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)>) override {}
+
+    [[nodiscard]] std::optional<core::llm::ProviderMetadata>
+    metadata() const override {
+        return metadata_;
+    }
+
+private:
+    core::llm::ProviderMetadata metadata_;
+};
+
+[[nodiscard]] std::shared_ptr<core::llm::LLMProvider> make_metadata_provider(
+    core::config::ApiType api_type,
+    std::string base_url,
+    bool include_credentials = true,
+    bool include_identity = true) {
+    return std::make_shared<StaticMetadataProvider>(
+        core::llm::ProviderMetadata{
+            .api_type = api_type,
+            .provider_name = "test",
+            .base_url = std::move(base_url),
+            .default_model = "gpt-5.5",
+            .credential_source = include_credentials
+                ? std::make_shared<StaticCredentialSource>()
+                : std::shared_ptr<core::auth::ICredentialSource>{},
+            .client_identity_source = include_identity
+                ? std::make_shared<StaticClientIdentitySource>()
+                : std::shared_ptr<core::llm::IProviderClientIdentitySource>{},
+        });
+}
+
+[[nodiscard]] std::string run_web_fetch_tool(
+    WebFetchTool& tool,
+    const std::string& json_args,
+    const core::tools::ToolInvocationContext& invocation) {
+    auto run = static_cast<std::string (WebFetchTool::*)(
+        const std::string&,
+        const core::tools::ToolInvocationContext&)>(&WebFetchTool::execute);
+    return (tool.*run)(json_args, invocation);
+}
 
 } // namespace
 
@@ -1425,6 +1543,186 @@ TEST_CASE("GetTimeTool returns a time string", "[tools]") {
 }
 
 // ---------------------------------------------------------------------------
+// Web tools
+// ---------------------------------------------------------------------------
+
+TEST_CASE("WebSearchTool reports missing provider search backend", "[tools][web]") {
+    WebSearchTool tool;
+    auto run = static_cast<std::string (WebSearchTool::*)(
+        const std::string&,
+        const core::tools::ToolInvocationContext&)>(&WebSearchTool::execute);
+    const auto res = (tool.*run)(
+        R"({"query":"latest C++ standard","limit":3})",
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("web-search-no-provider"),
+            .provider_name = "mock",
+            .model_name = "mock-model",
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("No web search backend"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("fetch_url"));
+}
+
+TEST_CASE("WebFetchTool rejects non-http URLs before network access", "[tools][web]") {
+    WebFetchTool tool;
+    const auto res = run_web_fetch_tool(
+        tool,
+        R"({"url":"file:///etc/passwd"})",
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("web-fetch-invalid-url"),
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("valid http:// or https:// URL"));
+}
+
+TEST_CASE("WebFetchTool validates redirected URLs against trusted URL policy",
+          "[tools][web]") {
+    httplib::Server server;
+    bool private_endpoint_hit = false;
+    server.Get("/redirect", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 302;
+        res.set_header("Location", "/private");
+    });
+    server.Get("/private", [&](const httplib::Request&, httplib::Response& res) {
+        private_endpoint_hit = true;
+        res.set_content("private data", "text/plain");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+
+    const auto stamp = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto sandbox = std::filesystem::temp_directory_path()
+        / ("filo_web_fetch_redirect_policy_" + stamp);
+    const auto project = sandbox / "project";
+    const auto config_path = project / ".filo" / "config.json";
+    std::filesystem::create_directories(config_path.parent_path());
+
+    const std::string trusted_url =
+        std::format("http://127.0.0.1:{}/redirect", port);
+    {
+        std::ofstream config(config_path);
+        config << std::format(R"({{
+            "tools": {{
+                "fetch_url": {{
+                    "trusted_urls": ["{}"]
+                }}
+            }}
+        }})", trusted_url);
+    }
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project);
+    ScopedConfigReload restore_config;
+
+    WebFetchTool tool;
+    const auto res = run_web_fetch_tool(
+        tool,
+        std::format(R"({{"url":"{}"}})", trusted_url),
+        core::tools::ToolInvocationContext{
+            .session_context = test_support::make_session_context(
+                core::workspace::WorkspaceSnapshot{
+                    .primary = project,
+                    .additional = {},
+                    .enforce = false,
+                    .version = 1,
+                },
+                core::context::SessionTransport::cli,
+                "web-fetch-redirect-policy"),
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("trusted_urls"));
+    REQUIRE_FALSE(private_endpoint_hit);
+
+    std::error_code ec;
+    std::filesystem::remove_all(sandbox, ec);
+}
+
+TEST_CASE("WebFetchTool aborts response bodies that exceed max_bytes",
+          "[tools][web]") {
+    httplib::Server server;
+    server.Get("/large", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(std::string(4096, 'x'), "text/plain");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+
+    WebFetchTool tool;
+    const auto res = run_web_fetch_tool(
+        tool,
+        std::format(
+            R"({{"url":"http://127.0.0.1:{}/large","max_bytes":1024}})",
+            port),
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("web-fetch-max-bytes"),
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("exceeded max_bytes"));
+}
+
+TEST_CASE("OpenAI web search backend only supports native Responses endpoints",
+          "[tools][web]") {
+    const auto backend = core::tools::web::make_openai_web_search_backend();
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("openai-web-search-api"),
+        .model_name = "gpt-5.5",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.openai.com/v1"),
+    }));
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("openai-web-search-codex"),
+        .model_name = "gpt-5.5-codex",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://chatgpt.com/backend-api/codex"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("openai-web-search-compatible"),
+        .model_name = "mistral-large",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.mistral.ai/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("openai-web-search-no-credentials"),
+        .model_name = "gpt-5.5",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.openai.com/v1",
+            false),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("openai-web-search-codex-no-identity"),
+        .model_name = "gpt-5.5-codex",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://chatgpt.com/backend-api/codex",
+            true,
+            false),
+    }));
+}
+
+// ---------------------------------------------------------------------------
 // ToolManager
 // ---------------------------------------------------------------------------
 
@@ -1476,6 +1774,26 @@ TEST_CASE("ToolManager executes tools against an explicit SessionContext workspa
 
     std::filesystem::remove_all(workspace_root, ec);
     core::workspace::Workspace::get_instance().initialize("", {}, false);
+}
+
+TEST_CASE("ToolManager passes provider-aware invocation context to tools",
+          "[tools][web]") {
+    auto& mgr = ToolManager::get_instance();
+    mgr.register_tool(std::make_shared<ToolManagerContextProbeTool>());
+
+    const auto res = mgr.execute_tool(
+        "context_probe",
+        "{}",
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("ctx-web"),
+            .tool_call_id = "call_123",
+            .provider_name = "kimi-for-coding",
+            .model_name = "kimi-for-coding",
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("tool_call_id":"call_123")"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("provider":"kimi-for-coding")"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("model":"kimi-for-coding")"));
 }
 
 TEST_CASE("ToolManager returns error for unknown tool", "[tools]") {

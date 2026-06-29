@@ -160,13 +160,15 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
                                  std::string                                    default_model,
                                  std::unique_ptr<protocols::ApiProtocolBase>    protocol,
                                  core::config::ApiType                          api_type,
-                                 std::string                                    provider_name)
+                                 std::string                                    provider_name,
+                                 std::shared_ptr<IProviderClientIdentitySource>  client_identity_source)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
     , protocol_(std::move(protocol))
     , api_type_(api_type)
     , provider_name_(std::move(provider_name))
+    , client_identity_source_(std::move(client_identity_source))
 {}
 
 HttpLLMProvider::~HttpLLMProvider() = default;
@@ -219,6 +221,17 @@ void HttpLLMProvider::discover_models(
 std::string HttpLLMProvider::get_last_model() const {
     std::lock_guard lock(state_mutex_);
     return last_model_;
+}
+
+std::optional<ProviderMetadata> HttpLLMProvider::metadata() const {
+    return ProviderMetadata{
+        .api_type = api_type_,
+        .provider_name = provider_name_,
+        .base_url = base_url_,
+        .default_model = default_model_,
+        .credential_source = cred_source_,
+        .client_identity_source = client_identity_source_,
+    };
 }
 
 std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& request) const {

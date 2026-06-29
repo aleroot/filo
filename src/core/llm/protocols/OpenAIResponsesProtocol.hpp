@@ -6,9 +6,12 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <filesystem>
 #include <utility>
 #include <unordered_map>
+
+namespace core::llm {
+class IProviderClientIdentitySource;
+}
 
 namespace core::llm::protocols {
 
@@ -91,7 +94,8 @@ class CodexResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
     explicit CodexResponsesProtocol(bool include_reasoning_encrypted = false,
                                     std::string default_service_tier = {},
-                                    std::filesystem::path config_dir = {});
+                                    std::shared_ptr<IProviderClientIdentitySource>
+                                        client_identity_source = {});
 
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
     void prepare_headers(cpr::Header& headers,
@@ -156,7 +160,7 @@ private:
         const ChatRequest& request,
         bool prewarm) const;
 
-    std::filesystem::path config_dir_;
+    std::shared_ptr<IProviderClientIdentitySource> client_identity_source_;
     std::shared_ptr<TransportState> transport_state_ = std::make_shared<TransportState>();
     mutable std::vector<std::string> active_response_items_;
     mutable std::string active_transport_turn_id_;

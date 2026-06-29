@@ -1,5 +1,6 @@
 #include "ProviderFactory.hpp"
 #include "HttpLLMProvider.hpp"
+#include "ProviderClientIdentity.hpp"
 #ifdef FILO_ENABLE_LLAMACPP
 #include "providers/LlamaCppProvider.hpp"
 #endif
@@ -163,10 +164,12 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     }
 
     // Try OAuth strategies first; fall back to API key credential.
-    auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(
-        core::config::ConfigManager::get_instance().get_config_dir());
+    const std::string config_dir =
+        core::config::ConfigManager::get_instance().get_config_dir();
+    auto auth_manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
     std::shared_ptr<core::auth::ICredentialSource> cred =
         auth_manager.create_credential_source(canonical_type, config);
+    std::shared_ptr<IProviderClientIdentitySource> client_identity_source;
     const std::string normalized_auth_type =
         core::utils::str::to_lower_ascii_copy(config.auth_type);
 
@@ -246,10 +249,11 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     name);
             }
             if (base_url == "https://chatgpt.com/backend-api/codex") {
+                client_identity_source = make_codex_client_identity_source(config_dir);
                 protocol = std::make_unique<protocols::CodexResponsesProtocol>(
                     /*include_reasoning_encrypted=*/false,
                     config.service_tier,
-                    core::config::ConfigManager::get_instance().get_config_dir());
+                    client_identity_source);
             } else {
                 protocol = std::make_unique<protocols::OpenAIResponsesProtocol>(
                     /*include_reasoning_encrypted=*/false,
@@ -317,7 +321,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         config.model,
         std::move(protocol),
         api_type,
-        std::string(name));
+        std::string(name),
+        std::move(client_identity_source));
 }
 
 } // namespace core::llm

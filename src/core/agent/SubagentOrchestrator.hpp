@@ -28,6 +28,7 @@ public:
     static constexpr std::string_view kTaskToolName = "task";
 
     struct RunContext {
+        std::string active_provider_name;
         std::string active_model;
         std::string parent_mode;
         const core::context::SessionContext& session_context;
@@ -39,6 +40,7 @@ public:
         std::string_view worker_label = "worker";
         std::string_view parent_mode;
         std::shared_ptr<core::llm::LLMProvider> inherited_provider = {};
+        std::string_view inherited_provider_name;
         std::string_view inherited_model;
         bool prefer_inherited_provider = false;
         std::string_view provider_override;

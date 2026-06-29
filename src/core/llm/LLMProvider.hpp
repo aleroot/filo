@@ -5,14 +5,31 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <optional>
 #include "Models.hpp"
 #include "protocols/ApiProtocol.hpp"
+#include "../config/ConfigManager.hpp"
+
+namespace core::auth {
+class ICredentialSource;
+}
 
 namespace core::llm {
+
+class IProviderClientIdentitySource;
 
 struct ProviderCapabilities {
     bool supports_tool_calls = true;
     bool is_local = false;
+};
+
+struct ProviderMetadata {
+    core::config::ApiType api_type = core::config::ApiType::Unknown;
+    std::string provider_name;
+    std::string base_url;
+    std::string default_model;
+    std::shared_ptr<core::auth::ICredentialSource> credential_source;
+    std::shared_ptr<IProviderClientIdentitySource> client_identity_source;
 };
 
 class LLMProvider {
@@ -40,6 +57,17 @@ public:
      *        construction for local or reduced-capability backends.
      */
     [[nodiscard]] virtual ProviderCapabilities capabilities() const { return {}; }
+
+    /**
+     * @brief Return transport/auth metadata for provider-aware local services.
+     *
+     * Non-HTTP or aggregate providers can return nullopt. Consumers must treat
+     * this as capability discovery rather than downcasting to a concrete provider.
+     */
+    [[nodiscard]] virtual std::optional<ProviderMetadata>
+    metadata() const {
+        return std::nullopt;
+    }
 
     /**
      * @brief Return whether heuristic USD cost estimation should be applied to

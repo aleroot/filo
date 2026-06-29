@@ -28,6 +28,7 @@ public:
 
     struct Request {
         std::shared_ptr<core::llm::LLMProvider> provider;
+        std::string provider_name;
         core::tools::ToolManager& tool_manager;
         core::context::SessionContext session_context;
         std::string mode = "BUILD";

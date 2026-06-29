@@ -154,6 +154,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
     src/core/llm/ModelRegistry.cpp
+    src/core/llm/ProviderClientIdentity.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
@@ -217,7 +218,16 @@ set(FILO_CORE_SOURCES
     src/core/tools/SearchReplaceTool.cpp
     src/core/tools/AskUserQuestionTool.cpp
     src/core/tools/ActivateSkillTool.cpp
+    src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
+    src/core/tools/AnthropicWebSearchBackend.cpp
+    src/core/tools/DirectWebFetchBackend.cpp
+    src/core/tools/KimiWebSearchBackend.cpp
+    src/core/tools/OpenAIWebSearchBackend.cpp
+    src/core/tools/WebAccess.cpp
+    src/core/tools/WebAccessDefaults.cpp
+    src/core/tools/WebFetchTool.cpp
+    src/core/tools/WebSearchTool.cpp
     src/core/tools/SkillRegistry.cpp
     src/core/tools/TempFileAccessRegistry.cpp
     src/core/utils/JsonUtils.cpp

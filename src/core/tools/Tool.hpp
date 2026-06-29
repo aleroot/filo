@@ -2,10 +2,31 @@
 
 #include "../context/SessionContext.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
+namespace core::llm {
+class LLMProvider;
+}
+
 namespace core::tools {
+
+/**
+ * @brief Per-call metadata available to provider-aware tools.
+ *
+ * Most tools only need a SessionContext and can keep implementing the legacy
+ * execute(json, SessionContext) overload. Provider-aware tools, such as web
+ * search adapters, can override execute(json, ToolInvocationContext) to inspect
+ * the active provider/model and tool-call id without coupling to Agent internals.
+ */
+struct ToolInvocationContext {
+    core::context::SessionContext session_context;
+    std::string tool_call_id;
+    std::string provider_name;
+    std::string model_name;
+    std::shared_ptr<core::llm::LLMProvider> provider;
+};
 
 /**
  * @brief Describes a single parameter accepted by a tool.
@@ -152,6 +173,17 @@ public:
      *         class-level documentation for the full contract.
      */
     virtual std::string execute(const std::string& json_args, const core::context::SessionContext& context) = 0;
+
+    /**
+     * @brief Executes the tool with full invocation metadata.
+     *
+     * The default adapter preserves source compatibility for existing tools.
+     * New provider-aware tools should override this overload.
+     */
+    virtual std::string execute(const std::string& json_args,
+                                const ToolInvocationContext& invocation) {
+        return execute(json_args, invocation.session_context);
+    }
 };
 
 } // namespace core::tools

@@ -11,6 +11,7 @@
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/tools/BuiltinToolRegistry.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
 #include "core/tools/CreateDirectoryTool.hpp"
@@ -308,35 +309,13 @@ resolve_resume_request(const RunOptions& options,
 }
 
 void register_default_tools(core::tools::ToolManager& tool_manager) {
-    tool_manager.register_tool(std::make_shared<core::tools::GetTimeTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ApplyPatchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReadFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReplaceTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::SearchReplaceTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::DeleteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::MoveFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::CreateDirectoryTool>());
-
-    auto ask_user_tool = std::make_shared<core::tools::AskUserQuestionTool>();
-    ask_user_tool->setQuestionCallback([](core::tools::QuestionRequest request) {
+    auto options = core::tools::agent_builtin_tool_options();
+    options.ask_user_question_callback = [](core::tools::QuestionRequest request) {
         if (request.promise) {
             request.promise->set_value(std::nullopt);
         }
-    });
-    tool_manager.register_tool(ask_user_tool);
-    if (!core::tools::SkillRegistry::discover_instruction_skills().empty()) {
-        tool_manager.register_tool(std::make_shared<core::tools::ActivateSkillTool>());
-    }
-
-#ifdef FILO_ENABLE_PYTHON
-    tool_manager.register_tool(std::make_shared<core::tools::PythonInterpreterTool>());
-    core::tools::SkillLoader::discover_and_register(tool_manager);
-#endif
+    };
+    core::tools::register_builtin_tools(tool_manager, std::move(options));
 }
 
 [[nodiscard]] std::string format_double(double value, int precision = 6) {
@@ -714,6 +693,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
         runtime.provider,
         tool_manager,
         agent_session_context);
+    agent->set_active_provider_name(runtime.provider_name);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);
     }
