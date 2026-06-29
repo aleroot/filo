@@ -224,6 +224,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/DirectWebFetchBackend.cpp
     src/core/tools/KimiWebSearchBackend.cpp
     src/core/tools/OpenAIWebSearchBackend.cpp
+    src/core/tools/ZaiWebBackend.cpp
     src/core/tools/WebAccess.cpp
     src/core/tools/WebAccessDefaults.cpp
     src/core/tools/WebFetchTool.cpp

@@ -11,6 +11,7 @@ namespace core::context {
 
 struct ContextWindowSnapshot {
     std::size_t estimated_context_tokens = 0;
+    std::size_t metered_context_tokens = 0;
     int32_t     max_context_tokens = 0;
     int32_t     remaining_pct = -1;
 };
@@ -43,7 +44,8 @@ public:
     [[nodiscard]] static ContextWindowSnapshot snapshot(
         const std::vector<core::llm::Message>& history,
         const std::shared_ptr<core::llm::LLMProvider>& provider,
-        std::string_view model) noexcept;
+        std::string_view model,
+        std::size_t metered_tokens_to_exclude = 0) noexcept;
 
     [[nodiscard]] static int effective_compaction_threshold(
         const CompactionTriggerPolicy& policy,

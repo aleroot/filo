@@ -250,6 +250,7 @@ private:
     std::string effort_level_;
     std::string context_summary_;
     std::string stable_prompt_prefix_;
+    std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;
     core::context::ContextWindowSnapshot context_window_snapshot_;
     core::session::SessionEfficiencyController efficiency_controller_;

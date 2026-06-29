@@ -745,6 +745,9 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
 
         if (const auto output = extract_string_field(object, {"output"})) {
             set_result_summary(*output);
+            if (output->find("[INTERRUPTED:") != std::string::npos) {
+                tool.status = ToolActivity::Status::Cancelled;
+            }
         } else if (tool.result.exit_code.has_value()) {
             set_result_summary((*tool.result.exit_code == 0)
                 ? "Command completed with no output."

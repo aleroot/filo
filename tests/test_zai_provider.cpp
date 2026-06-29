@@ -1,6 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <httplib.h>
+
+#include <atomic>
+#include <chrono>
+#include <format>
+#include <thread>
+
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/ModelRegistry.hpp"
@@ -138,6 +145,77 @@ TEST_CASE("Z.ai protocol parses streamed reasoning_content",
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].reasoning_content == "think");
     REQUIRE(result.chunks[0].content == "answer");
+}
+
+TEST_CASE("Z.ai protocol parses unified 5h and 7d utilization headers",
+          "[zai][rate_limit]") {
+    ZaiProtocol protocol;
+    cpr::Header headers{
+        {"X-RateLimit-Limit-Requests", "100"},
+        {"X-RateLimit-Remaining-Requests", "88"},
+        {"X-RateLimit-Unified-5h-Utilization", "0.42"},
+        {"X-RateLimit-Unified-7d-Utilization", "17"},
+        {"X-RateLimit-Unified-Status", "allowed"},
+        {"X-RateLimit-Unified-Representative-Claim", "five_hour"},
+    };
+
+    protocol.on_response(HttpResponse{200, "{}", headers});
+    const auto info = protocol.last_rate_limit();
+
+    REQUIRE(info.requests_limit == 100);
+    REQUIRE(info.requests_remaining == 88);
+    REQUIRE(info.usage_windows.size() == 2);
+    REQUIRE(info.usage_windows[0].label == "5h");
+    REQUIRE(info.usage_windows[0].utilization == 0.42f);
+    REQUIRE(info.usage_windows[1].label == "7d");
+    REQUIRE(info.usage_windows[1].utilization == 0.17f);
+    REQUIRE(info.unified_status == "allowed");
+    REQUIRE(info.unified_representative_claim == "five_hour");
+}
+
+TEST_CASE("Z.ai protocol enriches usage windows from dashboard quota endpoint",
+          "[zai][rate_limit][enrich]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    std::string authorization;
+    server.Get("/api/monitor/usage/quota/limit",
+               [&](const httplib::Request& req, httplib::Response& res) {
+                   ++requests;
+                   authorization = req.get_header_value("Authorization");
+                   res.set_content(
+                       R"({"code":200,"msg":"Operation successful","data":{"limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"usage":100,"currentValue":0,"remaining":100,"percentage":0,"nextResetTime":1785332618972,"usageDetails":[{"modelCode":"search-prime","usage":0},{"modelCode":"web-reader","usage":0},{"modelCode":"zread","usage":0}]},{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":11,"nextResetTime":1782759322207},{"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":2,"nextResetTime":1783345418971}],"level":"lite"},"success":true})",
+                       "application/json");
+               });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    for (int i = 0; i < 50 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(server.is_running());
+
+    ZaiProtocol protocol;
+    protocol.on_response(HttpResponse{200, "{}", {}});
+    protocol.enrich_rate_limit(
+        std::format("http://127.0.0.1:{}/api/coding/paas/v4", port),
+        cpr::Header{{"Authorization", "Bearer test-token"}},
+        HttpResponse{200, "{}", {}});
+
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(requests.load() == 1);
+    REQUIRE(authorization == "Bearer test-token");
+    REQUIRE(info.usage_windows.size() == 3);
+    REQUIRE(info.usage_windows[0].label == "5h");
+    REQUIRE(info.usage_windows[0].utilization == 0.11f);
+    REQUIRE(info.usage_windows[1].label == "7d");
+    REQUIRE(info.usage_windows[1].utilization == 0.02f);
+    REQUIRE(info.usage_windows[2].label == "web");
+    REQUIRE(info.usage_windows[2].utilization == 0.0f);
 }
 
 TEST_CASE("Z.ai Coding Plan protocol enables Z.ai thinking config",

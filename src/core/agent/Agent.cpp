@@ -8,6 +8,7 @@
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../session/SessionStats.hpp"
+#include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -175,6 +176,10 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
 
 void Agent::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
+    const auto context = session_context_snapshot();
+    if (!context.session_id.empty()) {
+        core::tools::ShellTool::interrupt_mcp_session(context.session_id);
+    }
 }
 
 bool Agent::is_stop_requested() const {
@@ -261,6 +266,14 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
         return;
     }
     stable_prompt_prefix_ = build_stable_prompt_prefix();
+    stable_prompt_prefix_tokens_ = stable_prompt_prefix_.empty()
+        ? 0
+        : core::context::ContextWindowTracker::estimate_tokens({
+            core::llm::Message{
+                .role = "system",
+                .content = stable_prompt_prefix_,
+            },
+        });
     stable_prompt_prefix_dirty_ = false;
 }
 
@@ -280,7 +293,8 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
     context_window_snapshot_ = core::context::ContextWindowTracker::snapshot(
         history_,
         provider_,
-        active_model_);
+        active_model_,
+        stable_prompt_prefix_tokens_);
 }
 
 // ---------------------------------------------------------------------------

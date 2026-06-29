@@ -1019,6 +1019,74 @@ public:
     }
 };
 
+class PsCommand : public Command {
+public:
+    std::string get_name() const override { return "/ps"; }
+    std::string get_description() const override { return "Show active terminal commands"; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.list_active_terminals_fn) {
+            ctx.append_history_fn("\nℹ  Terminal process tracking is unavailable.\n");
+            return;
+        }
+
+        const auto terminals = ctx.list_active_terminals_fn();
+        if (terminals.empty()) {
+            ctx.append_history_fn("\nℹ  No terminal commands are currently running.\n");
+            return;
+        }
+
+        std::ostringstream out;
+        out << "\n[Active terminal commands]\n";
+        for (std::size_t i = 0; i < terminals.size(); ++i) {
+            const auto& terminal = terminals[i];
+            out << "  " << (i + 1) << ". ";
+            if (!terminal.command.empty()) {
+                out << terminal.command;
+            } else {
+                out << "(unknown command)";
+            }
+            out << "  [" << terminal.elapsed.count() << "s]";
+            if (!terminal.working_dir.empty()) {
+                out << "\n      cwd: " << terminal.working_dir;
+            }
+            if (!terminal.tool_call_id.empty()) {
+                out << "\n      tool: " << terminal.tool_call_id;
+            }
+            out << "\n";
+        }
+        ctx.append_history_fn(out.str());
+    }
+};
+
+class StopCommand : public Command {
+public:
+    std::string get_name() const override { return "/stop"; }
+    std::string get_description() const override { return "Stop the active terminal command or generation"; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.stop_active_terminal_fn) {
+            if (ctx.agent) {
+                ctx.agent->request_stop();
+                ctx.append_history_fn("\n»  Stop requested.\n");
+            } else {
+                ctx.append_history_fn("\nℹ  Nothing is currently running.\n");
+            }
+            return;
+        }
+
+        const auto result = ctx.stop_active_terminal_fn();
+        ctx.append_history_fn(std::format(
+            "\n{}  {}\n",
+            result.ok ? "»" : "ℹ",
+            result.message.empty()
+                ? (result.ok ? "Stop requested." : "Nothing is currently running.")
+                : result.message));
+    }
+};
+
 class HelpCommand : public Command {
 public:
     std::string get_name() const override { return "/help"; }
@@ -1036,6 +1104,8 @@ public:
             "  /quit, /exit, /q    Exit the application\n"
             "  /sessions           List and manage conversation sessions\n"
             "  /resume [id]        Restore a saved session by ID or index\n"
+            "  /ps                 Show active terminal commands\n"
+            "  /stop               Stop active generation or terminal command\n"
             "  /compact            Summarise and compress the conversation history\n"
             "  /compress [mode]    Open/set tool output compression (off|light|full|ultra)\n"
             "  /undo               Remove the last user message from history\n"
@@ -1066,7 +1136,7 @@ public:
             "  Ctrl+X   Open current input in external editor ($VISUAL/$EDITOR)\n"
             "  Ctrl+D   Delete char right; when input is empty press twice to quit\n"
             "  Ctrl+L   Clear the screen\n"
-            "  Ctrl+C   Stop / quit\n"
+            "  Ctrl+C   Stop active generation or terminal command\n"
         );
     }
 };
@@ -2489,6 +2559,8 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<HelpCommand>());
     register_command(std::make_unique<SessionsCommand>());
     register_command(std::make_unique<ResumeCommand>());
+    register_command(std::make_unique<PsCommand>());
+    register_command(std::make_unique<StopCommand>());
     register_command(std::make_unique<CompactCommand>());
     register_command(std::make_unique<CompressionCommand>());
     register_command(std::make_unique<UndoCommand>());

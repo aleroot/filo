@@ -3,10 +3,12 @@
 #include "Tool.hpp"
 #include "shell/IShellExecutor.hpp"
 #include "shell/ShellExecutorFactory.hpp"
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::tools {
 
@@ -54,6 +56,14 @@ namespace core::tools {
  */
 class ShellTool : public Tool {
 public:
+    struct ActiveCommand {
+        std::string session_id;
+        std::string command;
+        std::string working_dir;
+        std::string tool_call_id;
+        std::chrono::steady_clock::time_point started_at;
+    };
+
     // Constructs with the platform-appropriate executor (selected at compile time).
     ShellTool() : executor_(shell::make_shell_executor()) {}
 
@@ -62,11 +72,18 @@ public:
         : executor_(std::move(executor)) {}
 
     static void clear_mcp_session(std::string_view session_id);
+    static bool interrupt_mcp_session(std::string_view session_id);
+    static std::vector<ActiveCommand> active_commands();
 
     ToolDefinition get_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
+    std::string execute(const std::string& json_args, const ToolInvocationContext& invocation) override;
 
 private:
+    std::string execute_impl(const std::string& json_args,
+                             const core::context::SessionContext& context,
+                             std::string_view tool_call_id);
+
     std::unique_ptr<shell::IShellExecutor> executor_;
     std::mutex                             executor_mutex_;
 };

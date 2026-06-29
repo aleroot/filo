@@ -93,6 +93,37 @@ TEST_CASE("ContextWindowTracker does not show 99 percent left before one percent
     CHECK(just_over_one_percent.remaining_pct == 99);
 }
 
+TEST_CASE("ContextWindowTracker excludes stable bootstrap from displayed context pressure",
+          "[context][window]") {
+    const std::vector<core::llm::Message> bootstrap_only{
+        message_with_chars(8'000),
+    };
+    const std::size_t bootstrap_tokens =
+        core::context::ContextWindowTracker::estimate_tokens(bootstrap_only);
+
+    const auto fresh_snapshot = core::context::ContextWindowTracker::snapshot(
+        bootstrap_only,
+        nullptr,
+        "claude-sonnet-4",
+        bootstrap_tokens);
+
+    CHECK(fresh_snapshot.estimated_context_tokens == 2'001);
+    CHECK(fresh_snapshot.metered_context_tokens == 0);
+    CHECK(fresh_snapshot.remaining_pct == 100);
+
+    std::vector<core::llm::Message> with_user_turn = bootstrap_only;
+    with_user_turn.push_back(message_with_chars(8'000));
+    const auto active_snapshot = core::context::ContextWindowTracker::snapshot(
+        with_user_turn,
+        nullptr,
+        "claude-sonnet-4",
+        bootstrap_tokens);
+
+    CHECK(active_snapshot.estimated_context_tokens == 4'001);
+    CHECK(active_snapshot.metered_context_tokens == 2'000);
+    CHECK(active_snapshot.remaining_pct == 99);
+}
+
 TEST_CASE("ContextWindowTracker falls back to provider last model for router-like providers",
           "[context][window]") {
     auto provider = std::make_shared<FixedContextProvider>();

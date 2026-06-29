@@ -47,6 +47,7 @@ public:
 
     bool is_alive() const noexcept override { return session_.is_alive(); }
     void reset()   override { session_.reset(); }
+    bool interrupt() override { return session_.interrupt(); }
     std::string_view shell_name() const noexcept override { return "bash"; }
 
 private:

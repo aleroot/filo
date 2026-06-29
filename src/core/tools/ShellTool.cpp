@@ -42,6 +42,9 @@ std::mutex g_session_shells_mutex;
 std::unordered_map<std::string, std::shared_ptr<SessionShellState>> g_session_shells;
 constexpr std::size_t kMaxSessionShells = 64;
 
+std::mutex g_active_commands_mutex;
+std::unordered_map<std::string, ShellTool::ActiveCommand> g_active_commands;
+
 struct TempCandidateSnapshot {
     std::filesystem::path path;
     bool existed{false};
@@ -292,6 +295,29 @@ void grant_created_temp_candidates(
     }
 }
 
+class ActiveCommandRegistration {
+public:
+    explicit ActiveCommandRegistration(ShellTool::ActiveCommand command)
+        : session_id_(command.session_id)
+    {
+        if (session_id_.empty()) return;
+        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
+        g_active_commands[session_id_] = std::move(command);
+    }
+
+    ~ActiveCommandRegistration() {
+        if (session_id_.empty()) return;
+        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
+        g_active_commands.erase(session_id_);
+    }
+
+    ActiveCommandRegistration(const ActiveCommandRegistration&) = delete;
+    ActiveCommandRegistration& operator=(const ActiveCommandRegistration&) = delete;
+
+private:
+    std::string session_id_;
+};
+
 } // namespace
 
 void ShellTool::clear_mcp_session(std::string_view session_id) {
@@ -304,7 +330,38 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
             g_session_shells.erase(it);
         }
     }
+    {
+        std::lock_guard<std::mutex> lock(g_active_commands_mutex);
+        g_active_commands.erase(std::string(session_id));
+    }
     TempFileAccessRegistry::instance().clear_session(session_id);
+}
+
+bool ShellTool::interrupt_mcp_session(std::string_view session_id) {
+    if (session_id.empty()) return false;
+
+    std::shared_ptr<SessionShellState> state;
+    {
+        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
+        auto it = g_session_shells.find(std::string(session_id));
+        if (it == g_session_shells.end()) return false;
+        state = it->second;
+    }
+    if (!state || !state->executor) return false;
+    return state->executor->interrupt();
+}
+
+std::vector<ShellTool::ActiveCommand> ShellTool::active_commands() {
+    std::lock_guard<std::mutex> lock(g_active_commands_mutex);
+    std::vector<ActiveCommand> commands;
+    commands.reserve(g_active_commands.size());
+    for (const auto& [_, command] : g_active_commands) {
+        commands.push_back(command);
+    }
+    std::ranges::sort(commands, [](const ActiveCommand& lhs, const ActiveCommand& rhs) {
+        return lhs.started_at < rhs.started_at;
+    });
+    return commands;
 }
 
 ToolDefinition ShellTool::get_definition() const {
@@ -348,6 +405,24 @@ ToolDefinition ShellTool::get_definition() const {
 std::string ShellTool::execute(
     const std::string& json_args,
     const core::context::SessionContext& context)
+{
+    return execute_impl(json_args, context, {});
+}
+
+std::string ShellTool::execute(
+    const std::string& json_args,
+    const ToolInvocationContext& invocation)
+{
+    return execute_impl(
+        json_args,
+        invocation.session_context,
+        invocation.tool_call_id);
+}
+
+std::string ShellTool::execute_impl(
+    const std::string& json_args,
+    const core::context::SessionContext& context,
+    std::string_view tool_call_id)
 {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
@@ -422,6 +497,13 @@ std::string ShellTool::execute(
         std::lock_guard<std::mutex> lock(executor_mutex_);
         result = executor_->run(command_view, working_dir, timeout);
     } else {
+        ActiveCommandRegistration active_command({
+            .session_id = std::string(session_id),
+            .command = std::string(command_view),
+            .working_dir = working_dir,
+            .tool_call_id = std::string(tool_call_id),
+            .started_at = std::chrono::steady_clock::now(),
+        });
         const auto state = get_or_create_session_shell(
             std::string(session_id),
             context.workspace_view().primary());

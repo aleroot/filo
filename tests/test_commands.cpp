@@ -10,6 +10,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/tools/ToolManager.hpp"
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -82,6 +83,15 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto yolo_enabled   = std::make_shared<bool>(false);
     auto tool_rules = std::make_shared<std::vector<std::string>>();
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
+    auto active_terminals = std::make_shared<std::vector<ActiveTerminalInfo>>(
+        std::vector<ActiveTerminalInfo>{{
+            .session_id = "session-1",
+            .command = "sleep 60",
+            .working_dir = "/tmp",
+            .tool_call_id = "call-1",
+            .elapsed = std::chrono::seconds{7},
+        }});
+    auto stop_called = std::make_shared<bool>(false);
 
     CommandContext ctx{
         .text = "",
@@ -190,6 +200,16 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .set_review_activity_fn = [review_activity_events](bool active, const std::string& hint) {
             review_activity_events->emplace_back(active, hint);
         },
+        .list_active_terminals_fn = [active_terminals]() {
+            return *active_terminals;
+        },
+        .stop_active_terminal_fn = [stop_called]() {
+            *stop_called = true;
+            return CommandOperationResult{
+                .ok = true,
+                .message = "Stop requested for the active terminal command.",
+            };
+        },
     };
 
     SECTION("Unknown commands fall through") {
@@ -216,6 +236,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Filo Commands]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/auth [provider]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/ps"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/stop"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/settings"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/tools [action]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/usage"));
@@ -226,6 +248,23 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Filo Commands]"));
+    }
+
+    SECTION("/ps command lists active terminal commands") {
+        ctx.text = "/ps";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Active terminal commands"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("sleep 60"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("7s"));
+    }
+
+    SECTION("/stop command requests terminal stop") {
+        ctx.text = "/stop";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*stop_called == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Stop requested"));
     }
 
     SECTION("/usage command shows totals, models, and tools") {

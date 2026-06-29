@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -118,6 +119,7 @@ public:
         int stale_exit_code = -1;
         [[maybe_unused]] const bool reaped_stale =
             reap_if_exited(stale_exit_code, true);
+        interrupted_.store(false, std::memory_order_release);
         if (!is_alive()) start();
         if (!is_alive()) {
             return {"[ShellSession] Failed to start bash process.\n", -1};
@@ -153,13 +155,21 @@ public:
 
     /// Returns true if the bash process is still running.
     [[nodiscard]] bool is_alive() const {
-        return pid_ > 0 && ::kill(pid_, 0) == 0;
+        const pid_t pid = pid_.load(std::memory_order_acquire);
+        return pid > 0 && ::kill(pid, 0) == 0;
     }
 
     /// Kill the current session and start a fresh one.
     void reset() {
         stop();
         start();
+    }
+
+    bool interrupt() {
+        interrupted_.store(true, std::memory_order_release);
+        const pid_t pgid = pgid_.load(std::memory_order_acquire);
+        if (pgid <= 0) return false;
+        return ::killpg(pgid, SIGKILL) == 0 || errno == ESRCH;
     }
 
 private:
@@ -192,15 +202,15 @@ private:
             return;
         }
 
-        pid_ = ::fork();
-        if (pid_ < 0) {
+        const pid_t child_pid = ::fork();
+        if (child_pid < 0) {
             ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
-            pid_ = -1;
+            pid_.store(-1, std::memory_order_release);
             return;
         }
 
-        if (pid_ == 0) {
+        if (child_pid == 0) {
             // ---- child ----
             // Place child in its own process group so killpg() on timeout
             // terminates bash AND all sub-processes it spawned.
@@ -214,6 +224,7 @@ private:
 
             ::setenv("HISTFILE", "/dev/null", 1);
             ::setenv("HISTSIZE", "0", 1);
+            ::signal(SIGINT, SIG_DFL);
 
             const bool has_bash = ::access("/bin/bash", X_OK) == 0;
             if (has_bash) {
@@ -227,8 +238,9 @@ private:
         // ---- parent ----
         // Mirror setpgid so there is no race: if the parent calls killpg()
         // before the child's setpgid() completes, it still finds the group.
-        ::setpgid(pid_, pid_);
-        pgid_ = pid_;
+        ::setpgid(child_pid, child_pid);
+        pid_.store(child_pid, std::memory_order_release);
+        pgid_.store(child_pid, std::memory_order_release);
 
         ::close(stdin_pipe[0]);
         ::close(stdout_pipe[1]);
@@ -250,23 +262,25 @@ private:
     void stop() {
         if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
         if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
-        if (pid_ > 0) {
-            ::killpg(pgid_, SIGTERM);
+        const pid_t pid = pid_.load(std::memory_order_acquire);
+        const pid_t pgid = pgid_.load(std::memory_order_acquire);
+        if (pid > 0) {
+            ::killpg(pgid, SIGTERM);
             int  status = 0;
             bool reaped = false;
             for (int i = 0; i < 10 && !reaped; ++i) {
-                if (::waitpid(pid_, &status, WNOHANG) > 0) {
+                if (::waitpid(pid, &status, WNOHANG) > 0) {
                     reaped = true;
                 } else {
                     ::usleep(10'000);  // 10 ms
                 }
             }
             if (!reaped) {
-                ::killpg(pgid_, SIGKILL);
-                ::waitpid(pid_, &status, 0);
+                ::killpg(pgid, SIGKILL);
+                ::waitpid(pid, &status, 0);
             }
-            pid_  = -1;
-            pgid_ = -1;
+            pid_.store(-1, std::memory_order_release);
+            pgid_.store(-1, std::memory_order_release);
         }
     }
 
@@ -277,25 +291,27 @@ private:
     }
 
     [[nodiscard]] bool reap_if_exited(int& exit_code, bool kill_process_group) {
-        if (pid_ <= 0) return false;
+        const pid_t pid = pid_.load(std::memory_order_acquire);
+        if (pid <= 0) return false;
 
         int status = 0;
         pid_t ret = -1;
         do {
-            ret = ::waitpid(pid_, &status, WNOHANG);
+            ret = ::waitpid(pid, &status, WNOHANG);
         } while (ret < 0 && errno == EINTR);
 
         if (ret == 0) return false;
         if (ret < 0 && errno != ECHILD) return false;
 
         exit_code = ret > 0 ? exit_code_from_status(status) : -1;
-        if (kill_process_group && pgid_ > 0) {
-            ::killpg(pgid_, SIGKILL);
+        const pid_t pgid = pgid_.load(std::memory_order_acquire);
+        if (kill_process_group && pgid > 0) {
+            ::killpg(pgid, SIGKILL);
         }
         if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
         if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
-        pid_  = -1;
-        pgid_ = -1;
+        pid_.store(-1, std::memory_order_release);
+        pgid_.store(-1, std::memory_order_release);
         return true;
     }
 
@@ -315,28 +331,37 @@ private:
     void kill_session() {
         if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
         if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
-        if (pid_ > 0) {
-            ::killpg(pgid_, SIGKILL);
-            ::waitpid(pid_, nullptr, 0);
-            pid_  = -1;
-            pgid_ = -1;
+        const pid_t pid = pid_.load(std::memory_order_acquire);
+        const pid_t pgid = pgid_.load(std::memory_order_acquire);
+        if (pid > 0) {
+            ::killpg(pgid, SIGKILL);
+            ::waitpid(pid, nullptr, 0);
+            pid_.store(-1, std::memory_order_release);
+            pgid_.store(-1, std::memory_order_release);
         }
+    }
+
+    [[nodiscard]] bool consume_interrupt_requested() noexcept {
+        return interrupted_.exchange(false, std::memory_order_acq_rel);
+    }
+
+    [[nodiscard]] Result interrupted_result(std::string raw) noexcept {
+        raw += "\n[INTERRUPTED: command cancelled by user]\n";
+        return {std::move(raw), -1};
     }
 
     // Drain stdout until the sentinel appears.
     // Called after output truncation to keep the session synchronised so the
     // next command can be run cleanly.
-    void drain_sentinel() {
-        if (stdout_fd_ < 0) return;
+    [[nodiscard]] bool drain_sentinel_until(
+        std::chrono::steady_clock::time_point deadline) {
+        if (stdout_fd_ < 0) return false;
 
         const std::string prefix = "\n" + sentinel_ + ":";
         // Rolling tail — only needs to be large enough to detect the sentinel
         // across two consecutive read() chunks.
         std::string tail;
         tail.reserve(prefix.size() * 2 + 32);
-
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds{30};
 
         while (std::chrono::steady_clock::now() < deadline) {
             const auto remaining_ms =
@@ -373,8 +398,9 @@ private:
             if (tail.size() > keep * 2)
                 tail = tail.substr(tail.size() - keep);
 
-            if (tail.find(prefix) != std::string::npos) break;
+            if (tail.find(prefix) != std::string::npos) return true;
         }
+        return false;
     }
 
     Result read_until_done(std::chrono::milliseconds timeout) {
@@ -439,6 +465,9 @@ private:
             if (ret == 0) {
                 int shell_exit_code = -1;
                 if (reap_if_exited(shell_exit_code, true)) {
+                    if (consume_interrupt_requested()) {
+                        return interrupted_result(std::move(raw));
+                    }
                     return {std::move(raw), shell_exit_code};
                 }
                 continue;
@@ -447,6 +476,9 @@ private:
             if ((pfd.revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
                 int shell_exit_code = -1;
                 if (reap_if_exited(shell_exit_code, true)) {
+                    if (consume_interrupt_requested()) {
+                        return interrupted_result(std::move(raw));
+                    }
                     return {std::move(raw), shell_exit_code};
                 }
                 continue;
@@ -461,6 +493,9 @@ private:
                         shell_exit_code,
                         true,
                         std::chrono::milliseconds{50})) {
+                    if (consume_interrupt_requested()) {
+                        return interrupted_result(std::move(raw));
+                    }
                     return {std::move(raw), shell_exit_code};
                 }
                 // stdout closed before the sentinel while the shell still
@@ -474,8 +509,14 @@ private:
                 raw.append(buf.data(), kMaxOutput - raw.size());
                 raw += "\n... [OUTPUT TRUNCATED AT 4MB] ...";
                 // Drain the remaining output up to the sentinel so the session
-                // stays synchronised for the next command.
-                drain_sentinel();
+                // stays synchronised for the next command. If the command never
+                // reaches the sentinel before the original deadline, reset the
+                // shell so future calls cannot receive stale output.
+                if (!drain_sentinel_until(deadline)) {
+                    kill_session();
+                    raw += "\n[TIMEOUT: command exceeded time limit while draining "
+                           "truncated output]\n";
+                }
                 // Exit code is unknown after truncation — report -1 so callers
                 // do not mistakenly treat a failed command as successful.
                 return {std::move(raw), -1};
@@ -487,11 +528,12 @@ private:
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
-    int         stdin_fd_{-1};
-    int         stdout_fd_{-1};
-    pid_t       pid_{-1};
-    pid_t       pgid_{-1};   // process group id (== pid_ while alive)
-    std::string sentinel_;
+    int                stdin_fd_{-1};
+    int                stdout_fd_{-1};
+    std::atomic<pid_t> pid_{-1};
+    std::atomic<pid_t> pgid_{-1};   // process group id (== pid_ while alive)
+    std::atomic<bool>  interrupted_{false};
+    std::string        sentinel_;
 };
 
 } // namespace core::tools::detail

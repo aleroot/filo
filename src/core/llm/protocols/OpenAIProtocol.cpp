@@ -6,13 +6,20 @@
 #include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace core::llm::protocols {
 
 namespace {
+
+constexpr auto kZaiUsageSnapshotTtl = std::chrono::seconds{20};
 
 [[nodiscard]] std::string lower_ascii(std::string_view value) {
     std::string lowered;
@@ -22,6 +29,346 @@ namespace {
             std::tolower(static_cast<unsigned char>(ch))));
     }
     return lowered;
+}
+
+[[nodiscard]] std::optional<std::string_view>
+find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
+    if (const auto it = headers.find(std::string(key)); it != headers.end()) {
+        return it->second;
+    }
+
+    const std::string key_lower = lower_ascii(key);
+    for (const auto& [k, v] : headers) {
+        if (k.size() != key_lower.size()) continue;
+        bool equal = true;
+        for (std::size_t i = 0; i < k.size(); ++i) {
+            const char lhs = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(k[i])));
+            if (lhs != key_lower[i]) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) return v;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] int32_t parse_int_header_case_insensitive(const cpr::Header& headers,
+                                                        std::string_view key) noexcept {
+    const auto value = find_header_case_insensitive(headers, key);
+    if (!value.has_value() || value->empty()) return 0;
+    try {
+        return static_cast<int32_t>(std::stoi(std::string(*value)));
+    } catch (...) {
+        return 0;
+    }
+}
+
+[[nodiscard]] std::optional<float>
+parse_float_header_case_insensitive(const cpr::Header& headers,
+                                    std::string_view key) noexcept {
+    const auto value = find_header_case_insensitive(headers, key);
+    if (!value.has_value() || value->empty()) return std::nullopt;
+    try {
+        float parsed = std::stof(std::string(*value));
+        if (parsed > 1.5f && parsed <= 100.0f) {
+            parsed /= 100.0f;
+        }
+        return std::clamp(parsed, 0.0f, 1.5f);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] RateLimitInfo parse_openai_compatible_rate_limit_headers(
+    const cpr::Header& headers,
+    int response_status_code) noexcept {
+    RateLimitInfo info;
+
+    info.requests_limit =
+        parse_int_header_case_insensitive(headers, "x-ratelimit-limit-requests");
+    info.requests_remaining =
+        parse_int_header_case_insensitive(headers, "x-ratelimit-remaining-requests");
+    info.tokens_limit =
+        parse_int_header_case_insensitive(headers, "x-ratelimit-limit-tokens");
+    info.tokens_remaining =
+        parse_int_header_case_insensitive(headers, "x-ratelimit-remaining-tokens");
+    info.retry_after = parse_int_header_case_insensitive(headers, "retry-after");
+    info.is_rate_limited = (response_status_code == 429 || info.retry_after > 0);
+
+    if (info.requests_limit > 0 && info.requests_remaining == 0 && !info.is_rate_limited) {
+        info.requests_remaining = info.requests_limit;
+    }
+    if (info.tokens_limit > 0 && info.tokens_remaining == 0 && !info.is_rate_limited) {
+        info.tokens_remaining = info.tokens_limit;
+    }
+
+    return info;
+}
+
+[[nodiscard]] RateLimitInfo parse_zai_rate_limit_headers(const cpr::Header& headers,
+                                                         int response_status_code) noexcept {
+    RateLimitInfo info =
+        parse_openai_compatible_rate_limit_headers(headers, response_status_code);
+
+    struct WindowHeader {
+        std::string_view label;
+        std::string_view key;
+    };
+    static constexpr std::array<WindowHeader, 2> kWindows{{
+        {"5h", "x-ratelimit-unified-5h-utilization"},
+        {"7d", "x-ratelimit-unified-7d-utilization"},
+    }};
+
+    for (const auto& window : kWindows) {
+        if (auto value = parse_float_header_case_insensitive(headers, window.key);
+            value.has_value()) {
+            info.usage_windows.push_back({
+                std::string(window.label),
+                *value,
+            });
+        }
+    }
+
+    if (auto status = find_header_case_insensitive(headers, "x-ratelimit-unified-status");
+        status.has_value()) {
+        info.unified_status = std::string(*status);
+        if (*status == "rate_limited" || *status == "rejected") {
+            info.is_rate_limited = true;
+        }
+    }
+    if (auto claim = find_header_case_insensitive(
+            headers, "x-ratelimit-unified-representative-claim");
+        claim.has_value()) {
+        info.unified_representative_claim = std::string(*claim);
+    }
+
+    return info;
+}
+
+struct ZaiUsageSnapshot {
+    std::vector<UsageWindow> windows;
+};
+
+struct CachedZaiUsageSnapshot {
+    ZaiUsageSnapshot value;
+    std::chrono::steady_clock::time_point expires_at;
+};
+
+void merge_usage_window(RateLimitInfo& info, UsageWindow incoming) {
+    auto existing = std::find_if(
+        info.usage_windows.begin(),
+        info.usage_windows.end(),
+        [&](const UsageWindow& current) {
+            return current.label == incoming.label;
+        });
+    if (existing != info.usage_windows.end()) {
+        existing->utilization = incoming.utilization;
+    } else {
+        info.usage_windows.push_back(std::move(incoming));
+    }
+}
+
+[[nodiscard]] std::optional<float> read_json_number(simdjson::dom::object object,
+                                                    std::string_view key) {
+    double as_double = 0.0;
+    if (object[key].get(as_double) == simdjson::SUCCESS) {
+        return static_cast<float>(as_double);
+    }
+
+    int64_t as_int = 0;
+    if (object[key].get(as_int) == simdjson::SUCCESS) {
+        return static_cast<float>(as_int);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string_view> read_json_string(simdjson::dom::object object,
+                                                               std::string_view key) {
+    std::string_view value;
+    if (object[key].get(value) == simdjson::SUCCESS) return value;
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<int64_t> read_json_int(simdjson::dom::object object,
+                                                   std::string_view key) {
+    int64_t value = 0;
+    if (object[key].get(value) == simdjson::SUCCESS) return value;
+    double as_double = 0.0;
+    if (object[key].get(as_double) == simdjson::SUCCESS) {
+        return static_cast<int64_t>(as_double);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> zai_quota_label(simdjson::dom::object limit) {
+    const auto type = read_json_string(limit, "type");
+    const auto unit = read_json_int(limit, "unit");
+    if (!type.has_value() || !unit.has_value()) return std::nullopt;
+
+    if (*type == "TOKENS_LIMIT" && *unit == 3) return std::string{"5h"};
+    if (*type == "TOKENS_LIMIT" && *unit == 6) return std::string{"7d"};
+    if (*type == "TIME_LIMIT" && *unit == 5) return std::string{"web"};
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<ZaiUsageSnapshot>
+parse_zai_usage_quota_payload(std::string_view payload) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(payload).get(doc) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::dom::object data;
+    if (doc["data"].get(data) != simdjson::SUCCESS) return std::nullopt;
+
+    simdjson::dom::array limits;
+    if (data["limits"].get(limits) != simdjson::SUCCESS) return std::nullopt;
+
+    ZaiUsageSnapshot snapshot;
+    for (simdjson::dom::element element : limits) {
+        simdjson::dom::object limit;
+        if (element.get(limit) != simdjson::SUCCESS) continue;
+
+        const auto label = zai_quota_label(limit);
+        if (!label.has_value()) continue;
+
+        std::optional<float> percentage = read_json_number(limit, "percentage");
+        if (!percentage.has_value()) {
+            const auto current = read_json_number(limit, "currentValue");
+            const auto remaining = read_json_number(limit, "remaining");
+            if (current.has_value() && remaining.has_value()
+                && (*current + *remaining) > 0.0f) {
+                percentage = (*current / (*current + *remaining)) * 100.0f;
+            }
+        }
+        if (!percentage.has_value()) continue;
+
+        snapshot.windows.push_back(UsageWindow{
+            *label,
+            std::clamp(*percentage / 100.0f, 0.0f, 1.5f),
+        });
+    }
+
+    if (snapshot.windows.empty()) return std::nullopt;
+    const auto rank = [](const std::string& label) {
+        if (label == "5h") return 0;
+        if (label == "7d") return 1;
+        if (label == "web") return 2;
+        return 3;
+    };
+    std::stable_sort(
+        snapshot.windows.begin(),
+        snapshot.windows.end(),
+        [&](const UsageWindow& lhs, const UsageWindow& rhs) {
+            return rank(lhs.label) < rank(rhs.label);
+        });
+    return snapshot;
+}
+
+[[nodiscard]] std::string trim_trailing_slash(std::string_view url) {
+    while (!url.empty() && url.back() == '/') {
+        url.remove_suffix(1);
+    }
+    return std::string(url);
+}
+
+[[nodiscard]] std::string zai_management_api_base_url(std::string_view base_url) {
+    std::string url = trim_trailing_slash(base_url);
+    const std::array<std::string_view, 2> suffixes{
+        "/api/coding/paas/v4",
+        "/api/paas/v4",
+    };
+    for (const auto suffix : suffixes) {
+        if (url.size() >= suffix.size()
+            && url.compare(url.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            url.resize(url.size() - suffix.size());
+            url += "/api";
+            return url;
+        }
+    }
+    return url;
+}
+
+[[nodiscard]] std::string zai_usage_cache_key(std::string_view base_url,
+                                              const cpr::Header& request_headers) {
+    std::string key = zai_management_api_base_url(base_url);
+    const auto auth_header = find_header_case_insensitive(request_headers, "Authorization");
+    const std::size_t auth_hash = std::hash<std::string_view>{}(
+        auth_header.has_value() ? *auth_header : std::string_view{});
+    key += "|auth:";
+    key += std::to_string(auth_hash);
+    return key;
+}
+
+[[nodiscard]] std::unordered_map<std::string, CachedZaiUsageSnapshot>&
+zai_usage_cache() {
+    static std::unordered_map<std::string, CachedZaiUsageSnapshot> cache;
+    return cache;
+}
+
+[[nodiscard]] std::mutex& zai_usage_cache_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+[[nodiscard]] std::optional<ZaiUsageSnapshot>
+load_cached_zai_usage_snapshot(const std::string& key) {
+    const auto now = std::chrono::steady_clock::now();
+    std::scoped_lock lock(zai_usage_cache_mutex());
+    auto& cache = zai_usage_cache();
+    auto it = cache.find(key);
+    if (it == cache.end()) return std::nullopt;
+    if (it->second.expires_at <= now) {
+        cache.erase(it);
+        return std::nullopt;
+    }
+    return it->second.value;
+}
+
+void store_cached_zai_usage_snapshot(std::string key,
+                                     const ZaiUsageSnapshot& snapshot) {
+    const auto expires_at = std::chrono::steady_clock::now() + kZaiUsageSnapshotTtl;
+    std::scoped_lock lock(zai_usage_cache_mutex());
+    auto& cache = zai_usage_cache();
+    cache[std::move(key)] = CachedZaiUsageSnapshot{snapshot, expires_at};
+}
+
+[[nodiscard]] std::optional<ZaiUsageSnapshot>
+fetch_zai_usage_snapshot(std::string_view base_url,
+                         const cpr::Header& request_headers) {
+    std::string url = zai_management_api_base_url(base_url);
+    url += "/monitor/usage/quota/limit";
+
+    cpr::Header headers = request_headers;
+    headers["Accept"] = "application/json";
+    if (!find_header_case_insensitive(headers, "Accept-Language").has_value()) {
+        headers["Accept-Language"] = "en";
+    }
+
+    const cpr::Response response = cpr::Get(
+        cpr::Url{url},
+        headers,
+        cpr::Timeout{1500});
+
+    if (response.error.code != cpr::ErrorCode::OK) return std::nullopt;
+    if (response.status_code != 200 || response.text.empty()) return std::nullopt;
+    return parse_zai_usage_quota_payload(response.text);
+}
+
+void merge_zai_usage_snapshot(RateLimitInfo& info, const ZaiUsageSnapshot& snapshot) {
+    for (const auto& incoming : snapshot.windows) {
+        merge_usage_window(info, incoming);
+    }
+}
+
+[[nodiscard]] bool has_usage_window(const RateLimitInfo& info, std::string_view label) {
+    return std::any_of(
+        info.usage_windows.begin(),
+        info.usage_windows.end(),
+        [&](const UsageWindow& window) {
+            return window.label == label;
+        });
 }
 
 [[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort) {
@@ -364,32 +711,8 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
 }
 
 void OpenAIProtocol::on_response(const HttpResponse& response) {
-    RateLimitInfo info;
-
-    auto parse_int = [&](std::string_view key) -> int32_t {
-        if (const auto it = response.headers.find(std::string(key)); it != response.headers.end()) {
-            try { return static_cast<int32_t>(std::stoi(it->second)); } catch (...) {}
-        }
-        return 0;
-    };
-
-    info.requests_limit     = parse_int("x-ratelimit-limit-requests");
-    info.requests_remaining = parse_int("x-ratelimit-remaining-requests");
-    info.tokens_limit       = parse_int("x-ratelimit-limit-tokens");
-    info.tokens_remaining   = parse_int("x-ratelimit-remaining-tokens");
-    info.retry_after        = parse_int("retry-after");
-    info.is_rate_limited    = (response.status_code == 429 || info.retry_after > 0);
-
-    // When a limit is known but remaining was not explicitly reported, assume full
-    // to avoid false "0 remaining" alarms on endpoints that omit the header.
-    if (info.requests_limit > 0 && info.requests_remaining == 0 && !info.is_rate_limited) {
-        info.requests_remaining = info.requests_limit;
-    }
-    if (info.tokens_limit > 0 && info.tokens_remaining == 0 && !info.is_rate_limited) {
-        info.tokens_remaining = info.tokens_limit;
-    }
-
-    last_rate_limit_ = info;
+    last_rate_limit_ =
+        parse_openai_compatible_rate_limit_headers(response.headers, response.status_code);
 }
 
 std::string ZaiProtocol::serialize(const ChatRequest& req) const {
@@ -434,6 +757,36 @@ ParseResult ZaiProtocol::parse_event(std::string_view raw_event) {
     }
 
     return result;
+}
+
+void ZaiProtocol::on_response(const HttpResponse& response) {
+    last_rate_limit_ = parse_zai_rate_limit_headers(response.headers, response.status_code);
+}
+
+void ZaiProtocol::enrich_rate_limit(std::string_view base_url,
+                                    const cpr::Header& request_headers,
+                                    const HttpResponse& response) {
+    if (response.status_code <= 0 || response.status_code == 401 || response.status_code == 403) {
+        return;
+    }
+
+    const bool needs_enrichment =
+        !has_usage_window(last_rate_limit_, "5h")
+        || !has_usage_window(last_rate_limit_, "7d");
+    if (!needs_enrichment) return;
+
+    const std::string cache_key = zai_usage_cache_key(base_url, request_headers);
+    if (const auto cached = load_cached_zai_usage_snapshot(cache_key);
+        cached.has_value()) {
+        merge_zai_usage_snapshot(last_rate_limit_, *cached);
+        return;
+    }
+
+    if (const auto usage = fetch_zai_usage_snapshot(base_url, request_headers);
+        usage.has_value()) {
+        store_cached_zai_usage_snapshot(cache_key, *usage);
+        merge_zai_usage_snapshot(last_rate_limit_, *usage);
+    }
 }
 
 void ZaiProtocol::append_extra_fields(std::string& payload, const ChatRequest& req) const {

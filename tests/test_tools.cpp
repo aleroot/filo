@@ -37,12 +37,12 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unistd.h>
 #ifdef FILO_ENABLE_PYTHON
-#include <future>
 #include <vector>
 #endif
 
@@ -1161,6 +1161,39 @@ TEST_CASE("ShellTool session recovers cleanly after a timeout", "[tools]") {
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
+TEST_CASE("ShellTool interrupt_mcp_session cancels a running command", "[tools]") {
+    ShellTool tool;
+    constexpr std::string_view kSession = "session-interrupt";
+    const auto session = make_tool_test_context(std::string(kSession));
+
+#undef execute
+    auto future = std::async(std::launch::async, [&]() {
+        return tool.execute(R"({"command":"sleep 60","timeout_seconds":30})", session);
+    });
+
+    bool observed_active = false;
+    for (int i = 0; i < 100; ++i) {
+        const auto active = ShellTool::active_commands();
+        observed_active = std::ranges::any_of(active, [kSession](const ShellTool::ActiveCommand& command) {
+            return command.session_id == kSession && command.command == "sleep 60";
+        });
+        if (observed_active) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    }
+    REQUIRE(observed_active);
+    REQUIRE(ShellTool::interrupt_mcp_session(kSession));
+
+    const auto res = future.get();
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("INTERRUPTED"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":-1"));
+
+    auto next = tool.execute(R"({"command":"echo recovered_after_interrupt"})", session);
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_interrupt"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    ShellTool::clear_mcp_session(kSession);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+}
+
 TEST_CASE("ShellTool preserves partial-line stdout and stderr", "[tools]") {
     ShellTool tool;
 
@@ -1290,6 +1323,24 @@ TEST_CASE("ShellTool recovers after output truncation drains to sentinel", "[too
 
     auto next = tool.execute(R"({"command":"echo recovered_after_truncation"})");
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_truncation"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool timeout applies while draining truncated output", "[tools]") {
+    ShellTool tool;
+
+    const auto started = std::chrono::steady_clock::now();
+    auto res = tool.execute(
+        R"({"command":"awk 'BEGIN{for (i=0;i<5000000;i++) printf \"x\"; fflush(); while (1) system(\"sleep 1\")}'","timeout_seconds":3})");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE(res.find("OUTPUT TRUNCATED AT 4MB") != std::string::npos);
+    REQUIRE(res.find("TIMEOUT") != std::string::npos);
+    REQUIRE(res.find("\"exit_code\":-1") != std::string::npos);
+    REQUIRE(elapsed < std::chrono::seconds{8});
+
+    auto next = tool.execute(R"({"command":"echo clean_after_truncated_timeout"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("clean_after_truncated_timeout"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
@@ -1720,6 +1771,76 @@ TEST_CASE("OpenAI web search backend only supports native Responses endpoints",
             true,
             false),
     }));
+}
+
+TEST_CASE("Z.ai web backends support GLM API endpoints only",
+          "[tools][web][zai]") {
+    const auto search_backend = core::tools::web::make_zai_web_search_backend();
+    const auto fetch_backend = core::tools::web::make_zai_web_fetch_backend();
+
+    const core::tools::ToolInvocationContext zai_context{
+        .session_context = make_tool_test_context("zai-web-backend"),
+        .model_name = "glm-5.2",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.z.ai/api/coding/paas/v4"),
+    };
+    REQUIRE(search_backend->supports(zai_context));
+    REQUIRE(fetch_backend->supports(zai_context));
+
+    const core::tools::ToolInvocationContext compatible_context{
+        .session_context = make_tool_test_context("zai-web-backend-compatible"),
+        .model_name = "mistral-large",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.mistral.ai/v1"),
+    };
+    REQUIRE_FALSE(search_backend->supports(compatible_context));
+    REQUIRE_FALSE(fetch_backend->supports(compatible_context));
+
+    const core::tools::ToolInvocationContext misleading_path_context{
+        .session_context = make_tool_test_context("zai-web-backend-misleading-path"),
+        .model_name = "glm-5.2",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://example.com/api.z.ai/api/paas/v4"),
+    };
+    REQUIRE_FALSE(search_backend->supports(misleading_path_context));
+    REQUIRE_FALSE(fetch_backend->supports(misleading_path_context));
+
+    const core::tools::ToolInvocationContext no_credentials_context{
+        .session_context = make_tool_test_context("zai-web-backend-no-credentials"),
+        .model_name = "glm-5.2",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.z.ai/api/paas/v4",
+            false),
+    };
+    REQUIRE_FALSE(search_backend->supports(no_credentials_context));
+    REQUIRE_FALSE(fetch_backend->supports(no_credentials_context));
+}
+
+TEST_CASE("Z.ai web search rejects unsupported multi-domain filters",
+          "[tools][web][zai]") {
+    const auto search_backend = core::tools::web::make_zai_web_search_backend();
+    const core::tools::ToolInvocationContext context{
+        .session_context = make_tool_test_context("zai-web-backend-domains"),
+        .model_name = "glm-5.2",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.z.ai/api/coding/paas/v4"),
+    };
+
+    core::tools::web::SearchRequest request{
+        .query = "z.ai",
+        .domains = {
+            .allowed_domains = {"docs.z.ai", "z.ai"},
+        },
+    };
+
+    const auto result = search_backend->search(request, context);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE_THAT(result.error(), Catch::Matchers::ContainsSubstring("at most one"));
 }
 
 // ---------------------------------------------------------------------------

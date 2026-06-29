@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -16,6 +17,14 @@ namespace core::commands {
 struct CommandOperationResult {
     bool ok = false;
     std::string message;
+};
+
+struct ActiveTerminalInfo {
+    std::string session_id;
+    std::string command;
+    std::string working_dir;
+    std::string tool_call_id;
+    std::chrono::seconds elapsed{0};
 };
 
 struct ToolRuleCallbacks {
@@ -85,6 +94,8 @@ struct CommandContext {
                                          core::config::SettingsScope)> add_mcp_server_fn = {};
     std::function<CommandOperationResult(std::string_view,
                                          core::config::SettingsScope)> remove_mcp_server_fn = {};
+    std::function<std::vector<ActiveTerminalInfo>()> list_active_terminals_fn = {};
+    std::function<CommandOperationResult()> stop_active_terminal_fn = {};
 };
 
 struct CommandDescriptor {

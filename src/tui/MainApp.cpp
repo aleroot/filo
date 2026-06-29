@@ -72,6 +72,7 @@
 #include <memory>
 #include <format>
 #include <chrono>
+#include <csignal>
 #include <thread>
 #include <filesystem>
 #include <fstream>
@@ -177,6 +178,19 @@ public:
     ~TerminalInputModeGuard() {
         std::cout << kDisableTerminalInputModes << std::flush;
     }
+};
+
+class SigintIgnoreGuard {
+public:
+    SigintIgnoreGuard() : previous_(std::signal(SIGINT, SIG_IGN)) {}
+    ~SigintIgnoreGuard() { std::signal(SIGINT, previous_); }
+
+    SigintIgnoreGuard(const SigintIgnoreGuard&) = delete;
+    SigintIgnoreGuard& operator=(const SigintIgnoreGuard&) = delete;
+
+private:
+    using Handler = void (*)(int);
+    Handler previous_ = SIG_DFL;
 };
 
 std::string shell_single_quote(std::string_view value) {
@@ -809,6 +823,7 @@ RunResult run(RunOptions opts) {
             wake_ui();
         });
     TerminalInputModeGuard terminal_input_mode_guard;
+    SigintIgnoreGuard sigint_ignore_guard;
     std::atomic<std::size_t> animation_tick = 0;
     std::mutex animation_mutex;
     std::condition_variable animation_cv;
@@ -1226,6 +1241,41 @@ RunResult run(RunOptions opts) {
             ui_messages.back().text += str;
         }
         wake_ui();
+    };
+
+    auto list_active_terminals = [&]() {
+        std::vector<core::commands::ActiveTerminalInfo> terminals;
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& command : core::tools::ShellTool::active_commands()) {
+            if (command.session_id != session_id) {
+                continue;
+            }
+            terminals.push_back({
+                .session_id = command.session_id,
+                .command = command.command,
+                .working_dir = command.working_dir,
+                .tool_call_id = command.tool_call_id,
+                .elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - command.started_at),
+            });
+        }
+        return terminals;
+    };
+
+    auto stop_active_terminal = [&]() -> core::commands::CommandOperationResult {
+        const bool had_terminal = !list_active_terminals().empty();
+        const bool had_turn = assistant_turn_active.load(std::memory_order_relaxed);
+        if (!had_terminal && !had_turn) {
+            return {.ok = false, .message = "Nothing is currently running."};
+        }
+
+        agent->request_stop();
+        return {
+            .ok = true,
+            .message = had_terminal
+                ? "Stop requested for the active terminal command."
+                : "Stop requested for the active generation.",
+        };
     };
 
     auto append_assistant_output = [&](const std::string& str) {
@@ -4037,6 +4087,8 @@ RunResult run(RunOptions opts) {
             .list_mcp_servers_fn = list_mcp_servers,
             .add_mcp_server_fn = add_mcp_server,
             .remove_mcp_server_fn = remove_mcp_server,
+            .list_active_terminals_fn = list_active_terminals,
+            .stop_active_terminal_fn = stop_active_terminal,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;
@@ -5116,7 +5168,7 @@ RunResult run(RunOptions opts) {
 
         if (event == Event::Escape
             && assistant_turn_active.load(std::memory_order_relaxed)) {
-            agent->request_stop();
+            [[maybe_unused]] const auto ignored = stop_active_terminal();
             return true;
         }
 
@@ -5223,8 +5275,12 @@ RunResult run(RunOptions opts) {
                 : "\n\xe2\x84\xb9  Verbose output view set to COMPACT: long output is collapsed (you can still click disclosure rows).\n");
             return true;
         }
-        if (is_ctrl_c_event(event)) {  // Ctrl+C — stop current LLM generation
-            agent->request_stop();
+        if (is_ctrl_c_event(event)) {
+            const auto result = stop_active_terminal();
+            append_history(std::format(
+                "\n{}  {}\n",
+                result.ok ? "»" : "ℹ",
+                result.message));
             return true;
         }
 

@@ -44,6 +44,10 @@ public:
     // Terminate and restart the shell session.
     virtual void reset() = 0;
 
+    // Request immediate termination of the currently running command/session.
+    // Implementations should be safe to call from a different thread than run().
+    virtual bool interrupt() = 0;
+
     // Human-readable name of the shell in use (e.g. "bash").
     virtual std::string_view shell_name() const noexcept = 0;
 };

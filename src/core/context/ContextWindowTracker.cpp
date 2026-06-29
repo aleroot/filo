@@ -41,15 +41,20 @@ int32_t ContextWindowTracker::resolve_max_context_tokens(
 ContextWindowSnapshot ContextWindowTracker::snapshot(
     const std::vector<core::llm::Message>& history,
     const std::shared_ptr<core::llm::LLMProvider>& provider,
-    std::string_view model) noexcept {
+    std::string_view model,
+    std::size_t metered_tokens_to_exclude) noexcept {
     const int32_t max_context_tokens =
         resolve_max_context_tokens(provider, model);
     const std::size_t estimated_context_tokens = estimate_tokens(history);
+    const std::size_t metered_context_tokens =
+        estimated_context_tokens > metered_tokens_to_exclude
+            ? estimated_context_tokens - metered_tokens_to_exclude
+            : 0;
 
     int32_t remaining_pct = -1;
     if (max_context_tokens > 0) {
         const double remaining = static_cast<double>(max_context_tokens)
-            - static_cast<double>(estimated_context_tokens);
+            - static_cast<double>(metered_context_tokens);
         remaining_pct = remaining <= 0.0
             ? 0
             : static_cast<int32_t>(std::ceil(
@@ -58,6 +63,7 @@ ContextWindowSnapshot ContextWindowTracker::snapshot(
 
     return ContextWindowSnapshot{
         .estimated_context_tokens = estimated_context_tokens,
+        .metered_context_tokens = metered_context_tokens,
         .max_context_tokens = max_context_tokens,
         .remaining_pct = remaining_pct,
     };
