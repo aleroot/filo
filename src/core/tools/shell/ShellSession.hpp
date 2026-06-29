@@ -404,7 +404,10 @@ private:
                 // so EOF is not a reliable liveness signal.
                 int ignored_exit_code = -1;
                 [[maybe_unused]] const bool reaped =
-                    reap_if_exited(ignored_exit_code, true);
+                    reap_if_exited_for(
+                        ignored_exit_code,
+                        true,
+                        std::chrono::milliseconds{10});
 
                 return {std::move(output), exit_code};
             }
