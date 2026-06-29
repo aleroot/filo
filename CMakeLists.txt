@@ -414,6 +414,7 @@ add_executable(filo_tests
     tests/test_mcp_tasks.cpp
     tests/test_oauth.cpp
     tests/test_logger.cpp
+    tests/test_hook_manager.cpp
     tests/test_tier1.cpp
     tests/test_routing.cpp
     tests/test_router_provider.cpp
@@ -533,6 +534,7 @@ source_group(
         tests/test_mcp_tasks.cpp
         tests/test_oauth.cpp
         tests/test_logger.cpp
+        tests/test_hook_manager.cpp
         tests/test_tier1.cpp
         tests/test_routing.cpp
         tests/test_router_provider.cpp

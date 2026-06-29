@@ -17,9 +17,20 @@ enum class HookEvent {
 
 [[nodiscard]] std::string_view to_string(HookEvent event) noexcept;
 
+struct HookDecision {
+    bool allowed = true;
+    bool approved = false;
+    std::string reason;
+};
+
 void dispatch(HookEvent event,
               std::string payload_json,
               const core::context::SessionContext& session_context,
               std::vector<std::pair<std::string, std::string>> extra_env = {});
+
+[[nodiscard]] HookDecision run_pre_tool_use(
+    std::string payload_json,
+    const core::context::SessionContext& session_context,
+    std::vector<std::pair<std::string, std::string>> extra_env = {});
 
 } // namespace core::hooks

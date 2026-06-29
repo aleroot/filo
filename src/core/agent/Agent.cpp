@@ -11,6 +11,7 @@
 #include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/ModelRegistry.hpp"
@@ -727,11 +728,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             enum class DeniedReason {
                 None,
                 BlockedByTurnAllowList,
+                BlockedByHook,
                 UserDenied,
                 SkippedAfterEarlierDenial,
             };
             std::vector<bool> approved(tool_calls_accum->size());
             std::vector<DeniedReason> denied_reasons(tool_calls_accum->size(), DeniedReason::None);
+            std::vector<std::string> hook_denial_reasons(tool_calls_accum->size());
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
                 const auto& tc = (*tool_calls_accum)[i];
@@ -750,7 +753,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     tool_callback(tc.function.name, "[skipped after earlier denial]");
                     continue;
                 }
-                approved[i] = self->check_permission(tc.function.name, tc.function.arguments);
+                const auto hook_decision = core::hooks::run_pre_tool_use(
+                    build_tool_hook_payload(tc),
+                    step_session_context);
+                if (!hook_decision.allowed) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::BlockedByHook;
+                    hook_denial_reasons[i] = hook_decision.reason;
+                    denied_any = true;
+                    tool_callback(
+                        tc.function.name,
+                        hook_decision.reason.empty()
+                            ? "[blocked by PreToolUse hook]"
+                            : "[blocked by PreToolUse hook: " + hook_decision.reason + "]");
+                    continue;
+                }
+                approved[i] = hook_decision.approved
+                    || self->check_permission(tc.function.name, tc.function.arguments);
                 if (!approved[i]) {
                     denied_reasons[i] = DeniedReason::UserDenied;
                     denied_any = true;
@@ -793,11 +812,17 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         denied_reasons[i] == DeniedReason::SkippedAfterEarlierDenial;
                     const bool blocked_by_turn_allow_list =
                         denied_reasons[i] == DeniedReason::BlockedByTurnAllowList;
+                    const bool blocked_by_hook =
+                        denied_reasons[i] == DeniedReason::BlockedByHook;
                     const std::string error_payload = skipped_after_denial
                         ? R"({"error":"Tool call skipped after a previous denial in this step."})"
                         : blocked_by_turn_allow_list
                             ? R"({"error":"Tool call blocked by the turn tool allow-list."})"
-                            : R"({"error":"Tool call denied by user."})";
+                            : blocked_by_hook
+                                ? std::format(
+                                    R"({{"error":"Tool call blocked by PreToolUse hook: {}"}})",
+                                    core::utils::escape_json_string(hook_denial_reasons[i]))
+                                : R"({"error":"Tool call denied by user."})";
                     scheduled_tasks.push_back({
                         .accesses = no_tool_access(),
                         .run = [tc, error_payload]() {
@@ -857,10 +882,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      active_model_for_task,
                      parent_mode_for_task]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
-                        core::hooks::dispatch(
-                            core::hooks::HookEvent::PreToolUse,
-                            build_tool_hook_payload(tc),
-                            session_context);
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                             SubagentOrchestrator::RunContext run_context{

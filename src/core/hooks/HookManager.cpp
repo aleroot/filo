@@ -6,6 +6,7 @@
 #include "../tools/shell/ShellUtils.hpp"
 #include "../utils/Base64.hpp"
 
+#include <simdjson.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -84,6 +85,98 @@ using core::tools::detail::shell_single_quote;
     return command_prefix;
 }
 
+[[nodiscard]] std::string build_stdin_prefix(std::string_view payload_json) {
+    return "printf '%s' '" + shell_single_quote(payload_json) + "' | ";
+}
+
+[[nodiscard]] HookDecision interpret_pre_tool_use_result(
+    const core::config::HookCommandConfig& hook,
+    const core::tools::shell::IShellExecutor::Result& result) {
+    if (result.exit_code == 2) {
+        return {
+            .allowed = false,
+            .approved = false,
+            .reason = result.output.empty()
+                ? "PreToolUse hook blocked the tool call."
+                : result.output,
+        };
+    }
+
+    if (result.exit_code != 0) {
+        core::logging::warn(
+            "[hooks] '{}' exited with status {}: {}",
+            hook.name.empty() ? "pre_tool_use" : hook.name,
+            result.exit_code,
+            result.output);
+        return {};
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(result.output);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        return {};
+    }
+
+    bool continue_session = true;
+    if (doc["continue"].get(continue_session) == simdjson::SUCCESS
+        && !continue_session) {
+        std::string reason = "PreToolUse hook stopped the tool call.";
+        std::string_view stop_reason;
+        if (doc["stopReason"].get(stop_reason) == simdjson::SUCCESS
+            && !stop_reason.empty()) {
+            reason = std::string(stop_reason);
+        }
+        return {.allowed = false, .approved = false, .reason = std::move(reason)};
+    }
+
+    simdjson::dom::object hook_output;
+    if (doc["hookSpecificOutput"].get(hook_output) != simdjson::SUCCESS) {
+        return {};
+    }
+
+    std::string_view decision;
+    if (hook_output["permissionDecision"].get(decision) != simdjson::SUCCESS) {
+        return {};
+    }
+
+    if (decision == "allow") {
+        return {.allowed = true, .approved = true};
+    }
+    if (decision == "deny") {
+        std::string reason = "PreToolUse hook denied the tool call.";
+        std::string_view decision_reason;
+        if (hook_output["permissionDecisionReason"].get(decision_reason) == simdjson::SUCCESS
+            && !decision_reason.empty()) {
+            reason = std::string(decision_reason);
+        }
+        return {.allowed = false, .approved = false, .reason = std::move(reason)};
+    }
+
+    return {};
+}
+
+[[nodiscard]] core::tools::shell::IShellExecutor::Result run_hook_command(
+    const core::config::HookCommandConfig& hook,
+    HookEvent event,
+    std::string_view payload_json,
+    const core::context::SessionContext& session_context,
+    const std::vector<std::pair<std::string, std::string>>& extra_env) {
+    const auto working_dir = hook.working_dir.empty()
+        ? std::string{}
+        : session_context.resolve_path(hook.working_dir).string();
+    const std::string command = build_stdin_prefix(payload_json)
+        + build_env_prefix(event, payload_json, session_context, hook, extra_env)
+        + hook.command;
+    const int timeout_seconds = std::max(1, hook.timeout_seconds);
+
+    auto executor = core::tools::shell::make_shell_executor();
+    return executor->run(
+        command,
+        working_dir,
+        std::chrono::seconds(timeout_seconds));
+}
+
 } // namespace
 
 std::string_view to_string(HookEvent event) noexcept {
@@ -114,27 +207,19 @@ void dispatch(HookEvent event,
             continue;
         }
 
-        const auto working_dir = hook.working_dir.empty()
-            ? std::string{}
-            : session_context.resolve_path(hook.working_dir).string();
-        const std::string command = build_env_prefix(
-            event,
-            payload_json,
-            session_context,
-            hook,
-            extra_env) + hook.command;
-        const int timeout_seconds = std::max(1, hook.timeout_seconds);
-
         std::thread([hook_name = hook.name.empty() ? std::string(to_string(event)) : hook.name,
-                     command,
-                     working_dir,
-                     timeout_seconds]() {
+                     hook,
+                     event,
+                     payload_json,
+                     session_context,
+                     extra_env]() {
             try {
-                auto executor = core::tools::shell::make_shell_executor();
-                const auto result = executor->run(
-                    command,
-                    working_dir,
-                    std::chrono::seconds(timeout_seconds));
+                const auto result = run_hook_command(
+                    hook,
+                    event,
+                    payload_json,
+                    session_context,
+                    extra_env);
                 if (result.exit_code != 0) {
                     core::logging::warn(
                         "[hooks] '{}' exited with status {}: {}",
@@ -149,6 +234,47 @@ void dispatch(HookEvent event,
             }
         }).detach();
     }
+}
+
+HookDecision run_pre_tool_use(
+    std::string payload_json,
+    const core::context::SessionContext& session_context,
+    std::vector<std::pair<std::string, std::string>> extra_env) {
+    const auto hooks = hooks_for_event(
+        core::config::ConfigManager::get_instance().get_config().hooks,
+        HookEvent::PreToolUse);
+    HookDecision decision;
+    for (const auto& hook : hooks) {
+        if (!hook.enabled || hook.command.empty()) {
+            continue;
+        }
+
+        try {
+            const auto result = run_hook_command(
+                hook,
+                HookEvent::PreToolUse,
+                payload_json,
+                session_context,
+                extra_env);
+            const auto current = interpret_pre_tool_use_result(hook, result);
+            if (!current.allowed) {
+                return current;
+            }
+            if (current.approved) {
+                decision.approved = true;
+            }
+        } catch (const std::exception& e) {
+            core::logging::warn(
+                "[hooks] '{}' failed: {}",
+                hook.name.empty() ? "pre_tool_use" : hook.name,
+                e.what());
+        } catch (...) {
+            core::logging::warn(
+                "[hooks] '{}' failed: unknown exception",
+                hook.name.empty() ? "pre_tool_use" : hook.name);
+        }
+    }
+    return decision;
 }
 
 } // namespace core::hooks
