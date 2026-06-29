@@ -140,7 +140,16 @@ protected:
      */
     void set_last_rate_limit_info(const protocols::RateLimitInfo& info) noexcept {
         try {
-            auto snapshot = std::make_shared<const protocols::RateLimitInfo>(info);
+            protocols::RateLimitInfo merged = info;
+            if (merged.usage_windows.empty()) {
+                auto previous = std::atomic_load_explicit(
+                    &last_rate_limit_snapshot_, std::memory_order_acquire);
+                if (previous && !previous->usage_windows.empty()) {
+                    merged.usage_windows = previous->usage_windows;
+                }
+            }
+
+            auto snapshot = std::make_shared<const protocols::RateLimitInfo>(merged);
             std::atomic_store_explicit(
                 &last_rate_limit_snapshot_, std::move(snapshot), std::memory_order_release);
         } catch (...) {

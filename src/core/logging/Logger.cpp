@@ -55,6 +55,12 @@ void Logger::use_stderr() noexcept {
     sink_ = Sink::Stderr;
 }
 
+void Logger::use_sink() noexcept {
+    std::scoped_lock lock(mutex_);
+    file_sink_.reset();
+    sink_ = Sink::Null;
+}
+
 bool Logger::use_file(const std::filesystem::path& path) {
     std::error_code ec;
     if (const auto parent = path.parent_path(); !parent.empty()) {
@@ -126,6 +132,8 @@ void Logger::configure_from_env() {
                          raw_file);
             use_stderr();
         }
+    } else {
+        use_sink();
     }
 }
 

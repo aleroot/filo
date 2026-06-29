@@ -70,6 +70,7 @@ private:
     static bool parse_bool(std::string_view raw, bool default_value) noexcept;
     static std::string timestamp_now();
 
+    void use_sink() noexcept;
     void log_formatted(Level level, std::string_view message) noexcept;
     bool is_enabled(Level level) const noexcept;
     void emit_line(std::FILE* target, Level level, std::string_view message) const;
@@ -77,7 +78,7 @@ private:
     mutable std::mutex mutex_;
     Level min_level_ = Level::Info;
     bool timestamps_enabled_ = true;
-    Sink sink_ = Sink::Stderr;
+    Sink sink_ = Sink::Null;
     std::unique_ptr<std::FILE, FileCloser> file_sink_{nullptr};
     std::function<void(Level, std::string)> callback_sink_;
 };

@@ -23,6 +23,16 @@ std::filesystem::path make_temp_image_file(std::string_view filename = "filo-cla
     return path;
 }
 
+class RateLimitSnapshotProbe final : public LLMProvider {
+public:
+    void stream_response(const ChatRequest&,
+                         std::function<void(const StreamChunk&)>) override {}
+
+    void publish(const RateLimitInfo& info) {
+        set_last_rate_limit_info(info);
+    }
+};
+
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -984,6 +994,50 @@ TEST_CASE("AnthropicProtocol - ISO 8601 tokens_reset parses to nonzero unix time
     REQUIRE(rl.tokens_limit == 50000);
     REQUIRE(rl.tokens_remaining == 40000);
     REQUIRE(rl.tokens_reset > 0);
+}
+
+TEST_CASE("LLMProvider preserves Claude usage windows across partial rate-limit snapshots",
+          "[claude][ratelimit]") {
+    RateLimitSnapshotProbe provider;
+
+    RateLimitInfo initial;
+    initial.requests_limit = 100;
+    initial.requests_remaining = 90;
+    initial.usage_windows.push_back(UsageWindow{.label = "5h", .utilization = 0.42f});
+    initial.usage_windows.push_back(UsageWindow{.label = "7d", .utilization = 0.18f});
+    provider.publish(initial);
+
+    RateLimitInfo partial;
+    partial.requests_limit = 100;
+    partial.requests_remaining = 75;
+    provider.publish(partial);
+
+    const auto retained = provider.get_last_rate_limit_info();
+    REQUIRE(retained.requests_remaining == 75);
+    REQUIRE(retained.usage_windows.size() == 2);
+    REQUIRE(retained.usage_windows[0].label == "5h");
+    REQUIRE(retained.usage_windows[0].utilization == 0.42f);
+    REQUIRE(retained.usage_windows[1].label == "7d");
+    REQUIRE(retained.usage_windows[1].utilization == 0.18f);
+}
+
+TEST_CASE("LLMProvider replaces Claude usage windows when a fresh snapshot has windows",
+          "[claude][ratelimit]") {
+    RateLimitSnapshotProbe provider;
+
+    RateLimitInfo initial;
+    initial.usage_windows.push_back(UsageWindow{.label = "5h", .utilization = 0.42f});
+    provider.publish(initial);
+
+    RateLimitInfo fresh;
+    fresh.usage_windows.push_back(UsageWindow{.label = "5h", .utilization = 0.50f});
+    fresh.usage_windows.push_back(UsageWindow{.label = "7d", .utilization = 0.20f});
+    provider.publish(fresh);
+
+    const auto replaced = provider.get_last_rate_limit_info();
+    REQUIRE(replaced.usage_windows.size() == 2);
+    REQUIRE(replaced.usage_windows[0].utilization == 0.50f);
+    REQUIRE(replaced.usage_windows[1].label == "7d");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
