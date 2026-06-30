@@ -833,7 +833,30 @@ RunResult run(RunOptions opts) {
     // Load layered prompt skills (global → project-local) before describe_commands()
     // so skill commands appear in the autocomplete index.
     core::commands::SkillCommandLoader::discover_and_register(cmd_executor);
-    const auto mention_index = build_mention_index(std::filesystem::current_path());
+    using MentionIndex = std::vector<MentionSuggestion>;
+    std::shared_ptr<const MentionIndex> mention_index =
+        std::make_shared<const MentionIndex>();
+    std::mutex mention_index_mutex;
+    auto mention_index_snapshot = [&]() {
+        std::lock_guard lock(mention_index_mutex);
+        return mention_index;
+    };
+    std::jthread mention_index_thread(
+        [root = std::filesystem::current_path(),
+         &mention_index,
+         &mention_index_mutex,
+         &wake_ui](std::stop_token stop_token) {
+            auto built = std::make_shared<const MentionIndex>(
+                build_mention_index(root, stop_token));
+            if (stop_token.stop_requested()) {
+                return;
+            }
+            {
+                std::lock_guard lock(mention_index_mutex);
+                mention_index = std::move(built);
+            }
+            wake_ui();
+        });
     const auto command_index = cmd_executor.describe_commands();
 
     // ── Picker state (shared structure for mention and command pickers) ───────
@@ -2047,8 +2070,9 @@ RunResult run(RunOptions opts) {
             input_text,
             static_cast<std::size_t>(std::max(input_cursor_position, 0)));
         if (snapshot.active.has_value()) {
+            const auto index = mention_index_snapshot();
             snapshot.suggestions = search_mention_index(
-                mention_index,
+                *index,
                 snapshot.active->raw_path,
                 kMaxAutocompleteSuggestions);
         }
@@ -3931,17 +3955,8 @@ RunResult run(RunOptions opts) {
                 turn_callbacks.min_context_utilization_for_rotation;
         }
 
-        const auto expanded_prompt =
-            core::context::expand_prompt(text, std::filesystem::current_path());
-
-        core::llm::Message user_message;
-        user_message.role = "user";
-        user_message.content = expanded_prompt.display_text;
-        if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
-            user_message.content_parts = expanded_prompt.content_parts;
-        }
-
-        std::thread([user_message = std::move(user_message),
+        std::thread([text = std::string(text),
+                     base_dir = std::filesystem::current_path(),
                      agent,
                      effective_callbacks = std::move(effective_callbacks),
                      assistant_index,
@@ -3952,6 +3967,15 @@ RunResult run(RunOptions opts) {
                      &stream_chunk_last_at,
                      assistant_message_id = std::move(assistant_message_id),
                      &save_session_snapshot]() mutable {
+            const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
+
+            core::llm::Message user_message;
+            user_message.role = "user";
+            user_message.content = expanded_prompt.display_text;
+            if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
+                user_message.content_parts = expanded_prompt.content_parts;
+            }
+
             agent->send_message(user_message,
                 [assistant_index,
                  &update_assistant_message,
@@ -5937,6 +5961,7 @@ RunResult run(RunOptions opts) {
     {
         std::lock_guard lock(ui_event_post_mutex);
     }
+    mention_index_thread.request_stop();
 
     core::logging::Logger::get_instance().clear_callback_sink();
     core::agent::PermissionGate::get_instance().set_notify_fn({});
@@ -5949,6 +5974,9 @@ RunResult run(RunOptions opts) {
     animation_cv.notify_one();
     if (animation_thread.joinable()) {
         animation_thread.join();
+    }
+    if (mention_index_thread.joinable()) {
+        mention_index_thread.join();
     }
 
     // Shut down MCP connections gracefully.

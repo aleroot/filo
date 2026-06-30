@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <optional>
 #include <ranges>
 
 namespace tui {
@@ -40,6 +41,10 @@ std::string_view basename_view(std::string_view path) {
     return path.substr(start, end - start);
 }
 
+int path_depth(std::string_view path) {
+    return static_cast<int>(std::ranges::count(path, '/'));
+}
+
 bool should_skip_mention_directory(std::string_view name) {
     return std::ranges::contains(kSkippedDirectories, name);
 }
@@ -58,11 +63,16 @@ std::string join_aliases(const std::vector<std::string>& aliases) {
 
 } // namespace
 
-std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& root) {
+std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& root,
+                                                   std::stop_token stop_token) {
     std::vector<MentionSuggestion> entries;
     std::error_code ec;
 
     for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (stop_token.stop_requested()) {
+            return {};
+        }
+
         if (ec) {
             ec.clear();
             continue;
@@ -95,11 +105,20 @@ std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& 
             rel_path += "/";
         }
 
+        const std::string search_path = to_lower_copy(rel_path);
+
         entries.push_back(MentionSuggestion{
             .display_path = rel_path,
             .insertion_text = rel_path,
+            .search_path = search_path,
+            .search_basename = to_lower_copy(basename_view(search_path)),
+            .depth = path_depth(rel_path),
             .is_directory = is_dir,
         });
+    }
+
+    if (stop_token.stop_requested()) {
+        return {};
     }
 
     std::ranges::sort(entries, {}, &MentionSuggestion::display_path);
@@ -128,11 +147,29 @@ std::vector<MentionSuggestion> search_mention_index(const std::vector<MentionSug
 
     const std::string lower_query = to_lower_copy(query);
     std::vector<ScoredEntry> matches;
-    matches.reserve(std::min<std::size_t>(index.size(), max_results * 8));
+    matches.reserve(max_results);
+
+    auto better = [](const ScoredEntry& lhs, const ScoredEntry& rhs) {
+        if (lhs.score != rhs.score) return lhs.score < rhs.score;
+        if (lhs.depth != rhs.depth) return lhs.depth < rhs.depth;
+        if (lhs.length != rhs.length) return lhs.length < rhs.length;
+        return lhs.suggestion->display_path < rhs.suggestion->display_path;
+    };
 
     for (const auto& suggestion : index) {
-        const std::string lower_path = to_lower_copy(suggestion.display_path);
-        const std::string lower_base = to_lower_copy(basename_view(suggestion.display_path));
+        const std::optional<std::string> fallback_path = suggestion.search_path.empty()
+            ? std::optional<std::string>{to_lower_copy(suggestion.display_path)}
+            : std::nullopt;
+        const std::string_view lower_path = suggestion.search_path.empty()
+            ? std::string_view{*fallback_path}
+            : std::string_view{suggestion.search_path};
+
+        const std::optional<std::string> fallback_base = suggestion.search_basename.empty()
+            ? std::optional<std::string>{to_lower_copy(basename_view(suggestion.display_path))}
+            : std::nullopt;
+        const std::string_view lower_base = suggestion.search_basename.empty()
+            ? std::string_view{*fallback_base}
+            : std::string_view{suggestion.search_basename};
 
         int score = 4;
         if (lower_path.starts_with(lower_query)) {
@@ -147,25 +184,29 @@ std::vector<MentionSuggestion> search_mention_index(const std::vector<MentionSug
             continue;
         }
 
-        matches.push_back(ScoredEntry{
+        ScoredEntry entry{
             .score = score,
-            .depth = static_cast<int>(std::ranges::count(suggestion.display_path, '/')),
+            .depth = suggestion.depth != 0 ? suggestion.depth : path_depth(suggestion.display_path),
             .length = suggestion.display_path.size(),
             .suggestion = &suggestion,
-        });
+        };
+
+        if (matches.size() < max_results) {
+            matches.push_back(entry);
+            continue;
+        }
+
+        auto worst = std::ranges::max_element(matches, better);
+        if (worst != matches.end() && better(entry, *worst)) {
+            *worst = entry;
+        }
     }
 
-    std::ranges::sort(matches, [](const ScoredEntry& lhs, const ScoredEntry& rhs) {
-        if (lhs.score != rhs.score) return lhs.score < rhs.score;
-        if (lhs.depth != rhs.depth) return lhs.depth < rhs.depth;
-        if (lhs.length != rhs.length) return lhs.length < rhs.length;
-        return lhs.suggestion->display_path < rhs.suggestion->display_path;
-    });
+    std::ranges::sort(matches, better);
 
     std::vector<MentionSuggestion> out;
-    const auto count = std::min(max_results, matches.size());
-    out.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
+    out.reserve(matches.size());
+    for (std::size_t i = 0; i < matches.size(); ++i) {
         out.push_back(*matches[i].suggestion);
     }
     return out;

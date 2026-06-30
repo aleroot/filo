@@ -19,6 +19,8 @@
 
 #include <ftxui/screen/screen.hpp>
 
+#include <filesystem>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -521,6 +523,18 @@ TEST_CASE("search_mention_index — case-insensitive matching",
     const auto lower = search_mention_index(index, "main", 10);
     REQUIRE(upper.size() == lower.size());
     REQUIRE(upper.size() == 1);
+}
+
+TEST_CASE("build_mention_index — cancellation returns without publishing partial results",
+          "[tui][picker][autocomplete]") {
+    std::stop_source stop_source;
+    stop_source.request_stop();
+
+    const auto results = build_mention_index(
+        std::filesystem::current_path(),
+        stop_source.get_token());
+
+    REQUIRE(results.empty());
 }
 
 TEST_CASE("kMaxAutocompleteSuggestions — is large enough for big projects",
