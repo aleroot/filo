@@ -1,5 +1,6 @@
 #include "SessionReport.hpp"
 #include "../budget/TokenUsageFormatters.hpp"
+#include "../net/NetworkTraffic.hpp"
 #include <ftxui/screen/string.hpp>
 #include <algorithm>
 #include <chrono>
@@ -258,6 +259,9 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
             fmt_tokens(total.completion_tokens),
             fmt_tokens(total.total_tokens)),
         kReset);
+    if (!snap.network_traffic.empty()) {
+        row("Network traffic", core::net::format_network_traffic(snap.network_traffic), kReset);
+    }
     if (cost > 0.0) {
         row("Total cost", fmt_cost(cost), kYellow);
     }

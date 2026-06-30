@@ -1,5 +1,6 @@
 #include "CurlWebSocketTransport.hpp"
 #include "HttpHeaderUtils.hpp"
+#include "core/net/NetworkTraffic.hpp"
 
 #include <curl/curl.h>
 
@@ -100,15 +101,21 @@ using SlistPtr = std::unique_ptr<curl_slist, SlistDeleter>;
     return WebSocketStreamResult::Status::ConnectFailed;
 }
 
+struct HeaderCapture {
+    cpr::Header& headers;
+    uint64_t bytes_received = 0;
+};
+
 std::size_t header_callback(char* buffer,
                             std::size_t size,
                             std::size_t nitems,
                             void* userdata) {
     const std::size_t bytes = size * nitems;
-    auto* headers = static_cast<cpr::Header*>(userdata);
+    auto* capture = static_cast<HeaderCapture*>(userdata);
+    capture->bytes_received += static_cast<uint64_t>(bytes);
     std::string_view line(buffer, bytes);
     if (auto parsed = parse_header_line(line); parsed.has_value()) {
-        (*headers)[std::move(parsed->first)] = std::move(parsed->second);
+        capture->headers[std::move(parsed->first)] = std::move(parsed->second);
     }
     return bytes;
 }
@@ -116,10 +123,12 @@ std::size_t header_callback(char* buffer,
 struct SendResult {
     CURLcode code = CURLE_OK;
     bool sent_any = false;
+    uint64_t bytes_sent = 0;
 };
 
 [[nodiscard]] SendResult send_all(CURL* curl, std::string_view payload) {
     bool sent_any = false;
+    uint64_t bytes_sent = 0;
     while (!payload.empty()) {
         std::size_t sent = 0;
         const CURLcode code = curl_ws_send(
@@ -131,6 +140,9 @@ struct SendResult {
             CURLWS_TEXT);
         const bool sent_bytes = sent > 0;
         sent_any = sent_any || sent_bytes;
+        if (sent_bytes) {
+            bytes_sent += static_cast<uint64_t>(std::min(sent, payload.size()));
+        }
         if (code == CURLE_AGAIN) {
             if (sent_bytes) {
                 payload.remove_prefix(std::min(sent, payload.size()));
@@ -139,16 +151,16 @@ struct SendResult {
             continue;
         }
         if (code != CURLE_OK) {
-            return SendResult{code, sent_any};
+            return SendResult{code, sent_any, bytes_sent};
         }
         if (sent_bytes) {
             payload.remove_prefix(std::min(sent, payload.size()));
         }
         if (!sent_bytes && !payload.empty()) {
-            return SendResult{CURLE_SEND_ERROR, sent_any};
+            return SendResult{CURLE_SEND_ERROR, sent_any, bytes_sent};
         }
     }
-    return SendResult{};
+    return SendResult{CURLE_OK, sent_any, bytes_sent};
 }
 
 } // namespace
@@ -191,6 +203,7 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
 
     const bool connection_reused = connect_result.connection_reused;
     SendResult send_result = send_all(connection_->curl.get(), request_payload);
+    core::net::NetworkTrafficStats::get_instance().record_sent(send_result.bytes_sent);
     if (send_result.code != CURLE_OK) {
         auto response_headers = connection_->response_headers;
         auto* curl = connection_->curl.get();
@@ -214,6 +227,9 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
         const curl_ws_frame* meta = nullptr;
         CURLcode code = curl_ws_recv(
             connection_->curl.get(), buffer, sizeof(buffer), &received, &meta);
+        if (received > 0) {
+            core::net::NetworkTrafficStats::get_instance().record_received(received);
+        }
 
         if (code == CURLE_AGAIN) {
             if (std::chrono::steady_clock::now() - last_activity > idle_timeout_) {
@@ -322,6 +338,9 @@ WebSocketStreamResult CurlWebSocketTransport::ensure_connected(
     }
 
     cpr::Header response_headers;
+    HeaderCapture header_capture{response_headers};
+    const uint64_t request_header_bytes =
+        core::net::estimated_http_header_bytes(headers);
     SlistPtr header_list = build_header_list(headers);
     std::string url_string(url);
 
@@ -331,12 +350,18 @@ WebSocketStreamResult CurlWebSocketTransport::ensure_connected(
     curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 15000L);
     curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, header_callback);
-    curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &response_headers);
+    curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, &header_capture);
 
     CURLcode code = curl_easy_perform(curl.get());
+    long http_status = 0;
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
+    core::net::NetworkTrafficStats::get_instance().record({
+        .bytes_sent = (code == CURLE_OK || http_status != 0 || header_capture.bytes_received > 0)
+            ? request_header_bytes
+            : 0,
+        .bytes_received = header_capture.bytes_received,
+    });
     if (code != CURLE_OK) {
-        long http_status = 0;
-        curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
         return failed(
             connect_failure_status(http_status),
             curl.get(),
@@ -345,8 +370,6 @@ WebSocketStreamResult CurlWebSocketTransport::ensure_connected(
             std::move(response_headers));
     }
 
-    long http_status = 0;
-    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
     if (http_status == 426) {
         return failed(
             WebSocketStreamResult::Status::UpgradeRequired,

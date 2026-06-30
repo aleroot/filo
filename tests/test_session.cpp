@@ -680,6 +680,10 @@ TEST_CASE("SessionReport keeps rows aligned and prints --resume command", "[sess
         .tool_calls_success = 5,
         .api_calls_total = 10,
         .api_calls_success = 9,
+        .network_traffic = {
+            .bytes_sent = 842ULL * 1024ULL,
+            .bytes_received = 12ULL * 1024ULL * 1024ULL + 410ULL * 1024ULL,
+        },
         .per_model = {{
             .model = "grok-code-fast-1",
             .call_count = 9,
@@ -695,6 +699,8 @@ TEST_CASE("SessionReport keeps rows aligned and prints --resume command", "[sess
 
     CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Resume with"));
     CHECK_THAT(out, Catch::Matchers::ContainsSubstring("filo --resume 0e275b32"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Network traffic"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("total 13.2 MB"));
 
     std::istringstream in{out};
     std::string line;

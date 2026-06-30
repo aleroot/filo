@@ -2,6 +2,7 @@
 
 #include "core/llm/Models.hpp"
 #include "core/budget/TokenAccounting.hpp"
+#include "core/net/NetworkTraffic.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -188,6 +189,7 @@ public:
         tool_calls_success_.store(0, std::memory_order_release);
         api_calls_total_.store(0, std::memory_order_release);
         api_calls_success_.store(0, std::memory_order_release);
+        core::net::NetworkTrafficStats::get_instance().reset();
         std::unique_lock lock(models_mutex_);
         per_model_.clear();
         std::unique_lock tool_lock(tools_mutex_);
@@ -222,6 +224,7 @@ public:
         int32_t tool_calls_success;
         int32_t api_calls_total;
         int32_t api_calls_success;
+        core::net::NetworkTraffic network_traffic;
         std::vector<PerModelSnapshot> per_model;
         std::vector<PerToolSnapshot> per_tool;
     };
@@ -234,6 +237,7 @@ public:
         s.tool_calls_success = tool_calls_success_.load(std::memory_order_acquire);
         s.api_calls_total    = api_calls_total_.load(std::memory_order_acquire);
         s.api_calls_success  = api_calls_success_.load(std::memory_order_acquire);
+        s.network_traffic    = core::net::NetworkTrafficStats::get_instance().snapshot();
         {
             std::shared_lock lock(models_mutex_);
             s.per_model.reserve(per_model_.size());

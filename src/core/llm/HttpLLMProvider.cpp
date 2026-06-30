@@ -5,6 +5,7 @@
 #include "transport/CurlWebSocketTransport.hpp"
 #include "transport/HttpHeaderUtils.hpp"
 #include "../logging/Logger.hpp"
+#include "../net/NetworkTraffic.hpp"
 #include "../utils/UriUtils.hpp"
 #include <cpr/cpr.h>
 #include <algorithm>
@@ -564,12 +565,18 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetHeader(headers);
                 session.SetBody(cpr::Body{payload});
 
+                uint64_t response_bytes_received = 0;
+                const uint64_t request_bytes_sent =
+                    static_cast<uint64_t>(payload.size())
+                    + core::net::estimated_http_header_bytes(headers);
                 cpr::Header response_headers_seen;
                 bool observed_transport_headers = false;
                 session.SetHeaderCallback(cpr::HeaderCallback(
                     [&protocol, &response_headers_seen,
-                     &observed_transport_headers, &request_metadata]
+                     &observed_transport_headers, &request_metadata,
+                     &response_bytes_received]
                     (std::string_view line, intptr_t /*userdata*/) -> bool {
+                        response_bytes_received += static_cast<uint64_t>(line.size());
                         if (core::utils::str::trim_ascii_view(line).empty()) {
                             if (!observed_transport_headers) {
                                 observed_transport_headers = true;
@@ -650,15 +657,26 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     }
                 };
 
-                session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events]
+                session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events,
+                                                             &response_bytes_received]
                                                             (std::string_view data,
                                                              intptr_t /*userdata*/) -> bool {
+                    response_bytes_received += static_cast<uint64_t>(data.size());
                     buffer.append(data);
                     drain_complete_events();
                     return true;
                 }));
 
                 cpr::Response r = session.Post();
+                core::net::NetworkTraffic traffic{
+                    .bytes_sent = (r.status_code != 0
+                                   || observed_transport_headers
+                                   || response_bytes_received > 0)
+                        ? request_bytes_sent
+                        : 0,
+                    .bytes_received = response_bytes_received,
+                };
+                core::net::NetworkTrafficStats::get_instance().record(traffic);
                 if (!done_signalled) {
                     // Some providers close the stream without a trailing delimiter.
                     // Parse any non-whitespace remainder as one final event.

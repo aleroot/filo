@@ -1,4 +1,5 @@
 #include "McpClientSession.hpp"
+#include "core/net/NetworkTraffic.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <cpr/cpr.h>
@@ -986,6 +987,15 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& bo
         headers,
         cpr::Body{body}
     );
+    const bool request_observed =
+        r.error.code == cpr::ErrorCode::OK || r.status_code != 0 || !r.text.empty();
+    core::net::NetworkTrafficStats::get_instance().record({
+        .bytes_sent = request_observed
+            ? static_cast<uint64_t>(body.size()) + core::net::estimated_http_header_bytes(headers)
+            : 0,
+        .bytes_received = static_cast<uint64_t>(r.text.size())
+            + core::net::estimated_http_header_bytes(r.header),
+    });
     if (r.error.code != cpr::ErrorCode::OK) {
         throw std::runtime_error("MCP HTTP: " + r.error.message);
     }

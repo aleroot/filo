@@ -243,6 +243,7 @@ set(FILO_CORE_SOURCES
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp
+    src/core/net/NetworkTraffic.cpp
     src/core/task/TaskService.cpp
     src/core/task/WorkStore.cpp
     src/core/history/PromptHistoryStore.cpp
@@ -386,6 +387,7 @@ add_executable(filo_tests
     tests/test_mime_utils.cpp
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
+    tests/test_network_traffic.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_history.cpp
