@@ -369,6 +369,15 @@ TEST_CASE("needs_permission in Autonomous mode never gates any tool",
     REQUIRE_FALSE(needs_permission("run_terminal_command", PermissionProfile::Autonomous, args_rm));
     REQUIRE_FALSE(needs_permission("write_file",           PermissionProfile::Autonomous, "{}"));
     REQUIRE_FALSE(needs_permission("delete_file",          PermissionProfile::Autonomous, "{}"));
+    REQUIRE_FALSE(needs_permission("python",               PermissionProfile::Autonomous, "{}"));
+}
+
+TEST_CASE("needs_permission gates Python in prompting profiles",
+          "[safety_policy][integration]") {
+    const auto args = R"PY({"code":"open('tmp.txt', 'w').write('x')"})PY";
+    REQUIRE(needs_permission("python", PermissionProfile::Interactive, args));
+    REQUIRE(needs_permission("python", PermissionProfile::Standard, args));
+    REQUIRE(needs_permission("python", PermissionProfile::Restricted, args));
 }
 
 TEST_CASE("needs_permission without args falls back to tool-based gating",

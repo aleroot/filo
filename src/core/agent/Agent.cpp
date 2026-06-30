@@ -204,16 +204,6 @@ void Agent::set_mode(const std::string& mode) {
     std::lock_guard lock(history_mutex_);
     if (current_mode_ != clean) {
         current_mode_ = clean;
-        
-        // Auto-configure permissions based on mode intention
-        if (current_mode_ == "EXECUTE") {
-            permission_profile_ = PermissionProfile::Autonomous;
-        } else if (current_mode_ == "PLAN" || current_mode_ == "RESEARCH") {
-            permission_profile_ = PermissionProfile::Restricted;
-        } else {
-            // BUILD / DEBUG / Default
-            permission_profile_ = PermissionProfile::Interactive;
-        }
 
         if (!history_.empty() && history_[0].role == "system") {
             history_.erase(history_.begin());
@@ -380,7 +370,20 @@ bool Agent::check_permission(const std::string& tool_name, const std::string& ar
         profile = permission_profile_;
     }
 
-    if (!needs_permission(tool_name, profile, args)) {
+    bool permission_required = needs_permission(tool_name, profile, args);
+    const bool profile_intentionally_allows_tool =
+        profile == PermissionProfile::Standard
+        && core::tools::names::is_file_modification_tool(tool_name);
+    if (!permission_required
+        && profile != PermissionProfile::Autonomous
+        && !profile_intentionally_allows_tool) {
+        if (const auto def = skill_manager_.get_tool_definition(tool_name); def.has_value()) {
+            const auto& ann = def->annotations;
+            permission_required = ann.destructive_hint || ann.open_world_hint;
+        }
+    }
+
+    if (!permission_required) {
         return true;
     }
 

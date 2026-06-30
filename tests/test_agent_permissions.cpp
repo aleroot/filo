@@ -4,6 +4,7 @@
 #include "core/agent/Agent.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
+#include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
 
@@ -90,6 +91,61 @@ private:
     std::atomic<int> calls_{0};
 };
 
+class SingleToolCallProvider final : public core::llm::LLMProvider {
+public:
+    SingleToolCallProvider(std::string tool_name, std::string arguments)
+        : tool_name_(std::move(tool_name))
+        , arguments_(std::move(arguments)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        core::llm::ToolCall tool_call;
+        tool_call.index = 0;
+        tool_call.id = "tc-single";
+        tool_call.type = "function";
+        tool_call.function.name = tool_name_;
+        tool_call.function.arguments = arguments_;
+
+        core::llm::StreamChunk chunk;
+        chunk.tools = {tool_call};
+        chunk.is_final = true;
+        callback(chunk);
+    }
+
+private:
+    std::string tool_name_;
+    std::string arguments_;
+};
+
+class AnnotatedNoopTool final : public core::tools::Tool {
+public:
+    explicit AnnotatedNoopTool(std::string name) : name_(std::move(name)) {}
+
+    core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .description = "No-op destructive test tool.",
+            .parameters = {
+                {"value", "string", "A test value.", false},
+            },
+            .annotations = {
+                .destructive_hint = true,
+                .open_world_hint = true,
+            },
+        };
+    }
+
+    std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
+        return R"({"success":true})";
+    }
+
+private:
+    std::string name_;
+};
+
 class ThrowingProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -148,6 +204,56 @@ TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][per
     REQUIRE(history[3].role == "tool");
     REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
     REQUIRE_THAT(history[3].content, Catch::Matchers::ContainsSubstring("skipped after a previous denial"));
+}
+
+TEST_CASE("Agent still gates destructive tools in EXECUTE mode",
+          "[agent][permission]") {
+    const std::string tool_name = "permission_test_execute_destructive_tool";
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<AnnotatedNoopTool>(tool_name));
+
+    auto provider = std::make_shared<SingleToolCallProvider>(
+        tool_name,
+        R"({"value":"test"})");
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_mode("EXECUTE");
+
+    std::atomic<int> permission_checks{0};
+    agent->set_permission_fn([&](std::string_view name, std::string_view) {
+        REQUIRE(name == tool_name);
+        ++permission_checks;
+        return false;
+    });
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "Run the test tool.",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&]() { return done; }));
+    }
+
+    REQUIRE(permission_checks.load(std::memory_order_acquire) == 1);
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 3);
+    REQUIRE(history[2].role == "tool");
+    REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
 }
 
 TEST_CASE("Agent distinguishes turn tool allow-list blocks from user denials",

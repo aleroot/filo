@@ -28,8 +28,8 @@ namespace {
         prompt += "Analyse, research, and plan. Do NOT modify files (avoid apply_patch / write_file). "
                   "Use read and search tools to understand the codebase, then propose a plan.";
     } else if (mode == "EXECUTE") {
-        prompt += "Execute instructions autonomously. Use tools to modify files and run commands "
-                  "immediately without asking permission.";
+        prompt += "Execute instructions directly. Use tools to modify files and run commands "
+                  "when appropriate; client-side permission prompts still apply.";
     } else {
         prompt += "Build software methodically. Search, read, edit, and run commands. "
                   "Verify your changes where possible. Ask clarifying questions only when truly needed.";
