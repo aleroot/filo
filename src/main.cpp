@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <iostream>
 #include <cstdio>
+#include <iterator>
 #include <signal.h>
 #include <unistd.h>
 
@@ -59,8 +60,7 @@ int main(int argc, char** argv) {
     bool        enable_api_gateway = false;
     std::string resume_session;      // --resume [id|index]; empty means most recent
     bool        list_sessions = false;  // --list-sessions
-    std::string work_dir;
-    std::vector<std::string> add_dirs;
+    std::vector<std::string> work_dirs;
     std::vector<std::string> trusted_tools;
 
     auto* mcp_opt = app.add_option(
@@ -93,10 +93,13 @@ int main(int argc, char** argv) {
         "Comma-separated list of sensitive tools to auto-approve at startup "
         "(prompter + TUI; e.g. run_terminal_command,write_file). Use '*' to trust all.")
         ->delimiter(',');
-    app.add_option("-w,--work-dir", work_dir,
-                   "Working directory for the agent. Default: current directory.");
-    app.add_option("--add-dir", add_dirs,
-                   "Add an additional directory to the workspace scope. Can be specified multiple times.");
+    app.add_option(
+        "-w,--work-dir",
+        work_dirs,
+        "Workspace directory for the agent. The first -w is the primary working directory; "
+        "later -w entries are additional workspace directories.")
+        ->expected(1)
+        ->take_all();
     app.add_option(
         "--port",
         port,
@@ -167,21 +170,28 @@ int main(int argc, char** argv) {
     const bool mcp_tcp_mode = mcp_mode && normalized_mcp_transport == "tcp";
     const bool http_daemon_mode = mcp_tcp_mode || enable_api_gateway;
 
-    if (!work_dir.empty()) {
+    if (!work_dirs.empty()) {
         std::error_code ec;
-        std::filesystem::current_path(work_dir, ec);
+        std::filesystem::current_path(work_dirs.front(), ec);
         if (ec) {
-            core::logging::error("Failed to change working directory to '{}': {}", work_dir, ec.message());
+            core::logging::error(
+                "Failed to change working directory to '{}': {}",
+                work_dirs.front(),
+                ec.message());
             return 1;
         }
     }
 
-    std::vector<std::filesystem::path> parsed_add_dirs;
-    for (const auto& dir : add_dirs) {
-        parsed_add_dirs.emplace_back(dir);
+    std::vector<std::filesystem::path> additional_work_dirs;
+    for (auto it = std::next(work_dirs.begin()); it != work_dirs.end(); ++it) {
+        const auto& dir = *it;
+        additional_work_dirs.emplace_back(dir);
     }
-    const bool enforce_workspace = !work_dir.empty() || !add_dirs.empty();
-    core::workspace::Workspace::get_instance().initialize(std::filesystem::current_path(), parsed_add_dirs, enforce_workspace);
+    const bool enforce_workspace = !work_dirs.empty();
+    core::workspace::Workspace::get_instance().initialize(
+        std::filesystem::current_path(),
+        additional_work_dirs,
+        enforce_workspace);
 
     // --list-sessions: print available sessions and exit.
     if (list_sessions) {

@@ -143,6 +143,7 @@ Useful CLI flags:
 - `--input-format` one of `text`, `stream-json`
 - `--include-partial-messages` include deltas in `stream-json`
 - `--continue` continue the latest project-scoped session in prompter mode
+- `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
 
 Prompter examples:
 
@@ -164,6 +165,9 @@ filo -p "Explain the architecture" -o stream-json --include-partial-messages
 
 # Continue latest project-scoped session
 filo --continue -p "Now apply the follow-up refactor"
+
+# Multi-project workspace: ../Lampo is primary, ../filo is additional
+filo -w ../Lampo -w ../filo
 ```
 
 ## Provider Setup

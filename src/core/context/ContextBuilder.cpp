@@ -50,6 +50,27 @@ namespace {
     return prompt;
 }
 
+[[nodiscard]] std::string build_workspace_facts(const SessionContext& session_context) {
+    const auto& workspace = session_context.workspace_view();
+    if (workspace.primary().empty()) {
+        return {};
+    }
+
+    std::string context_section = "\n\n[Workspace]\n";
+    context_section += "Primary: " + workspace.primary().string() + "\n";
+    if (!workspace.additional().empty()) {
+        context_section += "Additional directories:\n";
+        for (const auto& dir : workspace.additional()) {
+            context_section += "- " + dir.string() + "\n";
+        }
+    }
+    context_section += std::string("Path enforcement: ")
+        + (workspace.enforce() ? "enabled" : "disabled") + "\n";
+    context_section += "Relative paths resolve against the primary workspace.";
+
+    return context_section;
+}
+
 [[nodiscard]] std::string build_project_facts(const std::filesystem::path& project_root) {
     auto scm = core::scm::ScmFactory::create(project_root);
 
@@ -118,6 +139,12 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         ContextLayerKind::RuntimeInstructions,
         "runtime",
         build_runtime_prompt(mode_));
+
+    append_layer(
+        layers,
+        ContextLayerKind::WorkspaceFacts,
+        "workspace",
+        build_workspace_facts(session_context_));
 
     if (!include_project_context_) {
         return layers;

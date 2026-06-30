@@ -13,6 +13,7 @@
 #include <format>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -49,11 +50,13 @@ void write_text(const std::filesystem::path& path, std::string_view content) {
     REQUIRE(out);
 }
 
-[[nodiscard]] core::context::SessionContext make_context(const std::filesystem::path& workspace) {
+[[nodiscard]] core::context::SessionContext make_context(
+    const std::filesystem::path& workspace,
+    std::vector<std::filesystem::path> additional = {}) {
     return core::context::make_session_context(
         core::workspace::WorkspaceSnapshot{
             .primary = workspace,
-            .additional = {},
+            .additional = std::move(additional),
             .enforce = true,
             .version = 1,
         },
@@ -78,11 +81,13 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
     const auto layers = core::context::ContextBuilder(context).build_layers();
     const std::string prompt = build_prompt(context);
 
-    REQUIRE(layers.size() == 1);
+    REQUIRE(layers.size() == 2);
     CHECK(layers[0].kind == core::context::ContextLayerKind::RuntimeInstructions);
     CHECK(layers[0].name == "runtime");
-    CHECK(layers[0].content == prompt);
-    CHECK(prompt ==
+    CHECK(layers[1].kind == core::context::ContextLayerKind::WorkspaceFacts);
+    CHECK(layers[1].name == "workspace");
+    CHECK(layers[0].content + layers[1].content == prompt);
+    CHECK(layers[0].content ==
           "You are Filo, an advanced AI coding assistant running in BUILD mode.\n\n"
           "Build software methodically. Search, read, edit, and run commands. "
           "Verify your changes where possible. Ask clarifying questions only when truly needed."
@@ -91,6 +96,37 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
           " Default profiles are `general` (broad multi-step work) and"
           " `explore` (fast read-only codebase search)."
           " If the user asks with `@general` or `@explore`, map that request to a `task` call.");
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Workspace]"));
+    CHECK_THAT(
+        prompt,
+        Catch::Matchers::ContainsSubstring(
+            "Primary: " + context.workspace_view().primary().string()));
+}
+
+TEST_CASE("ContextBuilder renders ordered additional workspace directories",
+          "[context][builder][workspace]") {
+    auto primary = make_temp_workspace("filo_context_builder_primary");
+    auto secondary = make_temp_workspace("filo_context_builder_secondary");
+    auto tertiary = make_temp_workspace("filo_context_builder_tertiary");
+
+    const auto context = make_context(primary.path(), {secondary.path(), tertiary.path()});
+    const std::string prompt = build_prompt(context);
+    const auto& workspace = context.workspace_view();
+
+    const auto primary_pos = prompt.find("Primary: " + workspace.primary().string());
+    const auto secondary_pos = prompt.find("- " + workspace.additional()[0].string());
+    const auto tertiary_pos = prompt.find("- " + workspace.additional()[1].string());
+
+    REQUIRE(primary_pos != std::string::npos);
+    REQUIRE(secondary_pos != std::string::npos);
+    REQUIRE(tertiary_pos != std::string::npos);
+    CHECK(primary_pos < secondary_pos);
+    CHECK(secondary_pos < tertiary_pos);
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Path enforcement: enabled"));
+    CHECK_THAT(
+        prompt,
+        Catch::Matchers::ContainsSubstring(
+            "Relative paths resolve against the primary workspace."));
 }
 
 TEST_CASE("ContextBuilder renders project steering before project facts",
@@ -107,16 +143,20 @@ TEST_CASE("ContextBuilder renders project steering before project facts",
         .build_layers();
     const std::string prompt = build_prompt(context);
 
-    REQUIRE(layers.size() == 3);
+    REQUIRE(layers.size() == 4);
     CHECK(layers[0].kind == core::context::ContextLayerKind::RuntimeInstructions);
     CHECK(layers[0].name == "runtime");
-    CHECK(layers[1].kind == core::context::ContextLayerKind::ProjectSteering);
-    CHECK(layers[1].name == "project_steering");
-    CHECK(layers[2].kind == core::context::ContextLayerKind::ProjectFacts);
-    CHECK(layers[2].name == "project_facts");
-    CHECK(layers[0].content + layers[1].content + layers[2].content == prompt);
+    CHECK(layers[1].kind == core::context::ContextLayerKind::WorkspaceFacts);
+    CHECK(layers[1].name == "workspace");
+    CHECK(layers[2].kind == core::context::ContextLayerKind::ProjectSteering);
+    CHECK(layers[2].name == "project_steering");
+    CHECK(layers[3].kind == core::context::ContextLayerKind::ProjectFacts);
+    CHECK(layers[3].name == "project_facts");
+    CHECK(layers[0].content + layers[1].content + layers[2].content + layers[3].content
+          == prompt);
 
     const auto runtime_pos = prompt.find("You are Filo");
+    const auto workspace_pos = prompt.find("[Workspace]");
     const auto steering_pos = prompt.find("[Project Steering]");
     const auto agents_pos = prompt.find("Repository rules from AGENTS.md");
     const auto filo_pos = prompt.find("Project steering from FILO.md");
@@ -124,13 +164,15 @@ TEST_CASE("ContextBuilder renders project steering before project facts",
     const auto facts_pos = prompt.find("[Project Context]");
 
     REQUIRE(runtime_pos != std::string::npos);
+    REQUIRE(workspace_pos != std::string::npos);
     REQUIRE(steering_pos != std::string::npos);
     REQUIRE(agents_pos != std::string::npos);
     REQUIRE(filo_pos != std::string::npos);
     REQUIRE(backend_pos != std::string::npos);
     REQUIRE(facts_pos != std::string::npos);
 
-    CHECK(runtime_pos < steering_pos);
+    CHECK(runtime_pos < workspace_pos);
+    CHECK(workspace_pos < steering_pos);
     CHECK(steering_pos < agents_pos);
     CHECK(agents_pos < filo_pos);
     CHECK(filo_pos < backend_pos);
