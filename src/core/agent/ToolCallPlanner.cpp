@@ -62,8 +62,10 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
     const std::string_view args = call.function.arguments;
     ToolAccessSet accesses;
 
-    if (name == kGetCurrentTime || name == kAskUserQuestion) {
+    if (name == kGetCurrentTime) {
         accesses = no_tool_access();
+    } else if (name == kAskUserQuestion) {
+        accesses = all_tool_access();
     } else if (name == kReadFile) {
         accesses = single_file_access(ToolFileOperation::Read, context, args, "path");
     } else if (name == kFileSearch || name == kGrepSearch || name == kListDirectory) {

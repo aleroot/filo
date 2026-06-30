@@ -164,6 +164,31 @@ private:
     std::vector<core::llm::ChatRequest> requests_;
 };
 
+class BlockingProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+
+        entered_.set_value();
+        release_.get_future().wait();
+        callback(core::llm::StreamChunk::make_content("first done"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    void wait_until_entered() {
+        entered_.get_future().wait();
+    }
+
+    void release() {
+        release_.set_value();
+    }
+
+private:
+    std::promise<void> entered_;
+    std::promise<void> release_;
+};
+
 class RotatingToolLoopProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -252,6 +277,48 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
 }
 
 } // namespace
+
+TEST_CASE("Agent rejects overlapping turns", "[agent][loop]") {
+    auto provider = std::make_shared<BlockingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::promise<void> first_done;
+    std::thread first_turn([&]() {
+        agent->send_message(
+            "first",
+            [](const std::string&) {},
+            [](const std::string&, const std::string&) {},
+            [&]() { first_done.set_value(); });
+    });
+
+    provider->wait_until_entered();
+
+    std::string second_output;
+    int second_done_count = 0;
+    agent->send_message(
+        "second",
+        [&](const std::string& chunk) { second_output += chunk; },
+        [](const std::string&, const std::string&) {},
+        [&]() { ++second_done_count; });
+
+    CHECK(second_done_count == 1);
+    CHECK(second_output.find("another agent turn is already running") != std::string::npos);
+
+    provider->release();
+    REQUIRE(first_done.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    first_turn.join();
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 2);
+    CHECK(history[0].role == "user");
+    CHECK(history[0].content == "first");
+    CHECK(history[1].role == "assistant");
+    CHECK(history[1].content == "first done");
+}
 
 TEST_CASE("Agent enforces a per-turn model step bound", "[agent][loop]") {
     auto provider = std::make_shared<InfiniteToolLoopProvider>();

@@ -3536,6 +3536,9 @@ RunResult run(RunOptions opts) {
 
     // ── AskUserQuestion callback ─────────────────────────────────────────────
     ask_user_tool->setQuestionCallback([&](core::tools::QuestionRequest request) {
+        std::shared_ptr<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>
+            displaced_promise;
+
         // Convert core::tools types to tui types
         std::vector<tui::QuestionDialogItem> dialog_questions;
         for (const auto& q : request.questions) {
@@ -3552,6 +3555,9 @@ RunResult run(RunOptions opts) {
         
         {
             std::lock_guard lock(ui_mutex);
+            if (question_dialog_state.active && question_dialog_state.promise) {
+                displaced_promise = std::move(question_dialog_state.promise);
+            }
             question_dialog_state.active = true;
             question_dialog_state.questions = std::move(dialog_questions);
             question_dialog_state.current_question_index = 0;
@@ -3563,6 +3569,10 @@ RunResult run(RunOptions opts) {
             question_dialog_state.promise = request.promise;
         }
         wake_ui();
+
+        if (displaced_promise) {
+            displaced_promise->set_value(std::nullopt);
+        }
         
         // Wait for the result (UI will resolve the promise)
     });

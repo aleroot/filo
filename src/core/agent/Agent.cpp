@@ -494,6 +494,33 @@ void Agent::send_message(core::llm::Message user_message,
                          std::function<void(const std::string&, const std::string&)> tool_callback,
                          std::function<void()> done_callback,
                          TurnCallbacks turn_callbacks) {
+    bool expected_idle = false;
+    if (!turn_in_progress_.compare_exchange_strong(
+            expected_idle,
+            true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        text_callback("\n[Error: another agent turn is already running. Wait for it to finish or stop it before sending a new message.]\n");
+        done_callback();
+        return;
+    }
+
+    auto done_once = std::make_shared<std::atomic<bool>>(false);
+    auto finish_turn = [this,
+                        done_callback = std::move(done_callback),
+                        done_once]() mutable {
+        bool expected = false;
+        if (!done_once->compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return;
+        }
+        turn_in_progress_.store(false, std::memory_order_release);
+        done_callback();
+    };
+
     clear_stop_request();  // Reset cancellation flag for new turn
     auto turn_state = std::make_shared<TurnState>();
     if (user_message.role.empty()) {
@@ -515,7 +542,12 @@ void Agent::send_message(core::llm::Message user_message,
         core::hooks::HookEvent::UserPromptSubmit,
         build_user_prompt_hook_payload(hook_message, mode_snapshot),
         session_context);
-    step(text_callback, tool_callback, done_callback, std::move(turn_callbacks), std::move(turn_state));
+    step(
+        std::move(text_callback),
+        std::move(tool_callback),
+        std::move(finish_turn),
+        std::move(turn_callbacks),
+        std::move(turn_state));
 }
 
 // ---------------------------------------------------------------------------

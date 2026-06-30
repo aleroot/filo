@@ -268,6 +268,7 @@ private:
 
     // Cancellation support
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> turn_in_progress_{false};
     std::atomic<std::uint64_t> next_transport_turn_id_{1};
 };
 
