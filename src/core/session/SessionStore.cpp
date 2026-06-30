@@ -196,6 +196,22 @@ void append_todo_json(std::string& out, const core::session::SessionTodoItem& to
     out += "\"}";
 }
 
+void append_goal_json(std::string& out, const core::session::SessionGoal& goal) {
+    out += "{\"objective\":\"";
+    core::utils::append_escaped(out, goal.objective);
+    out += "\",\"status\":\"";
+    core::utils::append_escaped(out, core::session::to_string(goal.status));
+    out += "\",\"note\":\"";
+    core::utils::append_escaped(out, goal.note);
+    out += "\",\"created_at\":\"";
+    core::utils::append_escaped(out, goal.created_at);
+    out += "\",\"updated_at\":\"";
+    core::utils::append_escaped(out, goal.updated_at);
+    out += "\",\"completed_at\":\"";
+    core::utils::append_escaped(out, goal.completed_at);
+    out += "\"}";
+}
+
 } // namespace
 
 std::string SessionStore::to_json(const SessionData& data) {
@@ -222,7 +238,12 @@ std::string SessionStore::to_json(const SessionData& data) {
     core::utils::append_escaped(out, data.context_summary);
     out += "\",\"handoff_summary\":\"";
     core::utils::append_escaped(out, data.handoff_summary);
-    out += "\",\"messages\":[";
+    out += '"';
+    if (data.goal.has_value()) {
+        out += ",\"goal\":";
+        append_goal_json(out, *data.goal);
+    }
+    out += ",\"messages\":[";
 
     for (std::size_t i = 0; i < data.messages.size(); ++i) {
         if (i > 0) out += ',';
@@ -282,6 +303,33 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
         get_str("mode",            data.mode);
         get_str("context_summary", data.context_summary);
         get_str("handoff_summary", data.handoff_summary);
+
+        simdjson::dom::object goal_obj;
+        if (doc["goal"].get(goal_obj) == simdjson::SUCCESS) {
+            SessionGoal goal;
+            std::string_view sv;
+            if (goal_obj["objective"].get(sv) == simdjson::SUCCESS) {
+                goal.objective = std::string(sv);
+            }
+            if (goal_obj["status"].get(sv) == simdjson::SUCCESS) {
+                goal.status = goal_status_from_string(sv);
+            }
+            if (goal_obj["note"].get(sv) == simdjson::SUCCESS) {
+                goal.note = std::string(sv);
+            }
+            if (goal_obj["created_at"].get(sv) == simdjson::SUCCESS) {
+                goal.created_at = std::string(sv);
+            }
+            if (goal_obj["updated_at"].get(sv) == simdjson::SUCCESS) {
+                goal.updated_at = std::string(sv);
+            }
+            if (goal_obj["completed_at"].get(sv) == simdjson::SUCCESS) {
+                goal.completed_at = std::string(sv);
+            }
+            if (!goal.objective.empty()) {
+                data.goal = std::move(goal);
+            }
+        }
 
         simdjson::dom::array messages_arr;
         if (doc["messages"].get(messages_arr) == simdjson::SUCCESS) {

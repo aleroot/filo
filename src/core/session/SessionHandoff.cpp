@@ -331,6 +331,18 @@ std::string build_handoff_summary(const SessionData& data) {
         sentences.push_back(std::format("Saved summary: {}.", clamp_line(summary, 420)));
     }
 
+    if (data.goal.has_value() && !data.goal->objective.empty()
+        && is_active(data.goal->status)) {
+        std::string goal = std::format(
+            "Session goal ({}): {}",
+            to_string(data.goal->status),
+            clamp_line(data.goal->objective, 280));
+        if (!data.goal->note.empty()) {
+            goal += std::format(" Note: {}", clamp_line(data.goal->note, 180));
+        }
+        sentences.push_back(goal + ".");
+    }
+
     if (!signals.original_task.empty()) {
         sentences.push_back(std::format("Original task: {}.", signals.original_task));
     }

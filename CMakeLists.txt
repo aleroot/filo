@@ -239,6 +239,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp
     src/core/session/SessionStore.cpp
+    src/core/session/GoalManager.cpp
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp

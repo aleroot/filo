@@ -8,6 +8,7 @@
 #include "core/llm/ProviderManager.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/session/GoalManager.hpp"
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
@@ -734,6 +735,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     std::string session_id = core::session::SessionStore::generate_id();
     std::string created_at = core::session::SessionStore::now_iso8601();
     std::vector<core::session::SessionTodoItem> session_todos;
+    core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
 
     std::optional<core::session::SessionData> resumed_session;
     {
@@ -755,12 +757,16 @@ RunDiagnostics run_for_test(const RunOptions& options,
     if (resumed_session.has_value()) {
         diagnostics.used_resumed_session = true;
         diagnostics.resumed_session_id = resumed_session->session_id;
+        goal_manager.restore(resumed_session->goal);
         if (options.continue_last) {
             session_todos = resumed_session->todos;
+            auto handoff_source = *resumed_session;
+            handoff_source.goal.reset();
             agent->load_history(
                 {},
-                core::session::build_handoff_summary(*resumed_session),
+                core::session::build_handoff_summary(handoff_source),
                 resumed_session->mode);
+            agent->set_session_goal(goal_manager.active_goal());
         } else {
             session_id = resumed_session->session_id;
             created_at = resumed_session->created_at;
@@ -769,6 +775,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
                 resumed_session->messages,
                 resumed_session->context_summary,
                 resumed_session->mode);
+            agent->set_session_goal(goal_manager.active_goal());
         }
     }
 
@@ -1022,6 +1029,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     data.mode = agent->get_mode();
     data.context_summary = agent->get_context_summary();
     data.messages = history_after;
+    data.goal = goal_manager.current();
     data.todos = session_todos;
     data.stats.prompt_tokens = totals.prompt_tokens;
     data.stats.completion_tokens = totals.completion_tokens;

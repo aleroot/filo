@@ -12,6 +12,7 @@
 #include "PromptComponents.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/session/GoalManager.hpp"
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
@@ -1134,6 +1135,7 @@ RunResult run(RunOptions opts) {
     std::string session_id          = core::session::SessionStore::generate_id();
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
     std::string session_file_path;  // computed after first save
+    core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
     std::vector<core::session::SessionTodoItem> session_todos;
     struct SessionSaveState {
         std::mutex write_mutex;
@@ -1159,10 +1161,12 @@ RunResult run(RunOptions opts) {
             const auto& data = *data_opt;
             session_id         = data.session_id;
             session_created_at = data.created_at;
+            goal_manager.restore(data.goal);
             session_todos      = data.todos;
 
             // Restore agent state.
             agent->load_history(data.messages, data.context_summary, data.mode);
+            agent->set_session_goal(goal_manager.active_goal());
 
             // Align mode picker.
             for (std::size_t i = 0; i < modes.size(); ++i) {
@@ -1219,9 +1223,11 @@ RunResult run(RunOptions opts) {
                 append_ui_message(ui_messages, make_system_message(message));
             }
             session_todos.clear();
+            goal_manager.clear();
         }
         reset_history_view();
         animation_cv.notify_one();
+        agent->set_session_goal(std::nullopt);
         agent->clear_history();
         core::budget::BudgetTracker::get_instance().reset_session();
         core::session::SessionStats::get_instance().reset();
@@ -1594,10 +1600,12 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
             session_created_at = data.created_at;
+            goal_manager.restore(data.goal);
             session_todos      = data.todos;
 
             // Restore agent state.
             agent->load_history(data.messages, data.context_summary, data.mode);
+            agent->set_session_goal(goal_manager.active_goal());
 
             // Align mode picker.
             for (std::size_t i = 0; i < modes.size(); ++i) {
@@ -1687,12 +1695,14 @@ RunResult run(RunOptions opts) {
         std::string old_session_id;
         std::string provider_name;
         std::string model_name;
+        std::optional<core::session::SessionGoal> snap_goal;
         std::vector<core::session::SessionTodoItem> snap_todos;
         {
             std::lock_guard lock(ui_mutex);
             old_session_id = session_id;
             provider_name = active_provider_name;
             model_name = active_model_name;
+            snap_goal = goal_manager.current();
             snap_todos = session_todos;
         }
 
@@ -1709,6 +1719,7 @@ RunResult run(RunOptions opts) {
         data.mode            = snap_mode;
         data.context_summary = snap_context;
         data.messages        = snap_messages;
+        data.goal            = snap_goal;
         data.todos           = snap_todos;
 
         const auto& budget = core::budget::BudgetTracker::get_instance();
@@ -1746,7 +1757,7 @@ RunResult run(RunOptions opts) {
     agent->set_efficiency_decision_fn(
         [agent, session_store, &ui_mutex, &session_id, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &wake_ui, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
+         &ui_messages, &wake_ui, &goal_manager, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
             auto snap_context = agent->get_context_summary();
@@ -1758,6 +1769,7 @@ RunResult run(RunOptions opts) {
                 archived.created_at = session_created_at;
                 archived.provider = active_provider_name;
                 archived.model = active_model_name;
+                archived.goal = goal_manager.current();
                 archived.todos = session_todos;
             }
             archived.last_active_at = core::session::SessionStore::now_iso8601();
@@ -3556,6 +3568,7 @@ RunResult run(RunOptions opts) {
         std::string created_at;
         std::string provider_name;
         std::string model_name;
+        std::optional<core::session::SessionGoal> snap_goal;
         std::vector<core::session::SessionTodoItem> snap_todos;
         {
             std::lock_guard lock(ui_mutex);
@@ -3563,6 +3576,7 @@ RunResult run(RunOptions opts) {
             created_at = session_created_at;
             provider_name = active_provider_name;
             model_name = active_model_name;
+            snap_goal = goal_manager.current();
             snap_todos = session_todos;
         }
 
@@ -3574,6 +3588,7 @@ RunResult run(RunOptions opts) {
                      working_dir,
                      snap_messages = std::move(snap_messages),
                      snap_mode, snap_context,
+                     snap_goal = std::move(snap_goal),
                      snap_todos = std::move(snap_todos),
                      session_save_state,
                      generation]() {
@@ -3587,6 +3602,7 @@ RunResult run(RunOptions opts) {
             data.mode              = snap_mode;
             data.context_summary   = snap_context;
             data.messages          = snap_messages;
+            data.goal              = snap_goal;
             data.todos             = snap_todos;
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
@@ -3707,6 +3723,69 @@ RunResult run(RunOptions opts) {
                 ? "No completed todos to clear."
                 : std::format("Cleared {} completed todo(s).", removed),
         };
+    };
+
+    auto current_goal = [&]() -> std::optional<core::session::SessionGoal> {
+        std::lock_guard lock(ui_mutex);
+        return goal_manager.current();
+    };
+
+    auto set_goal = [&](std::string_view objective) -> core::commands::CommandOperationResult {
+        core::session::SessionGoal updated;
+        {
+            std::lock_guard lock(ui_mutex);
+            auto maybe_goal = goal_manager.set(objective);
+            if (!maybe_goal.has_value()) {
+                return {.ok = false, .message = "Goal objective cannot be empty."};
+            }
+            updated = *maybe_goal;
+        }
+        agent->set_session_goal(updated);
+        save_session_snapshot();
+        return {.ok = true, .message = "Goal set."};
+    };
+
+    auto set_goal_status = [&](std::string_view raw_status,
+                               std::string_view note) -> core::commands::CommandOperationResult {
+        const std::string status = to_lower_ascii(std::string(trim_ascii(raw_status)));
+        if (status != "active" && status != "blocked" && status != "complete") {
+            return {.ok = false, .message = "Unknown goal status."};
+        }
+        const auto goal_status = core::session::goal_status_from_string(status);
+
+        core::session::SessionGoal updated;
+        {
+            std::lock_guard lock(ui_mutex);
+            auto maybe_goal = goal_manager.set_status(goal_status, note);
+            if (!maybe_goal.has_value()) {
+                return {.ok = false, .message = "No goal is set."};
+            }
+            updated = *maybe_goal;
+        }
+        agent->set_session_goal(core::session::is_active(updated.status)
+            ? std::optional<core::session::SessionGoal>{updated}
+            : std::nullopt);
+        save_session_snapshot();
+        if (status == "complete") {
+            return {.ok = true, .message = "Goal marked complete."};
+        }
+        if (status == "blocked") {
+            return {.ok = true, .message = "Goal marked blocked."};
+        }
+        return {.ok = true, .message = "Goal resumed."};
+    };
+
+    auto clear_goal = [&]() -> core::commands::CommandOperationResult {
+        {
+            std::lock_guard lock(ui_mutex);
+            if (!goal_manager.has_goal()) {
+                return {.ok = true, .message = "No goal to clear."};
+            }
+            goal_manager.clear();
+        }
+        agent->set_session_goal(std::nullopt);
+        save_session_snapshot();
+        return {.ok = true, .message = "Goal cleared."};
     };
 
     auto add_mcp_server = [&](const core::config::McpServerConfig& server,
@@ -4084,6 +4163,10 @@ RunResult run(RunOptions opts) {
             .set_todo_completed_fn = set_todo_completed,
             .remove_todo_fn = remove_todo,
             .clear_completed_todos_fn = clear_completed_todos,
+            .current_goal_fn = current_goal,
+            .set_goal_fn = set_goal,
+            .set_goal_status_fn = set_goal_status,
+            .clear_goal_fn = clear_goal,
             .list_mcp_servers_fn = list_mcp_servers,
             .add_mcp_server_fn = add_mcp_server,
             .remove_mcp_server_fn = remove_mcp_server,

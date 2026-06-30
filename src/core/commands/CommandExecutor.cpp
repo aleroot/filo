@@ -540,6 +540,31 @@ std::string format_todos(const std::vector<core::session::SessionTodoItem>& todo
     return out.str();
 }
 
+std::string format_goal(const std::optional<core::session::SessionGoal>& goal) {
+    std::ostringstream out;
+    out << "\n[Session Goal]\n";
+    if (!goal.has_value() || goal->objective.empty()) {
+        out << "  No active goal. Use `/goal <objective>` to set one.\n";
+        return out.str();
+    }
+
+    out << "  Objective: " << goal->objective << '\n';
+    out << "  Status: " << core::session::to_string(goal->status) << '\n';
+    if (!goal->note.empty()) {
+        out << "  Note: " << goal->note << '\n';
+    }
+    if (!goal->created_at.empty()) {
+        out << "  Created: " << goal->created_at << '\n';
+    }
+    if (!goal->updated_at.empty()) {
+        out << "  Updated: " << goal->updated_at << '\n';
+    }
+    if (!goal->completed_at.empty()) {
+        out << "  Completed: " << goal->completed_at << '\n';
+    }
+    return out.str();
+}
+
 std::string format_mcp_servers(const std::vector<core::config::McpServerConfig>& servers) {
     std::ostringstream out;
     out << "\n[MCP Servers]\n";
@@ -1123,6 +1148,7 @@ public:
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
+            "  /goal [action]      Set or manage the session goal\n"
             "  /todo [action]      Manage session-backed todo items\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
@@ -2259,6 +2285,102 @@ Project-specific instructions for Filo.
     }
 };
 
+class GoalCommand : public Command {
+public:
+    std::string get_name() const override { return "/goal"; }
+    std::vector<std::string> get_aliases() const override { return {"/g"}; }
+    std::string get_description() const override {
+        return "Set or manage the session goal";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.current_goal_fn) {
+            ctx.append_history_fn("\n✗  Goal management is unavailable in this context.\n");
+            return;
+        }
+
+        const std::string args = trailing_arguments(ctx.text);
+        const auto tokens = split_ascii_whitespace(args);
+        auto show_goal = [&]() {
+            ctx.append_history_fn(format_goal(ctx.current_goal_fn()));
+        };
+
+        if (tokens.empty()) {
+            show_goal();
+            return;
+        }
+
+        const std::string action = to_lower_ascii(tokens.front());
+        const std::size_t remainder_offset =
+            static_cast<std::size_t>(tokens.front().data() - args.data()) + tokens.front().size();
+        const std::string remainder = trim_copy(
+            remainder_offset >= args.size() ? std::string_view{} : std::string_view(args).substr(remainder_offset));
+
+        CommandOperationResult result;
+        std::string objective_to_submit;
+        if (action == "show" || action == "status" || action == "list") {
+            show_goal();
+            return;
+        }
+
+        if (action == "clear" || action == "reset" || action == "remove" || action == "rm") {
+            if (!ctx.clear_goal_fn) {
+                ctx.append_history_fn("\n✗  Goal clearing is unavailable in this context.\n");
+                return;
+            }
+            result = ctx.clear_goal_fn();
+        } else if (action == "done" || action == "complete" || action == "completed") {
+            if (!ctx.set_goal_status_fn) {
+                ctx.append_history_fn("\n✗  Goal status updates are unavailable in this context.\n");
+                return;
+            }
+            result = ctx.set_goal_status_fn("complete", remainder);
+        } else if (action == "block" || action == "blocked") {
+            if (!ctx.set_goal_status_fn) {
+                ctx.append_history_fn("\n✗  Goal status updates are unavailable in this context.\n");
+                return;
+            }
+            result = ctx.set_goal_status_fn("blocked", remainder);
+        } else if (action == "resume" || action == "active" || action == "reopen") {
+            if (!ctx.set_goal_status_fn) {
+                ctx.append_history_fn("\n✗  Goal status updates are unavailable in this context.\n");
+                return;
+            }
+            result = ctx.set_goal_status_fn("active", remainder);
+        } else {
+            if (!ctx.set_goal_fn) {
+                ctx.append_history_fn("\n✗  Goal creation is unavailable in this context.\n");
+                return;
+            }
+            const std::string objective =
+                (action == "set" || action == "update") ? remainder : args;
+            if (trim(objective).empty()) {
+                ctx.append_history_fn(
+                    "\nℹ  Usage: /goal <objective>\n"
+                    "   Other actions: show, set <objective>, done [note], blocked [note], resume [note], clear.\n");
+                return;
+            }
+            objective_to_submit = objective;
+            result = ctx.set_goal_fn(objective);
+        }
+
+        ctx.append_history_fn(std::format(
+            "\n{}  {}\n",
+            result.ok ? "✓" : "✗",
+            result.message.empty()
+                ? (result.ok ? "Goal updated." : "Goal update failed.")
+                : result.message));
+        if (result.ok) {
+            show_goal();
+            if (!objective_to_submit.empty() && ctx.send_user_message_fn) {
+                ctx.send_user_message_fn(objective_to_submit);
+            }
+        }
+    }
+};
+
 class TodoCommand : public Command {
 public:
     std::string get_name() const override { return "/todo"; }
@@ -2578,6 +2700,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ExportCommand>());
     register_command(std::make_unique<ForkCommand>());
     register_command(std::make_unique<InitCommand>());
+    register_command(std::make_unique<GoalCommand>());
     register_command(std::make_unique<TodoCommand>());
     register_command(std::make_unique<McpCommand>());
     register_command(std::make_unique<ShellCommand>());

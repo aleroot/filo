@@ -80,8 +80,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto review_picker_opened = std::make_shared<bool>(false);
     auto review_activity_events =
         std::make_shared<std::vector<std::pair<bool, std::string>>>();
+    auto sent_user_messages = std::make_shared<std::vector<std::string>>();
     auto yolo_enabled   = std::make_shared<bool>(false);
     auto tool_rules = std::make_shared<std::vector<std::string>>();
+    auto goal = std::make_shared<std::optional<core::session::SessionGoal>>();
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
     auto active_terminals = std::make_shared<std::vector<ActiveTerminalInfo>>(
         std::vector<ActiveTerminalInfo>{{
@@ -197,8 +199,41 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .copy_to_clipboard_fn = [](std::string_view) {
             return std::optional<std::string>{};
         },
+        .send_user_message_fn = [sent_user_messages](const std::string& message) {
+            sent_user_messages->push_back(message);
+        },
         .set_review_activity_fn = [review_activity_events](bool active, const std::string& hint) {
             review_activity_events->emplace_back(active, hint);
+        },
+        .current_goal_fn = [goal]() {
+            return *goal;
+        },
+        .set_goal_fn = [goal](std::string_view objective) {
+            core::session::SessionGoal updated;
+            updated.objective = std::string(objective);
+            updated.status = core::session::GoalStatus::Active;
+            updated.created_at = "2026-06-30T08:00:00Z";
+            updated.updated_at = "2026-06-30T08:00:00Z";
+            *goal = updated;
+            return CommandOperationResult{.ok = true, .message = "Goal set."};
+        },
+        .set_goal_status_fn = [goal](std::string_view status, std::string_view note) {
+            if (!goal->has_value()) {
+                return CommandOperationResult{.ok = false, .message = "No goal is set."};
+            }
+            (*goal)->status = core::session::goal_status_from_string(status);
+            (*goal)->note = std::string(note);
+            (*goal)->updated_at = "2026-06-30T08:05:00Z";
+            if (status == "complete") {
+                (*goal)->completed_at = "2026-06-30T08:05:00Z";
+            } else {
+                (*goal)->completed_at.clear();
+            }
+            return CommandOperationResult{.ok = true, .message = "Goal updated."};
+        },
+        .clear_goal_fn = [goal]() {
+            goal->reset();
+            return CommandOperationResult{.ok = true, .message = "Goal cleared."};
         },
         .list_active_terminals_fn = [active_terminals]() {
             return *active_terminals;
@@ -265,6 +300,58 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*stop_called == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Stop requested"));
+    }
+
+    SECTION("/goal sets and shows the session goal") {
+        *mock_history = "";
+        goal->reset();
+        ctx.text = "/goal Implement resumable migrations";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(goal->has_value());
+        CHECK((*goal)->objective == "Implement resumable migrations");
+        CHECK((*goal)->status == core::session::GoalStatus::Active);
+        REQUIRE(sent_user_messages->size() == 1);
+        CHECK(sent_user_messages->back() == "Implement resumable migrations");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Goal set"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Implement resumable migrations"));
+
+        *mock_history = "";
+        ctx.text = "/g status";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[Session Goal]"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Status: active"));
+    }
+
+    SECTION("/goal updates status and clears") {
+        *mock_history = "";
+        *goal = core::session::SessionGoal{
+            .objective = "Ship the goal command",
+            .status = core::session::GoalStatus::Active,
+            .created_at = "2026-06-30T08:00:00Z",
+            .updated_at = "2026-06-30T08:00:00Z",
+        };
+
+        ctx.text = "/goal blocked waiting on CI";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE(goal->has_value());
+        CHECK((*goal)->status == core::session::GoalStatus::Blocked);
+        CHECK((*goal)->note == "waiting on CI");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Status: blocked"));
+
+        *mock_history = "";
+        ctx.text = "/goal done verified locally";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        CHECK((*goal)->status == core::session::GoalStatus::Complete);
+        CHECK((*goal)->completed_at == "2026-06-30T08:05:00Z");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Status: complete"));
+
+        *mock_history = "";
+        ctx.text = "/goal clear";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        CHECK_FALSE(goal->has_value());
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("No active goal"));
     }
 
     SECTION("/usage command shows totals, models, and tools") {

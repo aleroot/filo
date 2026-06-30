@@ -232,6 +232,13 @@ void Agent::set_session_id(std::string session_id) {
     }
 }
 
+void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
+    std::lock_guard lock(history_mutex_);
+    session_goal_ = std::move(goal);
+    ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
+}
+
 core::context::SessionContext Agent::session_context_snapshot() const {
     std::lock_guard lock(history_mutex_);
     return session_context_;
@@ -256,10 +263,11 @@ std::string Agent::build_stable_prompt_prefix() const {
 }
 
 std::string Agent::build_dynamic_prompt_suffix() const {
-    if (context_summary_.empty()) {
-        return {};
+    std::string suffix = core::session::GoalManager::prompt_context(session_goal_);
+    if (!context_summary_.empty()) {
+        suffix += "\n\nSummary of earlier conversation context:\n" + context_summary_;
     }
-    return "\n\nSummary of earlier conversation context:\n" + context_summary_;
+    return suffix;
 }
 
 void Agent::refresh_stable_prompt_prefix_unlocked() {

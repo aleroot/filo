@@ -3,6 +3,8 @@
 #include "../context/SessionContext.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
+#include "../session/GoalManager.hpp"
+#include "../session/SessionData.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../tools/ToolManager.hpp"
 #include "HistoryCompactor.hpp"
@@ -71,6 +73,7 @@ public:
 
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
+    void set_session_goal(std::optional<core::session::SessionGoal> goal);
 
     // Set the permission profile (Interactive, Standard, Autonomous).
     void set_permission_profile(PermissionProfile profile) {
@@ -249,6 +252,7 @@ private:
     std::string active_model_;
     std::string effort_level_;
     std::string context_summary_;
+    std::optional<core::session::SessionGoal> session_goal_;
     std::string stable_prompt_prefix_;
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;

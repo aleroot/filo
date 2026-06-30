@@ -89,6 +89,10 @@ struct CommandContext {
     std::function<CommandOperationResult(std::string_view, bool)> set_todo_completed_fn = {};
     std::function<CommandOperationResult(std::string_view)> remove_todo_fn = {};
     std::function<CommandOperationResult()> clear_completed_todos_fn = {};
+    std::function<std::optional<core::session::SessionGoal>()> current_goal_fn = {};
+    std::function<CommandOperationResult(std::string_view)> set_goal_fn = {};
+    std::function<CommandOperationResult(std::string_view, std::string_view)> set_goal_status_fn = {};
+    std::function<CommandOperationResult()> clear_goal_fn = {};
     std::function<std::vector<core::config::McpServerConfig>()> list_mcp_servers_fn = {};
     std::function<CommandOperationResult(const core::config::McpServerConfig&,
                                          core::config::SettingsScope)> add_mcp_server_fn = {};

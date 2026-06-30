@@ -1,10 +1,46 @@
 #pragma once
 
 #include "core/llm/Models.hpp"
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace core::session {
+
+enum class GoalStatus {
+    Active,
+    Blocked,
+    Complete,
+};
+
+[[nodiscard]] inline std::string_view to_string(GoalStatus status) noexcept {
+    switch (status) {
+    case GoalStatus::Active:   return "active";
+    case GoalStatus::Blocked:  return "blocked";
+    case GoalStatus::Complete: return "complete";
+    }
+    return "active";
+}
+
+[[nodiscard]] inline GoalStatus goal_status_from_string(std::string_view status) noexcept {
+    if (status == "blocked") return GoalStatus::Blocked;
+    if (status == "complete" || status == "completed") return GoalStatus::Complete;
+    return GoalStatus::Active;
+}
+
+[[nodiscard]] inline bool is_active(GoalStatus status) noexcept {
+    return status != GoalStatus::Complete;
+}
+
+struct SessionGoal {
+    std::string objective;
+    GoalStatus status = GoalStatus::Active;
+    std::string note;
+    std::string created_at;
+    std::string updated_at;
+    std::string completed_at;
+};
 
 struct SessionTodoItem {
     std::string id;
@@ -20,7 +56,7 @@ struct SessionTodoItem {
 // data type with no external dependencies.
 // ---------------------------------------------------------------------------
 struct SessionData {
-    static constexpr int kVersion = 2;
+    static constexpr int kVersion = 3;
 
     int         version         = kVersion;
     std::string session_id;
@@ -32,6 +68,7 @@ struct SessionData {
     std::string mode = "BUILD"; ///< agent mode
     std::string context_summary;
     std::string handoff_summary;
+    std::optional<SessionGoal> goal;
 
     /// Conversation messages — system message is excluded (regenerated on load).
     std::vector<core::llm::Message> messages;

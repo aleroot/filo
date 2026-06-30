@@ -798,6 +798,12 @@ TEST_CASE("prompter --continue starts a fresh segment from project handoff", "[p
         "old user",
         "old answer",
         "2026-03-26T12:00:00Z");
+    right.goal = core::session::SessionGoal{
+        .objective = "Finish release validation",
+        .status = core::session::GoalStatus::Active,
+        .created_at = "2026-03-26T12:01:00Z",
+        .updated_at = "2026-03-26T12:01:00Z",
+    };
     REQUIRE(store.save(right));
 
     exec::prompter::RunOptions opts;
@@ -820,6 +826,8 @@ TEST_CASE("prompter --continue starts a fresh segment from project handoff", "[p
     bool saw_old_user = false;
     bool saw_new_user = false;
     bool saw_old_task_in_handoff = false;
+    bool saw_goal_in_handoff = false;
+    bool saw_goal_in_dynamic_prompt = false;
     for (const auto& msg : provider->last_request.messages) {
         if (msg.role == "user" && msg.content == "old user") {
             saw_old_user = true;
@@ -830,9 +838,21 @@ TEST_CASE("prompter --continue starts a fresh segment from project handoff", "[p
         if (msg.role == "system" && msg.content.find("old user") != std::string::npos) {
             saw_old_task_in_handoff = true;
         }
+        if (msg.role == "system"
+            && msg.content.find("Session goal (active): Finish release validation")
+                   != std::string::npos) {
+            saw_goal_in_handoff = true;
+        }
+        if (msg.role == "system"
+            && msg.content.find("- Objective: Finish release validation")
+                   != std::string::npos) {
+            saw_goal_in_dynamic_prompt = true;
+        }
     }
     REQUIRE_FALSE(saw_old_user);
     REQUIRE(saw_old_task_in_handoff);
+    REQUIRE_FALSE(saw_goal_in_handoff);
+    REQUIRE(saw_goal_in_dynamic_prompt);
     REQUIRE(saw_new_user);
 }
 
