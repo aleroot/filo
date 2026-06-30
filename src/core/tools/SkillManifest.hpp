@@ -72,8 +72,10 @@ enum class SkillType {
  * | @c model          | no             | @c ""         | Preferred model hint (advisory; not yet enforced)   |
  * | @c allowed-tools  | no             | @c ""         | Comma-separated tool whitelist (future enforcement) |
  * | @c enabled        | no             | @c true       | Set to @c false to skip this skill at load time     |
+ * | @c user-invocable | no             | @c true       | Set to @c false to hide Prompt skills from slash commands |
  *
  * @note @c allowed-tools and @c allowed_tools are both accepted.
+ * @note @c user-invocable and @c user_invocable are both accepted.
  * @note Inline YAML comments (@c #) on value lines are not supported.
  * @note Boolean @c false variants: @c false, @c 0, @c no (case-sensitive).
  *
@@ -97,6 +99,10 @@ struct SkillManifest {
 
     /// Whether to register this skill; @c false skips it at load time.
     bool enabled = true;
+
+    /// Whether a Prompt skill should be exposed as a user slash command.
+    /// Agent activation remains available for Prompt skills even when false.
+    bool user_invocable = true;
 
     /// Resolved absolute path to the directory that contains @c SKILL.md.
     std::filesystem::path skill_dir;

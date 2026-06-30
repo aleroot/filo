@@ -29,6 +29,11 @@ int SkillCommandLoader::load_from_directory(const fs::path& root,
 
         // Only handle Prompt-type skills; Tool skills are registered by SkillLoader.
         if (m.type != core::tools::SkillType::Prompt) continue;
+        if (!m.user_invocable) {
+            core::logging::info("SkillCommandLoader: skipping non-user-invocable Prompt skill '{}'",
+                                m.name);
+            continue;
+        }
 
         executor.register_command(std::make_unique<SkillCommand>(m));
         core::logging::info("SkillCommandLoader: registered '/{}'", m.name);

@@ -325,6 +325,11 @@ SkillRegistry::parse_manifest(const fs::path& skill_dir) {
     if (const auto value = field(*parsed, "entry_point")) manifest.entry_point = *value;
     if (const auto value = field(*parsed, "entry-point")) manifest.entry_point = *value;
     if (const auto value = field(*parsed, "enabled")) manifest.enabled = boolean_enabled(*value);
+    if (const auto value = field(*parsed, "user_invocable")) {
+        manifest.user_invocable = boolean_enabled(*value);
+    } else if (const auto value2 = field(*parsed, "user-invocable")) {
+        manifest.user_invocable = boolean_enabled(*value2);
+    }
     if (const auto value = field(*parsed, "model")) manifest.model_hint = *value;
     if (const auto value = field(*parsed, "license")) manifest.license = *value;
     if (const auto value = field(*parsed, "compatibility")) manifest.compatibility = *value;

@@ -256,6 +256,28 @@ Review $ARGUMENTS quickly.
     fs::remove_all(root);
 }
 
+TEST_CASE("parse_manifest: parses user_invocable spelling variants",
+          "[skill_commands]") {
+    auto root = make_temp_root("manifest_user_invocable");
+
+    for (const auto& [dir_name, field_name] : std::vector<std::pair<std::string, std::string>>{
+             {"underscore", "user_invocable"},
+             {"hyphen", "user-invocable"},
+         }) {
+        auto skill_dir = root / dir_name;
+        fs::create_directories(skill_dir);
+        write_file(skill_dir / "SKILL.md",
+                   "---\nname: " + dir_name + "\ndescription: Hidden prompt.\n"
+                       + field_name + ": false\n---\nHidden body.\n");
+
+        auto result = SkillLoader::parse_manifest(skill_dir);
+        REQUIRE(result.has_value());
+        CHECK(result->user_invocable == false);
+    }
+
+    fs::remove_all(root);
+}
+
 TEST_CASE("resolve_skill_turn selects the provider family for known model IDs",
           "[skill_commands][model_resolution]") {
     const auto sandbox = make_temp_root("skill_turn_resolution_family");
@@ -510,6 +532,31 @@ Some body.
     const auto descs = executor.describe_commands();
     bool found = std::any_of(descs.begin(), descs.end(),
                              [](const auto& d) { return d.name == "/off_skill"; });
+    CHECK_FALSE(found);
+
+    fs::remove_all(root);
+}
+
+TEST_CASE("SkillCommandLoader::load_from_directory skips non-user-invocable Prompt skills",
+          "[skill_commands]") {
+    auto root = make_temp_root("cmd_loader_non_user_invocable");
+    auto skill_dir = root / "axi";
+    fs::create_directories(skill_dir);
+    write_file(skill_dir / "SKILL.md", R"(---
+name: gh-axi
+description: GitHub AXI skill for agent activation.
+user-invocable: false
+---
+Use gh-axi for GitHub work.
+)");
+
+    CommandExecutor executor;
+    const int count = SkillCommandLoader::load_from_directory(root, executor);
+    CHECK(count == 0);
+
+    const auto descs = executor.describe_commands();
+    const bool found = std::any_of(descs.begin(), descs.end(),
+                                   [](const auto& d) { return d.name == "/gh-axi"; });
     CHECK_FALSE(found);
 
     fs::remove_all(root);
@@ -839,6 +886,43 @@ User Filo body.
         ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
         REQUIRE(executor.try_execute("/review", ctx));
         CHECK(sent_prompt == "User Filo body.");
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("SkillRegistry keeps non-user-invocable Prompt skills in activation catalog",
+          "[skill_commands][agent_skills]") {
+    const auto sandbox = make_temp_root("non_user_invocable_catalog");
+    const auto project = sandbox / "project";
+    fs::create_directories(project);
+    {
+        ScopedCurrentPath cwd(project);
+
+        write_file(project / ".filo" / "skills" / "gh-axi" / "SKILL.md", R"(---
+name: gh-axi
+description: GitHub AXI skill for agent activation.
+user-invocable: false
+---
+Use gh-axi for GitHub work.
+)");
+
+        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        REQUIRE(skills.size() == 1);
+        CHECK(skills.front().name == "gh-axi");
+        CHECK_FALSE(skills.front().user_invocable);
+
+        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("gh-axi"));
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("activate_skill"));
+
+        CommandExecutor executor;
+        CHECK(SkillCommandLoader::load_from_directory(project / ".filo" / "skills", executor) == 0);
+
+        const auto descs = executor.describe_commands();
+        const bool found = std::any_of(descs.begin(), descs.end(),
+                                       [](const auto& d) { return d.name == "/gh-axi"; });
+        CHECK_FALSE(found);
     }
 
     fs::remove_all(sandbox);
