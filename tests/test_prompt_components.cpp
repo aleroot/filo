@@ -357,9 +357,9 @@ TEST_CASE("render_provider_model_picker_panel — renders model choices",
             .provider_default = true,
         },
         {
-            .id = "claude-3-5-haiku-20241022",
-            .selector = "claude-3-5-haiku-20241022",
-            .description = "Claude 3.5 Haiku",
+            .id = "claude-sonnet-5",
+            .selector = "claude-sonnet-5",
+            .description = "Claude Sonnet 5",
         },
     };
 

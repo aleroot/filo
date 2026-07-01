@@ -158,6 +158,14 @@ TEST_CASE("ClaudeSerializer - effort serialized via output_config", "[claude][se
         R"("output_config":{"effort":"medium"})"));
 }
 
+TEST_CASE("ClaudeSerializer - effort serialized for Sonnet 5", "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-sonnet-5");
+    req.effort = "medium";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"medium"})"));
+}
+
 TEST_CASE("ClaudeSerializer - effort auto/unset is treated as omitted", "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-4-6");
     req.effort = "auto";
@@ -165,18 +173,18 @@ TEST_CASE("ClaudeSerializer - effort auto/unset is treated as omitted", "[claude
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("output_config")"));
 }
 
-TEST_CASE("ClaudeSerializer - max effort downgrades to high on models without max support",
-          "[claude][serializer][effort]") {
-    auto req = make_simple_request("claude-opus-4-5");
-    req.effort = "max";
-    const auto payload = AnthropicSerializer::serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("output_config":{"effort":"high"})"));
-}
-
 TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 4.6",
           "[claude][serializer][effort]") {
     auto req = make_simple_request("claude-sonnet-4-6");
+    req.effort = "max";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"max"})"));
+}
+
+TEST_CASE("ClaudeSerializer - max effort preserved on Sonnet 5",
+          "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-sonnet-5");
     req.effort = "max";
     const auto payload = AnthropicSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
@@ -487,8 +495,7 @@ TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][se
 
 TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][serializer]") {
     for (const auto* model : {"claude-opus-4-8", "claude-sonnet-4-6",
-                               "claude-haiku-4-5", "claude-3-5-sonnet-20241022",
-                               "claude-3-5-haiku-20241022"}) {
+                               "claude-sonnet-5", "claude-fable-5"}) {
         auto payload = AnthropicSerializer::serialize(make_simple_request(model));
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(model));
     }
@@ -572,7 +579,7 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Claude alias + [1m]", "[c
     ChatRequest req = make_simple_request("sonnet[1m]");
     protocol.prepare_request(req);
 
-    REQUIRE(req.model == "claude-sonnet-4-6");
+    REQUIRE(req.model == "claude-sonnet-5");
 
     core::auth::AuthInfo auth;
     auto headers = protocol.build_headers(auth);
@@ -586,6 +593,14 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Opus alias to current Opu
     protocol.prepare_request(req);
 
     REQUIRE(req.model == "claude-opus-4-8");
+}
+
+TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5", "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("fable");
+    protocol.prepare_request(req);
+
+    REQUIRE(req.model == "claude-fable-5");
 }
 
 TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
@@ -604,7 +619,7 @@ TEST_CASE("AnthropicProtocol::prepare_request does not add context beta without 
     AnthropicProtocol protocol;
     ChatRequest req = make_simple_request("sonnet");
     protocol.prepare_request(req);
-    REQUIRE(req.model == "claude-sonnet-4-6");
+    REQUIRE(req.model == "claude-sonnet-5");
 
     core::auth::AuthInfo auth;
     auto headers = protocol.build_headers(auth);

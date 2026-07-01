@@ -89,6 +89,21 @@ inline std::string provider_family_key(
     return {};
 }
 
+inline std::string model_family_key(std::string_view model_hint) {
+    const std::string lowered = lower_ascii_copy(trim_copy(model_hint));
+    if (lowered.starts_with("claude")) return "anthropic";
+    if (lowered.starts_with("grok")) return "grok";
+    if (lowered.starts_with("gemini")) return "gemini";
+    if (lowered.starts_with("kimi") || lowered.starts_with("moonshot")) return "kimi";
+    if (lowered.starts_with("qwen")) return "qwen";
+    if (lowered.starts_with("mistral") || lowered.starts_with("devstral")) return "mistral";
+    if (lowered.starts_with("gpt") || lowered.starts_with("o1")
+        || lowered.starts_with("o3") || lowered.starts_with("o4")) {
+        return "openai";
+    }
+    return {};
+}
+
 inline bool try_select_provider(
     std::string_view provider_name,
     std::string_view requested_model,
@@ -136,7 +151,8 @@ inline bool try_select_from_candidates(
     std::string_view requested_model,
     std::string_view original_hint,
     std::optional<std::string_view> preferred_provider,
-    SkillTurnResolution& resolution) {
+    SkillTurnResolution& resolution,
+    bool allow_single_candidate = true) {
     if (candidates.empty()) {
         return false;
     }
@@ -156,8 +172,11 @@ inline bool try_select_from_candidates(
         }
     }
 
-    if (candidates.size() == 1) {
+    if (allow_single_candidate && candidates.size() == 1) {
         return try_select_provider(candidates.front(), requested_model, original_hint, resolution);
+    }
+    if (!allow_single_candidate) {
+        return false;
     }
 
     resolution.warning = std::format(
@@ -209,7 +228,8 @@ inline SkillTurnResolution resolve_skill_turn(
             trimmed_hint,
             trimmed_hint,
             preferred_provider,
-            resolution)) {
+            resolution,
+            !preferred_provider.has_value())) {
         return resolution;
     }
     if (!resolution.warning.empty()) {
@@ -241,6 +261,34 @@ inline SkillTurnResolution resolve_skill_turn(
             "Skill model '{}' is not available in the configured '{}' providers; using the current model.",
             trimmed_hint,
             model_info->provider);
+        return resolution;
+    }
+
+    if (const std::string hinted_family = model_family_key(trimmed_hint);
+        !hinted_family.empty()) {
+        std::vector<std::string> family_matches;
+        for (const auto& [provider_name, provider_config] : config.providers) {
+            if (provider_family_key(provider_name, provider_config) == hinted_family) {
+                family_matches.push_back(provider_name);
+            }
+        }
+
+        if (try_select_from_candidates(
+                family_matches,
+                trimmed_hint,
+                trimmed_hint,
+                preferred_provider,
+                resolution)) {
+            return resolution;
+        }
+        if (!resolution.warning.empty()) {
+            return resolution;
+        }
+
+        resolution.warning = std::format(
+            "Skill model '{}' is not available in the configured '{}' providers; using the current model.",
+            trimmed_hint,
+            hinted_family);
         return resolution;
     }
 

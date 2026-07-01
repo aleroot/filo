@@ -2629,6 +2629,7 @@ RunResult run(RunOptions opts) {
     auto model_supports_max_effort = [&](std::string_view model_name) -> bool {
         const std::string lowered = lower_ascii_copy(model_name);
         return lowered.find("mythos") != std::string::npos
+            || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
     };

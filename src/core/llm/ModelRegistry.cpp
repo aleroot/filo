@@ -122,17 +122,10 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Anthropic Claude Models
     // -----------------------------------------------------------------------
+    { "claude-fable-5",     1000000 },
+    { "claude-sonnet-5",    1000000 },
     { "claude-opus-4-8",    200000 },
     { "claude-sonnet-4-6", 1000000 },
-    { "claude-opus-4-5",    200000 },
-    { "claude-sonnet-4-5",  200000 },
-    { "claude-haiku-4-5",   200000 },
-    { "claude-opus-4",      200000 },
-    { "claude-sonnet-4",    200000 },
-    { "claude-3-opus",     200000 },
-    { "claude-3-sonnet",   200000 },
-    { "claude-3-5-sonnet", 200000 },
-    { "claude-3-haiku",    200000 },
     { "claude-",           200000 },
 
     // -----------------------------------------------------------------------
@@ -224,6 +217,45 @@ const ParameterConstraints kClaudeConstraints = [] {
 // Anthropic models
 std::vector<ModelInfo> build_anthropic_catalog() {
     return {
+        // Claude Fable 5
+        {
+            .canonical_id = "claude-fable-5",
+            .aliases = {"fable", "claude-fable", "fable-5"},
+            .display_name = "Claude Fable 5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Powerful,
+            .pricing = {10.0, 50.0, 1.0, 12.5},
+            .knowledge_cutoff = "2026-01",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
+        // Claude Sonnet 5
+        {
+            .canonical_id = "claude-sonnet-5",
+            .aliases = {"sonnet", "claude-sonnet", "sonnet-5"},
+            .display_name = "Claude Sonnet 5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Balanced,
+            // Introductory launch pricing is effective through 2026-08-31.
+            .pricing = {2.0, 10.0, 0.20, 2.5},
+            .knowledge_cutoff = "2026-01",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
         // Claude Opus 4.8
         {
             .canonical_id = "claude-opus-4-8",
@@ -242,70 +274,6 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             .knowledge_cutoff = "2026-03",
             .constraints = kClaudeConstraints,
             .max_tool_calls = 32
-        },
-        // Claude 3.7 Sonnet
-        {
-            .canonical_id = "claude-3-7-sonnet-20250219",
-            .aliases = {"claude-3-7-sonnet", "claude-3.7-sonnet", "sonnet-3.7"},
-            .display_name = "Claude 3.7 Sonnet",
-            .provider = "anthropic",
-            .context_window = 200000,
-            .max_output_tokens = 8192,
-            .max_reasoning_tokens = 0,
-            .capabilities = CAP_FULL | 
-                static_cast<uint32_t>(ModelCapability::PromptCaching) |
-                static_cast<uint32_t>(ModelCapability::TokenCounting),
-            .tier = ModelTier::Balanced,
-            .pricing = {3.0, 15.0, 0.30, 3.75},  // $3/Mtok input, $15/Mtok output
-            .knowledge_cutoff = "2025-01",
-            .constraints = kClaudeConstraints,
-            .max_tool_calls = 32
-        },
-        // Claude 3.5 Haiku
-        {
-            .canonical_id = "claude-3-5-haiku-20241022",
-            .aliases = {"claude-3-5-haiku", "claude-3.5-haiku", "haiku-3.5"},
-            .display_name = "Claude 3.5 Haiku",
-            .provider = "anthropic",
-            .context_window = 200000,
-            .max_output_tokens = 4096,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
-            .tier = ModelTier::Fast,
-            .pricing = {0.80, 4.0, 0.08, 1.0},
-            .knowledge_cutoff = "2024-07",
-            .constraints = kClaudeConstraints,
-        },
-        // Claude 3 Opus
-        {
-            .canonical_id = "claude-3-opus-20240229",
-            .aliases = {"claude-3-opus"},
-            .display_name = "Claude 3 Opus",
-            .provider = "anthropic",
-            .context_window = 200000,
-            .max_output_tokens = 4096,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
-            .tier = ModelTier::Powerful,
-            .pricing = {15.0, 75.0, 1.50, 18.75},
-            .knowledge_cutoff = "2024-02",
-            .constraints = kClaudeConstraints,
-        },
-        // Claude 3.5 Sonnet (legacy version)
-        {
-            .canonical_id = "claude-3-5-sonnet-20241022",
-            .aliases = {"claude-3-5-sonnet-legacy"},
-            .display_name = "Claude 3.5 Sonnet (Legacy)",
-            .provider = "anthropic",
-            .context_window = 200000,
-            .max_output_tokens = 8192,
-            .capabilities = CAP_FULL |
-                static_cast<uint32_t>(ModelCapability::PromptCaching),
-            .tier = ModelTier::Balanced,
-            .pricing = {3.0, 15.0, 0.30, 3.75},
-            .knowledge_cutoff = "2024-04",
-            .deprecation_date = "2025-06-01",
-            .constraints = kClaudeConstraints,
         },
     };
 }
@@ -1624,14 +1592,17 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
     }
 
     const std::string lowered = to_lower_ascii(normalized);
-    if (lowered == "sonnet" || lowered == "best" || lowered == "opusplan") {
-        return "claude-sonnet-4-6";
+    if (lowered == "sonnet") {
+        return "claude-sonnet-5";
+    }
+    if (lowered == "fable" || lowered == "best") {
+        return "claude-fable-5";
+    }
+    if (lowered == "opusplan") {
+        return "claude-sonnet-5";
     }
     if (lowered == "opus") {
         return "claude-opus-4-8";
-    }
-    if (lowered == "haiku") {
-        return "claude-haiku-4-5";
     }
     return normalized;
 }

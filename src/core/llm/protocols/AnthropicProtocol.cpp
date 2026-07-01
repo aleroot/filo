@@ -24,9 +24,9 @@ namespace {
     constexpr std::string_view ANTHROPIC_BETA_OAUTH    = "oauth-2025-04-20";
     constexpr std::string_view ANTHROPIC_BILLING_HEADER = "cc_version=2.1.78.13b; cc_entrypoint=cli; cch=0;";
 
-    constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-4-6";
+    constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-5";
+    constexpr std::string_view CLAUDE_DEFAULT_FABLE  = "claude-fable-5";
     constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-8";
-    constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
     struct HeaderWindowDef {
         std::string_view suffix;
@@ -193,14 +193,15 @@ namespace {
     bool anthropic_model_supports_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
         return lowered.find("mythos") != std::string::npos
+            || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
-            || lowered.find("sonnet-4-6") != std::string::npos
-            || lowered.find("opus-4-5") != std::string::npos;
+            || lowered.find("sonnet-4-6") != std::string::npos;
     }
 
     bool anthropic_model_supports_max_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
         return lowered.find("mythos") != std::string::npos
+            || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
     }
@@ -249,11 +250,13 @@ namespace {
         const std::string lowered = lower_copy(out.model);
         if (lowered == "sonnet") {
             out.model = std::string(CLAUDE_DEFAULT_SONNET);
+        } else if (lowered == "fable") {
+            out.model = std::string(CLAUDE_DEFAULT_FABLE);
         } else if (lowered == "opus") {
             out.model = std::string(CLAUDE_DEFAULT_OPUS);
-        } else if (lowered == "haiku") {
-            out.model = std::string(CLAUDE_DEFAULT_HAIKU);
-        } else if (lowered == "best" || lowered == "opusplan") {
+        } else if (lowered == "best") {
+            out.model = std::string(CLAUDE_DEFAULT_FABLE);
+        } else if (lowered == "opusplan") {
             out.model = std::string(CLAUDE_DEFAULT_SONNET);
         }
 
@@ -549,18 +552,9 @@ namespace {
         return info;
     }
 
-    bool is_sonnet_or_opus_model(std::string_view model) {
-        if (model.empty()) return false;
-        const std::string lowered = lower_copy(model);
-        return lowered.find("claude-sonnet") != std::string::npos
-            || lowered.find("claude-opus") != std::string::npos
-            || lowered == "sonnet"
-            || lowered == "opus";
-    }
-
     std::string impl_format_error_message(int status_code,
                                           std::string_view body,
-                                          std::string_view requested_model) {
+                                          std::string_view) {
         switch (status_code) {
             case 400:
                 return "[Anthropic API Error 400: Invalid request. The request body is malformed or contains invalid parameters.]";
@@ -576,10 +570,6 @@ namespace {
                     msg += "Please wait before retrying. Consider reducing request frequency or context size.";
                 } else {
                     msg += "Please wait before retrying.";
-                }
-                if (is_sonnet_or_opus_model(requested_model)) {
-                    msg += " If this is a Claude subscription limit on Sonnet/Opus, "
-                           "try '/model claude haiku' while waiting for reset.";
                 }
                 msg += ']';
                 return msg;

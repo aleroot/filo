@@ -269,7 +269,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "claude",
             .auth_type = "oauth_claude",
-            .default_model = "claude-sonnet-4-6",
+            .default_model = "claude-sonnet-5",
         };
     }
     if (normalized == "openai") {
@@ -512,7 +512,8 @@ AppConfig make_default_config() {
     add_provider("grok-fast",      "grok-4.20-non-reasoning");
     add_provider("grok-mini",      "grok-3-mini",      "high");
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
-    add_provider("claude",         "claude-sonnet-4-6");
+    add_provider("claude",         "claude-sonnet-5");
+    add_provider("claude-fable",   "claude-fable-5");
     add_provider("gemini",         "gemini-2.5-flash");
     add_provider("kimi",           "kimi-k2.7-code", "high");
     add_provider("kimi-k2-6",      "kimi-k2.6");
@@ -574,7 +575,8 @@ std::string default_config_json() {
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
         "openai":         { "model": "gpt-5.4" },
         "mistral":        { "model": "devstral-small-latest" },
-        "claude":         { "model": "claude-sonnet-4-6" },
+        "claude":         { "model": "claude-sonnet-5" },
+        "claude-fable":   { "model": "claude-fable-5" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
@@ -635,7 +637,7 @@ std::string default_config_json() {
                             "any_keywords": ["debug", "root cause", "architecture", "design", "migration", "refactor", "reasoning"]
                         },
                         "candidates": [
-                            { "provider": "claude", "model": "claude-sonnet-4-6", "retries": 1 },
+                            { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
                             { "provider": "grok-reasoning", "model": "grok-4.20-reasoning", "retries": 1 },
                             { "provider": "openai", "model": "gpt-5.4", "retries": 1 }
                         ]

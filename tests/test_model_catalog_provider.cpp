@@ -255,8 +255,8 @@ TEST_CASE("AnthropicModelCatalogProvider parses v1 models response", "[llm][mode
           "display_name": "Claude Sonnet 4.6"
         },
         {
-          "id": "claude-haiku-4-5-20251101",
-          "display_name": "Claude Haiku 4.5"
+          "id": "claude-fable-5-20260601",
+          "display_name": "Claude Fable 5"
         }
       ],
       "has_more": false
@@ -273,8 +273,8 @@ TEST_CASE("AnthropicModelCatalogProvider parses v1 models response", "[llm][mode
     CHECK(sonnet.max_output_tokens == 0);
     CHECK(sonnet.capabilities == 0);
 
-    const auto& haiku = result.models[1];
-    CHECK(haiku.tier == ModelTier::Balanced);
+    const auto& fable = result.models[1];
+    CHECK(fable.tier == ModelTier::Balanced);
 }
 
 TEST_CASE("AnthropicModelCatalogProvider captures next cursor", "[llm][model-catalog]") {

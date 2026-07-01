@@ -64,6 +64,7 @@ Filo focuses on speed, control, and local-first workflows without giving up mult
 cmake --preset linux-debug
 cmake --build --preset linux-debug
 ctest --preset linux-debug --output-on-failure
+cmake --build --preset linux-debug --target run_integration_tests
 ./build/Linux/linux-debug/filo
 ```
 
@@ -73,6 +74,7 @@ ctest --preset linux-debug --output-on-failure
 cmake --preset xcode-debug
 cmake --build --preset xcode-debug
 ctest --preset xcode-debug --output-on-failure
+cmake --build --preset xcode-debug --target run_integration_tests
 ./build/Darwin/xcode-debug/Debug/filo
 ```
 
@@ -361,7 +363,7 @@ Filo-specific Python tool skills continue to use `entry_point` and the existing
               "any_keywords": ["debug", "root cause", "architecture", "migration"]
             },
             "candidates": [
-              { "provider": "claude", "model": "claude-sonnet-4-6", "retries": 1 },
+              { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
               { "provider": "grok-reasoning", "model": "grok-4.20-reasoning", "retries": 1 }
             ]
           }

@@ -385,7 +385,7 @@ endif()
 set(CMAKE_FOLDER "${_filo_saved_folder}")
 unset(_filo_saved_folder)
 
-add_executable(filo_tests
+set(FILO_UNIT_TEST_SOURCES
     tests/test_tools.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
@@ -454,7 +454,6 @@ add_executable(filo_tests
     tests/test_main_exit.cpp
     tests/test_prompter_mode.cpp
     tests/test_mcp_client_session.cpp
-    tests/test_daemon_reliability.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
     tests/test_agent_loop_control.cpp
@@ -463,8 +462,24 @@ add_executable(filo_tests
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
 )
+
+set(FILO_INTEGRATION_TEST_SOURCES
+    tests/test_integration_daemon_reliability.cpp
+    tests/test_integration_web_tools.cpp
+)
+
+add_executable(filo_tests ${FILO_UNIT_TEST_SOURCES})
 target_link_libraries(filo_tests PRIVATE filo_core Catch2::Catch2WithMain)
 set_target_properties(filo_tests PROPERTIES
+    FOLDER "Tests"
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}
+    INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
+    INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
+)
+
+add_executable(test_integration ${FILO_INTEGRATION_TEST_SOURCES})
+target_link_libraries(test_integration PRIVATE filo_core Catch2::Catch2WithMain)
+set_target_properties(test_integration PROPERTIES
     FOLDER "Tests"
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}
     INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
@@ -489,7 +504,7 @@ set_target_properties(test_tui_freeze PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
-foreach(filo_ftxui_consumer filo filo_tests test_agent_freeze test_tui_freeze)
+foreach(filo_ftxui_consumer filo filo_tests test_integration test_agent_freeze test_tui_freeze)
     target_compile_definitions(${filo_ftxui_consumer}
         PRIVATE FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH}
     )
@@ -498,6 +513,12 @@ endforeach()
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 include(Catch)
 catch_discover_tests(filo_tests DISCOVERY_MODE PRE_TEST)
+
+add_custom_target(run_integration_tests
+    COMMAND $<TARGET_FILE:test_integration>
+    DEPENDS test_integration
+    USES_TERMINAL
+)
 
 source_group(
     TREE "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -573,7 +594,8 @@ source_group(
         tests/test_main_exit.cpp
         tests/test_prompter_mode.cpp
         tests/test_mcp_client_session.cpp
-        tests/test_daemon_reliability.cpp
+        tests/test_integration_daemon_reliability.cpp
+        tests/test_integration_web_tools.cpp
         tests/test_request_replay_cache.cpp
         tests/test_agent_loop_control.cpp
         tests/test_tool_output_history.cpp

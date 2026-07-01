@@ -104,7 +104,7 @@ TEST_CASE("ContextWindowTracker excludes stable bootstrap from displayed context
     const auto fresh_snapshot = core::context::ContextWindowTracker::snapshot(
         bootstrap_only,
         nullptr,
-        "claude-sonnet-4",
+        "claude-opus-4-8",
         bootstrap_tokens);
 
     CHECK(fresh_snapshot.estimated_context_tokens == 2'001);
@@ -116,7 +116,7 @@ TEST_CASE("ContextWindowTracker excludes stable bootstrap from displayed context
     const auto active_snapshot = core::context::ContextWindowTracker::snapshot(
         with_user_turn,
         nullptr,
-        "claude-sonnet-4",
+        "claude-opus-4-8",
         bootstrap_tokens);
 
     CHECK(active_snapshot.estimated_context_tokens == 4'001);

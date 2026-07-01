@@ -24,9 +24,10 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("kimi-for-coding") == 256000);
     
     // Anthropic (via new registry)
-    REQUIRE(get_max_context_size("claude-3-opus") == 200000);
-    REQUIRE(get_max_context_size("claude-3-7-sonnet") == 200000);
-    REQUIRE(get_max_context_size("claude-3-5-haiku") == 200000);
+    REQUIRE(get_max_context_size("claude-fable-5") == 1000000);
+    REQUIRE(get_max_context_size("claude-sonnet-5") == 1000000);
+    REQUIRE(get_max_context_size("fable") == 1000000);
+    REQUIRE(get_max_context_size("sonnet") == 1000000);
     REQUIRE(get_max_context_size("claude-sonnet-4-6[1m]") == 1000000);
     REQUIRE(get_max_context_size("sonnet[1m]") == 1000000);
     REQUIRE(get_max_context_size("opus") == 200000);
@@ -76,7 +77,8 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     // Check some known models were loaded
     REQUIRE(registry.has_model("gpt-5.4"));
     REQUIRE(registry.has_model("gpt-4o"));
-    REQUIRE(registry.has_model("claude-3-7-sonnet"));
+    REQUIRE(registry.has_model("claude-sonnet-5"));
+    REQUIRE(registry.has_model("claude-fable-5"));
     REQUIRE(registry.has_model("kimi-k2.7-code"));
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
@@ -117,6 +119,38 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto opus = registry.lookup("opus");
     REQUIRE(opus != nullptr);
     REQUIRE(opus->canonical_id == "claude-opus-4-8");
+
+    const auto sonnet = registry.lookup("sonnet");
+    REQUIRE(sonnet != nullptr);
+    REQUIRE(sonnet->canonical_id == "claude-sonnet-5");
+
+    const auto fable = registry.lookup("fable");
+    REQUIRE(fable != nullptr);
+    REQUIRE(fable->canonical_id == "claude-fable-5");
+}
+
+TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {
+    auto& registry = ModelRegistry::instance();
+
+    const auto sonnet = registry.get_info("claude-sonnet-5");
+    REQUIRE(sonnet.has_value());
+    CHECK(sonnet->display_name == "Claude Sonnet 5");
+    CHECK(sonnet->provider == "anthropic");
+    CHECK(sonnet->context_window == 1'000'000);
+    CHECK(sonnet->max_output_tokens == 128'000);
+    CHECK(sonnet->pricing.input_per_mtok == Catch::Approx(2.0));
+    CHECK(sonnet->pricing.output_per_mtok == Catch::Approx(10.0));
+    CHECK(sonnet->supports(ModelCapability::Reasoning));
+
+    const auto fable = registry.get_info("claude-fable-5");
+    REQUIRE(fable.has_value());
+    CHECK(fable->display_name == "Claude Fable 5");
+    CHECK(fable->provider == "anthropic");
+    CHECK(fable->context_window == 1'000'000);
+    CHECK(fable->max_output_tokens == 128'000);
+    CHECK(fable->pricing.input_per_mtok == Catch::Approx(10.0));
+    CHECK(fable->pricing.output_per_mtok == Catch::Approx(50.0));
+    CHECK(fable->supports(ModelCapability::Reasoning));
 }
 
 TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {
@@ -153,14 +187,13 @@ TEST_CASE("ModelRegistry::get_tier - returns correct tier classification", "[llm
     
     // Fast tier models
     REQUIRE(registry.get_tier("gpt-4o-mini") == ModelTier::Fast);
-    REQUIRE(registry.get_tier("claude-3-5-haiku") == ModelTier::Fast);
     
     // Balanced tier models
     REQUIRE(registry.get_tier("gpt-4o") == ModelTier::Powerful);  // GPT-4o is actually powerful
-    REQUIRE(registry.get_tier("claude-3-7-sonnet") == ModelTier::Balanced);
+    REQUIRE(registry.get_tier("claude-sonnet-5") == ModelTier::Balanced);
     
     // Powerful tier models  
-    REQUIRE(registry.get_tier("claude-3-opus") == ModelTier::Powerful);
+    REQUIRE(registry.get_tier("claude-opus-4-8") == ModelTier::Powerful);
     
     // Reasoning tier models
     REQUIRE(registry.get_tier("gpt-5.4") == ModelTier::Reasoning);
@@ -186,10 +219,10 @@ TEST_CASE("ModelRegistry::supports - checks capability flags", "[llm][registry]"
     REQUIRE(registry.supports("gpt-4o", ModelCapability::JsonMode));
     REQUIRE(registry.supports("gpt-4o", ModelCapability::Streaming));
     
-    // Claude 3 Opus also supports everything
-    REQUIRE(registry.supports("claude-3-opus", ModelCapability::Vision));
-    REQUIRE(registry.supports("claude-3-opus", ModelCapability::FunctionCalling));
-    REQUIRE(registry.supports("claude-3-opus", ModelCapability::PromptCaching));
+    // Current Claude Opus also supports everything
+    REQUIRE(registry.supports("claude-opus-4-8", ModelCapability::Vision));
+    REQUIRE(registry.supports("claude-opus-4-8", ModelCapability::FunctionCalling));
+    REQUIRE(registry.supports("claude-opus-4-8", ModelCapability::PromptCaching));
     
     // Reasoning models have special flag
     REQUIRE(registry.supports("o1", ModelCapability::Reasoning));
@@ -240,9 +273,9 @@ TEST_CASE("ModelRegistry::validate_parameter - temperature", "[llm][registry]") 
     REQUIRE_FALSE(registry.validate_parameter("gpt-4o", "temperature", -0.1));
     
     // Claude models: temperature [0, 1]
-    REQUIRE(registry.validate_parameter("claude-3-7-sonnet", "temperature", 0.0));
-    REQUIRE(registry.validate_parameter("claude-3-7-sonnet", "temperature", 1.0));
-    REQUIRE_FALSE(registry.validate_parameter("claude-3-7-sonnet", "temperature", 1.1));
+    REQUIRE(registry.validate_parameter("claude-sonnet-5", "temperature", 0.0));
+    REQUIRE(registry.validate_parameter("claude-sonnet-5", "temperature", 1.0));
+    REQUIRE_FALSE(registry.validate_parameter("claude-sonnet-5", "temperature", 1.1));
     
     // Unknown model: validation returns false (can't validate unknown models)
     REQUIRE_FALSE(registry.validate_parameter("unknown-model", "temperature", 5.0));
@@ -307,7 +340,7 @@ TEST_CASE("ModelInfo::is_deprecated - checks deprecation status", "[llm][registr
     REQUIRE(active.has_value());
     REQUIRE_FALSE(active->is_deprecated());
     
-    auto deprecated = ModelRegistry::instance().get_info("claude-3-5-sonnet-20241022");
+    auto deprecated = ModelRegistry::instance().get_info("gpt-4-0314");
     if (deprecated.has_value()) {
         // Note: This test depends on the catalog state
         // The legacy version has a deprecation date
@@ -322,7 +355,7 @@ TEST_CASE("ModelInfo::matches - matches canonical and aliases", "[llm][registry]
     REQUIRE(info.matches("gpt-4o-2024-08-06"));  // canonical
     REQUIRE(info.matches("gpt-4o"));               // alias
     REQUIRE(info.matches("4o"));                   // alias
-    REQUIRE_FALSE(info.matches("claude-3-opus"));  // different model
+    REQUIRE_FALSE(info.matches("claude-opus-4-8"));  // different model
 }
 
 TEST_CASE("ModelInfo::effective_max_tokens - returns max output or context", "[llm][registry]") {
@@ -389,8 +422,8 @@ TEST_CASE("RouterEngine uses ModelRegistry for quality scoring", "[llm][registry
     
     // Verify tiers are correctly mapped
     REQUIRE(registry.get_tier("o1") == ModelTier::Reasoning);
-    REQUIRE(registry.get_tier("claude-3-opus") == ModelTier::Powerful);
-    REQUIRE(registry.get_tier("claude-3-7-sonnet") == ModelTier::Balanced);
+    REQUIRE(registry.get_tier("claude-opus-4-8") == ModelTier::Powerful);
+    REQUIRE(registry.get_tier("claude-sonnet-5") == ModelTier::Balanced);
     REQUIRE(registry.get_tier("gpt-4o-mini") == ModelTier::Fast);
 }
 

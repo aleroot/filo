@@ -388,6 +388,14 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_opus_alias.input_per_m  == Catch::Approx(5.00));
     REQUIRE(r_opus_alias.output_per_m == Catch::Approx(25.00));
 
+    auto r_fable = rates_for_model("claude-fable-5");
+    REQUIRE(r_fable.input_per_m  == Catch::Approx(10.00));
+    REQUIRE(r_fable.output_per_m == Catch::Approx(50.00));
+
+    auto r_sonnet5 = rates_for_model("claude-sonnet-5");
+    REQUIRE(r_sonnet5.input_per_m  == Catch::Approx(2.00));
+    REQUIRE(r_sonnet5.output_per_m == Catch::Approx(10.00));
+
     auto r_sonnet = rates_for_model("claude-sonnet-4-6");
     REQUIRE(r_sonnet.input_per_m  == Catch::Approx(3.00));
     REQUIRE(r_sonnet.output_per_m == Catch::Approx(15.00));

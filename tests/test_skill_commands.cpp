@@ -298,16 +298,18 @@ TEST_CASE("resolve_skill_turn selects the provider family for known model IDs",
         "claude",
         std::make_shared<DummyProvider>());
 
-    const auto resolution = resolve_skill_turn(
-        "claude-sonnet-4-6",
-        {"read_file"},
-        std::optional<std::string_view>{"claude"});
+    for (const auto* model : {"claude-sonnet-4-6", "claude-sonnet-5", "claude-fable-5"}) {
+        const auto resolution = resolve_skill_turn(
+            model,
+            {"read_file"},
+            std::optional<std::string_view>{"claude"});
 
-    CHECK(resolution.warning.empty());
-    CHECK(resolution.callbacks.provider_override != nullptr);
-    CHECK(resolution.callbacks.model_override == "claude-sonnet-4-6");
-    REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
-    CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+        CHECK(resolution.warning.empty());
+        CHECK(resolution.callbacks.provider_override != nullptr);
+        CHECK(resolution.callbacks.model_override == model);
+        REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
+        CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+    }
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     fs::remove_all(sandbox);

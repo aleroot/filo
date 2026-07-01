@@ -309,7 +309,7 @@ TEST_CASE("AnthropicProtocol::format_error_message - 429 mentions rate limit", "
     REQUIRE_THAT(msg, ContainsSubstring("Rate limit"));
 }
 
-TEST_CASE("AnthropicProtocol::format_error_message - 429 suggests Haiku fallback for Sonnet/Opus",
+TEST_CASE("AnthropicProtocol::format_error_message - 429 omits model fallback",
           "[lifecycle][anthropic]") {
     AnthropicProtocol protocol;
     core::llm::ChatRequest req;
@@ -319,20 +319,7 @@ TEST_CASE("AnthropicProtocol::format_error_message - 429 suggests Haiku fallback
     const cpr::Header headers;
     const std::string msg = protocol.format_error_message({429, "error body", headers});
 
-    REQUIRE_THAT(msg, ContainsSubstring("/model claude haiku"));
-}
-
-TEST_CASE("AnthropicProtocol::format_error_message - 429 does not suggest Haiku for Haiku model",
-          "[lifecycle][anthropic]") {
-    AnthropicProtocol protocol;
-    core::llm::ChatRequest req;
-    req.model = "claude-haiku-4-5";
-    protocol.prepare_request(req);
-
-    const cpr::Header headers;
-    const std::string msg = protocol.format_error_message({429, "error body", headers});
-
-    REQUIRE_THAT(msg, !ContainsSubstring("/model claude haiku"));
+    REQUIRE_THAT(msg, !ContainsSubstring("/model claude"));
 }
 
 TEST_CASE("AnthropicProtocol::format_error_message - 529 is distinct from 429", "[lifecycle][anthropic]") {

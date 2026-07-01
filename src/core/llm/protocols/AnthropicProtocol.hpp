@@ -37,7 +37,7 @@ namespace core::llm::protocols {
  *
  * When enabled, Claude uses chain-of-thought reasoning before responding.
  * `budget_tokens` caps the thinking token budget (min 1024 per Anthropic docs).
- * Requires a model that supports extended thinking (claude-sonnet-4-5+).
+ * Requires a model that supports Anthropic's explicit extended thinking block.
  */
 struct AnthropicThinkingConfig {
     bool enabled      = false;
