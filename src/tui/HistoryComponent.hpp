@@ -49,6 +49,7 @@ private:
     enum class ScrollIntent { FollowBottom, UserHeld };
 
     void SetScrollIntent(ScrollIntent intent);
+    void PreserveUserHeldAnchorForContentGrowth(int previous_content_lines);
     [[nodiscard]] bool  IsNearBottom()          const noexcept;
     [[nodiscard]] float BottomThresholdRatio()  const;
 

@@ -247,6 +247,7 @@ ftxui::Element HistoryComponent::OnRender() {
     // Streaming / tool growth: content height grew while user is scrolled up.
     if (estimated_content_lines_ > prev_estimated_lines
             && scroll_intent_ == ScrollIntent::UserHeld) {
+        PreserveUserHeldAnchorForContentGrowth(prev_estimated_lines);
         new_content_while_held_ = true;
     }
     // ───────────────────────────────────────────────────────────────────
@@ -386,6 +387,24 @@ void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
     if (intent == ScrollIntent::FollowBottom) {
         new_content_while_held_ = false;
     }
+}
+
+void HistoryComponent::PreserveUserHeldAnchorForContentGrowth(int previous_content_lines) {
+    if (previous_content_lines <= 0 || estimated_content_lines_ <= previous_content_lines) {
+        return;
+    }
+
+    // scroll_position_relative() anchors by ratio. If that ratio stays fixed
+    // while streaming appends lines below the viewport, the focused content line
+    // moves down and appears to keep auto-scrolling. Convert the old ratio back
+    // into an absolute content-line anchor, then express that same anchor in the
+    // new content height.
+    const float previous_denominator =
+        std::max(1.0f, static_cast<float>(previous_content_lines));
+    const float current_denominator =
+        std::max(1.0f, static_cast<float>(estimated_content_lines_));
+    const float held_anchor_line = scroll_pos_ * previous_denominator;
+    scroll_pos_ = std::clamp(held_anchor_line / current_denominator, 0.0f, 1.0f);
 }
 
 bool HistoryComponent::IsNearBottom() const noexcept {

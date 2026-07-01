@@ -22,10 +22,10 @@ namespace core::tools {
  */
 struct ToolInvocationContext {
     core::context::SessionContext session_context;
-    std::string tool_call_id;
-    std::string provider_name;
-    std::string model_name;
-    std::shared_ptr<core::llm::LLMProvider> provider;
+    std::string tool_call_id{};
+    std::string provider_name{};
+    std::string model_name{};
+    std::shared_ptr<core::llm::LLMProvider> provider{};
 };
 
 /**

@@ -40,7 +40,7 @@ public:
 
     struct TaskSnapshot {
         TaskState task;
-        std::optional<ResultPayload> result;
+        std::optional<ResultPayload> result{};
     };
 
     struct CreateResult {

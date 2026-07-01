@@ -55,31 +55,31 @@ struct TokenLedgerEvent {
 };
 
 struct TokenLedgerFilter {
-    std::string session_id;
-    std::string actor;
-    std::string model;
-    std::optional<TokenLedgerSource> source;
-    std::optional<TokenLedgerEventKind> kind;
+    std::string session_id{};
+    std::string actor{};
+    std::string model{};
+    std::optional<TokenLedgerSource> source{};
+    std::optional<TokenLedgerEventKind> kind{};
 };
 
 struct TokenLedgerRecordOptions {
     TokenLedgerEventKind kind = TokenLedgerEventKind::Actual;
     TokenLedgerSource source = TokenLedgerSource::ModelCall;
 
-    std::string session_id;
-    std::string turn_id;
-    std::string request_id;
-    std::string parent_id;
+    std::string session_id{};
+    std::string turn_id{};
+    std::string request_id{};
+    std::string parent_id{};
     std::string actor = "agent";
-    std::string provider;
-    std::string model;
-    std::string tool_name;
-    std::string note;
+    std::string provider{};
+    std::string model{};
+    std::string tool_name{};
+    std::string note{};
 
-    core::llm::TokenUsage usage;
+    core::llm::TokenUsage usage{};
     bool should_estimate_cost = true;
     bool billable = true;
-    std::optional<int64_t> cost_micro_usd;
+    std::optional<int64_t> cost_micro_usd{};
 };
 
 struct TokenLedgerBucketSnapshot {

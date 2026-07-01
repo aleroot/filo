@@ -198,7 +198,7 @@ public:
 
     struct Result {
         Status status;
-        std::string line;
+        std::string line{};
     };
 
     [[nodiscard]] Result read_until(

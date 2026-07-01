@@ -131,8 +131,7 @@ public:
      * Returns a zero-initialised RateLimitInfo when no response has been received.
      */
     [[nodiscard]] virtual protocols::RateLimitInfo get_last_rate_limit_info() const noexcept {
-        auto snap = std::atomic_load_explicit(
-            &last_rate_limit_snapshot_, std::memory_order_acquire);
+        auto snap = load_last_rate_limit_snapshot();
         return snap ? *snap : protocols::RateLimitInfo{};
     }
 
@@ -158,29 +157,52 @@ protected:
         try {
             protocols::RateLimitInfo merged = info;
             if (merged.usage_windows.empty()) {
-                auto previous = std::atomic_load_explicit(
-                    &last_rate_limit_snapshot_, std::memory_order_acquire);
+                auto previous = load_last_rate_limit_snapshot();
                 if (previous && !previous->usage_windows.empty()) {
                     merged.usage_windows = previous->usage_windows;
                 }
             }
 
             auto snapshot = std::make_shared<const protocols::RateLimitInfo>(merged);
-            std::atomic_store_explicit(
-                &last_rate_limit_snapshot_, std::move(snapshot), std::memory_order_release);
+            store_last_rate_limit_snapshot(std::move(snapshot));
         } catch (...) {
             // OOM: silently retain the previous snapshot.
         }
     }
 
 private:
+    using RateLimitSnapshotPtr = std::shared_ptr<const protocols::RateLimitInfo>;
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+    using RateLimitSnapshotStore = std::atomic<RateLimitSnapshotPtr>;
+#else
+    using RateLimitSnapshotStore = RateLimitSnapshotPtr;
+#endif
+
+    [[nodiscard]] RateLimitSnapshotPtr load_last_rate_limit_snapshot() const noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        return last_rate_limit_snapshot_.load(std::memory_order_acquire);
+#else
+        return std::atomic_load_explicit(
+            &last_rate_limit_snapshot_, std::memory_order_acquire);
+#endif
+    }
+
+    void store_last_rate_limit_snapshot(RateLimitSnapshotPtr snapshot) noexcept {
+#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
+        last_rate_limit_snapshot_.store(std::move(snapshot), std::memory_order_release);
+#else
+        std::atomic_store_explicit(
+            &last_rate_limit_snapshot_, std::move(snapshot), std::memory_order_release);
+#endif
+    }
+
     std::atomic<int32_t> last_prompt_{0};
     std::atomic<int32_t> last_completion_{0};
 
     // Immutable snapshot of the last rate-limit response.  Written by the
     // streaming thread via set_last_rate_limit_info(); read lock-free by the
     // render thread via get_last_rate_limit_info().
-    std::shared_ptr<const protocols::RateLimitInfo> last_rate_limit_snapshot_{
+    RateLimitSnapshotStore last_rate_limit_snapshot_{
         std::make_shared<const protocols::RateLimitInfo>()};
 };
 

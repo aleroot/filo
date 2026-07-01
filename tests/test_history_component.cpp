@@ -165,10 +165,36 @@ TEST_CASE("HistoryComponent new message does not yank while user is reading",
     messages.push_back(tui::make_info_message("New tool call"));
     history.OnRender();
 
-    // Scroll position must NOT have been yanked to 1.0f.
-    REQUIRE(history.ScrollPosition() == pos_before);
+    // Scroll position must NOT have been yanked to 1.0f. Because the content
+    // became taller while the user was held, the equivalent visual anchor is
+    // represented by a smaller ratio.
+    REQUIRE(history.ScrollPosition() < pos_before);
     // Badge must appear.
     REQUIRE(history.HasNewContentIndicator());
+}
+
+TEST_CASE("HistoryComponent preserves held anchor while streaming grows",
+          "[tui][history_component][auto_scroll]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    messages.push_back(tui::make_user_message("prompt", ""));
+    messages.push_back(tui::make_assistant_message(std::string(800, 'a'), "", true));
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    history.OnRender();
+    history.ScrollUp(0.02f);
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    const float pos_before = history.ScrollPosition();
+
+    messages.back().text += std::string(2400, 'b');
+    history.OnRender();
+
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    REQUIRE(history.HasNewContentIndicator());
+    REQUIRE(history.ScrollPosition() < pos_before);
 }
 
 TEST_CASE("HistoryComponent new message snaps to bottom when following",

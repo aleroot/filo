@@ -28,7 +28,7 @@ enum class RewindPickerAction {
 
 struct RewindPickerEventResult {
     bool handled = false;
-    std::optional<RewindPickerAction> action;
+    std::optional<RewindPickerAction> action{};
 };
 
 struct DoubleEscapeState {

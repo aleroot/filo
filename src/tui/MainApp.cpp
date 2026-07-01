@@ -7,6 +7,7 @@
 #include "Conversation.hpp"
 #include "KeyInput.hpp"
 #include "SessionReplay.hpp"
+#include "SelectionClipboardCopier.hpp"
 #include "Text.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
@@ -787,18 +788,17 @@ RunResult run(RunOptions opts) {
         std::vector<std::string> lines;
     };
     StderrPanelState stderr_panel_state;
+    SelectionClipboardCopier selection_clipboard_copier;
     auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
     screen.TrackMouse(true);
     // Auto-copy any text selected via left-click drag to the system clipboard.
     // This is the cross-platform solution: on Linux the Shift+right-click bypass
     // works in xterm-family terminals, but on macOS iTerm2 uses Option/Alt instead.
-    // Wiring SelectionChange ensures copy works identically on both platforms.
-    screen.SelectionChange([&screen]() {
-        const std::string selection = screen.GetSelection();
-        if (!selection.empty()) {
-            core::commands::copy_text_to_clipboard(selection);
-        }
+    // Keep the FTXUI callback non-blocking; selection changes can fire rapidly
+    // while dragging/scrolling, and clipboard providers may spawn processes.
+    screen.SelectionChange([&screen, &selection_clipboard_copier]() {
+        selection_clipboard_copier.enqueue(screen.GetSelection());
     });
     std::atomic_bool ui_accepting_events{true};
     std::mutex ui_event_post_mutex;

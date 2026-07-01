@@ -739,7 +739,7 @@ struct ParsedToolCallRequest {
 
 struct ParsedPromptGetRequest {
     std::string name;
-    std::string arguments;
+    std::string arguments{};
 };
 
 [[nodiscard]] std::string make_rpc_error(const RequestId& id, const RpcError& error) {
