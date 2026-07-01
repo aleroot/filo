@@ -147,6 +147,8 @@ set(FILO_CORE_SOURCES
     src/tui/Text.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
+    src/tui/RewindActions.cpp
+    src/tui/RewindPicker.cpp
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
     src/core/llm/providers/RouterProvider.cpp

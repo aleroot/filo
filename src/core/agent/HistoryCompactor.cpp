@@ -21,12 +21,26 @@ void emit(const HistoryCompactionCallbacks& callbacks, const std::string& text) 
     }
 }
 
+[[nodiscard]] std::string start_status(HistoryCompactionReason reason) {
+    if (reason == HistoryCompactionReason::Manual) {
+        return "\n\xc2\xbb  Compacting conversation...\n";
+    }
+    return "\n\n\xe2\x9a\x99  Auto-compacting history...\n";
+}
+
+[[nodiscard]] std::string success_status(HistoryCompactionReason reason) {
+    if (reason == HistoryCompactionReason::Manual) {
+        return "\n\xe2\x9c\x93  History compacted and summary preserved.\n";
+    }
+    return "\xe2\x9c\x93  History compacted.\n\n";
+}
+
 } // namespace
 
 void HistoryCompactor::compact_async(HistoryCompactionRequest request,
                                      HistoryCompactionCallbacks callbacks) const {
     std::thread([request = std::move(request), callbacks = std::move(callbacks)]() mutable {
-        emit(callbacks, "\n\n\xe2\x9a\x99  Auto-compacting history...\n");
+        emit(callbacks, start_status(request.reason));
 
         if (!request.provider) {
             emit(callbacks, "\xe2\x9c\x97  History compaction skipped: no active provider.\n\n");
@@ -36,10 +50,11 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
         auto summary = std::make_shared<std::string>();
         auto completed = std::make_shared<std::atomic<bool>>(false);
         try {
+            const auto reason = request.reason;
             core::llm::ChatRequest llm_request = build_request(request);
             request.provider->stream_response(
                 llm_request,
-                [summary, callbacks, completed](const core::llm::StreamChunk& chunk) {
+                [summary, callbacks, completed, reason](const core::llm::StreamChunk& chunk) {
                     if (!chunk.content.empty()) *summary += chunk.content;
                     if (!chunk.is_final) return;
 
@@ -58,7 +73,7 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
                     if (callbacks.on_summary) {
                         callbacks.on_summary(compacted);
                     }
-                    emit(callbacks, "\xe2\x9c\x93  History compacted.\n\n");
+                    emit(callbacks, success_status(reason));
                 });
 
             if (!completed->load(std::memory_order_acquire)) {

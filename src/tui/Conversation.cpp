@@ -21,6 +21,16 @@ using namespace ftxui;
 
 namespace tui {
 
+bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->type == MessageType::User) {
+            messages.erase(it.base() - 1, messages.end());
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace {
 
 // ============================================================================

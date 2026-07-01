@@ -24,6 +24,7 @@ public:
     void stream_response(
         const ChatRequest& request,
         std::function<void(const StreamChunk&)> callback) override;
+    void cancel() override;
 
     [[nodiscard]] std::string get_last_model() const override;
     [[nodiscard]] ProviderCapabilities capabilities() const override;

@@ -177,6 +177,14 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
 
 void Agent::request_stop() {
     stop_requested_.store(true, std::memory_order_release);
+    std::shared_ptr<core::llm::LLMProvider> provider;
+    {
+        std::lock_guard lock(history_mutex_);
+        provider = provider_;
+    }
+    if (provider) {
+        provider->cancel();
+    }
     const auto context = session_context_snapshot();
     if (!context.session_id.empty()) {
         core::tools::ShellTool::interrupt_mcp_session(context.session_id);
@@ -334,6 +342,40 @@ void Agent::compact_history(std::string summary) {
     refresh_context_window_snapshot_unlocked();
 }
 
+void Agent::compact_history_async(
+    std::function<void(const std::string&)> text_callback,
+    std::function<void()> done_callback,
+    HistoryCompactionReason reason) {
+
+    std::vector<core::llm::Message> history_copy;
+    std::shared_ptr<core::llm::LLMProvider> provider;
+    std::string model;
+    {
+        std::lock_guard lock(history_mutex_);
+        history_copy = history_;
+        provider = provider_;
+        model = active_model_;
+    }
+
+    auto self = shared_from_this();
+    history_compactor_.compact_async(
+        HistoryCompactionRequest{
+            .history = std::move(history_copy),
+            .provider = std::move(provider),
+            .model = std::move(model),
+            .reason = reason,
+        },
+        HistoryCompactionCallbacks{
+            .on_status = std::move(text_callback),
+            .on_summary = [self, done_callback = std::move(done_callback)](std::string summary) {
+                self->compact_history(std::move(summary));
+                if (done_callback) {
+                    done_callback();
+                }
+            },
+        });
+}
+
 void Agent::undo_last() {
     std::lock_guard lock(history_mutex_);
     if (!history_.empty() && history_.back().role == "assistant") history_.pop_back();
@@ -347,6 +389,10 @@ std::string Agent::last_user_message() {
         return core::llm::message_text_for_display(*last);
     }
     return {};
+}
+
+bool Agent::has_user_turn() const {
+    return last_user_turn().has_value();
 }
 
 std::optional<core::llm::Message> Agent::last_user_turn() const {
@@ -584,12 +630,29 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             return;
         }
 
-        // Check for cancellation request
-        if (self->is_stop_requested() && !chunk.is_final) {
-            already_stopped->store(true, std::memory_order_release);
-            // Emit a final chunk to signal completion
+        auto finish_stopped_turn = [&]() {
+            if (already_stopped->exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            if (!assistant_response->empty() || !reasoning_accum->empty()) {
+                core::llm::Message stopped_msg;
+                stopped_msg.role = "assistant";
+                stopped_msg.content = *assistant_response;
+                stopped_msg.reasoning_content = *reasoning_accum;
+                {
+                    std::lock_guard lock(self->history_mutex_);
+                    self->history_.push_back(std::move(stopped_msg));
+                    self->refresh_context_window_snapshot_unlocked();
+                }
+            }
             text_callback("\n\n[Generation stopped by user]\n");
             done_callback();
+        };
+
+        // Check before processing final chunks too: some transports abort the
+        // stream by emitting only a final marker after cancellation.
+        if (self->is_stop_requested()) {
+            finish_stopped_turn();
             return;
         }
 
@@ -702,11 +765,17 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         core::llm::Message asst_msg;
         asst_msg.role               = "assistant";
         asst_msg.content            = *assistant_response;
-        asst_msg.tool_calls         = *tool_calls_accum;
+        asst_msg.tool_calls         = self->is_stop_requested()
+            ? std::vector<core::llm::ToolCall>{}
+            : *tool_calls_accum;
         asst_msg.reasoning_content  = *reasoning_accum;  // Required for Kimi thinking mode
         core::logging::debug("[Agent] Persisting assistant message: content_len={}, reasoning_len={}, tool_calls_count={}", 
                             asst_msg.content.size(), asst_msg.reasoning_content.size(), asst_msg.tool_calls.size());
-        {
+        const bool should_persist_assistant =
+            !self->is_stop_requested()
+            || !asst_msg.content.empty()
+            || !asst_msg.tool_calls.empty();
+        if (should_persist_assistant) {
             std::lock_guard lock(self->history_mutex_);
             self->history_.push_back(asst_msg);
             self->refresh_context_window_snapshot_unlocked();
@@ -748,6 +817,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::vector<std::string> hook_denial_reasons(tool_calls_accum->size());
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
+                if (self->is_stop_requested()) {
+                    done_callback();
+                    return;
+                }
                 const auto& tc = (*tool_calls_accum)[i];
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
@@ -786,6 +859,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     denied_any = true;
                     tool_callback(tc.function.name, "[denied by user]");
                 }
+            }
+
+            if (self->is_stop_requested()) {
+                done_callback();
+                return;
             }
 
             // 2. Execute approved calls through a resource-aware scheduler.
@@ -960,6 +1038,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             auto tool_messages = scheduler.run(std::move(scheduled_tasks));
             turn_state->deduplicator.end_step();
 
+            const bool stop_requested_after_tools = self->is_stop_requested();
+
             // 3. Collect results and assess failures
             int failure_count = 0;
             const bool dedup_requested_stop =
@@ -1041,6 +1121,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     self->consecutive_failure_rounds_ = 0;
                 }
                 if (break_fn) break_fn(rounds);
+                done_callback();
+                return;
+            }
+
+            if (stop_requested_after_tools || self->is_stop_requested()) {
                 done_callback();
                 return;
             }
@@ -1249,6 +1334,7 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> text_call
             .history = std::move(history_copy),
             .provider = std::move(provider),
             .model = std::move(model),
+            .reason = HistoryCompactionReason::Auto,
         },
         HistoryCompactionCallbacks{
             .on_status = std::move(text_callback),

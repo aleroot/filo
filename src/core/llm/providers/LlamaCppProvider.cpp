@@ -384,6 +384,10 @@ LlamaCppProvider::~LlamaCppProvider() {
     abort_requested_.store(true, std::memory_order_relaxed);
 }
 
+void LlamaCppProvider::cancel() {
+    abort_requested_.store(true, std::memory_order_relaxed);
+}
+
 LlamaCppProvider::LlamaCppProvider(const core::config::ProviderConfig& config)
     : default_model_(config.model) {
     // Universal local-model settings (shared across all local engines)
@@ -409,6 +413,8 @@ LlamaCppProvider::LlamaCppProvider(const core::config::ProviderConfig& config)
 void LlamaCppProvider::stream_response(
     const ChatRequest& request,
     std::function<void(const StreamChunk&)> callback) {
+
+    abort_requested_.store(false, std::memory_order_relaxed);
 
     ChatRequest req = request;
     if (req.model.empty()) {

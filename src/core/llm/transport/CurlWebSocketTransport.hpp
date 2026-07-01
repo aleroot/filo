@@ -3,6 +3,7 @@
 #include <cpr/cpr.h>
 
 #include <chrono>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -46,7 +47,8 @@ public:
         std::string_view connection_key,
         const cpr::Header& headers,
         std::string_view request_payload,
-        const MessageCallback& on_message);
+        const MessageCallback& on_message,
+        const std::atomic_bool* cancel_requested = nullptr);
 
     void reset();
 

@@ -1333,6 +1333,38 @@ Element render_conversation_search_panel(std::string_view query,
       | size(HEIGHT, GREATER_THAN, 12);
 }
 
+Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& options,
+                                   int selected_index) {
+    Elements rows;
+    rows.reserve(options.size() + 4);
+    rows.push_back(hbox({
+        text(" REWIND ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        filler(),
+        text("Esc: close") | color(Color::GrayDark),
+    }));
+    rows.push_back(separator());
+
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        const bool selected = static_cast<int>(i) == selected_index;
+        const auto& option = options[i];
+        Element row = hbox({
+            text(selected ? " > " : "   ") | color(ColorYellowBright),
+            text(std::format("[{}] ", i + 1)) | color(ColorYellowDark),
+            text(option.label) | ftxui::bold | xflex,
+            text(option.description) | dim,
+        });
+        rows.push_back(selected ? (row | bgcolor(ColorYellowDark) | color(Color::Black))
+                                : std::move(row));
+    }
+
+    rows.push_back(separator());
+    rows.push_back(text("Up/Down: select  Enter: apply  1-3: quick choose")
+                   | color(Color::GrayDark));
+
+    return vbox(std::move(rows)) | UiBorder(ColorYellowBright)
+      | size(HEIGHT, GREATER_THAN, 8);
+}
+
 Element render_stderr_panel(const std::vector<std::string>& lines) {
     constexpr std::size_t kMaxVisibleLines = 6;
     const std::size_t start = lines.size() > kMaxVisibleLines

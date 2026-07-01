@@ -120,6 +120,8 @@ struct UiMessage {
     }
 };
 
+bool remove_latest_ui_turn(std::vector<UiMessage>& messages);
+
 // ============================================================================
 // Conversation State (History Separation - Gemini CLI Style)
 // ============================================================================

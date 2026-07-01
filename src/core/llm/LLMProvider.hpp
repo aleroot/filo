@@ -47,6 +47,16 @@ public:
                                  std::function<void(const StreamChunk&)> callback) = 0;
 
     /**
+     * @brief Request cooperative cancellation of any in-flight stream owned by
+     *        this provider.
+     *
+     * Implementations should make blocked network or inference work return as
+     * promptly as their transport allows. The default is a no-op so simple test
+     * providers do not need cancellation plumbing.
+     */
+    virtual void cancel() {}
+
+    /**
      * @brief Return the effective model used by the most recent completed request.
      *        Providers that do not track this can return an empty string.
      */

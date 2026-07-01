@@ -87,6 +87,7 @@ public:
 
     void stream_response(const ChatRequest&                    request,
                          std::function<void(const StreamChunk&)> callback) override;
+    void cancel() override;
     [[nodiscard]] std::string get_last_model() const override;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
@@ -169,6 +170,7 @@ private:
     std::string                                    provider_name_;
     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
     WebSocketTransportState                        websocket_;
+    std::atomic_bool                               cancel_requested_{false};
 };
 
 } // namespace core::llm

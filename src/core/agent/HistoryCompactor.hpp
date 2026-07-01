@@ -9,10 +9,16 @@
 
 namespace core::agent {
 
+enum class HistoryCompactionReason {
+    Auto,
+    Manual,
+};
+
 struct HistoryCompactionRequest {
     std::vector<core::llm::Message> history;
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string model;
+    HistoryCompactionReason reason = HistoryCompactionReason::Auto;
 };
 
 struct HistoryCompactionCallbacks {

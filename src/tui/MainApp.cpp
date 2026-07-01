@@ -10,6 +10,8 @@
 #include "Text.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
+#include "RewindActions.hpp"
+#include "RewindPicker.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/GoalManager.hpp"
@@ -752,6 +754,7 @@ RunResult run(RunOptions opts) {
 
     std::string input_text;
     int input_cursor_position = 0;
+    DoubleEscapeState double_escape_state;
     int ctrl_d_press_count = 0;
     std::chrono::steady_clock::time_point ctrl_d_deadline =
         std::chrono::steady_clock::time_point::min();
@@ -987,6 +990,8 @@ RunResult run(RunOptions opts) {
         std::vector<core::session::SessionInfo> sessions;
     };
     SessionPickerState session_picker_state;
+
+    RewindPickerState rewind_picker_state;
 
     struct ConversationSearchState {
         bool active = false;
@@ -3656,6 +3661,12 @@ RunResult run(RunOptions opts) {
         }).detach();
     };
 
+    auto open_rewind_menu = [&]() {
+        std::lock_guard lock(ui_mutex);
+        open_rewind_picker(rewind_picker_state);
+        wake_ui();
+    };
+
     auto resolve_todo_index_locked = [&](std::string_view selector)
         -> std::optional<std::size_t> {
         return core::session::todo::resolve_index(session_todos, selector);
@@ -4088,6 +4099,7 @@ RunResult run(RunOptions opts) {
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
+                || rewind_picker_state.active
                 || conversation_search_state.active
                 || settings_panel_state.active) return;
         }
@@ -4215,6 +4227,7 @@ RunResult run(RunOptions opts) {
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
+                || rewind_picker_state.active
                 || conversation_search_state.active
                 || settings_panel_state.active) {
                 return true;
@@ -4364,6 +4377,8 @@ RunResult run(RunOptions opts) {
 
     // ── Event handling ───────────────────────────────────────────────────────
     auto component = CatchEvent(input_component, [&](Event event) {
+        reset_double_escape_on_non_escape(double_escape_state, event);
+
         if (event == Event::Escape
             || event == Event::Character('c')
             || event == Event::Character('C')
@@ -4374,6 +4389,35 @@ RunResult run(RunOptions opts) {
                 stderr_panel_state.active = false;
                 return true;
             }
+        }
+
+        RewindPickerEventResult rewind_result;
+        {
+            std::lock_guard lock(ui_mutex);
+            rewind_result = handle_rewind_picker_event(
+                rewind_picker_state,
+                event,
+                is_ctrl_c_event(event));
+        }
+        if (rewind_result.handled) {
+            if (rewind_result.action.has_value()) {
+                switch (*rewind_result.action) {
+                case RewindPickerAction::RewindLastTurn:
+                    rewind_last_turn(*agent, ui_mutex, ui_messages, append_history, save_session_snapshot);
+                    break;
+                case RewindPickerAction::SummarizeAndCompact:
+                    compact_history_from_rewind(
+                        *agent,
+                        assistant_turn_active.load(std::memory_order_relaxed),
+                        append_history,
+                        save_session_snapshot);
+                    break;
+                case RewindPickerAction::Cancel:
+                    break;
+                }
+            }
+            wake_ui();
+            return true;
         }
 
         // ── Permission overlay keypresses ────────────────────────────────
@@ -4432,6 +4476,11 @@ RunResult run(RunOptions opts) {
                     enable_always_allow         = sel == 1;
                     enable_yolo_from_permission = sel == 2;
                     perm_state.active = false;
+                } else if (is_ctrl_c_event(event)) {
+                    perm_prom   = std::move(perm_state.promise);
+                    perm_answer = false;
+                    perm_state.active = false;
+                    agent->request_stop();
                 } else if (event == Event::Character('4')
                            || event == Event::Character('n')
                            || event == Event::Character('N')
@@ -4519,10 +4568,13 @@ RunResult run(RunOptions opts) {
                             question_promise = std::move(state.promise);
                         }
                     }
-                } else if (event == Event::Escape) {
+                } else if (event == Event::Escape || is_ctrl_c_event(event)) {
                     question_dialog_dismissed = true;
                     state.active = false;
                     question_promise = std::move(state.promise);
+                    if (is_ctrl_c_event(event)) {
+                        agent->request_stop();
+                    }
                 } else {
                     // Number keys 1-5 for quick select
                     for (int n = 1; n <= std::min(option_count, 5); ++n) {
@@ -5328,6 +5380,30 @@ RunResult run(RunOptions opts) {
             }
         }
 
+        if (event == Event::Escape) {
+            if (!record_escape_press(double_escape_state)) {
+                return true;
+            }
+
+            command_picker.key.clear();
+            command_picker.selected = 0;
+            command_picker.suppress();
+            mention_picker.key.clear();
+            mention_picker.selected = 0;
+
+            if (!input_text.empty()) {
+                prompt_history.save(input_text);
+                input_text.clear();
+                input_cursor_position = 0;
+                append_history("\n↶  Draft cleared. Press Up to restore it.\n");
+                wake_ui();
+                return true;
+            }
+
+            open_rewind_menu();
+            return true;
+        }
+
         if (event == Event::F2) {
             current_mode_idx = (current_mode_idx + 1) % static_cast<int>(modes.size());
             agent->set_mode(modes[current_mode_idx].first);
@@ -5503,6 +5579,9 @@ RunResult run(RunOptions opts) {
         bool                            session_picker_active = false;
         int                             session_picker_selected = 0;
         std::vector<core::session::SessionInfo> session_picker_sessions;
+        bool                            rewind_picker_active = false;
+        int                             rewind_picker_selected = 0;
+        std::vector<RewindPickerOption> rewind_picker_options;
         bool                            conversation_search_active = false;
         int                             conversation_search_selected = 0;
         std::string                     conversation_search_query;
@@ -5555,6 +5634,9 @@ RunResult run(RunOptions opts) {
             session_picker_active = session_picker_state.active;
             session_picker_selected = session_picker_state.selected;
             session_picker_sessions = session_picker_state.sessions;
+            rewind_picker_active = rewind_picker_state.active;
+            rewind_picker_selected = rewind_picker_state.selected;
+            rewind_picker_options = rewind_picker_state.options;
             conversation_search_active = conversation_search_state.active;
             conversation_search_selected = conversation_search_state.selected;
             conversation_search_query = conversation_search_state.query;
@@ -5610,6 +5692,10 @@ RunResult run(RunOptions opts) {
                 settings_panel_status);
         } else if (question_state_copy.active) {
             bottom_el = render_question_dialog_panel(question_state_copy);
+        } else if (rewind_picker_active) {
+            bottom_el = render_rewind_picker_panel(
+                rewind_picker_options,
+                rewind_picker_selected);
         } else if (conversation_search_active) {
             bottom_el = render_conversation_search_panel(
                 conversation_search_query,

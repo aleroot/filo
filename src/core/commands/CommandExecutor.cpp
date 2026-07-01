@@ -1162,6 +1162,8 @@ public:
             "  Ctrl+X   Open current input in external editor ($VISUAL/$EDITOR)\n"
             "  Ctrl+D   Delete char right; when input is empty press twice to quit\n"
             "  Ctrl+L   Clear the screen\n"
+            "  Esc      Stop active generation or terminal command\n"
+            "  Esc Esc  Clear draft to history, or open rewind menu on empty input\n"
             "  Ctrl+C   Stop active generation or terminal command\n"
         );
     }
@@ -1180,36 +1182,7 @@ public:
             return;
         }
 
-        std::string summary_prompt =
-            "Please summarise our conversation so far in a concise paragraph, "
-            "preserving all key decisions, code changes, and open tasks. "
-            "Do NOT call any tools. Reply ONLY with the summary text.";
-
-        ctx.append_history_fn("\n»  Compacting conversation\xe2\x80\xa6\n");
-
-        auto append_fn = ctx.append_history_fn;
-        auto summary = std::make_shared<std::string>();
-        ctx.agent->send_message(
-            summary_prompt,
-            [summary](const std::string& chunk) {
-                *summary += chunk;
-            },
-            [](const std::string&, const std::string&) {},
-            [append_fn, agent = ctx.agent, summary]() {
-                std::string compacted = *summary;
-                std::string_view trimmed = trim(compacted);
-                if (trimmed.empty()
-                    || trimmed.find("[Error") != std::string_view::npos
-                    || trimmed.find("[HTTP") != std::string_view::npos
-                    || trimmed.find("[Anthropic") != std::string_view::npos
-                    || trimmed.find("[Mistral") != std::string_view::npos) {
-                    append_fn("\n✗  History compaction failed.\n");
-                    return;
-                }
-                agent->compact_history(std::string(trimmed));
-                append_fn("\n✓  History compacted and summary preserved.\n");
-            }
-        );
+        ctx.agent->compact_history_async(ctx.append_history_fn);
     }
 };
 

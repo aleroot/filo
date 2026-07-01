@@ -126,10 +126,16 @@ struct SendResult {
     uint64_t bytes_sent = 0;
 };
 
-[[nodiscard]] SendResult send_all(CURL* curl, std::string_view payload) {
+[[nodiscard]] SendResult send_all(CURL* curl,
+                                  std::string_view payload,
+                                  const std::atomic_bool* cancel_requested) {
     bool sent_any = false;
     uint64_t bytes_sent = 0;
     while (!payload.empty()) {
+        if (cancel_requested != nullptr
+            && cancel_requested->load(std::memory_order_acquire)) {
+            return SendResult{CURLE_ABORTED_BY_CALLBACK, sent_any, bytes_sent};
+        }
         std::size_t sent = 0;
         const CURLcode code = curl_ws_send(
             curl,
@@ -193,8 +199,17 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     std::string_view connection_key,
     const cpr::Header& headers,
     std::string_view request_payload,
-    const MessageCallback& on_message) {
+    const MessageCallback& on_message,
+    const std::atomic_bool* cancel_requested) {
     std::lock_guard lock(mutex_);
+
+    if (cancel_requested != nullptr
+        && cancel_requested->load(std::memory_order_acquire)) {
+        return WebSocketStreamResult{
+            .status = WebSocketStreamResult::Status::StreamFailed,
+            .message = "request cancelled by user",
+        };
+    }
 
     auto connect_result = ensure_connected(url, connection_key, headers);
     if (!connect_result.completed()) {
@@ -202,7 +217,7 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     }
 
     const bool connection_reused = connect_result.connection_reused;
-    SendResult send_result = send_all(connection_->curl.get(), request_payload);
+    SendResult send_result = send_all(connection_->curl.get(), request_payload, cancel_requested);
     core::net::NetworkTrafficStats::get_instance().record_sent(send_result.bytes_sent);
     if (send_result.code != CURLE_OK) {
         auto response_headers = connection_->response_headers;
@@ -222,6 +237,22 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     std::string message;
     auto last_activity = std::chrono::steady_clock::now();
     while (true) {
+        if (cancel_requested != nullptr
+            && cancel_requested->load(std::memory_order_acquire)) {
+            auto response_headers = connection_->response_headers;
+            auto* curl = connection_->curl.get();
+            auto result = failed(
+                WebSocketStreamResult::Status::StreamFailed,
+                curl,
+                CURLE_ABORTED_BY_CALLBACK,
+                "request cancelled by user",
+                std::move(response_headers),
+                /*request_sent=*/true,
+                connection_reused);
+            connection_.reset();
+            return result;
+        }
+
         char buffer[64 * 1024];
         std::size_t received = 0;
         const curl_ws_frame* meta = nullptr;

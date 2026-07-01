@@ -374,6 +374,18 @@ bool RouterProvider::should_estimate_cost() const {
     return last_should_estimate_cost_;
 }
 
+void RouterProvider::cancel() {
+    for (const auto& [provider_name, _] : provider_default_models_) {
+        try {
+            if (auto provider = provider_manager_.get_provider(provider_name)) {
+                provider->cancel();
+            }
+        } catch (...) {
+            // Cancellation is best-effort across router candidates.
+        }
+    }
+}
+
 void RouterProvider::reset_conversation_state() {
     for (const auto& [provider_name, _] : provider_default_models_) {
         try {

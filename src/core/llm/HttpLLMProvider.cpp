@@ -129,7 +129,10 @@ namespace {
 
     // Exponential backoff with jitter for rate limit retries.
     // Uses retry_after from the API when available (429/529 responses).
-    void backoff_sleep_with_retry_after(int attempt, int retry_after_seconds) {
+    [[nodiscard]] bool backoff_sleep_with_retry_after(
+        int attempt,
+        int retry_after_seconds,
+        const std::atomic_bool* cancel_requested = nullptr) {
         constexpr int base_ms = 500;
         constexpr int cap_ms = 30000;  // Max 30 seconds
         
@@ -147,7 +150,19 @@ namespace {
         std::uniform_int_distribution<int> jitter(-delay_ms / 4, delay_ms / 4);
         delay_ms = std::max(100, delay_ms + jitter(rng));
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+        auto remaining = std::chrono::milliseconds(delay_ms);
+        constexpr auto kSlice = std::chrono::milliseconds(100);
+        while (remaining.count() > 0) {
+            if (cancel_requested != nullptr
+                && cancel_requested->load(std::memory_order_acquire)) {
+                return false;
+            }
+            const auto slice = std::min(remaining, kSlice);
+            std::this_thread::sleep_for(slice);
+            remaining -= slice;
+        }
+        return cancel_requested == nullptr
+            || !cancel_requested->load(std::memory_order_acquire);
     }
 
     [[nodiscard]] bool looks_like_loopback_base_url(std::string_view base_url) {
@@ -173,6 +188,10 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
 {}
 
 HttpLLMProvider::~HttpLLMProvider() = default;
+
+void HttpLLMProvider::cancel() {
+    cancel_requested_.store(true, std::memory_order_release);
+}
 
 HttpLLMProvider::WebSocketTransportState::WebSocketTransportState()
     : client(std::make_unique<transport::CurlWebSocketTransport>()) {}
@@ -367,6 +386,8 @@ void HttpLLMProvider::reset_conversation_state() {
 void HttpLLMProvider::stream_response(const ChatRequest&                      request,
                                       std::function<void(const StreamChunk&)> callback) {
 
+    cancel_requested_.store(false, std::memory_order_release);
+
     std::shared_ptr<HttpLLMProvider> keepalive;
     try {
         keepalive = shared_from_this();
@@ -435,6 +456,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                  callback] () mutable {
 
         try {
+            if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                callback(StreamChunk::make_final());
+                return;
+            }
+
             if (self->websocket_.available() && protocol->supports_websocket_transport()) {
                 std::optional<PreparedWebSocketStreamRequest> websocket_request;
                 try {
@@ -497,10 +523,18 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                     }
                                 }
                                 return websocket_done;
-                            });
+                            },
+                            &self->cancel_requested_);
 
                         protocol->observe_response_headers(
                             websocket_result.response_headers, request_metadata);
+
+                        if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                            if (!websocket_frame.suppress_output && !websocket_done) {
+                                callback(StreamChunk::make_final());
+                            }
+                            return;
+                        }
 
                         if (websocket_result.completed() && !suppressed_error) {
                             if (!websocket_frame.suppress_output) {
@@ -564,6 +598,15 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetUrl(cpr::Url{url});
                 session.SetHeader(headers);
                 session.SetBody(cpr::Body{payload});
+                session.SetProgressCallback(cpr::ProgressCallback(
+                    [cancel_requested = &self->cancel_requested_](
+                        cpr::cpr_pf_arg_t,
+                        cpr::cpr_pf_arg_t,
+                        cpr::cpr_pf_arg_t,
+                        cpr::cpr_pf_arg_t,
+                        intptr_t) -> bool {
+                        return !cancel_requested->load(std::memory_order_acquire);
+                    }));
 
                 uint64_t response_bytes_received = 0;
                 const uint64_t request_bytes_sent =
@@ -658,13 +701,17 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 };
 
                 session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events,
-                                                             &response_bytes_received]
+                                                             &response_bytes_received,
+                                                             cancel_requested = &self->cancel_requested_]
                                                             (std::string_view data,
                                                              intptr_t /*userdata*/) -> bool {
+                    if (cancel_requested->load(std::memory_order_acquire)) {
+                        return false;
+                    }
                     response_bytes_received += static_cast<uint64_t>(data.size());
                     buffer.append(data);
                     drain_complete_events();
-                    return true;
+                    return !cancel_requested->load(std::memory_order_acquire);
                 }));
 
                 cpr::Response r = session.Post();
@@ -677,6 +724,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     .bytes_received = response_bytes_received,
                 };
                 core::net::NetworkTrafficStats::get_instance().record(traffic);
+                if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                    if (!done_signalled) {
+                        callback(StreamChunk::make_final());
+                    }
+                    break;
+                }
                 if (!done_signalled) {
                     // Some providers close the stream without a trailing delimiter.
                     // Parse any non-whitespace remainder as one final event.
@@ -714,6 +767,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             headers = protocol->build_headers(refreshed_auth);
                             headers["Accept"] = "text/event-stream";
                             protocol->prepare_headers(headers, request_metadata, self->base_url_);
+                            if (self->cancel_requested_.load(std::memory_order_acquire)) {
+                                callback(StreamChunk::make_final());
+                                break;
+                            }
                             callback(StreamChunk::make_error(
                                 "\n[Authentication expired. Retrying with refreshed credentials...]"));
                             continue;
@@ -744,7 +801,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                            r.status_code, retry_attempt, max_retries)));
                         }
 
-                        backoff_sleep_with_retry_after(retry_attempt, retry_after_seconds);
+                        if (!backoff_sleep_with_retry_after(
+                                retry_attempt,
+                                retry_after_seconds,
+                                &self->cancel_requested_)) {
+                            callback(StreamChunk::make_final());
+                            break;
+                        }
                         continue;  // Retry the request
                     }
                 }

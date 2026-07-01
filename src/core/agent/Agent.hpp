@@ -105,8 +105,13 @@ public:
 
     void clear_history();
     void compact_history(std::string summary);
+    void compact_history_async(
+        std::function<void(const std::string&)> text_callback,
+        std::function<void()> done_callback = {},
+        HistoryCompactionReason reason = HistoryCompactionReason::Manual);
     void undo_last();
     std::string last_user_message();
+    [[nodiscard]] bool has_user_turn() const;
     [[nodiscard]] std::optional<core::llm::Message> last_user_turn() const;
 
     // -----------------------------------------------------------------------

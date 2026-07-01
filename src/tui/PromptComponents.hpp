@@ -2,6 +2,7 @@
 
 #include "Autocomplete.hpp"
 #include "DiffPreview.hpp"
+#include "RewindPicker.hpp"
 #include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
@@ -127,6 +128,10 @@ ftxui::Element render_review_picker_panel(ReviewPickerMode mode,
 ftxui::Element render_conversation_search_panel(
     std::string_view query,
     const std::vector<ConversationSearchHit>& hits,
+    int selected_index);
+
+ftxui::Element render_rewind_picker_panel(
+    const std::vector<RewindPickerOption>& options,
     int selected_index);
 
 ftxui::Element render_stderr_panel(const std::vector<std::string>& lines);
