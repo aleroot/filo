@@ -513,7 +513,10 @@ endforeach()
 
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 include(Catch)
-catch_discover_tests(filo_tests DISCOVERY_MODE PRE_TEST)
+catch_discover_tests(filo_tests
+    DISCOVERY_MODE PRE_TEST
+    PROPERTIES TIMEOUT 60
+)
 
 add_custom_target(run_integration_tests
     COMMAND $<TARGET_FILE:test_integration>

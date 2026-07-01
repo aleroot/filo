@@ -257,30 +257,48 @@ private:
         }
     }
 
-    // Graceful shutdown (SIGTERM → wait → SIGKILL if still alive).
-    // Kills the entire process group so no orphaned sub-processes are left.
-    void stop() {
+    void close_pipes() noexcept {
         if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
         if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
+    }
+
+    void clear_process_state() noexcept {
+        pid_.store(-1, std::memory_order_release);
+        pgid_.store(-1, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool wait_for_child_exit(pid_t pid,
+                                           std::chrono::milliseconds wait) noexcept {
+        if (pid <= 0) return true;
+        const auto deadline = std::chrono::steady_clock::now() + wait;
+        int status = 0;
+        while (true) {
+            pid_t ret = -1;
+            do {
+                ret = ::waitpid(pid, &status, WNOHANG);
+            } while (ret < 0 && errno == EINTR);
+
+            if (ret == pid || (ret < 0 && errno == ECHILD)) return true;
+            if (ret < 0) return false;
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            ::usleep(1'000);
+        }
+    }
+
+    // Graceful shutdown (SIGTERM -> wait -> SIGKILL if still alive).
+    // Kills the entire process group so no orphaned sub-processes are left.
+    void stop() {
+        close_pipes();
         const pid_t pid = pid_.load(std::memory_order_acquire);
         const pid_t pgid = pgid_.load(std::memory_order_acquire);
         if (pid > 0) {
-            ::killpg(pgid, SIGTERM);
-            int  status = 0;
-            bool reaped = false;
-            for (int i = 0; i < 10 && !reaped; ++i) {
-                if (::waitpid(pid, &status, WNOHANG) > 0) {
-                    reaped = true;
-                } else {
-                    ::usleep(10'000);  // 10 ms
-                }
-            }
-            if (!reaped) {
+            if (pgid > 0) ::killpg(pgid, SIGTERM);
+            if (!wait_for_child_exit(pid, std::chrono::milliseconds{100}) && pgid > 0) {
                 ::killpg(pgid, SIGKILL);
-                ::waitpid(pid, &status, 0);
+                [[maybe_unused]] const bool reaped =
+                    wait_for_child_exit(pid, std::chrono::milliseconds{250});
             }
-            pid_.store(-1, std::memory_order_release);
-            pgid_.store(-1, std::memory_order_release);
+            clear_process_state();
         }
     }
 
@@ -308,8 +326,7 @@ private:
         if (kill_process_group && pgid > 0) {
             ::killpg(pgid, SIGKILL);
         }
-        if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
-        if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
+        close_pipes();
         pid_.store(-1, std::memory_order_release);
         pgid_.store(-1, std::memory_order_release);
         return true;
@@ -327,17 +344,16 @@ private:
     }
 
     // Immediate hard-kill used after a timeout.
-    // No grace period — the command already exceeded its allowed time.
+    // No grace period - the command already exceeded its allowed time.
     void kill_session() {
-        if (stdin_fd_ >= 0)  { ::close(stdin_fd_);  stdin_fd_  = -1; }
-        if (stdout_fd_ >= 0) { ::close(stdout_fd_); stdout_fd_ = -1; }
+        close_pipes();
         const pid_t pid = pid_.load(std::memory_order_acquire);
         const pid_t pgid = pgid_.load(std::memory_order_acquire);
         if (pid > 0) {
-            ::killpg(pgid, SIGKILL);
-            ::waitpid(pid, nullptr, 0);
-            pid_.store(-1, std::memory_order_release);
-            pgid_.store(-1, std::memory_order_release);
+            if (pgid > 0) ::killpg(pgid, SIGKILL);
+            [[maybe_unused]] const bool reaped =
+                wait_for_child_exit(pid, std::chrono::milliseconds{250});
+            clear_process_state();
         }
     }
 
