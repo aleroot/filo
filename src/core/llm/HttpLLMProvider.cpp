@@ -589,6 +589,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 std::string buffer;
                 std::size_t buffer_start = 0;
                 bool        done_signalled = false;
+                bool        stream_started = false;
+                bool        stream_error_seen = false;
+                bool        stream_error_retryable = false;
+                std::string stream_error_type;
+                std::string stream_error_message;
+                bool        output_emitted = false;
+                const bool  requires_terminal_event = protocol->name() == "anthropic";
 
                 // Prevent stale usage from previous requests if this request does not
                 // emit a usage chunk.
@@ -640,9 +647,24 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     if (event_payload.empty()) return;
                     protocols::ParseResult result = protocol->parse_event(event_payload);
 
+                    stream_started = stream_started || result.stream_started;
+                    if (result.stream_error) {
+                        stream_error_seen = true;
+                        stream_error_retryable = result.retryable_stream_error;
+                        stream_error_type = std::move(result.stream_error_type);
+                        stream_error_message = std::move(result.stream_error_message);
+                        done_signalled = true;
+                        return;
+                    }
+
                     // Forward all content/tool chunks produced by this event.
                     bool has_terminal_chunk = false;
                     for (auto& chunk : result.chunks) {
+                        if (!chunk.content.empty()
+                            || !chunk.reasoning_content.empty()
+                            || !chunk.tools.empty()) {
+                            output_emitted = true;
+                        }
                         callback(chunk);
                         if (chunk.is_final) has_terminal_chunk = true;
                     }
@@ -702,6 +724,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                 session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events,
                                                              &response_bytes_received,
+                                                             &stream_error_seen,
                                                              cancel_requested = &self->cancel_requested_]
                                                             (std::string_view data,
                                                              intptr_t /*userdata*/) -> bool {
@@ -711,7 +734,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     response_bytes_received += static_cast<uint64_t>(data.size());
                     buffer.append(data);
                     drain_complete_events();
-                    return !cancel_requested->load(std::memory_order_acquire);
+                    return !stream_error_seen
+                        && !cancel_requested->load(std::memory_order_acquire);
                 }));
 
                 cpr::Response r = session.Post();
@@ -752,6 +776,65 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     static_cast<int>(r.status_code), r.text, r.header};
                 protocol->observe_response_headers(r.header, request_metadata);
                 protocol->on_response(http_resp);
+
+                const bool incomplete_required_stream =
+                    requires_terminal_event
+                    && r.status_code == 200
+                    && !done_signalled
+                    && !stream_error_seen;
+
+                if (stream_error_seen || incomplete_required_stream) {
+                    const bool retryable_stream_failure =
+                        incomplete_required_stream || stream_error_retryable;
+                    if (retryable_stream_failure
+                        && !output_emitted
+                        && retry_attempt < max_retries) {
+                        retry_attempt++;
+                        const auto rate_limit_info = protocol->last_rate_limit();
+                        retry_after_seconds = rate_limit_info.retry_after;
+                        core::logging::warn(
+                            "[HTTP] Retrying {} stream failure type='{}' message='{}' attempt={}/{}",
+                            protocol->name(),
+                            incomplete_required_stream ? "incomplete_stream" : stream_error_type,
+                            incomplete_required_stream
+                                ? (stream_started
+                                       ? "stream ended before terminal event"
+                                       : "stream ended before start event")
+                                : stream_error_message,
+                            retry_attempt,
+                            max_retries);
+
+                        if (!backoff_sleep_with_retry_after(
+                                retry_attempt,
+                                retry_after_seconds,
+                                &self->cancel_requested_)) {
+                            callback(StreamChunk::make_final());
+                            break;
+                        }
+                        protocol->reset_state();
+                        continue;
+                    }
+
+                    std::string message;
+                    if (incomplete_required_stream) {
+                        message = std::format(
+                            "\n[{} stream ended before the terminal event; response may be incomplete]",
+                            protocol->name());
+                    } else {
+                        message = "\n[" + std::string(protocol->name()) + " stream error";
+                        if (!stream_error_type.empty()) {
+                            message += ": ";
+                            message += stream_error_type;
+                        }
+                        if (!stream_error_message.empty()) {
+                            message += " - ";
+                            message += stream_error_message;
+                        }
+                        message += "]";
+                    }
+                    callback(StreamChunk::make_error(std::move(message)));
+                    break;
+                }
 
                 // Attempt one forced credential refresh on auth failures (OAuth providers).
                 const bool oauth_revoked_403 =

@@ -2,14 +2,22 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
 
+#include <httplib.h>
+
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <thread>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -31,6 +39,19 @@ public:
     void publish(const RateLimitInfo& info) {
         set_last_rate_limit_info(info);
     }
+};
+
+class ScopedServerStop {
+public:
+    explicit ScopedServerStop(httplib::Server& server)
+        : server_(server) {}
+
+    ~ScopedServerStop() {
+        server_.stop();
+    }
+
+private:
+    httplib::Server& server_;
 };
 
 } // namespace
@@ -725,6 +746,154 @@ TEST_CASE("AnthropicSSEParser - unknown event type produces no output", "[claude
     auto r = p.process_event("some_future_event", R"({"type":"some_future_event"})");
     REQUIRE(r.text.empty());
     REQUIRE(!r.done);
+}
+
+TEST_CASE("AnthropicSSEParser - overloaded stream error is retryable",
+          "[claude][sse][error]") {
+    AnthropicSSEParser p;
+    auto r = p.process_event(
+        "error",
+        R"({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}})");
+
+    REQUIRE(r.stream_error);
+    REQUIRE(r.retryable_stream_error);
+    REQUIRE(r.error_type == "overloaded_error");
+    REQUIRE(r.error_message == "Overloaded");
+    REQUIRE(!r.done);
+}
+
+TEST_CASE("AnthropicSSEParser - invalid request stream error is not retryable",
+          "[claude][sse][error]") {
+    AnthropicSSEParser p;
+    auto r = p.process_event(
+        "error",
+        R"({"type":"error","error":{"type":"invalid_request_error","message":"Bad request"}})");
+
+    REQUIRE(r.stream_error);
+    REQUIRE_FALSE(r.retryable_stream_error);
+    REQUIRE(r.error_type == "invalid_request_error");
+    REQUIRE(r.error_message == "Bad request");
+    REQUIRE(!r.done);
+}
+
+TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
+          "[claude][sse][error][http]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& res) {
+        const int attempt = ++requests;
+        res.set_header("Content-Type", "text/event-stream");
+        if (attempt == 1) {
+            res.set_content(
+                "event: error\n"
+                "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+                "text/event-stream");
+            return;
+        }
+
+        res.set_content(
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Recovered\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "event: message_delta\n"
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n"
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+    for (int i = 0; i < 50 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(server.is_running());
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        "claude-sonnet-4-6",
+        std::make_unique<AnthropicProtocol>());
+
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(make_simple_request(), [&](const StreamChunk& chunk) {
+        chunks.push_back(chunk);
+    });
+
+    REQUIRE(requests.load() == 2);
+    REQUIRE_FALSE(chunks.empty());
+    REQUIRE(chunks.back().is_final);
+    REQUIRE_FALSE(chunks.back().is_error);
+
+    std::string text;
+    for (const auto& chunk : chunks) {
+        text += chunk.content;
+        REQUIRE_FALSE(chunk.is_error);
+    }
+    REQUIRE(text == "Recovered");
+}
+
+TEST_CASE("HttpLLMProvider - does not retry Anthropic stream error after output",
+          "[claude][sse][error][http]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& res) {
+        ++requests;
+        res.set_header("Content-Type", "text/event-stream");
+        res.set_content(
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial\"}}\n\n"
+            "event: error\n"
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+    for (int i = 0; i < 50 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(server.is_running());
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        "claude-sonnet-4-6",
+        std::make_unique<AnthropicProtocol>());
+
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(make_simple_request(), [&](const StreamChunk& chunk) {
+        chunks.push_back(chunk);
+    });
+
+    REQUIRE(requests.load() == 1);
+    REQUIRE(chunks.size() >= 2);
+    CHECK(chunks.front().content == "Partial");
+    REQUIRE(chunks.back().is_final);
+    REQUIRE(chunks.back().is_error);
+    CHECK_THAT(chunks.back().content,
+               Catch::Matchers::ContainsSubstring("anthropic stream error: overloaded_error"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

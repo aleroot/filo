@@ -217,9 +217,14 @@ struct RateLimitInfo {
 struct ParseResult {
     std::vector<StreamChunk> chunks;        ///< Chunks to forward to the caller.
     bool    done              = false;      ///< True when the stream is complete.
+    bool    stream_started    = false;      ///< True when the provider emitted a stream-start event.
+    bool    stream_error      = false;      ///< True when the provider emitted an in-stream error event.
+    bool    retryable_stream_error = false; ///< True if the in-stream error can be retried.
     int32_t prompt_tokens     = 0;          ///< Input token count (non-zero when reported).
     int32_t completion_tokens = 0;          ///< Output token count (non-zero when reported).
     RateLimitInfo rate_limit;               ///< Rate limit info from HTTP headers (if available).
+    std::string stream_error_type;          ///< Provider error type for stream_error.
+    std::string stream_error_message;       ///< Provider error message for stream_error.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

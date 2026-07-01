@@ -80,8 +80,13 @@ public:
         std::string          text;             ///< Non-empty on `text_delta` events.
         std::vector<ToolCall> completed_tools; ///< Non-empty on `content_block_stop` with a tool.
         bool    done          = false;         ///< True on `message_stop`.
+        bool    stream_started = false;        ///< True on `message_start`.
+        bool    stream_error   = false;        ///< True on `event: error`.
+        bool    retryable_stream_error = false; ///< True for transient stream errors.
         int32_t input_tokens  = 0;             ///< From `message_start` usage (includes cache token fields when present).
         int32_t output_tokens = 0;             ///< From `message_delta`.
+        std::string error_type;
+        std::string error_message;
     };
 
     /**
@@ -209,6 +214,7 @@ public:
      * quota dashboards and adaptive back-off strategies.
      */
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
+    void reset_state() override;
 
 private:
     AnthropicThinkingConfig thinking_;

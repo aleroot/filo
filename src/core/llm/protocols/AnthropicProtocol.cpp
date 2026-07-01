@@ -206,6 +206,12 @@ namespace {
             || lowered.find("sonnet-4-6") != std::string::npos;
     }
 
+    [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
+        return type == "overloaded_error"
+            || type == "rate_limit_error"
+            || type == "api_error";
+    }
+
     std::string normalized_effort_or_empty(std::string_view raw) {
         std::string normalized = lower_copy(trim_copy(raw));
         std::erase_if(normalized, [](unsigned char ch) {
@@ -812,7 +818,26 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     simdjson::dom::element doc;
     if (parser.parse(input).get(doc) != simdjson::SUCCESS) return result;
 
+    if (event_type == "error") {
+        result.stream_error = true;
+        simdjson::dom::object error_obj;
+        if (doc["error"].get(error_obj) == simdjson::SUCCESS) {
+            std::string_view type;
+            if (error_obj["type"].get(type) == simdjson::SUCCESS) {
+                result.error_type = std::string(type);
+                result.retryable_stream_error =
+                    is_retryable_anthropic_stream_error(type);
+            }
+            std::string_view message;
+            if (error_obj["message"].get(message) == simdjson::SUCCESS) {
+                result.error_message = std::string(message);
+            }
+        }
+        return result;
+    }
+
     if (event_type == "message_start") {
+        result.stream_started = true;
         simdjson::dom::object msg_obj;
         if (doc["message"].get(msg_obj) == simdjson::SUCCESS) {
             simdjson::dom::object usage_obj;
@@ -1019,6 +1044,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     auto r = sse_parser_.process_event(event_type, event_data);
 
     ParseResult result;
+    result.stream_started = r.stream_started;
+    result.stream_error = r.stream_error;
+    result.retryable_stream_error = r.retryable_stream_error;
+    result.stream_error_type = std::move(r.error_type);
+    result.stream_error_message = std::move(r.error_message);
     if (r.input_tokens  > 0) accumulated_input_  = r.input_tokens;
     if (r.output_tokens > 0) accumulated_output_ = r.output_tokens;
 
@@ -1036,6 +1066,13 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
 
 std::unique_ptr<ApiProtocolBase> AnthropicProtocol::clone() const {
     return std::make_unique<AnthropicProtocol>(thinking_, default_max_tokens_);
+}
+
+void AnthropicProtocol::reset_state() {
+    sse_parser_ = AnthropicSSEParser{};
+    accumulated_input_ = 0;
+    accumulated_output_ = 0;
+    last_rate_limit_ = RateLimitInfo{};
 }
 
 // ── Response lifecycle hook overrides ────────────────────────────────────────
