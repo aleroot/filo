@@ -4,6 +4,7 @@
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <simdjson.h>
@@ -279,6 +280,66 @@ TEST_CASE("MCP resources/read on file returns content", "[mcp][resources]") {
         REQUIRE_THAT(std::string(text), ContainsSubstring("int main()"));
     }
     REQUIRE(saw_file);
+}
+
+TEST_CASE("MCP resources/read respects .agentignore",
+          "[mcp][resources][agentignore]") {
+    WorkspaceResetToDefault workspace_reset;
+    const auto primary = std::filesystem::temp_directory_path()
+        / ("filo_mcp_agentignore_"
+           + std::to_string(
+               std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(primary);
+    ScopedPathCleanup cleanup{primary};
+
+    auto& ws = core::workspace::Workspace::get_instance();
+    ws.initialize(primary, {}, true);
+
+    { std::ofstream(primary / ".agentignore") << "secrets/\n*.env\n"; }
+    std::filesystem::create_directories(primary / "secrets");
+    { std::ofstream(primary / "visible.txt") << "visible"; }
+    { std::ofstream(primary / "secrets" / "hidden.txt") << "hidden"; }
+    { std::ofstream(primary / ".env") << "env"; }
+
+    const std::string hidden_uri =
+        "file://" + (primary / "secrets" / "hidden.txt").generic_string();
+    const std::string hidden_req =
+        R"({"jsonrpc":"2.0","method":"resources/read","params":{"uri":")"
+        + hidden_uri
+        + R"("},"id":40})";
+    const auto hidden_resp = disp().dispatch(hidden_req);
+
+    simdjson::dom::parser parser;
+    auto hidden_root = parse_json_or_require(hidden_resp, parser);
+    int64_t code = 0;
+    REQUIRE(hidden_root["error"]["code"].get(code) == simdjson::SUCCESS);
+    REQUIRE(code == -32001);
+    std::string_view message;
+    REQUIRE(hidden_root["error"]["message"].get(message) == simdjson::SUCCESS);
+    REQUIRE_THAT(std::string(message), ContainsSubstring(".agentignore"));
+
+    const std::string dir_uri = "file://" + primary.generic_string();
+    const std::string dir_req =
+        R"({"jsonrpc":"2.0","method":"resources/read","params":{"uri":")"
+        + dir_uri
+        + R"("},"id":41})";
+    const auto dir_resp = disp().dispatch(dir_req);
+
+    simdjson::dom::parser dir_parser;
+    auto dir_root = parse_json_or_require(dir_resp, dir_parser);
+    simdjson::dom::array contents;
+    REQUIRE(dir_root["result"]["contents"].get(contents) == simdjson::SUCCESS);
+    bool saw_listing = false;
+    for (auto content : contents) {
+        std::string_view text;
+        if (content["text"].get(text) == simdjson::SUCCESS) {
+            saw_listing = true;
+            REQUIRE_THAT(std::string(text), ContainsSubstring("visible.txt"));
+            REQUIRE_THAT(std::string(text), !ContainsSubstring("secrets"));
+            REQUIRE_THAT(std::string(text), !ContainsSubstring(".env"));
+        }
+    }
+    REQUIRE(saw_listing);
 }
 
 TEST_CASE("MCP resources/read missing params object returns -32602", "[mcp][resources]") {

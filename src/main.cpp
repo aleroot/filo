@@ -183,9 +183,8 @@ int main(int argc, char** argv) {
     }
 
     std::vector<std::filesystem::path> additional_work_dirs;
-    for (auto it = std::next(work_dirs.begin()); it != work_dirs.end(); ++it) {
-        const auto& dir = *it;
-        additional_work_dirs.emplace_back(dir);
+    for (std::size_t i = 1; i < work_dirs.size(); ++i) {
+        additional_work_dirs.emplace_back(work_dirs[i]);
     }
     const bool enforce_workspace = !work_dirs.empty();
     core::workspace::Workspace::get_instance().initialize(

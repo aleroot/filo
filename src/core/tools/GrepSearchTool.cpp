@@ -3,6 +3,7 @@
 #include "ToolNames.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
 #include <filesystem>
 #include <regex>
@@ -251,35 +252,27 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     std::vector<std::filesystem::path> files;
     files.reserve(512);
 
-    std::filesystem::recursive_directory_iterator it(
-        resolved_dir, std::filesystem::directory_options::skip_permission_denied, ec
-    );
-    if (!ec) {
-        const auto end = std::filesystem::recursive_directory_iterator{};
-        for (; it != end; ++it) {
-            const auto& entry = *it;
-            ec.clear();
-            if (entry.is_directory(ec)) {
-                if (should_skip_dir(entry.path()))
-                    it.disable_recursion_pending();
-                continue;
+    const auto visible_files = core::workspace::collect_visible_regular_files(
+        resolved_dir,
+        context,
+        [](const std::filesystem::path& directory) {
+            return should_skip_dir(directory);
+        });
+    for (const auto& file : visible_files) {
+        if (has_include) {
+            bool include_match = false;
+            if (include_directory_filter.has_value()) {
+                include_match = is_subpath(*include_directory_filter, file);
+            } else if (include_has_separator) {
+                include_match = glob_match(
+                    include_pattern,
+                    relative_generic_path(file, resolved_dir));
+            } else {
+                include_match = glob_match(include_pattern, file.filename().string());
             }
-            if (!entry.is_regular_file(ec)) continue;
-            if (has_include) {
-                bool include_match = false;
-                if (include_directory_filter.has_value()) {
-                    include_match = is_subpath(*include_directory_filter, entry.path());
-                } else if (include_has_separator) {
-                    include_match = glob_match(
-                        include_pattern,
-                        relative_generic_path(entry.path(), resolved_dir));
-                } else {
-                    include_match = glob_match(include_pattern, entry.path().filename().string());
-                }
-                if (!include_match) continue;
-            }
-            files.push_back(entry.path());
+            if (!include_match) continue;
         }
+        files.push_back(file);
     }
 
     // Sort once so output order is deterministic regardless of thread scheduling.

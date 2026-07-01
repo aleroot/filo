@@ -10,6 +10,7 @@
 #include "GrepSearchTool.hpp"
 #include "ListDirectoryTool.hpp"
 #include "MoveFileTool.hpp"
+#include "PathVisibilityToolDecorator.hpp"
 #include "ReadFileTool.hpp"
 #include "ReplaceTool.hpp"
 #include "SearchReplaceTool.hpp"
@@ -59,17 +60,17 @@ void register_builtin_tools(ToolManager& tool_manager,
     }
 
     tool_manager.register_tool(std::make_shared<ShellTool>());
-    tool_manager.register_tool(std::make_shared<ApplyPatchTool>());
-    tool_manager.register_tool(std::make_shared<FileSearchTool>());
-    tool_manager.register_tool(std::make_shared<ReadFileTool>());
-    tool_manager.register_tool(std::make_shared<WriteFileTool>());
-    tool_manager.register_tool(std::make_shared<ListDirectoryTool>());
-    tool_manager.register_tool(std::make_shared<ReplaceTool>());
-    tool_manager.register_tool(std::make_shared<GrepSearchTool>());
-    tool_manager.register_tool(std::make_shared<SearchReplaceTool>());
-    tool_manager.register_tool(std::make_shared<DeleteFileTool>());
-    tool_manager.register_tool(std::make_shared<MoveFileTool>());
-    tool_manager.register_tool(std::make_shared<CreateDirectoryTool>());
+    tool_manager.register_tool(with_path_visibility(std::make_shared<ApplyPatchTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<FileSearchTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<ReadFileTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<WriteFileTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<ListDirectoryTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<ReplaceTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<GrepSearchTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<SearchReplaceTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<DeleteFileTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<MoveFileTool>()));
+    tool_manager.register_tool(with_path_visibility(std::make_shared<CreateDirectoryTool>()));
     tool_manager.register_tool(std::make_shared<WebSearchTool>());
     tool_manager.register_tool(std::make_shared<WebFetchTool>());
 

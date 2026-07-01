@@ -2,6 +2,8 @@
 #include "MentionPathUtils.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../utils/MimeUtils.hpp"
+#include "../workspace/PathVisibility.hpp"
+#include "../workspace/SessionWorkspace.hpp"
 
 #include <algorithm>
 #include <format>
@@ -141,11 +143,12 @@ std::string render_file_contents(const std::filesystem::path& path,
 
 std::string render_directory_listing(const std::filesystem::path& path,
                                      std::string_view display_path,
-                                     std::size_t max_directory_entries) {
+                                     std::size_t max_directory_entries,
+                                     const core::workspace::PathVisibility& visibility) {
     std::vector<std::filesystem::path> entries;
-    std::error_code ec;
-    for (const auto& entry : std::filesystem::directory_iterator(path, ec)) {
-        if (ec) break;
+    for (const auto& entry : core::workspace::collect_visible_directory_entries(
+             path,
+             visibility)) {
         entries.push_back(entry.path().filename());
     }
     std::sort(entries.begin(), entries.end());
@@ -168,6 +171,12 @@ std::string render_missing_path(std::string_view display_path) {
     return std::format("\n[Context for {}]\nError: path not found.\n[/Context]\n", display_path);
 }
 
+std::string render_ignored_path(std::string_view display_path) {
+    return std::format(
+        "\n[Context for {}]\nError: path is excluded by .agentignore.\n[/Context]\n",
+        display_path);
+}
+
 std::filesystem::path resolve_mention_path(std::string_view raw_path,
                                            const std::filesystem::path& base_dir) {
     std::filesystem::path resolved = raw_path;
@@ -177,19 +186,53 @@ std::filesystem::path resolve_mention_path(std::string_view raw_path,
     return resolved.lexically_normal();
 }
 
+bool is_under_mention_root(const std::filesystem::path& base_dir,
+                           const std::filesystem::path& path) {
+    const auto root = core::workspace::SessionWorkspace::normalize_path(base_dir);
+    const auto target = core::workspace::SessionWorkspace::normalize_path(path);
+
+    auto root_it = root.begin();
+    auto target_it = target.begin();
+    for (; root_it != root.end(); ++root_it, ++target_it) {
+        if (target_it == target.end() || *root_it != *target_it) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string render_out_of_scope_path(std::string_view display_path) {
+    return std::format(
+        "\n[Context for {}]\nError: path is outside the workspace.\n[/Context]\n",
+        display_path);
+}
+
 std::string render_mention(std::string_view raw_path,
                            const std::filesystem::path& base_dir,
-                           const MentionExpansionOptions& options) {
+                           const MentionExpansionOptions& options,
+                           const core::workspace::PathVisibility& visibility) {
     if (raw_path.empty()) return "@";
 
     const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
 
+    if (!std::filesystem::path(raw_path).is_absolute()
+        && !is_under_mention_root(base_dir, resolved)) {
+        return render_out_of_scope_path(raw_path);
+    }
+    if (!visibility.is_visible(resolved)) {
+        return render_ignored_path(raw_path);
+    }
     std::error_code ec;
+    ec.clear();
     if (std::filesystem::is_regular_file(resolved, ec)) {
         return render_file_contents(resolved, raw_path, options.max_file_bytes);
     }
     if (std::filesystem::is_directory(resolved, ec)) {
-        return render_directory_listing(resolved, raw_path, options.max_directory_entries);
+        return render_directory_listing(
+            resolved,
+            raw_path,
+            options.max_directory_entries,
+            visibility);
     }
     return render_missing_path(raw_path);
 }
@@ -340,6 +383,8 @@ ExpandedPrompt expand_prompt(std::string_view input,
                              const MentionExpansionOptions& options) {
     ExpandedPrompt output;
     output.display_text.reserve(input.size() + 256);
+    const core::workspace::AgentIgnorePathVisibilityFactory visibility_factory;
+    const auto visibility = visibility_factory.for_root(base_dir);
 
     const auto append_plain_text = [&](std::string_view text) {
         output.display_text += text;
@@ -401,6 +446,21 @@ ExpandedPrompt expand_prompt(std::string_view input,
         }
 
         const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
+        if (!visibility.is_visible(resolved)) {
+            std::string expansion = render_ignored_path(raw_path);
+            if (!trailing_suffix.empty() && !expansion.empty() && expansion.back() == '\n') {
+                expansion.pop_back();
+                expansion += trailing_suffix;
+                expansion.push_back('\n');
+            } else {
+                expansion += trailing_suffix;
+            }
+            output.display_text += expansion;
+            append_text_part(output.content_parts, expansion);
+            i = cursor;
+            continue;
+        }
+
         if (is_image_file(resolved)) {
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;
@@ -423,7 +483,7 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
-        std::string expansion = render_mention(raw_path, base_dir, options);
+        std::string expansion = render_mention(raw_path, base_dir, options, visibility);
         if (!trailing_suffix.empty() && !expansion.empty() && expansion.back() == '\n') {
             expansion.pop_back();
             expansion += trailing_suffix;

@@ -1,5 +1,6 @@
 #include "Autocomplete.hpp"
 #include "Constants.hpp"
+#include "core/workspace/PathVisibility.hpp"
 
 #include <algorithm>
 #include <array>
@@ -67,6 +68,8 @@ std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& 
                                                    std::stop_token stop_token) {
     std::vector<MentionSuggestion> entries;
     std::error_code ec;
+    const core::workspace::AgentIgnorePathVisibilityFactory visibility_factory;
+    const auto visibility = visibility_factory.for_root(root);
 
     for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
         if (stop_token.stop_requested()) {
@@ -87,6 +90,12 @@ std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& 
 
         if (is_dir && should_skip_mention_directory(filename)) {
             it.disable_recursion_pending();
+            continue;
+        }
+        if (!visibility.is_visible(*it)) {
+            if (is_dir && visibility.should_prune_directory(*it)) {
+                it.disable_recursion_pending();
+            }
             continue;
         }
 

@@ -3,8 +3,13 @@
 #include "../workspace/SessionWorkspace.hpp"
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <utility>
+
+namespace core::workspace {
+class PathVisibility;
+}
 
 namespace core::context {
 
@@ -19,14 +24,17 @@ enum class SessionTransport {
 struct SessionContext {
     SessionContext(std::string session_id,
                    core::workspace::SessionWorkspace workspace,
-                   SessionTransport transport = SessionTransport::unspecified)
+                   SessionTransport transport = SessionTransport::unspecified,
+                   std::shared_ptr<const core::workspace::PathVisibility> path_visibility = {})
         : session_id(std::move(session_id))
         , workspace(std::move(workspace))
-        , transport(transport) {}
+        , transport(transport)
+        , path_visibility(std::move(path_visibility)) {}
 
     std::string session_id;
     core::workspace::SessionWorkspace workspace;
     SessionTransport transport;
+    std::shared_ptr<const core::workspace::PathVisibility> path_visibility;
 
     [[nodiscard]] const core::workspace::SessionWorkspace& workspace_view() const noexcept;
     [[nodiscard]] const core::workspace::WorkspaceSnapshot& effective_workspace() const noexcept;

@@ -22,6 +22,7 @@
 #include "../tools/SkillRegistry.hpp"
 #include "../tools/ActivateSkillTool.hpp"
 #include "../workspace/Workspace.hpp"
+#include "../workspace/PathVisibility.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/Base64.hpp"
 #include "../utils/MimeUtils.hpp"
@@ -940,33 +941,26 @@ struct ParsedPromptGetRequest {
 }
 
 [[nodiscard]] RpcExpected<std::string> build_directory_listing(
-    const std::filesystem::path& path)
+    const std::filesystem::path& path,
+    const core::context::SessionContext& context)
 {
-    std::error_code it_ec;
     std::vector<std::string> lines;
     lines.reserve(128);
     std::size_t listing_bytes = 0;
     bool listing_truncated = false;
 
-    for (std::filesystem::directory_iterator it(
+    for (const auto& entry : core::workspace::collect_visible_directory_entries(
              path,
-             std::filesystem::directory_options::skip_permission_denied,
-             it_ec),
-         end;
-         it != end;
-         it.increment(it_ec))
-    {
-        if (it_ec) break;
-
+             context)) {
         std::error_code type_ec;
-        const bool is_directory = it->is_directory(type_ec);
+        const bool is_directory = entry.is_directory(type_ec);
         if (type_ec) continue;
 
         std::uintmax_t size = 0;
         if (!is_directory) {
             std::error_code size_ec;
-            if (it->is_regular_file(size_ec) && !size_ec) {
-                size = it->file_size(size_ec);
+            if (entry.is_regular_file(size_ec) && !size_ec) {
+                size = entry.file_size(size_ec);
                 if (size_ec) size = 0;
             }
         }
@@ -974,7 +968,7 @@ struct ParsedPromptGetRequest {
         std::string line = std::format(
             "{}\t{}\t{}",
             is_directory ? "dir" : "file",
-            it->path().filename().string(),
+            entry.path().filename().string(),
             size);
         if (lines.size() >= kMaxDirectoryEntries
             || listing_bytes + line.size() + 1 > kMaxDirectoryListingBytes) {
@@ -985,14 +979,6 @@ struct ParsedPromptGetRequest {
         listing_bytes += line.size() + 1;
         lines.push_back(std::move(line));
     }
-
-    if (it_ec) {
-        return std::unexpected(
-            RpcError{
-                kResourceInternalErrorCode,
-                std::format("Failed to list directory '{}': {}", path.string(), it_ec.message())});
-    }
-
     std::ranges::sort(lines);
     std::string listing;
     listing.reserve(std::min(listing_bytes + 64, kMaxDirectoryListingBytes + 64));
@@ -1016,6 +1002,18 @@ struct ParsedPromptGetRequest {
             RpcError{-32001, "Access denied: path is outside the allowed workspace"});
     }
 
+    auto visibility_context = context;
+    if (!visibility_context.path_visibility) {
+        const core::workspace::AgentIgnorePathVisibilityFactory visibility_factory;
+        visibility_context.path_visibility =
+            std::make_shared<core::workspace::PathVisibility>(
+                visibility_factory.for_context(visibility_context));
+    }
+    if (const auto hidden_reason =
+            visibility_context.path_visibility->hidden_reason(path.string(), path)) {
+        return std::unexpected(RpcError{-32001, *hidden_reason});
+    }
+
     std::error_code status_ec;
     const auto status = std::filesystem::status(path, status_ec);
     if (status_ec || status.type() == std::filesystem::file_type::not_found) {
@@ -1034,7 +1032,7 @@ struct ParsedPromptGetRequest {
 
             if (status.type() == std::filesystem::file_type::directory) {
                 rw.kv_str("mimeType", "application/x-directory").comma();
-                auto listing = build_directory_listing(path);
+                auto listing = build_directory_listing(path, visibility_context);
                 if (!listing) return std::unexpected(listing.error());
                 rw.kv_str("text", *listing);
             } else if (status.type() == std::filesystem::file_type::regular) {

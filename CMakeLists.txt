@@ -197,6 +197,8 @@ set(FILO_CORE_SOURCES
     src/core/utils/Base64.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/hooks/HookManager.cpp
+    src/core/workspace/AgentIgnore.cpp
+    src/core/workspace/PathVisibility.cpp
     src/core/workspace/Workspace.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
@@ -206,6 +208,7 @@ set(FILO_CORE_SOURCES
     src/core/context/SteeringLoader.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/ApplyPatchTool.cpp
+    src/core/tools/PathVisibilityToolDecorator.cpp
     src/core/tools/FileSearchTool.cpp
     src/core/tools/ReadFileTool.cpp
     src/core/tools/WriteFileTool.cpp
@@ -388,6 +391,7 @@ add_executable(filo_tests
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
     tests/test_network_traffic.cpp
+    tests/test_agent_ignore.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_history.cpp
@@ -544,6 +548,7 @@ source_group(
         tests/test_auto_classifier.cpp
         tests/test_prompt_input.cpp
         tests/test_session.cpp
+        tests/test_agent_ignore.cpp
         tests/test_session_efficiency.cpp
         tests/test_sessions_lifecycle.cpp
         tests/test_budget_tracker.cpp

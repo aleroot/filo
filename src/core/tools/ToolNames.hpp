@@ -74,4 +74,10 @@ inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
         || tool_name == kListDirectory;
 }
 
+[[nodiscard]] constexpr bool is_path_visibility_constrained_tool(
+    std::string_view tool_name) noexcept {
+    return is_read_search_list_tool(tool_name)
+        || is_file_modification_tool(tool_name);
+}
+
 } // namespace core::tools::names

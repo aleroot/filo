@@ -221,6 +221,14 @@ Use `"ultra"` when token pressure matters more than keeping broad excerpts: it a
 
 In the interactive TUI, use `/compression` to pick a mode from a menu, or `/compression ultra` / `/compress ultra` to switch directly.
 
+### Agent Ignore
+
+Add a `.agentignore` file at the workspace root to keep sensitive or noisy files
+out of Filo-controlled context discovery. Patterns use gitignore-style matching.
+Filo applies `.agentignore` to direct file reads, file search, grep search,
+directory listings, path-aware file modification tools, `@file` context
+mentions, and mention autocomplete.
+
 ### Profiles
 
 Profiles let you keep multiple named configuration overlays and switch between them instantly.

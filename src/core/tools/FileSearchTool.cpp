@@ -3,6 +3,7 @@
 #include "ToolNames.hpp"
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <filesystem>
@@ -132,41 +133,32 @@ std::string FileSearchTool::execute(const std::string& json_args, const core::co
             bool first = true;
             size_t count = 0;
 
-            std::filesystem::recursive_directory_iterator it(
+            core::workspace::visit_visible_regular_files(
                 resolved_dir,
-                std::filesystem::directory_options::skip_permission_denied,
-                ec
-            );
-            if (!ec) {
-                const auto end = std::filesystem::recursive_directory_iterator{};
-                for (; it != end; ++it) {
-                    if (count >= kMaxResults) break;
-                    const auto& entry = *it;
-                    ec.clear();
-                    if (entry.is_directory(ec)) {
-                        if (should_skip_dir(entry.path()))
-                            it.disable_recursion_pending();
-                        continue;
-                    }
-                    if (!entry.is_regular_file(ec)) continue;
-                    const std::string relative_path = relative_generic_path(entry.path(), resolved_dir);
+                context,
+                [](const std::filesystem::path& directory) {
+                    return should_skip_dir(directory);
+                },
+                [&](const std::filesystem::path& file) {
+                    if (count >= kMaxResults) return false;
+                    const std::string relative_path = relative_generic_path(file, resolved_dir);
                     bool matches = false;
                     if (directory_filter.has_value()) {
-                        matches = is_subpath(*directory_filter, entry.path());
+                        matches = is_subpath(*directory_filter, file);
                     } else if (pattern_has_separator) {
                         matches = glob_match(pattern, relative_path);
                     } else {
-                        matches = glob_match(pattern, entry.path().filename().string());
+                        matches = glob_match(pattern, file.filename().string());
                     }
 
                     if (matches) {
                         if (!first) w.comma();
                         first = false;
-                        w.str(entry.path().string());
+                        w.str(file.string());
                         ++count;
                     }
-                }
-            }
+                    return count < kMaxResults;
+                });
         }
     }
     return std::move(w).take();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "../workspace/PathVisibility.hpp"
 #include "TempFileAccessRegistry.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
@@ -44,6 +45,18 @@ inline std::optional<std::string> check_workspace_access(
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
+    }
+    if (names::is_path_visibility_constrained_tool(tool_name)
+        && !has_temp_read_grant) {
+        const auto* visibility = context.path_visibility.get();
+        if (visibility != nullptr) {
+            if (const auto hidden_reason =
+                    visibility->hidden_reason(path_str, resolved)) {
+                return std::format(
+                    R"({{"error":"{}."}})",
+                    *hidden_reason);
+            }
+        }
     }
     if (!tool_name.empty()) {
         if (const auto policy_error =

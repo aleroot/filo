@@ -3,6 +3,7 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
 #include <format>
 #include <filesystem>
@@ -71,11 +72,19 @@ std::string ListDirectoryTool::execute(const std::string& json_args, const core:
         {
             auto _arr = w.array();
             bool first = true;
-            for (const auto& entry : std::filesystem::directory_iterator(resolved_path, ec)) {
+            for (const auto& entry : core::workspace::collect_visible_directory_entries(
+                     resolved_path,
+                     context)) {
+                ec.clear();
+                const bool is_dir = entry.is_directory(ec);
+                if (ec) {
+                    ec.clear();
+                    continue;
+                }
                 if (!first) w.comma();
                 first = false;
                 auto _item = w.object();
-                w.kv_str("type", entry.is_directory(ec) ? "dir" : "file").comma()
+                w.kv_str("type", is_dir ? "dir" : "file").comma()
                  .kv_str("name", entry.path().filename().string());
             }
         }
