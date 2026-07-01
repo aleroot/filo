@@ -81,6 +81,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <deque>
 #include <mutex>
 #include <condition_variable>
 #include <optional>
@@ -762,6 +763,11 @@ RunResult run(RunOptions opts) {
     std::mutex stream_chunk_timing_mutex;
     std::unordered_map<std::size_t, std::chrono::steady_clock::time_point> stream_chunk_last_at;
     std::atomic_bool assistant_turn_active{false};
+    struct PendingAgentTurn {
+        std::string text;
+        core::agent::Agent::TurnCallbacks callbacks;
+    };
+    std::deque<PendingAgentTurn> queued_steering_turns;
     ActivityTimerRegistry turn_activity_timers;
     
     // Rate limit tracking for status bar and notifications
@@ -1244,6 +1250,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.clear();
+            queued_steering_turns.clear();
             review_activity_state.active = false;
             review_activity_state.hint.clear();
             review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
@@ -3939,9 +3946,57 @@ RunResult run(RunOptions opts) {
     // ── Agent turn submission ─────────────────────────────────────────────────
     // Extracted so that SkillCommand can inject an expanded prompt as a full
     // agent turn (with user message card + tool cards) via send_user_message_fn.
-    auto submit_agent_turn = [&](const std::string& text,
-                                 core::agent::Agent::TurnCallbacks turn_callbacks =
-                                     core::agent::Agent::TurnCallbacks{}) {
+    std::function<void(std::string, core::agent::Agent::TurnCallbacks)> submit_agent_turn;
+
+    auto take_queued_steering_turn_or_mark_idle = [&]() -> std::optional<PendingAgentTurn> {
+        std::lock_guard lock(ui_mutex);
+        if (queued_steering_turns.empty()) {
+            assistant_turn_active.store(false, std::memory_order_release);
+            wake_ui();
+            return std::nullopt;
+        }
+        auto next = std::move(queued_steering_turns.front());
+        queued_steering_turns.pop_front();
+        wake_ui();
+        return next;
+    };
+
+    auto submit_or_queue_agent_turn =
+        [&](std::string text, core::agent::Agent::TurnCallbacks turn_callbacks) {
+            if (text.empty()) {
+                return;
+            }
+
+            bool should_submit_now = false;
+            {
+                std::lock_guard lock(ui_mutex);
+                if (assistant_turn_active.load(std::memory_order_acquire)
+                    || !queued_steering_turns.empty()) {
+                    queued_steering_turns.push_back(PendingAgentTurn{
+                        .text = std::move(text),
+                        .callbacks = std::move(turn_callbacks),
+                    });
+                } else {
+                    assistant_turn_active.store(true, std::memory_order_release);
+                    should_submit_now = true;
+                }
+            }
+
+            if (!should_submit_now) {
+                agent->request_stop();
+                append_history("\n↪  Steering queued; stopping the current turn.\n");
+                wake_ui();
+                return;
+            }
+            submit_agent_turn(std::move(text), std::move(turn_callbacks));
+        };
+
+    submit_agent_turn = [&](std::string text,
+                            core::agent::Agent::TurnCallbacks turn_callbacks) {
+        if (text.empty()) {
+            return;
+        }
+        assistant_turn_active.store(true, std::memory_order_release);
         std::string timestamp = current_time_str();
         std::size_t assistant_index = 0;
         std::string assistant_message_id;
@@ -3972,6 +4027,8 @@ RunResult run(RunOptions opts) {
                      effective_callbacks = std::move(effective_callbacks),
                      assistant_index,
                      &update_assistant_message,
+                     &submit_agent_turn,
+                     &take_queued_steering_turn_or_mark_idle,
                      &assistant_turn_active,
                      &turn_activity_timers,
                      &stream_chunk_timing_mutex,
@@ -4035,7 +4092,8 @@ RunResult run(RunOptions opts) {
                 [](const std::string&, const std::string&) {},
                 [assistant_index, agent,
                  &update_assistant_message,
-                 &assistant_turn_active,
+                 &submit_agent_turn,
+                 &take_queued_steering_turn_or_mark_idle,
                  &turn_activity_timers,
                  &stream_chunk_timing_mutex,
                  &stream_chunk_last_at,
@@ -4046,7 +4104,6 @@ RunResult run(RunOptions opts) {
                         stream_chunk_last_at.erase(assistant_index);
                     }
                     turn_activity_timers.stop(assistant_message_id);
-                    assistant_turn_active.store(false, std::memory_order_relaxed);
                     const bool was_stopped = agent->is_stop_requested();
                     update_assistant_message(assistant_index, [&](UiMessage& message) {
                         message.pending = false;
@@ -4057,6 +4114,11 @@ RunResult run(RunOptions opts) {
                         }
                     });
                     save_session_snapshot();
+                    if (auto next_turn = take_queued_steering_turn_or_mark_idle();
+                        next_turn.has_value()) {
+                        submit_agent_turn(std::move(next_turn->text),
+                                          std::move(next_turn->callbacks));
+                    }
                 },
                 std::move(effective_callbacks));
         }).detach();
@@ -4072,7 +4134,7 @@ RunResult run(RunOptions opts) {
         if (!resolution.warning.empty()) {
             append_history(std::format("\n⚠  {}\n", resolution.warning));
         }
-        submit_agent_turn(text, resolution.callbacks);
+        submit_or_queue_agent_turn(text, std::move(resolution.callbacks));
     };
 
     // ── Input component ──────────────────────────────────────────────────────
@@ -4190,7 +4252,7 @@ RunResult run(RunOptions opts) {
             // prompt as a full agent turn with TUI message cards and tool
             // activity panels, identical to normal user input.
             .send_user_message_fn = [&](const std::string& message) {
-                submit_agent_turn(message);
+                submit_or_queue_agent_turn(message, {});
             },
             .set_review_activity_fn = set_review_activity,
             .send_user_skill_message_fn = submit_skill_turn,
@@ -4212,7 +4274,7 @@ RunResult run(RunOptions opts) {
 
         if (cmd_executor.try_execute(text, ctx)) return;
 
-        submit_agent_turn(text);
+        submit_or_queue_agent_turn(std::move(text), {});
     };
 
     auto open_external_editor = [&]() -> bool {
@@ -5588,6 +5650,7 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ConversationSearchHit> conversation_search_hits;
         bool                            stderr_panel_active = false;
         std::vector<std::string>        stderr_panel_lines;
+        std::size_t                     queued_steering_count = 0;
         {
             std::lock_guard lock(ui_mutex);
             if (conversation_search_state.active) {
@@ -5644,6 +5707,7 @@ RunResult run(RunOptions opts) {
             stderr_panel_active = stderr_panel_state.active
                 && !stderr_panel_state.lines.empty();
             stderr_panel_lines = stderr_panel_state.lines;
+            queued_steering_count = queued_steering_turns.size();
         }
         
         // Question dialog state (copy for rendering)
@@ -5973,6 +6037,14 @@ RunResult run(RunOptions opts) {
                     | color(Color::GrayLight),
             });
         }
+
+        Element queued_steering_el = text("");
+        if (queued_steering_count > 0) {
+            queued_steering_el =
+                text(std::format(" steer queued:{} ", queued_steering_count))
+                | bgcolor(ColorWarn)
+                | color(Color::Black);
+        }
         
         Elements left_items;
         left_items.push_back(
@@ -5988,8 +6060,10 @@ RunResult run(RunOptions opts) {
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
         left_items.push_back(guardrail_el);
+        left_items.push_back(queued_steering_el);
         left_items.push_back(review_activity_el);
-        const bool show_status_footer = ui_show_footer || review_activity_active;
+        const bool show_status_footer =
+            ui_show_footer || review_activity_active || queued_steering_count > 0;
         auto left_el = show_status_footer
             ? hbox(std::move(left_items)) | xflex
             : text("");
