@@ -31,6 +31,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1603,7 +1604,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
             }
             started = true;
 
-            auto finish_with_error = [&](std::string_view message) {
+            auto finish_with_error = [state](std::string_view message) {
                 std::string trimmed_message = trim_copy(message);
                 if (trimmed_message.empty()) {
                     trimmed_message = "Upstream provider error";
@@ -1621,98 +1622,109 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
             };
             state->queue.push_data(exec::gateway::openai::role_chunk(context));
 
-            try {
-                provider->stream_response(
-                    request,
-                    [state,
-                     provider,
-                     provider_name,
-                     gateway_session_id = request.session_id,
-                     response_id,
-                     created,
-                     model,
-                     include_usage](const core::llm::StreamChunk& chunk) {
-                        if (state->queue.is_closed()) {
-                            return;
-                        }
-
-                        const exec::gateway::openai::StreamChunkContext chunk_context{
-                            .response_id = response_id,
-                            .created = created,
-                            .model = model,
-                            .include_usage = include_usage,
-                        };
-
-                        if (chunk.is_error) {
-                            std::string message = trim_copy(chunk.content);
-                            if (message.empty()) {
-                                message = "Upstream provider error";
+            std::thread([state,
+                         provider,
+                         request,
+                         response_id,
+                         created,
+                         model,
+                         provider_name,
+                         include_usage,
+                         finish_with_error]() mutable {
+                try {
+                    provider->stream_response(
+                        request,
+                        [state,
+                         provider,
+                         provider_name,
+                         gateway_session_id = request.session_id,
+                         response_id,
+                         created,
+                         model,
+                         include_usage](const core::llm::StreamChunk& chunk) {
+                            if (state->queue.is_closed()) {
+                                return;
                             }
-                            state->queue.push_data(exec::gateway::openai::error_body(message));
-                            state->queue.push_data("[DONE]");
-                            state->queue.close();
-                            return;
-                        }
 
-                        if (!chunk.content.empty()) {
-                            state->queue.push_data(
-                                exec::gateway::openai::content_chunk(
-                                    chunk_context,
-                                    chunk.content));
-                        }
+                            const exec::gateway::openai::StreamChunkContext chunk_context{
+                                .response_id = response_id,
+                                .created = created,
+                                .model = model,
+                                .include_usage = include_usage,
+                            };
 
-                        if (!chunk.tools.empty()) {
-                            state->saw_tool_calls.store(true, std::memory_order_relaxed);
-                            state->queue.push_data(
-                                exec::gateway::openai::tool_calls_chunk(
-                                    chunk_context,
-                                    chunk.tools));
-                        }
-
-                        if (chunk.is_final) {
-                            const auto usage = provider->get_last_usage();
-                            std::string actual_model = provider->get_last_model();
-                            if (actual_model.empty()) {
-                                actual_model = model;
+                            if (chunk.is_error) {
+                                std::string message = trim_copy(chunk.content);
+                                if (message.empty()) {
+                                    message = "Upstream provider error";
+                                }
+                                state->queue.push_data(exec::gateway::openai::error_body(message));
+                                state->queue.push_data("[DONE]");
+                                state->queue.close();
+                                return;
                             }
-                            if (usage.has_data()) {
-                                const bool should_estimate_cost = provider->should_estimate_cost();
-                                core::budget::BudgetTracker::get_instance().record_event({
-                                    .kind = core::budget::TokenLedgerEventKind::Actual,
-                                    .source = core::budget::TokenLedgerSource::Gateway,
-                                    .session_id = gateway_session_id,
-                                    .request_id = response_id,
-                                    .actor = "api_gateway",
-                                    .provider = provider_name,
-                                    .model = actual_model,
-                                    .usage = usage,
-                                    .should_estimate_cost = should_estimate_cost,
-                                    .billable = should_estimate_cost,
-                                });
-                            }
-                            const std::string_view finish_reason =
-                                state->saw_tool_calls.load(std::memory_order_relaxed)
-                                    ? "tool_calls"
-                                    : "stop";
-                            state->queue.push_data(
-                                exec::gateway::openai::finish_chunk(
-                                    chunk_context,
-                                    finish_reason));
-                            if (include_usage) {
+
+                            if (!chunk.content.empty()) {
                                 state->queue.push_data(
-                                    exec::gateway::openai::usage_chunk(
+                                    exec::gateway::openai::content_chunk(
                                         chunk_context,
-                                        usage));
+                                        chunk.content));
                             }
-                            state->queue.push_data("[DONE]");
-                            state->queue.close();
-                        }
-                    });
-            } catch (const std::exception& e) {
-                finish_with_error(std::format("Provider execution failed: {}", e.what()));
-            } catch (...) {
-                finish_with_error("Provider execution failed with an unknown error");
-            }
+
+                            if (!chunk.tools.empty()) {
+                                state->saw_tool_calls.store(true, std::memory_order_relaxed);
+                                state->queue.push_data(
+                                    exec::gateway::openai::tool_calls_chunk(
+                                        chunk_context,
+                                        chunk.tools));
+                            }
+
+                            if (chunk.is_final) {
+                                const auto usage = provider->get_last_usage();
+                                std::string actual_model = provider->get_last_model();
+                                if (actual_model.empty()) {
+                                    actual_model = model;
+                                }
+                                if (usage.has_data()) {
+                                    const bool should_estimate_cost =
+                                        provider->should_estimate_cost();
+                                    core::budget::BudgetTracker::get_instance().record_event({
+                                        .kind = core::budget::TokenLedgerEventKind::Actual,
+                                        .source = core::budget::TokenLedgerSource::Gateway,
+                                        .session_id = gateway_session_id,
+                                        .request_id = response_id,
+                                        .actor = "api_gateway",
+                                        .provider = provider_name,
+                                        .model = actual_model,
+                                        .usage = usage,
+                                        .should_estimate_cost = should_estimate_cost,
+                                        .billable = should_estimate_cost,
+                                    });
+                                }
+                                const std::string_view finish_reason =
+                                    state->saw_tool_calls.load(std::memory_order_relaxed)
+                                        ? "tool_calls"
+                                        : "stop";
+                                state->queue.push_data(
+                                    exec::gateway::openai::finish_chunk(
+                                        chunk_context,
+                                        finish_reason));
+                                if (include_usage) {
+                                    state->queue.push_data(
+                                        exec::gateway::openai::usage_chunk(
+                                            chunk_context,
+                                            usage));
+                                }
+                                state->queue.push_data("[DONE]");
+                                state->queue.close();
+                            }
+                        });
+                } catch (const std::exception& e) {
+                    finish_with_error(std::format("Provider execution failed: {}", e.what()));
+                } catch (...) {
+                    finish_with_error("Provider execution failed with an unknown error");
+                }
+            }).detach();
 
             constexpr auto kWaitTimeout = std::chrono::minutes{10};
             const auto deadline = std::chrono::steady_clock::now() + kWaitTimeout;

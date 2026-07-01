@@ -38,6 +38,12 @@ public:
 
     /**
      * @brief Stream a response from the LLM based on the conversation history.
+     *
+     * Implementations own the transport for exactly one model request and must
+     * not return before they have either emitted a terminal `is_final` chunk or
+     * thrown a startup/transport exception. Callers that need non-blocking
+     * behaviour should run this method on their own worker thread.
+     *
      * @param request The chat request options.
      * @param callback A function called with each new chunk of response.
      *        The StreamChunk struct contains content, tool_calls, is_final flag,

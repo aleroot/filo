@@ -273,6 +273,78 @@ TEST_CASE("Agent auto-compaction reports provider exceptions", "[agent][session]
     CHECK(agent->get_context_summary().empty());
 }
 
+// Regression: auto-compaction status must be delivered through the out-of-band
+// status log sink (TurnCallbacks::on_status_log) and NEVER through the streaming
+// text callback. Routing status through the streaming (assistant-message) chunk
+// callback polluted the assistant response body and left the TUI stuck on
+// "Analyzing..." with a broken /copy ("Nothing to copy yet").
+TEST_CASE("Agent auto-compaction status uses the status log sink, not text",
+          "[agent][session]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->set_auto_compact_threshold(50);
+
+    provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
+        if (!req.messages.empty()
+            && req.messages.back().content.find("Summarise the conversation")
+                != std::string::npos) {
+            callback(core::llm::StreamChunk::make_content("Condensed summary."));
+            callback(core::llm::StreamChunk::make_final());
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content(
+            "This response is long enough to trigger compaction."));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::mutex captured_mutex;
+    std::string streamed_text;
+    std::string status_log;
+    std::promise<void> turn_done;
+    std::promise<void> compacted;
+    std::atomic<bool> compacted_set{false};
+
+    core::agent::Agent::TurnCallbacks turn_callbacks;
+    turn_callbacks.on_status_log = [&](const std::string& status) {
+        std::lock_guard lock(captured_mutex);
+        status_log += status;
+        if (status.find("History compacted") != std::string::npos
+            && !compacted_set.exchange(true)) {
+            compacted.set_value();
+        }
+    };
+
+    agent->send_message(
+        std::string{"Hello"},
+        [&](const std::string& text) {
+            std::lock_guard lock(captured_mutex);
+            streamed_text += text;
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() { turn_done.set_value(); },
+        std::move(turn_callbacks));
+
+    turn_done.get_future().wait();
+    REQUIRE(compacted.get_future().wait_for(std::chrono::seconds(5))
+            == std::future_status::ready);
+
+    std::lock_guard lock(captured_mutex);
+    // The compaction lifecycle status landed on the status log sink.
+    CHECK(status_log.find("Auto-compacting history") != std::string::npos);
+    CHECK(status_log.find("History compacted") != std::string::npos);
+    // The streaming (assistant response) callback saw the model answer only and
+    // was never polluted with compaction status text.
+    CHECK(streamed_text.find("This response is long enough") != std::string::npos);
+    CHECK(streamed_text.find("Auto-compacting history") == std::string::npos);
+    CHECK(streamed_text.find("History compacted") == std::string::npos);
+}
+
 TEST_CASE("SessionStore list/delete operations", "[session][store]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_lifecycle"};
     core::session::SessionStore store{tmp.path};

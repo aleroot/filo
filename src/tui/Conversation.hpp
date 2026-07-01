@@ -96,6 +96,7 @@ struct UiMessage {
     // Assistant-specific fields
     std::vector<ToolActivity> tools;     // Tool calls in this turn
     bool pending = false;                // Still streaming/receiving
+    bool finalized = false;              // Turn completed; must not revert to pending
     bool thinking = false;               // Show thinking indicator
     bool show_lightbulb = false;         // Show 💡 prefix
     bool stopped = false;                // Generation was stopped by user

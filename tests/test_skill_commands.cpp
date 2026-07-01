@@ -82,10 +82,13 @@ struct ScopedCurrentPath {
 
 class DummyProvider final : public core::llm::LLMProvider {
 public:
-    void stream_response(const core::llm::ChatRequest&,
+    void stream_response(const core::llm::ChatRequest& request,
                          std::function<void(const core::llm::StreamChunk&)> callback) override {
+        requests.push_back(request);
         callback(core::llm::StreamChunk::make_final());
     }
+
+    std::vector<core::llm::ChatRequest> requests;
 };
 
 static core::commands::CommandContext make_null_ctx() {
@@ -690,6 +693,42 @@ TEST_CASE("SkillCommand::execute falls back to agent->send_message when no send_
 
     // No agent + no send_user_message_fn → reports "No agent available".
     CHECK_THAT(appended, Catch::Matchers::ContainsSubstring("No agent available"));
+}
+
+TEST_CASE("SkillCommand::execute dispatches direct agent fallback asynchronously",
+          "[skill_commands]") {
+    SkillManifest m;
+    m.name        = "fallback";
+    m.description = "Fallback skill";
+    m.type        = SkillType::Prompt;
+    m.body        = "Run fallback prompt.";
+    m.allowed_tools = {"read_file"};
+
+    SkillCommand cmd(m);
+
+    auto provider = std::make_shared<DummyProvider>();
+    auto ctx = make_null_ctx();
+    ctx.text = "/fallback";
+    ctx.agent = std::make_shared<core::agent::Agent>(
+        provider,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_workspace_session_context());
+    ctx.send_user_message_fn = nullptr;
+    ctx.send_user_skill_message_fn = nullptr;
+
+    std::optional<std::function<void()>> deferred_task;
+    ctx.dispatch_async_fn = [&deferred_task](std::function<void()> task) {
+        deferred_task = std::move(task);
+    };
+
+    cmd.execute(ctx);
+
+    REQUIRE(deferred_task.has_value());
+    REQUIRE(provider->requests.empty());
+
+    (*deferred_task)();
+    REQUIRE(provider->requests.size() == 1);
+    REQUIRE(provider->requests.front().messages.back().content == "Run fallback prompt.");
 }
 
 // ---------------------------------------------------------------------------

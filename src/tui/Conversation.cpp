@@ -615,6 +615,9 @@ UiMessage make_assistant_message(std::string text, std::string timestamp, bool p
     msg.text = std::move(text);
     msg.timestamp = std::move(timestamp);
     msg.pending = pending;
+    // A message created in a non-pending state is already complete and must
+    // never be reverted to pending by a late/out-of-band callback.
+    msg.finalized = !pending;
     msg.thinking = pending;
     return msg;
 }

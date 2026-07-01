@@ -581,7 +581,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             refresh_context_window_snapshot_unlocked();
         }
         text_callback(message);
-        check_auto_compact(text_callback);
+        check_auto_compact(turn_callbacks.on_status_log
+                               ? turn_callbacks.on_status_log
+                               : text_callback);
         done_callback();
         return;
     }
@@ -825,7 +827,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 self->run_efficiency_rotation_if_needed(
                     turn_callbacks.min_context_utilization_for_rotation);
             }
-            self->check_auto_compact(text_callback);
+            self->check_auto_compact(turn_callbacks.on_status_log
+                                          ? turn_callbacks.on_status_log
+                                          : text_callback);
             done_callback();
             return;
         }
@@ -1324,7 +1328,7 @@ void Agent::run_efficiency_rotation_if_needed(double min_context_utilization_for
     }
 }
 
-void Agent::check_auto_compact(std::function<void(const std::string&)> text_callback) {
+void Agent::check_auto_compact(std::function<void(const std::string&)> status_log_callback) {
     // Only check compaction when turn is complete (not in the middle of multi-step execution)
     // This is called from:
     // 1. After assistant text response (no tool calls) - OK to check
@@ -1369,7 +1373,7 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> text_call
             .reason = HistoryCompactionReason::Auto,
         },
         HistoryCompactionCallbacks{
-            .on_status = std::move(text_callback),
+            .on_status = std::move(status_log_callback),
             .on_summary = [self](std::string summary) {
                 self->compact_history(std::move(summary));
             },

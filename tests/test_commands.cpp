@@ -978,6 +978,34 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(review_activity_events->front().first == true);
     }
 
+    SECTION("/retry dispatches agent work asynchronously when dispatcher is available") {
+        *mock_history = "";
+        auto provider = std::make_shared<CapturingReviewProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.agent->load_history(
+            {core::llm::Message{.role = "user", .content = "retry this prompt"}},
+            "",
+            "BUILD");
+
+        std::optional<std::function<void()>> deferred_task;
+        ctx.dispatch_async_fn = [&deferred_task](std::function<void()> task) {
+            deferred_task = std::move(task);
+        };
+        ctx.text = "/retry";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(deferred_task.has_value());
+        REQUIRE(provider->requests.empty());
+
+        (*deferred_task)();
+        REQUIRE(provider->requests.size() == 1);
+        REQUIRE(provider->requests.front().messages.back().content == "retry this prompt");
+    }
+
     SECTION("/review with inline prompt toggles review activity callbacks") {
         *mock_history = "";
         review_activity_events->clear();

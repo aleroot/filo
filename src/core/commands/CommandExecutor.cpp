@@ -1255,18 +1255,25 @@ public:
             core::llm::message_text_for_display(*last)));
 
         auto append_fn = ctx.append_history_fn;
-        ctx.agent->send_message(*last,
-            [append_fn](const std::string& chunk) {
-                append_fn(chunk);
-            },
-            [append_fn](const std::string& name, const std::string& args) {
-                std::string msg = "\n[Tool] " + name + " " + args + "\n";
-                append_fn(msg);
-            },
-            [append_fn]() {
-                append_fn("\n");
-            }
-        );
+        auto run_retry = [agent = ctx.agent, last = *last, append_fn]() {
+            agent->send_message(last,
+                [append_fn](const std::string& chunk) {
+                    append_fn(chunk);
+                },
+                [append_fn](const std::string& name, const std::string& args) {
+                    std::string msg = "\n[Tool] " + name + " " + args + "\n";
+                    append_fn(msg);
+                },
+                [append_fn]() {
+                    append_fn("\n");
+                }
+            );
+        };
+        if (ctx.dispatch_async_fn) {
+            ctx.dispatch_async_fn(std::move(run_retry));
+            return;
+        }
+        run_retry();
     }
 };
 
@@ -2016,6 +2023,12 @@ public:
                 selection = choose_review_menu_request();
             });
             if (selection.has_value()) {
+                if (ctx.dispatch_async_fn) {
+                    ctx.dispatch_async_fn([ctx, selection = std::move(*selection)]() {
+                        ReviewExecutor::execute(ctx, selection);
+                    });
+                    return;
+                }
                 ReviewExecutor::execute(ctx, *selection);
             }
             return;

@@ -41,6 +41,11 @@ public:
         std::function<void(const core::llm::ToolCall&)> on_tool_start = {};
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
+        // Out-of-band status/log sink for lifecycle messages (e.g. auto-compaction
+        // progress). Must NOT be the streaming assistant-message chunk callback:
+        // routing status here keeps it out of the assistant response body and
+        // avoids re-marking a finalized assistant message as pending.
+        std::function<void(const std::string&)> on_status_log = {};
         std::shared_ptr<core::llm::LLMProvider> provider_override = {};
         std::string provider_name_override;
         std::string model_override;
@@ -212,7 +217,10 @@ private:
               TurnCallbacks turn_callbacks,
               std::shared_ptr<TurnState> turn_state);
 
-    void check_auto_compact(std::function<void(const std::string&)> text_callback);
+    // status_log_callback receives out-of-band lifecycle status (compaction
+    // progress). It must be distinct from the streaming assistant chunk
+    // callback so status text never lands in the assistant response body.
+    void check_auto_compact(std::function<void(const std::string&)> status_log_callback);
 
     void ensure_system_prompt();
 

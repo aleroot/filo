@@ -428,12 +428,10 @@ void LlamaCppProvider::stream_response(
         return;
     }
 
-    // Capture a shared_ptr to ourselves so that the provider (and all its
-    // members: inference_mutex_, state_mutex_, model_) stays alive for the
-    // entire lifetime of the detached thread.  Without this, the provider
-    // could be destroyed while the thread is still running, causing a crash.
+    // Capture a shared_ptr to ourselves so the provider and its members stay
+    // alive for the entire stream_response() lifecycle.
     auto self = shared_from_this();
-    std::thread([self, req, callback = std::move(callback)]() mutable {
+    [self, req, callback = std::move(callback)]() mutable {
         std::scoped_lock inference_lock(self->inference_mutex_);
 
         try {
@@ -596,7 +594,7 @@ void LlamaCppProvider::stream_response(
         } catch (const std::exception& e) {
             callback(StreamChunk::make_error("\n[llama.cpp error: " + std::string(e.what()) + "]"));
         }
-    }).detach();
+    }();
 }
 
 std::string LlamaCppProvider::get_last_model() const {

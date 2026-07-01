@@ -33,6 +33,9 @@ DerivedData/
 *.xcodeproj/project.xcworkspace/
 *.xcodeproj/xcuserdata/
 
+# Filo
+.filo/
+
 # =========================
 # BUILD SYSTEMS
 # =========================

@@ -761,7 +761,7 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
     std::mutex stream_chunk_timing_mutex;
-    std::unordered_map<std::size_t, std::chrono::steady_clock::time_point> stream_chunk_last_at;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> stream_chunk_last_at;
     std::atomic_bool assistant_turn_active{false};
     struct PendingAgentTurn {
         std::string text;
@@ -3586,19 +3586,18 @@ RunResult run(RunOptions opts) {
             " \xe2\x80\x94 provide guidance or /clear to start fresh.\n", rounds));
     });
 
-    auto update_assistant_message = [&](std::size_t assistant_index, auto&& updater) {
+    auto update_assistant_message = [&](std::string_view assistant_message_id, auto&& updater) {
         {
             std::lock_guard lock(ui_mutex);
-            if (assistant_index >= ui_messages.size()) {
+            auto it = std::ranges::find_if(ui_messages, [&](const UiMessage& message) {
+                return message.type == MessageType::Assistant
+                    && message.id == assistant_message_id;
+            });
+            if (it == ui_messages.end()) {
                 return;
             }
 
-            auto& message = ui_messages[assistant_index];
-            if (message.type != MessageType::Assistant) {
-                return;
-            }
-
-            updater(message);
+            updater(*it);
         }
         animation_cv.notify_one();
         wake_ui();
@@ -3888,19 +3887,29 @@ RunResult run(RunOptions opts) {
         return core::config::ConfigManager::get_instance().get_config().mcp_servers;
     };
 
-    auto make_turn_callbacks = [&](std::size_t assistant_index) {
+    auto make_turn_callbacks = [&](std::string assistant_message_id) {
         core::agent::Agent::TurnCallbacks callbacks;
-        callbacks.on_step_begin = [assistant_index, &update_assistant_message, &assistant_turn_active]() {
+        callbacks.on_step_begin = [assistant_message_id,
+                                   &update_assistant_message,
+                                   &assistant_turn_active]() {
             assistant_turn_active.store(true, std::memory_order_relaxed);
-            update_assistant_message(assistant_index, [&](UiMessage& message) {
+            update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                // Guard against stray step events after finalization; a
+                // completed message must never revert to pending.
+                if (message.finalized) {
+                    return;
+                }
                 message.pending = true;
                 message.thinking = true;
             });
         };
         callbacks.on_tool_start =
-            [assistant_index, &update_assistant_message](
+            [assistant_message_id, &update_assistant_message](
                 const core::llm::ToolCall& tool_call) {
-                update_assistant_message(assistant_index, [&](UiMessage& message) {
+                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                    if (message.finalized) {
+                        return;
+                    }
                     message.pending = true;
                     message.thinking = false;
                     message.show_lightbulb = true;
@@ -3915,10 +3924,10 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_tool_finish =
-            [assistant_index, &update_assistant_message](
+            [assistant_message_id, &update_assistant_message](
                 const core::llm::ToolCall& tool_call,
                 const core::llm::Message& result) {
-                update_assistant_message(assistant_index, [&](UiMessage& message) {
+                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
                     auto* tool = find_tool_activity(message, tool_call.id);
 
                     if (tool == nullptr) {
@@ -3948,6 +3957,15 @@ RunResult run(RunOptions opts) {
                     }
                 });
             };
+        // Route out-of-band lifecycle status (auto-compaction progress) to the
+        // standalone history log rather than the streaming assistant-message
+        // chunk callback. Emitting status through the chunk callback would
+        // pollute the assistant response body and re-mark the finalized message
+        // as pending, which leaves the UI stuck on "Analyzing..." and breaks
+        // /copy ("Nothing to copy yet").
+        callbacks.on_status_log = [&append_history](const std::string& status) {
+            append_history(status);
+        };
         callbacks.allow_efficiency_rotation = true;
         callbacks.min_context_utilization_for_rotation = 0.75;
         return callbacks;
@@ -4008,20 +4026,18 @@ RunResult run(RunOptions opts) {
         }
         assistant_turn_active.store(true, std::memory_order_release);
         std::string timestamp = current_time_str();
-        std::size_t assistant_index = 0;
         std::string assistant_message_id;
         {
             std::lock_guard lock(ui_mutex);
             append_ui_message(ui_messages, make_user_message(text, timestamp));
             append_ui_message(ui_messages, make_assistant_message("", "", true));
-            assistant_index = ui_messages.size() - 1;
             assistant_message_id = ui_messages.back().id;
         }
         reset_history_view();
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
 
-        auto effective_callbacks = make_turn_callbacks(assistant_index);
+        auto effective_callbacks = make_turn_callbacks(assistant_message_id);
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
         effective_callbacks.allowed_tools = std::move(turn_callbacks.allowed_tools);
@@ -4035,7 +4051,6 @@ RunResult run(RunOptions opts) {
                      base_dir = std::filesystem::current_path(),
                      agent,
                      effective_callbacks = std::move(effective_callbacks),
-                     assistant_index,
                      &update_assistant_message,
                      &submit_agent_turn,
                      &take_queued_steering_turn_or_mark_idle,
@@ -4055,7 +4070,7 @@ RunResult run(RunOptions opts) {
             }
 
             agent->send_message(user_message,
-                [assistant_index,
+                [assistant_message_id,
                  &update_assistant_message,
                  &assistant_turn_active,
                  &stream_chunk_timing_mutex,
@@ -4064,18 +4079,23 @@ RunResult run(RunOptions opts) {
                     bool resumed_after_pause = false;
                     {
                         std::lock_guard lock(stream_chunk_timing_mutex);
-                        if (const auto it = stream_chunk_last_at.find(assistant_index);
+                        if (const auto it = stream_chunk_last_at.find(assistant_message_id);
                             it != stream_chunk_last_at.end()) {
                             resumed_after_pause =
                                 (now - it->second) >= kStreamChunkPauseBreakThreshold;
                             it->second = now;
                         } else {
-                            stream_chunk_last_at.emplace(assistant_index, now);
+                            stream_chunk_last_at.emplace(assistant_message_id, now);
                         }
                     }
 
-                    update_assistant_message(assistant_index, [&](UiMessage& message) {
-                        if (assistant_turn_active.load(std::memory_order_relaxed)) {
+                    update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                        // Never revert a finalized assistant message back to
+                        // pending. Late/out-of-band callbacks (e.g. compaction
+                        // status racing the done callback) must not resurrect
+                        // the "Analyzing..." spinner or block /copy.
+                        if (!message.finalized
+                            && assistant_turn_active.load(std::memory_order_relaxed)) {
                             message.pending = true;
                         }
                         if (message.thinking) {
@@ -4100,23 +4120,23 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                [assistant_index, agent,
+                [assistant_message_id, agent,
                  &update_assistant_message,
                  &submit_agent_turn,
                  &take_queued_steering_turn_or_mark_idle,
                  &turn_activity_timers,
                  &stream_chunk_timing_mutex,
                  &stream_chunk_last_at,
-                 assistant_message_id,
                  &save_session_snapshot]() {
                     {
                         std::lock_guard lock(stream_chunk_timing_mutex);
-                        stream_chunk_last_at.erase(assistant_index);
+                        stream_chunk_last_at.erase(assistant_message_id);
                     }
                     turn_activity_timers.stop(assistant_message_id);
                     const bool was_stopped = agent->is_stop_requested();
-                    update_assistant_message(assistant_index, [&](UiMessage& message) {
+                    update_assistant_message(assistant_message_id, [&](UiMessage& message) {
                         message.pending = false;
+                        message.finalized = true;
                         message.thinking = false;
                         message.stopped = was_stopped;
                         if (!message.text.empty() || !message.tools.empty()) {

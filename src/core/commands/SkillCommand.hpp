@@ -136,13 +136,23 @@ public:
             if (!resolution.warning.empty()) {
                 append_fn("\n⚠  " + resolution.warning + "\n");
             }
-            ctx.agent->send_message(
-                prompt,
-                [append_fn](const std::string& chunk) { append_fn(chunk); },
-                [](const std::string&, const std::string&) {},
-                []() {},
-                resolution.callbacks
-            );
+            auto run_skill = [agent = ctx.agent,
+                              prompt,
+                              append_fn,
+                              callbacks = resolution.callbacks]() mutable {
+                agent->send_message(
+                    prompt,
+                    [append_fn](const std::string& chunk) { append_fn(chunk); },
+                    [](const std::string&, const std::string&) {},
+                    []() {},
+                    std::move(callbacks)
+                );
+            };
+            if (ctx.dispatch_async_fn) {
+                ctx.dispatch_async_fn(std::move(run_skill));
+                return;
+            }
+            run_skill();
             return;
         }
 

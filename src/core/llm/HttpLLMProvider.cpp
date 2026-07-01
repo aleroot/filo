@@ -445,15 +445,15 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         return;
     }
 
-    std::thread([self      = std::move(keepalive),
-                 url       = std::move(prepared.url),
-                 headers   = std::move(prepared.headers),
-                 payload   = std::move(prepared.payload),
-                 delimiter = std::move(prepared.delimiter),
-                 protocol  = std::move(prepared.protocol),
-                 request_metadata = std::move(prepared.request),
-                 auth = std::move(prepared.auth),
-                 callback] () mutable {
+    [self      = std::move(keepalive),
+     url       = std::move(prepared.url),
+     headers   = std::move(prepared.headers),
+     payload   = std::move(prepared.payload),
+     delimiter = std::move(prepared.delimiter),
+     protocol  = std::move(prepared.protocol),
+     request_metadata = std::move(prepared.request),
+     auth = std::move(prepared.auth),
+     callback] () mutable {
 
         try {
             if (self->cancel_requested_.load(std::memory_order_acquire)) {
@@ -850,7 +850,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             core::logging::error("[HTTP] Unhandled streaming exception: unknown exception");
             callback(StreamChunk::make_error("\n[Internal streaming error: unknown exception]"));
         }
-    }).detach();
+    }();
 }
 
 } // namespace core::llm
