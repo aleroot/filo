@@ -2246,6 +2246,22 @@ TEST_CASE("GrepSearchTool searches nested subdirectories", "[tools][grep]") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("GrepSearchTool accepts a regular file as path", "[tools][grep]") {
+    const std::string dir = "test_grep_file_path";
+    const std::string file = dir + "/target.swift";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(file) << "enum ConsciousnessState { case dormant }\n"; }
+    { std::ofstream(dir + "/other.swift") << "enum ConsciousnessState { case idle }\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("ConsciousnessState", file));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("target.swift"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("other.swift"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("error"));
+
+    std::filesystem::remove_all(dir);
+}
+
 // ── include_pattern filtering ───────────────────────────────────────────────
 
 TEST_CASE("GrepSearchTool include_pattern restricts to matching filenames", "[tools][grep]") {
@@ -2262,6 +2278,29 @@ TEST_CASE("GrepSearchTool include_pattern restricts to matching filenames", "[to
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("c.hpp"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("b.cpp"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("d.txt"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool applies include_pattern to file path scopes", "[tools][grep]") {
+    const std::string dir = "test_grep_file_path_include";
+    const std::string file = dir + "/target.swift";
+    const ScopedWorkspaceEnforcement scoped_workspace(std::filesystem::current_path());
+    std::filesystem::create_directories(dir);
+    { std::ofstream(file) << "needle\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("needle", file, "*.swift"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("target.swift"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("error"));
+
+    res = tool.execute(grep_args("needle", file, file));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("target.swift"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("error"));
+
+    res = tool.execute(grep_args("needle", file, "*.cpp"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"matches\":[]"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("error"));
 
     std::filesystem::remove_all(dir);
 }

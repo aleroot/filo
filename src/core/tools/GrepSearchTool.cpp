@@ -14,6 +14,8 @@
 #include <atomic>
 #include <algorithm>
 #include <optional>
+#include <format>
+#include <system_error>
 
 // POSIX mmap for zero-copy file reading
 #include <sys/mman.h>
@@ -32,6 +34,12 @@ struct MatchResult {
     std::string path;
     int64_t     line{};
     std::string text;
+};
+
+struct SearchScope {
+    std::filesystem::path traversal_root;
+    std::filesystem::path include_root;
+    std::optional<std::filesystem::path> single_file;
 };
 
 [[nodiscard]] std::string normalize_glob_pattern(std::string_view pattern) {
@@ -65,6 +73,57 @@ struct MatchResult {
         return relative.generic_string();
     }
     return file.generic_string();
+}
+
+[[nodiscard]] std::string searchable_path_error(std::string_view path,
+                                                std::string_view reason) {
+    return std::format(
+        R"({{"error":"Cannot search path '{}': {}."}})",
+        core::utils::escape_json_string(path),
+        core::utils::escape_json_string(reason));
+}
+
+[[nodiscard]] std::optional<std::string> resolve_search_scope(
+    std::string_view requested_path,
+    const std::filesystem::path& resolved_path,
+    const std::filesystem::path& workspace_root,
+    SearchScope& scope) {
+    std::error_code ec;
+    const auto status = std::filesystem::status(resolved_path, ec);
+    if (ec) {
+        if (ec == std::errc::no_such_file_or_directory
+            || ec == std::errc::not_a_directory) {
+            return searchable_path_error(requested_path, "path does not exist");
+        }
+        return searchable_path_error(
+            requested_path,
+            std::format("failed to inspect path ({})", ec.message()));
+    }
+
+    if (status.type() == std::filesystem::file_type::not_found) {
+        return searchable_path_error(requested_path, "path does not exist");
+    }
+
+    if (std::filesystem::is_directory(status)) {
+        scope.traversal_root = resolved_path;
+        scope.include_root = resolved_path;
+        scope.single_file.reset();
+        return std::nullopt;
+    }
+
+    if (std::filesystem::is_regular_file(status)) {
+        scope.traversal_root = resolved_path.parent_path();
+        if (scope.traversal_root.empty()) {
+            scope.traversal_root = ".";
+        }
+        scope.include_root = !workspace_root.empty() && is_subpath(workspace_root, resolved_path)
+            ? workspace_root
+            : scope.traversal_root;
+        scope.single_file = resolved_path;
+        return std::nullopt;
+    }
+
+    return searchable_path_error(requested_path, "path is not a regular file or directory");
 }
 
 // Returns true when 'pattern' contains no ECMAScript metacharacters, making
@@ -163,7 +222,7 @@ ToolDefinition GrepSearchTool::get_definition() const {
             "Returns up to 100 matching lines, each with 'path', 'line' (1-based), and 'text'.",
         .parameters = {
             {"pattern",         "string", "ECMAScript regex pattern to search for.", true},
-            {"path",            "string", "Root directory to search. Defaults to '.'.", false},
+            {"path",            "string", "Root directory or file to search. Defaults to '.'.", false},
             {"include_pattern", "string",
              "Glob pattern to restrict searched files (e.g. '*.cpp', '**/example/**/*.kt', 'modules/core'). "
              "Patterns with path separators match against relative paths; plain directory patterns include files beneath that directory.",
@@ -208,29 +267,35 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     const bool include_has_wildcards =
         has_include && include_pattern.find_first_of("*?") != std::string::npos;
 
-    std::filesystem::path resolved_dir;
+    std::filesystem::path resolved_path;
     if (const auto access_error =
             detail::check_workspace_access(
                 dir_path,
                 dir_path,
                 context,
-                &resolved_dir,
+                &resolved_path,
                 names::kGrepSearch)) {
         return *access_error;
     }
 
-    std::error_code ec;
-    if (!std::filesystem::is_directory(resolved_dir, ec))
-        return R"({"error":"'path' does not exist or is not a directory."})";
+    SearchScope scope;
+    if (const auto scope_error = resolve_search_scope(
+            dir_path,
+            resolved_path,
+            context.workspace_view().primary(),
+            scope)) {
+        return *scope_error;
+    }
 
     std::optional<std::filesystem::path> include_directory_filter;
     if (has_include && !include_has_wildcards) {
         std::filesystem::path candidate = std::filesystem::path(include_pattern);
         if (!candidate.is_absolute()) {
-            candidate = resolved_dir / candidate;
+            candidate = scope.include_root / candidate;
         }
+        std::error_code ec;
         if (std::filesystem::is_directory(candidate, ec)
-            && is_subpath(resolved_dir, candidate)) {
+            && is_subpath(scope.include_root, candidate)) {
             include_directory_filter = candidate.lexically_normal();
         }
     }
@@ -252,13 +317,7 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     std::vector<std::filesystem::path> files;
     files.reserve(512);
 
-    const auto visible_files = core::workspace::collect_visible_regular_files(
-        resolved_dir,
-        context,
-        [](const std::filesystem::path& directory) {
-            return should_skip_dir(directory);
-        });
-    for (const auto& file : visible_files) {
+    auto add_candidate = [&](const std::filesystem::path& file) {
         if (has_include) {
             bool include_match = false;
             if (include_directory_filter.has_value()) {
@@ -266,13 +325,27 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
             } else if (include_has_separator) {
                 include_match = glob_match(
                     include_pattern,
-                    relative_generic_path(file, resolved_dir));
+                    relative_generic_path(file, scope.include_root));
             } else {
                 include_match = glob_match(include_pattern, file.filename().string());
             }
-            if (!include_match) continue;
+            if (!include_match) return;
         }
         files.push_back(file);
+    };
+
+    if (scope.single_file.has_value()) {
+        add_candidate(*scope.single_file);
+    } else {
+        const auto visible_files = core::workspace::collect_visible_regular_files(
+            scope.traversal_root,
+            context,
+            [](const std::filesystem::path& directory) {
+                return should_skip_dir(directory);
+            });
+        for (const auto& file : visible_files) {
+            add_candidate(file);
+        }
     }
 
     // Sort once so output order is deterministic regardless of thread scheduling.
