@@ -126,6 +126,9 @@ public:
     /// Return a snapshot of the conversation history (system message excluded).
     [[nodiscard]] std::vector<core::llm::Message> get_history() const;
 
+    /// Append a message to conversation history without starting a model turn.
+    void append_history_message(core::llm::Message message);
+
     /// Restore history from a saved session.  Regenerates the system prompt.
     void load_history(std::vector<core::llm::Message> messages,
                       const std::string& context_summary,

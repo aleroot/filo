@@ -23,7 +23,7 @@ namespace tui {
 
 bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        if (it->type == MessageType::User) {
+        if (it->type == MessageType::User || it->type == MessageType::ShellCommand) {
             messages.erase(it.base() - 1, messages.end());
             return true;
         }
@@ -608,6 +608,19 @@ UiMessage make_user_message(std::string text, std::string timestamp) {
     return msg;
 }
 
+UiMessage make_shell_command_message(std::string command,
+                                     std::string timestamp,
+                                     bool pending) {
+    UiMessage msg;
+    msg.type = MessageType::ShellCommand;
+    msg.id = generate_message_id();
+    msg.text = std::move(command);
+    msg.timestamp = std::move(timestamp);
+    msg.pending = pending;
+    msg.finalized = !pending;
+    return msg;
+}
+
 UiMessage make_assistant_message(std::string text, std::string timestamp, bool pending) {
     UiMessage msg;
     msg.type = MessageType::Assistant;
@@ -812,6 +825,59 @@ Element render_user_message(const UiMessage& msg, const ConversationRenderOption
         user_message_bubble(msg.text, timestamp),
         ftxui::text("")
     });
+}
+
+Element render_shell_command_message(const UiMessage& msg,
+                                     std::size_t tick,
+                                     const ConversationRenderOptions& options) {
+    std::vector<Element> rows;
+    if (options.show_timestamps && !msg.timestamp.empty()) {
+        rows.push_back(
+            hbox({ filler(), ftxui::text(msg.timestamp) | ftxui::color(Color::GrayDark) }));
+    }
+
+    rows.push_back(
+        hbox({
+            ftxui::text("$ ") | ftxui::color(ColorYellowBright) | ftxui::bold,
+            paragraph(msg.text) | ftxui::color(Color::White) | xflex,
+        }));
+
+    const ftxui::Color output_color = msg.stopped
+        ? static_cast<ftxui::Color>(ColorToolFail)
+        : ftxui::Color::GrayLight;
+    const ftxui::Color border_color = msg.stopped
+        ? static_cast<ftxui::Color>(ColorToolFail)
+        : static_cast<ftxui::Color>(ColorYellowDark);
+
+    if (msg.pending) {
+        const std::string label = options.show_spinner
+            ? std::string("Running") + std::string(thinking_pulse_frame(tick))
+            : std::string("Running...");
+        rows.push_back(
+            hbox({
+                ftxui::text("  "),
+                ftxui::text(label) | ftxui::color(ColorYellowDark) | dim,
+            }));
+    } else if (!msg.secondary_text.empty()) {
+        rows.push_back(
+            hbox({
+                ftxui::text("  "),
+                render_text_lines_preserving_newlines(
+                    msg.secondary_text,
+                    output_color)
+                    | xflex,
+            }));
+    } else {
+        rows.push_back(
+            hbox({
+                ftxui::text("  "),
+                ftxui::text("Command completed with no output.")
+                    | ftxui::color(Color::GrayDark)
+                    | dim,
+            }));
+    }
+
+    return vbox(std::move(rows)) | UiBorder(border_color);
 }
 
 Element render_assistant_message(const UiMessage& msg,
@@ -1075,6 +1141,10 @@ Element render_history_panel(const std::vector<UiMessage>& messages,
         switch (msg.type) {
             case MessageType::User:
                 msg_elements.push_back(render_user_message(msg, options));
+                break;
+            case MessageType::ShellCommand:
+                msg_elements.push_back(render_shell_command_message(msg, tick, options));
+                msg_elements.push_back(ftxui::text(""));
                 break;
             case MessageType::Assistant:
                 msg_elements.push_back(render_assistant_message(msg, tick, options));

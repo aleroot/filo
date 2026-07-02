@@ -69,6 +69,7 @@ enum class MessageType {
     Warning,        // ⚠ Warning message
     Error,          // ✗ Error message
     ToolGroup,      // Group of tool calls (bordered container)
+    ShellCommand,   // User-submitted ! command and local output
     System,         // Generic system message
 };
 
@@ -188,6 +189,11 @@ struct ConversationRenderOptions {
 // User message
 UiMessage make_user_message(std::string text, std::string timestamp = {});
 
+// Direct shell command submitted with !cmd
+UiMessage make_shell_command_message(std::string command,
+                                     std::string timestamp = {},
+                                     bool pending = true);
+
 // Assistant message
 UiMessage make_assistant_message(std::string text = {}, 
                                   std::string timestamp = {},
@@ -268,6 +274,9 @@ ftxui::Element render_history_panel(const std::vector<UiMessage>& messages,
 // Render specific message types
 ftxui::Element render_user_message(const UiMessage& msg, 
                                    const ConversationRenderOptions& options);
+ftxui::Element render_shell_command_message(const UiMessage& msg,
+                                            std::size_t tick,
+                                            const ConversationRenderOptions& options);
 ftxui::Element render_assistant_message(const UiMessage& msg,
                                         std::size_t tick,
                                         const ConversationRenderOptions& options);

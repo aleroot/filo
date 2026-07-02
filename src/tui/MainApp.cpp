@@ -198,6 +198,130 @@ private:
     Handler previous_ = SIG_DFL;
 };
 
+struct DirectShellState {
+    std::unique_ptr<core::tools::shell::IShellExecutor> executor{
+        core::tools::shell::make_shell_executor()};
+    std::mutex run_mutex;
+    mutable std::mutex active_mutex;
+    std::optional<core::commands::ActiveTerminalInfo> active_command;
+    std::chrono::steady_clock::time_point active_started_at{};
+
+    void mark_active(std::string session_id,
+                     std::string command,
+                     std::string working_dir) {
+        std::lock_guard lock(active_mutex);
+        active_started_at = std::chrono::steady_clock::now();
+        active_command = core::commands::ActiveTerminalInfo{
+            .session_id = std::move(session_id),
+            .command = std::move(command),
+            .working_dir = std::move(working_dir),
+            .tool_call_id = {},
+            .elapsed = std::chrono::seconds{0},
+        };
+    }
+
+    void clear_active() {
+        std::lock_guard lock(active_mutex);
+        active_command.reset();
+        active_started_at = {};
+    }
+
+    [[nodiscard]] std::optional<core::commands::ActiveTerminalInfo>
+    active_info(std::chrono::steady_clock::time_point now) const {
+        std::lock_guard lock(active_mutex);
+        if (!active_command.has_value()) {
+            return std::nullopt;
+        }
+
+        auto info = *active_command;
+        info.elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - active_started_at);
+        return info;
+    }
+
+    [[nodiscard]] bool has_active_for(std::string_view session_id) const {
+        std::lock_guard lock(active_mutex);
+        return active_command.has_value() && active_command->session_id == session_id;
+    }
+
+    bool interrupt_active_for(std::string_view session_id) {
+        std::lock_guard lock(active_mutex);
+        if (!active_command.has_value() || active_command->session_id != session_id) {
+            return false;
+        }
+        if (!executor) {
+            return false;
+        }
+        return executor->interrupt();
+    }
+
+    core::tools::shell::IShellExecutor::Result run(std::string_view command,
+                                                   std::string_view working_dir,
+                                                   std::string session_id) {
+        std::lock_guard lock(run_mutex);
+        mark_active(std::move(session_id), std::string(command), std::string(working_dir));
+
+        struct ActiveGuard {
+            DirectShellState* state = nullptr;
+            ~ActiveGuard() {
+                if (state) {
+                    state->clear_active();
+                }
+            }
+        } guard{this};
+
+        return executor->run(command, working_dir);
+    }
+};
+
+constexpr std::size_t kDirectShellHistoryMaxOutputLength = 10'000;
+
+std::string markdown_code_fence_for(std::string_view value) {
+    std::size_t longest_run = 0;
+    std::size_t current_run = 0;
+    for (const char ch : value) {
+        if (ch == '`') {
+            ++current_run;
+            longest_run = std::max(longest_run, current_run);
+        } else {
+            current_run = 0;
+        }
+    }
+
+    return std::string(std::max<std::size_t>(3, longest_run + 1), '`');
+}
+
+std::string make_direct_shell_history_content(std::string_view command,
+                                              std::string_view result_text) {
+    std::string model_content = std::string(trim_ascii(result_text));
+    if (model_content.empty()) {
+        model_content = "(Command produced no output)";
+    } else if (model_content.size() > kDirectShellHistoryMaxOutputLength) {
+        model_content =
+            model_content.substr(0, kDirectShellHistoryMaxOutputLength)
+            + "\n... (truncated)";
+    }
+
+    const std::string command_fence = markdown_code_fence_for(command);
+    const std::string result_fence = markdown_code_fence_for(model_content);
+
+    return std::format(
+        "I ran the following shell command:\n"
+        "{}sh\n"
+        "{}\n"
+        "{}\n\n"
+        "This produced the following result:\n"
+        "{}\n"
+        "{}\n"
+        "{}",
+        command_fence,
+        command,
+        command_fence,
+        result_fence,
+        model_content,
+        result_fence);
+}
+
 std::string shell_single_quote(std::string_view value) {
     std::string out;
     out.reserve(value.size() + 2);
@@ -762,6 +886,7 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
     std::mutex stream_chunk_timing_mutex;
+    auto direct_shell_state = std::make_shared<DirectShellState>();
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> stream_chunk_last_at;
     std::atomic_bool assistant_turn_active{false};
     struct PendingAgentTurn {
@@ -1306,17 +1431,28 @@ RunResult run(RunOptions opts) {
                     now - command.started_at),
             });
         }
+        if (const auto direct_shell = direct_shell_state->active_info(now);
+            direct_shell.has_value() && direct_shell->session_id == session_id) {
+            terminals.push_back(*direct_shell);
+        }
         return terminals;
     };
 
     auto stop_active_terminal = [&]() -> core::commands::CommandOperationResult {
-        const bool had_terminal = !list_active_terminals().empty();
+        const auto active_terminals = list_active_terminals();
+        const bool had_terminal = !active_terminals.empty();
+        const bool had_direct_shell =
+            direct_shell_state && direct_shell_state->has_active_for(session_id);
         const bool had_turn = assistant_turn_active.load(std::memory_order_relaxed);
         if (!had_terminal && !had_turn) {
             return {.ok = false, .message = "Nothing is currently running."};
         }
 
         agent->request_stop();
+        if (had_direct_shell && direct_shell_state) {
+            [[maybe_unused]] const bool interrupted =
+                direct_shell_state->interrupt_active_for(session_id);
+        }
         return {
             .ok = true,
             .message = had_terminal
@@ -3624,12 +3760,11 @@ RunResult run(RunOptions opts) {
             " \xe2\x80\x94 provide guidance or /clear to start fresh.\n", rounds));
     });
 
-    auto update_assistant_message = [&](std::string_view assistant_message_id, auto&& updater) {
+    auto update_ui_message = [&](std::string_view message_id, auto&& updater) {
         {
             std::lock_guard lock(ui_mutex);
             auto it = std::ranges::find_if(ui_messages, [&](const UiMessage& message) {
-                return message.type == MessageType::Assistant
-                    && message.id == assistant_message_id;
+                return message.id == message_id;
             });
             if (it == ui_messages.end()) {
                 return;
@@ -3639,6 +3774,15 @@ RunResult run(RunOptions opts) {
         }
         animation_cv.notify_one();
         wake_ui();
+    };
+
+    auto update_assistant_message = [&](std::string_view assistant_message_id, auto&& updater) {
+        update_ui_message(assistant_message_id, [&](UiMessage& message) {
+            if (message.type != MessageType::Assistant) {
+                return;
+            }
+            updater(message);
+        });
     };
 
     auto save_session_snapshot = [&, session_save_state]() {
@@ -4205,6 +4349,75 @@ RunResult run(RunOptions opts) {
         submit_or_queue_agent_turn(text, std::move(resolution.callbacks));
     };
 
+    auto submit_direct_shell_command = [&](std::string command) {
+        if (command.empty()) {
+            return;
+        }
+
+        std::string message_id;
+        std::string direct_shell_session_id;
+        {
+            std::lock_guard lock(ui_mutex);
+            append_ui_message(
+                ui_messages,
+                make_shell_command_message(command, current_time_str(), true));
+            message_id = ui_messages.back().id;
+            direct_shell_session_id = session_id;
+        }
+        reset_history_view();
+        animation_cv.notify_one();
+        wake_ui();
+
+        const std::string working_dir = std::filesystem::current_path().string();
+        std::thread([command = std::move(command),
+                     working_dir,
+                     direct_shell_session_id = std::move(direct_shell_session_id),
+                     message_id = std::move(message_id),
+                     direct_shell_state,
+                     agent,
+                     &save_session_snapshot,
+                     &update_ui_message]() mutable {
+            core::tools::shell::IShellExecutor::Result result;
+            if (direct_shell_state && direct_shell_state->executor) {
+                result = direct_shell_state->run(
+                    command,
+                    working_dir,
+                    std::move(direct_shell_session_id));
+            } else {
+                result.output = "Direct shell executor is unavailable.\n";
+                result.exit_code = -1;
+            }
+
+            if (result.exit_code != 0) {
+                if (!result.output.empty() && result.output.back() != '\n') {
+                    result.output.push_back('\n');
+                }
+                result.output += std::format("Command exited with status {}.", result.exit_code);
+            }
+
+            const std::string shell_history_content =
+                make_direct_shell_history_content(command, result.output);
+
+            update_ui_message(message_id, [&](UiMessage& message) {
+                if (message.type != MessageType::ShellCommand) {
+                    return;
+                }
+                message.secondary_text = std::move(result.output);
+                message.pending = false;
+                message.finalized = true;
+                message.stopped = result.exit_code != 0;
+            });
+
+            if (agent) {
+                agent->append_history_message(core::llm::Message{
+                    .role = "user",
+                    .content = shell_history_content,
+                });
+                save_session_snapshot();
+            }
+        }).detach();
+    };
+
     // ── Input component ──────────────────────────────────────────────────────
     auto input_option = InputOption();
     input_option.transform = [](InputState state) {
@@ -4338,6 +4551,7 @@ RunResult run(RunOptions opts) {
             .remove_mcp_server_fn = remove_mcp_server,
             .list_active_terminals_fn = list_active_terminals,
             .stop_active_terminal_fn = stop_active_terminal,
+            .direct_shell_command_fn = submit_direct_shell_command,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;

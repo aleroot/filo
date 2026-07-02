@@ -107,6 +107,30 @@ TEST_CASE("make_user_message — basic creation", "[tui][conversation][factory]"
     REQUIRE(!msg.id.empty());
 }
 
+TEST_CASE("make_shell_command_message — pending direct command", "[tui][conversation][factory]") {
+    auto msg = make_shell_command_message("pwd", "12:00:01", true);
+    REQUIRE(msg.type == MessageType::ShellCommand);
+    REQUIRE(msg.text == "pwd");
+    REQUIRE(msg.timestamp == "12:00:01");
+    REQUIRE(msg.pending == true);
+    REQUIRE(msg.finalized == false);
+    REQUIRE(msg.secondary_text.empty());
+}
+
+TEST_CASE("remove_latest_ui_turn removes shell commands as visible turns",
+          "[tui][conversation][rewind]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_user_message("before"));
+    messages.push_back(make_assistant_message("response", {}, false));
+    messages.push_back(make_shell_command_message("pwd", {}, false));
+    messages.back().secondary_text = "/tmp\n";
+
+    REQUIRE(remove_latest_ui_turn(messages));
+    REQUIRE(messages.size() == 2);
+    CHECK(messages[0].type == MessageType::User);
+    CHECK(messages[1].type == MessageType::Assistant);
+}
+
 TEST_CASE("make_assistant_message — pending state", "[tui][conversation][factory]") {
     auto msg = make_assistant_message("Response text", "12:01:00", true);
     REQUIRE(msg.type == MessageType::Assistant);

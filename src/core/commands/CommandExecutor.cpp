@@ -2735,31 +2735,22 @@ public:
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
-        ctx.append_history_fn(std::format("\n»  {}\n", ctx.text));
 
         std::string cmd = ctx.text.substr(1);
         auto first = cmd.find_first_not_of(" \t");
         if (first != std::string::npos) cmd = cmd.substr(first);
-        if (cmd.empty()) return;
+        if (first == std::string::npos) cmd.clear();
+        if (cmd.empty()) {
+            ctx.append_history_fn("\n✗  Shell command is empty.\n");
+            return;
+        }
 
-        auto append_fn = ctx.append_history_fn;
-        std::thread([append_fn, cmd]() {
-            std::array<char, 1024> buffer;
-            std::string result;
-            auto pclose_wrapper = [](FILE* f) { pclose(f); };
-            std::unique_ptr<FILE, decltype(pclose_wrapper)> pipe(
-                popen((cmd + " 2>&1").c_str(), "r"), pclose_wrapper);
-            if (pipe) {
-                while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-                    result += buffer.data();
-                }
-            } else {
-                result = "Error: could not execute command.\n";
-            }
+        if (!ctx.direct_shell_command_fn) {
+            ctx.append_history_fn("\n✗  Direct shell execution is unavailable in this context.\n");
+            return;
+        }
 
-            if (result.empty() || result.back() != '\n') result += '\n';
-            append_fn(result);
-        }).detach();
+        ctx.direct_shell_command_fn(std::move(cmd));
     }
 };
 

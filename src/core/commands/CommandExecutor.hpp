@@ -100,6 +100,7 @@ struct CommandContext {
                                          core::config::SettingsScope)> remove_mcp_server_fn = {};
     std::function<std::vector<ActiveTerminalInfo>()> list_active_terminals_fn = {};
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
+    std::function<void(std::string)> direct_shell_command_fn = {};
 };
 
 struct CommandDescriptor {

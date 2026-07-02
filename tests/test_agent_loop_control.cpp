@@ -344,6 +344,37 @@ void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
 
 } // namespace
 
+TEST_CASE("Agent appends history-only user messages without model turn", "[agent][history]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->append_history_message(core::llm::Message{
+        .role = "user",
+        .content =
+            "I ran the following shell command:\n"
+            "```sh\n"
+            "pwd\n"
+            "```\n\n"
+            "This produced the following result:\n"
+            "```\n"
+            "/tmp\n"
+            "```",
+    });
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 1);
+    CHECK(history[0].role == "user");
+    REQUIRE_THAT(history[0].content,
+                 Catch::Matchers::ContainsSubstring("I ran the following shell command"));
+    REQUIRE_THAT(history[0].content,
+                 Catch::Matchers::ContainsSubstring("This produced the following result"));
+    CHECK(provider->requests_snapshot().empty());
+}
+
 TEST_CASE("Agent rejects overlapping turns", "[agent][loop]") {
     auto provider = std::make_shared<BlockingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

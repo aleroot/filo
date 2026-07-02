@@ -94,6 +94,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             .elapsed = std::chrono::seconds{7},
         }});
     auto stop_called = std::make_shared<bool>(false);
+    auto direct_shell_commands = std::make_shared<std::vector<std::string>>();
 
     CommandContext ctx{
         .text = "",
@@ -245,6 +246,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
                 .message = "Stop requested for the active terminal command.",
             };
         },
+        .direct_shell_command_fn = [direct_shell_commands](std::string command) {
+            direct_shell_commands->push_back(std::move(command));
+        },
     };
 
     SECTION("Unknown commands fall through") {
@@ -300,6 +304,34 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*stop_called == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Stop requested"));
+    }
+
+    SECTION("! command routes to direct shell without sending a model turn") {
+        *mock_history = "";
+        sent_user_messages->clear();
+        direct_shell_commands->clear();
+
+        ctx.text = "!  printf 'hello'";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(*input_cleared == true);
+        REQUIRE(direct_shell_commands->size() == 1);
+        CHECK(direct_shell_commands->back() == "printf 'hello'");
+        CHECK(sent_user_messages->empty());
+        CHECK(mock_history->empty());
+    }
+
+    SECTION("empty ! command is handled but not executed") {
+        *mock_history = "";
+        direct_shell_commands->clear();
+
+        ctx.text = "!";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        CHECK(direct_shell_commands->empty());
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Shell command is empty"));
     }
 
     SECTION("/goal sets and shows the session goal") {
@@ -567,20 +599,15 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     }
 
     SECTION("! shell command") {
+        *mock_history = "";
+        direct_shell_commands->clear();
+
         ctx.text = "!echo test";
         bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
-
-        // The shell command execution is highly asynchronous (it spawns a detached thread).
-        // Verify only the synchronous part: the original input is appended to history before
-        // the thread spins up. Take a locked snapshot so TSAN doesn't flag the concurrent write
-        // from the detached thread against our read here.
-        std::string snapshot;
-        {
-            std::lock_guard<std::mutex> lock(*history_mutex);
-            snapshot = *mock_history;
-        }
-        REQUIRE_THAT(snapshot, Catch::Matchers::ContainsSubstring("!echo test"));
+        REQUIRE(direct_shell_commands->size() == 1);
+        CHECK(direct_shell_commands->back() == "echo test");
+        CHECK(mock_history->empty());
     }
 
     SECTION("Command matching with aliases") {

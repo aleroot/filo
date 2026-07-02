@@ -81,6 +81,19 @@ int estimate_message_line_cost(
             lines += 1; // Spacer after user bubble
             break;
         }
+        case MessageType::ShellCommand: {
+            if (!msg.timestamp.empty()) {
+                lines += 1;
+            }
+            lines += estimate_wrapped_line_count(msg.text);
+            lines += msg.pending
+                ? 1
+                : (msg.secondary_text.empty()
+                    ? 1
+                    : estimate_wrapped_line_count(msg.secondary_text));
+            lines += 1; // Spacer after shell command panel
+            break;
+        }
         case MessageType::Assistant: {
             bool has_executing_tools = false;
             bool has_completed_tools = false;

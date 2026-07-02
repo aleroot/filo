@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
     app.add_flag("--continue", continue_last,
                  "Prompter mode: continue the most recent session scoped to the current project");
     app.add_flag(
-        "--yolo",
+        "-y,--yolo",
         yolo_mode,
         "Enable YOLO mode (auto-approve sensitive tools).");
     app.add_option(

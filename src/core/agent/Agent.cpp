@@ -1376,6 +1376,17 @@ std::vector<core::llm::Message> Agent::get_history() const {
     return result;
 }
 
+void Agent::append_history_message(core::llm::Message message) {
+    std::lock_guard lock(history_mutex_);
+    ensure_system_prompt();
+    if (message.role.empty()) {
+        message.role = "user";
+    }
+    history_.push_back(std::move(message));
+    mark_stable_prompt_prefix_dirty();
+    refresh_context_window_snapshot_unlocked();
+}
+
 void Agent::load_history(std::vector<core::llm::Message> messages,
                           const std::string& context_summary,
                           const std::string& mode) {
