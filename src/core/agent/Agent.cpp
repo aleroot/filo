@@ -34,6 +34,11 @@ namespace core::agent {
 
 namespace {
 
+constexpr int kMaxOutputRecoveryLimit = 3;
+constexpr std::string_view kMaxOutputRecoveryPrompt =
+    "Output token limit hit. Resume directly with the next unfinished action or text. "
+    "Do not apologize or recap. If a tool call was cut off, emit the complete tool call again.";
+
 // Returns true if the tool result JSON looks like an error response.
 // All Filo tools return {"error": "..."} on failure.
 [[nodiscard]] bool is_tool_error(const std::string& result) noexcept {
@@ -50,6 +55,11 @@ namespace {
 [[nodiscard]] bool is_truncation_stop_reason(std::string_view stop_reason) noexcept {
     return stop_reason == "max_tokens"
         || stop_reason == "model_context_window_exceeded";
+}
+
+[[nodiscard]] bool should_recover_truncated_turn(std::string_view stop_reason,
+                                                 bool incomplete_tool_call) noexcept {
+    return incomplete_tool_call || is_truncation_stop_reason(stop_reason);
 }
 
 [[nodiscard]] std::string provider_notice_subject(std::string_view provider_name) {
@@ -878,6 +888,40 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? std::vector<core::llm::ToolCall>{}
             : *tool_calls_accum;
         asst_msg.reasoning_content  = *reasoning_accum;  // Required for Kimi thinking mode
+
+        if (!chunk.is_error
+            && asst_msg.tool_calls.empty()
+            && should_recover_truncated_turn(chunk.stop_reason, chunk.incomplete_tool_call)
+            && turn_state->max_output_recovery_count < kMaxOutputRecoveryLimit
+            && !self->is_stop_requested()) {
+            ++turn_state->max_output_recovery_count;
+
+            const auto status = std::format(
+                "\n[{} hit an output limit; continuing automatically ({}/{}).]\n",
+                provider_notice_subject(provider_name_snapshot),
+                turn_state->max_output_recovery_count,
+                kMaxOutputRecoveryLimit);
+            if (turn_callbacks.on_status_log) {
+                turn_callbacks.on_status_log(status);
+            } else {
+                text_callback(status);
+            }
+
+            {
+                std::lock_guard lock(self->history_mutex_);
+                if (!asst_msg.content.empty() || !asst_msg.reasoning_content.empty()) {
+                    self->history_.push_back(asst_msg);
+                }
+                self->history_.push_back(core::llm::Message{
+                    .role = "user",
+                    .content = std::string(kMaxOutputRecoveryPrompt),
+                });
+                self->refresh_context_window_snapshot_unlocked();
+            }
+
+            self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
+            return;
+        }
 
         if (!chunk.is_error && asst_msg.tool_calls.empty()) {
             if (asst_msg.content.empty()) {

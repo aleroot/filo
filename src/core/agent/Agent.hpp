@@ -206,6 +206,7 @@ private:
     struct TurnState {
         int steps_taken = 0;
         int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
+        int max_output_recovery_count = 0;
         std::string transport_turn_id;
         ToolCallDeduplicator deduplicator;
         bool final_response_after_repeat_stop_requested = false;

@@ -164,6 +164,72 @@ private:
     std::vector<core::llm::ChatRequest> requests_;
 };
 
+class RecoveringMaxOutputProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            callback(core::llm::StreamChunk::make_final("max_tokens", true));
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content("continued after recovery"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+};
+
+class AlwaysMaxOutputProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+
+        calls_.fetch_add(1, std::memory_order_acq_rel);
+        callback(core::llm::StreamChunk::make_final("max_tokens", true));
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+};
+
 class BlockingProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -372,6 +438,161 @@ TEST_CASE("Agent enforces a per-turn model step bound", "[agent][loop]") {
 
     CHECK(tool_messages == 3);
     CHECK(found_limit_message);
+}
+
+TEST_CASE("Agent automatically recovers from truncated Claude turns",
+          "[agent][loop][claude]") {
+    auto provider = std::make_shared<RecoveringMaxOutputProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_active_provider_name("claude");
+
+    std::mutex capture_mutex;
+    std::string streamed_text;
+    std::vector<std::string> status_logs;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "complete a tool-heavy task",
+        [&](const std::string& chunk) {
+            std::lock_guard lock(capture_mutex);
+            streamed_text += chunk;
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        core::agent::Agent::TurnCallbacks{
+            .on_status_log = [&](const std::string& status) {
+                std::lock_guard lock(capture_mutex);
+                status_logs.push_back(status);
+            },
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; }));
+    }
+
+    {
+        std::lock_guard lock(capture_mutex);
+        CHECK_THAT(streamed_text, Catch::Matchers::ContainsSubstring("continued after recovery"));
+        CHECK(streamed_text.find("ended this turn with no visible text") == std::string::npos);
+        REQUIRE(status_logs.size() == 1);
+        CHECK_THAT(status_logs.front(),
+                   Catch::Matchers::ContainsSubstring("continuing automatically (1/3)"));
+    }
+
+    CHECK(provider->call_count() == 2);
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    REQUIRE_FALSE(requests[1].messages.empty());
+    const auto& recovery_message = requests[1].messages.back();
+    CHECK(recovery_message.role == "user");
+    CHECK_THAT(recovery_message.content,
+               Catch::Matchers::ContainsSubstring("Output token limit hit"));
+
+    const auto history = agent->get_history();
+    bool found_recovery_prompt = false;
+    bool found_final_assistant = false;
+    bool found_empty_turn_notice = false;
+    for (const auto& message : history) {
+        if (message.role == "user"
+            && message.content.find("Output token limit hit") != std::string::npos) {
+            found_recovery_prompt = true;
+        }
+        if (message.role == "assistant"
+            && message.content.find("continued after recovery") != std::string::npos) {
+            found_final_assistant = true;
+        }
+        if (message.role == "assistant"
+            && message.content.find("ended this turn with no visible text") != std::string::npos) {
+            found_empty_turn_notice = true;
+        }
+    }
+
+    CHECK(found_recovery_prompt);
+    CHECK(found_final_assistant);
+    CHECK_FALSE(found_empty_turn_notice);
+}
+
+TEST_CASE("Agent bounds automatic recovery for repeated truncated Claude turns",
+          "[agent][loop][claude]") {
+    auto provider = std::make_shared<AlwaysMaxOutputProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    agent->set_active_provider_name("claude");
+
+    std::mutex capture_mutex;
+    std::string streamed_text;
+    std::vector<std::string> status_logs;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "repeat truncation",
+        [&](const std::string& chunk) {
+            std::lock_guard lock(capture_mutex);
+            streamed_text += chunk;
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        core::agent::Agent::TurnCallbacks{
+            .on_status_log = [&](const std::string& status) {
+                std::lock_guard lock(capture_mutex);
+                status_logs.push_back(status);
+            },
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; }));
+    }
+
+    CHECK(provider->call_count() == 4);
+
+    {
+        std::lock_guard lock(capture_mutex);
+        REQUIRE(status_logs.size() == 3);
+        CHECK_THAT(status_logs.back(),
+                   Catch::Matchers::ContainsSubstring("continuing automatically (3/3)"));
+        CHECK_THAT(streamed_text,
+                   Catch::Matchers::ContainsSubstring("Claude ended this turn"));
+        CHECK_THAT(streamed_text,
+                   Catch::Matchers::ContainsSubstring("stream ended before the provider completed a tool call"));
+    }
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 4);
+    int recovery_prompt_count = 0;
+    for (const auto& request : requests) {
+        if (!request.messages.empty()
+            && request.messages.back().role == "user"
+            && request.messages.back().content.find("Output token limit hit") != std::string::npos) {
+            ++recovery_prompt_count;
+        }
+    }
+    CHECK(recovery_prompt_count == 3);
 }
 
 TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][prompt]") {
