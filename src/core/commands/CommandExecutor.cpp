@@ -1142,7 +1142,7 @@ public:
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /tools [action]     Manage session trust rules for sensitive tools\n"
             "  /usage              Show token usage, cost, and tool payload breakdown\n"
-            "  /copy               Copy the latest assistant response to clipboard\n"
+            "  /copy [target]      Copy response, prompt, or full transcript to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
             "  /review [target]    Open review menu or run Codex-style AI code review\n"
             "  /export [file]      Export the current conversation to Markdown\n"
@@ -1837,21 +1837,22 @@ class CopyCommand : public Command {
 public:
     std::string get_name() const override { return "/copy"; }
     std::string get_description() const override {
-        return "Copy the latest completed assistant response to clipboard";
+        return "Copy response, prompt, or full transcript to clipboard";
     }
+    bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
 
-        if (!ctx.latest_assistant_output_fn) {
-            ctx.append_history_fn("\n✗  Copy is unavailable in this session.\n");
+        const auto target = parse_target(trailing_arguments(ctx.text));
+        if (!target.has_value()) {
+            ctx.append_history_fn(
+                "\nℹ  Usage: /copy [response|prompt|full]\n");
             return;
         }
 
-        const std::string latest_output = ctx.latest_assistant_output_fn();
-        if (trim(latest_output).empty()) {
-            ctx.append_history_fn(
-                "\nℹ  Nothing to copy yet. Wait for the first completed assistant response.\n");
+        const auto source = resolve_source(ctx, *target);
+        if (!source.has_value()) {
             return;
         }
 
@@ -1862,14 +1863,115 @@ public:
             };
         }
 
-        if (const auto error = copy_fn(latest_output); error.has_value()) {
+        if (const auto error = copy_fn(source->text); error.has_value()) {
             ctx.append_history_fn(std::format(
-                "\n✗  Could not copy response: {}\n",
+                "\n✗  Could not copy {}: {}\n",
+                source->label,
                 *error));
             return;
         }
 
-        ctx.append_history_fn("\n✓  Copied the latest assistant response to clipboard.\n");
+        ctx.append_history_fn(std::format(
+            "\n✓  Copied {} to clipboard.\n",
+            source->success_label));
+    }
+
+private:
+    enum class Target {
+        Response,
+        Prompt,
+        Full,
+    };
+
+    struct CopySource {
+        std::string text;
+        std::string_view label;
+        std::string_view success_label;
+    };
+
+    static std::optional<Target> parse_target(std::string_view args) {
+        const std::string normalized = to_lower_ascii(trim(args));
+        if (normalized.empty() || normalized == "response") {
+            return Target::Response;
+        }
+        if (normalized == "prompt") {
+            return Target::Prompt;
+        }
+        if (normalized == "full") {
+            return Target::Full;
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<CopySource> resolve_source(const CommandContext& ctx,
+                                                    Target target) {
+        switch (target) {
+            case Target::Response:
+                return response_source(ctx);
+            case Target::Prompt:
+                return prompt_source(ctx);
+            case Target::Full:
+                return full_source(ctx);
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<CopySource> response_source(const CommandContext& ctx) {
+        if (!ctx.latest_assistant_output_fn) {
+            ctx.append_history_fn("\n✗  Copy is unavailable in this session.\n");
+            return std::nullopt;
+        }
+
+        std::string text = ctx.latest_assistant_output_fn();
+        if (trim(text).empty()) {
+            ctx.append_history_fn(
+                "\nℹ  Nothing to copy yet. Wait for the first completed assistant response.\n");
+            return std::nullopt;
+        }
+
+        return CopySource{
+            .text = std::move(text),
+            .label = "response",
+            .success_label = "the latest assistant response",
+        };
+    }
+
+    static std::optional<CopySource> prompt_source(const CommandContext& ctx) {
+        if (!ctx.agent) {
+            ctx.append_history_fn("\n✗  Prompt copy is unavailable without an active agent.\n");
+            return std::nullopt;
+        }
+
+        std::string text = ctx.agent->last_user_message();
+        if (trim(text).empty()) {
+            ctx.append_history_fn("\nℹ  Nothing to copy yet. No user prompt found.\n");
+            return std::nullopt;
+        }
+
+        return CopySource{
+            .text = std::move(text),
+            .label = "prompt",
+            .success_label = "the latest user prompt",
+        };
+    }
+
+    static std::optional<CopySource> full_source(const CommandContext& ctx) {
+        if (!ctx.agent) {
+            ctx.append_history_fn("\n✗  Transcript copy is unavailable without an active agent.\n");
+            return std::nullopt;
+        }
+
+        const auto messages = ctx.agent->get_history();
+        if (messages.empty()) {
+            ctx.append_history_fn("\nℹ  Nothing to copy yet. No conversation transcript found.\n");
+            return std::nullopt;
+        }
+
+        return CopySource{
+            .text = export_history_markdown(messages),
+            .label = "transcript",
+            .success_label = "the full conversation transcript",
+        };
     }
 };
 

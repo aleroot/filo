@@ -933,6 +933,80 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Copied the latest assistant response"));
     }
 
+    SECTION("/copy response explicitly copies the latest assistant output") {
+        std::string copied_text;
+        ctx.latest_assistant_output_fn = []() {
+            return std::string("Explicit assistant output");
+        };
+        ctx.copy_to_clipboard_fn = [&copied_text](std::string_view text) {
+            copied_text = std::string(text);
+            return std::optional<std::string>{};
+        };
+
+        ctx.text = "/copy response";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(copied_text == "Explicit assistant output");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Copied the latest assistant response"));
+    }
+
+    SECTION("/copy prompt copies the latest user prompt") {
+        std::string copied_text;
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.agent->load_history(
+            {
+                core::llm::Message{.role = "user", .content = "first prompt"},
+                core::llm::Message{.role = "assistant", .content = "first response"},
+                core::llm::Message{.role = "user", .content = "latest prompt"},
+            },
+            "",
+            "BUILD");
+        ctx.copy_to_clipboard_fn = [&copied_text](std::string_view text) {
+            copied_text = std::string(text);
+            return std::optional<std::string>{};
+        };
+
+        ctx.text = "/copy prompt";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(copied_text == "latest prompt");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Copied the latest user prompt"));
+    }
+
+    SECTION("/copy full copies the conversation transcript") {
+        std::string copied_text;
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.agent->load_history(
+            {
+                core::llm::Message{.role = "user", .content = "Build a thing"},
+                core::llm::Message{.role = "assistant", .content = "Built it"},
+            },
+            "",
+            "BUILD");
+        ctx.copy_to_clipboard_fn = [&copied_text](std::string_view text) {
+            copied_text = std::string(text);
+            return std::optional<std::string>{};
+        };
+
+        ctx.text = "/copy full";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("# Filo Conversation Export"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 1. User"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("Build a thing"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 2. Assistant"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("Built it"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Copied the full conversation transcript"));
+    }
+
     SECTION("/copy reports when there is nothing to copy") {
         ctx.latest_assistant_output_fn = []() { return std::string(); };
         ctx.text = "/copy";
@@ -940,6 +1014,14 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Nothing to copy yet"));
+    }
+
+    SECTION("/copy reports unknown targets") {
+        ctx.text = "/copy unknown";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /copy [response|prompt|full]"));
     }
 
     SECTION("/review requires an active agent") {
@@ -1394,7 +1476,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             return cmd.name == "/copy";
         });
         REQUIRE(copy_it != commands.end());
-        REQUIRE_FALSE(copy_it->accepts_arguments);
+        REQUIRE(copy_it->accepts_arguments);
 
         const auto yolo_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/yolo";
