@@ -95,6 +95,11 @@ struct RouterConfig {
     // Needed so merge_router_config can avoid clobbering an existing classifier
     // config when an overlay omits the section.
     bool has_auto_classifier_overrides = false;
+
+    // True when this config instance explicitly set router.scoring.  Kept
+    // separate from auto_classifier so scoring-only overlays do not reset the
+    // rest of the classifier config to defaults.
+    bool has_scoring_overrides = false;
 };
 
 struct RouteContext {

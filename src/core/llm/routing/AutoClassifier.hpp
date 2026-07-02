@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ComplexityScorer.hpp"
+
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -69,6 +71,11 @@ struct AutoClassifierConfig {
     // After this many turns in a conversation the tier escalates by one level,
     // capturing longer-context requests that naturally grow in complexity.
     int escalation_turn_threshold = 6;
+
+    // Deterministic structural scoring inspired by Wayfinder.  The default hybrid
+    // mode keeps Filo's task classifier for semantic intent and raises complexity
+    // when the prompt structure itself is heavy enough to deserve a stronger tier.
+    ComplexityScoringConfig scoring;
 };
 
 // ─── Result ───────────────────────────────────────────────────────────────────
@@ -77,9 +84,12 @@ struct ClassificationResult {
     TaskType task_type  = TaskType::Simple;
     Tier     tier       = Tier::Balanced;
     double   complexity = 0.0; // [0.0, 1.0]
+    double   task_complexity = 0.0;
+    double   structural_complexity = 0.0;
+    ComplexityFeatureValues structural_features{};
 
     // Short human-readable explanation shown in the status bar.
-    // E.g. "Debugging·0.72" or "CodeGen·0.41"
+    // E.g. "Debugging·0.72/s0.31" or "CodeGen·0.41/s0.08"
     std::string reason;
 };
 
@@ -112,13 +122,17 @@ private:
     [[nodiscard]] TaskType classify_task_type(std::string_view prompt_lower,
                                               const ClassificationInput& input) const noexcept;
 
-    [[nodiscard]] double compute_complexity(TaskType            task_type,
-                                            const ClassificationInput& input,
-                                            std::string_view    prompt_lower) const noexcept;
+    [[nodiscard]] double compute_task_complexity(TaskType            task_type,
+                                                 const ClassificationInput& input,
+                                                 std::string_view    prompt_lower) const noexcept;
+
+    [[nodiscard]] double combine_complexity(double task_complexity,
+                                            double structural_complexity) const noexcept;
 
     [[nodiscard]] Tier select_tier(double complexity) const noexcept;
 
     AutoClassifierConfig config_;
+    ComplexityScorer complexity_scorer_;
 };
 
 } // namespace core::llm::routing

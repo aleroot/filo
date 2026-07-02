@@ -349,6 +349,10 @@ void normalize_policy(PolicyDefinition& policy) {
     return true;
 }
 
+[[nodiscard]] bool parse_scoring_object(simdjson::dom::object scoring_obj,
+                                        ComplexityScoringConfig& out,
+                                        std::string& error);
+
 [[nodiscard]] bool parse_auto_classifier_object(simdjson::dom::object classifier_obj,
                                                 AutoClassifierConfig& out,
                                                 std::string& error) {
@@ -417,6 +421,75 @@ void normalize_policy(PolicyDefinition& policy) {
 
     if (out.powerful_token_threshold < out.fast_token_threshold) {
         out.powerful_token_threshold = out.fast_token_threshold;
+    }
+
+    {
+        simdjson::dom::object scoring_obj;
+        const auto ec = classifier_obj["scoring"].get(scoring_obj);
+        if (ec == simdjson::SUCCESS) {
+            if (!parse_scoring_object(scoring_obj, out.scoring, error)) {
+                error = std::format("field 'scoring': {}", error);
+                return false;
+            }
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "field 'scoring': expected object";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+[[nodiscard]] bool parse_scoring_object(simdjson::dom::object scoring_obj,
+                                        ComplexityScoringConfig& out,
+                                        std::string& error) {
+    if (std::ranges::all_of(out.weights, [](double weight) { return weight == 0.0; })) {
+        out.weights = default_complexity_weights();
+    }
+
+    {
+        simdjson::dom::element mode_el;
+        const auto ec = scoring_obj["mode"].get(mode_el);
+        if (ec == simdjson::SUCCESS) {
+            std::string mode;
+            if (!parse_value(mode_el, mode, error)) {
+                error = std::format("field 'mode': {}", error);
+                return false;
+            }
+            const auto parsed_mode = complexity_scoring_mode_from_string(mode);
+            if (!parsed_mode.has_value()) {
+                error = std::format("field 'mode': unknown scoring mode '{}'", mode);
+                return false;
+            }
+            out.mode = *parsed_mode;
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "failed to read field 'mode'";
+            return false;
+        }
+    }
+
+    {
+        simdjson::dom::object weights_obj;
+        const auto ec = scoring_obj["weights"].get(weights_obj);
+        if (ec == simdjson::SUCCESS) {
+            for (const auto entry : weights_obj) {
+                const auto feature = complexity_feature_from_string(entry.key);
+                if (!feature.has_value()) {
+                    error = std::format("field 'weights': unknown feature '{}'", entry.key);
+                    return false;
+                }
+
+                double weight = 0.0;
+                if (entry.value.get(weight) != simdjson::SUCCESS || weight < 0.0) {
+                    error = std::format("field 'weights.{}': expected non-negative number", entry.key);
+                    return false;
+                }
+                out.weights[static_cast<std::size_t>(*feature)] = weight;
+            }
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "field 'weights': expected object";
+            return false;
+        }
     }
 
     return true;
@@ -520,6 +593,21 @@ bool parse_router_config(simdjson::dom::object router_obj,
         }
     }
 
+    {
+        simdjson::dom::object scoring_obj;
+        const auto ec = router_obj["scoring"].get(scoring_obj);
+        if (ec == simdjson::SUCCESS) {
+            if (!parse_scoring_object(scoring_obj, out.auto_classifier.scoring, error)) {
+                error = std::format("router.scoring: {}", error);
+                return false;
+            }
+            out.has_scoring_overrides = true;
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "router.scoring must be an object";
+            return false;
+        }
+    }
+
     for (const auto section_name : {"guardrails", "spend_limits", "limits"}) {
         simdjson::dom::object guardrails_obj;
         const auto ec = router_obj[section_name].get(guardrails_obj);
@@ -605,6 +693,10 @@ void merge_router_config(RouterConfig& base, const RouterConfig& overlay) {
     if (overlay.has_auto_classifier_overrides) {
         base.auto_classifier = overlay.auto_classifier;
         base.has_auto_classifier_overrides = true;
+    }
+    if (overlay.has_scoring_overrides) {
+        base.auto_classifier.scoring = overlay.auto_classifier.scoring;
+        base.has_scoring_overrides = true;
     }
 
     for (const auto& [name, policy] : overlay.policies) {

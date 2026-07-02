@@ -174,6 +174,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/routing/PolicyLoader.cpp
     src/core/llm/routing/RouterEngine.cpp
     src/core/llm/routing/AutoClassifier.cpp
+    src/core/llm/routing/ComplexityScorer.cpp
     src/core/auth/FileTokenStore.cpp
     src/core/auth/AuthBrowserLauncher.cpp
     src/core/auth/GoogleCodeAssist.cpp
@@ -428,6 +429,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_routing.cpp
     tests/test_router_provider.cpp
     tests/test_auto_classifier.cpp
+    tests/test_complexity_scorer.cpp
     tests/test_prompt_input.cpp
     tests/test_http_response_lifecycle.cpp
     tests/test_session.cpp

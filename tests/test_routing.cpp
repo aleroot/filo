@@ -139,6 +139,41 @@ TEST_CASE("Router policy loader parses tier pins and auto classifier config", "[
     REQUIRE(defaults[1].tier == "powerful");
 }
 
+TEST_CASE("Router policy loader parses structural scoring config", "[routing][config]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "smart",
+        "scoring": {
+            "mode": "structural",
+            "weights": {
+                "word_count": 4.0,
+                "reasoning_term_count": 5.0,
+                "constraint_term_count": 2.0
+            }
+        },
+        "policies": {
+            "smart": {
+                "strategy": "smart",
+                "defaults": [
+                    { "provider": "local", "model": "local-fast", "tier": "fast" },
+                    { "provider": "remote", "model": "remote-power", "tier": "powerful" }
+                ]
+            }
+        }
+    })";
+
+    const auto config = parse_router_from_json(json);
+    REQUIRE_FALSE(config.has_auto_classifier_overrides);
+    REQUIRE(config.has_scoring_overrides);
+    REQUIRE(config.auto_classifier.scoring.mode == core::llm::routing::ComplexityScoringMode::StructuralOnly);
+    REQUIRE(config.auto_classifier.scoring.weights[
+        static_cast<std::size_t>(core::llm::routing::ComplexityFeature::WordCount)] == Catch::Approx(4.0));
+    REQUIRE(config.auto_classifier.scoring.weights[
+        static_cast<std::size_t>(core::llm::routing::ComplexityFeature::ReasoningTermCount)] == Catch::Approx(5.0));
+    REQUIRE(config.auto_classifier.scoring.weights[
+        static_cast<std::size_t>(core::llm::routing::ComplexityFeature::ConstraintTermCount)] == Catch::Approx(2.0));
+}
+
 TEST_CASE("merge_router_config overlays policies and toggles enabled", "[routing][config]") {
     using namespace core::llm::routing;
 
@@ -194,6 +229,46 @@ TEST_CASE("merge_router_config overlays auto classifier only when explicitly con
     })");
     merge_router_config(base, overlay_with_classifier);
     REQUIRE(base.auto_classifier.quality_bias == Catch::Approx(0.75));
+}
+
+TEST_CASE("merge_router_config overlays scoring without resetting classifier settings", "[routing][config]") {
+    auto base = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "base",
+        "auto_classifier": {
+            "quality_bias": 0.2,
+            "fast_token_threshold": 123,
+            "powerful_token_threshold": 456,
+            "escalation_turn_threshold": 3
+        },
+        "policies": {
+            "base": { "strategy": "fallback", "defaults": [{ "provider": "a", "model": "a" }] }
+        }
+    })");
+
+    const auto overlay = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "base",
+        "scoring": {
+            "mode": "structural",
+            "weights": {
+                "word_count": 4.0
+            }
+        },
+        "policies": {
+            "base": { "strategy": "fallback", "defaults": [{ "provider": "b", "model": "b" }] }
+        }
+    })");
+
+    merge_router_config(base, overlay);
+
+    REQUIRE(base.auto_classifier.quality_bias == Catch::Approx(0.2));
+    REQUIRE(base.auto_classifier.fast_token_threshold == 123);
+    REQUIRE(base.auto_classifier.powerful_token_threshold == 456);
+    REQUIRE(base.auto_classifier.escalation_turn_threshold == 3);
+    REQUIRE(base.auto_classifier.scoring.mode == core::llm::routing::ComplexityScoringMode::StructuralOnly);
+    REQUIRE(base.auto_classifier.scoring.weights[
+        static_cast<std::size_t>(core::llm::routing::ComplexityFeature::WordCount)] == Catch::Approx(4.0));
 }
 
 TEST_CASE("Router policy loader parses guardrails and clamps ratios", "[routing][config]") {

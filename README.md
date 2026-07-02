@@ -338,6 +338,22 @@ Filo-specific Python tool skills continue to use `entry_point` and the existing
   "router": {
     "enabled": true,
     "default_policy": "local-first",
+    "scoring": {
+      "mode": "hybrid",
+      "weights": {
+        "word_count": 3.0,
+        "heading_count": 1.5,
+        "max_heading_depth": 1.0,
+        "list_item_count": 2.0,
+        "link_count": 1.0,
+        "code_block_count": 1.5,
+        "table_row_count": 1.0,
+        "reasoning_term_count": 0.0,
+        "math_symbol_count": 0.0,
+        "constraint_term_count": 0.0,
+        "question_count": 0.0
+      }
+    },
     "guardrails": {
       "max_session_cost_usd": 5.0,
       "min_requests_remaining_ratio": 0.20,

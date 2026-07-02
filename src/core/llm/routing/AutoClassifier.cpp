@@ -74,7 +74,8 @@ std::string_view to_string(Tier tier) noexcept {
 // ─── AutoClassifier ───────────────────────────────────────────────────────────
 
 AutoClassifier::AutoClassifier(AutoClassifierConfig config) noexcept
-    : config_(config) {}
+    : config_(config)
+    , complexity_scorer_(config.scoring) {}
 
 ClassificationInput AutoClassifier::extract_signals(std::string_view prompt,
                                                      std::size_t      history_tokens,
@@ -144,14 +145,25 @@ ClassificationResult AutoClassifier::classify(const ClassificationInput& input) 
     const std::string prompt_lower = lower_string(input.prompt);
 
     const TaskType task_type = classify_task_type(prompt_lower, input);
-    const double complexity  = compute_complexity(task_type, input, prompt_lower);
-    const Tier tier          = select_tier(complexity);
+    const double task_complexity = compute_task_complexity(task_type, input, prompt_lower);
+    ComplexityScore structural;
+    if (config_.scoring.mode != ComplexityScoringMode::TaskOnly) {
+        structural = complexity_scorer_.score(input.prompt);
+    }
+    const double complexity = combine_complexity(task_complexity, structural.score);
+    const Tier tier = select_tier(complexity);
 
     ClassificationResult result;
     result.task_type  = task_type;
     result.tier       = tier;
     result.complexity = complexity;
-    result.reason     = std::format("{}·{:.2f}", to_string(task_type), complexity);
+    result.task_complexity = task_complexity;
+    result.structural_complexity = structural.score;
+    result.structural_features = structural.features;
+    result.reason = std::format("{}·{:.2f}/s{:.2f}",
+                                to_string(task_type),
+                                complexity,
+                                structural.score);
     return result;
 }
 
@@ -230,9 +242,9 @@ TaskType AutoClassifier::classify_task_type(std::string_view prompt_lower,
     return (prompt_lower.size() > 150) ? TaskType::CodeGen : TaskType::Simple;
 }
 
-double AutoClassifier::compute_complexity(TaskType            task_type,
-                                           const ClassificationInput& input,
-                                           std::string_view    prompt_lower) const noexcept {
+double AutoClassifier::compute_task_complexity(TaskType            task_type,
+                                                const ClassificationInput& input,
+                                                std::string_view    prompt_lower) const noexcept {
     // ── Base factor from task type ────────────────────────────────────────────
     double task_factor = kFactorSimple;
     switch (task_type) {
@@ -279,6 +291,19 @@ double AutoClassifier::compute_complexity(TaskType            task_type,
     const double base = std::max(task_factor, length_score * 0.6);
     const double raw  = base + content_boost + turn_boost + keyword_boost;
     return std::clamp(raw, 0.0, 1.0);
+}
+
+double AutoClassifier::combine_complexity(double task_complexity,
+                                          double structural_complexity) const noexcept {
+    switch (config_.scoring.mode) {
+        case ComplexityScoringMode::TaskOnly:
+            return std::clamp(task_complexity, 0.0, 1.0);
+        case ComplexityScoringMode::StructuralOnly:
+            return std::clamp(structural_complexity, 0.0, 1.0);
+        case ComplexityScoringMode::Hybrid:
+            break;
+    }
+    return std::clamp(std::max(task_complexity, structural_complexity), 0.0, 1.0);
 }
 
 Tier AutoClassifier::select_tier(double complexity) const noexcept {
