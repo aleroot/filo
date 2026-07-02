@@ -396,6 +396,10 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_sonnet5.input_per_m  == Catch::Approx(2.00));
     REQUIRE(r_sonnet5.output_per_m == Catch::Approx(10.00));
 
+    auto r_haiku45 = rates_for_model("claude-haiku-4-5");
+    REQUIRE(r_haiku45.input_per_m  == Catch::Approx(1.00));
+    REQUIRE(r_haiku45.output_per_m == Catch::Approx(5.00));
+
     auto r_sonnet = rates_for_model("claude-sonnet-4-6");
     REQUIRE(r_sonnet.input_per_m  == Catch::Approx(3.00));
     REQUIRE(r_sonnet.output_per_m == Catch::Approx(15.00));

@@ -8,6 +8,7 @@
 #include "core/tools/AskUserQuestionTool.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <vector>
 #include <utility>
@@ -41,6 +42,13 @@ struct ModelPickerRow {
     std::string description;
     bool active = false;
     bool provider_default = false;
+};
+
+struct OptionPickerRow {
+    std::string value;
+    std::string label;
+    std::string description;
+    bool active = false;
 };
 
 struct ConversationSearchHit {
@@ -100,8 +108,11 @@ ftxui::Element render_provider_model_picker_panel(
     const std::vector<ModelPickerRow>& models,
     int selected_index);
 
-ftxui::Element render_compression_selection_panel(int selected_index,
-                                                  std::string_view current_mode);
+ftxui::Element render_option_selection_panel(std::string_view title,
+                                             const std::vector<OptionPickerRow>& options,
+                                             int selected_index,
+                                             std::string_view current_value,
+                                             std::string_view help_text);
 
 ftxui::Element render_provider_selection_panel(const std::vector<std::string>& providers,
                                                int selected_index);

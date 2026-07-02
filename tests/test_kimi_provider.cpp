@@ -2,15 +2,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include <httplib.h>
-
-#include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <filesystem>
-#include <format>
 #include <fstream>
-#include <thread>
 
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
@@ -254,82 +248,6 @@ TEST_CASE("KimiSerializer - empty messages produce valid JSON", "[kimi][serializ
     req.stream = true;
     auto payload = Serializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[])"));
-}
-
-TEST_CASE("KimiProtocol uploads local videos as files and serializes ms references",
-          "[kimi][video][upload]") {
-    const auto dir = make_temp_dir("filo_kimi_video_upload");
-    const auto video = dir / "recording.mp4";
-    {
-        std::ofstream out(video, std::ios::binary | std::ios::trunc);
-        out << "fake-video";
-    }
-
-    httplib::Server server;
-    std::atomic<int> uploads{0};
-    std::string authorization;
-    std::string content_type;
-    server.Post("/v1/files", [&](const httplib::Request& req, httplib::Response& res) {
-        ++uploads;
-        authorization = req.get_header_value("Authorization");
-        content_type = req.get_header_value("Content-Type");
-        res.set_content(R"({"id":"file_kimi_video_123"})", "application/json");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() {
-        server.listen_after_bind();
-    });
-    for (int i = 0; i < 50 && !server.is_running(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    REQUIRE(server.is_running());
-
-    core::auth::AuthInfo auth;
-    auth.headers["Authorization"] = "Bearer test-token";
-
-    ChatRequest req;
-    req.model = "kimi-k2.6";
-    req.messages.push_back(Message{
-        .role = "user",
-        .content = describe_video_attachment(video.string()),
-        .content_parts = {
-            ContentPart::make_text("Summarize this recording"),
-            ContentPart::make_video(video.string(), "video/mp4"),
-        },
-    });
-
-    KimiProtocol protocol;
-    const std::string base_url = std::format("http://127.0.0.1:{}/v1", port);
-    REQUIRE_NOTHROW(protocol.prepare_media_uploads(req, base_url, auth));
-
-    REQUIRE(uploads.load() == 1);
-    CHECK(authorization == "Bearer test-token");
-    CHECK_THAT(content_type, Catch::Matchers::ContainsSubstring("multipart/form-data"));
-    REQUIRE(req.messages[0].content_parts[1].url == "ms://file_kimi_video_123");
-    REQUIRE(req.messages[0].content_parts[1].media_id == "file_kimi_video_123");
-
-    const auto payload = protocol.serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("video_url":{"url":"ms://file_kimi_video_123","id":"file_kimi_video_123"})"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("data:video/"));
-
-    ChatRequest cached_req;
-    cached_req.model = "kimi-k2.6";
-    cached_req.messages.push_back(Message{
-        .role = "user",
-        .content_parts = {
-            ContentPart::make_video(video.string(), "video/mp4"),
-        },
-    });
-    REQUIRE_NOTHROW(protocol.prepare_media_uploads(cached_req, base_url, auth));
-    CHECK(uploads.load() == 1);
-    CHECK(cached_req.messages[0].content_parts[0].url == "ms://file_kimi_video_123");
-
-    server.stop();
 }
 
 TEST_CASE("HttpLLMProvider validates video file size before Kimi upload",

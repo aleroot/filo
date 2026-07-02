@@ -46,8 +46,10 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
     SECTION("Anthropic Claude models") {
         CHECK(context_window_for_model("claude-fable-5")         == 1'000'000);
         CHECK(context_window_for_model("claude-sonnet-5")        == 1'000'000);
+        CHECK(context_window_for_model("claude-haiku-4-5")       ==   200'000);
         CHECK(context_window_for_model("fable")                  == 1'000'000);
         CHECK(context_window_for_model("sonnet")                 == 1'000'000);
+        CHECK(context_window_for_model("haiku")                  ==   200'000);
         CHECK(context_window_for_model("claude-opus-4-8")        ==   200'000);
         CHECK(context_window_for_model("claude-sonnet-4-6")      == 1'000'000);
         CHECK(context_window_for_model("sonnet[1m]")             == 1'000'000);

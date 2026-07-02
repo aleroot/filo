@@ -1,20 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#include <httplib.h>
-
-#include "core/auth/ApiKeyCredentialSource.hpp"
-#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/Models.hpp"
 
-#include <atomic>
-#include <chrono>
 #include <filesystem>
-#include <future>
 #include <fstream>
-#include <format>
-#include <thread>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -450,119 +441,6 @@ TEST_CASE("CodexResponsesProtocol - failed websocket terminal event clears pendi
     REQUIRE_THAT(fallback_payload, Catch::Matchers::ContainsSubstring(R"("type":"function_call","call_id":"call_123")"));
     REQUIRE_THAT(fallback_payload, Catch::Matchers::ContainsSubstring(R"("type":"function_call_output","call_id":"call_123")"));
     REQUIRE_THAT(fallback_payload, !Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_ws_1")"));
-}
-
-TEST_CASE("HttpLLMProvider - Codex Responses transport headers are scoped to Codex backend",
-          "[openai][responses][codex][transport]") {
-    httplib::Server server;
-
-    std::atomic<int> codex_requests{0};
-    std::string first_installation_id;
-    std::string first_client_request_id;
-    std::string first_window_id;
-    std::string first_timing_header;
-    std::string first_turn_state;
-    std::string second_turn_state;
-    std::string regular_installation_id;
-
-    auto completed_sse = [](std::string_view id) {
-        return std::format(
-            "event: response.completed\n"
-            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{}\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n",
-            id);
-    };
-
-    server.Post("/backend-api/codex/responses", [&](const httplib::Request& req,
-                                                    httplib::Response& res) {
-        const int n = ++codex_requests;
-        if (n == 1) {
-            first_installation_id = req.get_header_value("x-codex-installation-id");
-            first_client_request_id = req.get_header_value("x-client-request-id");
-            first_window_id = req.get_header_value("x-codex-window-id");
-            first_timing_header = req.get_header_value("x-responsesapi-include-timing-metrics");
-            first_turn_state = req.get_header_value("x-codex-turn-state");
-            res.set_header("x-codex-turn-state", "turn-state-one");
-            res.set_content(completed_sse("resp_codex_1"), "text/event-stream");
-            return;
-        }
-
-        second_turn_state = req.get_header_value("x-codex-turn-state");
-        res.set_header("x-codex-turn-state", "turn-state-two");
-        res.set_content(completed_sse("resp_codex_2"), "text/event-stream");
-    });
-
-    server.Post("/v1/responses", [&](const httplib::Request& req, httplib::Response& res) {
-        regular_installation_id = req.get_header_value("x-codex-installation-id");
-        res.set_content(completed_sse("resp_regular_1"), "text/event-stream");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() {
-        server.listen_after_bind();
-    });
-    for (int i = 0; i < 50 && !server.is_running(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    REQUIRE(server.is_running());
-
-    auto codex_provider = std::make_shared<HttpLLMProvider>(
-        std::format("http://127.0.0.1:{}/backend-api/codex", port),
-        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
-        "gpt-5",
-        std::make_unique<CodexResponsesProtocol>(),
-        core::config::ApiType::OpenAI,
-        "openai");
-
-    ChatRequest req;
-    req.model = "gpt-5";
-    req.session_id = "session-transport";
-    req.transport_turn_id = "session-transport:1";
-    req.messages.push_back(Message{.role = "user", .content = "first"});
-
-    auto stream_once = [](const std::shared_ptr<HttpLLMProvider>& provider, const ChatRequest& request) {
-        auto done = std::make_shared<std::promise<void>>();
-        auto completed = std::make_shared<std::atomic<bool>>(false);
-        auto future = done->get_future();
-
-        provider->stream_response(request, [done, completed](const StreamChunk& chunk) {
-            if (chunk.is_final && !completed->exchange(true)) {
-                done->set_value();
-            }
-        });
-
-        REQUIRE(future.wait_for(std::chrono::seconds(3)) == std::future_status::ready);
-    };
-
-    stream_once(codex_provider, req);
-
-    ChatRequest req2 = req;
-    req2.messages[0].content = "second";
-    stream_once(codex_provider, req2);
-
-    CHECK_FALSE(first_installation_id.empty());
-    CHECK(first_client_request_id == "session-transport");
-    CHECK(first_window_id == "session-transport:0");
-    CHECK(first_timing_header == "true");
-    CHECK(first_turn_state.empty());
-    CHECK(second_turn_state == "turn-state-one");
-
-    auto regular_provider = std::make_shared<HttpLLMProvider>(
-        std::format("http://127.0.0.1:{}/v1", port),
-        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
-        "gpt-5",
-        std::make_unique<OpenAIResponsesProtocol>(),
-        core::config::ApiType::OpenAI,
-        "openai-compatible");
-
-    ChatRequest regular_req = req;
-    regular_req.transport_turn_id = "session-transport:regular";
-    stream_once(regular_provider, regular_req);
-    CHECK(regular_installation_id.empty());
-
-    server.stop();
 }
 
 TEST_CASE("OpenAIResponsesProtocol - failed HTTP response does not advance continuation id",

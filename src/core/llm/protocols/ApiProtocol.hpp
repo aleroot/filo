@@ -225,6 +225,8 @@ struct ParseResult {
     RateLimitInfo rate_limit;               ///< Rate limit info from HTTP headers (if available).
     std::string stream_error_type;          ///< Provider error type for stream_error.
     std::string stream_error_message;       ///< Provider error message for stream_error.
+    std::string stop_reason;                ///< Provider terminal reason, when reported.
+    bool incomplete_tool_call = false;      ///< True when a stream ended mid-tool-use block.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

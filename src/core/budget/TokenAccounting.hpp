@@ -47,6 +47,8 @@ namespace core::budget {
     if (model.find("claude-sonnet-5")  != std::string_view::npos) return 1'000'000;
     if (model.find("fable")            != std::string_view::npos) return 1'000'000;
     if (model == "sonnet") return 1'000'000;
+    if (model.find("claude-haiku-4-5") != std::string_view::npos) return   200'000;
+    if (model == "haiku") return 200'000;
     if (model.find("claude-opus-4-8")  != std::string_view::npos) return   200'000;
     if (model.find("claude-sonnet-4-6") != std::string_view::npos) return 1'000'000;
     if (model.find("claude")           != std::string_view::npos) return   200'000;
@@ -86,11 +88,12 @@ struct ModelRates {
     if (model.find("claude-sonnet-5")  != std::string_view::npos) return { 2.00, 10.00 };
     if (model.find("fable")            != std::string_view::npos) return {10.00, 50.00 };
     if (model == "sonnet") return { 2.00, 10.00 };
+    if (model.find("claude-haiku-4-5") != std::string_view::npos) return { 1.00,  5.00 };
     if (model.find("claude-opus-4-8")  != std::string_view::npos) return { 5.00, 25.00 };
     if (model.find("claude-sonnet-4-6") != std::string_view::npos) return { 3.00, 15.00 };
     if (model.find("opus")        != std::string_view::npos) return { 5.00, 25.00 };
     if (model.find("sonnet")      != std::string_view::npos) return { 3.00, 15.00 };
-    if (model.find("haiku")       != std::string_view::npos) return { 0.80,  4.00 };
+    if (model.find("haiku")       != std::string_view::npos) return { 1.00,  5.00 };
     if (model.find("gpt-5.4")      != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-5")        != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-4o")      != std::string_view::npos) return { 2.50, 10.00 };

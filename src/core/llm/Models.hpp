@@ -367,25 +367,65 @@ using EncodedImagePart = EncodedMediaPart;
 struct StreamChunk {
     std::string content;           // Text content from the model
     std::string reasoning_content; // Provider-specific thinking/reasoning content
+    std::string stop_reason;       // Provider terminal reason, populated on final chunks when available
     std::vector<ToolCall> tools;   // Tool calls (if any)
     bool is_final = false;         // True if this is the last chunk
     bool is_error = false;         // True if this chunk represents an API/HTTP error
+    bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
 
     // Factory methods for common cases
-    [[nodiscard]] static StreamChunk make_final() {
-        return StreamChunk{ .content = {}, .reasoning_content = {}, .tools = {}, .is_final = true, .is_error = false };
+    [[nodiscard]] static StreamChunk make_final(
+        std::string stop_reason = {},
+        bool incomplete_tool_call = false) {
+        return StreamChunk{
+            .content = {},
+            .reasoning_content = {},
+            .stop_reason = std::move(stop_reason),
+            .tools = {},
+            .is_final = true,
+            .is_error = false,
+            .incomplete_tool_call = incomplete_tool_call,
+        };
     }
     [[nodiscard]] static StreamChunk make_error(std::string message) {
-        return StreamChunk{ .content = std::move(message), .reasoning_content = {}, .tools = {}, .is_final = true, .is_error = true };
+        return StreamChunk{
+            .content = std::move(message),
+            .reasoning_content = {},
+            .stop_reason = {},
+            .tools = {},
+            .is_final = true,
+            .is_error = true,
+        };
     }
     [[nodiscard]] static StreamChunk make_content(std::string text) {
-        return StreamChunk{ .content = std::move(text), .reasoning_content = {}, .tools = {}, .is_final = false, .is_error = false };
+        return StreamChunk{
+            .content = std::move(text),
+            .reasoning_content = {},
+            .stop_reason = {},
+            .tools = {},
+            .is_final = false,
+            .is_error = false,
+        };
     }
     [[nodiscard]] static StreamChunk make_tools(std::vector<ToolCall> tool_calls) {
-        return StreamChunk{ .content = {}, .reasoning_content = {}, .tools = std::move(tool_calls), .is_final = false, .is_error = false };
+        return StreamChunk{
+            .content = {},
+            .reasoning_content = {},
+            .stop_reason = {},
+            .tools = std::move(tool_calls),
+            .is_final = false,
+            .is_error = false,
+        };
     }
     [[nodiscard]] static StreamChunk make_reasoning(std::string text) {
-        return StreamChunk{ .content = {}, .reasoning_content = std::move(text), .tools = {}, .is_final = false, .is_error = false };
+        return StreamChunk{
+            .content = {},
+            .reasoning_content = std::move(text),
+            .stop_reason = {},
+            .tools = {},
+            .is_final = false,
+            .is_error = false,
+        };
     }
 };
 

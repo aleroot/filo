@@ -124,6 +124,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     { "claude-fable-5",     1000000 },
     { "claude-sonnet-5",    1000000 },
+    { "claude-haiku-4-5",   200000 },
     { "claude-opus-4-8",    200000 },
     { "claude-sonnet-4-6", 1000000 },
     { "claude-",           200000 },
@@ -253,6 +254,25 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             // Introductory launch pricing is effective through 2026-08-31.
             .pricing = {2.0, 10.0, 0.20, 2.5},
             .knowledge_cutoff = "2026-01",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
+        // Claude Haiku 4.5
+        {
+            .canonical_id = "claude-haiku-4-5",
+            .aliases = {"haiku", "claude-haiku", "haiku-4.5", "haiku-4-5"},
+            .display_name = "Claude Haiku 4.5",
+            .provider = "anthropic",
+            .context_window = 200000,
+            .max_output_tokens = 64000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Fast,
+            .pricing = {1.0, 5.0, 0.10, 1.25},
+            .knowledge_cutoff = "2025-02",
             .constraints = kClaudeConstraints,
             .max_tool_calls = 32
         },
@@ -1597,6 +1617,9 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
     }
     if (lowered == "fable" || lowered == "best") {
         return "claude-fable-5";
+    }
+    if (lowered == "haiku") {
+        return "claude-haiku-4-5";
     }
     if (lowered == "opusplan") {
         return "claude-sonnet-5";

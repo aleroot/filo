@@ -1137,7 +1137,7 @@ public:
             "  /retry              Re-send the last user message\n"
             "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
             "  /profile [name]     Show/list/switch named configuration profiles\n"
-            "  /effort [level]     Show/set model effort (auto|low|medium|high|max)\n"
+            "  /effort [level]     Open/show/set model effort (auto|low|medium|high|max)\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /tools [action]     Manage session trust rules for sensitive tools\n"
@@ -1203,7 +1203,8 @@ public:
         std::string_view arg = trim(arg_text);
 
         if (arg.empty()) {
-            if (ctx.open_compression_picker_fn && ctx.open_compression_picker_fn()) {
+            if (ctx.open_command_option_picker_fn
+                && ctx.open_command_option_picker_fn(get_name())) {
                 return;
             }
             const std::string body = ctx.compression_status_fn
@@ -1384,7 +1385,7 @@ class EffortCommand : public Command {
 public:
     std::string get_name() const override { return "/effort"; }
     std::string get_description() const override {
-        return "Show or set model effort level (auto|low|medium|high|max)";
+        return "Open, show, or set model effort level (auto|low|medium|high|max)";
     }
     bool accepts_arguments() const override { return true; }
 
@@ -1412,6 +1413,10 @@ public:
         };
 
         if (arg.empty()) {
+            if (ctx.open_command_option_picker_fn
+                && ctx.open_command_option_picker_fn(get_name())) {
+                return;
+            }
             const std::string body = ctx.effort_status_fn
                 ? ctx.effort_status_fn()
                 : "Use /effort auto|low|medium|high|max, or /effort status.";

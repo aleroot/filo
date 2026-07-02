@@ -17,8 +17,8 @@
  *     `message_delta`. With prompt caching enabled, `message_start` usage
  *     may also include cache creation/read token fields that contribute to
  *     effective prompt footprint.
- *   - Extended thinking is enabled via a request-level `thinking` block and
- *     a beta header.
+ *   - Extended/adaptive thinking uses provider-specific request fields on
+ *     models that support them.
  */
 
 #include "ApiProtocol.hpp"
@@ -71,8 +71,9 @@ struct AnthropicToolBlockState {
  *   `content_block_start`  — captures `tool_use` id/name into state; text ignored
  *   `content_block_delta`  — `text_delta` → text output; `input_json_delta` → arg accumulation
  *   `content_block_stop`   — finalises any pending tool call and emits it
- *   `message_stop`         — signals `done = true`
- *   `ping` / `message_start` / `message_delta` / `thinking_delta` — no content output
+ *   `message_stop`         — signals `done = true`; marks incomplete tool_use if still open
+ *   `message_delta`        — captures stop_reason and usage
+ *   `ping` / `message_start` / `thinking_delta` — no content output
  */
 class AnthropicSSEParser {
 public:
@@ -87,6 +88,8 @@ public:
         int32_t output_tokens = 0;             ///< From `message_delta`.
         std::string error_type;
         std::string error_message;
+        std::string stop_reason;               ///< From `message_delta.delta.stop_reason`.
+        bool incomplete_tool_call = false;      ///< True if message_stop arrives before content_block_stop for tool_use.
     };
 
     /**
@@ -126,8 +129,9 @@ struct AnthropicSerializer {
  * @brief Anthropic Messages API protocol (used by Claude models).
  *
  * **Request**: `POST {base_url}/v1/messages` with a JSON body serialised by
- * `AnthropicSerializer::serialize()`.  `max_tokens` is always emitted; the
- * default is 8096 tokens.
+ * `AnthropicSerializer::serialize()`.  `max_tokens` is always emitted; known
+ * models default to the registered output limit and unknown models use the
+ * constructor fallback.
  *
  * **Response**: named SSE events (`event: {type}\ndata: {json}\n\n`).
  * Tool calls are reassembled across `content_block_start` →
@@ -143,10 +147,12 @@ struct AnthropicSerializer {
 class AnthropicProtocol : public ApiProtocolBase {
 public:
     /**
-     * @param thinking           Extended-thinking configuration.  When
-     *                           `thinking.enabled` is true the `thinking` block
-     *                           and the beta header are added to every request.
-     * @param default_max_tokens Fallback when `ChatRequest::max_tokens` is unset.
+     * @param thinking           Extended-thinking configuration.  When enabled
+     *                           and supported by the requested model, the
+     *                           protocol emits the provider-specific thinking
+     *                           request fields.
+     * @param default_max_tokens Fallback for unknown models when
+     *                           `ChatRequest::max_tokens` is unset.
      */
     explicit AnthropicProtocol(AnthropicThinkingConfig thinking          = {},
                                int                    default_max_tokens = 8096)
@@ -224,6 +230,7 @@ private:
     AnthropicSSEParser      sse_parser_;          ///< Stateful; reset on clone().
     int32_t                 accumulated_input_  = 0;
     int32_t                 accumulated_output_ = 0;
+    std::string             last_stop_reason_;
     RateLimitInfo           last_rate_limit_;     ///< Populated by on_response(); scoped to this clone.
 };
 

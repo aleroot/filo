@@ -26,8 +26,10 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     // Anthropic (via new registry)
     REQUIRE(get_max_context_size("claude-fable-5") == 1000000);
     REQUIRE(get_max_context_size("claude-sonnet-5") == 1000000);
+    REQUIRE(get_max_context_size("claude-haiku-4-5") == 200000);
     REQUIRE(get_max_context_size("fable") == 1000000);
     REQUIRE(get_max_context_size("sonnet") == 1000000);
+    REQUIRE(get_max_context_size("haiku") == 200000);
     REQUIRE(get_max_context_size("claude-sonnet-4-6[1m]") == 1000000);
     REQUIRE(get_max_context_size("sonnet[1m]") == 1000000);
     REQUIRE(get_max_context_size("opus") == 200000);
@@ -79,6 +81,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-sonnet-5"));
     REQUIRE(registry.has_model("claude-fable-5"));
+    REQUIRE(registry.has_model("claude-haiku-4-5"));
     REQUIRE(registry.has_model("kimi-k2.7-code"));
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
@@ -127,6 +130,10 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto fable = registry.lookup("fable");
     REQUIRE(fable != nullptr);
     REQUIRE(fable->canonical_id == "claude-fable-5");
+
+    const auto haiku = registry.lookup("haiku");
+    REQUIRE(haiku != nullptr);
+    REQUIRE(haiku->canonical_id == "claude-haiku-4-5");
 }
 
 TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {
@@ -151,6 +158,17 @@ TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][regist
     CHECK(fable->pricing.input_per_mtok == Catch::Approx(10.0));
     CHECK(fable->pricing.output_per_mtok == Catch::Approx(50.0));
     CHECK(fable->supports(ModelCapability::Reasoning));
+
+    const auto haiku = registry.get_info("claude-haiku-4-5");
+    REQUIRE(haiku.has_value());
+    CHECK(haiku->display_name == "Claude Haiku 4.5");
+    CHECK(haiku->provider == "anthropic");
+    CHECK(haiku->context_window == 200'000);
+    CHECK(haiku->max_output_tokens == 64'000);
+    CHECK(haiku->pricing.input_per_mtok == Catch::Approx(1.0));
+    CHECK(haiku->pricing.output_per_mtok == Catch::Approx(5.0));
+    CHECK(haiku->tier == ModelTier::Fast);
+    CHECK(haiku->supports(ModelCapability::Reasoning));
 }
 
 TEST_CASE("ModelRegistry::lookup - finds current Gemini preview models", "[llm][registry]") {
@@ -191,6 +209,7 @@ TEST_CASE("ModelRegistry::get_tier - returns correct tier classification", "[llm
     // Balanced tier models
     REQUIRE(registry.get_tier("gpt-4o") == ModelTier::Powerful);  // GPT-4o is actually powerful
     REQUIRE(registry.get_tier("claude-sonnet-5") == ModelTier::Balanced);
+    REQUIRE(registry.get_tier("claude-haiku-4-5") == ModelTier::Fast);
     
     // Powerful tier models  
     REQUIRE(registry.get_tier("claude-opus-4-8") == ModelTier::Powerful);

@@ -672,6 +672,8 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("kimi-for-coding").model == "kimi-for-coding");
     REQUIRE(config.providers.at("kimi-for-coding").base_url == "https://api.kimi.com/coding/v1");
     REQUIRE(config.providers.contains("claude"));
+    REQUIRE_FALSE(config.providers.contains("claude-fable"));
+    REQUIRE_FALSE(config.providers.contains("claude-haiku"));
     REQUIRE_FALSE(config.providers.contains("claude-oauth"));
     REQUIRE(config.subagents.contains("general"));
     REQUIRE(config.subagents.contains("explore"));
@@ -960,6 +962,50 @@ TEST_CASE("ConfigManager persists specific model flavour across reloads", "[conf
         REQUIRE(config.default_provider == "kimi");
         REQUIRE(config.default_model_selection == "manual");
         REQUIRE(config.providers.at("kimi").model == "kimi-for-coding");
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager persists Claude Fable as a Claude model selection",
+          "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_claude_fable_model");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "claude",
+        "default_model_selection": "manual",
+        "providers": {
+            "claude": { "model": "claude-sonnet-5", "auth_type": "oauth_claude" }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    {
+        const auto config = manager.get_config();
+        REQUIRE(config.default_provider == "claude");
+        REQUIRE(config.default_model_selection == "manual");
+        REQUIRE(config.providers.at("claude").model == "claude-sonnet-5");
+        REQUIRE(config.providers.at("claude").auth_type == "oauth_claude");
+        REQUIRE_FALSE(config.providers.contains("claude-fable"));
+    }
+
+    std::string error;
+    REQUIRE(manager.persist_model_defaults("claude", "manual", "claude-fable-5", &error));
+    REQUIRE(error.empty());
+
+    manager.load(project_dir);
+    {
+        const auto config = manager.get_config();
+        REQUIRE(config.default_provider == "claude");
+        REQUIRE(config.providers.at("claude").model == "claude-fable-5");
+        REQUIRE_FALSE(config.providers.contains("claude-fable"));
     }
 
     fs::remove_all(sandbox);

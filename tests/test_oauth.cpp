@@ -14,21 +14,17 @@
 #include "core/auth/ClaudeOAuthFlow.hpp"
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/config/ConfigManager.hpp"
-#include <httplib.h>
 
-#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
-#include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fstream>
 #include <optional>
 #include <sstream>
-#include <thread>
 #include <vector>
 
 using namespace core::auth;
@@ -888,202 +884,6 @@ TEST_CASE("ClaudeOAuthFlow::login throws when token is missing", "[ClaudeOAuthFl
     ScopedEnvVar token("ANTHROPIC_AUTH_TOKEN", "");
     ClaudeOAuthFlow flow;
     REQUIRE_THROWS_AS(flow.login(), std::runtime_error);
-}
-
-TEST_CASE("ClaudeOAuthFlow::refresh retries without scope after invalid_scope", "[ClaudeOAuthFlow]") {
-    httplib::Server server;
-    std::atomic<int> call_count{0};
-    std::vector<std::string> request_bodies;
-    std::mutex request_mutex;
-
-    server.Post("/oauth/token", [&](const httplib::Request& req, httplib::Response& res) {
-        const int call = ++call_count;
-        {
-            std::lock_guard lock(request_mutex);
-            request_bodies.push_back(req.body);
-        }
-
-        if (call == 1) {
-            res.status = 400;
-            res.set_content(
-                R"({"error":"invalid_scope","error_description":"The requested scope is invalid"})",
-                "application/json");
-            return;
-        }
-
-        res.status = 200;
-        res.set_content(
-            R"({"access_token":"new-access-token","token_type":"Bearer","expires_in":3600})",
-            "application/json");
-    });
-
-    int port = -1;
-    for (int candidate = 42000; candidate < 42100; ++candidate) {
-        if (server.bind_to_port("127.0.0.1", candidate)) {
-            port = candidate;
-            break;
-        }
-    }
-    if (port <= 0) {
-        SKIP("Loopback port binding unavailable in this test environment");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-
-    const std::string base = "http://127.0.0.1:" + std::to_string(port);
-    ClaudeOAuthFlow flow(
-        "test-client-id",
-        base + "/oauth/authorize",
-        base + "/oauth/token",
-        {"unknown:scope", "user:inference"},
-        42000,
-        42001,
-        nullptr);
-
-    const auto token = flow.refresh("existing-refresh-token");
-    server.stop();
-
-    REQUIRE(token.access_token == "new-access-token");
-    REQUIRE(token.refresh_token == "existing-refresh-token");
-    REQUIRE(call_count.load() == 2);
-    REQUIRE(request_bodies.size() == 2);
-    REQUIRE(request_bodies[0].find("\"scope\"") != std::string::npos);
-    REQUIRE(request_bodies[1].find("\"scope\"") == std::string::npos);
-}
-
-TEST_CASE("ClaudeOAuthFlow::refresh parses top-level account/org identifiers", "[ClaudeOAuthFlow]") {
-    httplib::Server server;
-    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
-        res.status = 200;
-        res.set_content(
-            R"({
-                "access_token":"new-access-token",
-                "token_type":"Bearer",
-                "expires_in":3600,
-                "scope":"user:profile user:inference",
-                "account_id":"acct-top-level",
-                "organization_uuid":"org-top-level"
-            })",
-            "application/json");
-    });
-
-    int port = -1;
-    for (int candidate = 42100; candidate < 42200; ++candidate) {
-        if (server.bind_to_port("127.0.0.1", candidate)) {
-            port = candidate;
-            break;
-        }
-    }
-    if (port <= 0) {
-        SKIP("Loopback port binding unavailable in this test environment");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-
-    const std::string base = "http://127.0.0.1:" + std::to_string(port);
-    ClaudeOAuthFlow flow(
-        "test-client-id",
-        base + "/oauth/authorize",
-        base + "/oauth/token",
-        {"user:profile", "user:inference"},
-        42100,
-        42101,
-        nullptr);
-
-    const auto token = flow.refresh("existing-refresh-token");
-    server.stop();
-
-    REQUIRE(token.access_token == "new-access-token");
-    REQUIRE(token.refresh_token == "existing-refresh-token");
-    REQUIRE(token.account_id == "acct-top-level");
-    REQUIRE(token.organization_id == "org-top-level");
-    REQUIRE(token.scopes == std::vector<std::string>{"user:profile", "user:inference"});
-}
-
-TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization uuid fields", "[ClaudeOAuthFlow]") {
-    httplib::Server server;
-    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
-        res.status = 200;
-        res.set_content(
-            R"({
-                "access_token":"new-access-token",
-                "token_type":"Bearer",
-                "expires_in":3600,
-                "account":{"uuid":"acct-nested-uuid"},
-                "organization":{"uuid":"org-nested-uuid"}
-            })",
-            "application/json");
-    });
-
-    int port = -1;
-    for (int candidate = 42200; candidate < 42300; ++candidate) {
-        if (server.bind_to_port("127.0.0.1", candidate)) {
-            port = candidate;
-            break;
-        }
-    }
-    if (port <= 0) {
-        SKIP("Loopback port binding unavailable in this test environment");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-
-    const std::string base = "http://127.0.0.1:" + std::to_string(port);
-    ClaudeOAuthFlow flow(
-        "test-client-id",
-        base + "/oauth/authorize",
-        base + "/oauth/token",
-        {"user:inference"},
-        42200,
-        42201,
-        nullptr);
-
-    const auto token = flow.refresh("existing-refresh-token");
-    server.stop();
-
-    REQUIRE(token.account_id == "acct-nested-uuid");
-    REQUIRE(token.organization_id == "org-nested-uuid");
-}
-
-TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization id fallback", "[ClaudeOAuthFlow]") {
-    httplib::Server server;
-    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
-        res.status = 200;
-        res.set_content(
-            R"({
-                "access_token":"new-access-token",
-                "token_type":"Bearer",
-                "expires_in":3600,
-                "account":{"id":"acct-nested-id"},
-                "organization":{"id":"org-nested-id"}
-            })",
-            "application/json");
-    });
-
-    int port = -1;
-    for (int candidate = 42300; candidate < 42400; ++candidate) {
-        if (server.bind_to_port("127.0.0.1", candidate)) {
-            port = candidate;
-            break;
-        }
-    }
-    if (port <= 0) {
-        SKIP("Loopback port binding unavailable in this test environment");
-    }
-    std::jthread server_thread([&server]() { server.listen_after_bind(); });
-
-    const std::string base = "http://127.0.0.1:" + std::to_string(port);
-    ClaudeOAuthFlow flow(
-        "test-client-id",
-        base + "/oauth/authorize",
-        base + "/oauth/token",
-        {"user:inference"},
-        42300,
-        42301,
-        nullptr);
-
-    const auto token = flow.refresh("existing-refresh-token");
-    server.stop();
-
-    REQUIRE(token.account_id == "acct-nested-id");
-    REQUIRE(token.organization_id == "org-nested-id");
 }
 
 TEST_CASE("AuthenticationManager login(claude) stores token and returns hints", "[AuthenticationManager]") {

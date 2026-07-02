@@ -47,6 +47,81 @@ namespace {
     return value.substr(start, end - start + 1);
 }
 
+[[nodiscard]] bool is_truncation_stop_reason(std::string_view stop_reason) noexcept {
+    return stop_reason == "max_tokens"
+        || stop_reason == "model_context_window_exceeded";
+}
+
+[[nodiscard]] std::string provider_notice_subject(std::string_view provider_name) {
+    std::string lowered;
+    lowered.reserve(provider_name.size());
+    for (const char ch : provider_name) {
+        lowered.push_back(static_cast<char>(
+            std::tolower(static_cast<unsigned char>(ch))));
+    }
+    if (lowered.find("claude") != std::string::npos) {
+        return "Claude";
+    }
+    if (!provider_name.empty()) {
+        return "Provider '" + std::string(provider_name) + "'";
+    }
+    return "Model";
+}
+
+[[nodiscard]] std::string empty_response_detail(std::string_view stop_reason,
+                                                bool incomplete_tool_call) {
+    if (incomplete_tool_call) {
+        return " The stream ended before the provider completed a tool call, so no tool was executed.";
+    }
+    if (stop_reason == "tool_use") {
+        return " The provider reported tool_use, but Filo did not receive a complete tool call.";
+    }
+    if (stop_reason == "pause_turn") {
+        return " The provider paused a server-tool turn before producing client-visible output.";
+    }
+    if (stop_reason == "refusal") {
+        return " The provider refused the request without returning displayable text.";
+    }
+    if (is_truncation_stop_reason(stop_reason)) {
+        return " The response hit the configured output limit before Filo received a complete text block or tool call.";
+    }
+    return {};
+}
+
+[[nodiscard]] std::string empty_response_notice(std::string_view stop_reason,
+                                                bool incomplete_tool_call,
+                                                std::string_view provider_name) {
+    const std::string reason = stop_reason.empty()
+        ? std::string("unknown")
+        : std::string(stop_reason);
+    std::string notice =
+        std::format("\n[{} ended this turn with no visible text or tool calls (stop_reason={}).",
+                    provider_notice_subject(provider_name),
+                    reason);
+    notice += empty_response_detail(stop_reason, incomplete_tool_call);
+    notice += "]";
+    return notice;
+}
+
+[[nodiscard]] std::string truncation_notice(std::string_view stop_reason,
+                                            bool incomplete_tool_call,
+                                            std::string_view provider_name) {
+    const auto subject = provider_notice_subject(provider_name);
+    if (incomplete_tool_call) {
+        return std::format("\n\n[{} stopped before completing a tool call; no tool was executed.]",
+                           subject);
+    }
+    if (stop_reason == "max_tokens") {
+        return std::format("\n\n[{} stopped because the response reached max_tokens; this answer may be incomplete.]",
+                           subject);
+    }
+    if (stop_reason == "model_context_window_exceeded") {
+        return std::format("\n\n[{} stopped because the model context window was exceeded; this answer may be incomplete.]",
+                           subject);
+    }
+    return {};
+}
+
 [[nodiscard]] double sanitize_context_utilization_threshold(double value) noexcept {
     if (!std::isfinite(value)) {
         return 0.0;
@@ -803,6 +878,24 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? std::vector<core::llm::ToolCall>{}
             : *tool_calls_accum;
         asst_msg.reasoning_content  = *reasoning_accum;  // Required for Kimi thinking mode
+
+        if (!chunk.is_error && asst_msg.tool_calls.empty()) {
+            if (asst_msg.content.empty()) {
+                asst_msg.content = empty_response_notice(
+                    chunk.stop_reason,
+                    chunk.incomplete_tool_call,
+                    provider_name_snapshot);
+                text_callback(asst_msg.content);
+            } else if (const std::string notice = truncation_notice(
+                           chunk.stop_reason,
+                           chunk.incomplete_tool_call,
+                           provider_name_snapshot);
+                       !notice.empty()) {
+                asst_msg.content += notice;
+                text_callback(notice);
+            }
+        }
+
         core::logging::debug("[Agent] Persisting assistant message: content_len={}, reasoning_len={}, tool_calls_count={}", 
                             asst_msg.content.size(), asst_msg.reasoning_content.size(), asst_msg.tool_calls.size());
         const bool should_persist_assistant =

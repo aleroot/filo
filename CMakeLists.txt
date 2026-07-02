@@ -405,7 +405,6 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp
     tests/test_openai_responses_protocol.cpp
-    tests/test_curl_websocket_transport.cpp
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp
@@ -466,7 +465,10 @@ set(FILO_UNIT_TEST_SOURCES
 
 set(FILO_INTEGRATION_TEST_SOURCES
     tests/test_integration_daemon_reliability.cpp
+    tests/test_integration_provider_http.cpp
+    tests/test_integration_shell_tool.cpp
     tests/test_integration_web_tools.cpp
+    tests/test_curl_websocket_transport.cpp
 )
 
 add_executable(filo_tests ${FILO_UNIT_TEST_SOURCES})
@@ -551,7 +553,6 @@ source_group(
         tests/test_openai_provider.cpp
         tests/test_openai_stream_encoder.cpp
         tests/test_openai_responses_protocol.cpp
-        tests/test_curl_websocket_transport.cpp
         tests/test_model_catalog_provider.cpp
         tests/test_grok_provider.cpp
         tests/test_grok_enhanced.cpp
@@ -599,7 +600,10 @@ source_group(
         tests/test_prompter_mode.cpp
         tests/test_mcp_client_session.cpp
         tests/test_integration_daemon_reliability.cpp
+        tests/test_integration_provider_http.cpp
+        tests/test_integration_shell_tool.cpp
         tests/test_integration_web_tools.cpp
+        tests/test_curl_websocket_transport.cpp
         tests/test_request_replay_cache.cpp
         tests/test_agent_loop_control.cpp
         tests/test_tool_output_history.cpp

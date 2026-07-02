@@ -1,6 +1,7 @@
 #include "AnthropicProtocol.hpp"
 #include "SseUtils.hpp"
 #include "../Models.hpp"
+#include "../ModelRegistry.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -27,6 +28,7 @@ namespace {
     constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-5";
     constexpr std::string_view CLAUDE_DEFAULT_FABLE  = "claude-fable-5";
     constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-8";
+    constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
     struct HeaderWindowDef {
         std::string_view suffix;
@@ -192,24 +194,60 @@ namespace {
 
     bool anthropic_model_supports_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
-        return lowered.find("mythos") != std::string::npos
+        return lowered.find("fable") != std::string::npos
+            || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
+            || lowered.find("opus-4-7") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
     }
 
     bool anthropic_model_supports_max_effort(std::string_view model) {
         const std::string lowered = lower_copy(model);
-        return lowered.find("mythos") != std::string::npos
+        return lowered.find("fable") != std::string::npos
+            || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
+            || lowered.find("opus-4-7") != std::string::npos
             || lowered.find("sonnet-4-6") != std::string::npos;
+    }
+
+    bool anthropic_model_supports_xhigh_effort(std::string_view model) {
+        const std::string lowered = lower_copy(model);
+        return lowered.find("fable") != std::string::npos
+            || lowered.find("mythos") != std::string::npos
+            || lowered.find("sonnet-5") != std::string::npos
+            || lowered.find("opus-4-8") != std::string::npos
+            || lowered.find("opus-4-7") != std::string::npos;
+    }
+
+    bool anthropic_model_rejects_manual_thinking(std::string_view model) {
+        const std::string lowered = lower_copy(model);
+        return lowered.find("fable") != std::string::npos
+            || lowered.find("mythos") != std::string::npos
+            || lowered.find("sonnet-5") != std::string::npos
+            || lowered.find("opus-4-8") != std::string::npos
+            || lowered.find("opus-4-7") != std::string::npos;
+    }
+
+    bool anthropic_model_needs_explicit_adaptive_thinking(std::string_view model) {
+        const std::string lowered = lower_copy(model);
+        return lowered.find("opus-4-8") != std::string::npos
+            || lowered.find("opus-4-7") != std::string::npos;
     }
 
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
         return type == "overloaded_error"
             || type == "rate_limit_error"
             || type == "api_error";
+    }
+
+    [[nodiscard]] int model_default_max_tokens(std::string_view model,
+                                                int fallback) {
+        const auto info = ModelRegistry::instance().lookup(model);
+        if (!info) return fallback;
+        const int32_t max_tokens = info->effective_max_tokens();
+        return max_tokens > 0 ? max_tokens : fallback;
     }
 
     std::string normalized_effort_or_empty(std::string_view raw) {
@@ -220,8 +258,13 @@ namespace {
         if (normalized == "auto" || normalized == "unset" || normalized == "default") {
             return {};
         }
+        if (normalized == "x-high" || normalized == "x_high"
+            || normalized == "extra-high" || normalized == "extra_high") {
+            normalized = "xhigh";
+        }
         if (normalized == "low" || normalized == "medium"
-            || normalized == "high" || normalized == "max") {
+            || normalized == "high" || normalized == "xhigh"
+            || normalized == "max") {
             return normalized;
         }
         return {};
@@ -260,6 +303,8 @@ namespace {
             out.model = std::string(CLAUDE_DEFAULT_FABLE);
         } else if (lowered == "opus") {
             out.model = std::string(CLAUDE_DEFAULT_OPUS);
+        } else if (lowered == "haiku") {
+            out.model = std::string(CLAUDE_DEFAULT_HAIKU);
         } else if (lowered == "best") {
             out.model = std::string(CLAUDE_DEFAULT_FABLE);
         } else if (lowered == "opusplan") {
@@ -625,7 +670,8 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
 
     // max_tokens is mandatory in the Anthropic API.
     payload += R"(,"max_tokens":)";
-    payload += std::to_string(req.max_tokens.value_or(default_max_tokens));
+    payload += std::to_string(req.max_tokens.value_or(
+        model_default_max_tokens(req.model, default_max_tokens)));
 
     // Automatic prompt caching materially reduces repeated-prefix cost for
     // tool-heavy multi-step agent loops while remaining transparent to callers.
@@ -643,6 +689,10 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
             && !anthropic_model_supports_max_effort(req.model)) {
             effective_effort = "high";
         }
+        if (effective_effort == "xhigh"
+            && !anthropic_model_supports_xhigh_effort(req.model)) {
+            effective_effort = "high";
+        }
         if (!effective_effort.empty()) {
             payload += R"(,"output_config":{"effort":")";
             payload += core::utils::escape_json_string(effective_effort);
@@ -650,9 +700,17 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         }
     }
 
+    const bool use_adaptive_thinking =
+        thinking.enabled
+        && anthropic_model_rejects_manual_thinking(req.model)
+        && anthropic_model_needs_explicit_adaptive_thinking(req.model);
+    const bool use_manual_thinking =
+        thinking.enabled
+        && !anthropic_model_rejects_manual_thinking(req.model);
+
     // Anthropic requires temperature=1 when extended thinking is enabled.
     // Emit the constraint unconditionally so the API never receives a conflicting value.
-    if (thinking.enabled) {
+    if (use_manual_thinking) {
         payload += R"(,"temperature":1)";
     } else if (req.temperature.has_value()) {
         payload += R"(,"temperature":)";
@@ -660,10 +718,12 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
     }
 
     // Extended thinking block (must come before messages).
-    if (thinking.enabled) {
+    if (use_manual_thinking) {
         payload += R"(,"thinking":{"type":"enabled","budget_tokens":)";
         payload += std::to_string(thinking.budget_tokens);
         payload += '}';
+    } else if (use_adaptive_thinking) {
+        payload += R"(,"thinking":{"type":"adaptive"})";
     }
 
     // Claude Code-style attribution is carried in the top-level system field.
@@ -869,6 +929,14 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     }
 
     if (event_type == "message_delta") {
+        simdjson::dom::object delta_obj;
+        if (doc["delta"].get(delta_obj) == simdjson::SUCCESS) {
+            std::string_view stop_reason;
+            if (delta_obj["stop_reason"].get(stop_reason) == simdjson::SUCCESS) {
+                result.stop_reason = std::string(stop_reason);
+            }
+        }
+
         simdjson::dom::object usage_obj;
         if (doc["usage"].get(usage_obj) == simdjson::SUCCESS) {
             int64_t ot = 0;
@@ -937,6 +1005,8 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 
     if (event_type == "message_stop") {
         result.done = true;
+        result.incomplete_tool_call = current_tool_.has_value();
+        current_tool_.reset();
     }
 
     return result;
@@ -995,7 +1065,11 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
 
     append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
-    if (thinking_.enabled) append_beta_unique(ANTHROPIC_BETA_THINKING);
+    if (thinking_.enabled
+        && (last_requested_model_.empty()
+            || !anthropic_model_rejects_manual_thinking(last_requested_model_))) {
+        append_beta_unique(ANTHROPIC_BETA_THINKING);
+    }
     if (auto it = auth.properties.find("oauth");
         it != auth.properties.end() && it->second == "1") {
         append_beta_unique(ANTHROPIC_BETA_OAUTH);
@@ -1051,6 +1125,7 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     result.stream_error_message = std::move(r.error_message);
     if (r.input_tokens  > 0) accumulated_input_  = r.input_tokens;
     if (r.output_tokens > 0) accumulated_output_ = r.output_tokens;
+    if (!r.stop_reason.empty()) last_stop_reason_ = r.stop_reason;
 
     if (!r.text.empty())           result.chunks.push_back(StreamChunk::make_content(r.text));
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
@@ -1059,6 +1134,8 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
         result.done              = true;
         result.prompt_tokens     = accumulated_input_;
         result.completion_tokens = accumulated_output_;
+        result.stop_reason       = last_stop_reason_;
+        result.incomplete_tool_call = r.incomplete_tool_call;
     }
 
     return result;
@@ -1072,6 +1149,7 @@ void AnthropicProtocol::reset_state() {
     sse_parser_ = AnthropicSSEParser{};
     accumulated_input_ = 0;
     accumulated_output_ = 0;
+    last_stop_reason_.clear();
     last_rate_limit_ = RateLimitInfo{};
 }
 

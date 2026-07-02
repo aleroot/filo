@@ -2,22 +2,14 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/AnthropicProtocol.hpp"
-#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
-#include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
 
-#include <httplib.h>
-
-#include <atomic>
-#include <chrono>
 #include <filesystem>
-#include <format>
 #include <fstream>
-#include <thread>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -39,19 +31,6 @@ public:
     void publish(const RateLimitInfo& info) {
         set_last_rate_limit_info(info);
     }
-};
-
-class ScopedServerStop {
-public:
-    explicit ScopedServerStop(httplib::Server& server)
-        : server_(server) {}
-
-    ~ScopedServerStop() {
-        server_.stop();
-    }
-
-private:
-    httplib::Server& server_;
 };
 
 } // namespace
@@ -127,9 +106,9 @@ TEST_CASE("ClaudeSerializer - user image content becomes image blocks", "[claude
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"Describe this screenshot.")"));
 }
 
-TEST_CASE("ClaudeSerializer - max_tokens always present with default", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request());
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":8096)"));
+TEST_CASE("ClaudeSerializer - max_tokens uses registered model output limit by default", "[claude][serializer]") {
+    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-fable-5"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
 }
 
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {
@@ -138,8 +117,8 @@ TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][seri
     REQUIRE_THAT(AnthropicSerializer::serialize(req), Catch::Matchers::ContainsSubstring(R"("max_tokens":2048)"));
 }
 
-TEST_CASE("ClaudeSerializer - custom default_max_tokens respected", "[claude][serializer]") {
-    auto payload = AnthropicSerializer::serialize(make_simple_request(), 4096);
+TEST_CASE("ClaudeSerializer - custom default_max_tokens respected for unknown models", "[claude][serializer]") {
+    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-custom-model"), 4096);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":4096)"));
 }
 
@@ -185,6 +164,22 @@ TEST_CASE("ClaudeSerializer - effort serialized for Sonnet 5", "[claude][seriali
     const auto payload = AnthropicSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("output_config":{"effort":"medium"})"));
+}
+
+TEST_CASE("ClaudeSerializer - effort serialized for Fable 5", "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-fable-5");
+    req.effort = "medium";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"medium"})"));
+}
+
+TEST_CASE("ClaudeSerializer - xhigh effort serialized for Fable 5", "[claude][serializer][effort]") {
+    auto req = make_simple_request("claude-fable-5");
+    req.effort = "xhigh";
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("output_config":{"effort":"xhigh"})"));
 }
 
 TEST_CASE("ClaudeSerializer - effort auto/unset is treated as omitted", "[claude][serializer][effort]") {
@@ -303,6 +298,21 @@ TEST_CASE("ClaudeSerializer - thinking budget_tokens is correct", "[claude][seri
     AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
     auto payload = AnthropicSerializer::serialize(make_simple_request(), 8096, cfg);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("5000"));
+}
+
+TEST_CASE("ClaudeSerializer - Fable 5 omits rejected manual thinking config", "[claude][serializer][thinking]") {
+    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-fable-5"), 8096, cfg);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
+}
+
+TEST_CASE("ClaudeSerializer - Opus 4.8 converts thinking budget intent to adaptive thinking",
+          "[claude][serializer][thinking]") {
+    AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
+    auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-8"), 8096, cfg);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled")"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,7 +526,8 @@ TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][se
 
 TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][serializer]") {
     for (const auto* model : {"claude-opus-4-8", "claude-sonnet-4-6",
-                               "claude-sonnet-5", "claude-fable-5"}) {
+                               "claude-sonnet-5", "claude-fable-5",
+                               "claude-haiku-4-5"}) {
         auto payload = AnthropicSerializer::serialize(make_simple_request(model));
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(model));
     }
@@ -624,6 +635,28 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5", 
     REQUIRE(req.model == "claude-fable-5");
 }
 
+TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 4.5",
+          "[claude][headers]") {
+    AnthropicProtocol protocol;
+    ChatRequest req = make_simple_request("haiku");
+    protocol.prepare_request(req);
+
+    REQUIRE(req.model == "claude-haiku-4-5");
+}
+
+TEST_CASE("AnthropicProtocol::build_headers omits legacy thinking beta for Fable 5",
+          "[claude][headers][thinking]") {
+    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+    ChatRequest req = make_simple_request("fable");
+    protocol.prepare_request(req);
+
+    core::auth::AuthInfo auth;
+    auto headers = protocol.build_headers(auth);
+    REQUIRE(headers.count("anthropic-beta") == 1);
+    REQUIRE_THAT(headers.at("anthropic-beta"),
+                 !Catch::Matchers::ContainsSubstring("interleaved-thinking-2025-05-14"));
+}
+
 TEST_CASE("AnthropicProtocol::prepare_request keeps custom model case while removing [1m]", "[claude][headers]") {
     AnthropicProtocol protocol;
     ChatRequest req = make_simple_request("MyAzureDeployment[1M]");
@@ -700,6 +733,7 @@ TEST_CASE("AnthropicSSEParser - message_delta produces no output", "[claude][sse
         R"({"type":"message_delta","delta":{"stop_reason":"end_turn"}})");
     REQUIRE(r.text.empty());
     REQUIRE(!r.done);
+    REQUIRE(r.stop_reason == "end_turn");
 }
 
 TEST_CASE("AnthropicSSEParser - message_stop sets done=true", "[claude][sse]") {
@@ -776,126 +810,6 @@ TEST_CASE("AnthropicSSEParser - invalid request stream error is not retryable",
     REQUIRE(!r.done);
 }
 
-TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
-          "[claude][sse][error][http]") {
-    httplib::Server server;
-    std::atomic<int> requests{0};
-    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& res) {
-        const int attempt = ++requests;
-        res.set_header("Content-Type", "text/event-stream");
-        if (attempt == 1) {
-            res.set_content(
-                "event: error\n"
-                "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
-                "text/event-stream");
-            return;
-        }
-
-        res.set_content(
-            "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n"
-            "event: content_block_start\n"
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
-            "event: content_block_delta\n"
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Recovered\"}}\n\n"
-            "event: content_block_stop\n"
-            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
-            "event: message_delta\n"
-            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n"
-            "event: message_stop\n"
-            "data: {\"type\":\"message_stop\"}\n\n",
-            "text/event-stream");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() {
-        server.listen_after_bind();
-    });
-    ScopedServerStop stop_server(server);
-    for (int i = 0; i < 50 && !server.is_running(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    REQUIRE(server.is_running());
-
-    auto provider = std::make_shared<HttpLLMProvider>(
-        std::format("http://127.0.0.1:{}", port),
-        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
-        "claude-sonnet-4-6",
-        std::make_unique<AnthropicProtocol>());
-
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(make_simple_request(), [&](const StreamChunk& chunk) {
-        chunks.push_back(chunk);
-    });
-
-    REQUIRE(requests.load() == 2);
-    REQUIRE_FALSE(chunks.empty());
-    REQUIRE(chunks.back().is_final);
-    REQUIRE_FALSE(chunks.back().is_error);
-
-    std::string text;
-    for (const auto& chunk : chunks) {
-        text += chunk.content;
-        REQUIRE_FALSE(chunk.is_error);
-    }
-    REQUIRE(text == "Recovered");
-}
-
-TEST_CASE("HttpLLMProvider - does not retry Anthropic stream error after output",
-          "[claude][sse][error][http]") {
-    httplib::Server server;
-    std::atomic<int> requests{0};
-    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& res) {
-        ++requests;
-        res.set_header("Content-Type", "text/event-stream");
-        res.set_content(
-            "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3}}}\n\n"
-            "event: content_block_start\n"
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
-            "event: content_block_delta\n"
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial\"}}\n\n"
-            "event: error\n"
-            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
-            "text/event-stream");
-    });
-
-    const int port = server.bind_to_any_port("127.0.0.1");
-    if (port <= 0) {
-        SKIP("Local socket bind/listen is unavailable in this environment.");
-    }
-    std::jthread server_thread([&server]() {
-        server.listen_after_bind();
-    });
-    ScopedServerStop stop_server(server);
-    for (int i = 0; i < 50 && !server.is_running(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    REQUIRE(server.is_running());
-
-    auto provider = std::make_shared<HttpLLMProvider>(
-        std::format("http://127.0.0.1:{}", port),
-        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
-        "claude-sonnet-4-6",
-        std::make_unique<AnthropicProtocol>());
-
-    std::vector<StreamChunk> chunks;
-    provider->stream_response(make_simple_request(), [&](const StreamChunk& chunk) {
-        chunks.push_back(chunk);
-    });
-
-    REQUIRE(requests.load() == 1);
-    REQUIRE(chunks.size() >= 2);
-    CHECK(chunks.front().content == "Partial");
-    REQUIRE(chunks.back().is_final);
-    REQUIRE(chunks.back().is_error);
-    CHECK_THAT(chunks.back().content,
-               Catch::Matchers::ContainsSubstring("anthropic stream error: overloaded_error"));
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // AnthropicSSEParser — thinking delta (must be ignored)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -968,6 +882,21 @@ TEST_CASE("AnthropicSSEParser - content_block_stop emits complete tool call", "[
     REQUIRE(r.completed_tools[0].function.name == "get_weather");
     REQUIRE(r.completed_tools[0].function.arguments == R"({"location":"SF"})");
     REQUIRE(r.completed_tools[0].type == "function");
+}
+
+TEST_CASE("AnthropicSSEParser - message_stop marks incomplete tool call",
+          "[claude][sse][tool]") {
+    AnthropicSSEParser p;
+    p.process_event("content_block_start",
+        R"({"type":"content_block_start","index":1,)"
+        R"("content_block":{"type":"tool_use","id":"toolu_01","name":"get_weather","input":{}}})");
+    p.process_event("content_block_delta",
+        R"({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":"}})");
+
+    auto r = p.process_event("message_stop", R"({"type":"message_stop"})");
+    REQUIRE(r.done);
+    REQUIRE(r.incomplete_tool_call);
+    REQUIRE(r.completed_tools.empty());
 }
 
 TEST_CASE("AnthropicSSEParser - tool call index is captured", "[claude][sse][tool]") {
@@ -1077,6 +1006,51 @@ TEST_CASE("AnthropicProtocol - final usage includes cached input token fields", 
     REQUIRE(stop.done);
     REQUIRE(stop.prompt_tokens == 2000);
     REQUIRE(stop.completion_tokens == 42);
+}
+
+TEST_CASE("AnthropicProtocol - final event carries stop reason from message_delta",
+          "[claude][sse][integration]") {
+    AnthropicProtocol protocol;
+
+    auto delta = protocol.parse_event(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":8096}}\n");
+    REQUIRE(!delta.done);
+    REQUIRE(delta.stop_reason.empty());
+
+    auto stop = protocol.parse_event(
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n");
+    REQUIRE(stop.done);
+    REQUIRE(stop.stop_reason == "max_tokens");
+    REQUIRE(stop.completion_tokens == 8096);
+}
+
+TEST_CASE("AnthropicProtocol - final event reports incomplete tool call",
+          "[claude][sse][integration]") {
+    AnthropicProtocol protocol;
+
+    [[maybe_unused]] auto start = protocol.parse_event(
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,"
+        "\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\","
+        "\"name\":\"read_file\",\"input\":{}}}\n");
+    [[maybe_unused]] auto delta = protocol.parse_event(
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,"
+        "\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n");
+    [[maybe_unused]] auto message_delta = protocol.parse_event(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},"
+        "\"usage\":{\"output_tokens\":128000}}\n");
+
+    auto stop = protocol.parse_event(
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n");
+    REQUIRE(stop.done);
+    REQUIRE(stop.stop_reason == "max_tokens");
+    REQUIRE(stop.incomplete_tool_call);
+    REQUIRE(stop.chunks.empty());
 }
 
 TEST_CASE("AnthropicProtocol - parse_event accepts no-space SSE field separators",

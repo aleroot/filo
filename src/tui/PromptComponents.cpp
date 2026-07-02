@@ -915,26 +915,20 @@ Element render_provider_model_picker_panel(
       | size(HEIGHT, GREATER_THAN, std::max(12, static_cast<int>(models.size()) * 2 + 6));
 }
 
-Element render_compression_selection_panel(int selected_index,
-                                           std::string_view current_mode) {
-    struct CompressionOption {
-        std::string_view value;
-        std::string_view label;
-        std::string_view description;
-    };
-    static constexpr std::array<CompressionOption, 4> kOptions{{
-        {"off", "Off", "Keep tool outputs exact until the hard history-size clamp."},
-        {"light", "Light", "Summarize only oversized read_file and shell outputs."},
-        {"full", "Full", "Use read caching plus command-family summaries for common shell output."},
-        {"ultra", "Ultra", "Use the tightest built-in budgets for high token pressure."},
-    }};
-
+Element render_option_selection_panel(std::string_view title,
+                                      const std::vector<OptionPickerRow>& options,
+                                      int selected_index,
+                                      std::string_view current_value,
+                                      std::string_view help_text) {
     std::vector<Element> rows;
-    rows.reserve(kOptions.size());
-    for (std::size_t i = 0; i < kOptions.size(); ++i) {
-        const auto& option = kOptions[i];
+    rows.reserve(options.size());
+    const std::string current = current_value.empty()
+        ? std::string("<unset>")
+        : std::string(current_value);
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        const auto& option = options[i];
         std::string label = std::format("[{}] {}", i + 1, option.label);
-        if (option.value == current_mode) {
+        if (option.active) {
             label += " (active)";
         }
         rows.push_back(make_selection_row(
@@ -946,19 +940,22 @@ Element render_compression_selection_panel(int selected_index,
 
     return vbox({
         hbox({
-            text(" COMPRESSION ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" " + std::string(title) + " ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
             filler(),
-            text("Up/Down: select  Enter: confirm  1/2/3/4: quick choose")
+            text(std::format(
+                "Up/Down: select  Enter: confirm  1-{}: quick choose",
+                std::min<std::size_t>(options.size(), 9)))
                 | color(Color::GrayDark)
         }),
         separator(),
-        text(std::format("Current mode: {}", current_mode.empty() ? "off" : std::string(current_mode)))
-            | color(Color::White),
+        text(std::format("Current: {}", current)) | color(Color::White),
         filler(),
         vbox(std::move(rows)),
         filler(),
-        text("Esc closes this panel.") | dim,
-    }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 13);
+        help_text.empty()
+            ? (text("Esc closes this panel.") | dim)
+            : (text(std::string(help_text)) | dim),
+    }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 14);
 }
 
 Element render_provider_selection_panel(const std::vector<std::string>& providers,

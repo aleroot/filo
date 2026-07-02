@@ -75,7 +75,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto compression_target = std::make_shared<std::string>();
     auto compression_value = std::make_shared<std::string>("off");
     auto picker_opened  = std::make_shared<bool>(false);
-    auto compression_picker_opened = std::make_shared<bool>(false);
+    auto option_picker_command = std::make_shared<std::string>();
     auto settings_picker_opened = std::make_shared<bool>(false);
     auto review_picker_opened = std::make_shared<bool>(false);
     auto review_activity_events =
@@ -143,9 +143,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *picker_opened = true;
             return false;
         },
-        .open_compression_picker_fn = [compression_picker_opened]() {
-            *compression_picker_opened = true;
-            return true;
+        .open_command_option_picker_fn = [option_picker_command](std::string_view command_name) {
+            *option_picker_command = std::string(command_name);
+            return false;
         },
         .open_review_picker_fn = [review_picker_opened](std::function<void(std::optional<std::string>)>) {
             *review_picker_opened = true;
@@ -675,12 +675,29 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
 
     SECTION("/effort command reports current effort") {
         *mock_history = "";
+        *option_picker_command = "";
         *effort_value = "auto";
         ctx.text = "/effort";
         bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
+        REQUIRE(*option_picker_command == "/effort");
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Effort: auto"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Supported: auto, low, medium, high, max"));
+    }
+
+    SECTION("/effort opens option picker when callback handles it") {
+        *mock_history = "";
+        *option_picker_command = "";
+        ctx.open_command_option_picker_fn =
+            [option_picker_command](std::string_view command_name) {
+                *option_picker_command = std::string(command_name);
+                return true;
+            };
+        ctx.text = "/effort";
+        bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*option_picker_command == "/effort");
+        REQUIRE(mock_history->empty());
     }
 
     SECTION("/effort status alias reports current effort") {
@@ -704,17 +721,22 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
 
     SECTION("/compression opens picker when callback handles it") {
         *mock_history = "";
-        *compression_picker_opened = false;
+        *option_picker_command = "";
+        ctx.open_command_option_picker_fn =
+            [option_picker_command](std::string_view command_name) {
+                *option_picker_command = std::string(command_name);
+                return true;
+            };
         ctx.text = "/compression";
         bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
-        REQUIRE(*compression_picker_opened == true);
+        REQUIRE(*option_picker_command == "/compression");
         REQUIRE(mock_history->empty());
     }
 
     SECTION("/compression falls back to status text without picker") {
         *mock_history = "";
-        ctx.open_compression_picker_fn = {};
+        ctx.open_command_option_picker_fn = {};
         *compression_value = "full";
         ctx.text = "/compression";
         bool handled = executor.try_execute(ctx.text, ctx);

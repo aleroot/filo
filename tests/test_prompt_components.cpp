@@ -375,6 +375,40 @@ TEST_CASE("render_provider_model_picker_panel — renders model choices",
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Claude Opus 4.8"));
 }
 
+TEST_CASE("render_option_selection_panel — renders generic command choices",
+          "[tui][picker][option]") {
+    std::vector<OptionPickerRow> rows = {
+        {
+            .value = "auto",
+            .label = "Auto",
+            .description = "Use provider default.",
+            .active = false,
+        },
+        {
+            .value = "medium",
+            .label = "Medium",
+            .description = "Balanced effort.",
+            .active = true,
+        },
+    };
+
+    auto panel = render_option_selection_panel(
+        "EFFORT",
+        rows,
+        1,
+        "medium",
+        "Esc closes this panel.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(90),
+                                        ftxui::Dimension::Fixed(14));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("EFFORT"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Current: medium"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Medium (active)"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Balanced effort."));
+}
+
 TEST_CASE("render_command_prompt_panel — preserves command metadata in tall rows",
           "[tui][picker][command]") {
     std::vector<CommandSuggestion> suggestions = {{

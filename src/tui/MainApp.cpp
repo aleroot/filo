@@ -935,11 +935,17 @@ RunResult run(RunOptions opts) {
     };
     ProviderModelPickerState provider_model_picker_state;
 
-    struct CompressionPickerState {
+    struct CommandOptionPickerState {
         bool active = false;
-        int selected = 0; // 0=off, 1=light, 2=full, 3=ultra
+        int selected = 0;
+        std::string command_name;
+        std::string title;
+        std::string current_value;
+        std::string help_text;
+        std::vector<tui::OptionPickerRow> options;
+        std::function<std::string(std::string_view)> on_select;
     };
-    CompressionPickerState compression_picker_state;
+    CommandOptionPickerState command_option_picker_state;
 
     struct ProviderPickerState {
         bool active = false;
@@ -3294,16 +3300,6 @@ RunResult run(RunOptions opts) {
         return std::nullopt;
     };
 
-    auto compression_mode_index = [&](std::string_view mode) {
-        const auto normalized = normalize_compression_mode(mode).value_or("off");
-        for (std::size_t i = 0; i < kCompressionModes.size(); ++i) {
-            if (kCompressionModes[i] == normalized) {
-                return static_cast<int>(i);
-            }
-        }
-        return 0;
-    };
-
     auto describe_compression = [&]() -> std::string {
         const auto& effective = config_manager.get_config();
         const std::string mode = effective.context_compression.empty()
@@ -3347,11 +3343,52 @@ RunResult run(RunOptions opts) {
             *normalized);
     };
 
-    auto open_compression_picker = [&]() -> bool {
-        std::lock_guard lock(ui_mutex);
-        compression_picker_state.active = true;
-        compression_picker_state.selected =
-            compression_mode_index(config_manager.get_config().context_compression);
+    auto open_command_option_picker = [&](std::string_view command_name) -> bool {
+        CommandOptionPickerState next;
+        next.active = true;
+        next.command_name = std::string(command_name);
+
+        if (command_name == "/effort") {
+            next.title = "EFFORT";
+            next.current_value = session_effort_value.empty()
+                ? std::string("auto")
+                : session_effort_value;
+            next.help_text = "Esc closes this panel.";
+            next.options = {
+                {.value = "auto", .label = "Auto", .description = "Use the provider default for the selected model."},
+                {.value = "low", .label = "Low", .description = "Prefer faster, lighter reasoning when supported."},
+                {.value = "medium", .label = "Medium", .description = "Use balanced reasoning effort when supported."},
+                {.value = "high", .label = "High", .description = "Use deeper reasoning effort when supported."},
+                {.value = "max", .label = "Max", .description = "Request maximum effort; unsupported models fall back to high."},
+            };
+            next.on_select = switch_effort;
+        } else if (command_name == "/compression" || command_name == "/compress") {
+            next.title = "COMPRESSION";
+            next.current_value = normalize_compression_mode(
+                config_manager.get_config().context_compression).value_or("off");
+            next.help_text = "Esc closes this panel.";
+            next.options = {
+                {.value = "off", .label = "Off", .description = "Keep tool outputs exact until the hard history-size clamp."},
+                {.value = "light", .label = "Light", .description = "Summarize only oversized read_file and shell outputs."},
+                {.value = "full", .label = "Full", .description = "Use read caching plus command-family summaries for common shell output."},
+                {.value = "ultra", .label = "Ultra", .description = "Use the tightest built-in budgets for high token pressure."},
+            };
+            next.on_select = switch_compression;
+        } else {
+            return false;
+        }
+
+        for (std::size_t i = 0; i < next.options.size(); ++i) {
+            next.options[i].active = next.options[i].value == next.current_value;
+            if (next.options[i].active) {
+                next.selected = static_cast<int>(i);
+            }
+        }
+
+        {
+            std::lock_guard lock(ui_mutex);
+            command_option_picker_state = std::move(next);
+        }
         wake_ui();
         return true;
     };
@@ -4188,7 +4225,7 @@ RunResult run(RunOptions opts) {
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
-                || compression_picker_state.active
+                || command_option_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
@@ -4218,7 +4255,7 @@ RunResult run(RunOptions opts) {
             .compression_status_fn = describe_compression,
             .switch_compression_fn = switch_compression,
             .open_model_picker_fn = open_model_picker,
-            .open_compression_picker_fn = open_compression_picker,
+            .open_command_option_picker_fn = open_command_option_picker,
             .open_settings_picker_fn = open_settings_picker,
             .open_sessions_picker_fn = open_sessions_picker,
             .resume_session_fn = [&](std::string_view id_or_idx) {
@@ -4316,7 +4353,7 @@ RunResult run(RunOptions opts) {
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
-                || compression_picker_state.active
+                || command_option_picker_state.active
                 || provider_picker_state.active
                 || review_picker_state.active
                 || local_model_picker_state.active
@@ -4919,44 +4956,60 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        bool compression_picker_was_active = false;
-        std::optional<int> compression_choice;
+        bool command_option_picker_was_active = false;
+        std::optional<std::string> command_option_choice;
+        std::function<std::string(std::string_view)> command_option_on_select;
         {
             std::lock_guard lock(ui_mutex);
-            if (compression_picker_state.active) {
-                compression_picker_was_active = true;
-                const int mode_count = static_cast<int>(kCompressionModes.size());
+            if (command_option_picker_state.active) {
+                command_option_picker_was_active = true;
+                const int option_count =
+                    static_cast<int>(command_option_picker_state.options.size());
                 if (event == Event::ArrowUp) {
-                    compression_picker_state.selected =
-                        (compression_picker_state.selected + mode_count - 1) % mode_count;
+                    if (option_count > 0) {
+                        command_option_picker_state.selected =
+                            (command_option_picker_state.selected + option_count - 1)
+                            % option_count;
+                    }
                 } else if (event == Event::ArrowDown) {
-                    compression_picker_state.selected =
-                        (compression_picker_state.selected + 1) % mode_count;
-                } else if (event == Event::Character('1')) {
-                    compression_choice = 0;
-                    compression_picker_state.active = false;
-                } else if (event == Event::Character('2')) {
-                    compression_choice = 1;
-                    compression_picker_state.active = false;
-                } else if (event == Event::Character('3')) {
-                    compression_choice = 2;
-                    compression_picker_state.active = false;
-                } else if (event == Event::Character('4')) {
-                    compression_choice = 3;
-                    compression_picker_state.active = false;
+                    if (option_count > 0) {
+                        command_option_picker_state.selected =
+                            (command_option_picker_state.selected + 1) % option_count;
+                    }
                 } else if (event == Event::Return) {
-                    compression_choice = compression_picker_state.selected;
-                    compression_picker_state.active = false;
+                    if (option_count > 0) {
+                        command_option_choice =
+                            command_option_picker_state
+                                .options[static_cast<std::size_t>(
+                                    command_option_picker_state.selected)]
+                                .value;
+                        command_option_on_select = command_option_picker_state.on_select;
+                        command_option_picker_state.active = false;
+                    }
                 } else if (event == Event::Escape) {
-                    compression_picker_state.active = false;
+                    command_option_picker_state.active = false;
+                } else {
+                    for (int n = 1; n <= std::min(option_count, 9); ++n) {
+                        if (event == Event::Character(static_cast<char>('0' + n))) {
+                            command_option_choice =
+                                command_option_picker_state
+                                    .options[static_cast<std::size_t>(n - 1)]
+                                    .value;
+                            command_option_on_select = command_option_picker_state.on_select;
+                            command_option_picker_state.active = false;
+                            break;
+                        }
+                    }
                 }
             }
         }
-        if (compression_picker_was_active) {
-            if (compression_choice.has_value()) {
-                const std::string result = switch_compression(
-                    kCompressionModes[static_cast<std::size_t>(*compression_choice)]);
-                const bool success = result.starts_with("Set");
+        if (command_option_picker_was_active) {
+            if (command_option_choice.has_value() && command_option_on_select) {
+                const std::string result = command_option_on_select(*command_option_choice);
+                const bool success = result.starts_with("Set")
+                    || result.starts_with("Switched")
+                    || result.starts_with("Cleared")
+                    || result.starts_with("Applied");
                 append_history(std::format(
                     "\n{}\n",
                     success ? "✓  " + result : "✗  " + result));
@@ -5636,7 +5689,7 @@ RunResult run(RunOptions opts) {
         bool                   model_picker_active = false;
         bool                   model_provider_picker_active = false;
         bool                   provider_model_picker_active = false;
-        bool                   compression_picker_active = false;
+        bool                   command_option_picker_active = false;
         bool                   provider_picker_active = false;
         bool                   review_picker_active = false;
         bool                   review_activity_active = false;
@@ -5649,7 +5702,7 @@ RunResult run(RunOptions opts) {
         int                    model_picker_selected = 0;
         int                    model_provider_picker_selected = 0;
         int                    provider_model_picker_selected = 0;
-        int                    compression_picker_selected = 0;
+        int                    command_option_picker_selected = 0;
         int                    provider_picker_selected = 0;
         int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
@@ -5657,7 +5710,10 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ModelProviderPickerRow> model_provider_picker_providers;
         std::vector<tui::ModelPickerRow> provider_model_picker_models;
         std::string provider_model_picker_provider;
-        std::string            compression_mode;
+        std::string            command_option_picker_title;
+        std::string            command_option_picker_current;
+        std::string            command_option_picker_help;
+        std::vector<tui::OptionPickerRow> command_option_picker_options;
         ReviewPickerMode       review_picker_mode = ReviewPickerMode::SelectTarget;
         std::string            review_picker_input;
         std::vector<ReviewBaseRef> review_picker_base_refs;
@@ -5702,9 +5758,12 @@ RunResult run(RunOptions opts) {
             provider_model_picker_selected = provider_model_picker_state.selected;
             provider_model_picker_provider = provider_model_picker_state.provider_name;
             provider_model_picker_models = provider_model_picker_state.models;
-            compression_picker_active = compression_picker_state.active;
-            compression_picker_selected = compression_picker_state.selected;
-            compression_mode = config_manager.get_config().context_compression;
+            command_option_picker_active = command_option_picker_state.active;
+            command_option_picker_selected = command_option_picker_state.selected;
+            command_option_picker_title = command_option_picker_state.title;
+            command_option_picker_current = command_option_picker_state.current_value;
+            command_option_picker_help = command_option_picker_state.help_text;
+            command_option_picker_options = command_option_picker_state.options;
             provider_picker_active    = provider_picker_state.active;
             provider_picker_selected  = provider_picker_state.selected;
             provider_picker_providers = provider_picker_state.providers;
@@ -5829,11 +5888,13 @@ RunResult run(RunOptions opts) {
                 local_model_picker_dir,
                 local_model_picker_entries,
                 local_model_picker_selected);
-        } else if (compression_picker_active) {
-            bottom_el = render_compression_selection_panel(
-                compression_picker_selected,
-                compression_mode.empty() ? std::string_view("off")
-                                         : std::string_view(compression_mode));
+        } else if (command_option_picker_active) {
+            bottom_el = render_option_selection_panel(
+                command_option_picker_title,
+                command_option_picker_options,
+                command_option_picker_selected,
+                command_option_picker_current,
+                command_option_picker_help);
         } else if (model_picker_active) {
             const std::string manual_description = std::format(
                 "Use a fixed preset: {} ({})",

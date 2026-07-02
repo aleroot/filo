@@ -519,7 +519,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                 if (result.done) {
                                     websocket_done = true;
                                     if (!websocket_frame.suppress_output) {
-                                        callback(StreamChunk::make_final());
+                                        callback(StreamChunk::make_final(result.stop_reason, result.incomplete_tool_call));
                                     }
                                 }
                                 return websocket_done;
@@ -682,7 +682,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                     if (result.done) {
                         done_signalled = true;
-                        callback(StreamChunk::make_final());
+                        callback(StreamChunk::make_final(result.stop_reason, result.incomplete_tool_call));
                     }
                 };
 

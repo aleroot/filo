@@ -61,7 +61,7 @@ struct CommandContext {
     std::function<std::string()> compression_status_fn = {};
     std::function<std::string(std::string_view)> switch_compression_fn = {};
     std::function<bool()> open_model_picker_fn = {};
-    std::function<bool()> open_compression_picker_fn = {};
+    std::function<bool(std::string_view)> open_command_option_picker_fn = {};
     std::function<bool()> open_settings_picker_fn = {};
     std::function<bool()> open_sessions_picker_fn = {};
     std::function<void(std::string_view)> resume_session_fn = {};

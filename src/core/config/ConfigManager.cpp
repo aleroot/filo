@@ -513,7 +513,6 @@ AppConfig make_default_config() {
     add_provider("grok-mini",      "grok-3-mini",      "high");
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
     add_provider("claude",         "claude-sonnet-5");
-    add_provider("claude-fable",   "claude-fable-5");
     add_provider("gemini",         "gemini-2.5-flash");
     add_provider("kimi",           "kimi-k2.7-code", "high");
     add_provider("kimi-k2-6",      "kimi-k2.6");
@@ -576,7 +575,6 @@ std::string default_config_json() {
         "openai":         { "model": "gpt-5.4" },
         "mistral":        { "model": "devstral-small-latest" },
         "claude":         { "model": "claude-sonnet-5" },
-        "claude-fable":   { "model": "claude-fable-5" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
@@ -1655,11 +1653,12 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
 
     const std::string provider_str(default_provider);
     const std::string selection_str(default_model_selection);
+    const std::string model_str(specific_model);
     const fs::path overlay_path = model_defaults_overlay_path(get_config_dir());
 
     // Build the JSON payload, including specific model override if provided
     std::string payload;
-    if (!specific_model.empty()) {
+    if (!model_str.empty()) {
         payload = std::format(
             "{{\n"
             "    \"default_provider\": \"{}\",\n"
@@ -1673,7 +1672,7 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
             core::utils::escape_json_string(provider_str),
             core::utils::escape_json_string(selection_str),
             core::utils::escape_json_string(provider_str),
-            core::utils::escape_json_string(std::string(specific_model)));
+            core::utils::escape_json_string(model_str));
     } else {
         payload = std::format(
             "{{\n"
@@ -1692,8 +1691,8 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
 
     config_.default_provider = provider_str;
     config_.default_model_selection = selection_str;
-    if (!specific_model.empty()) {
-        config_.providers[provider_str].model = std::string(specific_model);
+    if (!model_str.empty()) {
+        config_.providers[provider_str].model = model_str;
     }
     return true;
 }
