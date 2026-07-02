@@ -6,7 +6,6 @@
 #include "shell/ShellUtils.hpp"
 #include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
-#include "../workspace/SessionWorkspace.hpp"
 #include "../workspace/Workspace.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -18,6 +17,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace core::tools {
@@ -85,71 +85,6 @@ get_or_create_session_shell(const std::string& session_id, const std::filesystem
     return state;
 }
 
-[[nodiscard]] bool path_has_prefix(
-    const std::filesystem::path& root,
-    const std::filesystem::path& target)
-{
-    const auto normalized_root = root.lexically_normal();
-    const auto normalized_target = target.lexically_normal();
-
-    auto root_it = normalized_root.begin();
-    auto target_it = normalized_target.begin();
-    while (root_it != normalized_root.end() && target_it != normalized_target.end()) {
-        if (*root_it != *target_it) return false;
-        ++root_it;
-        ++target_it;
-    }
-    return root_it == normalized_root.end();
-}
-
-[[nodiscard]] std::vector<std::filesystem::path> temp_roots() {
-    std::vector<std::filesystem::path> roots;
-    std::error_code ec;
-    roots.push_back(std::filesystem::temp_directory_path(ec));
-    roots.emplace_back("/tmp");
-    roots.emplace_back("/private/tmp");
-    roots.emplace_back("/var/tmp");
-    roots.emplace_back("/private/var/tmp");
-
-    std::vector<std::filesystem::path> normalized;
-    for (const auto& root : roots) {
-        if (root.empty()) continue;
-        const auto path = core::workspace::SessionWorkspace::normalize_path(root);
-        if (std::ranges::find(normalized, path) == normalized.end()) {
-            normalized.push_back(path);
-        }
-    }
-    return normalized;
-}
-
-[[nodiscard]] bool is_inside_temp_root(const std::filesystem::path& path) {
-    if (path.empty() || !path.is_absolute()) return false;
-    const auto normalized = core::workspace::SessionWorkspace::normalize_path(path);
-    for (const auto& root : temp_roots()) {
-        if (path_has_prefix(root, normalized)) return true;
-    }
-    return false;
-}
-
-[[nodiscard]] bool is_lexically_inside_temp_root(const std::filesystem::path& path) {
-    if (path.empty() || !path.is_absolute()) return false;
-    const auto normalized = path.lexically_normal();
-    std::error_code ec;
-    std::vector<std::filesystem::path> roots{
-        std::filesystem::temp_directory_path(ec).lexically_normal(),
-        std::filesystem::path("/tmp"),
-        std::filesystem::path("/private/tmp"),
-        std::filesystem::path("/var/tmp"),
-        std::filesystem::path("/private/var/tmp"),
-    };
-    for (const auto& root : roots) {
-        if (!root.empty() && path_has_prefix(root.lexically_normal(), normalized)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 [[nodiscard]] bool is_shell_token_separator(char c) {
     return std::isspace(static_cast<unsigned char>(c))
         || c == '<'
@@ -174,7 +109,8 @@ void append_temp_candidate_from_token(
         if (value.empty() || value.front() != '/') return;
         std::filesystem::path path(value);
         const auto normalized = path.lexically_normal();
-        if (!is_lexically_inside_temp_root(normalized) && !is_inside_temp_root(normalized)) {
+        if (!TempFileAccessRegistry::is_lexically_temp_path(normalized)
+            && !TempFileAccessRegistry::is_temp_path(normalized)) {
             return;
         }
         if (seen.insert(normalized.string()).second) {
@@ -184,7 +120,7 @@ void append_temp_candidate_from_token(
 
     try_append(token);
 
-    for (std::string_view prefix : {"/tmp/", "/private/tmp/", "/var/tmp/", "/private/var/tmp/"}) {
+    for (const auto& prefix : TempFileAccessRegistry::temp_path_prefixes()) {
         std::size_t offset = 0;
         while ((offset = token.find(prefix, offset)) != std::string::npos) {
             std::size_t end = offset;
@@ -279,19 +215,21 @@ void append_temp_candidate_from_token(
         return false;
     }
 
-    if (!is_inside_temp_root(before.path)) {
+    if (!TempFileAccessRegistry::is_temp_path(before.path)) {
         return false;
     }
     return true;
 }
 
 void grant_created_temp_candidates(
+    TempFileAccessRegistry* temp_file_access_registry,
     std::string_view session_id,
     const std::vector<TempCandidateSnapshot>& before)
 {
+    if (temp_file_access_registry == nullptr) return;
     for (const auto& candidate : before) {
         if (!temp_candidate_was_created(candidate)) continue;
-        TempFileAccessRegistry::instance().grant_read(session_id, candidate.path);
+        temp_file_access_registry->grant_read(session_id, candidate.path);
     }
 }
 
@@ -320,6 +258,28 @@ private:
 
 } // namespace
 
+ShellTool::ShellTool()
+    : ShellTool(shell::make_shell_executor(), std::make_shared<TempFileAccessRegistry>()) {}
+
+ShellTool::ShellTool(std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
+    : ShellTool(shell::make_shell_executor(), std::move(temp_file_access_registry)) {}
+
+ShellTool::ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
+    : ShellTool(std::move(executor), std::make_shared<TempFileAccessRegistry>()) {}
+
+ShellTool::ShellTool(
+    std::unique_ptr<shell::IShellExecutor> executor,
+    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
+    : executor_(std::move(executor))
+    , temp_file_access_registry_(
+          temp_file_access_registry
+              ? std::move(temp_file_access_registry)
+              : std::make_shared<TempFileAccessRegistry>()) {
+    if (!executor_) {
+        executor_ = shell::make_shell_executor();
+    }
+}
+
 void ShellTool::clear_mcp_session(std::string_view session_id) {
     if (session_id.empty()) return;
 
@@ -334,7 +294,13 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
         std::lock_guard<std::mutex> lock(g_active_commands_mutex);
         g_active_commands.erase(std::string(session_id));
     }
-    TempFileAccessRegistry::instance().clear_session(session_id);
+}
+
+void ShellTool::clear_session_state(std::string_view session_id) {
+    clear_mcp_session(session_id);
+    if (temp_file_access_registry_) {
+        temp_file_access_registry_->clear_session(session_id);
+    }
 }
 
 bool ShellTool::interrupt_mcp_session(std::string_view session_id) {
@@ -516,7 +482,10 @@ std::string ShellTool::execute_impl(
     }
 
     if (result.exit_code == 0) {
-        grant_created_temp_candidates(context.session_id, temp_snapshots);
+        grant_created_temp_candidates(
+            temp_file_access_registry_.get(),
+            context.session_id,
+            temp_snapshots);
     }
 
     const std::string escaped = core::utils::escape_json_string(result.output);

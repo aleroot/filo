@@ -10,7 +10,6 @@
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
 #include "../core/tools/ToolManager.hpp"
-#include "../core/tools/ShellTool.hpp"
 #include "../core/context/SessionContext.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
@@ -701,7 +700,7 @@ void handle_mcp_delete(const std::string& host,
     }
 
     replay_cache().clear_session(session_id);
-    core::tools::ShellTool::clear_mcp_session(session_id);
+    core::tools::ToolManager::get_instance().clear_session_state(session_id);
     res.status = 204;
 }
 
@@ -841,7 +840,7 @@ void handle_mcp_post(const std::string& host,
                 && parsed->method == "notifications/roots/list_changed") {
                 mark_session_workspace_dirty(*session);
                 lock.unlock();
-                core::tools::ShellTool::clear_mcp_session(session_id);
+                core::tools::ToolManager::get_instance().clear_session_state(session_id);
                 lock.lock();
             }
 
@@ -996,7 +995,7 @@ void handle_mcp_post(const std::string& host,
                                 string_response_id_key(roots_request_id));
                             fail_session_workspace_refresh(*session_ptr);
                         }
-                        core::tools::ShellTool::clear_mcp_session(session_id);
+                        core::tools::ToolManager::get_instance().clear_session_state(session_id);
                         detail::McpDispatchResult timeout_result{
                             .status = 200,
                             .body = make_jsonrpc_error_body(
@@ -1019,7 +1018,7 @@ void handle_mcp_post(const std::string& host,
                             std::lock_guard<std::mutex> lock(session_ptr->mutex);
                             fail_session_workspace_refresh(*session_ptr);
                         }
-                        core::tools::ShellTool::clear_mcp_session(session_id);
+                        core::tools::ToolManager::get_instance().clear_session_state(session_id);
                         detail::McpDispatchResult invalid_roots_result{
                             .status = 200,
                             .body = make_jsonrpc_error_body(
@@ -1043,7 +1042,7 @@ void handle_mcp_post(const std::string& host,
                     }
 
                     if (clear_shell) {
-                        core::tools::ShellTool::clear_mcp_session(session_id);
+                        core::tools::ToolManager::get_instance().clear_session_state(session_id);
                     }
 
                     const auto final_result = dispatch_mcp_payload(
@@ -1058,7 +1057,7 @@ void handle_mcp_post(const std::string& host,
                         std::lock_guard<std::mutex> lock(session_ptr->mutex);
                         fail_session_workspace_refresh(*session_ptr);
                     }
-                    core::tools::ShellTool::clear_mcp_session(session_id);
+                    core::tools::ToolManager::get_instance().clear_session_state(session_id);
                     detail::McpDispatchResult error_result{
                         .status = 200,
                         .body = make_jsonrpc_error_body(
@@ -1073,7 +1072,7 @@ void handle_mcp_post(const std::string& host,
                         std::lock_guard<std::mutex> lock(session_ptr->mutex);
                         fail_session_workspace_refresh(*session_ptr);
                     }
-                    core::tools::ShellTool::clear_mcp_session(session_id);
+                    core::tools::ToolManager::get_instance().clear_session_state(session_id);
                     detail::McpDispatchResult error_result{
                         .status = 200,
                         .body = make_jsonrpc_error_body(

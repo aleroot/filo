@@ -17,6 +17,7 @@
 #include "ShellTool.hpp"
 #include "SkillRegistry.hpp"
 #include "TaskTool.hpp"
+#include "TempFileAccessRegistry.hpp"
 #include "ToolManager.hpp"
 #include "WebFetchTool.hpp"
 #include "WebSearchTool.hpp"
@@ -59,11 +60,15 @@ void register_builtin_tools(ToolManager& tool_manager,
         tool_manager.register_tool(std::make_shared<GetTimeTool>());
     }
 
-    tool_manager.register_tool(std::make_shared<ShellTool>());
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+
+    tool_manager.register_tool(std::make_shared<ShellTool>(temp_file_access_registry));
     tool_manager.register_tool(with_path_visibility(std::make_shared<ApplyPatchTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<FileSearchTool>()));
-    tool_manager.register_tool(with_path_visibility(std::make_shared<ReadFileTool>()));
-    tool_manager.register_tool(with_path_visibility(std::make_shared<WriteFileTool>()));
+    tool_manager.register_tool(
+        with_path_visibility(std::make_shared<ReadFileTool>(temp_file_access_registry)));
+    tool_manager.register_tool(
+        with_path_visibility(std::make_shared<WriteFileTool>(temp_file_access_registry)));
     tool_manager.register_tool(with_path_visibility(std::make_shared<ListDirectoryTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<ReplaceTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<GrepSearchTool>()));

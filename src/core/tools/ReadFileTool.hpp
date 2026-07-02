@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "TempFileAccessRegistry.hpp"
+
+#include <memory>
 
 namespace core::tools {
 
@@ -31,8 +34,14 @@ namespace core::tools {
  */
 class ReadFileTool : public Tool {
 public:
+    ReadFileTool();
+    explicit ReadFileTool(std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry);
+
     ToolDefinition get_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
+
+private:
+    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry_;
 };
 
 } // namespace core::tools

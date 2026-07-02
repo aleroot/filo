@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "TempFileAccessRegistry.hpp"
 #include "shell/IShellExecutor.hpp"
 #include "shell/ShellExecutorFactory.hpp"
 #include <chrono>
@@ -64,12 +65,15 @@ public:
         std::chrono::steady_clock::time_point started_at;
     };
 
-    // Constructs with the platform-appropriate executor (selected at compile time).
-    ShellTool() : executor_(shell::make_shell_executor()) {}
+    ShellTool();
+
+    explicit ShellTool(std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry);
 
     // Dependency-injection constructor — used in tests to supply a mock executor.
-    explicit ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
-        : executor_(std::move(executor)) {}
+    explicit ShellTool(std::unique_ptr<shell::IShellExecutor> executor);
+
+    ShellTool(std::unique_ptr<shell::IShellExecutor> executor,
+              std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry);
 
     static void clear_mcp_session(std::string_view session_id);
     static bool interrupt_mcp_session(std::string_view session_id);
@@ -78,6 +82,7 @@ public:
     ToolDefinition get_definition() const override;
     std::string execute(const std::string& json_args, const core::context::SessionContext& context) override;
     std::string execute(const std::string& json_args, const ToolInvocationContext& invocation) override;
+    void clear_session_state(std::string_view session_id) override;
 
 private:
     std::string execute_impl(const std::string& json_args,
@@ -86,6 +91,7 @@ private:
 
     std::unique_ptr<shell::IShellExecutor> executor_;
     std::mutex                             executor_mutex_;
+    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry_;
 };
 
 } // namespace core::tools

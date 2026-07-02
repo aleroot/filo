@@ -1,4 +1,5 @@
 #include "WriteFileTool.hpp"
+#include "TempFileAccessRegistry.hpp"
 #include "ToolArgumentUtils.hpp"
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
@@ -7,8 +8,19 @@
 #include <sstream>
 #include <format>
 #include <filesystem>
+#include <utility>
 
 namespace core::tools {
+
+WriteFileTool::WriteFileTool()
+    : WriteFileTool(std::make_shared<TempFileAccessRegistry>()) {}
+
+WriteFileTool::WriteFileTool(
+    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
+    : temp_file_access_registry_(
+          temp_file_access_registry
+              ? std::move(temp_file_access_registry)
+              : std::make_shared<TempFileAccessRegistry>()) {}
 
 ToolDefinition WriteFileTool::get_definition() const {
     return {
@@ -56,7 +68,8 @@ std::string WriteFileTool::execute(const std::string& json_args, const core::con
                 path_str,
                 context,
                 &resolved_path,
-                names::kWriteFile)) {
+                names::kWriteFile,
+                temp_file_access_registry_.get())) {
         return *access_error;
     }
 
@@ -99,6 +112,9 @@ std::string WriteFileTool::execute(const std::string& json_args, const core::con
     }
     ofs << content;
     ofs.close();
+    if (TempFileAccessRegistry::is_temp_path(resolved_path)) {
+        temp_file_access_registry_->grant_read(context.session_id, resolved_path);
+    }
 
     // -------------------------------------------------------------------------
     // Build rich response for Lampo's diff UI.

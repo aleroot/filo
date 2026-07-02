@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace core::llm {
@@ -184,6 +185,14 @@ public:
                                 const ToolInvocationContext& invocation) {
         return execute(json_args, invocation.session_context);
     }
+
+    /**
+     * @brief Clears per-session state owned by this tool.
+     *
+     * Stateless tools keep the default no-op. Stateful tools use this hook for
+     * explicit lifecycle cleanup instead of hidden process-wide registries.
+     */
+    virtual void clear_session_state(std::string_view) {}
 };
 
 } // namespace core::tools

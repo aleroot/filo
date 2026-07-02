@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <cerrno>
 #include <system_error>
+#include <utility>
 
 namespace {
 
@@ -43,6 +44,16 @@ namespace {
 } // namespace
 
 namespace core::tools {
+
+ReadFileTool::ReadFileTool()
+    : ReadFileTool(std::make_shared<TempFileAccessRegistry>()) {}
+
+ReadFileTool::ReadFileTool(
+    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
+    : temp_file_access_registry_(
+          temp_file_access_registry
+              ? std::move(temp_file_access_registry)
+              : std::make_shared<TempFileAccessRegistry>()) {}
 
 ToolDefinition ReadFileTool::get_definition() const {
     return {
@@ -102,7 +113,8 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
                 path_str,
                 context,
                 &resolved_path,
-                names::kReadFile)) {
+                names::kReadFile,
+                temp_file_access_registry_.get())) {
         return *access_error;
     }
     const std::string resolved_path_string = resolved_path.string();

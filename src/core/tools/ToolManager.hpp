@@ -7,6 +7,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <stdexcept>
 #include <optional>
@@ -104,6 +105,20 @@ public:
         auto it = tools_.find(name);
         if (it == tools_.end()) return std::nullopt;
         return it->second->get_definition();
+    }
+
+    void clear_session_state(std::string_view session_id) {
+        std::vector<std::shared_ptr<Tool>> tools;
+        {
+            std::lock_guard lock(mutex_);
+            tools.reserve(tools_.size());
+            for (const auto& [_, tool] : tools_) {
+                tools.push_back(tool);
+            }
+        }
+        for (const auto& tool : tools) {
+            tool->clear_session_state(session_id);
+        }
     }
 
 private:

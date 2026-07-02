@@ -17,6 +17,7 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
+#include "core/tools/TempFileAccessRegistry.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
@@ -377,7 +378,8 @@ TEST_CASE("ReadFileTool can read temp files created by the same shell session",
     std::filesystem::remove(temp_file, ec);
 
 #undef execute
-    ShellTool shell_tool;
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    ShellTool shell_tool(temp_file_access_registry);
     const auto shell_res = shell_tool.execute(
         std::format(
             R"({{"command":"printf 'temp grant content\n' > '{}'"}})",
@@ -385,12 +387,148 @@ TEST_CASE("ReadFileTool can read temp files created by the same shell session",
         context);
     REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
 
-    ReadFileTool read_tool;
+    ReadFileTool read_tool(temp_file_access_registry);
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp grant content"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 45,
+        },
+        core::context::SessionTransport::cli,
+        "temp-write-allowed");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_write_allowed_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+
+#undef execute
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    WriteFileTool write_tool(temp_file_access_registry);
+    const auto write_res = write_tool.execute(
+        std::format(
+            R"({{"file_path":"{}","content":"temp write content"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+
+    ReadFileTool read_tool(temp_file_access_registry);
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp write content"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("ShellTool session cleanup clears temp read grants",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 47,
+        },
+        core::context::SessionTransport::cli,
+        "temp-grant-cleanup");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_cleanup_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+
+#undef execute
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    ShellTool shell_tool(temp_file_access_registry);
+    ReadFileTool read_tool(temp_file_access_registry);
+
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"printf 'cleanup temp grant\n' > '{}'"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    const auto allowed_read = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+    REQUIRE_THAT(allowed_read, Catch::Matchers::ContainsSubstring("cleanup temp grant"));
+
+    shell_tool.clear_session_state(context.session_id);
+    const auto denied_read = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(denied_read, Catch::Matchers::ContainsSubstring("Access denied"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("TempFileAccessRegistry recognizes canonical and lexical temp paths",
+          "[tools][workspace][temp]") {
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_path_recognition_" + std::to_string(getpid()) + ".txt");
+
+    REQUIRE(TempFileAccessRegistry::is_temp_path(temp_file));
+    REQUIRE(TempFileAccessRegistry::is_lexically_temp_path(
+        std::filesystem::path("/tmp") / "filo_lexical_temp_path.txt"));
+    REQUIRE_FALSE(TempFileAccessRegistry::is_temp_path("relative-temp-file.txt"));
+    REQUIRE_FALSE(TempFileAccessRegistry::is_lexically_temp_path("relative-temp-file.txt"));
+}
+
+TEST_CASE("ShellTool grants reads for temp files embedded in option-style arguments",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 46,
+        },
+        core::context::SessionTransport::cli,
+        "temp-grant-embedded-option");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_grant_embedded_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+
+#undef execute
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    ShellTool shell_tool(temp_file_access_registry);
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"arg=--out={}; printf 'embedded temp grant\n' > ${{arg#--out=}}"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    ReadFileTool read_tool(temp_file_access_registry);
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("embedded temp grant"));
 
     std::filesystem::remove(temp_file, ec);
 }
@@ -417,7 +555,8 @@ TEST_CASE("ReadFileTool still denies unchanged mentioned temp files",
     }
 
 #undef execute
-    ShellTool shell_tool;
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    ShellTool shell_tool(temp_file_access_registry);
     const auto shell_res = shell_tool.execute(
         std::format(
             R"({{"command":"printf '{}\n'"}})",
@@ -425,7 +564,7 @@ TEST_CASE("ReadFileTool still denies unchanged mentioned temp files",
         context);
     REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
 
-    ReadFileTool read_tool;
+    ReadFileTool read_tool(temp_file_access_registry);
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
@@ -469,7 +608,8 @@ TEST_CASE("ReadFileTool does not grant temp symlink reads",
     }
 
 #undef execute
-    ShellTool shell_tool;
+    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
+    ShellTool shell_tool(temp_file_access_registry);
     const auto shell_res = shell_tool.execute(
         std::format(
             R"({{"command":"printf 'changed through symlink\n' > '{}'"}})",
@@ -477,7 +617,7 @@ TEST_CASE("ReadFileTool does not grant temp symlink reads",
         context);
     REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
 
-    ReadFileTool read_tool;
+    ReadFileTool read_tool(temp_file_access_registry);
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_link.string()),
         context);
@@ -1359,7 +1499,7 @@ TEST_CASE("Z.ai web search rejects unsupported multi-domain filters",
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ToolManager registers and executes a tool", "[tools]") {
-    // Use a fresh instance-like test (singleton, so we just register and verify)
+    // Register into the production ToolManager used by dispatcher paths.
     auto& mgr = ToolManager::get_instance();
 
     // Register a write tool and verify it's findable via execute

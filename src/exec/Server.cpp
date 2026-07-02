@@ -2,7 +2,7 @@
 #include "../core/context/SessionContext.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
-#include "../core/tools/ShellTool.hpp"
+#include "../core/tools/ToolManager.hpp"
 #include "../core/utils/JsonWriter.hpp"
 #include "../core/workspace/Workspace.hpp"
 #include <simdjson.h>
@@ -319,7 +319,7 @@ void apply_cached_workspace_context(StdioWorkspaceState& state,
 void mark_stdio_roots_dirty(StdioWorkspaceState& state) {
     state.roots_dirty = true;
     state.cached_workspace.reset();
-    core::tools::ShellTool::clear_mcp_session("stdio");
+    core::tools::ToolManager::get_instance().clear_session_state("stdio");
 }
 
 void queue_workspace_request_for_roots(StdioWorkspaceState& state,
@@ -344,7 +344,7 @@ void fail_pending_roots_refresh(StdioWorkspaceState& state, std::string_view mes
     state.pending_roots_refresh.reset();
     state.roots_dirty = true;
     state.cached_workspace.reset();
-    core::tools::ShellTool::clear_mcp_session("stdio");
+    core::tools::ToolManager::get_instance().clear_session_state("stdio");
 
     for (const auto& request : pending.queued_requests) {
         emit_response(make_jsonrpc_error_body(request.id, -32002, message));
@@ -394,7 +394,7 @@ void handle_roots_list_response(StdioWorkspaceState& state,
     apply_cached_workspace_context(state, session_context);
 
     if (workspace_changed) {
-        core::tools::ShellTool::clear_mcp_session("stdio");
+        core::tools::ToolManager::get_instance().clear_session_state("stdio");
     }
 
     dispatch_pending_roots_requests(state, session_context, dispatcher);

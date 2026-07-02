@@ -2,6 +2,8 @@
 #include "../workspace/SessionWorkspace.hpp"
 
 #include <algorithm>
+#include <system_error>
+#include <utility>
 
 namespace core::tools {
 
@@ -15,15 +17,101 @@ constexpr std::string_view kDefaultCliSession = "__filo_default_cli_session__";
     return core::workspace::SessionWorkspace::normalize_path(path);
 }
 
-} // namespace
+[[nodiscard]] bool path_has_prefix(
+    const std::filesystem::path& root,
+    const std::filesystem::path& target)
+{
+    const auto normalized_root = root.lexically_normal();
+    const auto normalized_target = target.lexically_normal();
 
-TempFileAccessRegistry& TempFileAccessRegistry::instance() {
-    static TempFileAccessRegistry registry;
-    return registry;
+    auto root_it = normalized_root.begin();
+    auto target_it = normalized_target.begin();
+    while (root_it != normalized_root.end() && target_it != normalized_target.end()) {
+        if (*root_it != *target_it) return false;
+        ++root_it;
+        ++target_it;
+    }
+    return root_it == normalized_root.end();
 }
+
+void append_unique_path(
+    std::vector<std::filesystem::path>& paths,
+    const std::filesystem::path& path)
+{
+    if (path.empty()) return;
+    if (std::ranges::find(paths, path) == paths.end()) {
+        paths.push_back(path);
+    }
+}
+
+void append_unique_prefix(std::vector<std::string>& prefixes, std::string prefix) {
+    if (prefix.empty()) return;
+    if (!prefix.ends_with('/')) {
+        prefix.push_back('/');
+    }
+    if (std::ranges::find(prefixes, prefix) == prefixes.end()) {
+        prefixes.push_back(std::move(prefix));
+    }
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> lexical_temp_roots() {
+    std::vector<std::filesystem::path> roots;
+    std::error_code ec;
+    append_unique_path(roots, std::filesystem::temp_directory_path(ec).lexically_normal());
+    append_unique_path(roots, std::filesystem::path("/tmp").lexically_normal());
+    append_unique_path(roots, std::filesystem::path("/private/tmp").lexically_normal());
+    append_unique_path(roots, std::filesystem::path("/var/tmp").lexically_normal());
+    append_unique_path(roots, std::filesystem::path("/private/var/tmp").lexically_normal());
+    return roots;
+}
+
+} // namespace
 
 std::string TempFileAccessRegistry::session_key(std::string_view session_id) {
     return session_id.empty() ? std::string(kDefaultCliSession) : std::string(session_id);
+}
+
+std::vector<std::filesystem::path> TempFileAccessRegistry::temp_roots() {
+    std::vector<std::filesystem::path> normalized;
+    for (const auto& root : lexical_temp_roots()) {
+        append_unique_path(normalized, normalize(root));
+    }
+    return normalized;
+}
+
+std::vector<std::string> TempFileAccessRegistry::temp_path_prefixes() {
+    std::vector<std::string> prefixes;
+    for (const auto& root : lexical_temp_roots()) {
+        append_unique_prefix(prefixes, root.string());
+    }
+    for (const auto& root : temp_roots()) {
+        append_unique_prefix(prefixes, root.string());
+    }
+    return prefixes;
+}
+
+bool TempFileAccessRegistry::is_lexically_temp_path(const std::filesystem::path& path) {
+    if (path.empty() || !path.is_absolute()) return false;
+
+    const auto normalized = path.lexically_normal();
+    for (const auto& root : lexical_temp_roots()) {
+        if (path_has_prefix(root, normalized)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TempFileAccessRegistry::is_temp_path(const std::filesystem::path& path) {
+    if (path.empty() || !path.is_absolute()) return false;
+
+    const auto normalized = normalize(path);
+    for (const auto& root : TempFileAccessRegistry::temp_roots()) {
+        if (path_has_prefix(root, normalized)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void TempFileAccessRegistry::grant_read(
