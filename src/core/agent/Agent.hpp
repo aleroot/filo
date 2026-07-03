@@ -3,6 +3,7 @@
 #include "../context/SessionContext.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
+#include "../memory/MemoryBackgroundService.hpp"
 #include "../session/GoalManager.hpp"
 #include "../session/SessionData.hpp"
 #include "../session/SessionEfficiencyController.hpp"
@@ -79,6 +80,10 @@ public:
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
+    void set_memory_thread_policy(core::memory::MemoryThreadPolicy policy);
+    [[nodiscard]] core::memory::MemoryThreadPolicy memory_thread_policy() const;
+    void run_memory_review_async(std::function<void(std::string)> status_callback = {});
+    void refresh_system_prompt();
 
     // Set the permission profile (Interactive, Standard, Autonomous).
     void set_permission_profile(PermissionProfile profile) {
@@ -225,6 +230,9 @@ private:
     // progress). It must be distinct from the streaming assistant chunk
     // callback so status text never lands in the assistant response body.
     void check_auto_compact(std::function<void(const std::string&)> status_log_callback);
+    void run_memory_background_review(
+        core::llm::protocols::RateLimitInfo rate_limit,
+        std::function<void(const std::string&)> status_log_callback);
 
     void ensure_system_prompt();
 

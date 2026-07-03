@@ -9,6 +9,7 @@
 #include "GetWorkspaceConfigTool.hpp"
 #include "GrepSearchTool.hpp"
 #include "ListDirectoryTool.hpp"
+#include "MemoryTool.hpp"
 #include "MoveFileTool.hpp"
 #include "PathVisibilityToolDecorator.hpp"
 #include "ReadFileTool.hpp"
@@ -78,6 +79,7 @@ void register_builtin_tools(ToolManager& tool_manager,
     tool_manager.register_tool(with_path_visibility(std::make_shared<CreateDirectoryTool>()));
     tool_manager.register_tool(std::make_shared<WebSearchTool>());
     tool_manager.register_tool(std::make_shared<WebFetchTool>());
+    tool_manager.register_tool(std::make_shared<MemoryTool>());
 
     if (options.include_workspace_config) {
         tool_manager.register_tool(std::make_shared<GetWorkspaceConfigTool>());

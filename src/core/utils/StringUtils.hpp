@@ -32,6 +32,23 @@ namespace core::utils::str {
     return std::string(trim_ascii_view(value));
 }
 
+[[nodiscard]] inline std::string collapse_ascii_whitespace_copy(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    bool previous_space = true;
+    for (const unsigned char ch : value) {
+        if (std::isspace(ch)) {
+            if (!previous_space) out.push_back(' ');
+            previous_space = true;
+            continue;
+        }
+        out.push_back(static_cast<char>(ch));
+        previous_space = false;
+    }
+    if (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
 [[nodiscard]] inline std::string trim_trailing(std::string_view value, char ch) {
     std::size_t end = value.size();
     while (end > 0 && value[end - 1] == ch) --end;

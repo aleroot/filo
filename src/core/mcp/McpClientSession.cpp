@@ -69,6 +69,23 @@ namespace {
     return s;
 }
 
+[[nodiscard]] std::string make_cancelled_notification(int request_id,
+                                                       std::string_view reason) {
+    return make_jsonrpc_notification(
+        "notifications/cancelled",
+        std::format(
+            R"({{"requestId":{},"reason":"{}"}})",
+            request_id,
+            core::utils::escape_json_string(reason)));
+}
+
+[[nodiscard]] std::string format_timeout(std::chrono::milliseconds timeout) {
+    if (timeout.count() % 1000 == 0) {
+        return std::format("{}s", timeout.count() / 1000);
+    }
+    return std::format("{}ms", timeout.count());
+}
+
 // Extract the "result" field from a JSON-RPC response, or throw on error.
 [[nodiscard]] std::string extract_result(std::string_view json) {
     thread_local simdjson::dom::parser parser;
@@ -556,9 +573,13 @@ std::vector<McpPromptDef> parse_prompts_list(std::string_view json_result) {
 // ===========================================================================
 
 StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config,
-                                 McpSamplingCallback sampling_callback)
+                                 McpSamplingCallback sampling_callback,
+                                 std::chrono::milliseconds request_timeout)
     : server_name_(config.name)
-    , sampling_callback_(std::move(sampling_callback)) {
+    , sampling_callback_(std::move(sampling_callback))
+    , request_timeout_(request_timeout.count() > 0
+                           ? request_timeout
+                           : std::chrono::seconds(60)) {
     if (config.command.empty()) {
         throw std::runtime_error("MCP stdio session: 'command' is empty");
     }
@@ -798,7 +819,8 @@ void StdioMcpSession::reader_loop() {
 }
 
 std::string StdioMcpSession::send_request(std::string_view method,
-                                           std::string_view params_json) {
+                                           std::string_view params_json,
+                                           std::chrono::milliseconds timeout) {
     const int id = next_id_.fetch_add(1, std::memory_order_relaxed);
     std::string msg = make_jsonrpc_request(id, method, params_json);
 
@@ -820,7 +842,30 @@ std::string StdioMcpSession::send_request(std::string_view method,
         }
     }
 
-    // Block until reader_loop resolves the promise
+    if (fut.wait_for(timeout) != std::future_status::ready) {
+        {
+            std::lock_guard lock(pending_mutex_);
+            pending_.erase(id);
+        }
+
+        const std::string reason = std::format(
+            "Filo timed out waiting for MCP method '{}' after {}",
+            method,
+            format_timeout(timeout));
+        const std::string cancellation = make_cancelled_notification(id, reason);
+        {
+            std::lock_guard wlock(write_mutex_);
+            if (write_fd_ != -1) {
+                [[maybe_unused]] const bool ok = write_all_fd(write_fd_, cancellation);
+            }
+        }
+
+        throw std::runtime_error(std::format(
+            "MCP: request '{}' timed out after {}",
+            method,
+            format_timeout(timeout)));
+    }
+
     std::string raw_response = fut.get();
     return extract_result(raw_response);
 }
@@ -843,7 +888,7 @@ void StdioMcpSession::update_server_capabilities(std::string_view initialize_res
 std::vector<McpToolDef> StdioMcpSession::initialize() {
     // 1. initialize handshake
     const auto init_result =
-        send_request("initialize", make_initialize_params(supports_sampling()));
+        send_request("initialize", make_initialize_params(supports_sampling()), request_timeout_);
     update_server_capabilities(init_result);
 
     // 2. notifications/initialized (no response expected)
@@ -851,7 +896,7 @@ std::vector<McpToolDef> StdioMcpSession::initialize() {
     if (!server_supports_tools_.load(std::memory_order_acquire)) {
         if (!server_tools_advertised_.load(std::memory_order_acquire)) {
             try {
-                std::string tools_result = send_request("tools/list", "");
+                std::string tools_result = send_request("tools/list", "", request_timeout_);
                 server_supports_tools_.store(true, std::memory_order_release);
                 return parse_tools_list(tools_result);
             } catch (...) {
@@ -864,7 +909,7 @@ std::vector<McpToolDef> StdioMcpSession::initialize() {
     }
 
     // 3. tools/list
-    std::string tools_result = send_request("tools/list", "");
+    std::string tools_result = send_request("tools/list", "", request_timeout_);
     return parse_tools_list(tools_result);
 }
 
@@ -875,7 +920,7 @@ std::string StdioMcpSession::call_tool(const std::string& tool_name,
             std::format("MCP server '{}' does not advertise tools capability", server_name_));
     }
     std::string params = make_tools_call_params(tool_name, arguments_json);
-    std::string result = send_request("tools/call", params);
+    std::string result = send_request("tools/call", params, request_timeout_);
     return flatten_tool_result(result);
 }
 
@@ -885,8 +930,10 @@ std::vector<McpResourceDef> StdioMcpSession::list_resources() {
     std::vector<McpResourceDef> resources;
     std::optional<std::string> cursor;
     do {
-        const std::string result =
-            send_request("resources/list", make_list_params_with_cursor(cursor));
+        const std::string result = send_request(
+            "resources/list",
+            make_list_params_with_cursor(cursor),
+            request_timeout_);
         auto page = parse_resources_list(result);
         resources.insert(resources.end(),
                          std::make_move_iterator(page.begin()),
@@ -905,7 +952,8 @@ std::vector<McpResourceTemplateDef> StdioMcpSession::list_resource_templates() {
     do {
         const std::string result = send_request(
             "resources/templates/list",
-            make_list_params_with_cursor(cursor));
+            make_list_params_with_cursor(cursor),
+            request_timeout_);
         auto page = parse_resource_templates_list(result);
         templates.insert(templates.end(),
                          std::make_move_iterator(page.begin()),
@@ -921,7 +969,7 @@ std::string StdioMcpSession::read_resource(const std::string& uri) {
         throw std::runtime_error(
             std::format("MCP server '{}' does not advertise resources capability", server_name_));
     }
-    return send_request("resources/read", make_resource_read_params(uri));
+    return send_request("resources/read", make_resource_read_params(uri), request_timeout_);
 }
 
 std::vector<McpPromptDef> StdioMcpSession::list_prompts() {
@@ -930,8 +978,10 @@ std::vector<McpPromptDef> StdioMcpSession::list_prompts() {
     std::vector<McpPromptDef> prompts;
     std::optional<std::string> cursor;
     do {
-        const std::string result =
-            send_request("prompts/list", make_list_params_with_cursor(cursor));
+        const std::string result = send_request(
+            "prompts/list",
+            make_list_params_with_cursor(cursor),
+            request_timeout_);
         auto page = parse_prompts_list(result);
         prompts.insert(prompts.end(),
                        std::make_move_iterator(page.begin()),
@@ -948,7 +998,10 @@ std::string StdioMcpSession::get_prompt(const std::string& prompt_name,
         throw std::runtime_error(
             std::format("MCP server '{}' does not advertise prompts capability", server_name_));
     }
-    return send_request("prompts/get", make_prompt_get_params(prompt_name, arguments_json));
+    return send_request(
+        "prompts/get",
+        make_prompt_get_params(prompt_name, arguments_json),
+        request_timeout_);
 }
 
 // ===========================================================================

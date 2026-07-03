@@ -11,6 +11,7 @@ namespace core::context {
 enum class ContextLayerKind {
     RuntimeInstructions,
     WorkspaceFacts,
+    Memory,
     ProjectSteering,
     SkillCatalog,
     ProjectFacts,

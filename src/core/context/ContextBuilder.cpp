@@ -2,6 +2,7 @@
 
 #include "SteeringLoader.hpp"
 #include "../scm/ScmFactory.hpp"
+#include "../memory/MemoryStore.hpp"
 #include "../tools/SkillRegistry.hpp"
 #include "../utils/FileSystemUtils.hpp"
 
@@ -145,6 +146,17 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         ContextLayerKind::WorkspaceFacts,
         "workspace",
         build_workspace_facts(session_context_));
+
+    if (session_context_.memory_policy.use_memories) {
+        append_layer(
+            layers,
+            ContextLayerKind::Memory,
+            "memory",
+            core::memory::build_memory_prompt_block(
+                core::memory::MemoryStore{}.load(),
+                24,
+                session_context_.memory_policy.generate_memories));
+    }
 
     if (!include_project_context_) {
         return layers;

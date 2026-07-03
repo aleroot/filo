@@ -20,6 +20,7 @@
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/TodoUtils.hpp"
+#include "core/memory/MemoryStore.hpp"
 #include "core/scm/ScmFactory.hpp"
 #include "core/history/PromptHistoryStore.hpp"
 #include <ftxui/component/component.hpp>
@@ -29,6 +30,7 @@
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelRegistry.hpp"
+#include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
@@ -1296,6 +1298,7 @@ RunResult run(RunOptions opts) {
     // ── Session management ────────────────────────────────────────────────────
     auto session_store = std::make_shared<core::session::SessionStore>(
         core::session::SessionStore::default_sessions_dir());
+    auto memory_store = std::make_shared<core::memory::MemoryStore>();
 
     std::string session_id          = core::session::SessionStore::generate_id();
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
@@ -2598,15 +2601,15 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ModelPickerRow> rows;
         std::unordered_set<std::string> seen;
 
-        const auto provider_it = config.providers.find(std::string(provider_name));
-        if (provider_it == config.providers.end()) {
+        const auto catalog_group =
+            core::llm::provider_catalog_group_for(provider_name, sorted_provider_names);
+        if (catalog_group.sources.empty()) {
             return rows;
         }
-        const auto& provider_cfg = provider_it->second;
-        const std::string configured_default = provider_cfg.model;
 
         auto add_row = [&](std::string id,
                            std::string selector,
+                           std::string source_provider,
                            std::string description,
                            bool provider_default) {
             if (id.empty()) {
@@ -2616,10 +2619,17 @@ RunResult run(RunOptions opts) {
                 return;
             }
             const bool active = model_selection_mode == ModelSelectionMode::Manual
-                && manual_provider_name == provider_name
+                && manual_provider_name == source_provider
                 && (selector.empty()
                     ? manual_model_name.empty()
                     : models_equivalent(manual_model_name, selector));
+            if (const auto* source = catalog_group.find_source(source_provider);
+                source && !source->category_label.empty()) {
+                if (!description.empty()) {
+                    description += " ";
+                }
+                description += source->category_label;
+            }
             if (provider_default && !description.empty()) {
                 description += " Configured default.";
             } else if (provider_default) {
@@ -2628,55 +2638,101 @@ RunResult run(RunOptions opts) {
             rows.push_back(tui::ModelPickerRow{
                 .id = std::move(id),
                 .selector = std::move(selector),
+                .source_provider = std::move(source_provider),
                 .description = std::move(description),
                 .active = active,
                 .provider_default = provider_default,
             });
         };
 
-        if (!configured_default.empty()) {
+        for (const auto& source : catalog_group.sources) {
+            const auto& source_provider = source.provider_name;
+            const auto provider_it = config.providers.find(source_provider);
+            if (provider_it == config.providers.end()) {
+                continue;
+            }
+            const auto& provider_cfg = provider_it->second;
+            const std::string configured_default = provider_cfg.model;
+
+            if (configured_default.empty()) {
+                continue;
+            }
             std::string description;
             if (const auto info = core::llm::ModelRegistry::instance().lookup(configured_default)) {
                 description = compact_model_description(*info);
             }
-            add_row(configured_default, configured_default, std::move(description), true);
+            add_row(configured_default,
+                    configured_default,
+                    source_provider,
+                    std::move(description),
+                    true);
         }
 
-        auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(provider_name);
-        if (!core::llm::is_local_provider(registered_providers, provider_name)
-            && snapshot.refresh_due()) {
-            try {
-                if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
-                        provider_manager.get_provider(std::string(provider_name)))) {
-                    http_provider->discover_models({.timeout_ms = 1000});
-                    snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(provider_name);
-                }
-            } catch (const std::exception&) {
+        for (const auto& source : catalog_group.sources) {
+            const auto& source_provider = source.provider_name;
+            const auto provider_it = config.providers.find(source_provider);
+            if (provider_it == config.providers.end()) {
+                continue;
             }
-        }
+            const auto& provider_cfg = provider_it->second;
+            const std::string configured_default = provider_cfg.model;
 
-        for (const auto& model : snapshot.models) {
-            add_row(model.canonical_id,
-                    model.canonical_id,
-                    compact_model_description(model),
-                    models_equivalent(configured_default, model.canonical_id));
-        }
+            auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+            if (!core::llm::is_local_provider(registered_providers, source_provider)
+                && snapshot.refresh_due()) {
+                try {
+                    if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
+                            provider_manager.get_provider(source_provider))) {
+                        http_provider->discover_models({.timeout_ms = 1000});
+                        snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+                    }
+                } catch (const std::exception&) {
+                }
+            }
 
-        if (rows.size() <= 1) {
-            const std::string registry_key = registry_provider_key(provider_name, provider_cfg);
-            auto registry_models = core::llm::ModelRegistry::instance().get_by_provider(registry_key);
-            std::ranges::sort(registry_models, {}, &core::llm::ModelInfo::canonical_id);
-            for (const auto& model : registry_models) {
+            for (const auto& model : snapshot.models) {
                 add_row(model.canonical_id,
                         model.canonical_id,
+                        source_provider,
                         compact_model_description(model),
                         models_equivalent(configured_default, model.canonical_id));
             }
         }
 
+        if (rows.size() <= catalog_group.sources.size()) {
+            const auto add_registry_models = [&](const core::llm::ProviderCatalogSource& source) {
+                const auto& source_provider = source.provider_name;
+                const auto provider_it = config.providers.find(source_provider);
+                if (provider_it == config.providers.end()) {
+                    return;
+                }
+                const auto& provider_cfg = provider_it->second;
+                const std::string configured_default = provider_cfg.model;
+                const std::string registry_key = registry_provider_key(source_provider, provider_cfg);
+                auto registry_models = core::llm::ModelRegistry::instance().get_by_provider(registry_key);
+                std::ranges::sort(registry_models, {}, &core::llm::ModelInfo::canonical_id);
+                for (const auto& model : registry_models) {
+                    if (!source.includes_registry_model(model.canonical_id)) {
+                        continue;
+                    }
+                    add_row(model.canonical_id,
+                            model.canonical_id,
+                            source_provider,
+                            compact_model_description(model),
+                            models_equivalent(configured_default, model.canonical_id));
+                }
+            };
+
+            for (const auto& source : catalog_group.sources) {
+                add_registry_models(source);
+            }
+        }
+
         if (rows.empty()) {
+            const auto& source_provider = catalog_group.sources.front().provider_name;
             add_row("<provider default>",
                     "",
+                    source_provider,
                     "Use the provider default configured by the backend.",
                     true);
         }
@@ -2686,33 +2742,78 @@ RunResult run(RunOptions opts) {
 
     auto model_provider_rows = [&]() {
         std::vector<tui::ModelProviderPickerRow> rows;
-        rows.reserve(sorted_provider_names.size());
-        for (const auto& name : sorted_provider_names) {
-            const auto provider_it = config.providers.find(name);
-            if (provider_it == config.providers.end()) {
+        const auto catalog_groups =
+            core::llm::provider_catalog_groups(sorted_provider_names);
+        rows.reserve(catalog_groups.size());
+        for (const auto& catalog_group : catalog_groups) {
+            if (catalog_group.sources.empty()) {
                 continue;
             }
-            const std::string default_model =
-                provider_it->second.model.empty()
-                    ? std::string("<provider default>")
-                    : provider_it->second.model;
 
-            std::size_t known_count =
-                core::llm::ModelCatalogAvailability::instance().snapshot(name).models.size();
-            if (known_count == 0) {
-                const std::string registry_key = registry_provider_key(name, provider_it->second);
-                known_count = core::llm::ModelRegistry::instance().get_by_provider(registry_key).size();
+            std::vector<std::string> default_models;
+            default_models.reserve(catalog_group.sources.size());
+            std::unordered_set<std::string> known_model_ids;
+            for (const auto& source : catalog_group.sources) {
+                const auto& source_provider = source.provider_name;
+                const auto provider_it = config.providers.find(source_provider);
+                if (provider_it == config.providers.end()) {
+                    continue;
+                }
+                if (!provider_it->second.model.empty()) {
+                    default_models.push_back(provider_it->second.model);
+                }
+
+                const auto snapshot =
+                    core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+                for (const auto& model : snapshot.models) {
+                    known_model_ids.insert(model.canonical_id);
+                }
             }
 
-            std::string description = std::format("Default: {}", default_model);
+            if (known_model_ids.empty()) {
+                for (const auto& source : catalog_group.sources) {
+                    const auto& source_provider = source.provider_name;
+                    const auto provider_it = config.providers.find(source_provider);
+                    if (provider_it == config.providers.end()) {
+                        continue;
+                    }
+                    const std::string registry_key =
+                        registry_provider_key(source_provider, provider_it->second);
+                    auto registry_models =
+                        core::llm::ModelRegistry::instance().get_by_provider(registry_key);
+                    for (const auto& model : registry_models) {
+                        if (!source.includes_registry_model(model.canonical_id)) {
+                            continue;
+                        }
+                        known_model_ids.insert(model.canonical_id);
+                    }
+                }
+            }
+
+            std::string description;
+            if (default_models.empty()) {
+                description = "Default: <provider default>";
+            } else if (default_models.size() == 1) {
+                description = std::format("Default: {}", default_models.front());
+            } else {
+                description = "Defaults: ";
+                for (std::size_t i = 0; i < default_models.size(); ++i) {
+                    if (i > 0) {
+                        description += ", ";
+                    }
+                    description += default_models[i];
+                }
+            }
+
+            const std::size_t known_count = known_model_ids.size();
             if (known_count > 0) {
                 description += std::format(" · {} known model{}", known_count, known_count == 1 ? "" : "s");
             }
             rows.push_back(tui::ModelProviderPickerRow{
-                .name = name,
+                .name = catalog_group.provider_name,
                 .description = std::move(description),
                 .active = model_selection_mode == ModelSelectionMode::Manual
-                    && manual_provider_name == name,
+                    && catalog_group.contains_source_provider(manual_provider_name),
             });
         }
         return rows;
@@ -4021,6 +4122,80 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = "Goal cleared."};
     };
 
+    auto memory_state = [memory_store]() {
+        return memory_store->load();
+    };
+
+    auto memory_thread_policy = [agent]() {
+        return agent->memory_thread_policy();
+    };
+
+    auto set_memory_thread_policy =
+        [agent](core::memory::MemoryThreadPolicy policy)
+            -> core::commands::CommandOperationResult {
+        agent->set_memory_thread_policy(policy);
+        return {.ok = true, .message = "Thread memory policy updated."};
+    };
+
+    auto run_memory_review = [agent, append_history]() -> core::commands::CommandOperationResult {
+        agent->run_memory_review_async([append_history](std::string message) {
+            if (!message.empty()) {
+                append_history("\n[" + message + "]\n");
+            }
+        });
+        return {.ok = true, .message = "Memory background review queued."};
+    };
+
+    auto set_memory_settings =
+        [memory_store](core::memory::MemorySettings settings)
+            -> core::commands::CommandOperationResult {
+        std::string error;
+        if (!memory_store->save_settings(settings, &error)) {
+            return {.ok = false, .message = error};
+        }
+        if (settings.auto_capture || settings.background_review) {
+            return {.ok = true, .message = "Memory and automatic capture enabled."};
+        }
+        if (settings.enabled) {
+            return {.ok = true, .message = "Memory context enabled."};
+        }
+        return {.ok = true, .message = "Memory disabled."};
+    };
+
+    auto add_memory = [memory_store](std::string_view content)
+        -> core::commands::CommandOperationResult {
+        auto result = memory_store->remember(content, "global", {}, "manual");
+        return {.ok = result.ok, .message = result.message};
+    };
+
+    auto forget_memory = [memory_store](std::string_view selector)
+        -> core::commands::CommandOperationResult {
+        auto result = memory_store->forget(selector);
+        return {.ok = result.ok, .message = result.message};
+    };
+
+    auto clean_memory = [memory_store]() -> core::commands::CommandOperationResult {
+        auto result = memory_store->clean();
+        return {.ok = result.ok, .message = result.message};
+    };
+
+    auto clear_memory = [memory_store]() -> core::commands::CommandOperationResult {
+        auto result = memory_store->clear();
+        return {.ok = result.ok, .message = result.message};
+    };
+
+    auto save_memory_markdown =
+        [memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = memory_store->save_markdown(path);
+        return {.ok = result.ok, .message = result.message};
+    };
+
+    auto load_memory_markdown =
+        [memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = memory_store->load_markdown(path);
+        return {.ok = result.ok, .message = result.message};
+    };
+
     auto add_mcp_server = [&](const core::config::McpServerConfig& server,
                               core::config::SettingsScope scope)
         -> core::commands::CommandOperationResult {
@@ -4546,6 +4721,17 @@ RunResult run(RunOptions opts) {
             .set_goal_fn = set_goal,
             .set_goal_status_fn = set_goal_status,
             .clear_goal_fn = clear_goal,
+            .memory_state_fn = memory_state,
+            .set_memory_settings_fn = set_memory_settings,
+            .memory_thread_policy_fn = memory_thread_policy,
+            .set_memory_thread_policy_fn = set_memory_thread_policy,
+            .run_memory_review_fn = run_memory_review,
+            .add_memory_fn = add_memory,
+            .forget_memory_fn = forget_memory,
+            .clean_memory_fn = clean_memory,
+            .clear_memory_fn = clear_memory,
+            .save_memory_markdown_fn = save_memory_markdown,
+            .load_memory_markdown_fn = load_memory_markdown,
             .list_mcp_servers_fn = list_mcp_servers,
             .add_mcp_server_fn = add_mcp_server,
             .remove_mcp_server_fn = remove_mcp_server,
@@ -5355,9 +5541,12 @@ RunResult run(RunOptions opts) {
             if (provider_model_choice.has_value()
                 && static_cast<std::size_t>(*provider_model_choice) < provider_model_rows_snapshot.size()) {
                 const auto& row = provider_model_rows_snapshot[static_cast<std::size_t>(*provider_model_choice)];
-                const std::string selector = row.selector.empty()
+                const std::string effective_provider = row.source_provider.empty()
                     ? provider_model_provider_name
-                    : provider_model_provider_name + " " + row.selector;
+                    : row.source_provider;
+                const std::string selector = row.selector.empty()
+                    ? effective_provider
+                    : effective_provider + " " + row.selector;
                 const std::string result = apply_model_selector(selector, true);
                 const bool success = result.starts_with("Switched");
                 append_history(std::format(

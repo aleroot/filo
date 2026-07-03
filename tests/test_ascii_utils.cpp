@@ -51,3 +51,9 @@ TEST_CASE("str::trim_ascii_copy returns owned trimmed string",
           "[utils][string]") {
     REQUIRE(core::utils::str::trim_ascii_copy("  value  ") == "value");
 }
+
+TEST_CASE("str::collapse_ascii_whitespace_copy trims and collapses runs",
+          "[utils][string]") {
+    REQUIRE(core::utils::str::collapse_ascii_whitespace_copy("  a\t b\r\n c  ")
+            == "a b c");
+}

@@ -425,6 +425,16 @@ std::string trim_copy(std::string_view input) {
     return std::string(trim(input));
 }
 
+std::filesystem::path expand_user_path(std::string_view input) {
+    std::string text = trim_copy(input);
+    if (text == "~" || text.starts_with("~/")) {
+        if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+            return std::filesystem::path(home) / text.substr(text == "~" ? 1 : 2);
+        }
+    }
+    return std::filesystem::path(text);
+}
+
 std::string format_token_count(int32_t n) {
     return core::budget::formatters::CompactTokenCountFormatter{}.format(n);
 }
@@ -534,6 +544,41 @@ std::string format_todos(const std::vector<core::session::SessionTodoItem>& todo
             << todo.text;
         if (!todo.id.empty()) {
             out << "  {" << todo.id << "}";
+        }
+        out << '\n';
+    }
+    return out.str();
+}
+
+std::string format_memory_state(const core::memory::MemoryState& state) {
+    std::ostringstream out;
+    out << "\n[Filo Memory]\n";
+    out << "  Context: " << (state.settings.enabled ? "on" : "off") << '\n';
+    out << "  Auto capture: " << (state.settings.auto_capture ? "on" : "off") << '\n';
+    out << "  Background review: " << (state.settings.background_review ? "on" : "off") << '\n';
+    out << "  Consolidation: " << (state.settings.consolidation ? "on" : "off") << '\n';
+    out << "  Skill curation: " << (state.settings.skill_curation ? "on" : "off") << '\n';
+    out << "  Rate-limit reserve: " << state.settings.min_rate_limit_remaining_percent << "%\n";
+
+    std::size_t active_count = 0;
+    for (const auto& entry : state.entries) {
+        if (!entry.archived) ++active_count;
+    }
+    if (active_count == 0) {
+        out << "  No active memories. Use `/memory add <text>` to store one.\n";
+        return out.str();
+    }
+
+    out << "  Active memories:\n";
+    std::size_t index = 1;
+    for (const auto& entry : state.entries) {
+        if (entry.archived) continue;
+        out << "  " << index++ << ". " << entry.content;
+        if (!entry.scope.empty() && entry.scope != "global") {
+            out << "  [" << entry.scope << "]";
+        }
+        if (!entry.id.empty()) {
+            out << "  {" << entry.id << "}";
         }
         out << '\n';
     }
@@ -1150,6 +1195,7 @@ public:
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
             "  /goal [action]      Set or manage the session goal\n"
             "  /todo [action]      Manage session-backed todo items\n"
+            "  /memory [action]    Manage opt-in durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
@@ -2573,6 +2619,277 @@ public:
     }
 };
 
+class MemoryCommand : public Command {
+public:
+    std::string get_name() const override { return "/memory"; }
+    std::string get_description() const override {
+        return "Manage opt-in durable memory and auto capture";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.memory_state_fn) {
+            ctx.append_history_fn("\n✗  Memory management is unavailable in this context.\n");
+            return;
+        }
+
+        const std::string args = trailing_arguments(ctx.text);
+        const auto tokens = split_ascii_whitespace(args);
+        auto show_memory = [&]() {
+            ctx.append_history_fn(format_memory_state(ctx.memory_state_fn()));
+        };
+        auto refresh_agent_prompt = [&]() {
+            if (ctx.agent) {
+                ctx.agent->refresh_system_prompt();
+            }
+        };
+        auto usage = [&]() {
+            ctx.append_history_fn(
+                "\nℹ  Usage: /memory [status|on|off|auto on|auto off|background on|background off|consolidate on|consolidate off|skills on|skills off|thread status|thread use on|thread generate off|review|add <text>|forget <id>|clean|clear|save [file.md]|load <file.md>]\n");
+        };
+        auto parse_switch = [&](std::string_view text, std::optional<bool>& out) {
+            const auto parts = split_ascii_whitespace(text);
+            if (parts.empty()) return false;
+            const std::string value = to_lower_ascii(parts.front());
+            if (value == "on" || value == "enable") {
+                out = true;
+                return true;
+            }
+            if (value == "off" || value == "disable") {
+                out = false;
+                return true;
+            }
+            return false;
+        };
+
+        if (tokens.empty() || to_lower_ascii(tokens.front()) == "status"
+            || to_lower_ascii(tokens.front()) == "list") {
+            show_memory();
+            return;
+        }
+
+        const std::string action = to_lower_ascii(tokens.front());
+        const std::size_t remainder_offset =
+            static_cast<std::size_t>(tokens.front().data() - args.data()) + tokens.front().size();
+        const std::string remainder = trim_copy(
+            remainder_offset >= args.size() ? std::string_view{} : std::string_view(args).substr(remainder_offset));
+
+        CommandOperationResult result;
+        bool changed_prompt = false;
+        if (action == "on" || action == "enable") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.enabled = true;
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "off" || action == "disable") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.enabled = false;
+            state.settings.auto_capture = false;
+            state.settings.background_review = false;
+            state.settings.consolidation = false;
+            state.settings.skill_curation = false;
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "auto") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            const auto auto_tokens = split_ascii_whitespace(remainder);
+            if (auto_tokens.empty()) {
+                usage();
+                return;
+            }
+            const std::string value = to_lower_ascii(auto_tokens.front());
+            if (value != "on" && value != "off" && value != "enable" && value != "disable") {
+                usage();
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.auto_capture = value == "on" || value == "enable";
+            if (state.settings.auto_capture) {
+                state.settings.enabled = true;
+                state.settings.background_review = true;
+            } else {
+                state.settings.background_review = false;
+            }
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "background") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            std::optional<bool> value;
+            if (!parse_switch(remainder, value)) {
+                usage();
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.background_review = *value;
+            if (*value) state.settings.enabled = true;
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "consolidate" || action == "consolidation") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            std::optional<bool> value;
+            if (!parse_switch(remainder, value)) {
+                usage();
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.consolidation = *value;
+            if (*value) state.settings.enabled = true;
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "skills" || action == "skill") {
+            if (!ctx.set_memory_settings_fn) {
+                ctx.append_history_fn("\n✗  Memory settings are unavailable.\n");
+                return;
+            }
+            std::optional<bool> value;
+            if (!parse_switch(remainder, value)) {
+                usage();
+                return;
+            }
+            auto state = ctx.memory_state_fn();
+            state.settings.skill_curation = *value;
+            if (*value) state.settings.enabled = true;
+            result = ctx.set_memory_settings_fn(state.settings);
+            changed_prompt = result.ok;
+        } else if (action == "thread") {
+            if (!ctx.memory_thread_policy_fn || !ctx.set_memory_thread_policy_fn) {
+                ctx.append_history_fn("\n✗  Thread memory policy is unavailable.\n");
+                return;
+            }
+            const auto thread_tokens = split_ascii_whitespace(remainder);
+            if (thread_tokens.empty() || to_lower_ascii(thread_tokens.front()) == "status") {
+                const auto policy = ctx.memory_thread_policy_fn();
+                ctx.append_history_fn(std::format(
+                    "\n[Filo Memory · Thread]\n  Use memories: {}\n  Generate memories: {}\n  Curate skills: {}\n",
+                    policy.use_memories ? "on" : "off",
+                    policy.generate_memories ? "on" : "off",
+                    policy.curate_skills ? "on" : "off"));
+                return;
+            }
+            if (thread_tokens.size() < 2) {
+                usage();
+                return;
+            }
+            const std::string field = to_lower_ascii(thread_tokens[0]);
+            std::optional<bool> value;
+            if (!parse_switch(thread_tokens[1], value)) {
+                usage();
+                return;
+            }
+            auto policy = ctx.memory_thread_policy_fn();
+            if (field == "use" || field == "context") {
+                policy.use_memories = *value;
+                changed_prompt = true;
+            } else if (field == "generate" || field == "capture") {
+                policy.generate_memories = *value;
+            } else if (field == "skills" || field == "curate") {
+                policy.curate_skills = *value;
+            } else {
+                usage();
+                return;
+            }
+            result = ctx.set_memory_thread_policy_fn(policy);
+            changed_prompt = result.ok && changed_prompt;
+        } else if (action == "review") {
+            if (!ctx.run_memory_review_fn) {
+                ctx.append_history_fn("\n✗  Memory background review is unavailable.\n");
+                return;
+            }
+            result = ctx.run_memory_review_fn();
+        } else if (action == "add" || action == "remember") {
+            if (!ctx.add_memory_fn) {
+                ctx.append_history_fn("\n✗  Memory storage is unavailable.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /memory add <text>\n");
+                return;
+            }
+            result = ctx.add_memory_fn(remainder);
+            changed_prompt = result.ok;
+        } else if (action == "forget" || action == "remove" || action == "rm" || action == "delete") {
+            if (!ctx.forget_memory_fn) {
+                ctx.append_history_fn("\n✗  Memory removal is unavailable.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /memory forget <id>\n");
+                return;
+            }
+            result = ctx.forget_memory_fn(remainder);
+            changed_prompt = result.ok;
+        } else if (action == "save" || action == "export") {
+            if (!ctx.save_memory_markdown_fn) {
+                ctx.append_history_fn("\n✗  Memory markdown export is unavailable.\n");
+                return;
+            }
+            const auto path = remainder.empty()
+                ? std::filesystem::path("filo-memory.md")
+                : expand_user_path(remainder);
+            result = ctx.save_memory_markdown_fn(path);
+        } else if (action == "load" || action == "import") {
+            if (!ctx.load_memory_markdown_fn) {
+                ctx.append_history_fn("\n✗  Memory markdown import is unavailable.\n");
+                return;
+            }
+            if (remainder.empty()) {
+                ctx.append_history_fn("\n✗  Usage: /memory load <file.md>\n");
+                return;
+            }
+            result = ctx.load_memory_markdown_fn(expand_user_path(remainder));
+            changed_prompt = result.ok;
+        } else if (action == "clean") {
+            if (!ctx.clean_memory_fn) {
+                ctx.append_history_fn("\n✗  Memory cleaning is unavailable.\n");
+                return;
+            }
+            result = ctx.clean_memory_fn();
+            changed_prompt = result.ok;
+        } else if (action == "clear") {
+            if (!ctx.clear_memory_fn) {
+                ctx.append_history_fn("\n✗  Memory clearing is unavailable.\n");
+                return;
+            }
+            result = ctx.clear_memory_fn();
+            changed_prompt = result.ok;
+        } else {
+            usage();
+            return;
+        }
+
+        ctx.append_history_fn(std::format(
+            "\n{}  {}\n",
+            result.ok ? "✓" : "✗",
+            result.message.empty()
+                ? (result.ok ? "Memory updated." : "Memory update failed.")
+                : result.message));
+        if (changed_prompt) {
+            refresh_agent_prompt();
+        }
+        if (result.ok) {
+            show_memory();
+        }
+    }
+};
+
 class McpCommand : public Command {
 public:
     std::string get_name() const override { return "/mcp"; }
@@ -2786,6 +3103,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<InitCommand>());
     register_command(std::make_unique<GoalCommand>());
     register_command(std::make_unique<TodoCommand>());
+    register_command(std::make_unique<MemoryCommand>());
     register_command(std::make_unique<McpCommand>());
     register_command(std::make_unique<ShellCommand>());
 }

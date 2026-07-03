@@ -13,6 +13,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 #include <signal.h>
 #include <sys/types.h>
@@ -199,6 +200,61 @@ sleep 1
     core::mcp::StdioMcpSession session(make_stdio_server_config(script.path()));
     REQUIRE_THROWS_WITH(session.initialize(),
                         ContainsSubstring("MCP: write() to child stdin failed"));
+}
+
+TEST_CASE("StdioMcpSession times out hung requests and sends cancellation",
+          "[mcp][client][stdio][timeout]") {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto cancel_log = std::filesystem::temp_directory_path()
+                          / std::format(
+                              "filo_mcp_cancel_{}_{}.json",
+                              static_cast<long long>(::getpid()),
+                              stamp);
+
+    const TempScript script(
+        "filo_mcp_stdio_timeout",
+        R"SH(#!/bin/sh
+set -eu
+log="$1"
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "$line" in
+    *'"method":"initialize"'*)
+      # Simulate a hung MCP server by never replying to initialize.
+      ;;
+    *'"method":"notifications/cancelled"'*)
+      printf '%s\n' "$line" > "$log"
+      exit 0
+      ;;
+  esac
+done
+)SH");
+
+    auto config = make_stdio_server_config(script.path());
+    config.args.push_back(cancel_log.string());
+
+    core::mcp::StdioMcpSession session(config, {}, std::chrono::milliseconds(50));
+    REQUIRE_THROWS_WITH(session.initialize(), ContainsSubstring("timed out"));
+
+    for (int i = 0; i < 80; ++i) {
+        std::error_code size_ec;
+        if (std::filesystem::exists(cancel_log)
+            && std::filesystem::file_size(cancel_log, size_ec) > 0
+            && !size_ec) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
+    std::ifstream in(cancel_log);
+    std::string logged;
+    std::getline(in, logged);
+    std::error_code ec;
+    std::filesystem::remove(cancel_log, ec);
+
+    REQUIRE_THAT(logged, ContainsSubstring(R"("method":"notifications/cancelled")"));
+    REQUIRE_THAT(logged, ContainsSubstring(R"("requestId":1)"));
+    REQUIRE_THAT(logged, ContainsSubstring("timed out waiting for MCP method"));
 }
 
 TEST_CASE("StdioMcpSession supports resources and prompts", "[mcp][client][stdio]") {

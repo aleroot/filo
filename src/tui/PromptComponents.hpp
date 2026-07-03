@@ -39,6 +39,7 @@ struct ModelProviderPickerRow {
 struct ModelPickerRow {
     std::string id;
     std::string selector;
+    std::string source_provider;
     std::string description;
     bool active = false;
     bool provider_default = false;

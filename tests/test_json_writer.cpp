@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <limits>
+#include <simdjson.h>
 
 using namespace core::utils;
 
@@ -39,6 +40,34 @@ TEST_CASE("JsonWriter: boolean() writes true/false", "[json_writer]") {
     JsonWriter w2;
     w2.boolean(false);
     CHECK(w2.view() == "false");
+}
+
+TEST_CASE("JsonUtils: typed field accessors return fallbacks for missing fields",
+          "[json_utils]") {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    const std::string raw = R"({"enabled":true,"name":"memory","count":7})";
+    REQUIRE(parser.parse(raw).get(doc)
+            == simdjson::SUCCESS);
+
+    simdjson::dom::object object;
+    REQUIRE(doc.get(object) == simdjson::SUCCESS);
+
+    CHECK(core::utils::json::bool_field(object, "enabled") == true);
+    CHECK(core::utils::json::bool_field(object, "missing", true) == true);
+    CHECK(core::utils::json::string_field(object, "name") == "memory");
+    CHECK(core::utils::json::string_field(object, "missing", "fallback") == "fallback");
+    CHECK(core::utils::json::int_field(object, "count") == 7);
+    CHECK(core::utils::json::int_field(object, "missing", 42) == 42);
+}
+
+TEST_CASE("JsonUtils: raw JSON field accessors parse object fields",
+          "[json_utils]") {
+    CHECK(core::utils::json::string_field(R"({"action":"remember"})", "action")
+          == "remember");
+    CHECK(core::utils::json::bool_field(R"({"ok":true})", "ok") == true);
+    CHECK(core::utils::json::string_field("not-json", "action", "fallback")
+          == "fallback");
 }
 
 // -----------------------------------------------------------------------------

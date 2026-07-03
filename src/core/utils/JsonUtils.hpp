@@ -4,6 +4,8 @@
 #include <string_view>
 #include <array>
 
+#include <simdjson.h>
+
 namespace core::utils {
 
 // ---------------------------------------------------------------------------
@@ -44,7 +46,71 @@ void append_escaped(std::string& out, std::string_view sv);
     return out;
 }
 
-namespace json::schema {
+namespace json {
+
+[[nodiscard]] inline bool bool_field(simdjson::dom::object object,
+                                     std::string_view key,
+                                     bool fallback = false) {
+    bool value = fallback;
+    static_cast<void>(object[key].get(value));
+    return value;
+}
+
+[[nodiscard]] inline std::string string_field(simdjson::dom::object object,
+                                              std::string_view key,
+                                              std::string_view fallback = {}) {
+    std::string_view value;
+    if (object[key].get(value) == simdjson::SUCCESS) {
+        return std::string(value);
+    }
+    return std::string(fallback);
+}
+
+[[nodiscard]] inline int64_t int64_field(simdjson::dom::object object,
+                                         std::string_view key,
+                                         int64_t fallback = 0) {
+    int64_t value = fallback;
+    static_cast<void>(object[key].get(value));
+    return value;
+}
+
+[[nodiscard]] inline int int_field(simdjson::dom::object object,
+                                   std::string_view key,
+                                   int fallback = 0) {
+    return static_cast<int>(int64_field(object, key, fallback));
+}
+
+[[nodiscard]] inline std::string string_field(std::string_view raw_json,
+                                              std::string_view key,
+                                              std::string_view fallback = {}) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+        return std::string(fallback);
+    }
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        return std::string(fallback);
+    }
+    return string_field(object, key, fallback);
+}
+
+[[nodiscard]] inline bool bool_field(std::string_view raw_json,
+                                     std::string_view key,
+                                     bool fallback = false) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+        return fallback;
+    }
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        return fallback;
+    }
+    return bool_field(object, key, fallback);
+}
+
+namespace schema {
 
 enum class RootRole {
     Container,
@@ -56,5 +122,6 @@ enum class RootRole {
     RootRole root_role = RootRole::Container);
 
 } // namespace json::schema
+} // namespace json
 
 } // namespace core::utils

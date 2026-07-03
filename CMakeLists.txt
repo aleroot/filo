@@ -157,6 +157,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
     src/core/llm/ModelRegistry.cpp
+    src/core/llm/ProviderCatalogGrouping.cpp
     src/core/llm/ProviderClientIdentity.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
@@ -201,6 +202,8 @@ set(FILO_CORE_SOURCES
     src/core/utils/Base64.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/hooks/HookManager.cpp
+    src/core/memory/MemoryBackgroundService.cpp
+    src/core/memory/MemoryStore.cpp
     src/core/workspace/AgentIgnore.cpp
     src/core/workspace/PathVisibility.cpp
     src/core/workspace/Workspace.cpp
@@ -225,6 +228,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/SearchReplaceTool.cpp
     src/core/tools/AskUserQuestionTool.cpp
     src/core/tools/ActivateSkillTool.cpp
+    src/core/tools/MemoryTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
@@ -395,6 +399,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
     tests/test_network_traffic.cpp
+    tests/test_memory_store.cpp
     tests/test_agent_ignore.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
@@ -409,6 +414,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp
+    tests/test_provider_catalog_grouping.cpp
     tests/test_grok_provider.cpp
     tests/test_grok_enhanced.cpp
     tests/test_gemini_provider.cpp
@@ -547,6 +553,7 @@ source_group(
         tests/test_mime_utils.cpp
         tests/test_uri_utils.cpp
         tests/test_json_writer.cpp
+        tests/test_memory_store.cpp
         tests/test_commands.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp
@@ -556,6 +563,7 @@ source_group(
         tests/test_openai_stream_encoder.cpp
         tests/test_openai_responses_protocol.cpp
         tests/test_model_catalog_provider.cpp
+        tests/test_provider_catalog_grouping.cpp
         tests/test_grok_provider.cpp
         tests/test_grok_enhanced.cpp
         tests/test_gemini_provider.cpp

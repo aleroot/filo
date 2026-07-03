@@ -8,11 +8,12 @@
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../session/SessionStats.hpp"
+#include "../tools/MemoryTool.hpp"
 #include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
-#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/StringUtils.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include <iostream>
@@ -43,13 +44,6 @@ constexpr std::string_view kMaxOutputRecoveryPrompt =
 // All Filo tools return {"error": "..."} on failure.
 [[nodiscard]] bool is_tool_error(const std::string& result) noexcept {
     return result.find("\"error\"") != std::string::npos;
-}
-
-[[nodiscard]] std::string trim_copy(std::string value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return {};
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return value.substr(start, end - start + 1);
 }
 
 [[nodiscard]] bool is_truncation_stop_reason(std::string_view stop_reason) noexcept {
@@ -322,6 +316,94 @@ void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
     refresh_context_window_snapshot_unlocked();
 }
 
+void Agent::set_memory_thread_policy(core::memory::MemoryThreadPolicy policy) {
+    std::lock_guard lock(history_mutex_);
+    session_context_.memory_policy = policy;
+    mark_stable_prompt_prefix_dirty();
+    ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
+}
+
+core::memory::MemoryThreadPolicy Agent::memory_thread_policy() const {
+    std::lock_guard lock(history_mutex_);
+    return session_context_.memory_policy;
+}
+
+void Agent::run_memory_review_async(std::function<void(std::string)> status_callback) {
+    auto input = [&]() {
+        std::lock_guard lock(history_mutex_);
+        auto history = history_;
+        std::erase_if(history, [](const core::llm::Message& msg) {
+            return msg.role == "system";
+        });
+        return core::memory::MemoryReviewInput{
+            .history = std::move(history),
+            .session_context = session_context_,
+            .thread_policy = session_context_.memory_policy,
+            .rate_limit = {},
+        };
+    }();
+    if (provider_) {
+        input.rate_limit = provider_->get_last_rate_limit_info();
+    }
+    auto weak_self = weak_from_this();
+    core::memory::MemoryBackgroundService{}.review_async(
+        std::move(input),
+        [weak_self, status_callback = std::move(status_callback)](
+            core::memory::MemoryReviewResult result) {
+            if ((result.memories_stored > 0 || result.memories_cleaned > 0)
+                && !weak_self.expired()) {
+                if (auto self = weak_self.lock()) {
+                    self->refresh_system_prompt();
+                }
+            }
+            if (status_callback && !result.message.empty()) {
+                status_callback(std::move(result.message));
+            }
+        });
+}
+
+void Agent::run_memory_background_review(
+    core::llm::protocols::RateLimitInfo rate_limit,
+    std::function<void(const std::string&)> status_log_callback) {
+    auto input = [&]() {
+        std::lock_guard lock(history_mutex_);
+        auto history = history_;
+        std::erase_if(history, [](const core::llm::Message& msg) {
+            return msg.role == "system";
+        });
+        return core::memory::MemoryReviewInput{
+            .history = std::move(history),
+            .session_context = session_context_,
+            .thread_policy = session_context_.memory_policy,
+            .rate_limit = {},
+        };
+    }();
+    input.rate_limit = std::move(rate_limit);
+    auto weak_self = weak_from_this();
+    core::memory::MemoryBackgroundService{}.review_async(
+        std::move(input),
+        [weak_self, status_log_callback = std::move(status_log_callback)](
+            core::memory::MemoryReviewResult result) {
+            if ((result.memories_stored > 0 || result.memories_cleaned > 0)
+                && !weak_self.expired()) {
+                if (auto self = weak_self.lock()) {
+                    self->refresh_system_prompt();
+                }
+            }
+            if (status_log_callback && !result.message.empty()) {
+                status_log_callback("\n[" + result.message + "]\n");
+            }
+        });
+}
+
+void Agent::refresh_system_prompt() {
+    std::lock_guard lock(history_mutex_);
+    mark_stable_prompt_prefix_dirty();
+    ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
+}
+
 core::context::SessionContext Agent::session_context_snapshot() const {
     std::lock_guard lock(history_mutex_);
     return session_context_;
@@ -410,7 +492,7 @@ void Agent::clear_history() {
 void Agent::compact_history(std::string summary) {
     std::lock_guard lock(history_mutex_);
     const auto active_skill_context = collect_active_skill_context(history_);
-    context_summary_ = trim_copy(std::move(summary));
+    context_summary_ = core::utils::str::trim_ascii_copy(summary);
     if (!active_skill_context.empty()) {
         if (!context_summary_.empty()) context_summary_ += "\n\n";
         context_summary_ += "Active Agent Skill instructions preserved from earlier context:\n";
@@ -964,6 +1046,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 self->run_efficiency_rotation_if_needed(
                     turn_callbacks.min_context_utilization_for_rotation);
             }
+            self->run_memory_background_review(
+                provider ? provider->get_last_rate_limit_info()
+                         : core::llm::protocols::RateLimitInfo{},
+                turn_callbacks.on_status_log);
             self->check_auto_compact(turn_callbacks.on_status_log
                                           ? turn_callbacks.on_status_log
                                           : text_callback);
@@ -1172,6 +1258,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     .model_name = active_model_for_task,
                                     .provider = provider_for_task,
                                 });
+                        }
+                        if (core::tools::MemoryTool::committed_mutation(
+                                tc.function.name,
+                                tc.function.arguments,
+                                result)) {
+                            self->refresh_system_prompt();
                         }
                         result = tool_output_history::clamp_for_history(
                             tc.function.name,

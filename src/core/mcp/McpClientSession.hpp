@@ -11,6 +11,7 @@
 #include <functional>
 #include <stdexcept>
 #include <optional>
+#include <chrono>
 #include <cpr/cpr.h>
 #include "../config/ConfigManager.hpp"
 #include "../tools/Tool.hpp"
@@ -122,7 +123,9 @@ public:
 class StdioMcpSession : public IMcpClientSession {
 public:
     explicit StdioMcpSession(const core::config::McpServerConfig& config,
-                             McpSamplingCallback sampling_callback = {});
+                             McpSamplingCallback sampling_callback = {},
+                             std::chrono::milliseconds request_timeout =
+                                 std::chrono::seconds(60));
     ~StdioMcpSession() override;
 
     [[nodiscard]] std::vector<McpToolDef> initialize() override;
@@ -148,7 +151,8 @@ public:
 private:
     // Internal JSON-RPC helpers
     [[nodiscard]] std::string send_request(std::string_view method,
-                                           std::string_view params_json);
+                                           std::string_view params_json,
+                                           std::chrono::milliseconds timeout);
     void send_notification(std::string_view method, std::string_view params_json = "");
 
     // Reader loop (runs on reader_thread_)
@@ -160,6 +164,7 @@ private:
     pid_t child_pid_ = -1;
     std::string server_name_;
     McpSamplingCallback sampling_callback_;
+    std::chrono::milliseconds request_timeout_;
 
     std::atomic<bool> running_{false};
     std::thread reader_thread_;

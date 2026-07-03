@@ -4,12 +4,15 @@
 #include <string_view>
 #include <vector>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include "../../core/agent/Agent.hpp"
 #include "../../core/config/ConfigManager.hpp"
 #include "../../core/history/PromptHistoryStore.hpp"
+#include "../../core/memory/MemoryPolicy.hpp"
+#include "../../core/memory/MemoryStore.hpp"
 #include "../../core/session/SessionData.hpp"
 
 namespace core::commands {
@@ -93,6 +96,17 @@ struct CommandContext {
     std::function<CommandOperationResult(std::string_view)> set_goal_fn = {};
     std::function<CommandOperationResult(std::string_view, std::string_view)> set_goal_status_fn = {};
     std::function<CommandOperationResult()> clear_goal_fn = {};
+    std::function<core::memory::MemoryState()> memory_state_fn = {};
+    std::function<CommandOperationResult(core::memory::MemorySettings)> set_memory_settings_fn = {};
+    std::function<core::memory::MemoryThreadPolicy()> memory_thread_policy_fn = {};
+    std::function<CommandOperationResult(core::memory::MemoryThreadPolicy)> set_memory_thread_policy_fn = {};
+    std::function<CommandOperationResult()> run_memory_review_fn = {};
+    std::function<CommandOperationResult(std::string_view)> add_memory_fn = {};
+    std::function<CommandOperationResult(std::string_view)> forget_memory_fn = {};
+    std::function<CommandOperationResult()> clean_memory_fn = {};
+    std::function<CommandOperationResult()> clear_memory_fn = {};
+    std::function<CommandOperationResult(std::filesystem::path)> save_memory_markdown_fn = {};
+    std::function<CommandOperationResult(std::filesystem::path)> load_memory_markdown_fn = {};
     std::function<std::vector<core::config::McpServerConfig>()> list_mcp_servers_fn = {};
     std::function<CommandOperationResult(const core::config::McpServerConfig&,
                                          core::config::SettingsScope)> add_mcp_server_fn = {};

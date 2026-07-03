@@ -84,6 +84,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto yolo_enabled   = std::make_shared<bool>(false);
     auto tool_rules = std::make_shared<std::vector<std::string>>();
     auto goal = std::make_shared<std::optional<core::session::SessionGoal>>();
+    auto memory_state = std::make_shared<core::memory::MemoryState>();
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
     auto active_terminals = std::make_shared<std::vector<ActiveTerminalInfo>>(
         std::vector<ActiveTerminalInfo>{{
@@ -236,6 +237,13 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             goal->reset();
             return CommandOperationResult{.ok = true, .message = "Goal cleared."};
         },
+        .memory_state_fn = [memory_state]() {
+            return *memory_state;
+        },
+        .set_memory_settings_fn = [memory_state](core::memory::MemorySettings settings) {
+            memory_state->settings = settings;
+            return CommandOperationResult{.ok = true, .message = "Memory settings updated."};
+        },
         .list_active_terminals_fn = [active_terminals]() {
             return *active_terminals;
         },
@@ -304,6 +312,26 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         REQUIRE(*stop_called == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Stop requested"));
+    }
+
+    SECTION("/memory off disables all background memory features") {
+        memory_state->settings.enabled = true;
+        memory_state->settings.auto_capture = true;
+        memory_state->settings.background_review = true;
+        memory_state->settings.consolidation = true;
+        memory_state->settings.skill_curation = true;
+        *mock_history = "";
+
+        ctx.text = "/memory off";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        CHECK_FALSE(memory_state->settings.enabled);
+        CHECK_FALSE(memory_state->settings.auto_capture);
+        CHECK_FALSE(memory_state->settings.background_review);
+        CHECK_FALSE(memory_state->settings.consolidation);
+        CHECK_FALSE(memory_state->settings.skill_curation);
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Memory settings updated."));
     }
 
     SECTION("! command routes to direct shell without sending a model turn") {
