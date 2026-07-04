@@ -9,7 +9,6 @@
 #include <cpr/cpr.h>
 
 #include <algorithm>
-#include <cctype>
 #include <expected>
 #include <format>
 #include <memory>
@@ -25,28 +24,8 @@ constexpr int kFetchTimeoutMs = 60000;
 constexpr int kMaxFetchBytes = 2 * 1024 * 1024;
 constexpr int kMaxRedirects = 5;
 
-[[nodiscard]] std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) return {};
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
-}
-
 [[nodiscard]] std::string normalize_space(std::string text) {
-    std::string out;
-    out.reserve(text.size());
-    bool previous_space = false;
-    for (const unsigned char ch : text) {
-        const bool space = std::isspace(ch) != 0;
-        if (space) {
-            if (!previous_space) out.push_back(' ');
-            previous_space = true;
-        } else {
-            out.push_back(static_cast<char>(ch));
-            previous_space = false;
-        }
-    }
-    return trim_copy(out);
+    return core::utils::str::collapse_ascii_whitespace_copy(text);
 }
 
 void replace_all(std::string& text, std::string_view from, std::string_view to) {
@@ -181,7 +160,7 @@ void erase_tag_blocks(std::string& html,
 [[nodiscard]] std::expected<std::string, std::string> resolve_redirect_url(
     std::string_view current_url,
     std::string_view location_header) {
-    const std::string location = trim_copy(location_header);
+    const std::string location = core::utils::str::trim_ascii_copy(location_header);
     if (location.empty()) {
         return std::unexpected("Redirect response did not include a Location header.");
     }
@@ -302,9 +281,9 @@ public:
             detail::find_header_case_insensitive(response.header, "content-type").value_or("");
 
         const std::string preview = body.substr(0, std::min<std::size_t>(body.size(), 512));
-        const bool looks_html = detail::contains_case_insensitive(content_type, "text/html")
-            || detail::contains_case_insensitive(preview, "<html")
-            || detail::contains_case_insensitive(preview, "<!doctype html");
+        const bool looks_html = core::utils::str::contains_case_insensitive(content_type, "text/html")
+            || core::utils::str::contains_case_insensitive(preview, "<html")
+            || core::utils::str::contains_case_insensitive(preview, "<!doctype html");
 
         FetchResponse out{
             .final_url = response.url.str().empty() ? current_url : response.url.str(),

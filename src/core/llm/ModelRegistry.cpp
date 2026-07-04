@@ -1571,28 +1571,8 @@ std::string ModelRegistry::export_to_json() const {
 
 namespace {
 
-std::string trim_ascii(std::string_view input) {
-    std::size_t begin = 0;
-    while (begin < input.size()
-           && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = input.size();
-    while (end > begin
-           && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-
-    return std::string(input.substr(begin, end - begin));
-}
-
-std::string to_lower_ascii(std::string_view input) {
-    return core::utils::str::to_lower_ascii_copy(input);
-}
-
 bool has_1m_context_suffix(std::string_view model_id) {
-    const std::string trimmed = trim_ascii(model_id);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(model_id);
     if (trimmed.size() < 4) return false;
 
     const std::size_t tail = trimmed.size() - 4;
@@ -1603,15 +1583,15 @@ bool has_1m_context_suffix(std::string_view model_id) {
 }
 
 std::string normalize_context_lookup_model(std::string_view model_id) {
-    std::string normalized = trim_ascii(model_id);
+    std::string normalized = core::utils::str::trim_ascii_copy(model_id);
     if (normalized.empty()) return normalized;
 
     if (has_1m_context_suffix(normalized)) {
-        normalized = trim_ascii(
+        normalized = core::utils::str::trim_ascii_copy(
             std::string_view(normalized).substr(0, normalized.size() - 4));
     }
 
-    const std::string lowered = to_lower_ascii(normalized);
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(normalized);
     if (lowered == "sonnet") {
         return "claude-sonnet-5";
     }
@@ -1638,7 +1618,7 @@ int get_max_context_size(std::string_view model_id) {
         return 1'000'000;
     }
 
-    const std::string original = trim_ascii(model_id);
+    const std::string original = core::utils::str::trim_ascii_copy(model_id);
     const std::string normalized = normalize_context_lookup_model(model_id);
 
     // Try new registry first

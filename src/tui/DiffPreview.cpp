@@ -1,6 +1,8 @@
 #include "DiffPreview.hpp"
 
 #include "core/tools/ToolNames.hpp"
+#include "core/utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -10,15 +12,6 @@
 
 namespace tui {
 namespace {
-
-std::string trim_copy(std::string_view text) {
-    const auto start = text.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = text.find_last_not_of(" \t\r\n");
-    return std::string(text.substr(start, end - start + 1));
-}
 
 template <typename Fn>
 void for_each_line(std::string_view text, Fn&& fn) {
@@ -47,17 +40,6 @@ std::vector<std::string> split_lines_keep_empty(std::string_view text) {
         lines.emplace_back();
     }
     return lines;
-}
-
-std::optional<std::string> extract_string_field(const simdjson::dom::object& object,
-                                                std::initializer_list<std::string_view> keys) {
-    for (const auto key : keys) {
-        std::string_view value;
-        if (object[key].get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return std::nullopt;
 }
 
 bool parse_positive_int(std::string_view text, std::size_t& pos, int& out) {
@@ -127,7 +109,7 @@ bool is_patch_metadata_line(std::string_view line) {
 }
 
 std::string normalize_diff_path(std::string_view path) {
-    auto cleaned = trim_copy(path);
+    auto cleaned = core::utils::str::trim_ascii_copy(path);
     if (cleaned == "/dev/null") {
         return {};
     }
@@ -275,9 +257,9 @@ void clamp_preview_lines(ToolDiffPreview& preview, std::size_t max_lines) {
 ToolDiffPreview build_replace_preview(const simdjson::dom::object& object) {
     ToolDiffPreview preview;
 
-    const auto file_path = extract_string_field(object, {"file_path", "path"});
-    const auto old_string = extract_string_field(object, {"old_string"});
-    const auto new_string = extract_string_field(object, {"new_string"});
+    const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"});
+    const auto old_string = core::utils::json::first_string_field(object, {"old_string"});
+    const auto new_string = core::utils::json::first_string_field(object, {"new_string"});
     if (!file_path || !old_string || !new_string) {
         return preview;
     }
@@ -319,8 +301,8 @@ ToolDiffPreview build_replace_preview(const simdjson::dom::object& object) {
 ToolDiffPreview build_write_file_preview(const simdjson::dom::object& object) {
     ToolDiffPreview preview;
 
-    const auto file_path = extract_string_field(object, {"file_path", "path"});
-    const auto content = extract_string_field(object, {"content"});
+    const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"});
+    const auto content = core::utils::json::first_string_field(object, {"content"});
     if (!file_path || !content) {
         return preview;
     }
@@ -368,7 +350,7 @@ ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
     }
 
     if (tool_name == core::tools::names::kApplyPatch) {
-        const auto patch = extract_string_field(object, {"patch"});
+        const auto patch = core::utils::json::first_string_field(object, {"patch"});
         if (!patch || patch->empty()) {
             return preview;
         }

@@ -43,7 +43,7 @@ constexpr std::size_t kMaxDomainFilters = 100;
 }
 
 [[nodiscard]] bool is_codex_backend(std::string_view base_url) {
-    return detail::contains_case_insensitive(
+    return core::utils::str::contains_case_insensitive(
         base_url,
         "chatgpt.com/backend-api/codex");
 }
@@ -234,12 +234,12 @@ void write_domain_filters(core::utils::JsonWriter& writer,
 void parse_url_citation(SearchResponse& response,
                         const simdjson::dom::object& annotation,
                         std::string_view text) {
-    const auto type = detail::read_first_string(annotation, {"type"});
+    const auto type = core::utils::json::first_string_field_or_empty(annotation, {"type"});
     if (type != "url_citation") return;
 
     SearchHit hit{
-        .title = detail::read_first_string(annotation, {"title"}),
-        .url = detail::read_first_string(annotation, {"url"}),
+        .title = core::utils::json::first_string_field_or_empty(annotation, {"title"}),
+        .url = core::utils::json::first_string_field_or_empty(annotation, {"url"}),
     };
 
     const auto start = read_i64(annotation, "start_index");
@@ -257,7 +257,7 @@ void parse_url_citation(SearchResponse& response,
 
 void parse_output_text(SearchResponse& response,
                        const simdjson::dom::object& content) {
-    const auto type = detail::read_first_string(content, {"type"});
+    const auto type = core::utils::json::first_string_field_or_empty(content, {"type"});
     if (type != "output_text") return;
 
     std::string_view text;
@@ -319,7 +319,7 @@ void parse_output_array(SearchResponse& response,
         simdjson::dom::object item;
         if (item_element.get_object().get(item) != simdjson::SUCCESS) continue;
 
-        const auto type = detail::read_first_string(item, {"type"});
+        const auto type = core::utils::json::first_string_field_or_empty(item, {"type"});
         if (type == "message") {
             parse_message_item(response, item);
         } else if (type == "web_search_call") {
@@ -355,7 +355,7 @@ void parse_results(SearchResponse& response,
 
 [[nodiscard]] std::string read_error_message(simdjson::dom::element doc) {
     auto from_error_object = [](simdjson::dom::object error_object) -> std::string {
-        return detail::read_first_string(error_object, {"message", "detail", "error"});
+        return core::utils::json::first_string_field_or_empty(error_object, {"message", "detail", "error"});
     };
 
     simdjson::dom::object error_object;

@@ -9,12 +9,12 @@
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include "WorkStore.hpp"
 
 #include <simdjson.h>
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -59,24 +59,9 @@ struct RunOutcome {
     bool cancelled = false;
 };
 
-[[nodiscard]] std::string trim_copy(std::string_view input) {
-    const auto start = input.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) return {};
-    const auto end = input.find_last_not_of(" \t\r\n");
-    return std::string(input.substr(start, end - start + 1));
-}
-
-[[nodiscard]] std::string lower_ascii_copy(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-    for (const unsigned char ch : input) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
 [[nodiscard]] std::string normalize_mode(std::string_view input) {
-    std::string mode = lower_ascii_copy(trim_copy(input));
+    std::string mode = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_copy(input));
     if (mode.empty()) return "BUILD";
     if (mode == "plan") return "PLAN";
     if (mode == "research") return "RESEARCH";
@@ -86,7 +71,7 @@ struct RunOutcome {
 }
 
 [[nodiscard]] std::string clamp_line(std::string_view input, std::size_t max_chars = 240) {
-    std::string out = trim_copy(input);
+    std::string out = core::utils::str::trim_ascii_copy(input);
     if (out.size() <= max_chars) return out;
     out.resize(max_chars);
     out += "...";
@@ -96,7 +81,7 @@ struct RunOutcome {
 void append_unique(std::vector<std::string>& values,
                    std::string value,
                    std::size_t max_items = 16) {
-    value = trim_copy(value);
+    value = core::utils::str::trim_ascii_copy(value);
     if (value.empty()) return;
     if (std::ranges::find(values, value) != values.end()) return;
     if (values.size() >= max_items) return;
@@ -129,7 +114,7 @@ void append_unique(std::vector<std::string>& values,
 
     ParsedRequest parsed;
     std::string_view text;
-    if (obj["action"].get(text) == simdjson::SUCCESS) parsed.action = lower_ascii_copy(text);
+    if (obj["action"].get(text) == simdjson::SUCCESS) parsed.action = core::utils::str::to_lower_ascii_copy(text);
     if (obj["work_id"].get(text) == simdjson::SUCCESS) parsed.work_id = std::string(text);
     if (obj["title"].get(text) == simdjson::SUCCESS) parsed.title = std::string(text);
     if (obj["instructions"].get(text) == simdjson::SUCCESS) parsed.instructions = std::string(text);
@@ -137,7 +122,7 @@ void append_unique(std::vector<std::string>& values,
     if (obj["mode"].get(text) == simdjson::SUCCESS) parsed.mode = std::string(text);
     if (obj["provider"].get(text) == simdjson::SUCCESS) parsed.provider = std::string(text);
     if (obj["model"].get(text) == simdjson::SUCCESS) parsed.model = std::string(text);
-    if (obj["status"].get(text) == simdjson::SUCCESS) parsed.status_filter = lower_ascii_copy(text);
+    if (obj["status"].get(text) == simdjson::SUCCESS) parsed.status_filter = core::utils::str::to_lower_ascii_copy(text);
     if (obj["cwd"].get(text) == simdjson::SUCCESS) parsed.cwd = std::string(text);
 
     int64_t max_steps = 0;
@@ -154,16 +139,16 @@ void append_unique(std::vector<std::string>& values,
         return std::nullopt;
     }
     if (parsed.action == "start") {
-        if (trim_copy(parsed.title).empty()) {
+        if (core::utils::str::trim_ascii_copy(parsed.title).empty()) {
             error_out = "Missing required 'title' for task start.";
             return std::nullopt;
         }
-        if (trim_copy(parsed.instructions).empty()) {
+        if (core::utils::str::trim_ascii_copy(parsed.instructions).empty()) {
             error_out = "Missing required 'instructions' for task start.";
             return std::nullopt;
         }
     }
-    if (parsed.action == "resume" && trim_copy(parsed.work_id).empty()) {
+    if (parsed.action == "resume" && core::utils::str::trim_ascii_copy(parsed.work_id).empty()) {
         error_out = "Missing required 'work_id' for task resume.";
         return std::nullopt;
     }
@@ -175,27 +160,11 @@ void append_unique(std::vector<std::string>& values,
 }
 
 [[nodiscard]] std::string summary_from_text(std::string_view text) {
-    const auto trimmed = trim_copy(text);
+    const auto trimmed = core::utils::str::trim_ascii_copy(text);
     if (trimmed.empty()) return "No final summary was produced.";
     const auto newline = trimmed.find('\n');
     if (newline == std::string::npos) return clamp_line(trimmed, 220);
     return clamp_line(trimmed.substr(0, newline), 220);
-}
-
-[[nodiscard]] std::string json_string_field(std::string_view json,
-                                            std::initializer_list<std::string_view> keys) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
-        return {};
-    }
-    for (const auto key : keys) {
-        std::string_view value;
-        if (doc[key.data()].get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return {};
 }
 
 [[nodiscard]] std::string resolved_path_string(const core::context::SessionContext& context,
@@ -216,7 +185,7 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
             start,
             end == std::string_view::npos ? patch_text.size() - start : end - start);
         if (line.starts_with("+++ ") || line.starts_with("--- ")) {
-            std::string candidate = trim_copy(line.substr(4));
+            std::string candidate = core::utils::str::trim_ascii_copy(line.substr(4));
             if (candidate != "/dev/null" && !candidate.empty()) {
                 if ((candidate.starts_with("a/") || candidate.starts_with("b/")) && candidate.size() > 2) {
                     candidate.erase(0, 2);
@@ -260,7 +229,7 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
         }
 
         if (tool_name == core::tools::names::kRunTerminalCommand) {
-            append_unique(outcome.commands_run, json_string_field(tool_args, {"command"}), 12);
+            append_unique(outcome.commands_run, core::utils::json::first_string_field_or_empty(tool_args, {"command"}), 12);
             continue;
         }
 
@@ -270,7 +239,7 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
             || tool_name == core::tools::names::kDeleteFile) {
             append_unique(
                 outcome.files_touched,
-                resolved_path_string(context, json_string_field(tool_args, {"file_path", "path"})),
+                resolved_path_string(context, core::utils::json::first_string_field_or_empty(tool_args, {"file_path", "path"})),
                 24);
             continue;
         }
@@ -278,11 +247,11 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
         if (tool_name == core::tools::names::kMoveFile) {
             append_unique(
                 outcome.files_touched,
-                resolved_path_string(context, json_string_field(tool_args, {"source", "from"})),
+                resolved_path_string(context, core::utils::json::first_string_field_or_empty(tool_args, {"source", "from"})),
                 24);
             append_unique(
                 outcome.files_touched,
-                resolved_path_string(context, json_string_field(tool_args, {"destination", "to"})),
+                resolved_path_string(context, core::utils::json::first_string_field_or_empty(tool_args, {"destination", "to"})),
                 24);
             continue;
         }
@@ -291,7 +260,7 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
             capture_apply_patch_paths(
                 outcome.files_touched,
                 context,
-                json_string_field(tool_args, {"patch"}));
+                core::utils::json::first_string_field_or_empty(tool_args, {"patch"}));
         }
     }
 
@@ -456,12 +425,12 @@ std::string TaskService::execute(std::string_view json_args,
         auto items = work_store.list();
         if (!request->status_filter.empty()) {
             std::erase_if(items, [&](const WorkInfo& item) {
-                return lower_ascii_copy(item.status) != request->status_filter;
+                return core::utils::str::to_lower_ascii_copy(item.status) != request->status_filter;
             });
         }
         if (!request->worker.empty()) {
             std::erase_if(items, [&](const WorkInfo& item) {
-                return lower_ascii_copy(item.worker) != lower_ascii_copy(request->worker);
+                return core::utils::str::to_lower_ascii_copy(item.worker) != core::utils::str::to_lower_ascii_copy(request->worker);
             });
         }
         if (!request->cwd.empty()) {
@@ -493,7 +462,7 @@ std::string TaskService::execute(std::string_view json_args,
     } else {
         item.work_id = WorkStore::generate_work_id();
         item.session_id = item.work_id;
-        item.title = trim_copy(request->title);
+        item.title = core::utils::str::trim_ascii_copy(request->title);
         item.created_at = core::session::SessionStore::now_iso8601();
     }
 
@@ -543,7 +512,7 @@ std::string TaskService::execute(std::string_view json_args,
     item.model = plan->model_name;
 
     const std::string prompt = request->action == "resume"
-        ? (trim_copy(request->instructions).empty()
+        ? (core::utils::str::trim_ascii_copy(request->instructions).empty()
             ? "Continue from the saved state, complete the task if possible, and return a concise architect-facing result."
             : request->instructions)
         : request->instructions;

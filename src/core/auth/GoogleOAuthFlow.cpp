@@ -18,6 +18,7 @@
 #include <thread>
 #include <iostream>
 #include "../logging/Logger.hpp"
+#include "../utils/StringUtils.hpp"
 
 namespace core::auth {
 
@@ -92,21 +93,6 @@ static std::string build_form_body(
     return body;
 }
 
-static std::string trim_copy(std::string_view in) {
-    std::size_t begin = 0;
-    while (begin < in.size()
-        && std::isspace(static_cast<unsigned char>(in[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = in.size();
-    while (end > begin
-        && std::isspace(static_cast<unsigned char>(in[end - 1]))) {
-        --end;
-    }
-    return std::string(in.substr(begin, end - begin));
-}
-
 static int hex_value(unsigned char ch) {
     if (ch >= '0' && ch <= '9') return ch - '0';
     if (ch >= 'a' && ch <= 'f') return 10 + (ch - 'a');
@@ -157,7 +143,7 @@ static std::optional<int> oauth_requested_port() {
     const char* raw = std::getenv("OAUTH_CALLBACK_PORT");
     if (!raw || raw[0] == '\0') return std::nullopt;
 
-    const std::string text = trim_copy(raw);
+    const std::string text = core::utils::str::trim_ascii_copy(raw);
     if (text.empty()) return std::nullopt;
 
     int port = 0;
@@ -248,7 +234,7 @@ OAuthToken GoogleOAuthFlow::parse_token_response(std::string_view json,
 }
 
 GoogleManualAuthInput GoogleOAuthFlow::parse_manual_auth_input(std::string_view raw_input) {
-    const std::string input = trim_copy(raw_input);
+    const std::string input = core::utils::str::trim_ascii_copy(raw_input);
     if (input.empty()) {
         throw std::runtime_error("No authorization code provided");
     }
@@ -323,7 +309,7 @@ std::string GoogleOAuthFlow::build_loopback_redirect_uri(std::string_view listen
                                                          int port,
                                                          std::string_view path,
                                                          std::string_view redirect_host_override) {
-    std::string host = trim_copy(redirect_host_override.empty()
+    std::string host = core::utils::str::trim_ascii_copy(redirect_host_override.empty()
         ? listener_host
         : redirect_host_override);
 

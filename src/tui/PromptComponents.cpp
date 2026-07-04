@@ -4,6 +4,8 @@
 #include "TuiTheme.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -38,36 +40,8 @@ int prompt_body_height(std::string_view input_text, int base_height) {
     return std::clamp(std::max(base_height, lines + 1), base_height, base_height + 4);
 }
 
-std::string trim_copy(std::string_view text) {
-    const auto start = text.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = text.find_last_not_of(" \t\r\n");
-    return std::string(text.substr(start, end - start + 1));
-}
-
-std::string collapse_whitespace(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-
-    bool last_was_space = false;
-    for (const unsigned char ch : text) {
-        if (std::isspace(ch)) {
-            if (!last_was_space) {
-                out.push_back(' ');
-                last_was_space = true;
-            }
-            continue;
-        }
-        out.push_back(static_cast<char>(ch));
-        last_was_space = false;
-    }
-    return trim_copy(out);
-}
-
 std::string truncate_preview(std::string_view text, std::size_t max_len = 180) {
-    std::string cleaned = collapse_whitespace(text);
+    std::string cleaned = core::utils::str::collapse_ascii_whitespace_copy(text);
     if (cleaned.size() <= max_len) {
         return cleaned;
     }
@@ -75,40 +49,6 @@ std::string truncate_preview(std::string_view text, std::size_t max_len = 180) {
         return cleaned.substr(0, max_len);
     }
     return cleaned.substr(0, max_len - 1) + "…";
-}
-
-std::string to_lower_ascii_copy(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    for (const unsigned char ch : text) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
-std::optional<std::size_t> find_case_insensitive(std::string_view haystack,
-                                                 std::string_view needle) {
-    if (needle.empty()) {
-        return std::nullopt;
-    }
-    const std::string hay = to_lower_ascii_copy(haystack);
-    const std::string ned = to_lower_ascii_copy(needle);
-    const auto pos = hay.find(ned);
-    if (pos == std::string::npos) {
-        return std::nullopt;
-    }
-    return pos;
-}
-
-std::optional<std::string> extract_string_field(const simdjson::dom::object& object,
-                                                std::initializer_list<std::string_view> keys) {
-    for (const auto key : keys) {
-        std::string_view value;
-        if (object[key].get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return std::nullopt;
 }
 
 std::string humanize_key(std::string_view key) {
@@ -150,7 +90,7 @@ std::string extract_patch_target(std::string_view patch) {
             start,
             end == std::string_view::npos ? std::string_view::npos : end - start);
 
-        const std::string trimmed = trim_copy(line);
+        const std::string trimmed = core::utils::str::trim_ascii_copy(line);
         if (!trimmed.empty()) {
             for (const auto prefix : prefixes) {
                 if (line.starts_with(prefix)) {
@@ -177,7 +117,7 @@ struct PermissionField {
 void add_field(std::vector<PermissionField>& fields,
                std::string label,
                std::string value) {
-    value = trim_copy(value);
+    value = core::utils::str::trim_ascii_copy(value);
     if (value.empty()) {
         return;
     }
@@ -190,7 +130,7 @@ void add_field(std::vector<PermissionField>& fields,
 std::vector<PermissionField> describe_permission_arguments(std::string_view tool_name,
                                                            std::string_view args_json) {
     std::vector<PermissionField> fields;
-    if (trim_copy(args_json).empty()) {
+    if (core::utils::str::trim_ascii_copy(args_json).empty()) {
         add_field(fields, "Arguments", "No arguments.");
         return fields;
     }
@@ -210,46 +150,46 @@ std::vector<PermissionField> describe_permission_arguments(std::string_view tool
     }
 
     if (core::tools::names::is_terminal_tool(tool_name)) {
-        if (const auto command = extract_string_field(object, {"command"})) {
+        if (const auto command = core::utils::json::first_string_field(object, {"command"})) {
             add_field(fields, "Command", *command);
         }
-        if (const auto working_dir = extract_string_field(object, {"working_dir"})) {
+        if (const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"})) {
             add_field(fields, "Working Dir", *working_dir);
         }
     } else if (tool_name == core::tools::names::kWriteFile) {
-        if (const auto file_path = extract_string_field(object, {"file_path", "path"})) {
+        if (const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"})) {
             add_field(fields, "File", *file_path);
         }
-        if (const auto content = extract_string_field(object, {"content"})) {
+        if (const auto content = core::utils::json::first_string_field(object, {"content"})) {
             add_field(fields, "Content", std::format("{} chars", content->size()));
         }
     } else if (tool_name == core::tools::names::kDeleteFile) {
-        if (const auto path = extract_string_field(object, {"path", "file_path"})) {
+        if (const auto path = core::utils::json::first_string_field(object, {"path", "file_path"})) {
             add_field(fields, "Path", *path);
         }
     } else if (tool_name == core::tools::names::kMoveFile) {
-        if (const auto source = extract_string_field(object, {"source", "source_path", "from_path"})) {
+        if (const auto source = core::utils::json::first_string_field(object, {"source", "source_path", "from_path"})) {
             add_field(fields, "From", *source);
         }
-        if (const auto destination = extract_string_field(object, {"destination", "destination_path", "to_path"})) {
+        if (const auto destination = core::utils::json::first_string_field(object, {"destination", "destination_path", "to_path"})) {
             add_field(fields, "To", *destination);
         }
     } else if (tool_name == core::tools::names::kApplyPatch) {
-        if (const auto working_dir = extract_string_field(object, {"working_dir"})) {
+        if (const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"})) {
             add_field(fields, "Working Dir", *working_dir);
         }
-        if (const auto patch = extract_string_field(object, {"patch"})) {
+        if (const auto patch = core::utils::json::first_string_field(object, {"patch"})) {
             add_field(fields, "Patch", extract_patch_target(*patch));
             add_field(fields, "Patch Size", std::format("{} chars", patch->size()));
         }
     } else if (core::tools::names::is_replace_tool(tool_name)) {
-        if (const auto file_path = extract_string_field(object, {"file_path", "path"})) {
+        if (const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"})) {
             add_field(fields, "File", *file_path);
         }
-        if (const auto old_string = extract_string_field(object, {"old_string"})) {
+        if (const auto old_string = core::utils::json::first_string_field(object, {"old_string"})) {
             add_field(fields, "Find", truncate_preview(*old_string, 80));
         }
-        if (const auto new_string = extract_string_field(object, {"new_string"})) {
+        if (const auto new_string = core::utils::json::first_string_field(object, {"new_string"})) {
             add_field(fields, "Replace", truncate_preview(*new_string, 80));
         }
     }
@@ -525,7 +465,7 @@ Element render_search_snippet(std::string_view snippet,
     const Color match_fg = selected ? Color::Black : Color::Black;
     const Color match_bg = selected ? ColorYellowBright : ColorYellowDark;
 
-    const auto match = find_case_insensitive(snippet, query);
+    const auto match = core::utils::str::find_case_insensitive(snippet, query);
     if (!match.has_value() || query.empty()) {
         return paragraph(std::string(snippet)) | color(base_color) | xflex;
     }

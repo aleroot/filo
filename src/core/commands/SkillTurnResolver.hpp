@@ -4,9 +4,9 @@
 #include "../config/ConfigManager.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/ProviderManager.hpp"
+#include "../utils/StringUtils.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <format>
 #include <optional>
 #include <string>
@@ -22,24 +22,6 @@ struct SkillTurnResolution {
 
 namespace detail {
 
-inline std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
-}
-
-inline std::string lower_ascii_copy(std::string_view input) {
-    std::string output;
-    output.reserve(input.size());
-    for (const unsigned char ch : input) {
-        output.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return output;
-}
-
 inline std::string join_items(const std::vector<std::string>& values) {
     std::string output;
     for (std::size_t i = 0; i < values.size(); ++i) {
@@ -54,7 +36,7 @@ inline std::string join_items(const std::vector<std::string>& values) {
 inline std::string provider_family_key(
     std::string_view provider_name,
     const core::config::ProviderConfig& provider_config) {
-    const std::string lowered = lower_ascii_copy(trim_copy(provider_name));
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(provider_name));
 
     switch (provider_config.api_type) {
         case core::config::ApiType::Anthropic:
@@ -90,7 +72,7 @@ inline std::string provider_family_key(
 }
 
 inline std::string model_family_key(std::string_view model_hint) {
-    const std::string lowered = lower_ascii_copy(trim_copy(model_hint));
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(model_hint));
     if (lowered.starts_with("claude")) return "anthropic";
     if (lowered.starts_with("grok")) return "grok";
     if (lowered.starts_with("gemini")) return "gemini";
@@ -121,7 +103,7 @@ inline bool try_select_provider(
 
     const std::string effective_model = requested_model.empty()
         ? provider_it->second.model
-        : trim_copy(requested_model);
+        : core::utils::str::trim_ascii_copy(requested_model);
     if (effective_model.empty()) {
         resolution.warning = std::format(
             "Skill model '{}' resolved to provider '{}' without a concrete model; using the current model.",
@@ -193,7 +175,7 @@ inline SkillTurnResolution resolve_skill_turn(
     SkillTurnResolution resolution;
     resolution.callbacks.allowed_tools = allowed_tools;
 
-    const std::string trimmed_hint = trim_copy(model_hint);
+    const std::string trimmed_hint = core::utils::str::trim_ascii_copy(model_hint);
     if (trimmed_hint.empty()) {
         return resolution;
     }
@@ -202,8 +184,8 @@ inline SkillTurnResolution resolve_skill_turn(
 
     const std::size_t slash = trimmed_hint.find('/');
     if (slash != std::string::npos) {
-        const std::string provider_name = trim_copy(std::string_view(trimmed_hint).substr(0, slash));
-        const std::string model_name = trim_copy(std::string_view(trimmed_hint).substr(slash + 1));
+        const std::string provider_name = core::utils::str::trim_ascii_copy(std::string_view(trimmed_hint).substr(0, slash));
+        const std::string model_name = core::utils::str::trim_ascii_copy(std::string_view(trimmed_hint).substr(slash + 1));
         if (!provider_name.empty()) {
             if (try_select_provider(provider_name, model_name, trimmed_hint, resolution)) {
                 return resolution;

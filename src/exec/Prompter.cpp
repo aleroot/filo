@@ -33,6 +33,7 @@
 #include "core/tools/SkillRegistry.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonInterpreterTool.hpp"
 #include "core/tools/SkillLoader.hpp"
@@ -41,7 +42,6 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
-#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -95,26 +95,9 @@ struct ToolStats {
     std::map<std::string, ToolNameStats, std::less<>> by_name;
 };
 
-[[nodiscard]] std::string to_lower_copy(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-    for (const unsigned char ch : input) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
-[[nodiscard]] std::string trim_copy(std::string_view input) {
-    const auto start = input.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = input.find_last_not_of(" \t\r\n");
-    return std::string(input.substr(start, end - start + 1));
-}
-
 [[nodiscard]] std::optional<OutputFormat> parse_output_format(std::string_view value) {
-    const std::string lowered = to_lower_copy(trim_copy(value));
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_copy(value));
     if (lowered.empty() || lowered == "text") {
         return OutputFormat::Text;
     }
@@ -128,7 +111,8 @@ struct ToolStats {
 }
 
 [[nodiscard]] std::optional<InputFormat> parse_input_format(std::string_view value) {
-    const std::string lowered = to_lower_copy(trim_copy(value));
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_copy(value));
     if (lowered.empty() || lowered == "text") {
         return InputFormat::Text;
     }
@@ -210,8 +194,8 @@ struct ToolStats {
 
 [[nodiscard]] std::string compose_prompt(const std::optional<std::string>& prompt,
                                          std::string_view stdin_data) {
-    const std::string prompt_text = prompt.has_value() ? trim_copy(*prompt) : std::string{};
-    const std::string piped_text = trim_copy(stdin_data);
+    const std::string prompt_text = prompt.has_value() ? core::utils::str::trim_ascii_copy(*prompt) : std::string{};
+    const std::string piped_text = core::utils::str::trim_ascii_copy(stdin_data);
 
     if (prompt_text.empty()) {
         return piped_text;
@@ -678,7 +662,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
         : std::string{};
 
     diagnostics.final_prompt = compose_prompt(options.prompt, stdin_data);
-    if (trim_copy(diagnostics.final_prompt).empty()) {
+    if (core::utils::str::trim_ascii_copy(diagnostics.final_prompt).empty()) {
         diagnostics.exit_code = 2;
         err << "Prompter mode requires a prompt via --prompt/-p or stdin input.\n";
         return diagnostics;

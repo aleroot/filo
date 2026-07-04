@@ -336,7 +336,7 @@ void parse_content_array(SearchResponse& response, simdjson::dom::array content)
     for (auto element : content) {
         simdjson::dom::object object;
         if (element.get_object().get(object) != simdjson::SUCCESS) continue;
-        if (const auto text = detail::read_first_string(object, {"text", "content"});
+        if (const auto text = core::utils::json::first_string_field_or_empty(object, {"text", "content"});
             !text.empty()) {
             parse_text_content(response, text);
         }
@@ -404,15 +404,15 @@ void parse_search_response(SearchResponse& response, simdjson::dom::element doc)
 }
 
 void parse_reader_result(FetchResponse& response, simdjson::dom::object result) {
-    if (const auto title = detail::read_first_string(result, {"title"});
+    if (const auto title = core::utils::json::first_string_field_or_empty(result, {"title"});
         response.title.empty() && !title.empty()) {
         response.title = title;
     }
-    if (const auto url = detail::read_first_string(result, {"url"});
+    if (const auto url = core::utils::json::first_string_field_or_empty(result, {"url"});
         response.final_url.empty() && !url.empty()) {
         response.final_url = url;
     }
-    if (const auto text = detail::read_first_string(
+    if (const auto text = core::utils::json::first_string_field_or_empty(
             result, {"content", "description", "text", "markdown"});
         !text.empty()) {
         parse_text_content(response, text);
@@ -423,15 +423,15 @@ void parse_reader_content(FetchResponse& response, simdjson::dom::array content)
     for (auto element : content) {
         simdjson::dom::object object;
         if (element.get_object().get(object) != simdjson::SUCCESS) continue;
-        if (const auto title = detail::read_first_string(object, {"title", "document_title"});
+        if (const auto title = core::utils::json::first_string_field_or_empty(object, {"title", "document_title"});
             response.title.empty() && !title.empty()) {
             response.title = title;
         }
-        if (const auto url = detail::read_first_string(object, {"url", "source_url"});
+        if (const auto url = core::utils::json::first_string_field_or_empty(object, {"url", "source_url"});
             response.final_url.empty() && !url.empty()) {
             response.final_url = url;
         }
-        if (const auto text = detail::read_first_string(
+        if (const auto text = core::utils::json::first_string_field_or_empty(
                 object, {"text", "content", "markdown", "summary"});
             !text.empty()) {
             parse_text_content(response, text);
@@ -442,8 +442,8 @@ void parse_reader_content(FetchResponse& response, simdjson::dom::array content)
 void parse_fetch_response(FetchResponse& response, simdjson::dom::element doc) {
     simdjson::dom::object root;
     if (doc.get_object().get(root) == simdjson::SUCCESS) {
-        response.title = detail::read_first_string(root, {"title", "name"});
-        response.final_url = detail::read_first_string(root, {"url", "final_url", "source_url"});
+        response.title = core::utils::json::first_string_field_or_empty(root, {"title", "name"});
+        response.final_url = core::utils::json::first_string_field_or_empty(root, {"url", "final_url", "source_url"});
     }
 
     std::string_view text;

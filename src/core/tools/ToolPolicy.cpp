@@ -3,6 +3,7 @@
 
 #include "../config/ConfigManager.hpp"
 #include "../utils/AsciiUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
 #include <algorithm>
@@ -23,15 +24,6 @@ struct HttpUrlView {
     std::string_view port;
     std::string_view path;
 };
-
-[[nodiscard]] std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
-}
 
 void apply_overlay(core::config::ToolPolicyConfig& target,
                    const core::config::ToolPolicyConfig& overlay) {
@@ -125,8 +117,8 @@ void apply_overlay(core::config::ToolPolicyConfig& target,
 
 [[nodiscard]] bool starts_with_command_prefix(std::string_view command,
                                               std::string_view prefix) {
-    const auto trimmed_command = trim_copy(command);
-    const auto trimmed_prefix = trim_copy(prefix);
+    const auto trimmed_command = core::utils::str::trim_ascii_copy(command);
+    const auto trimmed_prefix = core::utils::str::trim_ascii_copy(prefix);
     if (trimmed_prefix.empty()) {
         return false;
     }
@@ -373,7 +365,7 @@ void apply_overlay(core::config::ToolPolicyConfig& target,
 } // namespace
 
 std::string canonical_tool_name(std::string_view name) {
-    std::string normalized = trim_copy(name);
+    std::string normalized = core::utils::str::trim_ascii_copy(name);
     std::ranges::transform(normalized, normalized.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
     });
@@ -449,7 +441,7 @@ std::optional<std::string> enforce_command_policy(std::string_view tool_name,
         if (contains_shell_control_operators(command)) {
             return std::format(
                 "command '{}' contains shell control operators and is not allowed by tool '{}' (allowed_commands policy)",
-                trim_copy(command),
+                core::utils::str::trim_ascii_copy(command),
                 canonical_tool_name(tool_name));
         }
         return std::nullopt;
@@ -457,7 +449,7 @@ std::optional<std::string> enforce_command_policy(std::string_view tool_name,
 
     return std::format(
         "command '{}' is not allowed for tool '{}' (allowed_commands policy)",
-        trim_copy(command),
+        core::utils::str::trim_ascii_copy(command),
         canonical_tool_name(tool_name));
 }
 

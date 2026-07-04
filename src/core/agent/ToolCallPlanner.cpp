@@ -2,11 +2,9 @@
 
 #include "SubagentOrchestrator.hpp"
 #include "../tools/ToolNames.hpp"
-
-#include <simdjson.h>
+#include "../utils/JsonUtils.hpp"
 
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <string_view>
 
@@ -14,26 +12,12 @@ namespace core::agent {
 
 namespace {
 
-[[nodiscard]] std::optional<std::string> json_string_field(std::string_view raw,
-                                                           std::string_view field) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw.data(), raw.size()).get(doc) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    std::string_view value;
-    if (doc[field.data()].get(value) == simdjson::SUCCESS) {
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 [[nodiscard]] std::filesystem::path resolved_arg_path(
     const core::context::SessionContext& context,
     std::string_view raw_args,
     std::string_view field,
     std::filesystem::path fallback = ".") {
-    const auto value = json_string_field(raw_args, field);
+    const auto value = core::utils::json::first_string_field(raw_args, {field});
     return context.resolve_path(value && !value->empty()
         ? std::filesystem::path(*value)
         : std::move(fallback));

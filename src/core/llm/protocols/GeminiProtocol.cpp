@@ -2,8 +2,8 @@
 #include "SseUtils.hpp"
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "../../utils/StringUtils.hpp"
 #include <atomic>
-#include <cctype>
 #include <charconv>
 #include <simdjson.h>
 
@@ -15,30 +15,6 @@ std::atomic_uint64_t g_gemini_call_counter{0};
 
 [[nodiscard]] bool gemini_model_requires_property_ordering(std::string_view model) {
     return model.starts_with("gemini-2.0");
-}
-
-[[nodiscard]] std::string trim_ascii_copy(std::string_view input) {
-    std::size_t begin = 0;
-    while (begin < input.size()
-        && std::isspace(static_cast<unsigned char>(input[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = input.size();
-    while (end > begin
-        && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
-        --end;
-    }
-    return std::string(input.substr(begin, end - begin));
-}
-
-[[nodiscard]] std::string lower_ascii_copy(std::string_view input) {
-    std::string out;
-    out.reserve(input.size());
-    for (const unsigned char ch : input) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
 }
 
 [[nodiscard]] std::string_view stable_gemini_pro_model() {
@@ -220,7 +196,7 @@ void append_schema_json(std::string& out,
 
 [[nodiscard]] std::string serialize_gemini_response_schema(std::string_view raw_schema,
                                                            bool inject_property_ordering) {
-    const std::string trimmed = trim_ascii_copy(raw_schema);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(raw_schema);
     if (trimmed.empty()) {
         return R"({"type":"object"})";
     }
@@ -241,12 +217,12 @@ void append_schema_json(std::string& out,
 } // namespace
 
 std::string normalize_requested_gemini_model(std::string_view raw_model) {
-    std::string normalized = trim_ascii_copy(raw_model);
+    std::string normalized = core::utils::str::trim_ascii_copy(raw_model);
     if (normalized.empty()) {
         return normalized;
     }
 
-    const std::string lowered = lower_ascii_copy(normalized);
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(normalized);
 
     if (lowered == "auto-gemini-2.5") {
         return std::string(stable_gemini_pro_model());

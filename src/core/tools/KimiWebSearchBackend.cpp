@@ -23,7 +23,7 @@ constexpr int kSearchTimeoutMs = 60000;
 [[nodiscard]] bool is_kimi_coding_endpoint(
     const core::llm::ProviderMetadata& metadata) {
     return metadata.api_type == core::config::ApiType::Kimi
-        && detail::contains_case_insensitive(metadata.base_url, "api.kimi.com/coding");
+        && core::utils::str::contains_case_insensitive(metadata.base_url, "api.kimi.com/coding");
 }
 
 void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {

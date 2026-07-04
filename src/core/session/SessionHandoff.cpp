@@ -1,11 +1,12 @@
 #include "SessionHandoff.hpp"
 
 #include "../tools/ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <format>
 #include <optional>
-#include <simdjson.h>
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
@@ -25,26 +26,11 @@ struct HandoffSignals {
     std::vector<std::string> recent_commands;
 };
 
-[[nodiscard]] std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) return {};
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
-}
-
 [[nodiscard]] std::string clamp_line(std::string_view input, std::size_t max_chars = 280) {
-    std::string out = trim_copy(input);
+    std::string out = core::utils::str::trim_ascii_copy(input);
     if (out.size() <= max_chars) return out;
     out.resize(max_chars);
     out += "...";
-    return out;
-}
-
-[[nodiscard]] std::string lower_ascii_copy(std::string_view input) {
-    std::string out(input);
-    std::ranges::transform(out, out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
     return out;
 }
 
@@ -74,8 +60,8 @@ void push_recent_limited(std::vector<std::string>& values,
 
 [[nodiscard]] std::string basename_or_self(std::string_view path) {
     const auto pos = path.find_last_of("/\\");
-    if (pos == std::string_view::npos) return trim_copy(path);
-    return trim_copy(path.substr(pos + 1));
+    if (pos == std::string_view::npos) return core::utils::str::trim_ascii_copy(path);
+    return core::utils::str::trim_ascii_copy(path.substr(pos + 1));
 }
 
 [[nodiscard]] std::optional<std::string> extract_patch_path(std::string_view line) {
@@ -83,7 +69,7 @@ void push_recent_limited(std::vector<std::string>& values,
         return std::nullopt;
     }
 
-    std::string raw = trim_copy(line.substr(4));
+    std::string raw = core::utils::str::trim_ascii_copy(line.substr(4));
     if (raw.empty()) {
         return std::nullopt;
     }
@@ -91,7 +77,7 @@ void push_recent_limited(std::vector<std::string>& values,
     const auto tab_pos = raw.find('\t');
     if (tab_pos != std::string::npos) {
         raw.erase(tab_pos);
-        raw = trim_copy(raw);
+        raw = core::utils::str::trim_ascii_copy(raw);
     }
 
     if (raw == "/dev/null") {
@@ -139,52 +125,17 @@ void capture_patch_paths(HandoffSignals& signals, std::string_view patch_text) {
     return out;
 }
 
-[[nodiscard]] std::string json_string_field(
-    std::string_view json,
-    std::initializer_list<std::string_view> keys) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
-        return {};
-    }
-
-    for (const auto key : keys) {
-        std::string_view value;
-        if (doc[key.data()].get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return {};
-}
-
-[[nodiscard]] int64_t json_int_field(
-    std::string_view json,
-    std::initializer_list<std::string_view> keys) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
-        return 0;
-    }
-
-    for (const auto key : keys) {
-        int64_t value = 0;
-        if (doc[key.data()].get(value) == simdjson::SUCCESS) {
-            return value;
-        }
-    }
-    return 0;
-}
-
 [[nodiscard]] std::string summarize_text_blob(std::string_view blob, std::size_t max_chars = 160) {
-    const auto trimmed = trim_copy(blob);
+    const auto trimmed = core::utils::str::trim_ascii_copy(blob);
     if (trimmed.empty()) return {};
 
     std::vector<std::string> lines;
     std::size_t start = 0;
     while (start < trimmed.size()) {
         const auto end = trimmed.find('\n', start);
-        const auto line = trim_copy(trimmed.substr(start, end == std::string_view::npos ? trimmed.size() - start
-                                                                                        : end - start));
+        const auto line = core::utils::str::trim_ascii_copy(
+            trimmed.substr(start, end == std::string_view::npos ? trimmed.size() - start
+                                                                : end - start));
         if (!line.empty()) {
             lines.push_back(line);
         }
@@ -197,7 +148,7 @@ void capture_patch_paths(HandoffSignals& signals, std::string_view patch_text) {
     };
 
     for (const auto& line : lines) {
-        const auto lowered = lower_ascii_copy(line);
+        const auto lowered = core::utils::str::to_lower_ascii_copy(line);
         if (std::ranges::any_of(keywords, [&](std::string_view keyword) {
                 return lowered.find(keyword) != std::string::npos;
             })) {
@@ -215,45 +166,45 @@ void capture_tool_effects(HandoffSignals& signals,
                           std::string_view tool_name,
                           std::string_view tool_args,
                           std::string_view tool_result) {
-    const std::string tool = trim_copy(tool_name);
+    const std::string tool = core::utils::str::trim_ascii_copy(tool_name);
     if (tool.empty()) return;
 
     append_unique_limited(signals.recent_tools, tool, 8, 64);
 
     if (tool == core::tools::names::kReadFile) {
-        append_unique_limited(signals.files_read, basename_or_self(json_string_field(tool_args, {"path"})), 6, 96);
+        append_unique_limited(signals.files_read, basename_or_self(core::utils::json::first_string_field_or_empty(tool_args, {"path"})), 6, 96);
     } else if (tool == core::tools::names::kApplyPatch) {
-        capture_patch_paths(signals, json_string_field(tool_args, {"patch"}));
+        capture_patch_paths(signals, core::utils::json::first_string_field_or_empty(tool_args, {"patch"}));
     } else if (tool == core::tools::names::kWriteFile
                || tool == core::tools::names::kReplace
                || tool == core::tools::names::kSearchReplace
                || tool == core::tools::names::kDeleteFile) {
         append_unique_limited(
             signals.files_modified,
-            basename_or_self(json_string_field(tool_args, {"file_path", "path"})),
+            basename_or_self(core::utils::json::first_string_field_or_empty(tool_args, {"file_path", "path"})),
             8,
             96);
     } else if (tool == core::tools::names::kMoveFile) {
         append_unique_limited(
             signals.files_modified,
-            basename_or_self(json_string_field(tool_args, {"source", "from"})),
+            basename_or_self(core::utils::json::first_string_field_or_empty(tool_args, {"source", "from"})),
             8,
             96);
         append_unique_limited(
             signals.files_modified,
-            basename_or_self(json_string_field(tool_args, {"destination", "to"})),
+            basename_or_self(core::utils::json::first_string_field_or_empty(tool_args, {"destination", "to"})),
             8,
             96);
     }
 
     if (tool == core::tools::names::kRunTerminalCommand) {
-        std::string command = json_string_field(tool_args, {"command"});
+        std::string command = core::utils::json::first_string_field_or_empty(tool_args, {"command"});
         command = clamp_line(command, 120);
         if (!command.empty()) {
             std::string summary = command;
-            const std::string error = json_string_field(tool_result, {"error"});
-            const std::string output = json_string_field(tool_result, {"output", "content"});
-            const int64_t exit_code = json_int_field(tool_result, {"exit_code"});
+            const std::string error = core::utils::json::first_string_field_or_empty(tool_result, {"error"});
+            const std::string output = core::utils::json::first_string_field_or_empty(tool_result, {"output", "content"});
+            const int64_t exit_code = core::utils::json::first_int64_field_or_zero(tool_result, {"exit_code"});
 
             if (!error.empty()) {
                 summary += std::format(" => {}", clamp_line(error, 120));
@@ -327,7 +278,7 @@ std::string build_handoff_summary(const SessionData& data) {
     sentences.push_back(
         "Keep working on the active task without asking the user to restate context unless something is ambiguous.");
 
-    if (const auto summary = trim_copy(data.context_summary); !summary.empty()) {
+    if (const auto summary = core::utils::str::trim_ascii_copy(data.context_summary); !summary.empty()) {
         sentences.push_back(std::format("Saved summary: {}.", clamp_line(summary, 420)));
     }
 
@@ -409,7 +360,7 @@ std::string build_handoff_summary(
     const std::vector<core::llm::Message>& messages,
     std::string_view existing_context_summary,
     std::string_view mode) {
-    std::string summary = trim_copy(existing_context_summary);
+    std::string summary = core::utils::str::trim_ascii_copy(existing_context_summary);
     if (!summary.empty()) {
         return summary;
     }

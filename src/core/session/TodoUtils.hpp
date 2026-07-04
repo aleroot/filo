@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SessionData.hpp"
+#include "../utils/StringUtils.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -11,15 +12,6 @@
 #include <vector>
 
 namespace core::session::todo {
-
-inline std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
-}
 
 inline std::optional<int> parse_positive_int(std::string_view value) {
     if (value.empty()) {
@@ -35,7 +27,7 @@ inline std::optional<int> parse_positive_int(std::string_view value) {
 }
 
 inline std::optional<std::string> parse_sequence_id(std::string_view id) {
-    const std::string trimmed = trim_copy(id);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(id);
     if (trimmed.empty()) {
         return std::nullopt;
     }
@@ -55,9 +47,9 @@ inline std::optional<std::string> parse_sequence_id(std::string_view id) {
 }
 
 inline std::optional<std::string> strip_braced_id(std::string_view selector) {
-    const std::string trimmed = trim_copy(selector);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(selector);
     if (trimmed.size() >= 2 && trimmed.front() == '{' && trimmed.back() == '}') {
-        const std::string inner = trim_copy(
+        const std::string inner = core::utils::str::trim_ascii_copy(
             std::string_view(trimmed).substr(1, trimmed.size() - 2));
         if (!inner.empty()) {
             return inner;
@@ -69,7 +61,7 @@ inline std::optional<std::string> strip_braced_id(std::string_view selector) {
 inline std::optional<std::size_t> find_by_id(
     const std::vector<SessionTodoItem>& todos,
     std::string_view selector) {
-    const std::string trimmed = trim_copy(selector);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(selector);
     if (trimmed.empty()) {
         return std::nullopt;
     }
@@ -89,7 +81,7 @@ inline std::optional<std::size_t> resolve_index(
         return find_by_id(todos, *explicit_id);
     }
 
-    const std::string trimmed = trim_copy(selector);
+    const std::string trimmed = core::utils::str::trim_ascii_copy(selector);
     if (trimmed.empty()) {
         return std::nullopt;
     }

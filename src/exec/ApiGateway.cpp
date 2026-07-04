@@ -15,6 +15,7 @@
 #include "../core/logging/Logger.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
+#include "../core/utils/StringUtils.hpp"
 #include "../core/utils/UriUtils.hpp"
 
 #include <simdjson.h>
@@ -23,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cctype>
 #include <deque>
 #include <filesystem>
 #include <format>
@@ -58,15 +60,6 @@ struct GatewayRuntime {
     bool router_available = false;
 };
 
-[[nodiscard]] std::string to_lower_ascii(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const unsigned char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
 [[nodiscard]] std::filesystem::path normalize_path(const std::filesystem::path& path) {
     std::error_code ec;
     auto normalized = std::filesystem::weakly_canonical(path, ec);
@@ -85,7 +78,7 @@ struct GatewayRuntime {
 
 [[nodiscard]] std::optional<std::filesystem::path>
 parse_local_file_uri(std::string_view uri_value, std::string& error_out) {
-    if (!to_lower_ascii(uri_value).starts_with("file://")) {
+    if (!core::utils::str::to_lower_ascii_copy(uri_value).starts_with("file://")) {
         error_out = "Only file:// root URIs are supported";
         return std::nullopt;
     }
@@ -98,7 +91,7 @@ parse_local_file_uri(std::string_view uri_value, std::string& error_out) {
         const auto slash = rest.find('/');
         const std::string_view authority =
             slash == std::string_view::npos ? rest : rest.substr(0, slash);
-        const auto lowered_authority = to_lower_ascii(authority);
+        const auto lowered_authority = core::utils::str::to_lower_ascii_copy(authority);
         if (!authority.empty() && lowered_authority != "localhost") {
             error_out = "Unsupported file URI authority";
             return std::nullopt;
@@ -193,20 +186,6 @@ struct CompletionResult {
     std::string model;
 };
 
-[[nodiscard]] std::string trim_copy(std::string_view value) {
-    std::size_t begin = 0;
-    while (begin < value.size()
-           && std::isspace(static_cast<unsigned char>(value[begin]))) {
-        ++begin;
-    }
-    std::size_t end = value.size();
-    while (end > begin
-           && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
-        --end;
-    }
-    return std::string(value.substr(begin, end - begin));
-}
-
 [[nodiscard]] std::string normalize_model_selection_mode(std::string_view value) {
     std::string normalized;
     normalized.reserve(value.size());
@@ -245,7 +224,7 @@ struct CompletionResult {
             out.push_back('_');
         }
     }
-    return trim_copy(out);
+    return core::utils::str::trim_ascii_copy(out);
 }
 
 [[nodiscard]] std::string hashed_gateway_scope(std::string_view prefix,
@@ -265,7 +244,7 @@ struct CompletionResult {
              "MCP-Session-Id",
          }) {
         const std::string header_value =
-            trim_copy(request.get_header_value(std::string(header_name)));
+            core::utils::str::trim_ascii_copy(request.get_header_value(std::string(header_name)));
         if (header_value.empty()) continue;
         const std::string sanitized = sanitize_gateway_scope_component(header_value);
         if (!sanitized.empty()) {
@@ -274,7 +253,7 @@ struct CompletionResult {
         }
     }
 
-    const std::string authorization = trim_copy(request.get_header_value("Authorization"));
+    const std::string authorization = core::utils::str::trim_ascii_copy(request.get_header_value("Authorization"));
     if (!authorization.empty()) {
         std::string auth_scope = hashed_gateway_scope("auth", authorization);
         if (!explicit_session.empty()) {
@@ -866,7 +845,7 @@ void parse_openai_response_format(simdjson::dom::object root_obj,
     std::string_view type;
     if (response_format_obj["type"].get(type) != simdjson::SUCCESS) return;
 
-    const std::string lowered = to_lower_ascii(type);
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(type);
     if (lowered == "json_object") {
         request.response_format.type = core::llm::ResponseFormat::Type::JsonObject;
         return;
@@ -1066,7 +1045,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
         }
     };
 
-    const std::string requested_model = trim_copy(gateway_request.requested_model);
+    const std::string requested_model = core::utils::str::trim_ascii_copy(gateway_request.requested_model);
     const bool has_requested_model = !requested_model.empty();
 
     GatewaySelection selection;
@@ -1605,7 +1584,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
             started = true;
 
             auto finish_with_error = [state](std::string_view message) {
-                std::string trimmed_message = trim_copy(message);
+                std::string trimmed_message = core::utils::str::trim_ascii_copy(message);
                 if (trimmed_message.empty()) {
                     trimmed_message = "Upstream provider error";
                 }
@@ -1654,7 +1633,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                             };
 
                             if (chunk.is_error) {
-                                std::string message = trim_copy(chunk.content);
+                                std::string message = core::utils::str::trim_ascii_copy(chunk.content);
                                 if (message.empty()) {
                                     message = "Upstream provider error";
                                 }
@@ -1821,7 +1800,7 @@ struct ApiGateway::Impl {
         CompletionResult completion =
             run_completion_sync(*selection, gateway_request.request, response_id);
         if (completion.has_error) {
-            const std::string message = trim_copy(
+            const std::string message = core::utils::str::trim_ascii_copy(
                 completion.error_message.empty()
                     ? std::string_view{"Upstream provider error"}
                     : std::string_view{completion.error_message});
@@ -1877,7 +1856,7 @@ struct ApiGateway::Impl {
         CompletionResult completion =
             run_completion_sync(*selection, gateway_request.request, response_id);
         if (completion.has_error) {
-            const std::string message = trim_copy(
+            const std::string message = core::utils::str::trim_ascii_copy(
                 completion.error_message.empty()
                     ? std::string_view{"Upstream provider error"}
                     : std::string_view{completion.error_message});

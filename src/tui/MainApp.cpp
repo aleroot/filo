@@ -69,6 +69,7 @@
 #include "core/commands/CommandExecutor.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -2518,19 +2519,9 @@ RunResult run(RunOptions opts) {
         return with_persisted_model_preferences(std::move(message));
     };
 
-    auto lower_ascii_copy = [](std::string_view value) {
-        std::string lowered;
-        lowered.reserve(value.size());
-        for (const char ch : value) {
-            lowered.push_back(static_cast<char>(
-                std::tolower(static_cast<unsigned char>(ch))));
-        }
-        return lowered;
-    };
-
     auto registry_provider_key = [&](std::string_view provider_name,
                                      const core::config::ProviderConfig& provider_cfg) {
-        const std::string lowered = lower_ascii_copy(provider_name);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(provider_name);
         if (provider_cfg.api_type == core::config::ApiType::Anthropic
             || lowered.starts_with("claude")
             || lowered.find("anthropic") != std::string::npos) {
@@ -2820,7 +2811,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto model_supports_openai_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = lower_ascii_copy(model_name);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
         return lowered.starts_with("gpt-5")
             || lowered.starts_with("o1")
             || lowered.starts_with("o3")
@@ -2828,7 +2819,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto model_supports_kimi_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = lower_ascii_copy(model_name);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
         return lowered == "kimi-for-coding"
             || lowered.starts_with("kimi-k2")
             || lowered.find("thinking") != std::string::npos;
@@ -2855,7 +2846,7 @@ RunResult run(RunOptions opts) {
         if (it->second.api_type != core::config::ApiType::Unknown) {
             return false;
         }
-        const std::string lowered = lower_ascii_copy(provider_name);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(provider_name);
         if (lowered.starts_with("claude")
             || lowered.find("anthropic") != std::string::npos) {
             return true;
@@ -2870,7 +2861,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto model_supports_max_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = lower_ascii_copy(model_name);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
         return lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
             || lowered.find("opus-4-8") != std::string::npos
@@ -3125,7 +3116,7 @@ RunResult run(RunOptions opts) {
             return "Usage: /profile <name>|list|status|clear";
         }
 
-        const std::string lowered = lower_ascii_copy(trimmed);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(trimmed);
         if (lowered == "list" || lowered == "status" || lowered == "ls") {
             return profile_status();
         }

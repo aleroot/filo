@@ -1,6 +1,7 @@
 #include "McpClientSession.hpp"
 #include "core/net/NetworkTraffic.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <cpr/cpr.h>
 
@@ -12,7 +13,6 @@
 #include <signal.h>
 
 #include <cerrno>
-#include <cctype>
 #include <cstring>
 #include <stdexcept>
 #include <format>
@@ -296,22 +296,13 @@ struct ParsedServerCapabilities {
     return true;
 }
 
-[[nodiscard]] std::string to_lower_ascii(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const unsigned char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
 [[nodiscard]] std::optional<std::string> find_header_case_insensitive(
     const cpr::Header& headers,
     std::string_view key)
 {
-    const std::string lowered_key = to_lower_ascii(key);
+    const std::string lowered_key = core::utils::str::to_lower_ascii_copy(key);
     for (const auto& [header_name, header_value] : headers) {
-        if (to_lower_ascii(header_name) == lowered_key) {
+        if (core::utils::str::to_lower_ascii_copy(header_name) == lowered_key) {
             return header_value;
         }
     }

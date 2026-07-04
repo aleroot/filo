@@ -1,9 +1,9 @@
 #include "RouterEngine.hpp"
 
 #include "../ModelRegistry.hpp"
+#include "../../utils/StringUtils.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <format>
 #include <functional>
 #include <limits>
@@ -15,19 +15,10 @@ namespace core::llm::routing {
 
 namespace {
 
-[[nodiscard]] std::string lower_copy(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-    }
-    return out;
-}
-
 [[nodiscard]] bool contains_keyword(std::string_view haystack,
                                     std::string_view keyword) {
     if (keyword.empty()) return false;
-    const auto lower_keyword = lower_copy(keyword);
+    const auto lower_keyword = core::utils::str::to_lower_ascii_copy(keyword);
     return haystack.find(lower_keyword) != std::string_view::npos;
 }
 
@@ -108,7 +99,7 @@ RouteDecision RouterEngine::route(const RouteContext& context) {
 
     decision.policy = active_policy_;
 
-    const std::string prompt_lower = lower_copy(context.prompt);
+    const std::string prompt_lower = core::utils::str::to_lower_ascii_copy(context.prompt);
     // Rules are pre-sorted by priority; just scan linearly.
     const RouteRule* matched_rule = select_matching_rule(*policy, prompt_lower, context);
 
@@ -168,7 +159,7 @@ std::vector<RouteDecision> RouterEngine::route_chain(const RouteContext& context
     const PolicyDefinition* policy = get_active_policy_shared();
     if (policy == nullptr) return {};
 
-    const std::string prompt_lower = lower_copy(context.prompt);
+    const std::string prompt_lower = core::utils::str::to_lower_ascii_copy(context.prompt);
     const RouteRule* matched_rule = select_matching_rule(*policy, prompt_lower, context);
 
     const Strategy strategy = matched_rule ? matched_rule->strategy : policy->strategy;
@@ -644,7 +635,7 @@ double RouterEngine::candidate_quality_score(std::string_view model_name) const 
     
     // Fallback to legacy heuristic matching for unknown models
     // This maintains backward compatibility during migration
-    const std::string lower = lower_copy(model_name);
+    const std::string lower = core::utils::str::to_lower_ascii_copy(model_name);
     double score = 0.0;
 
     if (lower.find("reasoning") != std::string::npos) score += 3.0;

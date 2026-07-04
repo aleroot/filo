@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <array>
@@ -66,6 +70,44 @@ namespace json {
     return std::string(fallback);
 }
 
+[[nodiscard]] inline std::optional<std::string>
+optional_string_field(const simdjson::dom::object& object,
+                      std::string_view key) {
+    std::string_view value;
+    if (object[key].get(value) == simdjson::SUCCESS) {
+        return std::string(value);
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<std::string>
+first_string_field(const simdjson::dom::object& object,
+                   std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) {
+        if (auto value = optional_string_field(object, key); value.has_value()) {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<std::string>
+first_string_field(const simdjson::dom::object& object) {
+    for (const auto field : object) {
+        std::string_view value;
+        if (field.value.get(value) == simdjson::SUCCESS) {
+            return std::string(value);
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::string first_string_field_or_empty(
+    const simdjson::dom::object& object,
+    std::initializer_list<std::string_view> keys) {
+    return first_string_field(object, keys).value_or(std::string{});
+}
+
 [[nodiscard]] inline int64_t int64_field(simdjson::dom::object object,
                                          std::string_view key,
                                          int64_t fallback = 0) {
@@ -78,6 +120,42 @@ namespace json {
                                    std::string_view key,
                                    int fallback = 0) {
     return static_cast<int>(int64_field(object, key, fallback));
+}
+
+[[nodiscard]] inline std::optional<int>
+optional_int_field_clamped(const simdjson::dom::object& object, std::string_view key) {
+    int64_t signed_value = 0;
+    if (object[key].get(signed_value) == simdjson::SUCCESS) {
+        if (signed_value > std::numeric_limits<int>::max()) {
+            return std::numeric_limits<int>::max();
+        }
+        if (signed_value < std::numeric_limits<int>::min()) {
+            return std::numeric_limits<int>::min();
+        }
+        return static_cast<int>(signed_value);
+    }
+
+    uint64_t unsigned_value = 0;
+    if (object[key].get(unsigned_value) == simdjson::SUCCESS) {
+        if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+            return std::numeric_limits<int>::max();
+        }
+        return static_cast<int>(unsigned_value);
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<int64_t>
+first_int64_field(const simdjson::dom::object& object,
+                  std::initializer_list<std::string_view> keys) {
+    for (const auto key : keys) {
+        int64_t value = 0;
+        if (object[key].get(value) == simdjson::SUCCESS) {
+            return value;
+        }
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] inline std::string string_field(std::string_view raw_json,
@@ -108,6 +186,48 @@ namespace json {
         return fallback;
     }
     return bool_field(object, key, fallback);
+}
+
+[[nodiscard]] inline std::optional<std::string>
+first_string_field(std::string_view raw_json,
+                   std::initializer_list<std::string_view> keys) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return first_string_field(object, keys);
+}
+
+[[nodiscard]] inline std::string first_string_field_or_empty(
+    std::string_view raw_json,
+    std::initializer_list<std::string_view> keys) {
+    return first_string_field(raw_json, keys).value_or(std::string{});
+}
+
+[[nodiscard]] inline std::optional<int64_t>
+first_int64_field(std::string_view raw_json,
+                  std::initializer_list<std::string_view> keys) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    simdjson::dom::object object;
+    if (doc.get(object) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return first_int64_field(object, keys);
+}
+
+[[nodiscard]] inline int64_t first_int64_field_or_zero(
+    std::string_view raw_json,
+    std::initializer_list<std::string_view> keys) {
+    return first_int64_field(raw_json, keys).value_or(0);
 }
 
 namespace schema {

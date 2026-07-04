@@ -127,7 +127,7 @@ void write_string_array(core::utils::JsonWriter& writer,
 
 void parse_text_block(SearchResponse& response,
                       const simdjson::dom::object& block) {
-    if (auto text = detail::read_string(block, "text"); text.has_value() && !text->empty()) {
+    if (auto text = core::utils::json::optional_string_field(block, "text"); text.has_value() && !text->empty()) {
         if (!response.answer.empty()) response.answer += "\n\n";
         response.answer += *text;
     }
@@ -139,9 +139,9 @@ void parse_text_block(SearchResponse& response,
         simdjson::dom::object object;
         if (citation.get_object().get(object) != simdjson::SUCCESS) continue;
         SearchHit hit{
-            .title = detail::read_first_string(object, {"title", "document_title"}),
-            .url = detail::read_first_string(object, {"url", "source_url"}),
-            .snippet = detail::read_first_string(object, {"cited_text", "snippet"}),
+            .title = core::utils::json::first_string_field_or_empty(object, {"title", "document_title"}),
+            .url = core::utils::json::first_string_field_or_empty(object, {"url", "source_url"}),
+            .snippet = core::utils::json::first_string_field_or_empty(object, {"cited_text", "snippet"}),
         };
         detail::add_hit_if_present(response, std::move(hit));
     }
@@ -167,7 +167,7 @@ void parse_results(SearchResponse& response, simdjson::dom::element doc) {
         simdjson::dom::object block;
         if (element.get_object().get(block) != simdjson::SUCCESS) continue;
 
-        const auto type = detail::read_first_string(block, {"type"});
+        const auto type = core::utils::json::first_string_field_or_empty(block, {"type"});
         if (type == "text") {
             parse_text_block(response, block);
         } else if (type == "web_search_tool_result") {

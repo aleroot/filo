@@ -1,10 +1,10 @@
 #include "Autocomplete.hpp"
 #include "Constants.hpp"
 #include "core/workspace/PathVisibility.hpp"
+#include "core/utils/StringUtils.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <optional>
 #include <ranges>
 
@@ -23,14 +23,6 @@ constexpr std::array kSkippedDirectories = {
     std::string_view{"dist"},
     std::string_view{"target"},
 };
-
-std::string to_lower_copy(std::string_view text) {
-    std::string out(text);
-    std::ranges::transform(out, out.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return out;
-}
 
 std::string_view basename_view(std::string_view path) {
     std::size_t end = path.size();
@@ -114,13 +106,13 @@ std::vector<MentionSuggestion> build_mention_index(const std::filesystem::path& 
             rel_path += "/";
         }
 
-        const std::string search_path = to_lower_copy(rel_path);
+        const std::string search_path = core::utils::str::to_lower_ascii_copy(rel_path);
 
         entries.push_back(MentionSuggestion{
             .display_path = rel_path,
             .insertion_text = rel_path,
             .search_path = search_path,
-            .search_basename = to_lower_copy(basename_view(search_path)),
+            .search_basename = core::utils::str::to_lower_ascii_copy(basename_view(search_path)),
             .depth = path_depth(rel_path),
             .is_directory = is_dir,
         });
@@ -154,7 +146,7 @@ std::vector<MentionSuggestion> search_mention_index(const std::vector<MentionSug
         const MentionSuggestion* suggestion = nullptr;
     };
 
-    const std::string lower_query = to_lower_copy(query);
+    const std::string lower_query = core::utils::str::to_lower_ascii_copy(query);
     std::vector<ScoredEntry> matches;
     matches.reserve(max_results);
 
@@ -167,14 +159,14 @@ std::vector<MentionSuggestion> search_mention_index(const std::vector<MentionSug
 
     for (const auto& suggestion : index) {
         const std::optional<std::string> fallback_path = suggestion.search_path.empty()
-            ? std::optional<std::string>{to_lower_copy(suggestion.display_path)}
+            ? std::optional<std::string>{core::utils::str::to_lower_ascii_copy(suggestion.display_path)}
             : std::nullopt;
         const std::string_view lower_path = suggestion.search_path.empty()
             ? std::string_view{*fallback_path}
             : std::string_view{suggestion.search_path};
 
         const std::optional<std::string> fallback_base = suggestion.search_basename.empty()
-            ? std::optional<std::string>{to_lower_copy(basename_view(suggestion.display_path))}
+            ? std::optional<std::string>{core::utils::str::to_lower_ascii_copy(basename_view(suggestion.display_path))}
             : std::nullopt;
         const std::string_view lower_base = suggestion.search_basename.empty()
             ? std::string_view{*fallback_base}
@@ -256,13 +248,13 @@ std::vector<CommandSuggestion> search_command_index(
         const core::commands::CommandDescriptor* command = nullptr;
     };
 
-    const std::string lower_query = to_lower_copy(query);
+    const std::string lower_query = core::utils::str::to_lower_ascii_copy(query);
     std::vector<ScoredEntry> matches;
     matches.reserve(index.size());
 
     for (std::size_t i = 0; i < index.size(); ++i) {
         const auto& command = index[i];
-        std::string lower_name = to_lower_copy(command.name);
+        std::string lower_name = core::utils::str::to_lower_ascii_copy(command.name);
         if (!lower_name.empty() && lower_name.front() == '/') {
             lower_name.erase(lower_name.begin());
         }
@@ -275,7 +267,7 @@ std::vector<CommandSuggestion> search_command_index(
         }
 
         for (const auto& alias : command.aliases) {
-            std::string lower_alias = to_lower_copy(alias);
+            std::string lower_alias = core::utils::str::to_lower_ascii_copy(alias);
             if (!lower_alias.empty() && lower_alias.front() == '/') {
                 lower_alias.erase(lower_alias.begin());
             }
@@ -288,7 +280,7 @@ std::vector<CommandSuggestion> search_command_index(
         }
 
         if (score == 5) {
-            const std::string lower_description = to_lower_copy(command.description);
+            const std::string lower_description = core::utils::str::to_lower_ascii_copy(command.description);
             if (lower_description.find(lower_query) != std::string::npos) {
                 score = 4;
             }

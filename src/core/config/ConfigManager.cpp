@@ -10,6 +10,7 @@
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <format>
@@ -423,15 +424,6 @@ std::string normalize_profile_name(std::string_view name) {
         normalized.push_back(static_cast<char>(std::tolower(ch)));
     }
     return normalized;
-}
-
-std::string trim_copy(std::string_view value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(start, end - start + 1));
 }
 
 SubagentConfig merge_subagent(const SubagentConfig& base, const SubagentConfig& overlay) {
@@ -1962,7 +1954,7 @@ bool ConfigManager::remove_mcp_server(std::string_view server_name,
                                       SettingsScope scope,
                                       std::optional<std::filesystem::path> working_dir,
                                       std::string* error) {
-    const std::string trimmed_name = trim_copy(server_name);
+    const std::string trimmed_name = core::utils::str::trim_ascii_copy(server_name);
     if (trimmed_name.empty()) {
         if (error) *error = "MCP server name cannot be empty";
         return false;

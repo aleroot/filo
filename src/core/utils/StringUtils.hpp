@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -47,6 +48,22 @@ namespace core::utils::str {
     }
     if (!out.empty() && out.back() == ' ') out.pop_back();
     return out;
+}
+
+[[nodiscard]] inline bool contains_case_insensitive(std::string_view haystack,
+                                                    std::string_view needle) {
+    if (needle.empty()) return true;
+    return to_lower_ascii_copy(haystack).find(to_lower_ascii_copy(needle)) != std::string::npos;
+}
+
+[[nodiscard]] inline std::optional<std::size_t>
+find_case_insensitive(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) return std::nullopt;
+    const std::string lowered_haystack = to_lower_ascii_copy(haystack);
+    const std::string lowered_needle = to_lower_ascii_copy(needle);
+    const auto pos = lowered_haystack.find(lowered_needle);
+    if (pos == std::string::npos) return std::nullopt;
+    return pos;
 }
 
 [[nodiscard]] inline std::string trim_trailing(std::string_view value, char ch) {

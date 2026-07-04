@@ -1,9 +1,9 @@
 #include "GoogleCodeAssist.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../utils/StringUtils.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
-#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
@@ -16,22 +16,6 @@ namespace {
 constexpr std::string_view kDefaultEndpoint = "https://cloudcode-pa.googleapis.com";
 constexpr std::string_view kDocsUrl = "https://goo.gle/gemini-cli-auth-docs#workspace-gca";
 constexpr std::string_view kApiVersion = "v1internal";
-
-[[nodiscard]] std::string trim_copy(std::string_view in) {
-    std::size_t begin = 0;
-    while (begin < in.size()
-        && std::isspace(static_cast<unsigned char>(in[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = in.size();
-    while (end > begin
-        && std::isspace(static_cast<unsigned char>(in[end - 1]))) {
-        --end;
-    }
-
-    return std::string(in.substr(begin, end - begin));
-}
 
 [[nodiscard]] std::string client_metadata_json(std::string_view project_id) {
     std::string json =
@@ -124,7 +108,7 @@ std::string code_assist_endpoint() {
 std::optional<std::string> configured_project_override() {
     if (const char* raw = std::getenv("GOOGLE_CLOUD_PROJECT");
         raw && raw[0] != '\0') {
-        const std::string trimmed = trim_copy(raw);
+        const std::string trimmed = core::utils::str::trim_ascii_copy(raw);
         if (!trimmed.empty()) return trimmed;
     }
     return std::nullopt;

@@ -13,6 +13,7 @@
 #include "../core/context/SessionContext.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
+#include "../core/utils/StringUtils.hpp"
 #include "../core/workspace/Workspace.hpp"
 #include "../core/logging/Logger.hpp"
 #include <simdjson.h>
@@ -273,15 +274,6 @@ extract_initialize_protocol_version(std::string_view response_body) {
     return std::string(version);
 }
 
-[[nodiscard]] std::string to_lower_ascii(std::string_view value) {
-    std::string out;
-    out.reserve(value.size());
-    for (const unsigned char ch : value) {
-        out.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return out;
-}
-
 [[nodiscard]] std::string response_id_key(const ResponseId& id) {
     switch (id.kind) {
         case ResponseId::Kind::integer:
@@ -315,7 +307,7 @@ extract_initialize_protocol_version(std::string_view response_body) {
 
 [[nodiscard]] std::optional<std::string> parse_origin_host(std::string_view origin) {
     // Strictly allow only http(s) origins. Reject opaque/special origins.
-    const auto lower = to_lower_ascii(origin);
+    const auto lower = core::utils::str::to_lower_ascii_copy(origin);
     std::size_t pos = std::string_view::npos;
     if (lower.starts_with("http://")) {
         pos = 7;
@@ -346,18 +338,18 @@ extract_initialize_protocol_version(std::string_view response_body) {
     if (authority.front() == '[') {
         const std::size_t end = authority.find(']');
         if (end == std::string_view::npos) return std::nullopt;
-        return to_lower_ascii(authority.substr(0, end + 1));
+        return core::utils::str::to_lower_ascii_copy(authority.substr(0, end + 1));
     }
 
     const std::size_t colon = authority.find(':');
     if (colon == std::string_view::npos) {
-        return to_lower_ascii(authority);
+        return core::utils::str::to_lower_ascii_copy(authority);
     }
-    return to_lower_ascii(authority.substr(0, colon));
+    return core::utils::str::to_lower_ascii_copy(authority.substr(0, colon));
 }
 
 [[nodiscard]] bool is_loopback_host(std::string_view host) {
-    const auto lower = to_lower_ascii(host);
+    const auto lower = core::utils::str::to_lower_ascii_copy(host);
     return lower == "localhost"
         || lower == "127.0.0.1"
         || lower == "::1"
@@ -373,7 +365,7 @@ extract_initialize_protocol_version(std::string_view response_body) {
     if (!origin_host.has_value()) return false;
     if (is_loopback_host(*origin_host)) return true;
 
-    const auto bind_host = to_lower_ascii(listen_host);
+    const auto bind_host = core::utils::str::to_lower_ascii_copy(listen_host);
     if (bind_host != "0.0.0.0" && bind_host != "::" && !bind_host.empty()) {
         return *origin_host == bind_host;
     }
@@ -442,7 +434,7 @@ extract_request_id_for_replay(std::string_view json_body) {
 [[nodiscard]] bool has_required_accept_header(const httplib::Request& req) {
     if (!req.has_header("Accept")) return false;
 
-    const std::string accept = to_lower_ascii(req.get_header_value("Accept"));
+    const std::string accept = core::utils::str::to_lower_ascii_copy(req.get_header_value("Accept"));
     return accept.find("application/json") != std::string::npos
         && accept.find("text/event-stream") != std::string::npos;
 }

@@ -2,6 +2,7 @@
 #include "../agent/PermissionGate.hpp"
 #include "../agent/SafetyPolicy.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -111,27 +112,8 @@ std::string extract_shell_program(std::string_view tool_args) {
     return strip_path_prefix(token);
 }
 
-std::string_view trim_ascii(std::string_view text) {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
-        text.remove_prefix(1);
-    }
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
-        text.remove_suffix(1);
-    }
-    return text;
-}
-
-std::string to_lower_ascii_copy(std::string_view text) {
-    std::string lowered;
-    lowered.reserve(text.size());
-    for (const unsigned char ch : text) {
-        lowered.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return lowered;
-}
-
 bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
-    return to_lower_ascii_copy(lhs) == to_lower_ascii_copy(rhs);
+    return core::utils::ascii::iequals(lhs, rhs);
 }
 
 enum class SessionRuleKind {
@@ -159,7 +141,7 @@ bool is_write_like_file_tool(std::string_view tool_name) {
 }
 
 std::string normalize_files_scope(std::string_view value) {
-    const std::string normalized = to_lower_ascii_copy(trim_ascii(value));
+    const std::string normalized = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(value));
     if (normalized.empty()) {
         return {};
     }
@@ -182,23 +164,23 @@ std::string normalize_files_scope(std::string_view value) {
 }
 
 ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
-    const std::string_view trimmed_raw = trim_ascii(raw_rule);
+    const std::string_view trimmed_raw = core::utils::str::trim_ascii_view(raw_rule);
     if (trimmed_raw.empty()) {
         return {};
     }
-    const std::string trimmed_lower = to_lower_ascii_copy(trimmed_raw);
+    const std::string trimmed_lower = core::utils::str::to_lower_ascii_copy(trimmed_raw);
     const std::string_view trimmed = trimmed_lower;
 
     auto parse_prefixed = [&](std::string_view prefix) -> std::string_view {
         if (!trimmed.starts_with(prefix)) {
             return {};
         }
-        return trim_ascii(trimmed.substr(prefix.size()));
+        return core::utils::str::trim_ascii_view(trimmed.substr(prefix.size()));
     };
 
     if (const auto value = parse_prefixed("tool:"); !value.empty()) {
         return ParsedSessionRule{.kind = SessionRuleKind::ToolName,
-                                 .value = to_lower_ascii_copy(value)};
+                                 .value = core::utils::str::to_lower_ascii_copy(value)};
     }
     if (const auto value = parse_prefixed("shell:"); !value.empty()) {
         if (value == "*") {
@@ -206,7 +188,7 @@ ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
         }
         return ParsedSessionRule{
             .kind = SessionRuleKind::ShellProgram,
-            .value = to_lower_ascii_copy(strip_path_prefix(value)),
+            .value = core::utils::str::to_lower_ascii_copy(strip_path_prefix(value)),
         };
     }
     if (const auto value = parse_prefixed("files:"); !value.empty()) {
@@ -237,7 +219,7 @@ ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
         std::string(core::tools::names::kRunTerminalCommand) + ":";
     if (trimmed.starts_with(legacy_shell_prefix)) {
         const std::string_view suffix =
-            trim_ascii(trimmed.substr(core::tools::names::kRunTerminalCommand.size() + 1));
+            core::utils::str::trim_ascii_view(trimmed.substr(core::tools::names::kRunTerminalCommand.size() + 1));
         if (suffix.empty()) {
             return ParsedSessionRule{
                 .kind = SessionRuleKind::ExactAllowKey,
@@ -246,7 +228,7 @@ ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
         }
         return ParsedSessionRule{
             .kind = SessionRuleKind::ShellProgram,
-            .value = to_lower_ascii_copy(strip_path_prefix(suffix)),
+            .value = core::utils::str::to_lower_ascii_copy(strip_path_prefix(suffix)),
         };
     }
     if (trimmed == core::tools::names::kRunTerminalCommand) {
@@ -595,7 +577,7 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
 std::string make_session_allow_rule(std::string_view tool_name,
                                     std::string_view tool_args) {
     if (tool_name == core::tools::names::kRunTerminalCommand) {
-        const auto program = to_lower_ascii_copy(extract_shell_program(tool_args));
+        const auto program = core::utils::str::to_lower_ascii_copy(extract_shell_program(tool_args));
         if (!program.empty()) {
             return std::format("shell:{}", program);
         }
@@ -619,7 +601,7 @@ std::string make_session_allow_rule(std::string_view tool_name,
         return "files:*";
     }
 
-    const std::string normalized_tool = to_lower_ascii_copy(trim_ascii(tool_name));
+    const std::string normalized_tool = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(tool_name));
     if (normalized_tool.empty()) {
         return {};
     }

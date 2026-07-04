@@ -3,6 +3,7 @@
 #include "../Models.hpp"
 #include "../ModelRegistry.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -156,21 +157,6 @@ namespace {
         return default_val;
     }
 
-    std::string trim_copy(std::string_view sv) {
-        std::size_t begin = 0;
-        while (begin < sv.size()
-            && std::isspace(static_cast<unsigned char>(sv[begin]))) {
-            ++begin;
-        }
-
-        std::size_t end = sv.size();
-        while (end > begin
-            && std::isspace(static_cast<unsigned char>(sv[end - 1]))) {
-            --end;
-        }
-        return std::string(sv.substr(begin, end - begin));
-    }
-
     [[nodiscard]] std::string infer_anthropic_event_type(std::string_view payload) {
         thread_local simdjson::dom::parser parser;
         simdjson::padded_string padded(payload);
@@ -182,18 +168,8 @@ namespace {
         return std::string(type);
     }
 
-    std::string lower_copy(std::string_view sv) {
-        std::string out;
-        out.reserve(sv.size());
-        for (const char ch : sv) {
-            out.push_back(
-                static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
-        }
-        return out;
-    }
-
     bool anthropic_model_supports_effort(std::string_view model) {
-        const std::string lowered = lower_copy(model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
         return lowered.find("fable") != std::string::npos
             || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
@@ -203,7 +179,7 @@ namespace {
     }
 
     bool anthropic_model_supports_max_effort(std::string_view model) {
-        const std::string lowered = lower_copy(model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
         return lowered.find("fable") != std::string::npos
             || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
@@ -213,7 +189,7 @@ namespace {
     }
 
     bool anthropic_model_supports_xhigh_effort(std::string_view model) {
-        const std::string lowered = lower_copy(model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
         return lowered.find("fable") != std::string::npos
             || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
@@ -222,7 +198,7 @@ namespace {
     }
 
     bool anthropic_model_rejects_manual_thinking(std::string_view model) {
-        const std::string lowered = lower_copy(model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
         return lowered.find("fable") != std::string::npos
             || lowered.find("mythos") != std::string::npos
             || lowered.find("sonnet-5") != std::string::npos
@@ -231,7 +207,7 @@ namespace {
     }
 
     bool anthropic_model_needs_explicit_adaptive_thinking(std::string_view model) {
-        const std::string lowered = lower_copy(model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
         return lowered.find("opus-4-8") != std::string::npos
             || lowered.find("opus-4-7") != std::string::npos;
     }
@@ -251,7 +227,7 @@ namespace {
     }
 
     std::string normalized_effort_or_empty(std::string_view raw) {
-        std::string normalized = lower_copy(trim_copy(raw));
+        std::string normalized = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(raw));
         std::erase_if(normalized, [](unsigned char ch) {
             return std::isspace(ch);
         });
@@ -286,17 +262,17 @@ namespace {
 
     ModelNormalization normalize_requested_claude_model(std::string_view raw_model) {
         ModelNormalization out{
-            .model = trim_copy(raw_model),
+            .model = core::utils::str::trim_ascii_copy(raw_model),
             .use_context_1m = false,
         };
         if (out.model.empty()) return out;
 
         if (ends_with_1m_suffix(out.model)) {
-            out.model = trim_copy(std::string_view(out.model).substr(0, out.model.size() - 4));
+            out.model = core::utils::str::trim_ascii_copy(std::string_view(out.model).substr(0, out.model.size() - 4));
             out.use_context_1m = true;
         }
 
-        const std::string lowered = lower_copy(out.model);
+        const std::string lowered = core::utils::str::to_lower_ascii_copy(out.model);
         if (lowered == "sonnet") {
             out.model = std::string(CLAUDE_DEFAULT_SONNET);
         } else if (lowered == "fable") {
@@ -1045,14 +1021,14 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
     const auto append_beta_unique = [&](std::string_view beta) {
         if (beta.empty()) return;
 
-        const std::string candidate = trim_copy(beta);
+        const std::string candidate = core::utils::str::trim_ascii_copy(beta);
         if (candidate.empty()) return;
 
         std::size_t start = 0;
         while (start < anthropic_beta.size()) {
             std::size_t comma = anthropic_beta.find(',', start);
             if (comma == std::string::npos) comma = anthropic_beta.size();
-            const std::string existing = trim_copy(
+            const std::string existing = core::utils::str::trim_ascii_copy(
                 std::string_view(anthropic_beta).substr(start, comma - start));
             if (existing == candidate) return;
             if (comma == anthropic_beta.size()) break;

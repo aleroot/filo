@@ -1,4 +1,5 @@
 #include "HistoryCompactor.hpp"
+#include "../utils/StringUtils.hpp"
 
 #include <atomic>
 #include <format>
@@ -7,13 +8,6 @@
 namespace core::agent {
 
 namespace {
-
-[[nodiscard]] std::string trim_copy(std::string value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return {};
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return value.substr(start, end - start + 1);
-}
 
 void emit(const HistoryCompactionCallbacks& callbacks, const std::string& text) {
     if (callbacks.on_status) {
@@ -64,7 +58,7 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
                         return;
                     }
 
-                    const std::string compacted = trim_copy(*summary);
+                    const std::string compacted = core::utils::str::trim_ascii_copy(*summary);
                     if (compacted.empty()) {
                         emit(callbacks, "\xe2\x9c\x97  History compaction failed: empty summary.\n\n");
                         return;

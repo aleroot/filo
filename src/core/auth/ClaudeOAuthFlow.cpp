@@ -3,6 +3,7 @@
 #include "OpenAIOAuthFlow.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/Base64.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
 #include <simdjson.h>
@@ -171,21 +172,6 @@ std::string join_scopes(const std::vector<std::string>& scopes) {
     return out;
 }
 
-std::string trim_copy(std::string_view in) {
-    std::size_t begin = 0;
-    while (begin < in.size()
-        && std::isspace(static_cast<unsigned char>(in[begin]))) {
-        ++begin;
-    }
-
-    std::size_t end = in.size();
-    while (end > begin
-        && std::isspace(static_cast<unsigned char>(in[end - 1]))) {
-        --end;
-    }
-    return std::string(in.substr(begin, end - begin));
-}
-
 std::string append_rate_limit_headers(const cpr::Response& r) {
     std::string extra;
     auto append_header = [&](std::string_view key) {
@@ -240,7 +226,7 @@ struct ManualAuthInput {
 };
 
 ManualAuthInput parse_manual_auth_input(std::string_view raw_input) {
-    const std::string input = trim_copy(raw_input);
+    const std::string input = core::utils::str::trim_ascii_copy(raw_input);
     if (input.empty()) {
         throw std::runtime_error("No authorization code provided");
     }

@@ -1,6 +1,7 @@
 #include "ToolOutputHistory.hpp"
 
 #include "../tools/ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -9,7 +10,6 @@
 #include <format>
 #include <mutex>
 #include <optional>
-#include <simdjson.h>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -220,49 +220,6 @@ split_preview(std::string_view text, Limits limits) {
         if (ch == '\n') ++count;
     }
     return count;
-}
-
-[[nodiscard]] std::optional<std::string> json_string_field(std::string_view raw_output,
-                                                           std::string_view field_name) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw_output.data(), raw_output.size()).get(doc) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    std::string_view value;
-    if (doc[field_name.data()].get(value) == simdjson::SUCCESS) {
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] std::optional<int64_t> json_optional_int_field(std::string_view raw_output,
-                                                            std::string_view field_name) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw_output.data(), raw_output.size()).get(doc) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    int64_t value = 0;
-    if (doc[field_name.data()].get(value) == simdjson::SUCCESS) {
-        return value;
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] int64_t json_int_field(std::string_view raw_output,
-                                     std::string_view field_name,
-                                     int64_t fallback = 0) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(raw_output.data(), raw_output.size()).get(doc) != simdjson::SUCCESS) {
-        return fallback;
-    }
-    int64_t value = fallback;
-    if (doc[field_name.data()].get(value) == simdjson::SUCCESS) {
-        return value;
-    }
-    return fallback;
 }
 
 [[nodiscard]] std::string clipped(std::string_view text, std::size_t max_chars) {
@@ -803,8 +760,8 @@ FullCompressionCache& full_cache() {
 }
 
 [[nodiscard]] bool is_line_range_request(std::string_view tool_arguments) {
-    const auto offset_line = json_optional_int_field(tool_arguments, "offset_line");
-    const auto limit_lines = json_optional_int_field(tool_arguments, "limit_lines");
+    const auto offset_line = core::utils::json::first_int64_field(tool_arguments, {"offset_line"});
+    const auto limit_lines = core::utils::json::first_int64_field(tool_arguments, {"limit_lines"});
     return (offset_line.has_value() && *offset_line > 1)
         || (limit_lines.has_value() && *limit_lines > 0);
 }
@@ -860,12 +817,12 @@ FullCompressionCache& full_cache() {
     std::string_view raw_output,
     Context context,
     const CompressionProfile& profile) {
-    const auto content = json_string_field(raw_output, "content");
+    const auto content = core::utils::json::first_string_field(raw_output, {"content"});
     if (!content.has_value()) {
         return std::nullopt;
     }
 
-    const auto path = json_string_field(context.tool_arguments, "path").value_or("");
+    const auto path = core::utils::json::first_string_field(context.tool_arguments, {"path"}).value_or("");
     if (is_instruction_file(path)) {
         return std::nullopt;
     }
@@ -1112,12 +1069,12 @@ FullCompressionCache& full_cache() {
     std::string_view raw_output,
     Context context,
     const CompressionProfile& profile) {
-    const auto output = json_string_field(raw_output, "output");
+    const auto output = core::utils::json::first_string_field(raw_output, {"output"});
     if (!output.has_value()) {
         return std::nullopt;
     }
-    const auto command = json_string_field(context.tool_arguments, "command").value_or("");
-    const int64_t exit_code = json_int_field(raw_output, "exit_code");
+    const auto command = core::utils::json::first_string_field(context.tool_arguments, {"command"}).value_or("");
+    const int64_t exit_code = core::utils::json::first_int64_field_or_zero(raw_output, {"exit_code"});
     const std::string family = command_family(command);
 
     if (family == "build-test" && is_build_test_diagnostic_output(*output, exit_code)) {
@@ -1154,7 +1111,7 @@ FullCompressionCache& full_cache() {
         CompressionMode::Light);
 
     if (tool_name == core::tools::names::kReadFile) {
-        const auto content = json_string_field(raw_output, "content");
+        const auto content = core::utils::json::first_string_field(raw_output, {"content"});
         if (!content.has_value() || content->size() <= profile.limits.max_chars) {
             return std::nullopt;
         }
@@ -1163,7 +1120,7 @@ FullCompressionCache& full_cache() {
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
-        const auto path = json_string_field(context.tool_arguments, "path").value_or("");
+        const auto path = core::utils::json::first_string_field(context.tool_arguments, {"path"}).value_or("");
         return wrapped_light_payload(
             tool_name,
             "content",
@@ -1174,17 +1131,17 @@ FullCompressionCache& full_cache() {
     }
 
     if (tool_name == core::tools::names::kRunTerminalCommand) {
-        const auto output = json_string_field(raw_output, "output");
+        const auto output = core::utils::json::first_string_field(raw_output, {"output"});
         if (!output.has_value() || output->size() <= profile.limits.max_chars) {
             return std::nullopt;
         }
-        const int64_t exit_code = json_int_field(raw_output, "exit_code");
+        const int64_t exit_code = core::utils::json::first_int64_field_or_zero(raw_output, {"exit_code"});
         const std::string compressed =
             shell_output_summary(*output, exit_code, profile.limits.max_chars);
         if (compressed.size() >= raw_output.size()) {
             return std::nullopt;
         }
-        const auto command = json_string_field(context.tool_arguments, "command").value_or("");
+        const auto command = core::utils::json::first_string_field(context.tool_arguments, {"command"}).value_or("");
         return wrapped_light_payload(
             tool_name,
             "output",
@@ -1302,7 +1259,7 @@ std::string clamp_for_history(
     const CompressionProfile profile =
         compression_profile(tool_name, limits, parse_compression_mode(compression_mode));
     if (tool_name == core::tools::names::kReadFile) {
-        const auto path = json_string_field(context.tool_arguments, "path").value_or("");
+        const auto path = core::utils::json::first_string_field(context.tool_arguments, {"path"}).value_or("");
         if (is_instruction_file(path)) {
             return std::string(raw_output);
         }

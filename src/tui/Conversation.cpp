@@ -5,6 +5,8 @@
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <simdjson.h>
@@ -13,7 +15,6 @@
 #include <chrono>
 #include <ctime>
 #include <format>
-#include <limits>
 #include <optional>
 #include <random>
 
@@ -33,41 +34,8 @@ bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
 
 namespace {
 
-// ============================================================================
-// String Utilities
-// ============================================================================
-
-std::string trim_copy(std::string_view text) {
-    const auto start = text.find_first_not_of(" \t\r\n");
-    if (start == std::string_view::npos) {
-        return {};
-    }
-    const auto end = text.find_last_not_of(" \t\r\n");
-    return std::string(text.substr(start, end - start + 1));
-}
-
-std::string collapse_whitespace(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-
-    bool last_was_space = false;
-    for (unsigned char ch : text) {
-        if (std::isspace(ch)) {
-            if (!last_was_space) {
-                out.push_back(' ');
-                last_was_space = true;
-            }
-            continue;
-        }
-        out.push_back(static_cast<char>(ch));
-        last_was_space = false;
-    }
-
-    return trim_copy(out);
-}
-
 std::string truncate_preview(std::string_view text, std::size_t max_len = kToolPreviewMaxLen) {
-    std::string cleaned = collapse_whitespace(text);
+    std::string cleaned = core::utils::str::collapse_ascii_whitespace_copy(text);
     if (cleaned.size() <= max_len) {
         return cleaned;
     }
@@ -77,56 +45,12 @@ std::string truncate_preview(std::string_view text, std::size_t max_len = kToolP
     return cleaned.substr(0, max_len - 1) + "...";
 }
 
-std::optional<std::string> extract_string_field(const simdjson::dom::object& object,
-                                                std::initializer_list<std::string_view> keys) {
-    for (const auto key : keys) {
-        std::string_view value;
-        if (object[key].get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> first_string_field(const simdjson::dom::object& object) {
-    for (const auto field : object) {
-        std::string_view value;
-        if (field.value.get(value) == simdjson::SUCCESS) {
-            return std::string(value);
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<int> extract_int_field(const simdjson::dom::object& object, std::string_view key) {
-    int64_t signed_value = 0;
-    if (object[key].get(signed_value) == simdjson::SUCCESS) {
-        if (signed_value > std::numeric_limits<int>::max()) {
-            return std::numeric_limits<int>::max();
-        }
-        if (signed_value < std::numeric_limits<int>::min()) {
-            return std::numeric_limits<int>::min();
-        }
-        return static_cast<int>(signed_value);
-    }
-
-    uint64_t unsigned_value = 0;
-    if (object[key].get(unsigned_value) == simdjson::SUCCESS) {
-        if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-            return std::numeric_limits<int>::max();
-        }
-        return static_cast<int>(unsigned_value);
-    }
-
-    return std::nullopt;
-}
-
 bool has_output_truncation_marker(std::string_view output) {
     return output.find("[OUTPUT TRUNCATED AT") != std::string_view::npos;
 }
 
 std::string extract_patch_preview(std::string_view patch) {
-    const auto patch_text = trim_copy(patch);
+    const auto patch_text = core::utils::str::trim_ascii_copy(patch);
     if (patch_text.empty()) {
         return "patch";
     }
@@ -153,7 +77,7 @@ std::string extract_patch_preview(std::string_view patch) {
             }
         }
         
-        if (!trim_copy(line).empty()) {
+        if (!core::utils::str::trim_ascii_copy(line).empty()) {
             return truncate_preview(line);
         }
         
@@ -753,14 +677,14 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
         return;
     }
 
-    if (const auto error = extract_string_field(object, {"error"})) {
+    if (const auto error = core::utils::json::first_string_field(object, {"error"})) {
         tool.status = ToolActivity::Status::Failed;
         set_result_summary(*error);
         return;
     }
 
     if (core::tools::names::is_terminal_tool(tool.name)) {
-        if (const auto exit_code = extract_int_field(object, "exit_code")) {
+        if (const auto exit_code = core::utils::json::optional_int_field_clamped(object, "exit_code")) {
             tool.result.exit_code = *exit_code;
             tool.status = (*exit_code == 0)
                 ? ToolActivity::Status::Succeeded
@@ -769,7 +693,7 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
             tool.status = ToolActivity::Status::Succeeded;
         }
 
-        if (const auto output = extract_string_field(object, {"output"})) {
+        if (const auto output = core::utils::json::first_string_field(object, {"output"})) {
             set_result_summary(*output);
             if (output->find("[INTERRUPTED:") != std::string::npos) {
                 tool.status = ToolActivity::Status::Cancelled;
@@ -784,19 +708,19 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
         return;
     }
 
-    if (const auto output = extract_string_field(object, {"output"})) {
+    if (const auto output = core::utils::json::first_string_field(object, {"output"})) {
         tool.status = ToolActivity::Status::Succeeded;
         set_result_summary(output->empty() ? std::string("Done") : *output);
         return;
     }
 
-    if (const auto content = extract_string_field(object, {"content"})) {
+    if (const auto content = core::utils::json::first_string_field(object, {"content"})) {
         tool.status = ToolActivity::Status::Succeeded;
         set_result_summary(content->empty() ? std::string("Done") : *content);
         return;
     }
 
-    if (const auto matches = extract_string_field(object, {"matches"})) {
+    if (const auto matches = core::utils::json::first_string_field(object, {"matches"})) {
         tool.status = ToolActivity::Status::Succeeded;
         set_result_summary(matches->empty() ? "no matches" : *matches);
         return;
@@ -1282,30 +1206,30 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
     }
 
     if (tool_name == core::tools::names::kMoveFile) {
-        const auto source = extract_string_field(object, {"source_path", "from_path"});
-        const auto destination = extract_string_field(object, {"destination_path", "to_path"});
+        const auto source = core::utils::json::first_string_field(object, {"source_path", "from_path"});
+        const auto destination = core::utils::json::first_string_field(object, {"destination_path", "to_path"});
         if (source && destination) {
             return truncate_preview(*source + " -> " + *destination);
         }
     }
 
     if (tool_name == core::tools::names::kGrepSearch) {
-        const auto pattern = extract_string_field(object, {"pattern"});
-        const auto dir = extract_string_field(object, {"path"});
+        const auto pattern = core::utils::json::first_string_field(object, {"pattern"});
+        const auto dir = core::utils::json::first_string_field(object, {"path"});
         if (pattern && dir) {
             return truncate_preview(*pattern + " in " + *dir);
         }
     }
 
     if (tool_name == core::tools::names::kApplyPatch) {
-        if (const auto patch = extract_string_field(object, {"patch"})) {
+        if (const auto patch = core::utils::json::first_string_field(object, {"patch"})) {
             return extract_patch_preview(*patch);
         }
     }
 
     if (core::tools::names::is_terminal_tool(tool_name)) {
-        const auto command = extract_string_field(object, {"command"});
-        const auto working_dir = extract_string_field(object, {"working_dir"});
+        const auto command = core::utils::json::first_string_field(object, {"command"});
+        const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"});
         if (command && working_dir) {
             return std::format("cwd: {} | cmd: {}", *working_dir, *command);
         }
@@ -1314,7 +1238,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         }
     }
 
-    if (const auto preview = extract_string_field(object, {
+    if (const auto preview = core::utils::json::first_string_field(object, {
             "command",
             "file_path",
             "path",
@@ -1329,7 +1253,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         return truncate_preview(*preview);
     }
 
-    if (const auto preview = first_string_field(object)) {
+    if (const auto preview = core::utils::json::first_string_field(object)) {
         return truncate_preview(*preview);
     }
 
@@ -1396,7 +1320,7 @@ ToolResultSummary summarize_tool_result(std::string_view result) {
         return summary;
     }
 
-    if (const auto error = extract_string_field(object, {"error"})) {
+    if (const auto error = core::utils::json::first_string_field(object, {"error"})) {
         summary.state = error->find("denied") != std::string_view::npos
             ? ToolResultSummary::State::Denied
             : ToolResultSummary::State::Failed;
@@ -1404,22 +1328,22 @@ ToolResultSummary summarize_tool_result(std::string_view result) {
         return summary;
     }
 
-    if (const auto matches = extract_string_field(object, {"matches"})) {
+    if (const auto matches = core::utils::json::first_string_field(object, {"matches"})) {
         summary.preview = matches->empty() ? "no matches" : truncate_preview(*matches);
         return summary;
     }
 
-    if (const auto output = extract_string_field(object, {"output"})) {
+    if (const auto output = core::utils::json::first_string_field(object, {"output"})) {
         summary.preview = std::string(*output);
         return summary;
     }
 
-    if (extract_string_field(object, {"content"})) {
+    if (core::utils::json::first_string_field(object, {"content"})) {
         summary.preview = "content loaded";
         return summary;
     }
 
-    if (const auto value = extract_string_field(object, {"time", "message", "result"})) {
+    if (const auto value = core::utils::json::first_string_field(object, {"time", "message", "result"})) {
         summary.preview = truncate_preview(*value);
         return summary;
     }
