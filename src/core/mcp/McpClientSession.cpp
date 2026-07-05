@@ -865,7 +865,9 @@ void StdioMcpSession::send_notification(std::string_view method,
                                          std::string_view params_json) {
     std::string msg = make_jsonrpc_notification(method, params_json);
     std::lock_guard wlock(write_mutex_);
-    [[maybe_unused]] const bool ok = write_all_fd(write_fd_, msg);
+    if (!write_all_fd(write_fd_, msg)) {
+        throw std::runtime_error("MCP: write() to child stdin failed");
+    }
 }
 
 void StdioMcpSession::update_server_capabilities(std::string_view initialize_result) {

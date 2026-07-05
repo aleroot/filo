@@ -6,6 +6,7 @@
 #include "core/tools/MemoryTool.hpp"
 #include "core/tools/ToolNames.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -319,6 +320,31 @@ TEST_CASE("MemoryBackgroundService respects rate-limit reserve", "[memory]") {
     CHECK_FALSE(core::memory::MemoryBackgroundService::rate_limit_allows(settings, info));
     info.requests_remaining = 40;
     CHECK(core::memory::MemoryBackgroundService::rate_limit_allows(settings, info));
+}
+
+TEST_CASE("MemoryBackgroundService async skips disabled stores without spawning work",
+          "[memory]") {
+    TempDir dir{"filo_memory_background_async_disabled"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    core::memory::MemoryBackgroundService service{store};
+    std::atomic<bool> callback_called{false};
+
+    service.review_async(
+        core::memory::MemoryReviewInput{
+            .history = {
+                core::llm::Message{.role = "user", .content = "Please remember that I prefer short updates."},
+            },
+            .session_context = core::context::make_session_context(
+                core::workspace::WorkspaceSnapshot{.primary = dir.path}),
+            .thread_policy = {},
+        },
+        [&](core::memory::MemoryReviewResult result) {
+            CHECK(result.skipped_for_policy);
+            callback_called.store(true, std::memory_order_release);
+        });
+
+    CHECK(callback_called.load(std::memory_order_acquire));
+    CHECK(store.list().empty());
 }
 
 TEST_CASE("MemoryBackgroundService writes disabled skill drafts when curation is enabled", "[memory]") {

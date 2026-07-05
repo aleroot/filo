@@ -231,6 +231,18 @@ void MemoryBackgroundService::review_async(
     MemoryReviewInput input,
     std::function<void(MemoryReviewResult)> on_done) const {
     const auto store = store_;
+    const auto settings = store.settings();
+    if (!settings.enabled
+        || !input.thread_policy.generate_memories
+        || (!settings.background_review && !settings.consolidation && !settings.skill_curation)) {
+        if (on_done) on_done(MemoryReviewResult{.skipped_for_policy = true});
+        return;
+    }
+    if (!rate_limit_allows(settings, input.rate_limit)) {
+        if (on_done) on_done(MemoryReviewResult{.skipped_for_rate_limit = true});
+        return;
+    }
+
     std::thread([store, input = std::move(input), on_done = std::move(on_done)]() mutable {
         auto result = MemoryBackgroundService{store}.review(input);
         if (on_done) on_done(std::move(result));
