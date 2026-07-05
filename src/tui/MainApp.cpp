@@ -4853,10 +4853,7 @@ RunResult run(RunOptions opts) {
         ctrl_d_deadline = std::chrono::steady_clock::time_point::min();
     };
 
-    auto input_component = PromptInput(&input_text,
-        "Ask anything  (F2 mode  @ file context  / command)",
-        input_option);
-
+    auto input_component = PromptInput(&input_text, "Ask anything", input_option);
     auto history_component = Make<HistoryComponent>(
         [&]() {
             std::vector<UiMessage> messages;

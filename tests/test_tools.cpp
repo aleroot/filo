@@ -39,9 +39,13 @@
 #include <fstream>
 #include <future>
 #include <optional>
+#include <regex>
 #include <string>
 #include <thread>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <ctime>
+#endif
 #ifdef FILO_ENABLE_PYTHON
 #include <vector>
 #endif
@@ -83,6 +87,31 @@ private:
     std::string key_;
     std::optional<std::string> old_value_;
 };
+
+#if !defined(_WIN32)
+class ScopedTimezone {
+public:
+    explicit ScopedTimezone(const char* timezone) {
+        if (const char* current = std::getenv("TZ"); current != nullptr) {
+            previous_ = current;
+        }
+        ::setenv("TZ", timezone, 1);
+        tzset();
+    }
+
+    ~ScopedTimezone() {
+        if (previous_.has_value()) {
+            ::setenv("TZ", previous_->c_str(), 1);
+        } else {
+            ::unsetenv("TZ");
+        }
+        tzset();
+    }
+
+private:
+    std::optional<std::string> previous_;
+};
+#endif
 
 class ToolTestConfigEnvironment {
 public:
@@ -1335,12 +1364,27 @@ TEST_CASE("ApplyPatchTool denies out-of-scope patch targets when workspace is en
 // GetTimeTool
 // ---------------------------------------------------------------------------
 
-TEST_CASE("GetTimeTool returns a time string", "[tools]") {
+TEST_CASE("GetTimeTool returns local date time and timezone", "[tools]") {
+#if !defined(_WIN32)
+    ScopedTimezone timezone("UTC0");
+#endif
+
     GetTimeTool tool;
-    auto res = tool.execute("{}");
-    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("time"));
-    // Basic format check: contains digits and colons (HH:MM:SS)
-    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(":"));
+    const auto def = tool.get_definition();
+    REQUIRE_THAT(def.description, Catch::Matchers::ContainsSubstring("current local date"));
+    REQUIRE_THAT(def.description, Catch::Matchers::ContainsSubstring("UTC offset"));
+    REQUIRE_THAT(def.output_schema, Catch::Matchers::ContainsSubstring(R"("time")"));
+    REQUIRE_THAT(def.output_schema, Catch::Matchers::ContainsSubstring(R"("date")"));
+    REQUIRE_THAT(def.output_schema, Catch::Matchers::ContainsSubstring(R"("timezone")"));
+
+    const auto res = tool.execute("{}");
+    REQUIRE(std::regex_match(
+        res,
+        std::regex{
+            R"(\{"time":"[0-2][0-9]:[0-5][0-9]:[0-5][0-9]\.[0-9]{6}","date":"[0-9]{4}-[0-9]{2}-[0-9]{2}","timezone":"[+-][0-9]{4}"\})"}));
+#if !defined(_WIN32)
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("timezone":"+0000")"));
+#endif
 }
 
 // ---------------------------------------------------------------------------
