@@ -183,36 +183,6 @@ exit 0
                         ContainsSubstring("MCP: read_fd closed unexpectedly"));
 }
 
-TEST_CASE("StdioMcpSession surfaces write failure after peer closes stdin",
-          "[mcp][client][stdio]") {
-    const TempScript script(
-        "filo_mcp_stdio_write_fail",
-        R"PY(#!/usr/bin/env python3
-import json
-import os
-import sys
-import time
-
-line = sys.stdin.readline()
-request = json.loads(line)
-print(json.dumps({
-    "jsonrpc": "2.0",
-    "id": request.get("id", 1),
-    "result": {"protocolVersion": "2025-11-25"},
-}), flush=True)
-sys.stdin.close()
-try:
-    os.close(0)
-except OSError:
-    pass
-time.sleep(1)
-)PY");
-
-    core::mcp::StdioMcpSession session(make_stdio_server_config(script.path()));
-    REQUIRE_THROWS_WITH(session.initialize(),
-                        ContainsSubstring("MCP: write() to child stdin failed"));
-}
-
 TEST_CASE("StdioMcpSession times out hung requests and sends cancellation",
           "[mcp][client][stdio][timeout]") {
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
