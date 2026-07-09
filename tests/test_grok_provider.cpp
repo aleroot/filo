@@ -104,6 +104,8 @@ TEST_CASE("GrokSerializer - reasoning_effort is omitted for grok-4 (would cause 
     // xAI docs: grok-4 does NOT accept reasoning_effort; API returns 400 if sent
     REQUIRE_THAT(GrokProtocol{GrokReasoningEffort::High}.serialize(make_simple_request("grok-4")),
                  !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(GrokProtocol{GrokReasoningEffort::High}.serialize(make_simple_request("grok-4.5")),
+                 !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(GrokProtocol{GrokReasoningEffort::High}.serialize(make_simple_request("grok-4-fast-non-reasoning")),
                  !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(GrokProtocol{GrokReasoningEffort::High}.serialize(make_simple_request("grok-4.20-reasoning")),
@@ -125,6 +127,7 @@ TEST_CASE("grok_supports_reasoning_effort matches xAI model support", "[grok][re
 
     // Grok 4 and grok-4.20: always-reasoning, no reasoning_effort param (errors if sent)
     REQUIRE_FALSE(grok_supports_reasoning_effort("grok-4"));
+    REQUIRE_FALSE(grok_supports_reasoning_effort("grok-4.5"));
     REQUIRE_FALSE(grok_supports_reasoning_effort("grok-4-fast-reasoning"));
     REQUIRE_FALSE(grok_supports_reasoning_effort("grok-4-fast-non-reasoning"));
     REQUIRE_FALSE(grok_supports_reasoning_effort("grok-4.20-reasoning"));
@@ -343,7 +346,9 @@ TEST_CASE("GrokSerializer - all known Grok model names are preserved verbatim", 
     const std::vector<std::string> models = {
         // Code-focused
         "grok-code-fast-1",
-        // Grok 4.20 variants (flagship as of 2026)
+        // Grok 4.5 flagship
+        "grok-4.5",
+        // Grok 4.20 variants
         "grok-4.20-reasoning",
         "grok-4.20-non-reasoning",
         // Grok 4 (always-reasoning)
@@ -821,6 +826,7 @@ TEST_CASE("ProviderFactory - handles various grok-prefixed provider names", "[gr
     
     // All these should create valid providers
     REQUIRE(ProviderFactory::create_provider("grok", config) != nullptr);
+    REQUIRE(ProviderFactory::create_provider("grok-4-5", config) != nullptr);
     REQUIRE(ProviderFactory::create_provider("grok-4", config) != nullptr);
     REQUIRE(ProviderFactory::create_provider("grok-reasoning", config) != nullptr);
     REQUIRE(ProviderFactory::create_provider("grok-mini", config) != nullptr);

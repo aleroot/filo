@@ -371,6 +371,10 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_code.input_per_m  == Catch::Approx(0.20));
     REQUIRE(r_code.output_per_m == Catch::Approx(1.50));
 
+    auto r_grok45 = rates_for_model("grok-4.5");
+    REQUIRE(r_grok45.input_per_m  == Catch::Approx(2.00));
+    REQUIRE(r_grok45.output_per_m == Catch::Approx(6.00));
+
     auto r_mini = rates_for_model("grok-3-mini");
     REQUIRE(r_mini.input_per_m  == Catch::Approx(0.30));
     REQUIRE(r_mini.output_per_m == Catch::Approx(0.50));

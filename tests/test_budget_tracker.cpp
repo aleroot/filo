@@ -36,6 +36,7 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
         CHECK(context_window_for_model("grok-code-fast-1")       ==   131'072);
         CHECK(context_window_for_model("grok-4.1-fast")          == 2'097'152);
         CHECK(context_window_for_model("grok-4.1-mini")          == 2'097'152);
+        CHECK(context_window_for_model("grok-4.5")               ==   500'000);
         CHECK(context_window_for_model("grok-4-fast")            ==   256'000);
         CHECK(context_window_for_model("grok-4")                 ==   256'000);
         CHECK(context_window_for_model("grok-3-mini")            ==   131'072);

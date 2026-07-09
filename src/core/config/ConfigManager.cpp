@@ -498,9 +498,10 @@ AppConfig make_default_config() {
     add_provider("openai",         "gpt-5.4");
     add_provider("mistral",        "devstral-small-latest");
     add_provider("grok",           "grok-code-fast-1");
+    add_provider("grok-4-5",       "grok-4.5", {}, {}, {}, "responses");
     add_provider("grok-4",         "grok-4");
     add_provider("grok-4-fast",    "grok-4-fast-non-reasoning");
-    add_provider("grok-reasoning", "grok-4.20-reasoning");
+    add_provider("grok-reasoning", "grok-4.5", {}, {}, {}, "responses");
     add_provider("grok-fast",      "grok-4.20-non-reasoning");
     add_provider("grok-mini",      "grok-3-mini",      "high");
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
@@ -558,9 +559,10 @@ std::string default_config_json() {
     "context_compression": "off",
     "providers": {
         "grok":           { "model": "grok-code-fast-1" },
+        "grok-4-5":       { "model": "grok-4.5", "wire_api": "responses" },
         "grok-4":         { "model": "grok-4" },
         "grok-4-fast":    { "model": "grok-4-fast-non-reasoning" },
-        "grok-reasoning": { "model": "grok-4.20-reasoning" },
+        "grok-reasoning": { "model": "grok-4.5", "wire_api": "responses" },
         "grok-fast":      { "model": "grok-4.20-non-reasoning" },
         "grok-mini":      { "model": "grok-3-mini",      "reasoning_effort": "high" },
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
@@ -628,7 +630,7 @@ std::string default_config_json() {
                         },
                         "candidates": [
                             { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
-                            { "provider": "grok-reasoning", "model": "grok-4.20-reasoning", "retries": 1 },
+                            { "provider": "grok-4-5", "model": "grok-4.5", "retries": 1 },
                             { "provider": "openai", "model": "gpt-5.4", "retries": 1 }
                         ]
                     },

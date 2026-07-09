@@ -380,7 +380,7 @@ Filo-specific Python tool skills continue to use `entry_point` and the existing
             },
             "candidates": [
               { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
-              { "provider": "grok-reasoning", "model": "grok-4.20-reasoning", "retries": 1 }
+              { "provider": "grok-4-5", "model": "grok-4.5", "retries": 1 }
             ]
           }
         ]

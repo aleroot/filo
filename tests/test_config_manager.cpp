@@ -659,8 +659,12 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.ui_spinner == "show");
     REQUIRE(config.providers.contains("grok"));
     REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
+    REQUIRE(config.providers.contains("grok-4-5"));
+    REQUIRE(config.providers.at("grok-4-5").model == "grok-4.5");
+    REQUIRE(config.providers.at("grok-4-5").wire_api == "responses");
     REQUIRE(config.providers.contains("grok-reasoning"));
-    REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.20-reasoning");
+    REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.5");
+    REQUIRE(config.providers.at("grok-reasoning").wire_api == "responses");
     REQUIRE(config.providers.contains("kimi"));
     REQUIRE(config.providers.at("kimi").model == "kimi-k2.7-code");
     REQUIRE(config.providers.at("kimi").reasoning_effort == "high");

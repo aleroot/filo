@@ -523,7 +523,7 @@ RouterConfig make_default_router_config() {
     };
     deep_reasoning.candidates = {
         RouteCandidate{.provider = "claude", .model = "claude-sonnet-5", .weight = 1, .retries = 1},
-        RouteCandidate{.provider = "grok-reasoning", .model = "grok-4.20-reasoning", .weight = 1, .retries = 1},
+        RouteCandidate{.provider = "grok-4-5", .model = "grok-4.5", .weight = 1, .retries = 1},
         RouteCandidate{.provider = "openai", .model = "gpt-5.4", .weight = 1, .retries = 1},
     };
 

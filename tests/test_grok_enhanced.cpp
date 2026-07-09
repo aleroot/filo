@@ -84,6 +84,7 @@ TEST_CASE("GrokSerializer - response_format json_schema with schema", "[grok][se
 TEST_CASE("GrokSerializer - JSON mode works with all Grok models", "[grok][serializer][json_mode]") {
     const std::vector<std::string> models = {
         "grok-code-fast-1",
+        "grok-4.5",
         "grok-4",
         "grok-4.20-reasoning",
         "grok-3-mini",

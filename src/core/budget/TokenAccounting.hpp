@@ -26,6 +26,7 @@ namespace core::budget {
 
     if (model.find("grok-code-fast-1") != std::string_view::npos) return   131'072;
     if (model.find("grok-4.1")         != std::string_view::npos) return 2'097'152;
+    if (model.find("grok-4.5")         != std::string_view::npos) return   500'000;
     if (model.find("grok-4")           != std::string_view::npos) return   256'000;
     if (model.find("grok-3-mini")      != std::string_view::npos) return   131'072;
     if (model.find("grok-3")           != std::string_view::npos) return   131'072;
@@ -80,6 +81,7 @@ struct ModelRates {
     if (model.find("grok-code-fast-1") != std::string_view::npos) return { 0.20,  1.50 };
     if (model.find("grok-4-fast")      != std::string_view::npos) return { 0.20,  0.50 };
     if (model.find("grok-4.1-fast")    != std::string_view::npos) return { 0.20,  0.50 };
+    if (model.find("grok-4.5")         != std::string_view::npos) return { 2.00,  6.00 };
     if (model.find("grok-3-mini") != std::string_view::npos) return { 0.30,  0.50 };
     if (model.find("grok-3")      != std::string_view::npos) return { 3.00, 15.00 };
     if (model.find("grok-2")      != std::string_view::npos) return { 2.00, 10.00 };

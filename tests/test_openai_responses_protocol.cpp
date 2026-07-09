@@ -28,6 +28,13 @@ TEST_CASE("OpenAIResponsesProtocol - build_url uses /responses endpoint",
             == "https://api.openai.com/v1/responses");
 }
 
+TEST_CASE("OpenAIResponsesProtocol - build_url supports xAI Grok Responses endpoint",
+          "[openai][responses][url][grok]") {
+    OpenAIResponsesProtocol protocol;
+    REQUIRE(protocol.build_url("https://api.x.ai/v1", "grok-4.5")
+            == "https://api.x.ai/v1/responses");
+}
+
 TEST_CASE("OpenAIResponsesProtocol - serializer emits responses request fields",
           "[openai][responses][serializer]") {
     OpenAIResponsesProtocol protocol;

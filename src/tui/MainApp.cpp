@@ -853,7 +853,7 @@ RunResult run(RunOptions opts) {
         if (provider_name.starts_with("grok") && it->second.api_key.empty()) {
             return "Set XAI_API_KEY to start chatting with Grok.\n"
                    "Get a key at: console.x.ai  (sign up → API Keys)\n"
-                   "Grok presets: grok (default), grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
+                   "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
         }
         return "";
     };

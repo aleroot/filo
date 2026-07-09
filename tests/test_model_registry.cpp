@@ -50,6 +50,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("gemini-1.5-pro") == 2097152);
     
     // Grok (via legacy fallback)
+    REQUIRE(get_max_context_size("grok-4.5") == 500000);
     REQUIRE(get_max_context_size("grok-1") == 128000);
 
     // Local (via new registry)
@@ -86,6 +87,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
     REQUIRE(registry.has_model("kimi-for-coding"));
+    REQUIRE(registry.has_model("grok-4.5"));
     REQUIRE(registry.has_model("gemini-2.5-pro"));
     REQUIRE(registry.has_model("gemini-3.1-pro-preview"));
 }
@@ -134,6 +136,26 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto haiku = registry.lookup("haiku");
     REQUIRE(haiku != nullptr);
     REQUIRE(haiku->canonical_id == "claude-haiku-4-5");
+
+    const auto grok45 = registry.lookup("grok-4-5");
+    REQUIRE(grok45 != nullptr);
+    REQUIRE(grok45->canonical_id == "grok-4.5");
+}
+
+TEST_CASE("ModelRegistry::lookup - knows Grok 4.5 model metadata", "[llm][registry][grok]") {
+    auto& registry = ModelRegistry::instance();
+
+    const auto info = registry.get_info("grok-4.5");
+    REQUIRE(info.has_value());
+    CHECK(info->display_name == "Grok 4.5");
+    CHECK(info->provider == "grok");
+    CHECK(info->context_window == 500'000);
+    CHECK(info->pricing.input_per_mtok == Catch::Approx(2.0));
+    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.50));
+    CHECK(info->pricing.output_per_mtok == Catch::Approx(6.0));
+    CHECK(info->supports(ModelCapability::Reasoning));
+    CHECK(info->supports(ModelCapability::PromptCaching));
+    CHECK(info->supports(ModelCapability::FunctionCalling));
 }
 
 TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {
