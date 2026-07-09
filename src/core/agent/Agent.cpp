@@ -1228,7 +1228,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      provider_for_task,
                      active_provider_name_for_task,
                      active_model_for_task,
-                     parent_mode_for_task]() -> core::llm::Message {
+                     parent_mode_for_task,
+                     on_subagent_event = turn_callbacks.on_subagent_event]() -> core::llm::Message {
                         tool_callback(tc.function.name, tc.function.arguments);
                         std::string result;
                         if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
@@ -1241,6 +1242,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                                            const std::string& args) {
                                     return self->check_permission(tool_name, args);
                                 },
+                                .parent_tool_call_id = tc.id,
+                                .on_subagent_event = on_subagent_event,
                             };
 
                             result = self->orchestrator_.execute_task(

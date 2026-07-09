@@ -649,9 +649,13 @@ StdioMcpSession::~StdioMcpSession() {
 
 void StdioMcpSession::shutdown() noexcept {
     if (!running_.exchange(false, std::memory_order_acq_rel)) return;
+    transport_closed_.store(true, std::memory_order_release);
 
     // Close write end — signals EOF to the child
-    if (write_fd_ != -1) { close(write_fd_); write_fd_ = -1; }
+    {
+        std::lock_guard wlock(write_mutex_);
+        close_write_fd_locked();
+    }
 
     // Reject all pending promises
     {
@@ -698,13 +702,33 @@ void StdioMcpSession::shutdown() noexcept {
     child_pid_ = -1;
 }
 
+void StdioMcpSession::close_write_fd_locked() noexcept {
+    if (write_fd_ != -1) {
+        close(write_fd_);
+        write_fd_ = -1;
+    }
+}
+
+bool StdioMcpSession::write_message(std::string_view message) {
+    std::lock_guard wlock(write_mutex_);
+    if (transport_closed_.load(std::memory_order_acquire) || write_fd_ == -1) {
+        return false;
+    }
+
+    if (write_all_fd(write_fd_, message)) {
+        return true;
+    }
+
+    transport_closed_.store(true, std::memory_order_release);
+    close_write_fd_locked();
+    return false;
+}
+
 // Reader loop — runs on its own thread.
 // Reads newline-delimited JSON-RPC responses and resolves pending promises.
 void StdioMcpSession::reader_loop() {
     auto write_response = [this](std::string&& payload) {
-        std::lock_guard wlock(write_mutex_);
-        if (write_fd_ == -1) return;
-        [[maybe_unused]] const bool ok = write_all_fd(write_fd_, payload);
+        [[maybe_unused]] const bool ok = write_message(payload);
     };
 
     auto dispatch_line = [this, &write_response](std::string_view line) {
@@ -798,6 +822,12 @@ void StdioMcpSession::reader_loop() {
         }
     }
 
+    transport_closed_.store(true, std::memory_order_release);
+    {
+        std::lock_guard wlock(write_mutex_);
+        close_write_fd_locked();
+    }
+
     // On exit, reject any remaining promises
     std::lock_guard lock(pending_mutex_);
     for (auto& [id, prom] : pending_) {
@@ -824,8 +854,7 @@ std::string StdioMcpSession::send_request(std::string_view method,
     }
 
     {
-        std::lock_guard wlock(write_mutex_);
-        if (!write_all_fd(write_fd_, msg)) {
+        if (!write_message(msg)) {
             // Remove the pending promise to avoid leaking
             std::lock_guard lock(pending_mutex_);
             pending_.erase(id);
@@ -845,10 +874,7 @@ std::string StdioMcpSession::send_request(std::string_view method,
             format_timeout(timeout));
         const std::string cancellation = make_cancelled_notification(id, reason);
         {
-            std::lock_guard wlock(write_mutex_);
-            if (write_fd_ != -1) {
-                [[maybe_unused]] const bool ok = write_all_fd(write_fd_, cancellation);
-            }
+            [[maybe_unused]] const bool ok = write_message(cancellation);
         }
 
         throw std::runtime_error(std::format(
@@ -864,8 +890,7 @@ std::string StdioMcpSession::send_request(std::string_view method,
 void StdioMcpSession::send_notification(std::string_view method,
                                          std::string_view params_json) {
     std::string msg = make_jsonrpc_notification(method, params_json);
-    std::lock_guard wlock(write_mutex_);
-    if (!write_all_fd(write_fd_, msg)) {
+    if (!write_message(msg)) {
         throw std::runtime_error("MCP: write() to child stdin failed");
     }
 }

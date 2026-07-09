@@ -257,9 +257,13 @@ std::string SubagentOrchestrator::execute_task(
         .worker_name = plan->worker_name,
         .worker_description = plan->worker_description,
         .worker_prompt = plan->worker_prompt,
+        .task_id = session->id,
+        .task_description = description,
+        .parent_tool_call_id = context.parent_tool_call_id,
         .resume_state = std::move(resume_state),
         .timeout = std::chrono::minutes(30),
         .permission_check = adapt_permission_check(context),
+        .on_event = context.on_subagent_event,
     });
     if (result.timed_out) {
         return render_error_json("Delegated task timed out while waiting for the worker response.");

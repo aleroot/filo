@@ -82,6 +82,7 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
     auto& tool_manager = core::tools::ToolManager::get_instance();
     core::agent::SubagentOrchestrator orchestrator(tool_manager);
     const auto session_context = test_support::make_workspace_session_context();
+    std::vector<core::agent::SubagentEvent> events;
 
     const auto result = orchestrator.execute_task(
         R"({"description":"investigate startup","prompt":"inspect startup sequence","subagent_type":"general"})",
@@ -91,12 +92,23 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
             .parent_mode = "BUILD",
             .session_context = session_context,
             .permission_check = {},
+            .parent_tool_call_id = "parent-task-call",
+            .on_subagent_event = [&](const core::agent::SubagentEvent& event) {
+                events.push_back(event);
+            },
         });
 
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("\"task_id\":\"task_"));
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("\"subagent_type\":\"general\""));
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("delegated-response-1"));
     REQUIRE_FALSE(result.contains("\"error\""));
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.front().kind == core::agent::SubagentEvent::Kind::Started);
+    REQUIRE(events.front().parent_tool_call_id == "parent-task-call");
+    REQUIRE(events.front().worker_name == "general");
+    REQUIRE(events.front().description == "investigate startup");
+    REQUIRE(events.back().kind == core::agent::SubagentEvent::Kind::Finished);
+    REQUIRE(events.back().summary == "delegated-response-1");
 }
 
 TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", "[agent][orchestration]") {

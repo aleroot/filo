@@ -158,6 +158,8 @@ private:
     // Reader loop (runs on reader_thread_)
     void reader_loop();
     void update_server_capabilities(std::string_view initialize_result);
+    [[nodiscard]] bool write_message(std::string_view message);
+    void close_write_fd_locked() noexcept;
 
     int write_fd_ = -1;
     int read_fd_  = -1;
@@ -167,6 +169,7 @@ private:
     std::chrono::milliseconds request_timeout_;
 
     std::atomic<bool> running_{false};
+    std::atomic<bool> transport_closed_{false};
     std::thread reader_thread_;
 
     std::mutex pending_mutex_;

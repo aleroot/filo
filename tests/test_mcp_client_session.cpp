@@ -187,15 +187,26 @@ TEST_CASE("StdioMcpSession surfaces write failure after peer closes stdin",
           "[mcp][client][stdio]") {
     const TempScript script(
         "filo_mcp_stdio_write_fail",
-        R"SH(#!/bin/sh
-set -eu
-IFS= read -r line || exit 0
-id=$(printf '%s\n' "$line" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-[ -n "$id" ] || id=1
-printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25"}}\n' "$id"
-exec 0<&-
-sleep 1
-)SH");
+        R"PY(#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+line = sys.stdin.readline()
+request = json.loads(line)
+print(json.dumps({
+    "jsonrpc": "2.0",
+    "id": request.get("id", 1),
+    "result": {"protocolVersion": "2025-11-25"},
+}), flush=True)
+sys.stdin.close()
+try:
+    os.close(0)
+except OSError:
+    pass
+time.sleep(1)
+)PY");
 
     core::mcp::StdioMcpSession session(make_stdio_server_config(script.path()));
     REQUIRE_THROWS_WITH(session.initialize(),

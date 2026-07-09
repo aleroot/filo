@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Agent.hpp"
+#include "SubagentEvents.hpp"
 
 #include <chrono>
 #include <functional>
@@ -19,6 +20,7 @@ namespace core::agent {
 class DelegatedAgentRunner {
 public:
     using PermissionCheck = std::function<bool(std::string_view, std::string_view)>;
+    using EventCallback = std::function<void(const SubagentEvent&)>;
 
     struct ResumeState {
         std::vector<core::llm::Message> messages;
@@ -39,11 +41,15 @@ public:
         std::string worker_name;
         std::string worker_description;
         std::string worker_prompt;
+        std::string task_id;
+        std::string task_description;
+        std::string parent_tool_call_id;
         std::optional<ResumeState> resume_state;
         std::chrono::milliseconds timeout = std::chrono::minutes(30);
         std::function<void(const std::shared_ptr<core::agent::Agent>&)> on_agent_ready = {};
         std::function<bool()> cancellation_requested = {};
         PermissionCheck permission_check = {};
+        EventCallback on_event = {};
     };
 
     struct Result {

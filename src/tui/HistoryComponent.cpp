@@ -509,6 +509,22 @@ std::size_t HistoryComponent::history_layout_fingerprint(
             seed = combine_hash(
                 seed,
                 static_cast<std::size_t>(tool.diff_preview.hidden_line_count));
+            seed = combine_hash(seed, tool.subagents.size());
+            for (const auto& subagent : tool.subagents) {
+                seed = combine_hash(seed, subagent.worker_name.size());
+                seed = combine_hash(seed, subagent.description.size());
+                seed = combine_hash(seed, subagent.latest_text.size());
+                seed = combine_hash(seed, subagent.summary.size());
+                seed = combine_hash(seed, static_cast<std::size_t>(subagent.status));
+                seed = combine_hash(seed, static_cast<std::size_t>(subagent.steps));
+                seed = combine_hash(seed, static_cast<std::size_t>(subagent.tool_calls));
+                seed = combine_hash(seed, subagent.recent_tools.size());
+                for (const auto& child_tool : subagent.recent_tools) {
+                    seed = combine_hash(seed, child_tool.name.size());
+                    seed = combine_hash(seed, child_tool.description.size());
+                    seed = combine_hash(seed, static_cast<std::size_t>(child_tool.status));
+                }
+            }
         }
     }
     return seed;

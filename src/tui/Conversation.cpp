@@ -416,6 +416,135 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview) {
     return vbox(std::move(rows)) | border;
 }
 
+std::string subagent_status_label(const ToolActivity::SubagentActivity& subagent) {
+    if (subagent.status == ToolActivity::Status::Executing) {
+        std::string label = "running";
+        if (subagent.steps > 0) {
+            label += std::format(" · {} {}", subagent.steps, subagent.steps == 1 ? "step" : "steps");
+        }
+        if (subagent.tool_calls > 0) {
+            label += std::format(" · {} {}", subagent.tool_calls, subagent.tool_calls == 1 ? "tool" : "tools");
+        }
+        return label;
+    }
+    if (subagent.status == ToolActivity::Status::Succeeded) {
+        return subagent.tool_calls > 0
+            ? std::format("completed · {} {}", subagent.tool_calls, subagent.tool_calls == 1 ? "tool" : "tools")
+            : "completed";
+    }
+    if (subagent.status == ToolActivity::Status::Cancelled) {
+        return "cancelled";
+    }
+    return "failed";
+}
+
+Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
+                                 std::size_t tick,
+                                 const ConversationRenderOptions& options) {
+    const bool running = subagent.status == ToolActivity::Status::Executing;
+    const Color status_color = tool_status_color(subagent.status);
+    const std::string icon = running && options.show_spinner
+        ? std::string(tool_status_spinner(tick))
+        : std::string(tool_status_icon(subagent.status));
+
+    std::vector<Element> header;
+    header.push_back(ftxui::text("  "));
+    header.push_back(ftxui::text(icon) | ftxui::color(status_color) | ftxui::bold);
+    header.push_back(ftxui::text(" @"));
+    header.push_back(ftxui::text(subagent.worker_name.empty() ? "subagent" : subagent.worker_name)
+                     | ftxui::bold
+                     | ftxui::color(ColorYellowBright));
+    if (!subagent.description.empty()) {
+        header.push_back(ftxui::text("  "));
+        header.push_back(ftxui::text(truncate_preview(subagent.description, 64))
+                         | ftxui::color(Color::GrayLight)
+                         | xflex);
+    } else {
+        header.push_back(filler());
+    }
+    header.push_back(ftxui::text("  "));
+    header.push_back(ftxui::text(subagent_status_label(subagent)) | ftxui::color(status_color));
+
+    std::vector<Element> rows;
+    rows.push_back(hbox(std::move(header)) | xflex);
+
+    if (!subagent.provider.empty() || !subagent.model.empty()) {
+        const std::string runtime = subagent.provider.empty()
+            ? subagent.model
+            : (subagent.model.empty()
+                ? subagent.provider
+                : std::format("{} · {}", subagent.provider, subagent.model));
+        rows.push_back(
+            hbox({
+                ftxui::text("    "),
+                ftxui::text(runtime) | ftxui::color(Color::GrayDark) | dim,
+            }));
+    }
+
+    const std::size_t max_tools = options.expand_tool_results ? subagent.recent_tools.size() : std::min<std::size_t>(subagent.recent_tools.size(), 4);
+    const std::size_t hidden_tools = subagent.recent_tools.size() > max_tools
+        ? subagent.recent_tools.size() - max_tools
+        : 0;
+    for (std::size_t i = subagent.recent_tools.size() - max_tools; i < subagent.recent_tools.size(); ++i) {
+        const auto& tool = subagent.recent_tools[i];
+        rows.push_back(
+            hbox({
+                ftxui::text("    "),
+                ftxui::text(std::string(tool_status_icon(tool.status))) | ftxui::color(tool_status_color(tool.status)),
+                ftxui::text(" "),
+                ftxui::text(tool.name) | ftxui::color(ColorYellowDark),
+                ftxui::text(tool.description.empty() ? "" : "  "),
+                ftxui::text(tool.description) | ftxui::color(Color::GrayDark) | xflex,
+            }) | xflex);
+    }
+    if (hidden_tools > 0) {
+        rows.push_back(
+            hbox({
+                ftxui::text("    "),
+                ftxui::text(std::format("{} earlier tool {} hidden", hidden_tools, hidden_tools == 1 ? "call" : "calls"))
+                | ftxui::color(Color::GrayDark)
+                | dim,
+            }));
+    }
+
+    if (!subagent.summary.empty() && subagent.status != ToolActivity::Status::Executing) {
+        rows.push_back(
+            hbox({
+                ftxui::text("    "),
+                paragraph(truncate_preview(subagent.summary, options.expand_tool_results ? 1200 : 180))
+                    | ftxui::color(Color::GrayLight)
+                    | xflex,
+            }) | xflex);
+    } else if (running && !subagent.latest_text.empty() && options.expand_tool_results) {
+        rows.push_back(
+            hbox({
+                ftxui::text("    "),
+                paragraph(truncate_preview(subagent.latest_text, 320))
+                    | ftxui::color(Color::GrayDark)
+                    | xflex,
+            }) | xflex);
+    }
+
+    return vbox(std::move(rows));
+}
+
+Element render_subagent_group(const ToolActivity& tool,
+                              std::size_t tick,
+                              const ConversationRenderOptions& options) {
+    if (tool.subagents.empty()) {
+        return emptyElement();
+    }
+
+    std::vector<Element> rows;
+    rows.push_back(ftxui::text(tool.subagents.size() == 1 ? "Subagent" : "Subagents")
+                   | ftxui::color(ColorYellowDark)
+                   | ftxui::bold);
+    for (const auto& subagent : tool.subagents) {
+        rows.push_back(render_subagent_activity(subagent, tick, options));
+    }
+    return vbox(std::move(rows));
+}
+
 struct AssistantActivityState {
     bool has_executing_tools = false;
     bool has_completed_tools = false;
@@ -430,6 +559,15 @@ AssistantActivityState compute_assistant_activity_state(const UiMessage& msg) {
         } else if (tool.status == ToolActivity::Status::Succeeded ||
                    tool.status == ToolActivity::Status::Failed) {
             state.has_completed_tools = true;
+        }
+        for (const auto& subagent : tool.subagents) {
+            if (subagent.status == ToolActivity::Status::Executing) {
+                state.has_executing_tools = true;
+            } else if (subagent.status == ToolActivity::Status::Succeeded ||
+                       subagent.status == ToolActivity::Status::Failed ||
+                       subagent.status == ToolActivity::Status::Cancelled) {
+                state.has_completed_tools = true;
+            }
         }
     }
 
@@ -453,6 +591,11 @@ Element render_tool_item(const ToolActivity& tool,
     
     if (tool.status == ToolActivity::Status::Executing && tool.progress.has_value()) {
         tool_elements.push_back(render_tool_progress(tool));
+    }
+
+    if (!tool.subagents.empty()) {
+        tool_elements.push_back(separator() | ftxui::color(Color::GrayDark));
+        tool_elements.push_back(render_subagent_group(tool, tick, options));
     }
     
     if (!tool.result.empty()) {
@@ -1174,6 +1317,11 @@ bool message_uses_animation(const UiMessage& message, bool show_spinner) {
         if (tool.status == ToolActivity::Status::Executing) {
             return true;
         }
+        for (const auto& subagent : tool.subagents) {
+            if (subagent.status == ToolActivity::Status::Executing) {
+                return true;
+            }
+        }
     }
 
     if (message.type == MessageType::Assistant) {
@@ -1203,6 +1351,20 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
     simdjson::dom::object object;
     if (document.get(object) != simdjson::SUCCESS) {
         return truncate_preview(tool_args);
+    }
+
+    if (tool_name == "task") {
+        const auto worker = core::utils::json::first_string_field(object, {"subagent_type", "worker", "agent"});
+        const auto description = core::utils::json::first_string_field(object, {"description", "title", "task"});
+        if (worker && description) {
+            return truncate_preview("@" + *worker + " · " + *description);
+        }
+        if (description) {
+            return truncate_preview(*description);
+        }
+        if (worker) {
+            return truncate_preview("@" + *worker);
+        }
     }
 
     if (tool_name == core::tools::names::kMoveFile) {
@@ -1281,6 +1443,26 @@ const ToolActivity* find_tool_activity(const UiMessage& message, std::string_vie
     for (const auto& tool : message.tools) {
         if (tool.id == tool_id) {
             return &tool;
+        }
+    }
+    return nullptr;
+}
+
+ToolActivity::SubagentActivity* find_subagent_activity(ToolActivity& tool,
+                                                       std::string_view subagent_id) {
+    for (auto& subagent : tool.subagents) {
+        if (subagent.id == subagent_id) {
+            return &subagent;
+        }
+    }
+    return nullptr;
+}
+
+const ToolActivity::SubagentActivity* find_subagent_activity(const ToolActivity& tool,
+                                                             std::string_view subagent_id) {
+    for (const auto& subagent : tool.subagents) {
+        if (subagent.id == subagent_id) {
+            return &subagent;
         }
     }
     return nullptr;

@@ -24,6 +24,7 @@ struct RunState {
     std::atomic<int> steps{0};
     std::atomic<int> tool_calls_total{0};
     std::atomic<int> tool_calls_success{0};
+    std::atomic<int> failed_tool_calls{0};
 };
 
 [[nodiscard]] std::string build_delegated_prompt(const DelegatedAgentRunner::Request& request) {
@@ -97,6 +98,25 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     const std::string delegated_prompt = build_delegated_prompt(request);
     std::string ledger_actor = request.worker_name.empty() ? std::string("subagent") : std::string("subagent:") + request.worker_name;
 
+    auto emit_event = [callback = request.on_event,
+                       parent_tool_call_id = request.parent_tool_call_id,
+                       task_id = request.task_id,
+                       worker_name = request.worker_name,
+                       description = request.task_description,
+                       provider_name = request.provider_name,
+                       model_name = request.model](SubagentEvent event) {
+        if (!callback) return;
+        event.parent_tool_call_id = parent_tool_call_id;
+        event.task_id = task_id;
+        event.worker_name = worker_name;
+        event.description = description;
+        event.provider_name = provider_name;
+        event.model_name = model_name;
+        callback(event);
+    };
+
+    emit_event(SubagentEvent{.kind = SubagentEvent::Kind::Started});
+
     std::thread turn_thread(
         [agent,
          run_state,
@@ -105,12 +125,20 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          provider_name = std::move(request.provider_name),
          model = request.model,
          allowed_tools = std::move(request.allowed_tools),
-         ledger_actor = std::move(ledger_actor)]() mutable {
+         ledger_actor = std::move(ledger_actor),
+         emit_event]() mutable {
             agent->send_message(
                 delegated_prompt,
-                [run_state](const std::string& chunk) {
+                [run_state, emit_event](const std::string& chunk) {
                     std::lock_guard lock(run_state->streamed_mutex);
                     run_state->streamed_text += chunk;
+                    emit_event(SubagentEvent{
+                        .kind = SubagentEvent::Kind::TextDelta,
+                        .text_delta = chunk,
+                        .steps = run_state->steps.load(std::memory_order_relaxed),
+                        .tool_calls = run_state->tool_calls_total.load(std::memory_order_relaxed),
+                        .failed_tool_calls = run_state->failed_tool_calls.load(std::memory_order_relaxed),
+                    });
                 },
                 [](const std::string&, const std::string&) {},
                 [run_state]() {
@@ -119,15 +147,44 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                     run_state->done_cv.notify_all();
                 },
                 core::agent::Agent::TurnCallbacks{
-                    .on_step_begin = [run_state]() {
-                        run_state->steps.fetch_add(1, std::memory_order_relaxed);
+                    .on_step_begin = [run_state, emit_event]() {
+                        const int steps = run_state->steps.fetch_add(1, std::memory_order_relaxed) + 1;
+                        emit_event(SubagentEvent{
+                            .kind = SubagentEvent::Kind::Progress,
+                            .steps = steps,
+                            .tool_calls = run_state->tool_calls_total.load(std::memory_order_relaxed),
+                            .failed_tool_calls = run_state->failed_tool_calls.load(std::memory_order_relaxed),
+                        });
                     },
-                    .on_tool_finish = [run_state](const core::llm::ToolCall&,
+                    .on_tool_start = [run_state, emit_event](const core::llm::ToolCall& tool_call) {
+                        emit_event(SubagentEvent{
+                            .kind = SubagentEvent::Kind::ToolStarted,
+                            .tool_call_id = tool_call.id,
+                            .tool_name = tool_call.function.name,
+                            .tool_arguments = tool_call.function.arguments,
+                            .steps = run_state->steps.load(std::memory_order_relaxed),
+                            .tool_calls = run_state->tool_calls_total.load(std::memory_order_relaxed),
+                            .failed_tool_calls = run_state->failed_tool_calls.load(std::memory_order_relaxed),
+                        });
+                    },
+                    .on_tool_finish = [run_state, emit_event](const core::llm::ToolCall& tool_call,
                                                   const core::llm::Message& tool_result) {
-                        run_state->tool_calls_total.fetch_add(1, std::memory_order_relaxed);
+                        const int total = run_state->tool_calls_total.fetch_add(1, std::memory_order_relaxed) + 1;
                         if (!is_tool_error_payload(tool_result.content)) {
                             run_state->tool_calls_success.fetch_add(1, std::memory_order_relaxed);
+                        } else {
+                            run_state->failed_tool_calls.fetch_add(1, std::memory_order_relaxed);
                         }
+                        emit_event(SubagentEvent{
+                            .kind = SubagentEvent::Kind::ToolFinished,
+                            .tool_call_id = tool_call.id,
+                            .tool_name = tool_call.function.name,
+                            .tool_arguments = tool_call.function.arguments,
+                            .tool_result = tool_result.content,
+                            .steps = run_state->steps.load(std::memory_order_relaxed),
+                            .tool_calls = total,
+                            .failed_tool_calls = run_state->failed_tool_calls.load(std::memory_order_relaxed),
+                        });
                     },
                     .provider_override = std::move(provider),
                     .provider_name_override = std::move(provider_name),
@@ -181,6 +238,16 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
         || result.timed_out
         || (request.cancellation_requested && request.cancellation_requested())
         || agent->is_stop_requested();
+
+    emit_event(SubagentEvent{
+        .kind = result.cancelled
+            ? (result.timed_out ? SubagentEvent::Kind::Failed : SubagentEvent::Kind::Cancelled)
+            : SubagentEvent::Kind::Finished,
+        .summary = result.streamed_text,
+        .steps = result.steps,
+        .tool_calls = result.tool_calls_total,
+        .failed_tool_calls = result.tool_calls_total - result.tool_calls_success,
+    });
 
     return result;
 }

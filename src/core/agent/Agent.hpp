@@ -10,6 +10,7 @@
 #include "../tools/ToolManager.hpp"
 #include "HistoryCompactor.hpp"
 #include "SubagentOrchestrator.hpp"
+#include "SubagentEvents.hpp"
 #include "PermissionGate.hpp"
 #include "ToolCallDeduplicator.hpp"
 #include <memory>
@@ -42,6 +43,7 @@ public:
         std::function<void(const core::llm::ToolCall&)> on_tool_start = {};
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
+        std::function<void(const SubagentEvent&)> on_subagent_event = {};
         // Out-of-band status/log sink for lifecycle messages (e.g. auto-compaction
         // progress). Must NOT be the streaming assistant-message chunk callback:
         // routing status here keeps it out of the assistant response body and

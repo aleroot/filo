@@ -322,6 +322,14 @@ TEST_CASE("summarize_tool_arguments — invalid JSON", "[tui][conversation][args
     REQUIRE_FALSE(result.empty());
 }
 
+TEST_CASE("summarize_tool_arguments — task shows subagent label", "[tui][conversation][args]") {
+    const auto result = summarize_tool_arguments(
+        "task",
+        R"({"description":"verify root cause","prompt":"check the code","subagent_type":"explore"})");
+    REQUIRE_THAT(result, ContainsSubstring("@explore"));
+    REQUIRE_THAT(result, ContainsSubstring("verify root cause"));
+}
+
 // ============================================================================
 // summarize_tool_result
 // ============================================================================
@@ -413,6 +421,33 @@ TEST_CASE("message_uses_animation — executing tool animates", "[tui][conversat
     tool.status = ToolActivity::Status::Executing;
     message.tools.push_back(std::move(tool));
     REQUIRE(message_uses_animation(message, true));
+}
+
+TEST_CASE("message_uses_animation — executing subagent animates", "[tui][conversation][animation]") {
+    auto message = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("parent", "task", "{}", "@explore");
+    tool.status = ToolActivity::Status::Succeeded;
+    ToolActivity::SubagentActivity subagent;
+    subagent.id = "task_1";
+    subagent.worker_name = "explore";
+    subagent.status = ToolActivity::Status::Executing;
+    tool.subagents.push_back(std::move(subagent));
+    message.tools.push_back(std::move(tool));
+    REQUIRE(message_uses_animation(message, true));
+    REQUIRE_FALSE(message_uses_animation(message, false));
+}
+
+TEST_CASE("find_subagent_activity — finds nested agent", "[tui][conversation][tool]") {
+    auto tool = make_tool_activity("parent", "task", "{}", "@general");
+    ToolActivity::SubagentActivity subagent;
+    subagent.id = "task_00000001";
+    subagent.worker_name = "general";
+    tool.subagents.push_back(std::move(subagent));
+
+    auto* found = find_subagent_activity(tool, "task_00000001");
+    REQUIRE(found != nullptr);
+    REQUIRE(found->worker_name == "general");
+    REQUIRE(find_subagent_activity(tool, "missing") == nullptr);
 }
 
 TEST_CASE("message_uses_animation — completed tool without pending assistant is static", "[tui][conversation][animation]") {

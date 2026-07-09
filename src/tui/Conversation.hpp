@@ -43,6 +43,29 @@ struct ToolActivity {
         }
     };
 
+    struct ChildToolActivity {
+        std::string id;
+        std::string name;
+        std::string args;
+        std::string description;
+        Status status = Status::Pending;
+    };
+
+    struct SubagentActivity {
+        std::string id;
+        std::string worker_name;
+        std::string description;
+        std::string provider;
+        std::string model;
+        std::string latest_text;
+        std::string summary;
+        std::vector<ChildToolActivity> recent_tools;
+        int steps = 0;
+        int tool_calls = 0;
+        int failed_tool_calls = 0;
+        Status status = Status::Executing;
+    };
+
     std::string id;                      // Unique tool call ID
     std::string name;                    // Tool name (e.g., "read_file")
     std::string args;                    // JSON arguments
@@ -56,6 +79,9 @@ struct ToolActivity {
     std::optional<int> progress;
     std::optional<int> progress_total;
     std::string progress_message;
+
+    // Nested subagent activity for task/delegation tools.
+    std::vector<SubagentActivity> subagents;
 };
 
 // ============================================================================
@@ -255,6 +281,10 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
 // Tool lookup
 ToolActivity* find_tool_activity(UiMessage& message, std::string_view tool_id);
 const ToolActivity* find_tool_activity(const UiMessage& message, std::string_view tool_id);
+ToolActivity::SubagentActivity* find_subagent_activity(ToolActivity& tool,
+                                                       std::string_view subagent_id);
+const ToolActivity::SubagentActivity* find_subagent_activity(const ToolActivity& tool,
+                                                             std::string_view subagent_id);
 
 // Animation frames
 std::string_view thinking_pulse_frame(std::size_t tick);

@@ -4,6 +4,7 @@
 #include "../llm/LLMProvider.hpp"
 #include "../llm/Models.hpp"
 #include "../tools/ToolManager.hpp"
+#include "SubagentEvents.hpp"
 
 #include <atomic>
 #include <expected>
@@ -33,6 +34,8 @@ public:
         std::string parent_mode;
         const core::context::SessionContext& session_context;
         std::function<bool(const std::string&, const std::string&)> permission_check;
+        std::string parent_tool_call_id;
+        std::function<void(const SubagentEvent&)> on_subagent_event;
     };
 
     struct ExecutionRequest {

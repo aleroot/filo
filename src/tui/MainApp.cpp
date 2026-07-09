@@ -4305,6 +4305,134 @@ RunResult run(RunOptions opts) {
                     }
                 });
             };
+        callbacks.on_subagent_event =
+            [assistant_message_id, &update_assistant_message](
+                const core::agent::SubagentEvent& event) {
+                if (event.parent_tool_call_id.empty() || event.task_id.empty()) {
+                    return;
+                }
+
+                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                    if (message.finalized) {
+                        return;
+                    }
+
+                    auto* parent_tool = find_tool_activity(message, event.parent_tool_call_id);
+                    if (parent_tool == nullptr) {
+                        message.tools.push_back(make_tool_activity(
+                            event.parent_tool_call_id,
+                            std::string(core::agent::SubagentOrchestrator::kTaskToolName),
+                            "{}",
+                            event.description));
+                        parent_tool = &message.tools.back();
+                        parent_tool->status = ToolActivity::Status::Executing;
+                    }
+
+                    auto* subagent = find_subagent_activity(*parent_tool, event.task_id);
+                    if (subagent == nullptr) {
+                        ToolActivity::SubagentActivity created;
+                        created.id = event.task_id;
+                        created.worker_name = event.worker_name;
+                        created.description = event.description;
+                        created.provider = event.provider_name;
+                        created.model = event.model_name;
+                        parent_tool->subagents.push_back(std::move(created));
+                        subagent = &parent_tool->subagents.back();
+                    }
+
+                    if (!event.worker_name.empty()) subagent->worker_name = event.worker_name;
+                    if (!event.description.empty()) subagent->description = event.description;
+                    if (!event.provider_name.empty()) subagent->provider = event.provider_name;
+                    if (!event.model_name.empty()) subagent->model = event.model_name;
+                    subagent->steps = std::max(subagent->steps, event.steps);
+                    subagent->tool_calls = std::max(subagent->tool_calls, event.tool_calls);
+                    subagent->failed_tool_calls = std::max(subagent->failed_tool_calls, event.failed_tool_calls);
+
+                    auto upsert_child_tool = [&]() -> ToolActivity::ChildToolActivity* {
+                        if (event.tool_call_id.empty()) {
+                            return nullptr;
+                        }
+                        for (auto& child_tool : subagent->recent_tools) {
+                            if (child_tool.id == event.tool_call_id) {
+                                return &child_tool;
+                            }
+                        }
+                        ToolActivity::ChildToolActivity child;
+                        child.id = event.tool_call_id;
+                        child.name = event.tool_name;
+                        child.args = event.tool_arguments;
+                        child.description = summarize_tool_arguments(event.tool_name, event.tool_arguments);
+                        child.status = ToolActivity::Status::Executing;
+                        subagent->recent_tools.push_back(std::move(child));
+                        constexpr std::size_t kMaxSubagentTools = 12;
+                        if (subagent->recent_tools.size() > kMaxSubagentTools) {
+                            subagent->recent_tools.erase(subagent->recent_tools.begin());
+                        }
+                        return &subagent->recent_tools.back();
+                    };
+
+                    switch (event.kind) {
+                        case core::agent::SubagentEvent::Kind::Started:
+                        case core::agent::SubagentEvent::Kind::Progress:
+                            subagent->status = ToolActivity::Status::Executing;
+                            parent_tool->status = ToolActivity::Status::Executing;
+                            break;
+                        case core::agent::SubagentEvent::Kind::TextDelta:
+                            if (!event.text_delta.empty()) {
+                                subagent->latest_text += event.text_delta;
+                                constexpr std::size_t kMaxLatestText = 1200;
+                                if (subagent->latest_text.size() > kMaxLatestText) {
+                                    subagent->latest_text.erase(
+                                        0,
+                                        subagent->latest_text.size() - kMaxLatestText);
+                                }
+                            }
+                            subagent->status = ToolActivity::Status::Executing;
+                            parent_tool->status = ToolActivity::Status::Executing;
+                            break;
+                        case core::agent::SubagentEvent::Kind::ToolStarted:
+                            if (auto* child_tool = upsert_child_tool()) {
+                                child_tool->status = ToolActivity::Status::Executing;
+                            }
+                            subagent->status = ToolActivity::Status::Executing;
+                            parent_tool->status = ToolActivity::Status::Executing;
+                            break;
+                        case core::agent::SubagentEvent::Kind::ToolFinished:
+                            if (auto* child_tool = upsert_child_tool()) {
+                                ToolActivity probe = make_tool_activity(
+                                    child_tool->id,
+                                    child_tool->name,
+                                    child_tool->args,
+                                    child_tool->description);
+                                apply_tool_result(probe, event.tool_result);
+                                child_tool->status = probe.status;
+                            }
+                            subagent->status = ToolActivity::Status::Executing;
+                            parent_tool->status = ToolActivity::Status::Executing;
+                            break;
+                        case core::agent::SubagentEvent::Kind::Finished:
+                            subagent->status = ToolActivity::Status::Succeeded;
+                            subagent->summary = event.summary;
+                            break;
+                        case core::agent::SubagentEvent::Kind::Failed:
+                            subagent->status = ToolActivity::Status::Failed;
+                            subagent->summary = event.summary.empty()
+                                ? "Subagent failed before producing a final summary."
+                                : event.summary;
+                            break;
+                        case core::agent::SubagentEvent::Kind::Cancelled:
+                            subagent->status = ToolActivity::Status::Cancelled;
+                            subagent->summary = event.summary.empty()
+                                ? "Subagent was cancelled."
+                                : event.summary;
+                            break;
+                    }
+
+                    message.pending = true;
+                    message.thinking = false;
+                    message.show_lightbulb = true;
+                });
+            };
         // Route out-of-band lifecycle status (auto-compaction progress) to the
         // standalone history log rather than the streaming assistant-message
         // chunk callback. Emitting status through the chunk callback would
