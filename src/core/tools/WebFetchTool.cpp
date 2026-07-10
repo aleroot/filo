@@ -7,8 +7,6 @@
 
 #include <simdjson.h>
 
-#include <algorithm>
-#include <cstdint>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -44,11 +42,6 @@ parse_fetch_request(std::string_view json_args) {
     web::FetchRequest request;
     request.url = std::string(url);
 
-    int64_t max_bytes = request.max_bytes;
-    if (doc["max_bytes"].get(max_bytes) == simdjson::SUCCESS) {
-        request.max_bytes = static_cast<int>(
-            std::clamp<int64_t>(max_bytes, 1024, 2 * 1024 * 1024));
-    }
     return request;
 }
 
@@ -59,20 +52,16 @@ ToolDefinition WebFetchTool::get_definition() const {
         .name = std::string(names::kFetchUrl),
         .title = "Fetch URL",
         .description =
-            "Fetch a known http or https URL and return extracted text content for analysis. "
-            "Use web_search first when the URL is not already known.",
+            "Fetch a known http or https URL and return bounded extracted text for analysis. "
+            "A successful response may be marked truncated when the source or returned text "
+            "exceeds Filo's safety budgets; use the returned content instead of retrying the "
+            "same URL to change its size. Use web_search first when the URL is not already known.",
         .parameters = {
             {
                 .name = "url",
                 .type = "string",
                 .description = "HTTP or HTTPS URL to fetch. Credentials in URLs are rejected.",
                 .required = true,
-            },
-            {
-                .name = "max_bytes",
-                .type = "integer",
-                .description = "Maximum response bytes to process, from 1024 to 2097152.",
-                .required = false,
             },
         },
         .annotations = {

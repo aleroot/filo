@@ -236,13 +236,12 @@ public:
                 cpr::Redirect{false},
                 cpr::Timeout{kFetchTimeoutMs});
 
-            if (truncated) {
-                return std::unexpected(std::format(
-                    "Fetch response exceeded max_bytes limit of {} bytes.",
-                    max_bytes));
-            }
-
-            if (response.error.code != cpr::ErrorCode::OK) {
+            // Returning false from the write callback intentionally aborts
+            // libcurl once the bounded buffer is full.  That is a successful
+            // partial retrieval: retain the captured prefix and surface it
+            // below with FetchResponse::truncated instead of converting the
+            // page into a tool error.
+            if (!truncated && response.error.code != cpr::ErrorCode::OK) {
                 return std::unexpected("Fetch request failed: " + response.error.message);
             }
 

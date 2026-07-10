@@ -7,6 +7,42 @@
 
 namespace core::tools::web {
 
+namespace {
+
+// Keep individual web-tool results useful without letting a successful fetch
+// consume an unbounded share of the model context. The transport budget lives
+// in FetchRequest; this separate budget applies after text extraction.
+constexpr std::size_t kMaxReturnedContentBytes = 64 * 1024;
+
+[[nodiscard]] std::size_t utf8_prefix_boundary(std::string_view text,
+                                                std::size_t max_bytes) noexcept {
+    if (text.size() <= max_bytes) return text.size();
+
+    // Keep a valid UTF-8 prefix valid when the byte budget lands in the middle
+    // of a multi-byte code point. Malformed source text is left untouched;
+    // this only avoids introducing a new malformed suffix while truncating.
+    std::size_t lead = max_bytes;
+    while (lead > 0
+           && (static_cast<unsigned char>(text[lead - 1]) & 0xC0U) == 0x80U) {
+        --lead;
+    }
+    if (lead == 0) return max_bytes;
+    --lead;
+
+    const unsigned char first = static_cast<unsigned char>(text[lead]);
+    const std::size_t sequence_length = (first & 0x80U) == 0 ? 1
+        : (first & 0xE0U) == 0xC0U ? 2
+        : (first & 0xF0U) == 0xE0U ? 3
+        : (first & 0xF8U) == 0xF0U ? 4
+        : 0;
+    if (sequence_length == 0 || max_bytes - lead >= sequence_length) {
+        return max_bytes;
+    }
+    return lead;
+}
+
+} // namespace
+
 WebAccess& WebAccess::instance() {
     static WebAccess access = make_default_web_access();
     return access;
@@ -68,6 +104,13 @@ std::string search_response_to_json(const SearchResponse& response) {
 }
 
 std::string fetch_response_to_json(const FetchResponse& response) {
+    const bool content_truncated = response.text.size() > kMaxReturnedContentBytes;
+    const std::string_view content = content_truncated
+        ? std::string_view(response.text).substr(
+            0,
+            utf8_prefix_boundary(response.text, kMaxReturnedContentBytes))
+        : std::string_view(response.text);
+
     core::utils::JsonWriter writer(4096);
     {
         auto _root = writer.object();
@@ -75,8 +118,8 @@ std::string fetch_response_to_json(const FetchResponse& response) {
               .kv_num("status_code", response.status_code).comma()
               .kv_str("content_type", response.content_type).comma()
               .kv_str("title", response.title).comma()
-              .kv_bool("truncated", response.truncated).comma()
-              .kv_str("content", response.text);
+              .kv_bool("truncated", response.truncated || content_truncated).comma()
+              .kv_str("content", content);
     }
     return std::move(writer).take();
 }

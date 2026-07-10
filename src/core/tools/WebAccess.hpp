@@ -37,7 +37,9 @@ struct SearchResponse {
 
 struct FetchRequest {
     std::string url;
-    int max_bytes = 200000;
+    // This is a transport safety budget, deliberately controlled by Filo rather
+    // than by the model.  Presentation/output limits are applied downstream.
+    int max_bytes = 2 * 1024 * 1024;
 };
 
 struct FetchResponse {

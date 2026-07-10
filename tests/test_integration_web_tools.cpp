@@ -4,6 +4,7 @@
 
 #include "core/config/ConfigManager.hpp"
 #include "core/context/SessionContext.hpp"
+#include "core/tools/WebAccess.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
@@ -128,10 +129,41 @@ TEST_CASE("WebFetchTool validates redirected URLs against trusted URL policy",
     std::filesystem::remove_all(sandbox, ec);
 }
 
-TEST_CASE("WebFetchTool aborts response bodies that exceed max_bytes",
+TEST_CASE("WebFetchTool returns a usable truncated result for oversized responses",
           "[integration][tools][web]") {
     httplib::Server server;
     server.Get("/large", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(std::string(2 * 1024 * 1024 + 4096, 'x'), "text/plain");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+
+    WebFetchTool tool;
+    const auto res = run_web_fetch_tool(
+        tool,
+        std::format(
+            R"({{"url":"http://127.0.0.1:{}/large"}})",
+            port),
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("web-fetch-max-bytes"),
+        });
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("content":")"));
+    REQUIRE_FALSE(res.find(R"("error":)") != std::string::npos);
+    REQUIRE(res.size() < 128 * 1024);
+}
+
+TEST_CASE("WebFetchTool ignores legacy max_bytes arguments", "[integration][tools][web]") {
+    httplib::Server server;
+    server.Get("/small", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(std::string(4096, 'x'), "text/plain");
     });
 
@@ -148,11 +180,23 @@ TEST_CASE("WebFetchTool aborts response bodies that exceed max_bytes",
     const auto res = run_web_fetch_tool(
         tool,
         std::format(
-            R"({{"url":"http://127.0.0.1:{}/large","max_bytes":1024}})",
+            R"({{"url":"http://127.0.0.1:{}/small","max_bytes":1024}})",
             port),
         core::tools::ToolInvocationContext{
-            .session_context = make_tool_test_context("web-fetch-max-bytes"),
+            .session_context = make_tool_test_context("web-fetch-legacy-max-bytes"),
         });
 
-    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("exceeded max_bytes"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"("truncated":false)"));
+    REQUIRE_FALSE(res.find(R"("error":)") != std::string::npos);
+}
+
+TEST_CASE("Web fetch output truncation preserves UTF-8 boundaries", "[integration][tools][web]") {
+    core::tools::web::FetchResponse response{
+        .text = std::string(64 * 1024 - 1, 'x') + "\xE2\x82\xACsuffix",
+    };
+
+    const auto json = core::tools::web::fetch_response_to_json(response);
+
+    REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
+    REQUIRE_FALSE(json.find("\xE2\x82\xAC") != std::string::npos);
 }
