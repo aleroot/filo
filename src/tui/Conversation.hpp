@@ -5,6 +5,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 #include <chrono>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -197,6 +198,16 @@ struct ConversationState {
 // Render Options
 // ============================================================================
 
+// The history component owns this state and the scroll decorator updates it
+// with FTXUI's real, post-markdown layout height. Keeping the held focus line
+// in this coordinate space prevents streamed content below the viewport from
+// moving what the user is reading.
+struct ConversationScrollAnchor {
+    int content_height = 1;
+    int focus_y = 1;
+    bool follow_bottom = true;
+};
+
 struct ConversationRenderOptions {
     bool        show_timestamps = true;
     bool        show_spinner = true;
@@ -206,6 +217,7 @@ struct ConversationRenderOptions {
     std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
     float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
+    std::shared_ptr<ConversationScrollAnchor> scroll_anchor;
 };
 
 // ============================================================================

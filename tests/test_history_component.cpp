@@ -6,6 +6,7 @@
 
 #include <ftxui/screen/screen.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <string_view>
@@ -53,19 +54,31 @@ std::string render_history_text(tui::HistoryComponent& history, int width = 160)
     ftxui::Render(screen, panel);
     return strip_ansi(screen.ToString());
 }
+
+std::string render_history_viewport(tui::HistoryComponent& history,
+                                    int width,
+                                    int height) {
+    auto panel = history.OnRender();
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(height));
+    ftxui::Render(screen, panel);
+    return strip_ansi(screen.ToString());
 }
 
-TEST_CASE("HistoryComponent layout fingerprinting", "[tui][history_component]") {
+int rendered_row_containing(std::string_view text, std::string_view marker) {
+    const auto pos = text.find(marker);
+    if (pos == std::string_view::npos) {
+        return -1;
+    }
+    return static_cast<int>(std::count(text.begin(), text.begin() + pos, '\n'));
+}
+}
+
+TEST_CASE("HistoryComponent basic scrolling", "[tui][history_component]") {
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
-    auto msgs1 = mock_messages();
-    auto msgs2 = msgs1;
-    
-    // Fingerprints should be same for same messages
-    // history_layout_fingerprint is private, but we can indirectly test it
-    // via OnRender if we had more access, but let's just test that 
-    // it handles basic operations.
+    static_cast<void>(render_history_text(history));
 
     history.ScrollDown(0.5f);
     history.ScrollUp(0.2f);
@@ -82,6 +95,7 @@ TEST_CASE("HistoryComponent scroll bounds", "[tui][history_component]") {
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     history.ScrollUp(10.0f); // Way past 0
     // Should be clamped to 0.0f
     
@@ -109,6 +123,7 @@ TEST_CASE("HistoryComponent ScrollUp suspends auto-follow",
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     history.ScrollUp(0.1f);
 
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
@@ -120,6 +135,7 @@ TEST_CASE("HistoryComponent HandleWheel up suspends auto-follow",
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     ftxui::Mouse mouse;
     mouse.button = ftxui::Mouse::WheelUp;
     mouse.motion = ftxui::Mouse::Pressed;
@@ -133,6 +149,7 @@ TEST_CASE("HistoryComponent ScrollDown to bottom resumes auto-follow",
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     // Scroll up to suspend follow.
     history.ScrollUp(0.3f);
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
@@ -153,8 +170,8 @@ TEST_CASE("HistoryComponent new message does not yank while user is reading",
         tick,
         mock_options);
 
-    // Prime last_message_count_ by rendering once.
-    history.OnRender();
+    // Prime the actual FTXUI layout.
+    static_cast<void>(render_history_text(history));
 
     // User scrolls up to read.
     history.ScrollUp(0.3f);
@@ -163,11 +180,10 @@ TEST_CASE("HistoryComponent new message does not yank while user is reading",
 
     // A new message arrives.
     messages.push_back(tui::make_info_message("New tool call"));
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
 
-    // Scroll position must NOT have been yanked to 1.0f. Because the content
-    // became taller while the user was held, the equivalent visual anchor is
-    // represented by a smaller ratio.
+    // The absolute anchor stays put, so its relative position decreases as
+    // the transcript grows. It must not be yanked back to the bottom.
     REQUIRE(history.ScrollPosition() < pos_before);
     // Badge must appear.
     REQUIRE(history.HasNewContentIndicator());
@@ -178,23 +194,50 @@ TEST_CASE("HistoryComponent preserves held anchor while streaming grows",
     std::atomic<size_t> tick{0};
     std::vector<tui::UiMessage> messages;
     messages.push_back(tui::make_user_message("prompt", ""));
-    messages.push_back(tui::make_assistant_message(std::string(800, 'a'), "", true));
+    messages.push_back(tui::make_assistant_message(
+        "# First heading\n"
+        "READ-01\n"
+        "# Second heading\n"
+        "READ-02\n"
+        "# Third heading\n"
+        "READ-03\n"
+        "# Fourth heading\n"
+        "READ-04\n"
+        "# Fifth heading\n"
+        "READ-05\n"
+        "# Sixth heading\n"
+        "READ-06\n"
+        "# Seventh heading\n"
+        "READ-07\n"
+        "# Eighth heading\n"
+        "READ-08\n"
+        "# Ninth heading\n"
+        "READ-09\n"
+        "# Tenth heading\n"
+        "READ-10",
+        "",
+        true));
     tui::HistoryComponent history(
         [&messages]() { return messages; },
         tick,
         mock_options);
 
-    history.OnRender();
-    history.ScrollUp(0.02f);
+    static_cast<void>(render_history_viewport(history, 40, 7));
+    history.ScrollUp(0.35f);
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
-    const float pos_before = history.ScrollPosition();
+    const auto before = render_history_viewport(history, 40, 7);
+    const int before_row = rendered_row_containing(before, "READ-07");
+    REQUIRE(before_row >= 0);
 
-    messages.back().text += std::string(2400, 'b');
-    history.OnRender();
+    // Plain streamed text adds one rendered line, whereas the headings above
+    // each occupy two. This is the layout mismatch that used to make the
+    // estimate-based compensation twitch the viewport.
+    messages.back().text += "\nSTREAMED-ONE\nSTREAMED-TWO";
+    const auto after = render_history_viewport(history, 40, 7);
 
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
     REQUIRE(history.HasNewContentIndicator());
-    REQUIRE(history.ScrollPosition() < pos_before);
+    REQUIRE(rendered_row_containing(after, "READ-07") == before_row);
 }
 
 TEST_CASE("HistoryComponent new message snaps to bottom when following",
@@ -207,13 +250,13 @@ TEST_CASE("HistoryComponent new message snaps to bottom when following",
         mock_options);
 
     // Prime the component (default: FollowBottom).
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
     REQUIRE(history.IsAutoScrollFollowing());
 
     // Simulate a partial scroll down that keeps us in the "near bottom" zone.
     // (Do NOT scroll up, so intent stays FollowBottom.)
     messages.push_back(tui::make_info_message("Status update"));
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
 
     REQUIRE(history.ScrollPosition() == 1.0f);
     REQUIRE_FALSE(history.HasNewContentIndicator());
@@ -229,10 +272,10 @@ TEST_CASE("HistoryComponent ResetToBottom clears hold and indicator",
         mock_options);
 
     // Put the component into a held + indicator state.
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
     history.ScrollUp(0.4f);
     messages.push_back(tui::make_info_message("New content"));
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
     REQUIRE(history.HasNewContentIndicator());
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
 
@@ -253,16 +296,16 @@ TEST_CASE("HistoryComponent transcript shrink resets stale hold state",
         tick,
         mock_options);
 
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
     history.ScrollUp(0.4f);
     messages.push_back(tui::make_info_message("New content"));
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
     REQUIRE(history.HasNewContentIndicator());
 
     messages.clear();
     messages.push_back(tui::make_system_message("Fresh transcript"));
-    history.OnRender();
+    static_cast<void>(render_history_text(history));
 
     REQUIRE(history.IsAutoScrollFollowing());
     REQUIRE(history.ScrollPosition() == 1.0f);
@@ -274,6 +317,7 @@ TEST_CASE("HistoryComponent JumpToMessage suspends follow when not at end",
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     // Jump to the first of 5 messages => UserHeld.
     history.JumpToMessage(0, 5);
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
@@ -290,6 +334,7 @@ TEST_CASE("HistoryComponent End key resumes auto-follow",
     std::atomic<size_t> tick{0};
     tui::HistoryComponent history(mock_messages, tick, mock_options);
 
+    static_cast<void>(render_history_text(history));
     history.ScrollUp(0.5f);
     REQUIRE_FALSE(history.IsAutoScrollFollowing());
 

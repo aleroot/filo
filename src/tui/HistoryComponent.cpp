@@ -1,193 +1,17 @@
 #include "HistoryComponent.hpp"
 
-#include "Constants.hpp"
 #include "TuiTheme.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace tui {
 namespace {
 
-// ── Auto-scroll threshold constants ──────────────────────────────────────────
-// "Near bottom" = within ~3 visual lines of the end.
-// The ratio cap ensures correctness for both tiny and large transcripts.
-constexpr float kBottomThresholdLines    = 3.0f;
-constexpr float kBottomThresholdMaxRatio = 0.05f;  // never treat >5% from end as "bottom"
-constexpr float kBottomThresholdMinRatio = 0.95f;  // threshold is at least 95% of content
-
-int estimate_wrapped_line_count(std::string_view text) {
-    if (text.empty()) {
-        return 1;
-    }
-
-    int total_lines = 0;
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        const auto newline = text.find('\n', start);
-        const std::size_t len = newline == std::string_view::npos
-            ? text.size() - start
-            : newline - start;
-        const int wrapped = std::max(
-            1,
-            static_cast<int>((len + static_cast<std::size_t>(kEstimatedLineWidthChars) - 1)
-                             / static_cast<std::size_t>(kEstimatedLineWidthChars)));
-        total_lines += wrapped;
-
-        if (newline == std::string_view::npos) {
-            break;
-        }
-        start = newline + 1;
-    }
-
-    return std::max(total_lines, 1);
-}
-
-int estimate_tool_line_cost(const ToolActivity& tool) {
-    int lines = 1; // Header row
-
-    if (!tool.description.empty()) {
-        lines += estimate_wrapped_line_count(tool.description);
-    }
-    if (!tool.result.empty()) {
-        lines += 1; // Separator / label row
-        lines += estimate_wrapped_line_count(tool.result.summary);
-        if (tool.result.truncated) {
-            lines += 1;
-        }
-    }
-    if (!tool.diff_preview.empty()) {
-        lines += 1; // Diff header
-        lines += static_cast<int>(tool.diff_preview.lines.size());
-        if (tool.diff_preview.hidden_line_count > 0) {
-            lines += 1;
-        }
-    }
-
-    return std::max(lines, 1);
-}
-
-int estimate_message_line_cost(
-    const UiMessage& msg,
-    const std::unordered_map<std::string, bool>& disclosure_expanded,
-    bool expand_all_system_details) {
-    int lines = std::max(0, msg.margin_top);
-
-    switch (msg.type) {
-        case MessageType::User: {
-            if (!msg.timestamp.empty()) {
-                lines += 1;
-            }
-            lines += estimate_wrapped_line_count(msg.text);
-            lines += 1; // Spacer after user bubble
-            break;
-        }
-        case MessageType::ShellCommand: {
-            if (!msg.timestamp.empty()) {
-                lines += 1;
-            }
-            lines += estimate_wrapped_line_count(msg.text);
-            lines += msg.pending
-                ? 1
-                : (msg.secondary_text.empty()
-                    ? 1
-                    : estimate_wrapped_line_count(msg.secondary_text));
-            lines += 1; // Spacer after shell command panel
-            break;
-        }
-        case MessageType::Assistant: {
-            bool has_executing_tools = false;
-            bool has_completed_tools = false;
-            for (const auto& tool : msg.tools) {
-                if (tool.status == ToolActivity::Status::Executing) {
-                    has_executing_tools = true;
-                } else if (tool.status == ToolActivity::Status::Succeeded
-                           || tool.status == ToolActivity::Status::Failed) {
-                    has_completed_tools = true;
-                }
-            }
-            const bool show_thinking = msg.thinking
-                || (msg.pending && has_completed_tools && !has_executing_tools);
-
-            if (msg.text.empty() && msg.tools.empty() && !msg.thinking) {
-                lines += 1;
-            }
-
-            if (!msg.tools.empty()) {
-                lines += 2; // Tool-group border top/bottom
-                for (std::size_t i = 0; i < msg.tools.size(); ++i) {
-                    lines += estimate_tool_line_cost(msg.tools[i]);
-                    if (i + 1 < msg.tools.size()) {
-                        lines += 1; // Separator between tool rows
-                    }
-                }
-            }
-
-            if (!msg.text.empty()) {
-                if (!msg.tools.empty()) {
-                    lines += 1; // Spacer between tools and markdown response
-                }
-                lines += estimate_wrapped_line_count(msg.text);
-            }
-
-            if (show_thinking) {
-                lines += 1;
-            }
-
-            lines += 1; // Spacer after assistant message
-            break;
-        }
-        case MessageType::Info:
-        case MessageType::Warning:
-        case MessageType::Error:
-        case MessageType::System: {
-            lines += estimate_wrapped_line_count(msg.text);
-            if (!msg.secondary_text.empty()) {
-                lines += estimate_wrapped_line_count(msg.secondary_text);
-            }
-            if (!msg.disclosure_text.empty()) {
-                bool expanded = expand_all_system_details;
-                if (const auto it = disclosure_expanded.find(msg.id);
-                    it != disclosure_expanded.end()) {
-                    expanded = expanded || it->second;
-                }
-                if (expanded) {
-                    if (msg.repeat_count > 1) {
-                        lines += 1;  // Repeated-event explanatory line.
-                    }
-                    lines += estimate_wrapped_line_count(msg.disclosure_text);
-                }
-            }
-            break;
-        }
-        case MessageType::ToolGroup: {
-            lines += 2; // Tool-group border top/bottom
-            for (std::size_t i = 0; i < msg.tools.size(); ++i) {
-                lines += estimate_tool_line_cost(msg.tools[i]);
-                if (i + 1 < msg.tools.size()) {
-                    lines += 1; // Separator between tool rows
-                }
-            }
-            lines += 1; // Spacer after tool group message
-            break;
-        }
-    }
-
-    return std::max(lines, 1);
-}
-
-int estimate_history_line_cost(
-    const std::vector<UiMessage>& messages,
-    const std::unordered_map<std::string, bool>& disclosure_expanded,
-    bool expand_all_system_details) {
-    int total = 0;
-    for (const auto& msg : messages) {
-        total += estimate_message_line_cost(
-            msg,
-            disclosure_expanded,
-            expand_all_system_details);
-    }
-    return std::max(total, 1);
-}
+constexpr int kWheelScrollLines = 3;
+constexpr int kArrowScrollLines = 2;
+constexpr int kPageScrollLines = 18;
+constexpr int kBottomThresholdLines = 3;
 
 } // namespace
 
@@ -203,42 +27,19 @@ ftxui::Element HistoryComponent::OnRender() {
     // Snapshot messages and build render options.
     const auto messages = get_messages_();
     auto options = get_options_();
-    options.scroll_pos = scroll_pos_;
+    options.scroll_pos = ScrollPosition();
+    options.scroll_anchor = scroll_anchor_;
     options.system_disclosure_expanded = &disclosure_expanded_;
     disclosure_hitboxes_.clear();
     options.system_disclosure_hitboxes = &disclosure_hitboxes_;
 
-    const std::size_t disclosure_hash = [&]() -> std::size_t {
-        std::size_t seed = 0;
-        for (const auto& [message_id, expanded] : disclosure_expanded_) {
-            if (!expanded) {
-                continue;
-            }
-            seed ^= std::hash<std::string>{}(message_id)
-                + static_cast<std::size_t>(0x9e3779b97f4a7c15ULL)
-                + (seed << 6)
-                + (seed >> 2);
-        }
-        return seed;
-    }();
-
-    // Recompute content-height estimate only when layout changes.
-    std::size_t layout_fingerprint = history_layout_fingerprint(messages);
-    layout_fingerprint = combine_hash(
-        layout_fingerprint,
-        static_cast<std::size_t>(options.expand_system_details));
-    layout_fingerprint = combine_hash(layout_fingerprint, disclosure_hash);
-
-    const int prev_estimated_lines = estimated_content_lines_;
-    if (layout_fingerprint != last_layout_fingerprint_) {
-        estimated_content_lines_ = estimate_history_line_cost(
-            messages,
-            disclosure_expanded_,
-            options.expand_system_details);
-        last_layout_fingerprint_ = layout_fingerprint;
-    }
-
     // ── Intent-aware auto-scroll ─────────────────────────────────────────────
+    const std::size_t content_fingerprint = history_content_fingerprint(messages);
+    const bool content_changed = has_content_snapshot_
+        && content_fingerprint != last_content_fingerprint_;
+    last_content_fingerprint_ = content_fingerprint;
+    has_content_snapshot_ = true;
+
     const std::size_t prev_message_count = last_message_count_;
     last_message_count_ = messages.size();
 
@@ -250,23 +51,24 @@ ftxui::Element HistoryComponent::OnRender() {
         // A new message card was added (user turn, tool card, assistant card, etc.).
         if (scroll_intent_ == ScrollIntent::FollowBottom) {
             // User is watching — keep pinned to the bottom.
-            scroll_pos_ = 1.0f;
+            scroll_anchor_->follow_bottom = true;
         } else {
             // User is reading — do NOT yank; show indicator instead.
             new_content_while_held_ = true;
         }
     }
 
-    // Streaming / tool growth: content height grew while user is scrolled up.
-    if (estimated_content_lines_ > prev_estimated_lines
-            && scroll_intent_ == ScrollIntent::UserHeld) {
-        PreserveUserHeldAnchorForContentGrowth(prev_estimated_lines);
+    // A streamed update can change an existing assistant card without adding a
+    // message. Surface that update to a reader, but leave the actual anchor
+    // untouched: the scroll decorator keeps the same FTXUI line in view.
+    if (content_changed && scroll_intent_ == ScrollIntent::UserHeld) {
         new_content_while_held_ = true;
     }
     // ───────────────────────────────────────────────────────────────────
 
     // Update scroll_pos for the render options snapshot.
-    options.scroll_pos = scroll_pos_;
+    options.scroll_pos = ScrollPosition();
+    options.scroll_anchor = scroll_anchor_;
 
     auto panel = render_history_panel(
         messages,
@@ -304,28 +106,28 @@ bool HistoryComponent::OnEvent(ftxui::Event event) {
 
     if (Focused()) {
         if (event == ftxui::Event::ArrowUp) {
-            ScrollUp(arrow_step_ratio());
+            ScrollByLines(-kArrowScrollLines);
             return true;
         }
         if (event == ftxui::Event::ArrowDown) {
-            ScrollDown(arrow_step_ratio());
+            ScrollByLines(kArrowScrollLines);
             return true;
         }
         if (event == ftxui::Event::PageUp) {
-            ScrollUp(page_step_ratio());
+            ScrollByLines(-kPageScrollLines);
             return true;
         }
         if (event == ftxui::Event::PageDown) {
-            ScrollDown(page_step_ratio());
+            ScrollByLines(kPageScrollLines);
             return true;
         }
         if (event == ftxui::Event::Home) {
-            scroll_pos_ = 0.0f;
+            scroll_anchor_->focus_y = 0;
             SetScrollIntent(ScrollIntent::UserHeld);
             return true;
         }
         if (event == ftxui::Event::End) {
-            scroll_pos_ = 1.0f;
+            scroll_anchor_->focus_y = scroll_anchor_->content_height;
             SetScrollIntent(ScrollIntent::FollowBottom);
             return true;
         }
@@ -338,36 +140,36 @@ bool HistoryComponent::OnEvent(ftxui::Event event) {
 }
 
 void HistoryComponent::ScrollUp(float amount) {
-    scroll_pos_ = std::max(0.0f, scroll_pos_ - amount);
-    SetScrollIntent(ScrollIntent::UserHeld);
+    const int lines = std::max(1, static_cast<int>(std::ceil(
+        amount * static_cast<float>(std::max(scroll_anchor_->content_height, 1)))));
+    ScrollByLines(-lines);
 }
 
 void HistoryComponent::ScrollDown(float amount) {
-    scroll_pos_ = std::min(1.0f, scroll_pos_ + amount);
-    // If the user scrolled back down to (or past) the bottom threshold,
-    // resume auto-following so new content keeps them pinned there.
-    if (IsNearBottom()) {
-        SetScrollIntent(ScrollIntent::FollowBottom);
-    }
+    const int lines = std::max(1, static_cast<int>(std::ceil(
+        amount * static_cast<float>(std::max(scroll_anchor_->content_height, 1)))));
+    ScrollByLines(lines);
 }
 
 void HistoryComponent::ScrollPageUp() {
-    ScrollUp(page_step_ratio());
+    ScrollByLines(-kPageScrollLines);
 }
 
 void HistoryComponent::ScrollPageDown() {
-    ScrollDown(page_step_ratio());
+    ScrollByLines(kPageScrollLines);
 }
 
 void HistoryComponent::JumpToMessage(std::size_t message_index, std::size_t message_count) {
     if (message_count <= 1) {
-        scroll_pos_ = 1.0f;
+        scroll_anchor_->focus_y = scroll_anchor_->content_height;
         SetScrollIntent(ScrollIntent::FollowBottom);
         return;
     }
     const float ratio = static_cast<float>(message_index)
         / static_cast<float>(message_count - 1);
-    scroll_pos_ = std::clamp(ratio, 0.0f, 1.0f);
+    scroll_anchor_->focus_y = static_cast<int>(std::lround(
+        std::clamp(ratio, 0.0f, 1.0f)
+        * static_cast<float>(scroll_anchor_->content_height)));
     // Navigating to the last message resumes auto-follow; anything else is a
     // deliberate user jump that suspends it.
     SetScrollIntent(IsNearBottom() ? ScrollIntent::FollowBottom
@@ -377,7 +179,7 @@ void HistoryComponent::JumpToMessage(std::size_t message_index, std::size_t mess
 // ── Scroll-intent state machine ───────────────────────────────────────────
 
 void HistoryComponent::ResetToBottom() {
-    scroll_pos_ = 1.0f;
+    scroll_anchor_->focus_y = scroll_anchor_->content_height;
     SetScrollIntent(ScrollIntent::FollowBottom);
 }
 
@@ -390,11 +192,16 @@ bool HistoryComponent::HasNewContentIndicator() const noexcept {
 }
 
 float HistoryComponent::ScrollPosition() const noexcept {
-    return scroll_pos_;
+    if (scroll_intent_ == ScrollIntent::FollowBottom) {
+        return 1.0f;
+    }
+    return static_cast<float>(CurrentFocusY())
+        / static_cast<float>(std::max(scroll_anchor_->content_height, 1));
 }
 
 void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
     scroll_intent_ = intent;
+    scroll_anchor_->follow_bottom = intent == ScrollIntent::FollowBottom;
     // Returning to FollowBottom clears the indicator badge — the user
     // has scrolled back down and will see the new content naturally.
     if (intent == ScrollIntent::FollowBottom) {
@@ -402,35 +209,25 @@ void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
     }
 }
 
-void HistoryComponent::PreserveUserHeldAnchorForContentGrowth(int previous_content_lines) {
-    if (previous_content_lines <= 0 || estimated_content_lines_ <= previous_content_lines) {
-        return;
-    }
-
-    // scroll_position_relative() anchors by ratio. If that ratio stays fixed
-    // while streaming appends lines below the viewport, the focused content line
-    // moves down and appears to keep auto-scrolling. Convert the old ratio back
-    // into an absolute content-line anchor, then express that same anchor in the
-    // new content height.
-    const float previous_denominator =
-        std::max(1.0f, static_cast<float>(previous_content_lines));
-    const float current_denominator =
-        std::max(1.0f, static_cast<float>(estimated_content_lines_));
-    const float held_anchor_line = scroll_pos_ * previous_denominator;
-    scroll_pos_ = std::clamp(held_anchor_line / current_denominator, 0.0f, 1.0f);
-}
-
 bool HistoryComponent::IsNearBottom() const noexcept {
-    return scroll_pos_ >= BottomThresholdRatio();
+    return CurrentFocusY()
+        >= std::max(0, scroll_anchor_->content_height - kBottomThresholdLines);
 }
 
-float HistoryComponent::BottomThresholdRatio() const {
-    // Threshold = 1.0 - (3 lines expressed as a ratio), clamped so that:
-    //   • for short transcripts: at least 95% of the way down counts as "bottom"
-    //   • for long transcripts: the ratio never shrinks below 5% of content
-    return std::max(
-        1.0f - line_based_ratio(kBottomThresholdLines, 0.0f, kBottomThresholdMaxRatio),
-        kBottomThresholdMinRatio);
+int HistoryComponent::CurrentFocusY() const noexcept {
+    return std::clamp(scroll_anchor_->focus_y, 0, scroll_anchor_->content_height);
+}
+
+void HistoryComponent::ScrollByLines(int lines) {
+    const int content_height = std::max(scroll_anchor_->content_height, 1);
+    scroll_anchor_->focus_y = std::clamp(CurrentFocusY() + lines, 0, content_height);
+    if (lines < 0) {
+        SetScrollIntent(ScrollIntent::UserHeld);
+    } else if (IsNearBottom()) {
+        SetScrollIntent(ScrollIntent::FollowBottom);
+    } else {
+        SetScrollIntent(ScrollIntent::UserHeld);
+    }
 }
 
 bool HistoryComponent::HandleWheel(ftxui::Event event) {
@@ -438,11 +235,11 @@ bool HistoryComponent::HandleWheel(ftxui::Event event) {
         return false;
     }
     if (event.mouse().button == ftxui::Mouse::WheelUp) {
-        ScrollUp(wheel_step_ratio());
+        ScrollByLines(-kWheelScrollLines);
         return true;
     }
     if (event.mouse().button == ftxui::Mouse::WheelDown) {
-        ScrollDown(wheel_step_ratio());
+        ScrollByLines(kWheelScrollLines);
         return true;
     }
     return false;
@@ -454,7 +251,6 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
         for (const auto& [message_id, box] : disclosure_hitboxes_) {
             if (box.Contain(event.mouse().x, event.mouse().y)) {
                 disclosure_expanded_[message_id] = !disclosure_expanded_[message_id];
-                last_layout_fingerprint_ = 0;  // force line-cost refresh next render
                 return true;
             }
         }
@@ -462,92 +258,62 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
 
     // Only handle wheel events; never steal focus from clicks.
     if (event.mouse().button == ftxui::Mouse::WheelUp) {
-        ScrollUp(wheel_step_ratio());
+        ScrollByLines(-kWheelScrollLines);
         return true;
     }
     if (event.mouse().button == ftxui::Mouse::WheelDown) {
-        ScrollDown(wheel_step_ratio());
+        ScrollByLines(kWheelScrollLines);
         return true;
     }
     return false;
 }
 
 std::size_t HistoryComponent::combine_hash(std::size_t seed, std::size_t value) {
-    // 64-bit mix constant (works fine on 32-bit std::size_t as well).
     constexpr std::size_t kMix = static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
     seed ^= value + kMix + (seed << 6) + (seed >> 2);
     return seed;
 }
 
-std::size_t HistoryComponent::history_layout_fingerprint(
+std::size_t HistoryComponent::history_content_fingerprint(
     const std::vector<UiMessage>& messages) {
     std::size_t seed = messages.size();
+    const auto hash_text = [](std::string_view value) {
+        return std::hash<std::string_view>{}(value);
+    };
+
     for (const auto& msg : messages) {
+        seed = combine_hash(seed, hash_text(msg.id));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.type));
-        seed = combine_hash(seed, msg.text.size());
-        seed = combine_hash(seed, msg.secondary_text.size());
-        seed = combine_hash(seed, msg.disclosure_text.size());
-        seed = combine_hash(seed, msg.timestamp.size());
+        seed = combine_hash(seed, hash_text(msg.text));
+        seed = combine_hash(seed, hash_text(msg.secondary_text));
+        seed = combine_hash(seed, hash_text(msg.disclosure_text));
+        seed = combine_hash(seed, hash_text(msg.timestamp));
         seed = combine_hash(seed, msg.repeat_count);
-        seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_top));
-        seed = combine_hash(seed, static_cast<std::size_t>(msg.margin_bottom));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.pending));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.thinking));
         seed = combine_hash(seed, static_cast<std::size_t>(msg.show_lightbulb));
-        seed = combine_hash(seed, msg.tools.size());
+        seed = combine_hash(seed, static_cast<std::size_t>(msg.stopped));
+        seed = combine_hash(seed, hash_text(msg.activity_elapsed));
         for (const auto& tool : msg.tools) {
-            seed = combine_hash(seed, tool.name.size());
-            seed = combine_hash(seed, tool.description.size());
-            seed = combine_hash(seed, tool.result.summary.size());
-            seed = combine_hash(seed, static_cast<std::size_t>(tool.result.truncated));
-            seed = combine_hash(seed, static_cast<std::size_t>(tool.auto_approved));
+            seed = combine_hash(seed, hash_text(tool.id));
+            seed = combine_hash(seed, hash_text(tool.name));
+            seed = combine_hash(seed, hash_text(tool.description));
+            seed = combine_hash(seed, hash_text(tool.result.summary));
             seed = combine_hash(seed, static_cast<std::size_t>(tool.status));
-            if (tool.result.exit_code.has_value()) {
-                seed = combine_hash(seed, static_cast<std::size_t>(*tool.result.exit_code));
-            }
+            seed = combine_hash(seed, static_cast<std::size_t>(tool.result.truncated));
             seed = combine_hash(seed, tool.diff_preview.lines.size());
             seed = combine_hash(
                 seed,
                 static_cast<std::size_t>(tool.diff_preview.hidden_line_count));
-            seed = combine_hash(seed, tool.subagents.size());
             for (const auto& subagent : tool.subagents) {
-                seed = combine_hash(seed, subagent.worker_name.size());
-                seed = combine_hash(seed, subagent.description.size());
-                seed = combine_hash(seed, subagent.latest_text.size());
-                seed = combine_hash(seed, subagent.summary.size());
+                seed = combine_hash(seed, hash_text(subagent.id));
+                seed = combine_hash(seed, hash_text(subagent.latest_text));
+                seed = combine_hash(seed, hash_text(subagent.summary));
                 seed = combine_hash(seed, static_cast<std::size_t>(subagent.status));
-                seed = combine_hash(seed, static_cast<std::size_t>(subagent.steps));
-                seed = combine_hash(seed, static_cast<std::size_t>(subagent.tool_calls));
-                seed = combine_hash(seed, subagent.recent_tools.size());
-                for (const auto& child_tool : subagent.recent_tools) {
-                    seed = combine_hash(seed, child_tool.name.size());
-                    seed = combine_hash(seed, child_tool.description.size());
-                    seed = combine_hash(seed, static_cast<std::size_t>(child_tool.status));
-                }
             }
         }
     }
     return seed;
-}
-
-float HistoryComponent::line_based_ratio(float lines, float min_ratio, float max_ratio) const {
-    const float denominator = std::max(1.0f, static_cast<float>(estimated_content_lines_));
-    return std::clamp(lines / denominator, min_ratio, max_ratio);
-}
-
-float HistoryComponent::wheel_step_ratio() const {
-    // Aim for ~3 visual lines per wheel notch, regardless of transcript size.
-    return line_based_ratio(3.0f, 0.0015f, 0.04f);
-}
-
-float HistoryComponent::arrow_step_ratio() const {
-    // Keyboard arrows should be more precise than wheel scrolling.
-    return line_based_ratio(2.0f, 0.001f, 0.03f);
-}
-
-float HistoryComponent::page_step_ratio() const {
-    // Page navigation targets a viewport-sized jump without skipping huge chunks.
-    return line_based_ratio(18.0f, 0.03f, 0.30f);
 }
 
 } // namespace tui

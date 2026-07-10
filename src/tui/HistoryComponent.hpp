@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -49,28 +50,25 @@ private:
     enum class ScrollIntent { FollowBottom, UserHeld };
 
     void SetScrollIntent(ScrollIntent intent);
-    void PreserveUserHeldAnchorForContentGrowth(int previous_content_lines);
     [[nodiscard]] bool  IsNearBottom()          const noexcept;
-    [[nodiscard]] float BottomThresholdRatio()  const;
+    [[nodiscard]] int CurrentFocusY() const noexcept;
+    void ScrollByLines(int lines);
 
     bool OnMouseEvent(ftxui::Event event);
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
-    static std::size_t history_layout_fingerprint(const std::vector<UiMessage>& messages);
-    float line_based_ratio(float lines, float min_ratio, float max_ratio) const;
-    float wheel_step_ratio() const;
-    float arrow_step_ratio() const;
-    float page_step_ratio() const;
+    static std::size_t history_content_fingerprint(const std::vector<UiMessage>& messages);
 
     std::function<std::vector<UiMessage>()> get_messages_;
     const std::atomic<size_t>& animation_tick_;
     std::function<ConversationRenderOptions()> get_options_;
 
-    float          scroll_pos_              = 1.0f;
     ScrollIntent   scroll_intent_           = ScrollIntent::FollowBottom;
     bool           new_content_while_held_  = false;
     size_t         last_message_count_      = 0;
-    int            estimated_content_lines_ = 1;
-    std::size_t    last_layout_fingerprint_ = 0;
+    std::size_t    last_content_fingerprint_ = 0;
+    bool           has_content_snapshot_     = false;
+    std::shared_ptr<ConversationScrollAnchor> scroll_anchor_ =
+        std::make_shared<ConversationScrollAnchor>();
     std::unordered_map<std::string, bool>        disclosure_expanded_;
     std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
 };

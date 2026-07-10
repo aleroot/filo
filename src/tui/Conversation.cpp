@@ -15,6 +15,7 @@
 #include <chrono>
 #include <ctime>
 #include <format>
+#include <memory>
 #include <optional>
 #include <random>
 
@@ -1167,20 +1168,42 @@ Element render_system_message(const UiMessage& msg,
 // Main Render Function
 // ============================================================================
 
-Decorator scroll_position_relative(float x, float y) {
+Decorator scroll_position_relative(float x,
+                                   float y,
+                                   std::shared_ptr<ConversationScrollAnchor> scroll_anchor = {}) {
     class Impl : public ftxui::Node {
     public:
-        Impl(Element child, float x, float y)
-            : ftxui::Node(ftxui::unpack(std::move(child))), x_(x), y_(y) {}
+        Impl(Element child,
+             float x,
+             float y,
+             std::shared_ptr<ConversationScrollAnchor> scroll_anchor)
+            : ftxui::Node(ftxui::unpack(std::move(child))),
+              x_(x),
+              y_(y),
+              scroll_anchor_(scroll_anchor) {}
 
         void ComputeRequirement() override {
             children_[0]->ComputeRequirement();
             requirement_ = children_[0]->requirement();
             requirement_.focused.enabled = false;
             requirement_.focused.box.x_min = int(float(requirement_.min_x) * x_);
-            requirement_.focused.box.y_min = int(float(requirement_.min_y) * y_);
+            if (scroll_anchor_ != nullptr) {
+                const int content_height = std::max(requirement_.min_y, 1);
+                scroll_anchor_->content_height = content_height;
+                if (scroll_anchor_->follow_bottom) {
+                    scroll_anchor_->focus_y = content_height;
+                } else {
+                    scroll_anchor_->focus_y = std::clamp(
+                        scroll_anchor_->focus_y,
+                        0,
+                        content_height);
+                }
+                requirement_.focused.box.y_min = scroll_anchor_->focus_y;
+            } else {
+                requirement_.focused.box.y_min = int(float(requirement_.min_y) * y_);
+            }
             requirement_.focused.box.x_max = int(float(requirement_.min_x) * x_);
-            requirement_.focused.box.y_max = int(float(requirement_.min_y) * y_);
+            requirement_.focused.box.y_max = requirement_.focused.box.y_min;
         }
 
         void SetBox(ftxui::Box box) override {
@@ -1191,10 +1214,11 @@ Decorator scroll_position_relative(float x, float y) {
     private:
         const float x_;
         const float y_;
+        const std::shared_ptr<ConversationScrollAnchor> scroll_anchor_;
     };
 
-    return [x, y](Element child) {
-        return std::make_shared<Impl>(std::move(child), x, y);
+    return [x, y, scroll_anchor](Element child) {
+        return std::make_shared<Impl>(std::move(child), x, y, scroll_anchor);
     };
 }
 
@@ -1237,7 +1261,7 @@ Element render_history_panel(const std::vector<UiMessage>& messages,
     }
 
     return vbox(std::move(msg_elements))
-        | scroll_position_relative(0, options.scroll_pos)
+        | scroll_position_relative(0, options.scroll_pos, options.scroll_anchor)
         | vscroll_indicator
         | yframe
         | yflex;
