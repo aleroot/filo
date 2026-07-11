@@ -1192,13 +1192,16 @@ Decorator scroll_position_relative(float x,
                 scroll_anchor_->content_height = content_height;
                 if (scroll_anchor_->follow_bottom) {
                     scroll_anchor_->focus_y = content_height;
-                } else {
-                    scroll_anchor_->focus_y = std::clamp(
-                        scroll_anchor_->focus_y,
-                        0,
-                        content_height);
                 }
-                requirement_.focused.box.y_min = scroll_anchor_->focus_y;
+                // FTXUI's flexbox deliberately reports provisional heights
+                // during its iterative layout pass. Never write a clamp based
+                // on one of those transient heights back into a held persistent
+                // anchor: a later iteration can restore the full height, but
+                // the lost focus position cannot be recovered.
+                requirement_.focused.box.y_min = std::clamp(
+                    scroll_anchor_->focus_y,
+                    0,
+                    content_height);
             } else {
                 requirement_.focused.box.y_min = int(float(requirement_.min_y) * y_);
             }
@@ -1222,9 +1225,19 @@ Decorator scroll_position_relative(float x,
     };
 }
 
-Element render_history_panel(const std::vector<UiMessage>& messages,
-                             std::size_t tick,
-                             ConversationRenderOptions options) {
+Element apply_scroll_viewport(Element content,
+                              float scroll_pos,
+                              std::shared_ptr<ConversationScrollAnchor> scroll_anchor) {
+    return std::move(content)
+        | scroll_position_relative(0, scroll_pos, scroll_anchor)
+        | vscroll_indicator
+        | yframe
+        | yflex;
+}
+
+Element render_history_content(const std::vector<UiMessage>& messages,
+                               std::size_t tick,
+                               ConversationRenderOptions options) {
     std::vector<Element> msg_elements;
     msg_elements.reserve(messages.size() * 2);
 
@@ -1260,11 +1273,16 @@ Element render_history_panel(const std::vector<UiMessage>& messages,
         }
     }
 
-    return vbox(std::move(msg_elements))
-        | scroll_position_relative(0, options.scroll_pos, options.scroll_anchor)
-        | vscroll_indicator
-        | yframe
-        | yflex;
+    return vbox(std::move(msg_elements));
+}
+
+Element render_history_panel(const std::vector<UiMessage>& messages,
+                             std::size_t tick,
+                             ConversationRenderOptions options) {
+    return apply_scroll_viewport(
+        render_history_content(messages, tick, options),
+        options.scroll_pos,
+        options.scroll_anchor);
 }
 
 // ============================================================================

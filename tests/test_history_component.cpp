@@ -4,6 +4,7 @@
 #include "tui/HistoryComponent.hpp"
 #include "tui/Conversation.hpp"
 
+#include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
 
 #include <algorithm>
@@ -72,6 +73,30 @@ int rendered_row_containing(std::string_view text, std::string_view marker) {
     }
     return static_cast<int>(std::count(text.begin(), text.begin() + pos, '\n'));
 }
+
+// FTXUI flexbox nodes recompute their required height several times per frame.
+// This small node models a wrapped layout whose provisional height shrinks and
+// then returns to its final value within the same Render() call.
+class IterativeHeightNode final : public ftxui::Node {
+public:
+    void ComputeRequirement() override {
+        static constexpr int kHeights[] = {100, 60, 100};
+        requirement_ = ftxui::Requirement{};
+        requirement_.min_x = 20;
+        requirement_.min_y = kHeights[std::min(compute_index_, 2)];
+        ++compute_index_;
+    }
+
+    void Check(Status* status) override {
+        if (status->iteration == 0) {
+            compute_index_ = 0;
+        }
+        status->need_iteration |= status->iteration < 3;
+    }
+
+private:
+    int compute_index_ = 0;
+};
 }
 
 TEST_CASE("HistoryComponent basic scrolling", "[tui][history_component]") {
@@ -373,4 +398,116 @@ TEST_CASE("HistoryComponent toggles system disclosure by mouse click",
     const auto expanded = render_history_text(history);
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("Previous segment: seg-a"));
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("New segment: seg-b"));
+}
+
+// ============================================================================
+// Render-cache regression tests
+// ============================================================================
+// The transcript Element tree is cached and reused across frames while only the
+// scroll offset changes. These tests pin that behaviour down: scrolling must
+// still move the viewport even though the underlying messages never change, and
+// toggling a disclosure must rebuild the cached tree.
+
+TEST_CASE("HistoryComponent wheel scroll moves viewport over cached content",
+          "[tui][history_component][render_cache]") {
+    std::atomic<size_t> tick{0};
+
+    // A conversation tall enough that a short viewport cannot show both ends.
+    std::vector<tui::UiMessage> messages;
+    messages.push_back(tui::make_assistant_message("TOP_MARKER_LINE", "", false));
+    for (int i = 0; i < 24; ++i) {
+        messages.push_back(tui::make_assistant_message(
+            "filler paragraph number " + std::to_string(i), "", false));
+    }
+    messages.push_back(tui::make_assistant_message("BOTTOM_MARKER_LINE", "", false));
+
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    constexpr int kWidth = 80;
+    constexpr int kHeight = 6;
+
+    // First render primes the layout + cache and pins to the bottom.
+    const auto at_bottom = render_history_viewport(history, kWidth, kHeight);
+    REQUIRE_THAT(at_bottom, Catch::Matchers::ContainsSubstring("BOTTOM_MARKER_LINE"));
+    REQUIRE_THAT(at_bottom, !Catch::Matchers::ContainsSubstring("TOP_MARKER_LINE"));
+
+    // Wheel-scroll up several times. The messages vector is untouched, so the
+    // *only* thing that can move the viewport is re-applying the scroll anchor
+    // over the cached content tree.
+    ftxui::Mouse wheel;
+    wheel.motion = ftxui::Mouse::Pressed;
+    wheel.button = ftxui::Mouse::WheelUp;
+    for (int i = 0; i < 40; ++i) {
+        REQUIRE(history.HandleWheel(ftxui::Event::Mouse("", wheel)));
+    }
+
+    const auto scrolled_up = render_history_viewport(history, kWidth, kHeight);
+    REQUIRE_THAT(scrolled_up, Catch::Matchers::ContainsSubstring("TOP_MARKER_LINE"));
+    REQUIRE_FALSE(history.IsAutoScrollFollowing());
+    REQUIRE(history.ScrollPosition() < 1.0f);
+}
+
+TEST_CASE("scroll anchor survives provisional FTXUI layout height",
+          "[tui][history_component][render_cache]") {
+    auto content = std::make_shared<IterativeHeightNode>();
+    auto anchor = std::make_shared<tui::ConversationScrollAnchor>();
+    anchor->content_height = 100;
+    anchor->focus_y = 90;
+    anchor->follow_bottom = false;
+
+    auto panel = tui::apply_scroll_viewport(content, 0.9f, anchor);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(10));
+    ftxui::Render(screen, panel);
+
+    REQUIRE(anchor->content_height == 100);
+    REQUIRE(anchor->focus_y == 90);
+}
+
+TEST_CASE("HistoryComponent render cache is stable across identical frames",
+          "[tui][history_component][render_cache]") {
+    std::atomic<size_t> tick{0};
+    tui::HistoryComponent history(
+        [&]() { return mock_messages(); },
+        tick,
+        mock_options);
+
+    // Repeatedly rendering the same content with no state change must produce
+    // identical output — i.e. the cache must not drift or corrupt layout.
+    const auto first  = render_history_text(history);
+    const auto second = render_history_text(history);
+    const auto third  = render_history_text(history);
+    REQUIRE(first == second);
+    REQUIRE(second == third);
+}
+
+TEST_CASE("HistoryComponent invalidates render cache when tool approval changes",
+          "[tui][history_component][render_cache]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    auto assistant = tui::make_assistant_message("", "", true);
+    assistant.tools.push_back(tui::make_tool_activity(
+        "tool-1", "read_file", R"({"path":"README.md"})", "Read README.md"));
+    messages.push_back(std::move(assistant));
+
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    const auto before_approval = render_history_text(history);
+    REQUIRE_THAT(before_approval,
+                 !Catch::Matchers::ContainsSubstring("auto-approved"));
+
+    // YOLO approval changes a pending tool in place. Pending tools do not run
+    // the animation ticker, so this field must invalidate the content cache on
+    // its own when MainApp wakes the UI.
+    messages.front().tools.front().auto_approved = true;
+
+    const auto after_approval = render_history_text(history);
+    REQUIRE_THAT(after_approval,
+                 Catch::Matchers::ContainsSubstring("auto-approved"));
 }

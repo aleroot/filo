@@ -308,7 +308,25 @@ bool conversation_uses_animation(const std::vector<UiMessage>& messages, bool sh
 // Rendering Functions
 // ============================================================================
 
-// Main render function
+// Wrap already-built transcript content in the scrollable viewport: a focus
+// anchor that pins a given content line, a scrollbar indicator, and a vertical
+// frame. Cheap to re-apply every frame — pair it with a cached content tree so
+// that scrolling never rebuilds the transcript.
+ftxui::Element apply_scroll_viewport(
+    ftxui::Element content,
+    float scroll_pos,
+    std::shared_ptr<ConversationScrollAnchor> scroll_anchor = {});
+
+// Build the transcript Element tree (every message card). This is the expensive
+// step — markdown parsing, tool cards, borders — and is independent of both the
+// terminal width (FTXUI wraps at layout time) and the current scroll offset.
+// Callers that scroll the same content frame-to-frame should cache its result.
+ftxui::Element render_history_content(const std::vector<UiMessage>& messages,
+                                      std::size_t tick,
+                                      ConversationRenderOptions options = {});
+
+// Build the full panel: cached-friendly content plus the scroll viewport.
+// Kept for direct callers and tests; internally delegates to render_history_content.
 ftxui::Element render_history_panel(const std::vector<UiMessage>& messages,
                                     std::size_t tick,
                                     ConversationRenderOptions options = {});

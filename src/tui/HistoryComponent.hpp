@@ -55,8 +55,26 @@ private:
     void ScrollByLines(int lines);
 
     bool OnMouseEvent(ftxui::Event event);
+
+    // Folding hash of every signal that can change the *built* transcript tree:
+    // content, per-message disclosure state, render-option flags, and the
+    // animation tick (only folded in while something is actually animating).
+    std::size_t compute_render_cache_key(std::size_t content_fingerprint,
+                                         const ConversationRenderOptions& options,
+                                         std::size_t tick_or_zero) const;
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
     static std::size_t history_content_fingerprint(const std::vector<UiMessage>& messages);
+
+    // ── Render cache ────────────────────────────────────────────────────
+    // The transcript Element tree is expensive to build (markdown parsing,
+    // tool cards, borders). It only depends on content/options, NOT on the
+    // scroll offset or terminal width, so we reuse it across frames while the
+    // user scrolls or reads. This is what keeps scrolling responsive — even a
+    // huge conversation costs one full rebuild per content change instead of
+    // per frame.
+    ftxui::Element cached_content_;
+    std::size_t    cache_key_  = 0;
+    bool           has_cache_  = false;
 
     std::function<std::vector<UiMessage>()> get_messages_;
     const std::atomic<size_t>& animation_tick_;
