@@ -19,23 +19,40 @@ HistoryComponent::HistoryComponent(
     std::function<std::vector<UiMessage>()> get_messages,
     const std::atomic<size_t>& animation_tick,
     std::function<ConversationRenderOptions()> get_options)
+    : HistoryComponent(
+          [get_messages = std::move(get_messages)]() {
+              return std::make_shared<const std::vector<UiMessage>>(get_messages());
+          },
+          animation_tick,
+          std::move(get_options)) {}
+
+HistoryComponent::HistoryComponent(
+    std::function<MessageSnapshot()> get_messages,
+    const std::atomic<size_t>& animation_tick,
+    std::function<ConversationRenderOptions()> get_options)
     : get_messages_(std::move(get_messages)),
       animation_tick_(animation_tick),
       get_options_(std::move(get_options)) {}
 
 ftxui::Element HistoryComponent::OnRender() {
-    const auto messages = get_messages_();
+    const auto snapshot = get_messages_();
+    static const auto empty = std::make_shared<const std::vector<UiMessage>>();
+    const auto& messages = *(snapshot ? snapshot : empty);
     auto options = get_options_();
     options.system_disclosure_expanded = &disclosure_expanded_;
 
     // ── Intent-aware auto-scroll ─────────────────────────────────────────────
     // This state machine is cheap (bookkeeping only) and must run every frame,
     // independent of whether the content tree is rebuilt or served from cache.
-    const std::size_t content_fingerprint = history_content_fingerprint(messages);
+    const bool snapshot_changed = snapshot.get() != last_message_snapshot_.get();
+    const std::size_t content_fingerprint = snapshot_changed || !has_content_snapshot_
+        ? history_content_fingerprint(messages)
+        : last_content_fingerprint_;
     const bool content_changed = has_content_snapshot_
         && content_fingerprint != last_content_fingerprint_;
     last_content_fingerprint_ = content_fingerprint;
     has_content_snapshot_ = true;
+    last_message_snapshot_ = snapshot;
 
     const std::size_t prev_message_count = last_message_count_;
     last_message_count_ = messages.size();
@@ -68,12 +85,12 @@ ftxui::Element HistoryComponent::OnRender() {
     // re-applying only the cheap scroll decorator below.
     //
     // The cache key folds together every signal that can alter the built tree.
-    // The animation tick is included *only* while something is animating, so an
-    // idle reading/scrolling session never invalidates the cache.
+    // Animated fields are reactive leaf nodes. The transcript tree therefore
+    // remains cached across ticks instead of reparsing Markdown and rebuilding
+    // every tool card for a three-character pulse or one-cell spinner.
     const std::size_t tick = animation_tick_.load(std::memory_order_relaxed);
-    const bool animating = conversation_uses_animation(messages, options.show_spinner);
-    const std::size_t key = compute_render_cache_key(
-        content_fingerprint, options, animating ? tick : 0);
+    options.animation_tick = &animation_tick_;
+    const std::size_t key = compute_render_cache_key(content_fingerprint, options);
 
     if (!has_cache_ || key != cache_key_) {
         cache_key_ = key;
@@ -84,6 +101,7 @@ ftxui::Element HistoryComponent::OnRender() {
         disclosure_hitboxes_.clear();
         options.system_disclosure_hitboxes = &disclosure_hitboxes_;
         cached_content_ = render_history_content(messages, tick, options);
+        ++cache_build_count_;
     }
     // On a cache hit we intentionally leave disclosure_hitboxes_ alone: the
     // cached reflect() nodes still reference its entries and refresh their
@@ -217,6 +235,10 @@ float HistoryComponent::ScrollPosition() const noexcept {
         / static_cast<float>(std::max(scroll_anchor_->content_height, 1));
 }
 
+std::size_t HistoryComponent::CacheBuildCount() const noexcept {
+    return cache_build_count_;
+}
+
 void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
     scroll_intent_ = intent;
     scroll_anchor_->follow_bottom = intent == ScrollIntent::FollowBottom;
@@ -292,8 +314,7 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
 
 std::size_t HistoryComponent::compute_render_cache_key(
     std::size_t content_fingerprint,
-    const ConversationRenderOptions& options,
-    std::size_t tick_or_zero) const {
+    const ConversationRenderOptions& options) const {
     std::size_t seed = content_fingerprint;
     seed = combine_hash(seed, options.show_timestamps ? 1 : 0);
     seed = combine_hash(seed, options.show_spinner ? 1 : 0);
@@ -305,8 +326,6 @@ std::size_t HistoryComponent::compute_render_cache_key(
         seed = combine_hash(seed, std::hash<std::string>{}(id));
         seed = combine_hash(seed, expanded ? 1 : 0);
     }
-    // Animation frame, but only folded in by the caller while animating.
-    seed = combine_hash(seed, tick_or_zero);
     return seed;
 }
 

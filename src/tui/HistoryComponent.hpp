@@ -16,8 +16,14 @@ namespace tui {
 
 class HistoryComponent : public ftxui::ComponentBase {
 public:
+    using MessageSnapshot = std::shared_ptr<const std::vector<UiMessage>>;
+
     HistoryComponent(
         std::function<std::vector<UiMessage>()> get_messages,
+        const std::atomic<size_t>& animation_tick,
+        std::function<ConversationRenderOptions()> get_options);
+    HistoryComponent(
+        std::function<MessageSnapshot()> get_messages,
         const std::atomic<size_t>& animation_tick,
         std::function<ConversationRenderOptions()> get_options);
 
@@ -42,6 +48,7 @@ public:
     [[nodiscard]] bool  IsAutoScrollFollowing()  const noexcept;
     [[nodiscard]] bool  HasNewContentIndicator() const noexcept;
     [[nodiscard]] float ScrollPosition()         const noexcept;
+    [[nodiscard]] std::size_t CacheBuildCount() const noexcept;
 
 private:
     // ── Scroll-intent state machine ──────────────────────────────────────
@@ -56,12 +63,11 @@ private:
 
     bool OnMouseEvent(ftxui::Event event);
 
-    // Folding hash of every signal that can change the *built* transcript tree:
-    // content, per-message disclosure state, render-option flags, and the
-    // animation tick (only folded in while something is actually animating).
+    // Folding hash of every signal that can change the built transcript tree.
+    // Animation state is deliberately excluded: reactive leaf nodes read the
+    // live tick without invalidating Markdown and tool-card structure.
     std::size_t compute_render_cache_key(std::size_t content_fingerprint,
-                                         const ConversationRenderOptions& options,
-                                         std::size_t tick_or_zero) const;
+                                         const ConversationRenderOptions& options) const;
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
     static std::size_t history_content_fingerprint(const std::vector<UiMessage>& messages);
 
@@ -75,8 +81,9 @@ private:
     ftxui::Element cached_content_;
     std::size_t    cache_key_  = 0;
     bool           has_cache_  = false;
+    std::size_t    cache_build_count_ = 0;
 
-    std::function<std::vector<UiMessage>()> get_messages_;
+    std::function<MessageSnapshot()> get_messages_;
     const std::atomic<size_t>& animation_tick_;
     std::function<ConversationRenderOptions()> get_options_;
 
@@ -85,6 +92,7 @@ private:
     size_t         last_message_count_      = 0;
     std::size_t    last_content_fingerprint_ = 0;
     bool           has_content_snapshot_     = false;
+    MessageSnapshot last_message_snapshot_;
     std::shared_ptr<ConversationScrollAnchor> scroll_anchor_ =
         std::make_shared<ConversationScrollAnchor>();
     std::unordered_map<std::string, bool>        disclosure_expanded_;

@@ -1587,7 +1587,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             return cmd.name == "/rewind";
         });
         REQUIRE(rewind_it != commands.end());
-        REQUIRE(std::ranges::find(rewind_it->aliases, "/checkpoint") != rewind_it->aliases.end());
+        REQUIRE(std::ranges::find(rewind_it->aliases, std::string("/checkpoint"))
+                != rewind_it->aliases.end());
         REQUIRE_FALSE(rewind_it->accepts_arguments);
 
         const auto init_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {

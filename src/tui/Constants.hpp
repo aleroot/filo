@@ -1,6 +1,9 @@
 #pragma once
 
+#include <chrono>
+#include <compare>
 #include <cstddef>
+#include <optional>
 
 namespace tui {
 
@@ -59,5 +62,35 @@ inline constexpr int kCommandPickerMaxDisplayRows = 6;
 /// thinking-pulse animations in the conversation history).
 /// 150 ms → thinking dots cycle ≈ 900 ms; status spinners cycle smoothly without layout jitter.
 inline constexpr int kAnimationIntervalMs = 150;
+
+struct AnimationCadence {
+    std::chrono::milliseconds period;
+    bool advance_frame = false;
+    auto operator<=>(const AnimationCadence&) const = default;
+};
+
+// Select the cheapest cadence that preserves every visible behavior.
+// Spinner frames run at the established 150 ms rhythm. When spinners are
+// hidden, assistant/review elapsed labels need only a one-second refresh.
+[[nodiscard]] constexpr std::optional<AnimationCadence> select_animation_cadence(
+    bool show_spinner,
+    bool assistant_active,
+    bool review_active,
+    bool conversation_animation_active) noexcept {
+    if (show_spinner
+        && (assistant_active || review_active || conversation_animation_active)) {
+        return AnimationCadence{
+            .period = std::chrono::milliseconds(kAnimationIntervalMs),
+            .advance_frame = true,
+        };
+    }
+    if (assistant_active || review_active) {
+        return AnimationCadence{
+            .period = std::chrono::seconds(1),
+            .advance_frame = false,
+        };
+    }
+    return std::nullopt;
+}
 
 } // namespace tui

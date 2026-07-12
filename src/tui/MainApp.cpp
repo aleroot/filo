@@ -123,47 +123,6 @@ constexpr std::string_view kStreamChunkResumeMarker = "💡";
 constexpr int kReviewActivitySpinnerCharset = 12; // Compact circle spinner (single-cell frames).
 constexpr std::size_t kMaxStderrPanelLines = 20;
 
-struct PromptActivitySnapshot {
-    std::string message_id;
-    std::string label;
-};
-
-std::optional<PromptActivitySnapshot> active_prompt_activity(
-    const std::vector<UiMessage>& messages) {
-    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        const auto& message = *it;
-        if (message.type != MessageType::Assistant || !message.pending) {
-            continue;
-        }
-
-        bool has_executing_tools = false;
-        bool has_completed_tools = false;
-        for (const auto& tool : message.tools) {
-            if (tool.status == ToolActivity::Status::Executing) {
-                has_executing_tools = true;
-            } else if (tool.status == ToolActivity::Status::Succeeded
-                       || tool.status == ToolActivity::Status::Failed) {
-                has_completed_tools = true;
-            }
-        }
-
-        const bool show_thinking = message.thinking
-            || (message.pending && has_completed_tools && !has_executing_tools);
-        if (!show_thinking) {
-            return std::nullopt;
-        }
-
-        const bool show_analyzing = has_completed_tools
-            && !has_executing_tools
-            && !message.thinking;
-        return PromptActivitySnapshot{
-            .message_id = message.id,
-            .label = show_analyzing ? "Analyzing..." : "Thinking...",
-        };
-    }
-    return std::nullopt;
-}
-
 std::string join_context_source_labels(const std::vector<std::string>& source_labels) {
     std::string joined;
     for (const auto& label : source_labels) {
@@ -804,7 +763,8 @@ RunResult run(RunOptions opts) {
     bool ui_show_model_info = visibility_setting_enabled(config.ui_model_info, true);
     bool ui_show_context_usage = visibility_setting_enabled(config.ui_context_usage, true);
     bool ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
-    bool ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
+    std::atomic_bool ui_show_spinner{
+        visibility_setting_enabled(config.ui_spinner, true)};
     bool tool_output_expanded = false;
 
     // ── Tool registration ───────────────────────────────────────────────────
@@ -893,6 +853,7 @@ RunResult run(RunOptions opts) {
     auto direct_shell_state = std::make_shared<DirectShellState>();
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> stream_chunk_last_at;
     std::atomic_bool assistant_turn_active{false};
+    std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAgentTurn {
         std::string text;
         core::agent::Agent::TurnCallbacks callbacks;
@@ -930,6 +891,10 @@ RunResult run(RunOptions opts) {
         selection_clipboard_copier.enqueue(screen.GetSelection());
     });
     std::atomic_bool ui_accepting_events{true};
+    // Every substantive UI mutation wakes the event loop and advances this
+    // revision. Animation-only frames bypass wake_ui(), allowing the history
+    // component to retain one immutable message snapshot across all ticks.
+    std::atomic<std::size_t> ui_state_revision{1};
     std::mutex ui_event_post_mutex;
     auto wake_ui = [&]() {
         if (!ui_accepting_events.load(std::memory_order_acquire)) {
@@ -937,6 +902,7 @@ RunResult run(RunOptions opts) {
         }
         std::lock_guard lock(ui_event_post_mutex);
         if (ui_accepting_events.load(std::memory_order_relaxed)) {
+            ui_state_revision.fetch_add(1, std::memory_order_release);
             screen.PostEvent(Event::Custom);
         }
     };
@@ -1408,6 +1374,7 @@ RunResult run(RunOptions opts) {
         core::budget::BudgetTracker::get_instance().set_session_id(session_id);
         agent->set_session_id(session_id);
         compute_session_path();
+        wake_ui();
     };
 
     auto append_history = [&](const std::string& str) {
@@ -1472,15 +1439,24 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
-    auto has_active_animation = [&]() -> bool {
-        if (assistant_turn_active.load(std::memory_order_relaxed)) {
-            return true;
-        }
+    auto animation_cadence = [&]() -> std::optional<AnimationCadence> {
+        const bool assistant_active =
+            assistant_turn_active.load(std::memory_order_relaxed);
         std::lock_guard lock(ui_mutex);
-        if (review_activity_state.active) {
-            return true;
+        const bool review_active = review_activity_state.active;
+        bool conversation_animation_active =
+            direct_shell_animation_count.load(std::memory_order_relaxed) > 0;
+        if (!assistant_active && !review_active && !conversation_animation_active) {
+            // Defensive fallback for restored or externally-updated activity
+            // cards that are not owned by the normal assistant/shell counters.
+            conversation_animation_active =
+                conversation_uses_animation(ui_messages, true);
         }
-        return conversation_uses_animation(ui_messages, ui_show_spinner);
+        return select_animation_cadence(
+            ui_show_spinner.load(std::memory_order_relaxed),
+            assistant_active,
+            review_active,
+            conversation_animation_active);
     };
 
     auto refresh_conversation_search_locked = [&]() {
@@ -4604,6 +4580,7 @@ RunResult run(RunOptions opts) {
         reset_history_view();
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
+        wake_ui();
 
         auto effective_callbacks = make_turn_callbacks(assistant_message_id);
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
@@ -4751,6 +4728,7 @@ RunResult run(RunOptions opts) {
             message_id = ui_messages.back().id;
             direct_shell_session_id = session_id;
         }
+        direct_shell_animation_count.fetch_add(1, std::memory_order_release);
         reset_history_view();
         animation_cv.notify_one();
         wake_ui();
@@ -4762,6 +4740,7 @@ RunResult run(RunOptions opts) {
                      message_id = std::move(message_id),
                      direct_shell_state,
                      agent,
+                     &direct_shell_animation_count,
                      &save_session_snapshot,
                      &update_ui_message]() mutable {
             core::tools::shell::IShellExecutor::Result result;
@@ -4785,6 +4764,7 @@ RunResult run(RunOptions opts) {
             const std::string shell_history_content =
                 make_direct_shell_history_content(command, result.output);
 
+            direct_shell_animation_count.fetch_sub(1, std::memory_order_acq_rel);
             update_ui_message(message_id, [&](UiMessage& message) {
                 if (message.type != MessageType::ShellCommand) {
                     return;
@@ -5077,38 +5057,31 @@ RunResult run(RunOptions opts) {
     };
 
     auto input_component = PromptInput(&input_text, "Ask anything", input_option);
+    std::size_t history_snapshot_revision = 0;
+    auto history_snapshot = std::make_shared<const std::vector<UiMessage>>();
     auto history_component = Make<HistoryComponent>(
-        [&]() {
-            std::vector<UiMessage> messages;
-            {
+        std::function<HistoryComponent::MessageSnapshot()>{[&]() {
+            const auto revision = ui_state_revision.load(std::memory_order_acquire);
+            if (history_snapshot_revision != revision) {
                 std::lock_guard lock(ui_mutex);
-                messages = ui_messages;
+                history_snapshot = std::make_shared<const std::vector<UiMessage>>(ui_messages);
+                history_snapshot_revision = revision;
             }
-
-            if (const auto activity = active_prompt_activity(messages);
-                activity.has_value()) {
-                const auto elapsed = turn_activity_timers
-                    .elapsed(activity->message_id)
-                    .value_or(std::chrono::seconds::zero());
-                for (auto& message : messages) {
-                    if (message.id == activity->message_id) {
-                        message.activity_elapsed = format_elapsed_compact(elapsed);
-                        break;
-                    }
-                }
-            }
-
-            return messages;
-        },
+            return history_snapshot;
+        }},
         std::cref(animation_tick),
         [&]() {
             return ConversationRenderOptions{
                 .show_timestamps = ui_show_timestamps,
-                .show_spinner    = ui_show_spinner,
+                .show_spinner = ui_show_spinner.load(std::memory_order_relaxed),
                 .expand_system_details = tool_output_expanded,
                 .expand_tool_results = tool_output_expanded,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
+                .activity_elapsed = [&turn_activity_timers](std::string_view message_id) {
+                    const auto elapsed = turn_activity_timers.elapsed(message_id);
+                    return elapsed.has_value() ? format_elapsed_compact(*elapsed) : std::string{};
+                },
             };
         }
     );
@@ -6731,7 +6704,8 @@ RunResult run(RunOptions opts) {
                 ? std::string("current changes")
                 : compact_single_line(review_activity_hint, 44);
             const std::string label = std::format(" reviewing {} ({})", hint, format_elapsed_compact(elapsed));
-            const std::size_t spinner_frame = ui_show_spinner ? (tick / 2) : 0;
+            const std::size_t spinner_frame =
+                ui_show_spinner.load(std::memory_order_relaxed) ? (tick / 2) : 0;
             Element spinner_el = spinner(kReviewActivitySpinnerCharset, spinner_frame)
                                | color(ColorYellowBright)
                                | ftxui::bold
@@ -6799,29 +6773,47 @@ RunResult run(RunOptions opts) {
         ) | color(ColorYellowBright);
     });
 
-    std::atomic<bool> animation_running = true;
-    std::thread animation_thread([&]() {
-        while (animation_running.load(std::memory_order_relaxed)) {
-            {
-                std::unique_lock lock(animation_mutex);
-                animation_cv.wait(lock, [&]() {
-                    return !animation_running.load(std::memory_order_relaxed)
-                        || has_active_animation();
-                });
-            }
-            if (!animation_running.load(std::memory_order_relaxed)) {
+    std::jthread animation_thread([&](std::stop_token stop_token) {
+        while (!stop_token.stop_requested()) {
+            std::unique_lock lock(animation_mutex);
+            animation_cv.wait(lock, [&]() {
+                return stop_token.stop_requested()
+                    || animation_cadence().has_value();
+            });
+            if (stop_token.stop_requested()) {
                 break;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(kAnimationIntervalMs));
-            if (!has_active_animation()) {
+
+            const auto cadence = animation_cadence();
+            if (!cadence.has_value()) {
                 continue;
             }
-            animation_tick.fetch_add(1, std::memory_order_relaxed);
-            wake_ui();
+            const bool state_changed = animation_cv.wait_for(
+                lock,
+                cadence->period,
+                [&]() {
+                    return stop_token.stop_requested()
+                        || animation_cadence() != cadence;
+                });
+            if (state_changed) {
+                continue;
+            }
+            lock.unlock();
+
+            if (cadence->advance_frame) {
+                animation_tick.fetch_add(1, std::memory_order_relaxed);
+            }
+            // No application event changed; request a render frame directly.
+            // This avoids routing animation-only wakes through the event queue.
+            screen.RequestAnimationFrame();
         }
     });
 
     screen.Loop(renderer);
+
+    animation_thread.request_stop();
+    animation_cv.notify_one();
+    animation_thread.join();
 
     ui_accepting_events.store(false, std::memory_order_release);
     {
@@ -6836,11 +6828,6 @@ RunResult run(RunOptions opts) {
     agent->set_loop_break_fn({});
     agent->set_efficiency_decision_fn({});
 
-    animation_running.store(false, std::memory_order_relaxed);
-    animation_cv.notify_one();
-    if (animation_thread.joinable()) {
-        animation_thread.join();
-    }
     if (mention_index_thread.joinable()) {
         mention_index_thread.join();
     }

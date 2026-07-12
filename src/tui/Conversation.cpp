@@ -9,6 +9,10 @@
 #include "core/utils/StringUtils.hpp"
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/dom/node.hpp>
+#include <ftxui/dom/selection.hpp>
+#include <ftxui/screen/screen.hpp>
+#include <ftxui/screen/string.hpp>
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -22,6 +26,122 @@
 using namespace ftxui;
 
 namespace tui {
+namespace {
+
+// A small reactive leaf for fixed-size animation fields and elapsed labels.
+// The surrounding transcript DOM remains immutable and cacheable; only this
+// leaf reads live state during FTXUI's normal layout/render pass.
+//
+// Selection handling mirrors ftxui::text(): FTXUI only calls Select() while a
+// selection is active, so the per-frame state is reset in ComputeRequirement()
+// (which always runs) to avoid leaking a stale highlight into the next frame.
+class LiveText final : public ftxui::Node {
+public:
+    explicit LiveText(std::function<std::string()> value)
+        : value_(std::move(value)) {}
+
+    void ComputeRequirement() override {
+        refresh();
+        sel_start_ = -1;  // Reset each frame; Select() repopulates when active.
+        requirement_ = {};
+        requirement_.min_x = static_cast<int>(glyphs_.size());
+        requirement_.min_y = 1;
+    }
+
+    void Select(ftxui::Selection& selection) override {
+        if (ftxui::Box::Intersection(selection.GetBox(), box_).IsEmpty()) {
+            return;
+        }
+        // LiveText is always a single line, so the selection on this node is a
+        // single contiguous horizontal range. Saturate it against our row and
+        // record the exact cells so Render() highlights and the clipboard copy
+        // stay per-cell, identical to ftxui::text().
+        const ftxui::Box row_box{box_.x_min, box_.x_max, box_.y_min, box_.y_min};
+        if (ftxui::Box::Intersection(selection.GetBox(), row_box).IsEmpty()) {
+            return;
+        }
+        const ftxui::Selection row_sel = selection.SaturateHorizontal(row_box);
+        sel_start_ = row_sel.GetBox().x_min;
+        sel_end_ = row_sel.GetBox().x_max;
+
+        std::string part;
+        int x = box_.x_min;
+        for (const auto& glyph : glyphs_) {
+            if (x > box_.x_max) {
+                break;
+            }
+            if (sel_start_ <= x && x <= sel_end_) {
+                part += glyph;
+            }
+            ++x;
+        }
+        selection.AddPart(part, box_.y_min, sel_start_, sel_end_);
+    }
+
+    void Render(ftxui::Screen& screen) override {
+        // Use the value captured during ComputeRequirement() so glyph count
+        // and assigned geometry stay coherent for the entire FTXUI frame.
+        int x = box_.x_min;
+        for (const auto& glyph : glyphs_) {
+            if (x > box_.x_max) {
+                break;
+            }
+            auto& cell = screen.CellAt(x, box_.y_min);
+            cell.character = glyph;
+            if (sel_start_ != -1 && x >= sel_start_ && x <= sel_end_) {
+                screen.GetSelectionStyle()(cell);
+            }
+            ++x;
+        }
+    }
+
+private:
+    void refresh() {
+        std::string next = value_();
+        if (next == text_) {
+            return;
+        }
+        text_ = std::move(next);
+        glyphs_ = ftxui::Utf8ToGlyphs(text_);
+    }
+
+    std::function<std::string()> value_;
+    std::string text_;
+    std::vector<std::string> glyphs_;
+    int sel_start_ = -1;
+    int sel_end_ = -1;
+};
+
+ftxui::Element live_text(std::function<std::string()> value) {
+    return std::make_shared<LiveText>(std::move(value));
+}
+
+ftxui::Element pulse_text(std::string prefix,
+                          std::size_t fallback_tick,
+                          const ConversationRenderOptions& options) {
+    const auto* tick = options.animation_tick;
+    return live_text([
+        prefix = std::move(prefix), tick, fallback_tick
+    ]() {
+        const auto frame = tick != nullptr
+            ? tick->load(std::memory_order_relaxed)
+            : fallback_tick;
+        return prefix + std::string(thinking_pulse_frame(frame));
+    });
+}
+
+ftxui::Element status_spinner_text(std::size_t fallback_tick,
+                                   const ConversationRenderOptions& options) {
+    const auto* tick = options.animation_tick;
+    return live_text([tick, fallback_tick]() {
+        const auto frame = tick != nullptr
+            ? tick->load(std::memory_order_relaxed)
+            : fallback_tick;
+        return std::string(tool_status_spinner(frame));
+    });
+}
+
+} // namespace
 
 bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
@@ -260,16 +380,16 @@ Element render_status_text(std::string_view text_content, Color text_color, std:
 
 Element render_tool_header(const ToolActivity& tool, 
                            std::size_t tick,
-                           bool show_spinner,
+                           const ConversationRenderOptions& options,
                            int /*terminal_width*/,
                            Color /*border_color*/,
                            bool /*is_first*/) {
     const Color status_color = tui::tool_status_color(tool.status);
-    std::string icon = std::string(tool.status == ToolActivity::Status::Executing && show_spinner
-                                   ? tui::tool_status_spinner(tick)
-                                   : tui::tool_status_icon(tool.status));
-    
-    Element status_el = ftxui::text(std::format(" {} ", icon)) | ftxui::color(status_color) | ftxui::bold;
+    Element icon_el = tool.status == ToolActivity::Status::Executing && options.show_spinner
+        ? status_spinner_text(tick, options)
+        : ftxui::text(std::string(tui::tool_status_icon(tool.status)));
+    Element status_el = hbox({ftxui::text(" "), std::move(icon_el), ftxui::text(" ")})
+                      | ftxui::color(status_color) | ftxui::bold;
     Element name_el = ftxui::text(tool.name) | ftxui::bold | ftxui::color(ColorYellowBright);
     
     std::vector<Element> header_items;
@@ -458,13 +578,13 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
                                  const ConversationRenderOptions& options) {
     const bool running = subagent.status == ToolActivity::Status::Executing;
     const Color status_color = tool_status_color(subagent.status);
-    const std::string icon = running && options.show_spinner
-        ? std::string(tool_status_spinner(tick))
-        : std::string(tool_status_icon(subagent.status));
+    Element icon = running && options.show_spinner
+        ? status_spinner_text(tick, options)
+        : ftxui::text(std::string(tool_status_icon(subagent.status)));
 
     std::vector<Element> header;
     header.push_back(ftxui::text("  "));
-    header.push_back(ftxui::text(icon) | ftxui::color(status_color) | ftxui::bold);
+    header.push_back(std::move(icon) | ftxui::color(status_color) | ftxui::bold);
     header.push_back(ftxui::text(" @"));
     header.push_back(ftxui::text(subagent.worker_name.empty() ? "subagent" : subagent.worker_name)
                      | ftxui::bold
@@ -601,7 +721,7 @@ Element render_tool_item(const ToolActivity& tool,
     std::vector<Element> tool_elements;
     
     tool_elements.push_back(
-        render_tool_header(tool, tick, options.show_spinner, terminal_width, 
+        render_tool_header(tool, tick, options, terminal_width,
                           border_color, is_first));
     
     if (tool.status == ToolActivity::Status::Executing && tool.progress.has_value()) {
@@ -932,13 +1052,13 @@ Element render_shell_command_message(const UiMessage& msg,
         : static_cast<ftxui::Color>(ColorYellowDark);
 
     if (msg.pending) {
-        const std::string label = options.show_spinner
-            ? std::string("Running") + std::string(thinking_pulse_frame(tick))
-            : std::string("Running...");
+        Element label = options.show_spinner
+            ? pulse_text("Running", tick, options)
+            : ftxui::text("Running...");
         rows.push_back(
             hbox({
                 ftxui::text("  "),
-                ftxui::text(label) | ftxui::color(ColorYellowDark) | dim,
+                std::move(label) | ftxui::color(ColorYellowDark) | dim,
             }));
     } else if (!msg.secondary_text.empty()) {
         rows.push_back(
@@ -997,21 +1117,31 @@ Element render_assistant_message(const UiMessage& msg,
     // Render thinking indicator at the BOTTOM (current activity)
     // This ensures users see what's happening NOW when looking at the bottom
     if (activity.show_thinking) {
-        std::string label;
+        Element label;
         if (activity.has_completed_tools && !activity.has_executing_tools && !msg.thinking) {
             label = options.show_spinner
-                ? std::string("Analyzing") + std::string(thinking_pulse_frame(tick))
-                : std::string("Analyzing...");
+                ? pulse_text("Analyzing", tick, options)
+                : ftxui::text("Analyzing...");
         } else {
             label = options.show_spinner
-                ? std::string("Thinking") + std::string(thinking_pulse_frame(tick))
-                : std::string("Thinking...");
+                ? pulse_text("Thinking", tick, options)
+                : ftxui::text("Thinking...");
         }
         Elements indicator_row = {
             render_lightbulb_prefix(true),
-            ftxui::text(label) | ftxui::color(ColorYellowDark) | dim
+            std::move(label) | ftxui::color(ColorYellowDark) | dim
         };
-        if (!msg.activity_elapsed.empty()) {
+        if (options.activity_elapsed) {
+            const auto elapsed = options.activity_elapsed;
+            const auto message_id = msg.id;
+            indicator_row.push_back(
+                live_text([elapsed, message_id]() {
+                    const auto value = elapsed(message_id);
+                    return value.empty() ? std::string{} : std::format(" ({})", value);
+                })
+                | ftxui::color(Color::GrayDark)
+                | dim);
+        } else if (!msg.activity_elapsed.empty()) {
             indicator_row.push_back(
                 ftxui::text(std::format(" ({})", msg.activity_elapsed))
                 | ftxui::color(Color::GrayDark)
@@ -1382,6 +1512,10 @@ bool message_uses_animation(const UiMessage& message, bool show_spinner) {
 
     if (message.type == MessageType::Assistant) {
         return compute_assistant_activity_state(message).show_thinking;
+    }
+
+    if (message.type == MessageType::ShellCommand) {
+        return message.pending;
     }
 
     return false;

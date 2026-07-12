@@ -20,7 +20,10 @@
 #include "tui/RewindPicker.hpp"
 #include "tui/TuiTheme.hpp"
 
+#include <ftxui/dom/node.hpp>
+#include <ftxui/dom/selection.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <optional>
@@ -485,6 +488,12 @@ TEST_CASE("message_uses_animation — executing subagent animates", "[tui][conve
     REQUIRE_FALSE(message_uses_animation(message, false));
 }
 
+TEST_CASE("message_uses_animation — pending shell command animates", "[tui][conversation][animation]") {
+    auto message = make_shell_command_message("sleep 1", "", true);
+    REQUIRE(message_uses_animation(message, true));
+    REQUIRE_FALSE(message_uses_animation(message, false));
+}
+
 TEST_CASE("find_subagent_activity — finds nested agent", "[tui][conversation][tool]") {
     auto tool = make_tool_activity("parent", "task", "{}", "@general");
     ToolActivity::SubagentActivity subagent;
@@ -513,6 +522,86 @@ TEST_CASE("conversation_uses_animation — any animated message enables ticker",
     messages.push_back(std::move(assistant));
     REQUIRE(conversation_uses_animation(messages, true));
     REQUIRE_FALSE(conversation_uses_animation(messages, false));
+}
+
+TEST_CASE("animation cadence covers review and hidden elapsed indicators",
+          "[tui][conversation][animation][policy]") {
+    using namespace std::chrono_literals;
+
+    const auto review = select_animation_cadence(true, false, true, false);
+    REQUIRE(review.has_value());
+    REQUIRE(review->period == 150ms);
+    REQUIRE(review->advance_frame);
+
+    const auto hidden_assistant = select_animation_cadence(false, true, false, true);
+    REQUIRE(hidden_assistant.has_value());
+    REQUIRE(hidden_assistant->period == 1s);
+    REQUIRE_FALSE(hidden_assistant->advance_frame);
+
+    const auto hidden_review = select_animation_cadence(false, false, true, false);
+    REQUIRE(hidden_review.has_value());
+    REQUIRE(hidden_review->period == 1s);
+    REQUIRE_FALSE(hidden_review->advance_frame);
+
+    REQUIRE_FALSE(select_animation_cadence(false, false, false, true).has_value());
+    REQUIRE_FALSE(select_animation_cadence(true, false, false, false).has_value());
+}
+
+// ============================================================================
+// LiveText reactive-leaf selection
+// ============================================================================
+//
+// The animated "Thinking..." label is a custom LiveText node (its surrounding
+// transcript tree is cached and reused across ticks). Selection must behave
+// exactly like ftxui::text(): only the actually-selected cells are copied to
+// the clipboard and only those cells receive the selection highlight.
+
+TEST_CASE("animated thinking label supports per-cell selection",
+          "[tui][conversation][render][selection]") {
+    // thinking_pulse_frame(3) == "..." so the live label reads "Thinking...".
+    std::atomic<std::size_t> tick{3};
+    auto msg = make_assistant_message("", "", true);  // pending + thinking
+    ConversationRenderOptions options;
+    options.show_spinner = true;
+    options.animation_tick = &tick;
+
+    auto element = render_assistant_message(msg, 3, options);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(80),
+                                        ftxui::Dimension::Fit(element));
+    ftxui::Render(screen, element);
+
+    // Locate the screen cell where the "Thinking" label begins by scanning the
+    // rendered cells (robust against the lightbulb prefix width/encoding).
+    int label_row = -1;
+    int label_col = -1;
+    for (int y = 0; y < screen.dimy() && label_row < 0; ++y) {
+        for (int x = 0; x + 7 < screen.dimx(); ++x) {
+            if (screen.CellAt(x,     y).character == "T"
+                && screen.CellAt(x + 1, y).character == "h"
+                && screen.CellAt(x + 2, y).character == "i"
+                && screen.CellAt(x + 3, y).character == "n"
+                && screen.CellAt(x + 4, y).character == "k"
+                && screen.CellAt(x + 5, y).character == "i"
+                && screen.CellAt(x + 6, y).character == "n"
+                && screen.CellAt(x + 7, y).character == "g") {
+                label_row = y;
+                label_col = x;
+                break;
+            }
+        }
+    }
+    REQUIRE(label_row >= 0);
+
+    // A partial selection over just the "Think" cells copies exactly those
+    // glyphs — not the whole cached label (the previous whole-node behavior).
+    ftxui::Selection partial(label_col, label_row, label_col + 4, label_row);
+    ftxui::Render(screen, element.get(), partial);
+    REQUIRE(partial.GetParts() == "Think");
+
+    // A full-row selection copies the entire live label exactly once.
+    ftxui::Selection full_row(0, label_row, screen.dimx() - 1, label_row);
+    ftxui::Render(screen, element.get(), full_row);
+    REQUIRE_THAT(full_row.GetParts(), ContainsSubstring("Thinking..."));
 }
 
 // ============================================================================

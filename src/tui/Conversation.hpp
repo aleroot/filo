@@ -4,7 +4,9 @@
 #include "Constants.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
+#include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -224,6 +226,13 @@ struct ConversationRenderOptions {
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
     float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
     std::shared_ptr<ConversationScrollAnchor> scroll_anchor;
+
+    // Optional live render state. HistoryComponent supplies these so animated
+    // glyphs and elapsed labels can update inside an otherwise immutable,
+    // cached transcript tree. Direct render callers may omit them and retain
+    // the snapshot values passed to render_history_content().
+    const std::atomic<std::size_t>* animation_tick = nullptr;
+    std::function<std::string(std::string_view)> activity_elapsed;
 };
 
 // ============================================================================

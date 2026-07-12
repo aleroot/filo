@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -482,6 +484,146 @@ TEST_CASE("HistoryComponent render cache is stable across identical frames",
     const auto third  = render_history_text(history);
     REQUIRE(first == second);
     REQUIRE(second == third);
+}
+
+TEST_CASE("animation frames update without rebuilding transcript cache",
+          "[tui][history_component][render_cache][animation]") {
+    std::atomic<size_t> tick{0};
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{tui::make_assistant_message("", "", true)});
+
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    const auto frame_0 = render_history_text(history);
+    REQUIRE(history.CacheBuildCount() == 1);
+
+    tick.store(1, std::memory_order_relaxed);
+    const auto frame_1 = render_history_text(history);
+
+    REQUIRE(history.CacheBuildCount() == 1);
+    REQUIRE(frame_0 != frame_1);
+    REQUIRE_THAT(frame_1, Catch::Matchers::ContainsSubstring("Thinking."));
+}
+
+TEST_CASE("shell pulse updates without rebuilding transcript cache",
+          "[tui][history_component][render_cache][animation]") {
+    std::atomic<size_t> tick{0};
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{
+            tui::make_shell_command_message("sleep 1", "", true)
+        });
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_text(history));
+    tick.store(3, std::memory_order_relaxed);
+    const auto animated = render_history_text(history);
+
+    REQUIRE(history.CacheBuildCount() == 1);
+    REQUIRE_THAT(animated, Catch::Matchers::ContainsSubstring("Running..."));
+}
+
+TEST_CASE("elapsed activity text updates without rebuilding transcript cache",
+          "[tui][history_component][render_cache][animation]") {
+    std::atomic<size_t> tick{0};
+    std::atomic<int> elapsed_seconds{1};
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{tui::make_assistant_message("", "", true)});
+    auto options = [&elapsed_seconds]() {
+        auto value = mock_options();
+        value.activity_elapsed = [&elapsed_seconds](std::string_view) {
+            return std::to_string(elapsed_seconds.load(std::memory_order_relaxed)) + "s";
+        };
+        return value;
+    };
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        options);
+
+    const auto first = render_history_text(history);
+    elapsed_seconds.store(2, std::memory_order_relaxed);
+    const auto second = render_history_text(history);
+
+    REQUIRE(history.CacheBuildCount() == 1);
+    REQUIRE_THAT(first, Catch::Matchers::ContainsSubstring("(1s)"));
+    REQUIRE_THAT(second, Catch::Matchers::ContainsSubstring("(2s)"));
+}
+
+TEST_CASE("tool and subagent spinners update without rebuilding transcript cache",
+          "[tui][history_component][render_cache][animation]") {
+    std::atomic<size_t> tick{0};
+    auto assistant = tui::make_assistant_message("", "", true);
+    assistant.thinking = false;
+    auto tool = tui::make_tool_activity("parent", "task", "{}", "delegate");
+    tool.status = tui::ToolActivity::Status::Executing;
+    tui::ToolActivity::SubagentActivity subagent;
+    subagent.id = "child";
+    subagent.worker_name = "worker";
+    subagent.status = tui::ToolActivity::Status::Executing;
+    tool.subagents.push_back(std::move(subagent));
+    assistant.tools.push_back(std::move(tool));
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{std::move(assistant)});
+
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    const auto frame_0 = render_history_text(history);
+    tick.store(1, std::memory_order_relaxed);
+    const auto frame_1 = render_history_text(history);
+
+    REQUIRE(history.CacheBuildCount() == 1);
+    REQUIRE(frame_0 != frame_1);
+    REQUIRE_THAT(frame_0, Catch::Matchers::ContainsSubstring("○"));
+    REQUIRE_THAT(frame_1, Catch::Matchers::ContainsSubstring("◔"));
+}
+
+TEST_CASE("large animated transcript retains one structural render",
+          "[tui][history_component][render_cache][animation][performance]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(121);
+    for (int i = 0; i < 120; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "## Result " + std::to_string(i)
+                + "\n\nA paragraph with **formatting**, `code`, and enough text to wrap "
+                  "across a normal terminal viewport without changing between frames.",
+            "",
+            false));
+    }
+    source.push_back(tui::make_assistant_message("", "", true));
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(std::move(source));
+
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    for (std::size_t frame = 0; frame < 30; ++frame) {
+        tick.store(frame, std::memory_order_relaxed);
+        const auto rendered = render_history_viewport(history, 120, 40);
+        REQUIRE_FALSE(rendered.empty());
+    }
+
+    REQUIRE(history.CacheBuildCount() == 1);
 }
 
 TEST_CASE("HistoryComponent invalidates render cache when tool approval changes",
