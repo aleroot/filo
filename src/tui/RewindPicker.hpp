@@ -3,15 +3,26 @@
 #include <ftxui/component/event.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "core/llm/Models.hpp"
 
 namespace tui {
 
 struct RewindPickerOption {
     std::string label;
     std::string description;
+    enum class Action {
+        RewindToMessage,
+        SummarizeAndCompact,
+        Cancel,
+    } action = Action::Cancel;
+    std::size_t history_index = 0;
+    std::size_t user_ordinal = 0;
+    std::string prompt;
 };
 
 struct RewindPickerState {
@@ -20,15 +31,9 @@ struct RewindPickerState {
     std::vector<RewindPickerOption> options;
 };
 
-enum class RewindPickerAction {
-    RewindLastTurn,
-    SummarizeAndCompact,
-    Cancel,
-};
-
 struct RewindPickerEventResult {
     bool handled = false;
-    std::optional<RewindPickerAction> action{};
+    std::optional<RewindPickerOption> selection{};
 };
 
 struct DoubleEscapeState {
@@ -36,7 +41,9 @@ struct DoubleEscapeState {
         std::chrono::steady_clock::time_point::min();
 };
 
-void open_rewind_picker(RewindPickerState& state);
+[[nodiscard]] bool open_rewind_picker(
+    RewindPickerState& state,
+    const std::vector<core::llm::Message>& messages);
 
 [[nodiscard]] RewindPickerEventResult handle_rewind_picker_event(
     RewindPickerState& state,

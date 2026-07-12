@@ -35,6 +35,7 @@ std::vector<UiMessage> build_resumed_ui_messages(
     int current_asst_idx = -1;
     for (const auto& msg : data.messages) {
         if (msg.role == "user") {
+            if (msg.synthetic) continue;
             std::string user_text = msg.content;
             if (user_text.empty()) {
                 for (const auto& part : msg.content_parts) {

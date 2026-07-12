@@ -1192,6 +1192,7 @@ public:
             "  /review [target]    Open review menu or run Codex-style AI code review\n"
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
+            "  /rewind             Restore and branch from an earlier prompt\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
             "  /goal [action]      Set or manage the session goal\n"
             "  /todo [action]      Manage session-backed todo items\n"
@@ -2278,6 +2279,26 @@ public:
     }
 };
 
+class RewindCommand : public Command {
+public:
+    std::string get_name() const override { return "/rewind"; }
+    std::vector<std::string> get_aliases() const override { return {"/checkpoint"}; }
+    std::string get_description() const override {
+        return "Restore and branch the conversation from an earlier prompt";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.open_rewind_picker_fn) {
+            ctx.append_history_fn("\n✗  Rewind is only available in the interactive TUI.\n");
+            return;
+        }
+        if (!ctx.open_rewind_picker_fn()) {
+            ctx.append_history_fn("\nℹ  Nothing to rewind yet.\n");
+        }
+    }
+};
+
 class InitCommand : public Command {
 public:
     std::string get_name() const override { return "/init"; }
@@ -3100,6 +3121,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ReviewCommand>());
     register_command(std::make_unique<ExportCommand>());
     register_command(std::make_unique<ForkCommand>());
+    register_command(std::make_unique<RewindCommand>());
     register_command(std::make_unique<InitCommand>());
     register_command(std::make_unique<GoalCommand>());
     register_command(std::make_unique<TodoCommand>());

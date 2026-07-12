@@ -119,6 +119,14 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         core::utils::append_escaped(out, msg.tool_call_id);
         out += '"';
     }
+    if (msg.synthetic) {
+        out += ",\"synthetic\":true";
+    }
+    if (!msg.input_text.empty()) {
+        out += ",\"input_text\":\"";
+        core::utils::append_escaped(out, msg.input_text);
+        out += '"';
+    }
     if (!msg.tool_calls.empty()) {
         out += ",\"tool_calls\":[";
         for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
@@ -340,6 +348,13 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                 if (msg_el["content"].get(sv)      == simdjson::SUCCESS) msg.content      = std::string(sv);
                 if (msg_el["name"].get(sv)         == simdjson::SUCCESS) msg.name         = std::string(sv);
                 if (msg_el["tool_call_id"].get(sv) == simdjson::SUCCESS) msg.tool_call_id = std::string(sv);
+                bool synthetic = false;
+                if (msg_el["synthetic"].get(synthetic) == simdjson::SUCCESS) {
+                    msg.synthetic = synthetic;
+                }
+                if (msg_el["input_text"].get(sv) == simdjson::SUCCESS) {
+                    msg.input_text = std::string(sv);
+                }
 
                 simdjson::dom::array tc_arr;
                 if (msg_el["tool_calls"].get(tc_arr) == simdjson::SUCCESS) {

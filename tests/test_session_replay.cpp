@@ -90,3 +90,22 @@ TEST_CASE("Session replay handles failed tool calls and multiple assistant messa
     REQUIRE(messages[2].type == tui::MessageType::Assistant);
     REQUIRE(messages[2].text == "I failed to run that.");
 }
+
+TEST_CASE("Session replay does not render synthetic user context as prompts",
+          "[tui][session_replay][rewind]") {
+    core::session::SessionData data;
+    data.session_id = "sess_synthetic";
+    data.messages = {
+        {.role = "user", .content = "visible prompt"},
+        {.role = "assistant", .content = "visible answer"},
+        {.role = "user", .content = "automatic continuation", .synthetic = true},
+        {.role = "assistant", .content = "continued answer"},
+    };
+
+    const auto messages = tui::build_resumed_ui_messages(data);
+    REQUIRE(messages.size() == 4);
+    CHECK(messages[1].type == tui::MessageType::User);
+    CHECK(messages[1].text == "visible prompt");
+    CHECK(messages[2].type == tui::MessageType::Assistant);
+    CHECK(messages[3].type == tui::MessageType::Assistant);
+}

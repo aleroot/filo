@@ -997,6 +997,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 self->history_.push_back(core::llm::Message{
                     .role = "user",
                     .content = std::string(kMaxOutputRecoveryPrompt),
+                    .synthetic = true,
                 });
                 self->refresh_context_window_snapshot_unlocked();
             }

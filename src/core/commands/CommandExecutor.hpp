@@ -76,6 +76,7 @@ struct CommandContext {
     std::function<void(bool)> set_yolo_mode_enabled_fn = {};
     ToolRuleCallbacks tool_rules = {};
     std::function<std::string()> fork_session_fn = {};
+    std::function<bool()> open_rewind_picker_fn = {};
     std::function<void(std::function<void()>)> suspend_tui_fn = {};
     std::function<std::string()> latest_assistant_output_fn = {};
     std::function<std::optional<std::string>(std::string_view)> copy_to_clipboard_fn = {};

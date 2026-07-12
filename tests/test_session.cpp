@@ -206,6 +206,26 @@ TEST_CASE("SessionStore round-trips messages with special JSON characters", "[se
     CHECK(loaded->messages[0].content == "He said \"hello\"\nLine2\\nBackslash");
 }
 
+TEST_CASE("SessionStore preserves synthetic message metadata", "[session][json][rewind]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_synthetic"};
+    core::session::SessionStore store{tmp.path};
+
+    auto data = make_test_session("synthetic01");
+    data.messages.push_back(core::llm::Message{
+        .role = "user",
+        .content = "automatic continuation",
+        .input_text = "@original-input.txt",
+        .synthetic = true,
+    });
+
+    REQUIRE(store.save(data));
+    const auto loaded = store.load_by_id("synthetic01");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 3);
+    CHECK(loaded->messages.back().synthetic);
+    CHECK(loaded->messages.back().input_text == "@original-input.txt");
+}
+
 TEST_CASE("SessionStore round-trips video content parts", "[session][json][video]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_video_rt"};
     core::session::SessionStore store{tmp.path};

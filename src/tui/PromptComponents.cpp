@@ -1272,8 +1272,9 @@ Element render_conversation_search_panel(std::string_view query,
 
 Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& options,
                                    int selected_index) {
+    constexpr std::size_t kMaxVisibleOptions = 7;
     Elements rows;
-    rows.reserve(options.size() + 4);
+    rows.reserve(kMaxVisibleOptions + 4);
     rows.push_back(hbox({
         text(" REWIND ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
         filler(),
@@ -1281,7 +1282,18 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
     }));
     rows.push_back(separator());
 
-    for (std::size_t i = 0; i < options.size(); ++i) {
+    const std::size_t selected = selected_index < 0
+        ? 0
+        : static_cast<std::size_t>(selected_index);
+    const std::size_t first = options.size() <= kMaxVisibleOptions
+        ? 0
+        : std::min(
+            selected > kMaxVisibleOptions / 2
+                ? selected - kMaxVisibleOptions / 2
+                : 0,
+            options.size() - kMaxVisibleOptions);
+    const std::size_t last = std::min(options.size(), first + kMaxVisibleOptions);
+    for (std::size_t i = first; i < last; ++i) {
         const bool selected = static_cast<int>(i) == selected_index;
         const auto& option = options[i];
         Element row = hbox({
@@ -1295,7 +1307,7 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
     }
 
     rows.push_back(separator());
-    rows.push_back(text("Up/Down: select  Enter: apply  1-3: quick choose")
+    rows.push_back(text("Up/Down: select  Enter: continue  1-9: quick choose")
                    | color(Color::GrayDark));
 
     return vbox(std::move(rows)) | UiBorder(ColorYellowBright)

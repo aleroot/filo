@@ -437,6 +437,8 @@ struct Message {
     std::vector<ToolCall> tool_calls = {}; // Optional, for assistant role
     std::string reasoning_content = {};    // Optional provider-specific reasoning text
     std::vector<ContentPart> content_parts = {}; // Optional, for multimodal user input
+    std::string input_text = {};            // Original editable prompt before mention/media expansion
+    bool synthetic = false;                // Internal context record, not a visible user prompt
 };
 
 struct Tool {

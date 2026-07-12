@@ -17,6 +17,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "tui/Conversation.hpp"
+#include "tui/RewindPicker.hpp"
 #include "tui/TuiTheme.hpp"
 
 #include <ftxui/screen/screen.hpp>
@@ -129,6 +130,53 @@ TEST_CASE("remove_latest_ui_turn removes shell commands as visible turns",
     REQUIRE(messages.size() == 2);
     CHECK(messages[0].type == MessageType::User);
     CHECK(messages[1].type == MessageType::Assistant);
+}
+
+TEST_CASE("truncate_ui_before_user_turn removes the selected turn and tail",
+          "[tui][conversation][rewind]") {
+    std::vector<UiMessage> messages{
+        make_system_message("header"),
+        make_user_message("first"),
+        make_assistant_message("one", {}, false),
+        make_user_message("second"),
+        make_assistant_message("two", {}, false),
+    };
+
+    REQUIRE(truncate_ui_before_user_turn(messages, 1));
+    REQUIRE(messages.size() == 3);
+    CHECK(messages.back().text == "one");
+    CHECK_FALSE(truncate_ui_before_user_turn(messages, 2));
+}
+
+TEST_CASE("rewind picker exposes recent user checkpoints",
+          "[tui][conversation][rewind]") {
+    std::vector<core::llm::Message> history{
+        {.role = "user", .content = "first prompt"},
+        {.role = "assistant", .content = "first answer"},
+        {.role = "user", .content = "I ran a shell command", .synthetic = true},
+        {.role = "user", .content = "Resume after output limit", .synthetic = true},
+        {.role = "user", .content = "Expanded: /tmp/example.png", .input_text = "second\nprompt"},
+        {.role = "assistant", .content = "second answer"},
+    };
+    RewindPickerState state;
+
+    REQUIRE(open_rewind_picker(state, history));
+    REQUIRE(state.active);
+    REQUIRE(state.options.size() == 4);
+    CHECK(state.selected == 1);
+    CHECK(state.options[0].history_index == 0);
+    CHECK(state.options[1].history_index == 4);
+    CHECK(state.options[1].user_ordinal == 1);
+    CHECK(state.options[1].label == "Expanded: /tmp/example.png");
+    CHECK(state.options[1].action == RewindPickerOption::Action::RewindToMessage);
+
+    const auto selected = handle_rewind_picker_event(
+        state,
+        ftxui::Event::Return,
+        false);
+    REQUIRE(selected.selection.has_value());
+    CHECK(selected.selection->prompt == "second\nprompt");
+    CHECK_FALSE(state.active);
 }
 
 TEST_CASE("make_assistant_message — pending state", "[tui][conversation][factory]") {

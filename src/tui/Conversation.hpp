@@ -151,6 +151,12 @@ struct UiMessage {
 
 bool remove_latest_ui_turn(std::vector<UiMessage>& messages);
 
+/// Removes the selected user turn and every visible message after it.
+/// Returns false when the requested user ordinal is not present.
+bool truncate_ui_before_user_turn(
+    std::vector<UiMessage>& messages,
+    std::size_t user_ordinal);
+
 // ============================================================================
 // Conversation State (History Separation - Gemini CLI Style)
 // ============================================================================

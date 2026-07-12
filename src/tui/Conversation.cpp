@@ -33,6 +33,20 @@ bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
     return false;
 }
 
+bool truncate_ui_before_user_turn(
+    std::vector<UiMessage>& messages,
+    std::size_t user_ordinal) {
+
+    std::size_t current = 0;
+    const auto target = std::ranges::find_if(messages, [&](const UiMessage& message) {
+        if (message.type != MessageType::User) return false;
+        return current++ == user_ordinal;
+    });
+    if (target == messages.end()) return false;
+    messages.erase(target, messages.end());
+    return true;
+}
+
 namespace {
 
 std::string truncate_preview(std::string_view text, std::size_t max_len = kToolPreviewMaxLen) {

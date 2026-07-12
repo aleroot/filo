@@ -85,6 +85,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <expected>
 #include <deque>
 #include <mutex>
 #include <condition_variable>
@@ -1868,12 +1869,17 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
-    auto fork_session = [&]() -> std::string {
-        const auto snap_messages = agent->get_history();
+    using SessionBranchIds = std::pair<std::string, std::string>;
+    auto branch_session = [&](const std::vector<core::llm::Message>& branch_messages,
+                              std::string branch_context)
+        -> std::expected<SessionBranchIds, std::string> {
+
+        const auto original_messages = agent->get_history();
         const std::string snap_mode = agent->get_mode();
         const std::string snap_context = agent->get_context_summary();
 
         std::string old_session_id;
+        std::string old_created_at;
         std::string provider_name;
         std::string model_name;
         std::optional<core::session::SessionGoal> snap_goal;
@@ -1881,58 +1887,86 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             old_session_id = session_id;
+            old_created_at = session_created_at;
             provider_name = active_provider_name;
             model_name = active_model_name;
             snap_goal = goal_manager.current();
             snap_todos = session_todos;
         }
 
-        const std::string new_session_id = core::session::SessionStore::generate_id();
-        const std::string new_created_at = core::session::SessionStore::now_iso8601();
-
-        core::session::SessionData data;
-        data.session_id      = new_session_id;
-        data.created_at      = new_created_at;
-        data.last_active_at  = core::session::SessionStore::now_iso8601();
-        data.working_dir     = std::filesystem::current_path().string();
-        data.provider        = provider_name;
-        data.model           = model_name;
-        data.mode            = snap_mode;
-        data.context_summary = snap_context;
-        data.messages        = snap_messages;
-        data.goal            = snap_goal;
-        data.todos           = snap_todos;
+        core::session::SessionData original;
+        original.session_id      = old_session_id;
+        original.created_at      = old_created_at;
+        original.last_active_at  = core::session::SessionStore::now_iso8601();
+        original.working_dir     = std::filesystem::current_path().string();
+        original.provider        = provider_name;
+        original.model           = model_name;
+        original.mode            = snap_mode;
+        original.context_summary = snap_context;
+        original.messages        = original_messages;
+        original.goal            = snap_goal;
+        original.todos           = snap_todos;
 
         const auto& budget = core::budget::BudgetTracker::get_instance();
         const auto total = budget.session_total();
-        data.stats.prompt_tokens = total.prompt_tokens;
-        data.stats.completion_tokens = total.completion_tokens;
-        data.stats.cost_usd = budget.session_cost_usd();
+        original.stats.prompt_tokens = total.prompt_tokens;
+        original.stats.completion_tokens = total.completion_tokens;
+        original.stats.cost_usd = budget.session_cost_usd();
 
         const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
-        data.stats.turn_count = stats_snapshot.turn_count;
-        data.stats.tool_calls_total = stats_snapshot.tool_calls_total;
-        data.stats.tool_calls_success = stats_snapshot.tool_calls_success;
-        data.handoff_summary = core::session::build_handoff_summary(data);
+        original.stats.turn_count = stats_snapshot.turn_count;
+        original.stats.tool_calls_total = stats_snapshot.tool_calls_total;
+        original.stats.tool_calls_success = stats_snapshot.tool_calls_success;
+        original.handoff_summary = core::session::build_handoff_summary(original);
+
+        const std::string new_session_id = core::session::SessionStore::generate_id();
+        const std::string new_created_at = core::session::SessionStore::now_iso8601();
+        auto branch = original;
+        branch.session_id = new_session_id;
+        branch.created_at = new_created_at;
+        branch.last_active_at = new_created_at;
+        branch.context_summary = std::move(branch_context);
+        branch.messages = branch_messages;
+        branch.handoff_summary = core::session::build_handoff_summary(branch);
 
         std::string error;
-        if (!session_store->save(data, &error)) {
-            if (error.empty()) {
-                error = "unknown save error";
+        session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard save_lock(session_save_state->write_mutex);
+            if (!session_store->save(original, &error)) {
+                return std::unexpected(std::format(
+                    "Failed to preserve session: {}",
+                    error.empty() ? std::string("unknown save error") : error));
             }
-            return std::format("Failed to fork session: {}", error);
+            error.clear();
+            if (!session_store->save(branch, &error)) {
+                return std::unexpected(std::format(
+                    "Failed to create session branch: {}",
+                    error.empty() ? std::string("unknown save error") : error));
+            }
         }
 
         {
             std::lock_guard lock(ui_mutex);
             session_id = new_session_id;
             session_created_at = new_created_at;
-            session_file_path = session_store->compute_path(data).string();
+            session_file_path = session_store->compute_path(branch).string();
         }
         core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
         agent->set_session_id(new_session_id);
         wake_ui();
-        return std::format("Forked session {} into {}.", old_session_id, new_session_id);
+        return SessionBranchIds{old_session_id, new_session_id};
+    };
+
+    auto fork_session = [&]() -> std::string {
+        const auto result = branch_session(
+            agent->get_history(),
+            agent->get_context_summary());
+        if (!result) return result.error();
+        return std::format(
+            "Forked session {} into {}.",
+            result->first,
+            result->second);
     };
 
     agent->set_efficiency_decision_fn(
@@ -3951,10 +3985,68 @@ RunResult run(RunOptions opts) {
         }).detach();
     };
 
-    auto open_rewind_menu = [&]() {
+    auto open_rewind_menu = [&]() -> bool {
+        if (assistant_turn_active.load(std::memory_order_acquire)) {
+            append_history("\nℹ  Stop the active turn before rewinding.\n");
+            return true;
+        }
+
+        const auto history = agent->get_history();
         std::lock_guard lock(ui_mutex);
-        open_rewind_picker(rewind_picker_state);
+        const bool opened = open_rewind_picker(rewind_picker_state, history);
         wake_ui();
+        return opened;
+    };
+
+    auto rewind_to_message = [&](const RewindPickerOption& target) {
+        if (assistant_turn_active.load(std::memory_order_acquire)) {
+            append_history("\nℹ  Stop the active turn before rewinding.\n");
+            return;
+        }
+
+        const auto history = agent->get_history();
+        if (target.history_index >= history.size()
+            || history[target.history_index].role != "user") {
+            append_history("\n✗  The selected rewind point is no longer available.\n");
+            return;
+        }
+
+        bool ui_target_exists = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto user_count = std::ranges::count_if(
+                ui_messages,
+                [](const UiMessage& message) { return message.type == MessageType::User; });
+            ui_target_exists = target.user_ordinal < static_cast<std::size_t>(user_count);
+        }
+        if (!ui_target_exists) {
+            append_history("\n✗  The selected rewind point is not present in the visible conversation.\n");
+            return;
+        }
+
+        std::vector<core::llm::Message> prefix(
+            history.begin(),
+            history.begin() + static_cast<std::ptrdiff_t>(target.history_index));
+        const auto mode = agent->get_mode();
+        const auto branch = branch_session(prefix, {});
+        if (!branch) {
+            append_history(std::format("\n✗  {}\n", branch.error()));
+            return;
+        }
+
+        agent->load_history(prefix, {}, mode);
+        {
+            std::lock_guard lock(ui_mutex);
+            (void)truncate_ui_before_user_turn(ui_messages, target.user_ordinal);
+            input_text = target.prompt;
+            input_cursor_position = static_cast<int>(input_text.size());
+        }
+        reset_history_view();
+        append_history(std::format(
+            "\n↶  Rewound into session {}. The selected prompt is ready to edit; "
+            "the original remains in session {}.\n",
+            branch->second,
+            branch->first));
     };
 
     auto resolve_todo_index_locked = [&](std::string_view selector)
@@ -4541,6 +4633,7 @@ RunResult run(RunOptions opts) {
             core::llm::Message user_message;
             user_message.role = "user";
             user_message.content = expanded_prompt.display_text;
+            user_message.input_text = text;
             if (core::llm::message_has_media_input(expanded_prompt.content_parts)) {
                 user_message.content_parts = expanded_prompt.content_parts;
             }
@@ -4706,6 +4799,7 @@ RunResult run(RunOptions opts) {
                 agent->append_history_message(core::llm::Message{
                     .role = "user",
                     .content = shell_history_content,
+                    .synthetic = true,
                 });
                 save_session_snapshot();
             }
@@ -4801,6 +4895,7 @@ RunResult run(RunOptions opts) {
                 .clear = clear_tool_rules,
             },
             .fork_session_fn = fork_session,
+            .open_rewind_picker_fn = open_rewind_menu,
             .suspend_tui_fn   = [&](std::function<void()> task) {
                 // Suspends the TUI loop and restores standard I/O for the duration of the task.
                 auto closure = screen.WithRestoredIO(task);
@@ -5046,19 +5141,19 @@ RunResult run(RunOptions opts) {
                 is_ctrl_c_event(event));
         }
         if (rewind_result.handled) {
-            if (rewind_result.action.has_value()) {
-                switch (*rewind_result.action) {
-                case RewindPickerAction::RewindLastTurn:
-                    rewind_last_turn(*agent, ui_mutex, ui_messages, append_history, save_session_snapshot);
+            if (rewind_result.selection.has_value()) {
+                switch (rewind_result.selection->action) {
+                case RewindPickerOption::Action::RewindToMessage:
+                    rewind_to_message(*rewind_result.selection);
                     break;
-                case RewindPickerAction::SummarizeAndCompact:
+                case RewindPickerOption::Action::SummarizeAndCompact:
                     compact_history_from_rewind(
                         *agent,
                         assistant_turn_active.load(std::memory_order_relaxed),
                         append_history,
                         save_session_snapshot);
                     break;
-                case RewindPickerAction::Cancel:
+                case RewindPickerOption::Action::Cancel:
                     break;
                 }
             }

@@ -86,6 +86,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto goal = std::make_shared<std::optional<core::session::SessionGoal>>();
     auto memory_state = std::make_shared<core::memory::MemoryState>();
     auto fork_result    = std::make_shared<std::string>("Forked session abc123 into def456.");
+    auto rewind_picker_opened = std::make_shared<bool>(false);
     auto active_terminals = std::make_shared<std::vector<ActiveTerminalInfo>>(
         std::vector<ActiveTerminalInfo>{{
             .session_id = "session-1",
@@ -196,6 +197,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         },
         .fork_session_fn = [fork_result]() {
             return *fork_result;
+        },
+        .open_rewind_picker_fn = [rewind_picker_opened]() {
+            *rewind_picker_opened = true;
+            return true;
         },
         .latest_assistant_output_fn = []() { return std::string(); },
         .copy_to_clipboard_fn = [](std::string_view) {
@@ -1415,6 +1420,15 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Forked session old11111 into new22222"));
     }
 
+    SECTION("/rewind opens the interactive checkpoint picker") {
+        *rewind_picker_opened = false;
+        ctx.text = "/rewind";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*rewind_picker_opened);
+    }
+
     SECTION("/init scaffolds .filo/config.json in the working directory") {
         namespace fs = std::filesystem;
         struct CwdGuard {
@@ -1568,6 +1582,13 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         });
         REQUIRE(fork_it != commands.end());
         REQUIRE_FALSE(fork_it->accepts_arguments);
+
+        const auto rewind_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
+            return cmd.name == "/rewind";
+        });
+        REQUIRE(rewind_it != commands.end());
+        REQUIRE(std::ranges::find(rewind_it->aliases, "/checkpoint") != rewind_it->aliases.end());
+        REQUIRE_FALSE(rewind_it->accepts_arguments);
 
         const auto init_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/init";
