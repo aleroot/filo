@@ -68,6 +68,10 @@ struct CommandContext {
     std::function<bool()> open_settings_picker_fn = {};
     std::function<bool()> open_sessions_picker_fn = {};
     std::function<void(std::string_view)> resume_session_fn = {};
+    // Renames the current session (empty = clear). Returns outcome message.
+    std::function<CommandOperationResult(std::string_view)> rename_session_fn = {};
+    // Current session name (for /rename display).
+    std::function<std::string()> session_name_fn = {};
     std::function<void(std::vector<std::string>, std::function<void(std::optional<std::string>)>)> open_provider_picker_fn = {};
     std::function<void(std::function<void(std::optional<std::string>)>)> open_review_picker_fn = {};
     std::function<void(std::function<void()>)> dispatch_async_fn = {};

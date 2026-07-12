@@ -1074,7 +1074,7 @@ public:
 class ResumeCommand : public Command {
 public:
     std::string get_name() const override { return "/resume"; }
-    std::string get_description() const override { return "Restore a saved session by ID or index"; }
+    std::string get_description() const override { return "Restore a saved session by ID, index, or name"; }
     bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
@@ -1086,6 +1086,85 @@ public:
 
         const auto arg = first_argument(ctx.text);
         ctx.resume_session_fn(arg.value_or(""));
+    }
+};
+
+class ContinueCommand : public Command {
+public:
+    std::string get_name() const override { return "/continue"; }
+    std::string get_description() const override {
+        return "Resume the last session when empty, or push the current one forward";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+
+        const bool conversation_empty =
+            !ctx.agent || ctx.agent->get_history().empty();
+
+        if (conversation_empty) {
+            // Nothing in flight — behave like `filo --continue`: reload the
+            // most recent saved session and keep working inside it.
+            if (!ctx.resume_session_fn) {
+                ctx.append_history_fn(
+                    "\n\xe2\x9a\xa0  Session resumption is only available in the interactive TUI.\n");
+                return;
+            }
+            ctx.append_history_fn("\n\xc2\xbb  Resuming the most recent session\xe2\x80\xa6\n");
+            ctx.resume_session_fn("");
+            return;
+        }
+
+        // A conversation is already active (e.g. the previous turn ended in
+        // an error or was interrupted) — nudge the agent to carry on from
+        // exactly where it stopped instead of replacing the session.
+        if (ctx.send_user_message_fn) {
+            ctx.append_history_fn("\n\xc2\xbb  Continuing the current session\xe2\x80\xa6\n");
+            ctx.send_user_message_fn(
+                "Continue from where you left off. If the previous step failed "
+                "or was interrupted, diagnose the error, retry it, and carry "
+                "the task forward to completion.");
+            return;
+        }
+        ctx.append_history_fn("\n\xe2\x84\xb9  Nothing to continue.\n");
+    }
+};
+
+class RenameCommand : public Command {
+public:
+    std::string get_name() const override { return "/rename"; }
+    std::string get_description() const override {
+        return "Name the current session (no arg shows it, 'clear' removes it)";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.rename_session_fn) {
+            ctx.append_history_fn("\n\xe2\x9a\xa0  Session renaming is only available in the interactive TUI.\n");
+            return;
+        }
+
+        const std::string arg = trailing_arguments(ctx.text);
+        if (arg.empty()) {
+            const std::string current = ctx.session_name_fn ? ctx.session_name_fn() : "";
+            if (current.empty()) {
+                ctx.append_history_fn(
+                    "\n\xe2\x84\xb9  This session has no name. Use /rename <name> to set one "
+                    "(then resume it later with /resume <name>).\n");
+            } else {
+                ctx.append_history_fn(std::format(
+                    "\n\xe2\x84\xb9  Current session name: {}\n", current));
+            }
+            return;
+        }
+
+        const bool clearing = (arg == "clear" || arg == "none");
+        const auto result = ctx.rename_session_fn(clearing ? std::string_view{} : std::string_view{arg});
+        ctx.append_history_fn(std::format(
+            "\n{}  {}\n",
+            result.ok ? "\xc2\xbb" : "\xe2\x9c\x97",
+            result.message));
     }
 };
 
@@ -1173,7 +1252,9 @@ public:
             "  /clear, /cls        Clear the screen and conversation history\n"
             "  /quit, /exit, /q    Exit the application\n"
             "  /sessions           List and manage conversation sessions\n"
-            "  /resume [id]        Restore a saved session by ID or index\n"
+            "  /resume [id|name]   Restore a saved session by ID, index, or name\n"
+            "  /continue           Resume last session when empty, else push the current one on\n"
+            "  /rename [name]      Name the current session for /resume <name>\n"
             "  /ps                 Show active terminal commands\n"
             "  /stop               Stop active generation or terminal command\n"
             "  /compact            Summarise and compress the conversation history\n"
@@ -3103,6 +3184,8 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<HelpCommand>());
     register_command(std::make_unique<SessionsCommand>());
     register_command(std::make_unique<ResumeCommand>());
+    register_command(std::make_unique<ContinueCommand>());
+    register_command(std::make_unique<RenameCommand>());
     register_command(std::make_unique<PsCommand>());
     register_command(std::make_unique<StopCommand>());
     register_command(std::make_unique<CompactCommand>());

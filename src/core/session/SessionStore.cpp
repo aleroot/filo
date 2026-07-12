@@ -230,6 +230,8 @@ std::string SessionStore::to_json(const SessionData& data) {
     out += std::to_string(data.version);
     out += ",\"session_id\":\"";
     core::utils::append_escaped(out, data.session_id);
+    out += "\",\"name\":\"";
+    core::utils::append_escaped(out, data.name);
     out += "\",\"created_at\":\"";
     core::utils::append_escaped(out, data.created_at);
     out += "\",\"last_active_at\":\"";
@@ -303,6 +305,7 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
             if (doc[key].get(sv) == simdjson::SUCCESS) out = std::string(sv);
         };
         get_str("session_id",      data.session_id);
+        get_str("name",            data.name);
         get_str("created_at",      data.created_at);
         get_str("last_active_at",  data.last_active_at);
         get_str("working_dir",     data.working_dir);
@@ -524,6 +527,7 @@ std::vector<SessionInfo> SessionStore::list() const {
         const auto& d = *data_opt;
         SessionInfo info;
         info.session_id     = d.session_id;
+        info.name           = d.name;
         info.created_at     = d.created_at;
         info.last_active_at = d.last_active_at;
         info.provider       = d.provider;
@@ -584,6 +588,42 @@ std::optional<SessionData> SessionStore::load_most_recent() const {
     return load_by_index(1);
 }
 
+std::optional<SessionData> SessionStore::load_most_recent_for_project(
+    std::string_view working_dir) const {
+    if (working_dir.empty()) return std::nullopt;
+
+    // Normalize the requested path so that symlinks, trailing separators, and
+    // relative paths don't cause spurious mismatches against stored sessions.
+    std::error_code ec;
+    std::filesystem::path target = std::filesystem::path(working_dir);
+    if (!target.is_absolute()) {
+        target = std::filesystem::absolute(target, ec);
+    }
+    target = std::filesystem::weakly_canonical(target, ec);
+    if (ec) {
+        target = std::filesystem::path(working_dir).lexically_normal();
+    }
+
+    for (const auto& info : list()) {   // sorted most-recent first
+        auto data_opt = load_by_id(info.session_id);
+        if (!data_opt.has_value()) continue;
+
+        std::filesystem::path stored = std::filesystem::path(data_opt->working_dir);
+        if (!stored.is_absolute()) {
+            stored = std::filesystem::absolute(stored, ec);
+        }
+        stored = std::filesystem::weakly_canonical(stored, ec);
+        if (ec) {
+            stored = std::filesystem::path(data_opt->working_dir).lexically_normal();
+        }
+
+        if (stored == target) {
+            return data_opt;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<SessionData> SessionStore::load(std::string_view id_or_index) const {
     if (id_or_index.empty()) return load_most_recent();
     // Try as integer index first.
@@ -593,7 +633,21 @@ std::optional<SessionData> SessionStore::load(std::string_view id_or_index) cons
     if (ec == std::errc{} && ptr == id_or_index.data() + id_or_index.size()) {
         return load_by_index(idx);
     }
-    return load_by_id(id_or_index);
+    if (auto by_id = load_by_id(id_or_index); by_id.has_value()) {
+        return by_id;
+    }
+    return load_by_name(id_or_index);
+}
+
+std::optional<SessionData> SessionStore::load_by_name(std::string_view name) const {
+    if (name.empty()) return std::nullopt;
+    // list() is sorted most-recent first, so the first match wins.
+    for (const auto& info : list()) {
+        if (info.name == name) {
+            return load_by_id(info.session_id);
+        }
+    }
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------

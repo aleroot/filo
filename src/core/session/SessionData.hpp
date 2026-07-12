@@ -60,6 +60,7 @@ struct SessionData {
 
     int         version         = kVersion;
     std::string session_id;
+    std::string name;           ///< Optional user-assigned name (see /rename)
     std::string created_at;     ///< ISO 8601, e.g. "2026-03-22T10:15:30Z"
     std::string last_active_at; ///< ISO 8601
     std::string working_dir;    ///< filesystem::current_path() at session start

@@ -1269,6 +1269,7 @@ RunResult run(RunOptions opts) {
     auto memory_store = std::make_shared<core::memory::MemoryStore>();
 
     std::string session_id          = core::session::SessionStore::generate_id();
+    std::string session_name;       // optional user-assigned name (/rename)
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
     std::string session_file_path;  // computed after first save
     core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
@@ -1287,43 +1288,57 @@ RunResult run(RunOptions opts) {
         session_file_path = session_store->compute_path(tmp).string();
     };
 
-    // Handle --resume / opts.resume_session_id
+    // Resolve the startup session from --resume or --continue.
+    // --resume wins over --continue if both are somehow set.
+    std::optional<core::session::SessionData> startup_data;
+    std::string missing_session_label;   // non-empty → warn when not found
     if (opts.resume_session_id.has_value()) {
         const auto& req = *opts.resume_session_id;
-        auto data_opt = req.empty()
+        startup_data = req.empty()
             ? session_store->load_most_recent()
             : session_store->load(req);
-        if (data_opt.has_value()) {
-            const auto& data = *data_opt;
-            session_id         = data.session_id;
-            session_created_at = data.created_at;
-            goal_manager.restore(data.goal);
-            session_todos      = data.todos;
+        missing_session_label = req.empty()
+            ? std::string("most recent")
+            : std::string(req);
+    } else if (opts.continue_last) {
+        // --continue scopes to the current project: only sessions whose
+        // working_dir matches the current directory are candidates.  If none
+        // exist we start a fresh session silently (no warning).
+        startup_data = session_store->load_most_recent_for_project(
+            std::filesystem::current_path().string());
+    }
 
-            // Restore agent state.
-            agent->load_history(data.messages, data.context_summary, data.mode);
-            agent->set_session_goal(goal_manager.active_goal());
+    if (startup_data.has_value()) {
+        const auto& data = *startup_data;
+        session_id         = data.session_id;
+        session_name       = data.name;
+        session_created_at = data.created_at;
+        goal_manager.restore(data.goal);
+        session_todos      = data.todos;
 
-            // Align mode picker.
-            for (std::size_t i = 0; i < modes.size(); ++i) {
-                if (modes[i].first == data.mode) {
-                    current_mode_idx = static_cast<int>(i);
-                    break;
-                }
+        // Restore agent state.
+        agent->load_history(data.messages, data.context_summary, data.mode);
+        agent->set_session_goal(goal_manager.active_goal());
+
+        // Align mode picker.
+        for (std::size_t i = 0; i < modes.size(); ++i) {
+            if (modes[i].first == data.mode) {
+                current_mode_idx = static_cast<int>(i);
+                break;
             }
-
-            // Restore session file path.
-            session_file_path = session_store->compute_path(data).string();
-
-            ui_messages = build_resumed_ui_messages(
-                data,
-                SessionReplayOptions{.include_continue_hint = true});
-        } else {
-            // Session not found — warn and continue with a fresh session.
-            append_ui_message(ui_messages, make_warning_message(
-                std::format("Session '{}' not found. Starting a fresh session.",
-                    req.empty() ? std::string("most recent") : req)));
         }
+
+        // Restore session file path.
+        session_file_path = session_store->compute_path(data).string();
+
+        ui_messages = build_resumed_ui_messages(
+            data,
+            SessionReplayOptions{.include_continue_hint = true});
+    } else if (!missing_session_label.empty()) {
+        // --resume pointed at something that doesn't exist — warn the user.
+        append_ui_message(ui_messages, make_warning_message(
+            std::format("Session '{}' not found. Starting a fresh session.",
+                missing_session_label)));
     }
 
     compute_session_path();
@@ -1370,6 +1385,7 @@ RunResult run(RunOptions opts) {
         core::session::SessionStats::get_instance().reset();
         // Start a fresh session after /clear.
         session_id         = core::session::SessionStore::generate_id();
+        session_name.clear();
         session_created_at = core::session::SessionStore::now_iso8601();
         core::budget::BudgetTracker::get_instance().set_session_id(session_id);
         agent->set_session_id(session_id);
@@ -1757,6 +1773,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
+            session_name       = data.name;
             session_created_at = data.created_at;
             goal_manager.restore(data.goal);
             session_todos      = data.todos;
@@ -1855,6 +1872,7 @@ RunResult run(RunOptions opts) {
         const std::string snap_context = agent->get_context_summary();
 
         std::string old_session_id;
+        std::string old_session_name;
         std::string old_created_at;
         std::string provider_name;
         std::string model_name;
@@ -1863,6 +1881,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             old_session_id = session_id;
+            old_session_name = session_name;
             old_created_at = session_created_at;
             provider_name = active_provider_name;
             model_name = active_model_name;
@@ -1872,6 +1891,7 @@ RunResult run(RunOptions opts) {
 
         core::session::SessionData original;
         original.session_id      = old_session_id;
+        original.name            = old_session_name;
         original.created_at      = old_created_at;
         original.last_active_at  = core::session::SessionStore::now_iso8601();
         original.working_dir     = std::filesystem::current_path().string();
@@ -1899,6 +1919,7 @@ RunResult run(RunOptions opts) {
         const std::string new_created_at = core::session::SessionStore::now_iso8601();
         auto branch = original;
         branch.session_id = new_session_id;
+        branch.name.clear();  // the fork starts unnamed; the original keeps its name
         branch.created_at = new_created_at;
         branch.last_active_at = new_created_at;
         branch.context_summary = std::move(branch_context);
@@ -1925,6 +1946,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             session_id = new_session_id;
+            session_name.clear();
             session_created_at = new_created_at;
             session_file_path = session_store->compute_path(branch).string();
         }
@@ -1946,7 +1968,7 @@ RunResult run(RunOptions opts) {
     };
 
     agent->set_efficiency_decision_fn(
-        [agent, session_store, &ui_mutex, &session_id, &session_created_at,
+        [agent, session_store, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
          &ui_messages, &wake_ui, &goal_manager, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
@@ -1957,6 +1979,7 @@ RunResult run(RunOptions opts) {
             {
                 std::lock_guard lock(ui_mutex);
                 archived.session_id = session_id;
+                archived.name = session_name;
                 archived.created_at = session_created_at;
                 archived.provider = active_provider_name;
                 archived.model = active_model_name;
@@ -3894,6 +3917,7 @@ RunResult run(RunOptions opts) {
         const auto working_dir = std::filesystem::current_path().string();
 
         std::string sid;
+        std::string sname;
         std::string created_at;
         std::string provider_name;
         std::string model_name;
@@ -3902,6 +3926,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             sid = session_id;
+            sname = session_name;
             created_at = session_created_at;
             provider_name = active_provider_name;
             model_name = active_model_name;
@@ -3912,7 +3937,7 @@ RunResult run(RunOptions opts) {
         const std::uint64_t generation =
             session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-        std::thread([session_store, sid, created_at,
+        std::thread([session_store, sid, sname, created_at,
                      provider_name, model_name,
                      working_dir,
                      snap_messages = std::move(snap_messages),
@@ -3923,6 +3948,7 @@ RunResult run(RunOptions opts) {
                      generation]() {
             core::session::SessionData data;
             data.session_id        = sid;
+            data.name              = sname;
             data.created_at        = created_at;
             data.last_active_at    = core::session::SessionStore::now_iso8601();
             data.working_dir       = working_dir;
@@ -4851,6 +4877,28 @@ RunResult run(RunOptions opts) {
                     return;
                 }
                 resume_session(*data_opt);
+            },
+            .rename_session_fn = [&](std::string_view new_name)
+                -> core::commands::CommandOperationResult {
+                std::string previous;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    previous = session_name;
+                    session_name = std::string(new_name);
+                }
+                save_session_snapshot();
+                if (new_name.empty()) {
+                    return {.ok = true, .message = previous.empty()
+                        ? std::string("Session name cleared.")
+                        : std::format("Session name '{}' cleared.", previous)};
+                }
+                return {.ok = true, .message = std::format(
+                    "Session renamed to '{}'. Resume it later with /resume {} or filo -r {}.",
+                    new_name, new_name, new_name)};
+            },
+            .session_name_fn = [&]() {
+                std::lock_guard lock(ui_mutex);
+                return session_name;
             },
             .open_provider_picker_fn = [&](std::vector<std::string> providers,
                                            std::function<void(std::optional<std::string>)> on_select) {

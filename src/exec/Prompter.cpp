@@ -214,51 +214,6 @@ struct ToolStats {
     return combined;
 }
 
-[[nodiscard]] std::filesystem::path normalize_path(std::filesystem::path path) {
-    std::error_code ec;
-    if (path.empty()) {
-        return path;
-    }
-
-    if (!path.is_absolute()) {
-        path = std::filesystem::absolute(path, ec);
-        if (ec) {
-            return path.lexically_normal();
-        }
-    }
-
-    auto canonical = std::filesystem::weakly_canonical(path, ec);
-    if (ec) {
-        return path.lexically_normal();
-    }
-    return canonical;
-}
-
-[[nodiscard]] bool same_directory(std::string_view lhs, const std::filesystem::path& rhs) {
-    if (lhs.empty()) {
-        return false;
-    }
-    const auto left_norm = normalize_path(std::filesystem::path(lhs));
-    const auto right_norm = normalize_path(rhs);
-    return left_norm == right_norm;
-}
-
-[[nodiscard]] std::optional<core::session::SessionData>
-load_most_recent_for_project(const core::session::SessionStore& store,
-                             const std::filesystem::path& cwd) {
-    const auto infos = store.list();
-    for (const auto& info : infos) {
-        auto data_opt = store.load_by_id(info.session_id);
-        if (!data_opt.has_value()) {
-            continue;
-        }
-        if (same_directory(data_opt->working_dir, cwd)) {
-            return data_opt;
-        }
-    }
-    return std::nullopt;
-}
-
 [[nodiscard]] std::optional<core::session::SessionData>
 resolve_resume_request(const RunOptions& options,
                        const core::session::SessionStore& store,
@@ -272,7 +227,7 @@ resolve_resume_request(const RunOptions& options,
     }
 
     if (options.continue_last) {
-        auto resumed = load_most_recent_for_project(store, cwd);
+        auto resumed = store.load_most_recent_for_project(cwd.string());
         if (!resumed.has_value()) {
             error = "No resumable session found for the current project.";
         }
@@ -717,6 +672,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     core::session::SessionStore store(session_dir);
 
     std::string session_id = core::session::SessionStore::generate_id();
+    std::string session_name;
     std::string created_at = core::session::SessionStore::now_iso8601();
     std::vector<core::session::SessionTodoItem> session_todos;
     core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
@@ -753,6 +709,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
             agent->set_session_goal(goal_manager.active_goal());
         } else {
             session_id = resumed_session->session_id;
+            session_name = resumed_session->name;
             created_at = resumed_session->created_at;
             session_todos = resumed_session->todos;
             agent->load_history(
@@ -771,7 +728,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     const std::string emitted_session_id = session_id;
 
     agent->set_efficiency_decision_fn(
-        [agent, &store, &session_id, &created_at, &runtime, &session_todos](
+        [agent, &store, &session_id, &session_name, &created_at, &runtime, &session_todos](
             const core::session::SessionEfficiencyDecision&) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
@@ -779,6 +736,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
             core::session::SessionData archived;
             archived.session_id = session_id;
+            archived.name = session_name;
             archived.created_at = created_at;
             archived.last_active_at = core::session::SessionStore::now_iso8601();
             archived.working_dir = std::filesystem::current_path().string();
@@ -1005,6 +963,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
     core::session::SessionData data;
     data.session_id = session_id;
+    data.name = session_name;
     data.created_at = created_at;
     data.last_active_at = core::session::SessionStore::now_iso8601();
     data.working_dir = std::filesystem::current_path().string();

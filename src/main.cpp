@@ -81,8 +81,9 @@ int main(int argc, char** argv) {
                    "Prompter input format: text, stream-json")->capture_default_str();
     app.add_flag("--include-partial-messages", include_partial_messages,
                  "Include content-delta events in stream-json prompter output");
-    app.add_flag("--continue", continue_last,
-                 "Prompter mode: continue the most recent session scoped to the current project");
+    app.add_flag("-c,--continue", continue_last,
+                 "Continue the most recent session scoped to the current project "
+                 "(TUI + prompter mode)");
     app.add_flag(
         "-y,--yolo",
         yolo_mode,
@@ -128,8 +129,8 @@ int main(int argc, char** argv) {
         login_provider,
         "Provider to authenticate (e.g. openai, claude, zai)");
     auto* resume_opt = app.add_option(
-        "--resume", resume_session,
-        "Resume a session by ID or 1-based index (see --list-sessions). "
+        "-r,--resume", resume_session,
+        "Resume a session by ID, 1-based index, or name (see --list-sessions and /rename). "
         "If no value is provided, resumes the most recent session.");
     resume_opt->expected(0, 1);
     app.add_flag("--list-sessions", list_sessions, "List available sessions and exit");
@@ -206,16 +207,17 @@ int main(int argc, char** argv) {
                     ? infos[i].created_at : infos[i].last_active_at;
                 if (ts.size() >= 16 && ts[10] == 'T') ts[10] = ' ';
                 ts = ts.substr(0, 16);
-                std::cout << std::format("  [{:2d}]  {}  {}  {}/{:20}  {:3d} turns  {}\n",
+                std::cout << std::format("  [{:2d}]  {}  {}  {}/{:20}  {:3d} turns  {}{}\n",
                     i + 1,
                     infos[i].session_id,
                     ts,
                     infos[i].provider,
                     infos[i].model,
                     infos[i].turn_count,
-                    infos[i].mode);
+                    infos[i].mode,
+                    infos[i].name.empty() ? std::string{} : std::format("  \"{}\"", infos[i].name));
             }
-            std::cout << "\nResume with: filo --resume <id>  or  filo --resume\n";
+            std::cout << "\nResume with: filo --resume <id|name>  or  filo --resume\n";
         }
         return 0;
     }
@@ -334,6 +336,7 @@ int main(int argc, char** argv) {
             .trust_all_tools = trust_resolution.trust_all_tools,
             .session_allow_rules = trust_resolution.session_allow_rules,
         };
+        run_opts.continue_last = continue_last;
         const auto run_result = tui::run(run_opts);
 
         if (mcp_stdio_mode) exec::mcp::stop_server();

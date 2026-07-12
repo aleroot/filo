@@ -467,6 +467,94 @@ TEST_CASE("SessionStore::load dispatches by integer index or ID", "[session][sto
     CHECK(by_idx->session_id == "dispatch1");
 }
 
+TEST_CASE("SessionStore round-trips the session name", "[session][store][rename]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_name"};
+    core::session::SessionStore store{tmp.path};
+
+    auto named = make_test_session("named001");
+    named.name = "auth-refactor";
+    REQUIRE(store.save(named));
+
+    const auto loaded = store.load_by_id("named001");
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->name == "auth-refactor");
+
+    const auto infos = store.list();
+    REQUIRE(infos.size() == 1);
+    CHECK(infos[0].name == "auth-refactor");
+}
+
+TEST_CASE("SessionStore loads sessions by name", "[session][store][rename]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_byname"};
+    core::session::SessionStore store{tmp.path};
+
+    auto older = make_test_session("byname01");
+    older.name = "auth-refactor";
+    older.last_active_at = "2026-03-20T08:00:00Z";
+    auto newer = make_test_session("byname02");
+    newer.name = "auth-refactor";
+    newer.last_active_at = "2026-03-22T12:00:00Z";
+    auto other = make_test_session("byname03");
+    other.name = "bugfix";
+    other.last_active_at = "2026-03-23T09:00:00Z";
+    REQUIRE(store.save(older));
+    REQUIRE(store.save(newer));
+    REQUIRE(store.save(other));
+
+    // Direct name lookup: most recently active match wins.
+    const auto by_name = store.load_by_name("auth-refactor");
+    REQUIRE(by_name.has_value());
+    CHECK(by_name->session_id == "byname02");
+
+    // Unified load() falls back to name after index and ID.
+    const auto unified = store.load("bugfix");
+    REQUIRE(unified.has_value());
+    CHECK(unified->session_id == "byname03");
+
+    // ID still takes precedence over names.
+    const auto by_id = store.load("byname01");
+    REQUIRE(by_id.has_value());
+    CHECK(by_id->session_id == "byname01");
+
+    CHECK(!store.load_by_name("unknown").has_value());
+    CHECK(!store.load("unknown").has_value());
+}
+
+TEST_CASE("SessionStore::load_most_recent_for_project scopes to working_dir",
+          "[session][store][continue]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_project"};
+    core::session::SessionStore store{tmp.path};
+
+    // Two sessions in the current project, one in a different project.
+    const auto cwd = std::filesystem::current_path().string();
+
+    auto proj_a = make_test_session("projAAAA");
+    proj_a.working_dir = cwd;
+    proj_a.last_active_at = "2026-03-20T08:00:00Z";
+
+    auto proj_b = make_test_session("projBBBB");
+    proj_b.working_dir = cwd;
+    proj_b.last_active_at = "2026-03-22T12:00:00Z";  // most recent
+
+    auto other = make_test_session("otherXXX");
+    other.working_dir = "/completely/different/path";
+    other.last_active_at = "2026-03-23T09:00:00Z";    // newer, but wrong project
+
+    REQUIRE(store.save(proj_a));
+    REQUIRE(store.save(proj_b));
+    REQUIRE(store.save(other));
+
+    // --continue should pick proj_b: the most recent session for *this* project,
+    // ignoring the newer session from the other directory.
+    const auto result = store.load_most_recent_for_project(cwd);
+    REQUIRE(result.has_value());
+    CHECK(result->session_id == "projBBBB");
+
+    // Unknown project → nullopt (silent fresh start, not an error).
+    CHECK(!store.load_most_recent_for_project("/no/such/project").has_value());
+    CHECK(!store.load_most_recent_for_project("").has_value());
+}
+
 // ---------------------------------------------------------------------------
 // SessionStore::remove
 // ---------------------------------------------------------------------------

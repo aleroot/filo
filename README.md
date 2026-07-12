@@ -138,13 +138,13 @@ Useful CLI flags:
 - `--api` enable optional OpenAI/Anthropic-compatible proxy mode
 - `--login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
 - `--list-sessions` list resumable sessions
-- `--resume [id|index]` resume a saved session
+- `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
 - `--prompter` force non-interactive mode
 - `--prompt`, `-p` prompt text
 - `--output-format`, `-o` one of `text`, `json`, `stream-json`
 - `--input-format` one of `text`, `stream-json`
 - `--include-partial-messages` include deltas in `stream-json`
-- `--continue` continue the latest project-scoped session in prompter mode
+- `-c, --continue` continue the latest project-scoped session (TUI + prompter)
 - `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
 
 Prompter examples:

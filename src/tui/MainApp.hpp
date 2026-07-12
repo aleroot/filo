@@ -14,6 +14,9 @@ struct StartupTrust {
 struct RunOptions {
     /// Non-empty: resume by ID or 1-based index.  Empty string: resume most recent.
     std::optional<std::string> resume_session_id;
+    /// When true and no resume_session_id is set: open the TUI with the most
+    /// recent session scoped to the current project (the "filo -c" experience).
+    bool continue_last = false;
     /// Optional startup trust settings applied before the first turn.
     StartupTrust startup_trust;
 };

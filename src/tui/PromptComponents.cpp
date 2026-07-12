@@ -1065,6 +1065,8 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
         auto row = hbox({
             text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
             text(std::format(" {} ", s.session_id)) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
+            text(s.name.empty() ? std::string{} : std::format(" {} ", s.name))
+                | ftxui::bold | color(is_selected ? Color::White : Color::GrayLight),
             text(std::format(" {}  ", ts)) | color(is_selected ? Color::White : Color::GrayDark),
             text(std::format("{}/{:18} ", s.provider, s.model)) | color(is_selected ? Color::White : Color::GrayLight),
             text(std::format(" {:3d} turns ", s.turn_count)) | color(is_selected ? Color::White : Color::GrayDark),

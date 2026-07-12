@@ -12,6 +12,7 @@ namespace core::session {
 /// Brief metadata for listing sessions without loading full message history.
 struct SessionInfo {
     std::string           session_id;
+    std::string           name;
     std::string           created_at;
     std::string           last_active_at;
     std::string           provider;
@@ -42,13 +43,22 @@ public:
     // Load by 8-char hex session ID.
     [[nodiscard]] std::optional<SessionData> load_by_id(std::string_view session_id) const;
 
+    // Load by user-assigned name (most recently active match wins).
+    [[nodiscard]] std::optional<SessionData> load_by_name(std::string_view name) const;
+
     // Load by 1-based index from the sorted list (1 = most recent).
     [[nodiscard]] std::optional<SessionData> load_by_index(int index) const;
 
     // Load the most recent session.
     [[nodiscard]] std::optional<SessionData> load_most_recent() const;
 
-    // Unified load: tries integer index first, then session ID.
+    // Load the most recent session whose working_dir matches @p working_dir.
+    // This is what powers `--continue`: it scopes to the current project so a
+    // session from another repo is never silently resumed.
+    [[nodiscard]] std::optional<SessionData> load_most_recent_for_project(
+        std::string_view working_dir) const;
+
+    // Unified load: tries integer index first, then session ID, then name.
     [[nodiscard]] std::optional<SessionData> load(std::string_view id_or_index) const;
 
     // List all sessions sorted by last-active time (most recent first).
