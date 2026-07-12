@@ -496,3 +496,127 @@ TEST_CASE("PromptInput - Ctrl+U in multiline deletes to start of current line on
     REQUIRE(content == "line one\ntwo");
     REQUIRE(cursor == 9);
 }
+
+// ── Large-document virtualization ────────────────────────────────────────────
+// Regression guard for the O(document) per-frame render bug: feeding FTXUI's
+// non-virtualizing `frame` every line of a huge paste made each keystroke scale
+// with the whole document. These tests pin the two guarantees of the fix:
+//   (1) correctness — the cursor line stays visible no matter how large the doc,
+//   (2) performance — per-frame render cost is O(viewport), independent of size.
+
+static std::string make_big_document(int lines, const std::string& marker_line) {
+    std::string s;
+    s.reserve(static_cast<size_t>(lines) * 40);
+    for (int i = 0; i < lines; ++i) {
+        if (i == lines - 1) {
+            s += marker_line;
+        } else {
+            s += "padding line number ";
+            s += std::to_string(i);
+        }
+        s += '\n';
+    }
+    return s;
+}
+
+// Renders `comp` twice. The first call assigns `box_` (via reflect); the
+// second call is the one that actually exercises the virtualized window built
+// from that geometry — i.e. the steady-state production path on every frame
+// after the first.
+static std::string render_twice(ftxui::Component& comp, int width, int height) {
+    std::string out;
+    for (int i = 0; i < 2; ++i) {
+        Screen screen(width, height);
+        Render(screen, comp->Render());
+        out = screen.ToString();
+    }
+    return out;
+}
+
+TEST_CASE("PromptInput - large document keeps cursor line visible",
+          "[prompt_input][perf]") {
+    // The cursor line must remain on screen regardless of document size and
+    // cursor position, including on the steady-state (box_-populated) frame.
+    constexpr int kLines = 2000;
+    const std::string marker = "ZZZ_MARKER_ZZZ";
+
+    for (int target_line : {0, kLines / 2, kLines - 1}) {
+        std::string content;
+        int cursor = 0;
+        for (int i = 0; i < kLines; ++i) {
+            if (i == target_line) {
+                cursor = static_cast<int>(content.size());
+                content += marker;
+            } else {
+                content += "padding line number " + std::to_string(i);
+            }
+            content += '\n';
+        }
+
+        auto comp = make_input(content, cursor, true);
+        const std::string rendered = render_twice(comp, 90, 24);
+
+        INFO("cursor line " << target_line << " of " << kLines);
+        REQUIRE(rendered.find(marker) != std::string::npos);
+    }
+}
+
+TEST_CASE("PromptInput - large document keeps cursor line visible in a small box",
+          "[prompt_input][perf]") {
+    // Mirror the production layout: the input shares the screen with a flex
+    // history pane, so it only gets a few rows. The virtualized window must
+    // still keep the cursor line on screen.
+    constexpr int kLines = 2000;
+    const std::string marker = "ZZZ_MARKER_ZZZ";
+    std::string content;
+    for (int i = 0; i < kLines; ++i) {
+        if (i == kLines - 1) content += marker;
+        else content += "padding line " + std::to_string(i);
+        content += '\n';
+    }
+    int cursor = static_cast<int>(content.size());
+
+    auto input = make_input(content, cursor, true);
+    auto layout = Container::Vertical({
+        Renderer([] { return text("") | flex; }),
+        input,
+    });
+    // Production always focuses the input (MainApp calls TakeFocus); the frame
+    // only centres on the cursor when the input owns focus.
+    input->TakeFocus();
+    auto renderer = Renderer(layout, [&] {
+        return vbox({layout->Render() | flex, separator(), text("status")});
+    });
+
+    std::string rendered;
+    for (int i = 0; i < 2; ++i) {
+        Screen screen(90, 24);
+        Render(screen, renderer->Render());
+        rendered = screen.ToString();
+    }
+    REQUIRE(rendered.find(marker) != std::string::npos);
+}
+
+TEST_CASE("PromptInput - large document render cost is viewport-bounded",
+          "[prompt_input][perf]") {
+    auto render_n = [](int lines, int iters) {
+        std::string content = make_big_document(lines, "end");
+        int cursor = static_cast<int>(content.size());
+        auto comp = make_input(content, cursor, true);
+        using clk = std::chrono::steady_clock;
+        auto t0 = clk::now();
+        for (int i = 0; i < iters; ++i) {
+            Screen screen(90, 24);
+            Render(screen, comp->Render());
+        }
+        auto t1 = clk::now();
+        return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
+    };
+
+    // Virtualized rendering is ~constant in document size; the old O(n) path
+    // was ~10x slower per frame at 5000 vs 500 lines. A 4x budget cleanly
+    // separates the two while tolerating CI hardware variance.
+    const double small = render_n(500, 60);
+    const double large = render_n(5000, 60);
+    REQUIRE(large < 4.0 * small);
+}

@@ -189,16 +189,39 @@ private:
         cursor_position() = std::clamp(cursor_position(), 0, static_cast<int>(content->size()));
         const auto [cursor_line, cursor_char_index] = cursor_coord(lines);
 
-        Elements elements;
-        elements.reserve(lines.size());
+        // ── Virtualized line window ──────────────────────────────────────────
+        // FTXUI's `frame` clips the *output* to the viewport but does not skip
+        // the *work*: every Element handed to it is laid out (ComputeRequirement
+        // + SetBox + Render) on every frame. Feeding it an entire multi-
+        // thousand-line paste therefore makes each keystroke O(document size)
+        // — even though only a handful of rows are ever on screen — which is
+        // why typing grows sluggish after pasting a large document.
+        //
+        // Build Element nodes only for the rows that can possibly be visible:
+        // a window centred on the cursor line. `box_` holds the geometry
+        // assigned on the *previous* frame (via reflect), a tight estimate of
+        // how many input rows are actually displayed. The per-frame cost then
+        // stays O(viewport) instead of O(document).
+        const int total_lines = static_cast<int>(lines.size());
+        constexpr int kMinWindowHalf = 24;  // sane floor; covers any terminal
+        const int viewport_height =
+            (box_.y_max > box_.y_min)
+                ? std::max(box_.y_max - box_.y_min + 1, kMinWindowHalf)
+                : kMinWindowHalf;
+        const int half_window = viewport_height + 8;  // overshoot for smooth scroll
+        const int first_line = std::max(0, cursor_line - half_window);
+        const int last_line  = std::min(total_lines - 1, cursor_line + half_window);
 
-        if (lines.empty()) {
+        Elements elements;
+        if (total_lines == 0) {
             elements.push_back(apply_focus(text("")));
+        } else {
+            elements.reserve(static_cast<size_t>(last_line - first_line + 1));
         }
 
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const auto& line = lines[i];
-            if (static_cast<int>(i) != cursor_line) {
+        for (int i = first_line; i <= last_line; ++i) {
+            const auto& line = lines[static_cast<size_t>(i)];
+            if (i != cursor_line) {
                 elements.push_back(Text(line));
                 continue;
             }
