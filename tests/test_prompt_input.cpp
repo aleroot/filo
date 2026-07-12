@@ -597,6 +597,51 @@ TEST_CASE("PromptInput - large document keeps cursor line visible in a small box
     REQUIRE(rendered.find(marker) != std::string::npos);
 }
 
+TEST_CASE("PromptInput - large paste never squeezes surrounding chrome off screen",
+          "[prompt_input][layout]") {
+    // Regression: the virtualized line window used to propagate its full
+    // height as a minimum layout requirement.  After a multi-hundred-line
+    // paste the prompt box would grow until it displaced the banner, the
+    // history pane, and even the top window border.  The input must instead
+    // cap its height and scroll internally.
+    constexpr int kLines = 800;
+    std::string content;
+    for (int i = 0; i < kLines; ++i) {
+        content += "pasted line " + std::to_string(i) + '\n';
+    }
+    int cursor = static_cast<int>(content.size());
+
+    auto input = make_input(content, cursor, true);
+    input->TakeFocus();
+
+    const std::string banner_marker = "BANNER_MARKER";
+    const std::string status_marker = "STATUS_MARKER";
+    auto renderer = Renderer(input, [&] {
+        return vbox({
+            text(banner_marker),
+            text("") | flex,   // history pane
+            input->Render(),
+            text(status_marker),
+        });
+    });
+
+    std::string rendered;
+    // Render several frames so box_ feedback (via reflect) reaches steady
+    // state; the old bug only manifested once box_ began inflating the
+    // virtualization window.
+    for (int i = 0; i < 4; ++i) {
+        Screen screen(90, 24);
+        Render(screen, renderer->Render());
+        rendered = screen.ToString();
+    }
+
+    REQUIRE(rendered.find(banner_marker) != std::string::npos);
+    REQUIRE(rendered.find(status_marker) != std::string::npos);
+    // Cursor (end of paste) must still be visible inside the capped viewport.
+    REQUIRE(rendered.find("pasted line " + std::to_string(kLines - 1))
+            != std::string::npos);
+}
+
 TEST_CASE("PromptInput - large document render cost is viewport-bounded",
           "[prompt_input][perf]") {
     auto render_n = [](int lines, int iters) {

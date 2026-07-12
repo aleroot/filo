@@ -1,4 +1,5 @@
 #include "PromptInput.hpp"
+#include "Constants.hpp"
 #include "StringUtils.hpp"
 #include "core/context/MentionPathUtils.hpp"
 #include "core/utils/AsciiUtils.hpp"
@@ -247,7 +248,18 @@ private:
             }) | xflex);
         }
 
-        auto element = vbox(std::move(elements)) | frame;
+        // Cap the reported height requirement.  The virtualized window above
+        // can span dozens of lines after a large paste; without this cap the
+        // vbox's min_y propagates up through the layout and enters a feedback
+        // loop with the virtualization window (bigger box_ → bigger window →
+        // bigger requirement → bigger box_), until the prompt panel demands
+        // more rows than the terminal has and the top-level window — banner
+        // and history included — is squeezed off screen.  With the cap in
+        // place, `frame` scrolls the content to keep the focused cursor
+        // element visible instead of growing the box.
+        auto element = vbox(std::move(elements))
+            | frame
+            | size(HEIGHT, LESS_THAN, kPromptInputMaxVisibleLines);
         return transform_func({
                    std::move(element),
                    hovered_,

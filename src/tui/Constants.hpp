@@ -56,6 +56,15 @@ inline constexpr int kPickerMaxDisplayRows = 12;
 /// smaller visible window to avoid the bottom panel taking over the screen.
 inline constexpr int kCommandPickerMaxDisplayRows = 6;
 
+/// Hard cap on the number of input rows visible inside the prompt box.  The
+/// PromptInput element reports its full (virtualized) line window as its
+/// minimum height requirement; without this cap a long paste enters a
+/// feedback loop (bigger box → bigger virtualization window → bigger
+/// requirement → bigger box) until the prompt swallows the whole screen and
+/// clips the banner/status bar.  When content exceeds this, the inner
+/// `frame` scrolls to keep the cursor visible.
+inline constexpr int kPromptInputMaxVisibleLines = 10;
+
 // ── Animation ─────────────────────────────────────────────────────────────────
 
 /// Interval between animation frames in milliseconds (controls the spinner and
