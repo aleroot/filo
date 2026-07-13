@@ -256,7 +256,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     client_identity_source);
             } else {
                 protocol = std::make_unique<protocols::OpenAIResponsesProtocol>(
-                    /*include_reasoning_encrypted=*/false,
+                    /*include_reasoning_encrypted=*/
+                        canonical_type == "openai"
+                        && openai_endpoint::is_native_openai_responses_base_url(base_url),
                     config.service_tier);
             }
         } else {

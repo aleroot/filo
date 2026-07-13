@@ -618,6 +618,31 @@ TEST_CASE("OpenAIResponsesProtocol - parse function_call item event",
     REQUIRE(result.chunks[0].tools[0].function.name == "read_file");
 }
 
+TEST_CASE("OpenAIResponsesProtocol preserves and replays encrypted reasoning items",
+          "[openai][responses][continuation]") {
+    OpenAIResponsesProtocol protocol(true);
+    auto parsed = protocol.parse_event(
+        "event: response.output_item.done\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"opaque-token\",\"summary\":[]}}");
+
+    REQUIRE(parsed.chunks.size() == 1);
+    REQUIRE(parsed.chunks[0].continuation_items.size() == 1);
+    const auto& item = parsed.chunks[0].continuation_items[0];
+    CHECK(item.provider == "openai");
+    CHECK(item.kind == "reasoning");
+    CHECK_THAT(item.payload, Catch::Matchers::ContainsSubstring("opaque-token"));
+
+    ChatRequest request;
+    request.model = "gpt-5.6";
+    request.messages = {
+        {.role = "assistant", .continuation_items = {item}},
+        {.role = "user", .content = "Continue"},
+    };
+    const std::string payload = protocol.serialize(request);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("encrypted_content":"opaque-token")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("include":["reasoning.encrypted_content"])"));
+}
+
 TEST_CASE("OpenAIResponsesProtocol - parse assistant message from output_item.done without deltas",
           "[openai][responses][sse]") {
     OpenAIResponsesProtocol protocol;

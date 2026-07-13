@@ -4,6 +4,7 @@
 #include "../ModelRegistry.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
+#include "../../tools/ToolSchema.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -293,6 +294,12 @@ namespace {
     std::string compose_anthropic_system_prompt(const ChatRequest& req) {
         std::string base_system =
             "x-anthropic-billing-header: " + std::string(ANTHROPIC_BILLING_HEADER);
+
+        if (!req.prompt_plan.empty()) {
+            base_system += "\n\n";
+            base_system += req.prompt_plan.render();
+            return base_system;
+        }
 
         for (const auto& msg : req.messages) {
             if (msg.role != "system" || msg.content.empty()) continue;
@@ -717,37 +724,9 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
             payload += core::utils::escape_json_string(def.name);
             payload += R"(","description":")";
             payload += core::utils::escape_json_string(def.description);
-            payload += R"(","input_schema":{"type":"object","properties":{)";
-
-            for (size_t j = 0; j < def.parameters.size(); ++j) {
-                const auto& p = def.parameters[j];
-                payload += '"';
-                payload += core::utils::escape_json_string(p.name);
-                payload += R"(":{"type":")";
-                payload += core::utils::escape_json_string(p.type);
-                payload += R"(","description":")";
-                payload += core::utils::escape_json_string(p.description);
-                payload += '"';
-                if (!p.items_schema.empty()) {
-                    payload += R"(,"items":)";
-                    payload += p.items_schema;
-                }
-                payload += '}';
-                if (j + 1 < def.parameters.size()) payload += ',';
-            }
-
-            payload += R"(},"required":[)";
-            bool first_req = true;
-            for (const auto& p : def.parameters) {
-                if (p.required) {
-                    if (!first_req) payload += ',';
-                    payload += '"';
-                    payload += core::utils::escape_json_string(p.name);
-                    payload += '"';
-                    first_req = false;
-                }
-            }
-            payload += "]}}";
+            payload += R"(","input_schema":)";
+            payload += core::tools::schema::canonical_input_schema(def);
+            payload += '}';
             if (i + 1 < req.tools.size()) payload += ',';
         }
         payload += ']';
@@ -770,12 +749,25 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
             payload += core::utils::escape_json_string(msg.content);
             payload += "\"}]}";
 
-        } else if (msg.role == "assistant" && !msg.tool_calls.empty()) {
+        } else if (msg.role == "assistant"
+                   && (!msg.tool_calls.empty() || !msg.continuation_items.empty())) {
             // OpenAI assistant tool_calls → Claude content blocks.
             payload += R"({"role":"assistant","content":[)";
             bool first_block = true;
 
+            for (const auto& continuation : msg.continuation_items) {
+                if ((!continuation.provider.empty()
+                     && continuation.provider != "anthropic")
+                    || !has_valid_continuation_payload(continuation)) {
+                    continue;
+                }
+                if (!first_block) payload += ',';
+                payload += continuation.payload;
+                first_block = false;
+            }
+
             if (!msg.content.empty()) {
+                if (!first_block) payload += ',';
                 payload += R"({"type":"text","text":")";
                 payload += core::utils::escape_json_string(msg.content);
                 payload += "\"}";
@@ -941,6 +933,18 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             if (content_block["name"].get(name_v) == simdjson::SUCCESS)
                 state.name = std::string(name_v);
             current_tool_ = std::move(state);
+        } else if (type_v == "thinking" || type_v == "redacted_thinking") {
+            AnthropicContinuationBlockState state;
+            state.type = std::string(type_v);
+            state.initial_payload = simdjson::to_string(content_block);
+            std::string_view value;
+            if (content_block["thinking"].get(value) == simdjson::SUCCESS) {
+                state.thinking = std::string(value);
+            }
+            if (content_block["signature"].get(value) == simdjson::SUCCESS) {
+                state.signature = std::string(value);
+            }
+            current_continuation_ = std::move(state);
         }
         return result;
     }
@@ -960,8 +964,17 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             std::string_view partial_json;
             if (delta["partial_json"].get(partial_json) == simdjson::SUCCESS)
                 current_tool_->accumulated_args += partial_json;
+        } else if (delta_type == "thinking_delta" && current_continuation_.has_value()) {
+            std::string_view thinking;
+            if (delta["thinking"].get(thinking) == simdjson::SUCCESS) {
+                current_continuation_->thinking += thinking;
+            }
+        } else if (delta_type == "signature_delta" && current_continuation_.has_value()) {
+            std::string_view signature;
+            if (delta["signature"].get(signature) == simdjson::SUCCESS) {
+                current_continuation_->signature += signature;
+            }
         }
-        // thinking_delta: intentionally ignored.
         return result;
     }
 
@@ -976,6 +989,24 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             result.completed_tools.push_back(std::move(tc));
             current_tool_.reset();
         }
+        if (current_continuation_.has_value()) {
+            std::string block;
+            if (current_continuation_->type == "redacted_thinking") {
+                block = std::move(current_continuation_->initial_payload);
+            } else {
+                block = R"({"type":"thinking","thinking":")";
+                block += core::utils::escape_json_string(current_continuation_->thinking);
+                block += R"(","signature":")";
+                block += core::utils::escape_json_string(current_continuation_->signature);
+                block += R"("})";
+            }
+            result.continuation_items.push_back(ContinuationItem{
+                .provider = "anthropic",
+                .kind = current_continuation_->type,
+                .payload = std::move(block),
+            });
+            current_continuation_.reset();
+        }
         return result;
     }
 
@@ -983,6 +1014,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
         result.done = true;
         result.incomplete_tool_call = current_tool_.has_value();
         current_tool_.reset();
+        current_continuation_.reset();
     }
 
     return result;
@@ -1105,6 +1137,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
 
     if (!r.text.empty())           result.chunks.push_back(StreamChunk::make_content(r.text));
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
+    if (!r.continuation_items.empty()) {
+        StreamChunk chunk;
+        chunk.continuation_items = std::move(r.continuation_items);
+        result.chunks.push_back(std::move(chunk));
+    }
 
     if (r.done) {
         result.done              = true;

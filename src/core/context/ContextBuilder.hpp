@@ -1,27 +1,13 @@
 #pragma once
 
 #include "SessionContext.hpp"
+#include "PromptPlan.hpp"
 
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace core::context {
-
-enum class ContextLayerKind {
-    RuntimeInstructions,
-    WorkspaceFacts,
-    Memory,
-    ProjectSteering,
-    SkillCatalog,
-    ProjectFacts,
-};
-
-struct ContextLayer {
-    ContextLayerKind kind;
-    std::string name;
-    std::string content;
-};
 
 class ContextBuilder {
 public:
@@ -32,6 +18,7 @@ public:
     ContextBuilder& include_skill_catalog(bool include = true) noexcept;
 
     [[nodiscard]] std::vector<ContextLayer> build_layers() const;
+    [[nodiscard]] PromptPlan build_plan() const;
     [[nodiscard]] std::string build() const;
 
 private:

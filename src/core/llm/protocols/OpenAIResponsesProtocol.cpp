@@ -4,6 +4,7 @@
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../../logging/Logger.hpp"
+#include "../../tools/ToolSchema.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -53,42 +54,16 @@ void append_tool_schema(std::string& payload, const std::vector<Tool>& tools) {
         payload += core::utils::escape_json_string(def.name);
         payload += R"(","description":")";
         payload += core::utils::escape_json_string(def.description);
-        payload += R"(","strict":false,"parameters":{"type":"object","properties":{)";
-
-        for (std::size_t j = 0; j < def.parameters.size(); ++j) {
-            const auto& p = def.parameters[j];
-            payload += "\"";
-            payload += core::utils::escape_json_string(p.name);
-            payload += R"(":{"type":")";
-            payload += core::utils::escape_json_string(p.type);
-            payload += R"(","description":")";
-            payload += core::utils::escape_json_string(p.description);
-            payload += "\"";
-            if (!p.items_schema.empty()) {
-                payload += R"(,"items":)";
-                payload += p.items_schema;
-            }
-            payload += "}";
-            if (j + 1 < def.parameters.size()) payload += ",";
-        }
-
-        payload += R"(},"required":[)";
-        bool first_req = true;
-        for (const auto& p : def.parameters) {
-            if (!p.required) continue;
-            if (!first_req) payload += ",";
-            payload += "\"";
-            payload += core::utils::escape_json_string(p.name);
-            payload += "\"";
-            first_req = false;
-        }
-        payload += "]}}";
+        payload += R"(","strict":false,"parameters":)";
+        payload += core::tools::schema::canonical_input_schema(def);
+        payload += "}";
         if (i + 1 < tools.size()) payload += ",";
     }
     payload += "]";
 }
 
 [[nodiscard]] std::string collect_instructions(const ChatRequest& req) {
+    if (!req.prompt_plan.empty()) return req.prompt_plan.render();
     std::string instructions;
     bool first = true;
     for (const auto& msg : req.messages) {
@@ -185,6 +160,15 @@ void append_function_call_output_item(std::string& payload,
 
     for (const auto& msg : messages) {
         if (msg.role == "system") continue;
+
+        if (msg.role == "assistant") {
+            for (const auto& continuation : msg.continuation_items) {
+                if ((continuation.provider.empty() || continuation.provider == "openai")
+                    && has_valid_continuation_payload(continuation)) {
+                    items.push_back(continuation.payload);
+                }
+            }
+        }
 
         if (msg.role == "tool") {
             if (msg.content.empty() && msg.tool_call_id.empty()) continue;
@@ -1021,6 +1005,14 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
                 chunk.tools.push_back(std::move(call));
                 result.chunks.push_back(std::move(chunk));
             }
+        } else if (item_type == "reasoning" && event_type == "response.output_item.done") {
+            StreamChunk chunk;
+            chunk.continuation_items.push_back(ContinuationItem{
+                .provider = "openai",
+                .kind = "reasoning",
+                .payload = simdjson::to_string(item),
+            });
+            result.chunks.push_back(std::move(chunk));
         } else if (item_type == "message" && !saw_text_delta_) {
             std::string_view role;
             if (item["role"].get(role) != simdjson::SUCCESS || role != "assistant") {

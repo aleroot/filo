@@ -12,6 +12,10 @@ std::size_t ContextWindowTracker::estimate_tokens(
     std::size_t total_chars = 0;
     for (const auto& msg : history) {
         total_chars += msg.content.size();
+        total_chars += msg.reasoning_content.size();
+        for (const auto& item : msg.continuation_items) {
+            total_chars += item.payload.size();
+        }
         for (const auto& tc : msg.tool_calls) {
             total_chars += tc.function.name.size() + tc.function.arguments.size();
         }

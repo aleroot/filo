@@ -99,6 +99,7 @@ namespace {
 
 void append_layer(std::vector<ContextLayer>& layers,
                   ContextLayerKind kind,
+                  PromptStability stability,
                   std::string name,
                   std::string content) {
     if (content.empty()) {
@@ -107,6 +108,7 @@ void append_layer(std::vector<ContextLayer>& layers,
 
     layers.push_back(ContextLayer{
         .kind = kind,
+        .stability = stability,
         .name = std::move(name),
         .content = std::move(content),
     });
@@ -138,32 +140,35 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
     append_layer(
         layers,
         ContextLayerKind::RuntimeInstructions,
+        PromptStability::Stable,
         "runtime",
         build_runtime_prompt(mode_));
 
     append_layer(
         layers,
         ContextLayerKind::WorkspaceFacts,
+        PromptStability::Workspace,
         "workspace",
         build_workspace_facts(session_context_));
 
-    if (session_context_.memory_policy.use_memories) {
-        append_layer(
-            layers,
-            ContextLayerKind::Memory,
-            "memory",
-            core::memory::build_memory_prompt_block(
-                core::memory::MemoryStore{}.load(),
-                24,
-                session_context_.memory_policy.generate_memories));
-    }
-
     if (!include_project_context_) {
+        if (session_context_.memory_policy.use_memories) {
+            append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
+                         "memory", core::memory::build_memory_prompt_block(
+                             core::memory::MemoryStore{}.load(), 24,
+                             session_context_.memory_policy.generate_memories));
+        }
         return layers;
     }
 
+    std::filesystem::path project_root;
     try {
-        const auto project_root = resolve_project_root(session_context_);
+        project_root = resolve_project_root(session_context_);
+    } catch (const std::exception&) {
+        // Context discovery must not prevent agent startup.
+    }
+
+    try {
         if (project_root.empty()) {
             return layers;
         }
@@ -171,6 +176,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         append_layer(
             layers,
             ContextLayerKind::ProjectSteering,
+            PromptStability::Workspace,
             "project_steering",
             load_project_steering_block(project_root));
 
@@ -178,28 +184,41 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
             append_layer(
                 layers,
                 ContextLayerKind::SkillCatalog,
+                PromptStability::Workspace,
                 "skill_catalog",
                 core::tools::SkillRegistry::build_catalog_prompt(project_root));
         }
 
-        append_layer(
-            layers,
-            ContextLayerKind::ProjectFacts,
-            "project_facts",
-            build_project_facts(project_root));
     } catch (const std::exception&) {
         // Context discovery must not prevent agent startup.
+    }
+
+    if (session_context_.memory_policy.use_memories) {
+        append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
+                     "memory", core::memory::build_memory_prompt_block(
+                         core::memory::MemoryStore{}.load(), 24,
+                         session_context_.memory_policy.generate_memories));
+    }
+
+    try {
+        if (!project_root.empty()) {
+            append_layer(layers, ContextLayerKind::ProjectFacts, PromptStability::Dynamic,
+                         "project_facts", build_project_facts(project_root));
+        }
+    } catch (const std::exception&) {
     }
 
     return layers;
 }
 
+PromptPlan ContextBuilder::build_plan() const {
+    PromptPlan plan;
+    for (auto& layer : build_layers()) plan.append(std::move(layer));
+    return plan;
+}
+
 std::string ContextBuilder::build() const {
-    std::string prompt;
-    for (const auto& layer : build_layers()) {
-        prompt += layer.content;
-    }
-    return prompt;
+    return build_plan().render();
 }
 
 } // namespace core::context

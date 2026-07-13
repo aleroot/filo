@@ -193,10 +193,12 @@ set(FILO_CORE_SOURCES
     src/core/agent/Agent.cpp
     src/core/agent/DelegatedAgentRunner.cpp
     src/core/agent/HistoryCompactor.cpp
+    src/core/agent/SemanticHistoryEditor.cpp
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
     src/core/agent/SubagentOrchestrator.cpp
+    src/core/tools/ToolSchema.cpp
     src/core/scm/GitProvider.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
@@ -209,6 +211,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/Workspace.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/PromptPlan.cpp
     src/core/context/ContextWindowTracker.cpp
     src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
@@ -467,6 +470,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_agent_loop_control.cpp
     tests/test_tool_loop_efficiency.cpp
     tests/test_tool_output_history.cpp
+    tests/test_tool_schema.cpp
+    tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
 )
@@ -619,6 +624,8 @@ source_group(
         tests/test_request_replay_cache.cpp
         tests/test_agent_loop_control.cpp
         tests/test_tool_output_history.cpp
+        tests/test_tool_schema.cpp
+        tests/test_semantic_history_editor.cpp
         tests/test_mcp_resources.cpp
         tests/test_trust_flag_resolver.cpp
 )

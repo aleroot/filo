@@ -12,6 +12,8 @@
 #include <functional>
 #include <fstream>
 #include "../tools/Tool.hpp"
+#include "../tools/ToolSchema.hpp"
+#include "../context/PromptPlan.hpp"
 #include "../utils/Base64.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/MimeUtils.hpp"
@@ -364,6 +366,21 @@ using EncodedImagePart = EncodedMediaPart;
 // ---------------------------------------------------------------------------
 // StreamChunk — represents a single chunk from an LLM streaming response.
 // ---------------------------------------------------------------------------
+struct ContinuationItem {
+    std::string provider = {}; ///< Wire-protocol owner (for example "openai" or "anthropic").
+    std::string kind = {};     ///< Provider item/block type; informational and forward-compatible.
+    std::string payload = {};  ///< Complete provider JSON item, replayed without interpretation.
+};
+
+[[nodiscard]] inline bool has_valid_continuation_payload(
+    const ContinuationItem& item) {
+    if (item.payload.empty()) return false;
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(item.payload);
+    simdjson::dom::object object;
+    return parser.parse(padded).get(object) == simdjson::SUCCESS;
+}
+
 struct StreamChunk {
     std::string content;           // Text content from the model
     std::string reasoning_content; // Provider-specific thinking/reasoning content
@@ -372,6 +389,7 @@ struct StreamChunk {
     bool is_final = false;         // True if this is the last chunk
     bool is_error = false;         // True if this chunk represents an API/HTTP error
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
+    std::vector<ContinuationItem> continuation_items; // Opaque signed/encrypted reasoning state
 
     // Factory methods for common cases
     [[nodiscard]] static StreamChunk make_final(
@@ -439,6 +457,7 @@ struct Message {
     std::vector<ContentPart> content_parts = {}; // Optional, for multimodal user input
     std::string input_text = {};            // Original editable prompt before mention/media expansion
     bool synthetic = false;                // Internal context record, not a visible user prompt
+    std::vector<ContinuationItem> continuation_items = {}; // Opaque provider continuation state
 };
 
 struct Tool {
@@ -484,6 +503,7 @@ struct ChatRequest {
     std::string transport_turn_id = {};     ///< Short-lived provider transport scope for one agent turn
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
+    core::context::PromptPlan prompt_plan; ///< Structured stable-to-dynamic system prompt.
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {
@@ -615,9 +635,7 @@ struct Serializer {
         // OpenAI-compatible providers do not all agree on completion-budget
         // spelling.
         std::string max_tokens_field = "max_tokens";
-        // Some providers accept raw tool input schemas and/or need provider-
-        // specific schema normalization.
-        bool use_tool_input_schema = false;
+        // Some providers need provider-specific schema normalization.
         std::function<std::string(std::string_view, bool)> transform_tool_schema;
         std::function<std::optional<std::string>(const Tool&)> serialize_tool_override;
     };
@@ -684,40 +702,10 @@ struct Serializer {
                 };
 
                 payload += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":)";
-                if (options.use_tool_input_schema && !def.input_schema.empty()) {
-                    payload += transform_schema(def.input_schema, false);
-                    payload += "}}";
-                    if (i < req.tools.size() - 1) payload += ",";
-                    continue;
-                }
-
-                payload += R"({"type":"object","properties":{)";
-                
-                for (size_t j = 0; j < def.parameters.size(); ++j) {
-                    const auto& p = def.parameters[j];
-                    payload += "\"" + core::utils::escape_json_string(p.name) + R"(":)";
-                    if (options.use_tool_input_schema && !p.schema.empty()) {
-                        payload += transform_schema(p.schema, true);
-                    } else {
-                        payload += R"({"type":")" + core::utils::escape_json_string(p.type) + R"(","description":")" + core::utils::escape_json_string(p.description) + "\"";
-                        if (!p.items_schema.empty()) {
-                            payload += R"(,"items":)" + p.items_schema;
-                        }
-                        payload += "}";
-                    }
-                    if (j < def.parameters.size() - 1) payload += ",";
-                }
-                
-                payload += R"(},"required":[)";
-                bool first_req = true;
-                for (const auto& p : def.parameters) {
-                    if (p.required) {
-                        if (!first_req) payload += ",";
-                        payload += "\"" + core::utils::escape_json_string(p.name) + "\"";
-                        first_req = false;
-                    }
-                }
-                payload += "]}}}";
+                const std::string canonical_schema =
+                    core::tools::schema::canonical_input_schema(def);
+                payload += transform_schema(canonical_schema, false);
+                payload += "}}";
                 if (i < req.tools.size() - 1) payload += ",";
             }
             payload += "]";

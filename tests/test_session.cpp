@@ -192,6 +192,31 @@ TEST_CASE("SessionStore round-trips messages with tool calls", "[session][json]"
     CHECK(msgs[3].tool_call_id   == "call_001");
 }
 
+TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
+          "[session][json][continuation]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_continuation"};
+    core::session::SessionStore store{tmp.path};
+    auto data = make_test_session("opaque01");
+    data.messages.push_back(core::llm::Message{
+        .role = "assistant",
+        .reasoning_content = "interleaved GLM reasoning",
+        .continuation_items = {{
+            .provider = "openai",
+            .kind = "reasoning",
+            .payload = R"({"type":"reasoning","encrypted_content":"secret"})",
+        }},
+    });
+
+    REQUIRE(store.save(data));
+    const auto loaded = store.load_by_id("opaque01");
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 3);
+    CHECK(loaded->messages[2].reasoning_content == "interleaved GLM reasoning");
+    REQUIRE(loaded->messages[2].continuation_items.size() == 1);
+    CHECK(loaded->messages[2].continuation_items[0].payload
+          == R"({"type":"reasoning","encrypted_content":"secret"})");
+}
+
 TEST_CASE("SessionStore round-trips messages with special JSON characters", "[session][json]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_esc"};
     core::session::SessionStore store{tmp.path};

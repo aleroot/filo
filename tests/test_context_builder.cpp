@@ -83,8 +83,10 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
 
     REQUIRE(layers.size() == 2);
     CHECK(layers[0].kind == core::context::ContextLayerKind::RuntimeInstructions);
+    CHECK(layers[0].stability == core::context::PromptStability::Stable);
     CHECK(layers[0].name == "runtime");
     CHECK(layers[1].kind == core::context::ContextLayerKind::WorkspaceFacts);
+    CHECK(layers[1].stability == core::context::PromptStability::Workspace);
     CHECK(layers[1].name == "workspace");
     CHECK(layers[0].content + layers[1].content == prompt);
     CHECK(layers[0].content ==
@@ -151,6 +153,7 @@ TEST_CASE("ContextBuilder renders project steering before project facts",
     CHECK(layers[2].kind == core::context::ContextLayerKind::ProjectSteering);
     CHECK(layers[2].name == "project_steering");
     CHECK(layers[3].kind == core::context::ContextLayerKind::ProjectFacts);
+    CHECK(layers[3].stability == core::context::PromptStability::Dynamic);
     CHECK(layers[3].name == "project_facts");
     CHECK(layers[0].content + layers[1].content + layers[2].content + layers[3].content
           == prompt);
@@ -184,6 +187,23 @@ TEST_CASE("ContextBuilder renders project steering before project facts",
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Structure:\n"));
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("src/"));
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("main.cpp"));
+}
+
+TEST_CASE("PromptPlan exposes a cacheable prefix without mutable project facts",
+          "[context][prompt-plan]") {
+    auto workspace = make_temp_workspace("filo_prompt_plan_layers");
+    write_text(workspace.path() / "AGENTS.md", "Stable repository guidance\n");
+    write_text(workspace.path() / "src" / "main.cpp", "int main() {}\n");
+    const auto context = make_context(workspace.path());
+
+    const auto plan = core::context::ContextBuilder(context).build_plan();
+    const std::string workspace_prefix =
+        plan.render_through(core::context::PromptStability::Workspace);
+
+    CHECK_THAT(workspace_prefix,
+               Catch::Matchers::ContainsSubstring("Stable repository guidance"));
+    CHECK(workspace_prefix.find("[Project Context]") == std::string::npos);
+    CHECK_THAT(plan.render(), Catch::Matchers::ContainsSubstring("[Project Context]"));
 }
 
 TEST_CASE("SteeringLoader reports loaded project steering source labels",

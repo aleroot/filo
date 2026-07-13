@@ -3,6 +3,7 @@
 #include "ToolCallPlanner.hpp"
 #include "ToolCallScheduler.hpp"
 #include "ToolOutputHistory.hpp"
+#include "SemanticHistoryEditor.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
@@ -12,6 +13,7 @@
 #include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
+#include "../tools/ToolSchema.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../logging/Logger.hpp"
@@ -762,6 +764,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::shared_ptr<core::llm::LLMProvider> provider;
     std::string mode_snapshot;
     std::string provider_name_snapshot;
+    std::string dynamic_prompt_suffix;
     {
         std::lock_guard lock(history_mutex_);
         request.messages = history_;
@@ -782,6 +785,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         request.transport_turn_id = turn_state->transport_turn_id;
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
+        dynamic_prompt_suffix = build_dynamic_prompt_suffix();
         provider_name_snapshot = turn_callbacks.provider_name_override.empty()
             ? active_provider_name_
             : turn_callbacks.provider_name_override;
@@ -790,6 +794,33 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         text_callback("\n[Error: no active provider configured]\n");
         done_callback();
         return;
+    }
+    if (!turn_state->prompt_plan.has_value()) {
+        auto plan = core::context::ContextBuilder(step_session_context)
+            .with_mode(mode_snapshot)
+            .build_plan();
+        plan.append(core::context::ContextLayer{
+            .kind = core::context::ContextLayerKind::ConversationState,
+            .stability = core::context::PromptStability::Dynamic,
+            .name = "conversation_state",
+            .content = std::move(dynamic_prompt_suffix),
+        });
+        turn_state->prompt_plan = std::move(plan);
+    }
+    request.prompt_plan = *turn_state->prompt_plan;
+    const auto context_before_edit = core::context::ContextWindowTracker::snapshot(
+        request.messages, provider, request.model);
+    if (context_before_edit.max_context_tokens > 0
+        && context_before_edit.estimated_context_tokens * 100
+            >= static_cast<std::size_t>(context_before_edit.max_context_tokens) * 65) {
+        auto edited = SemanticHistoryEditor::edit(request.messages);
+        if (edited.superseded_results > 0) {
+            core::logging::debug(
+                "[Agent] Semantic context edit removed {} chars from {} superseded tool results",
+                edited.characters_removed,
+                edited.superseded_results);
+            request.messages = std::move(edited.messages);
+        }
     }
     if (provider->capabilities().supports_tool_calls) {
         request.tools = skill_manager_.get_all_tools();
@@ -819,10 +850,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto tool_cost_attribution =
         std::make_shared<std::vector<std::pair<int32_t, int64_t>>>();
     auto reasoning_accum      = std::make_shared<std::string>();  // For Kimi thinking mode
+    auto continuation_accum   =
+        std::make_shared<std::vector<core::llm::ContinuationItem>>();
     auto already_stopped      = std::make_shared<std::atomic<bool>>(false);
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
+         continuation_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
          already_stopped, turn_state, step_session_context, provider_name_snapshot](
              const core::llm::StreamChunk& chunk) {
@@ -835,11 +869,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             if (already_stopped->exchange(true, std::memory_order_acq_rel)) {
                 return;
             }
-            if (!assistant_response->empty() || !reasoning_accum->empty()) {
+            if (!assistant_response->empty() || !reasoning_accum->empty()
+                || !continuation_accum->empty()) {
                 core::llm::Message stopped_msg;
                 stopped_msg.role = "assistant";
                 stopped_msg.content = *assistant_response;
                 stopped_msg.reasoning_content = *reasoning_accum;
+                stopped_msg.continuation_items = *continuation_accum;
                 {
                     std::lock_guard lock(self->history_mutex_);
                     self->history_.push_back(std::move(stopped_msg));
@@ -869,6 +905,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             core::logging::debug("[Agent] Accumulating reasoning_content: '{}'", chunk.reasoning_content.substr(0, 50));
             *reasoning_accum += chunk.reasoning_content;
         }
+        continuation_accum->insert(
+            continuation_accum->end(),
+            chunk.continuation_items.begin(),
+            chunk.continuation_items.end());
 
         // Accumulate streamed tool-call fragments (OpenAI-style delta streaming)
         for (const auto& t : chunk.tools) {
@@ -970,6 +1010,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ? std::vector<core::llm::ToolCall>{}
             : *tool_calls_accum;
         asst_msg.reasoning_content  = *reasoning_accum;  // Required for Kimi thinking mode
+        asst_msg.continuation_items = *continuation_accum;
 
         if (!chunk.is_error
             && asst_msg.tool_calls.empty()
@@ -991,7 +1032,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
             {
                 std::lock_guard lock(self->history_mutex_);
-                if (!asst_msg.content.empty() || !asst_msg.reasoning_content.empty()) {
+                if (!asst_msg.content.empty() || !asst_msg.reasoning_content.empty()
+                    || !asst_msg.continuation_items.empty()) {
                     self->history_.push_back(asst_msg);
                 }
                 self->history_.push_back(core::llm::Message{
@@ -1067,6 +1109,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // 1. Permission checks (sequential — only one prompt at a time)
             enum class DeniedReason {
                 None,
+                InvalidArguments,
                 BlockedByTurnAllowList,
                 BlockedByHook,
                 UserDenied,
@@ -1075,13 +1118,40 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::vector<bool> approved(tool_calls_accum->size());
             std::vector<DeniedReason> denied_reasons(tool_calls_accum->size(), DeniedReason::None);
             std::vector<std::string> hook_denial_reasons(tool_calls_accum->size());
+            std::vector<std::string> argument_errors(tool_calls_accum->size());
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
                 if (self->is_stop_requested()) {
                     done_callback();
                     return;
                 }
-                const auto& tc = (*tool_calls_accum)[i];
+                auto& tc = (*tool_calls_accum)[i];
+                std::optional<core::tools::ToolDefinition> definition;
+                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
+                    definition = self->orchestrator_.task_tool_definition().function;
+                } else {
+                    definition = self->skill_manager_.get_tool_definition(tc.function.name);
+                }
+                if (!definition.has_value()) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::InvalidArguments;
+                    argument_errors[i] = "tool not found";
+                    tool_callback(tc.function.name, "[invalid tool call: tool not found]");
+                    continue;
+                }
+                auto normalized = core::tools::schema::normalize_arguments(
+                    *definition,
+                    tc.function.arguments);
+                if (!normalized.has_value()) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::InvalidArguments;
+                    argument_errors[i] = normalized.error();
+                    tool_callback(
+                        tc.function.name,
+                        "[invalid tool arguments: " + normalized.error() + "]");
+                    continue;
+                }
+                tc.function.arguments = std::move(*normalized);
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
                 }
@@ -1157,13 +1227,19 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
                 const auto& tc = (*tool_calls_accum)[i];
                 if (!approved[i]) {
+                    const bool invalid_arguments =
+                        denied_reasons[i] == DeniedReason::InvalidArguments;
                     const bool skipped_after_denial =
                         denied_reasons[i] == DeniedReason::SkippedAfterEarlierDenial;
                     const bool blocked_by_turn_allow_list =
                         denied_reasons[i] == DeniedReason::BlockedByTurnAllowList;
                     const bool blocked_by_hook =
                         denied_reasons[i] == DeniedReason::BlockedByHook;
-                    const std::string error_payload = skipped_after_denial
+                    const std::string error_payload = invalid_arguments
+                        ? std::format(
+                            R"({{"error":"Invalid tool arguments: {}"}})",
+                            core::utils::escape_json_string(argument_errors[i]))
+                        : skipped_after_denial
                         ? R"({"error":"Tool call skipped after a previous denial in this step."})"
                         : blocked_by_turn_allow_list
                             ? R"({"error":"Tool call blocked by the turn tool allow-list."})"

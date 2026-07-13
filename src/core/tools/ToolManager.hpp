@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "ToolSchema.hpp"
 #include "../context/SessionContext.hpp"
 #include <algorithm>
 #include <memory>
@@ -11,6 +12,8 @@
 #include <vector>
 #include <stdexcept>
 #include <optional>
+#include <expected>
+#include "../utils/JsonUtils.hpp"
 #include "../llm/Models.hpp"
 
 namespace core::tools {
@@ -80,18 +83,43 @@ public:
         const ToolInvocationContext& invocation)
     {
         std::shared_ptr<Tool> tool;
+        ToolDefinition definition;
         {
             std::lock_guard lock(mutex_);
             auto it = tools_.find(name);
             if (it == tools_.end())
                 return "{\"error\": \"Tool not found: " + name + "\"}";
             tool = it->second;
+            definition = tool->get_definition();
+        }
+        const auto normalized = schema::normalize_arguments(definition, json_args);
+        if (!normalized.has_value()) {
+            return "{\"error\":\"Invalid arguments for "
+                + core::utils::escape_json_string(name)
+                + ": "
+                + core::utils::escape_json_string(normalized.error())
+                + "\"}";
         }
         try {
-            return tool->execute(json_args, invocation);
+            return tool->execute(*normalized, invocation);
         } catch (const std::exception& e) {
             return "{\"error\": \"Exception executing tool: " + std::string(e.what()) + "\"}";
         }
+    }
+
+    [[nodiscard]] std::expected<std::string, std::string>
+    normalize_tool_arguments(const std::string& name,
+                             std::string_view json_args) const {
+        ToolDefinition definition;
+        {
+            std::lock_guard lock(mutex_);
+            auto it = tools_.find(name);
+            if (it == tools_.end()) {
+                return std::unexpected("tool not found");
+            }
+            definition = it->second->get_definition();
+        }
+        return schema::normalize_arguments(definition, json_args);
     }
 
     [[nodiscard]] bool has_tool(const std::string& name) const {

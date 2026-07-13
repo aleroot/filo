@@ -3,6 +3,7 @@
 #include "../Models.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
+#include "../../tools/ToolSchema.hpp"
 #include <atomic>
 #include <charconv>
 #include <simdjson.h>
@@ -300,32 +301,11 @@ std::string serialize_gemini_request(const ChatRequest& req,
             payload += core::utils::escape_json_string(def.name);
             payload += R"(","description":")";
             payload += core::utils::escape_json_string(def.description);
-            payload += R"(","parameters":{"type":"OBJECT","properties":{)";
-
-            for (size_t j = 0; j < def.parameters.size(); ++j) {
-                const auto& p = def.parameters[j];
-                payload += '"';
-                payload += core::utils::escape_json_string(p.name);
-                payload += R"(":{"type":")";
-                payload += core::utils::escape_json_string(p.type);
-                payload += R"(","description":")";
-                payload += core::utils::escape_json_string(p.description);
-                payload += "\"}";
-                if (j < def.parameters.size() - 1) payload += ',';
-            }
-
-            payload += R"(},"required":[)";
-            bool first_req = true;
-            for (const auto& p : def.parameters) {
-                if (p.required) {
-                    if (!first_req) payload += ',';
-                    payload += '"';
-                    payload += core::utils::escape_json_string(p.name);
-                    payload += '"';
-                    first_req = false;
-                }
-            }
-            payload += "]}}";
+            payload += R"(","parameters":)";
+            payload += serialize_gemini_response_schema(
+                core::tools::schema::canonical_input_schema(def),
+                gemini_model_requires_property_ordering(effective_model));
+            payload += '}';
             if (i < req.tools.size() - 1) payload += ',';
         }
         payload += "]}],";

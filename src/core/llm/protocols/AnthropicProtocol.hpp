@@ -57,6 +57,13 @@ struct AnthropicToolBlockState {
     std::string accumulated_args; ///< Built up from `input_json_delta` chunks.
 };
 
+struct AnthropicContinuationBlockState {
+    std::string type;
+    std::string thinking;
+    std::string signature;
+    std::string initial_payload;
+};
+
 /**
  * @brief Stateful SSE event parser for the Anthropic streaming Messages API.
  *
@@ -80,6 +87,7 @@ public:
     struct Result {
         std::string          text;             ///< Non-empty on `text_delta` events.
         std::vector<ToolCall> completed_tools; ///< Non-empty on `content_block_stop` with a tool.
+        std::vector<ContinuationItem> continuation_items; ///< Completed signed thinking blocks.
         bool    done          = false;         ///< True on `message_stop`.
         bool    stream_started = false;        ///< True on `message_start`.
         bool    stream_error   = false;        ///< True on `event: error`.
@@ -101,6 +109,7 @@ public:
 
 private:
     std::optional<AnthropicToolBlockState> current_tool_;
+    std::optional<AnthropicContinuationBlockState> current_continuation_;
 };
 
 /**

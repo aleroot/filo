@@ -826,6 +826,34 @@ TEST_CASE("AnthropicSSEParser - thinking_delta is silently ignored", "[claude][s
     REQUIRE(!r.done);
 }
 
+TEST_CASE("AnthropicSSEParser preserves thinking signatures for replay",
+          "[claude][sse][thinking][continuation]") {
+    AnthropicSSEParser parser;
+    parser.process_event("content_block_start",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})");
+    parser.process_event("content_block_delta",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Inspect carefully"}})");
+    parser.process_event("content_block_delta",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed-state"}})");
+    const auto completed = parser.process_event(
+        "content_block_stop", R"({"type":"content_block_stop","index":0})");
+
+    REQUIRE(completed.continuation_items.size() == 1);
+    const auto& item = completed.continuation_items[0];
+    CHECK(item.provider == "anthropic");
+    CHECK_THAT(item.payload, Catch::Matchers::ContainsSubstring("Inspect carefully"));
+    CHECK_THAT(item.payload, Catch::Matchers::ContainsSubstring("signed-state"));
+
+    ChatRequest request = make_simple_request();
+    request.messages.insert(request.messages.begin() + 1, Message{
+        .role = "assistant",
+        .continuation_items = {item},
+    });
+    const std::string payload = AnthropicSerializer::serialize(request);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"thinking")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("signature":"signed-state")"));
+}
+
 TEST_CASE("AnthropicSSEParser - text follows thinking block correctly", "[claude][sse][thinking]") {
     AnthropicSSEParser p;
     // Thinking block

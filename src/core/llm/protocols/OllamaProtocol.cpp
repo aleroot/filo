@@ -1,5 +1,6 @@
 #include "OllamaProtocol.hpp"
 #include "../Models.hpp"
+#include "../../tools/ToolSchema.hpp"
 #include <charconv>
 #include <cstdio>
 #include <simdjson.h>
@@ -105,36 +106,9 @@ std::string OllamaProtocol::serialize(const ChatRequest& req) const {
             payload += core::utils::escape_json_string(def.name);
             payload += R"(","description":")";
             payload += core::utils::escape_json_string(def.description);
-            payload += R"(","parameters":{"type":"object","properties":{)";
-
-            for (std::size_t j = 0; j < def.parameters.size(); ++j) {
-                const auto& p = def.parameters[j];
-                payload += "\"";
-                payload += core::utils::escape_json_string(p.name);
-                payload += R"(":{"type":")";
-                payload += core::utils::escape_json_string(p.type);
-                payload += R"(","description":")";
-                payload += core::utils::escape_json_string(p.description);
-                payload += "\"";
-                if (!p.items_schema.empty()) {
-                    payload += R"(,"items":)";
-                    payload += p.items_schema;
-                }
-                payload += "}";
-                if (j + 1 < def.parameters.size()) payload += ",";
-            }
-
-            payload += R"(},"required":[)";
-            bool first_req = true;
-            for (const auto& p : def.parameters) {
-                if (!p.required) continue;
-                if (!first_req) payload += ",";
-                payload += "\"";
-                payload += core::utils::escape_json_string(p.name);
-                payload += "\"";
-                first_req = false;
-            }
-            payload += "]}}}";
+            payload += R"(","parameters":)";
+            payload += core::tools::schema::canonical_input_schema(def);
+            payload += "}}";
             if (i + 1 < req.tools.size()) payload += ",";
         }
         payload += "]";

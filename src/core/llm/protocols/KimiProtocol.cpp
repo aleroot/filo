@@ -886,7 +886,6 @@ std::string KimiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
     options.include_reasoning_content = true;
     options.max_tokens_field = "max_completion_tokens";
-    options.use_tool_input_schema = true;
     options.transform_tool_schema = normalize_kimi_tool_schema;
     options.serialize_tool_override = serialize_kimi_builtin_tool;
 

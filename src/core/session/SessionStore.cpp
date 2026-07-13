@@ -127,6 +127,26 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         core::utils::append_escaped(out, msg.input_text);
         out += '"';
     }
+    if (!msg.reasoning_content.empty()) {
+        out += ",\"reasoning_content\":\"";
+        core::utils::append_escaped(out, msg.reasoning_content);
+        out += '"';
+    }
+    if (!msg.continuation_items.empty()) {
+        out += ",\"continuation_items\":[";
+        for (std::size_t i = 0; i < msg.continuation_items.size(); ++i) {
+            if (i > 0) out += ',';
+            const auto& item = msg.continuation_items[i];
+            out += "{\"provider\":\"";
+            core::utils::append_escaped(out, item.provider);
+            out += "\",\"kind\":\"";
+            core::utils::append_escaped(out, item.kind);
+            out += "\",\"payload\":\"";
+            core::utils::append_escaped(out, item.payload);
+            out += "\"}";
+        }
+        out += ']';
+    }
     if (!msg.tool_calls.empty()) {
         out += ",\"tool_calls\":[";
         for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
@@ -357,6 +377,28 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                 }
                 if (msg_el["input_text"].get(sv) == simdjson::SUCCESS) {
                     msg.input_text = std::string(sv);
+                }
+                if (msg_el["reasoning_content"].get(sv) == simdjson::SUCCESS) {
+                    msg.reasoning_content = std::string(sv);
+                }
+                simdjson::dom::array continuation_arr;
+                if (msg_el["continuation_items"].get(continuation_arr)
+                    == simdjson::SUCCESS) {
+                    for (simdjson::dom::element item_el : continuation_arr) {
+                        core::llm::ContinuationItem item;
+                        if (item_el["provider"].get(sv) == simdjson::SUCCESS) {
+                            item.provider = std::string(sv);
+                        }
+                        if (item_el["kind"].get(sv) == simdjson::SUCCESS) {
+                            item.kind = std::string(sv);
+                        }
+                        if (item_el["payload"].get(sv) == simdjson::SUCCESS) {
+                            item.payload = std::string(sv);
+                        }
+                        if (!item.payload.empty()) {
+                            msg.continuation_items.push_back(std::move(item));
+                        }
+                    }
                 }
 
                 simdjson::dom::array tc_arr;
