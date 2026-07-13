@@ -1126,32 +1126,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     return;
                 }
                 auto& tc = (*tool_calls_accum)[i];
-                std::optional<core::tools::ToolDefinition> definition;
-                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
-                    definition = self->orchestrator_.task_tool_definition().function;
-                } else {
-                    definition = self->skill_manager_.get_tool_definition(tc.function.name);
-                }
-                if (!definition.has_value()) {
-                    approved[i] = false;
-                    denied_reasons[i] = DeniedReason::InvalidArguments;
-                    argument_errors[i] = "tool not found";
-                    tool_callback(tc.function.name, "[invalid tool call: tool not found]");
-                    continue;
-                }
-                auto normalized = core::tools::schema::normalize_arguments(
-                    *definition,
-                    tc.function.arguments);
-                if (!normalized.has_value()) {
-                    approved[i] = false;
-                    denied_reasons[i] = DeniedReason::InvalidArguments;
-                    argument_errors[i] = normalized.error();
-                    tool_callback(
-                        tc.function.name,
-                        "[invalid tool arguments: " + normalized.error() + "]");
-                    continue;
-                }
-                tc.function.arguments = std::move(*normalized);
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
                 }
@@ -1188,7 +1162,39 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     denied_reasons[i] = DeniedReason::UserDenied;
                     denied_any = true;
                     tool_callback(tc.function.name, "[denied by user]");
+                    continue;
                 }
+
+                // Validate arguments against the authoritative schema only for
+                // calls that passed every approval gate. Gating (allow-list,
+                // hooks, user permission) must not depend on tool registration,
+                // and its denial precedence must be preserved.
+                std::optional<core::tools::ToolDefinition> definition;
+                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
+                    definition = self->orchestrator_.task_tool_definition().function;
+                } else {
+                    definition = self->skill_manager_.get_tool_definition(tc.function.name);
+                }
+                if (!definition.has_value()) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::InvalidArguments;
+                    argument_errors[i] = "tool not found";
+                    tool_callback(tc.function.name, "[invalid tool call: tool not found]");
+                    continue;
+                }
+                auto normalized = core::tools::schema::normalize_arguments(
+                    *definition,
+                    tc.function.arguments);
+                if (!normalized.has_value()) {
+                    approved[i] = false;
+                    denied_reasons[i] = DeniedReason::InvalidArguments;
+                    argument_errors[i] = normalized.error();
+                    tool_callback(
+                        tc.function.name,
+                        "[invalid tool arguments: " + normalized.error() + "]");
+                    continue;
+                }
+                tc.function.arguments = std::move(*normalized);
             }
 
             if (self->is_stop_requested()) {
