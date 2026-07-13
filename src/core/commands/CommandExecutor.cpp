@@ -1292,7 +1292,7 @@ public:
             "  Ctrl+L   Clear the screen\n"
             "  Esc      Stop active generation or terminal command\n"
             "  Esc Esc  Clear draft to history, or open rewind menu on empty input\n"
-            "  Ctrl+C   Stop active generation or terminal command\n"
+            "  Ctrl+C   Stop active generation or terminal command; quits when idle\n"
         );
     }
 };

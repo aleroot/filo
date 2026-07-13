@@ -845,8 +845,11 @@ RunResult run(RunOptions opts) {
     std::string input_text;
     int input_cursor_position = 0;
     DoubleEscapeState double_escape_state;
-    int ctrl_d_press_count = 0;
-    std::chrono::steady_clock::time_point ctrl_d_deadline =
+    // Double-press-to-quit confirmation for Ctrl+D (on an empty prompt).
+    // Stores the key label that armed it so the footer hint names the right
+    // key, plus the expiry deadline. Ctrl+C quits immediately when idle.
+    std::string quit_confirm_key;
+    std::chrono::steady_clock::time_point quit_confirm_deadline =
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
     std::mutex stream_chunk_timing_mutex;
@@ -882,6 +885,13 @@ RunResult run(RunOptions opts) {
     auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
     screen.TrackMouse(true);
+    // By default FTXUI exits the main loop on Ctrl+C even when the component
+    // consumes the event (force_handle_ctrl_c_ defaults to true). Disable that
+    // so the CatchEvent handler can use Ctrl+C to stop the active terminal
+    // command / generation instead of terminating the whole app. If a future
+    // event handler ever fails to consume Ctrl+C, FTXUI still exits gracefully
+    // because the "!handled" fallback in its dispatch loop remains active.
+    screen.ForceHandleCtrlC(false);
     // Auto-copy any text selected via left-click drag to the system clipboard.
     // This is the cross-platform solution: on Linux the Shift+right-click bypass
     // works in xterm-family terminals, but on macOS iTerm2 uses Option/Alt instead.
@@ -1426,15 +1436,21 @@ RunResult run(RunOptions opts) {
         return terminals;
     };
 
+    // Single source of truth for "is there anything Ctrl+C/Esc could stop?".
+    // Both stop_active_terminal() and the Ctrl+C quit-when-idle gate rely on
+    // this predicate so they can never disagree about what "idle" means.
+    auto has_stoppable_activity = [&]() -> bool {
+        return !list_active_terminals().empty()
+            || assistant_turn_active.load(std::memory_order_relaxed);
+    };
+
     auto stop_active_terminal = [&]() -> core::commands::CommandOperationResult {
-        const auto active_terminals = list_active_terminals();
-        const bool had_terminal = !active_terminals.empty();
-        const bool had_direct_shell =
-            direct_shell_state && direct_shell_state->has_active_for(session_id);
-        const bool had_turn = assistant_turn_active.load(std::memory_order_relaxed);
-        if (!had_terminal && !had_turn) {
+        if (!has_stoppable_activity()) {
             return {.ok = false, .message = "Nothing is currently running."};
         }
+        const bool had_terminal = !list_active_terminals().empty();
+        const bool had_direct_shell =
+            direct_shell_state && direct_shell_state->has_active_for(session_id);
 
         agent->request_stop();
         if (had_direct_shell && direct_shell_state) {
@@ -1445,7 +1461,7 @@ RunResult run(RunOptions opts) {
             .ok = true,
             .message = had_terminal
                 ? "Stop requested for the active terminal command."
-                : "Stop requested for the active generation.",
+                : "Stop requested for the active generation and any running subagents.",
         };
     };
 
@@ -5087,21 +5103,34 @@ RunResult run(RunOptions opts) {
         return true;
     };
 
-    auto ctrl_d_warning_active = [&]() -> bool {
-        if (ctrl_d_press_count <= 0) {
+    auto quit_confirm_active = [&]() -> bool {
+        if (quit_confirm_key.empty()) {
             return false;
         }
-        if (std::chrono::steady_clock::now() > ctrl_d_deadline) {
-            ctrl_d_press_count = 0;
-            ctrl_d_deadline = std::chrono::steady_clock::time_point::min();
+        if (std::chrono::steady_clock::now() > quit_confirm_deadline) {
+            quit_confirm_key.clear();
+            quit_confirm_deadline = std::chrono::steady_clock::time_point::min();
             return false;
         }
         return true;
     };
 
-    auto reset_ctrl_d_warning = [&]() {
-        ctrl_d_press_count = 0;
-        ctrl_d_deadline = std::chrono::steady_clock::time_point::min();
+    auto reset_quit_confirm = [&]() {
+        quit_confirm_key.clear();
+        quit_confirm_deadline = std::chrono::steady_clock::time_point::min();
+    };
+
+    // Second consecutive press of the same key within the confirmation window
+    // confirms the quit; any first (or mismatched) press arms it and shows the
+    // "Press <key> again to quit" footer hint instead.
+    auto confirm_quit_or_arm = [&](std::string_view key_label) -> bool {
+        if (quit_confirm_active() && quit_confirm_key == key_label) {
+            return true;
+        }
+        quit_confirm_key = key_label;
+        quit_confirm_deadline = std::chrono::steady_clock::now() + kExitConfirmWindow;
+        wake_ui();
+        return false;
     };
 
     auto input_component = PromptInput(&input_text, "Ask anything", input_option);
@@ -6240,11 +6269,19 @@ RunResult run(RunOptions opts) {
             return true;
         }
         if (is_ctrl_c_event(event)) {
+            // Idle: quit immediately on a single press. Unlike Ctrl+D (which
+            // doubles as delete-right and needs a confirmation guard), Ctrl+C
+            // has no other meaning when nothing is running. The explicit
+            // predicate — rather than stop_active_terminal()'s failure flag —
+            // guarantees we can never quit while work is still active, even if
+            // stop_active_terminal() grows new failure modes.
+            if (!has_stoppable_activity()) {
+                screen.ExitLoopClosure()();
+                return true;
+            }
             const auto result = stop_active_terminal();
-            append_history(std::format(
-                "\n{}  {}\n",
-                result.ok ? "»" : "ℹ",
-                result.message));
+            reset_quit_confirm();
+            append_history(std::format("\n»  {}\n", result.message));
             return true;
         }
 
@@ -6270,19 +6307,14 @@ RunResult run(RunOptions opts) {
             if (!input_text.empty()) {
                 // Normalize terminal-specific Ctrl+D variants through PromptInput's
                 // canonical control-byte handler.
-                reset_ctrl_d_warning();
+                reset_quit_confirm();
                 input_component->OnEvent(Event::Special({4}));
                 return true;
             }
 
-            if (ctrl_d_warning_active()) {
+            if (confirm_quit_or_arm("Ctrl+D")) {
                 screen.ExitLoopClosure()();
-                return true;
             }
-
-            ctrl_d_press_count = 1;
-            ctrl_d_deadline = std::chrono::steady_clock::now() + kExitConfirmWindow;
-            wake_ui();
             return true;
         }
 
@@ -6639,8 +6671,9 @@ RunResult run(RunOptions opts) {
 
         // Build right side of status bar: current folder + context left
         Element right_el;
-        if (ctrl_d_warning_active()) {
-            right_el = text(" Press Ctrl+D again to quit ") | color(Color::GrayDark);
+        if (quit_confirm_active()) {
+            right_el = text(" Press " + quit_confirm_key + " again to quit ")
+                | color(Color::GrayDark);
         } else {
             Elements right_items;
             // Current working directory
@@ -6796,7 +6829,7 @@ RunResult run(RunOptions opts) {
             ? hbox(std::move(left_items)) | xflex
             : text("");
 
-        auto status_el = (show_status_footer || ctrl_d_warning_active())
+        auto status_el = (show_status_footer || quit_confirm_active())
             ? hbox({
                 left_el,
                 right_el,
