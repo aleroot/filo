@@ -169,7 +169,7 @@ std::vector<std::string> MemoryBackgroundService::extract_candidate_memories(
     std::unordered_set<std::string> seen;
     std::size_t inspected = 0;
     for (auto it = history.rbegin(); it != history.rend() && inspected < max_recent_messages; ++it) {
-        if (it->role != "user") continue;
+        if (it->role != "user" || it->synthetic) continue;
         ++inspected;
         for (auto candidate : explicit_memory_candidates(it->content)) {
             const auto fingerprint = core::utils::str::to_lower_ascii_copy(

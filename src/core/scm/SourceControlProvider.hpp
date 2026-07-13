@@ -40,6 +40,17 @@ public:
   is_ignored(const std::filesystem::path &path) const = 0;
 
   /**
+   * @brief Batch variant used by bounded directory scans.
+   *
+   * Providers with an efficient bulk query should return one flag per input
+   * path. Returning nullopt asks the caller to use is_ignored() instead.
+  */
+  [[nodiscard]] virtual std::optional<std::vector<bool>>
+  ignored_paths(const std::vector<std::filesystem::path> &) const {
+    return std::nullopt;
+  }
+
+  /**
    * @brief Returns a short textual summary of the current status (changed
    * files, branch). Designed for injection into LLM context.
    */

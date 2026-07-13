@@ -17,8 +17,10 @@
 
 #include <simdjson.h>
 
+#include <algorithm>
 #include <format>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -73,6 +75,12 @@ std::unordered_set<std::string> tool_names(const core::llm::ChatRequest& request
         names.insert(tool.function.name);
     }
     return names;
+}
+
+std::size_t visible_message_count(const core::llm::ChatRequest& request) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        request.messages,
+        [](const core::llm::Message& message) { return !message.synthetic; }));
 }
 
 } // namespace
@@ -147,8 +155,8 @@ TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", 
 
     const auto requests = provider->requests_snapshot();
     REQUIRE(requests.size() == 2);
-    REQUIRE(requests[0].messages.size() == 2);  // system + first delegated user prompt
-    REQUIRE(requests[1].messages.size() >= 4);  // system + previous turn + new user prompt
+    REQUIRE(visible_message_count(requests[0]) == 2);  // system + first delegated user prompt
+    REQUIRE(visible_message_count(requests[1]) >= 4);  // system + previous turn + new user prompt
 
     bool found_previous_assistant_message = false;
     for (const auto& message : requests[1].messages) {

@@ -8,6 +8,7 @@
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -17,6 +18,15 @@
 #include <vector>
 
 namespace {
+
+[[nodiscard]] std::vector<core::llm::Message> visible_history(
+    const std::shared_ptr<core::agent::Agent>& agent) {
+    auto history = agent->get_history();
+    std::erase_if(history, [](const core::llm::Message& message) {
+        return message.synthetic;
+    });
+    return history;
+}
 
 class ToolCallThenTextProvider final : public core::llm::LLMProvider {
 public:
@@ -196,7 +206,7 @@ TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][per
     REQUIRE(provider->call_count() == 1);
     REQUIRE(permission_checks.load(std::memory_order_acquire) == 1);
 
-    const auto history = agent->get_history();
+    const auto history = visible_history(agent);
     REQUIRE(history.size() == 4);
     REQUIRE(history[0].role == "user");
     REQUIRE(history[1].role == "assistant");
@@ -250,7 +260,7 @@ TEST_CASE("Agent still gates destructive tools in EXECUTE mode",
     }
 
     REQUIRE(permission_checks.load(std::memory_order_acquire) == 1);
-    const auto history = agent->get_history();
+    const auto history = visible_history(agent);
     REQUIRE(history.size() == 3);
     REQUIRE(history[2].role == "tool");
     REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
@@ -289,7 +299,7 @@ TEST_CASE("Agent distinguishes turn tool allow-list blocks from user denials",
         REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&]() { return done; }));
     }
 
-    const auto history = agent->get_history();
+    const auto history = visible_history(agent);
     REQUIRE(history.size() == 4);
     REQUIRE(history[2].role == "tool");
     REQUIRE(history[3].role == "assistant");
@@ -332,7 +342,7 @@ TEST_CASE("Agent turns provider startup exceptions into terminal assistant error
     REQUIRE_THAT(streamed_text, Catch::Matchers::ContainsSubstring("Provider startup error"));
     REQUIRE_THAT(streamed_text, Catch::Matchers::ContainsSubstring("invalid_scope"));
 
-    const auto history = agent->get_history();
+    const auto history = visible_history(agent);
     REQUIRE(history.size() == 2);
     REQUIRE(history[0].role == "user");
     REQUIRE(history[1].role == "assistant");

@@ -3,6 +3,7 @@
 
 #include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/agent/RepositoryContextMessage.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/llm/LLMProvider.hpp"
@@ -1047,6 +1048,17 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         ctx.agent->load_history(
             {
                 core::llm::Message{.role = "user", .content = "Build a thing"},
+                core::llm::Message{
+                    .role = "user",
+                    .content = "[Project Context]\nStructure:\nprivate-file.txt",
+                    .name = std::string(core::agent::kRepositoryContextMessageName),
+                    .synthetic = true,
+                },
+                core::llm::Message{
+                    .role = "user",
+                    .content = "$ cmake --build build\nBuild succeeded.",
+                    .synthetic = true,
+                },
                 core::llm::Message{.role = "assistant", .content = "Built it"},
             },
             "",
@@ -1062,9 +1074,46 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("# Filo Conversation Export"));
         REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 1. User"));
         REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("Build a thing"));
-        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 2. Assistant"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 2. User"));
+        REQUIRE_THAT(copied_text,
+                     Catch::Matchers::ContainsSubstring("cmake --build build"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("## 3. Assistant"));
         REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("Built it"));
+        REQUIRE_THAT(copied_text, Catch::Matchers::ContainsSubstring("- Message count: 3"));
+        REQUIRE_THAT(copied_text,
+                     !Catch::Matchers::ContainsSubstring("private-file.txt"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Copied the full conversation transcript"));
+    }
+
+    SECTION("/copy full treats synthetic-only history as empty") {
+        std::string copied_text;
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+        ctx.agent->load_history(
+            {
+                core::llm::Message{
+                    .role = "user",
+                    .content = "[Project Context]\nStructure:\nprivate-file.txt",
+                    .name = std::string(core::agent::kRepositoryContextMessageName),
+                    .synthetic = true,
+                },
+            },
+            "",
+            "BUILD");
+        ctx.copy_to_clipboard_fn = [&copied_text](std::string_view text) {
+            copied_text = std::string(text);
+            return std::optional<std::string>{};
+        };
+
+        ctx.text = "/copy full";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        CHECK(copied_text.empty());
+        REQUIRE_THAT(*mock_history,
+                     Catch::Matchers::ContainsSubstring("No conversation transcript found"));
     }
 
     SECTION("/copy reports when there is nothing to copy") {

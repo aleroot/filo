@@ -1,5 +1,6 @@
 #include "SessionHandoff.hpp"
 
+#include "../agent/RepositoryContextMessage.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
@@ -223,7 +224,9 @@ void capture_tool_effects(HandoffSignals& signals,
     std::unordered_map<std::string, core::llm::ToolCall> tool_calls_by_id;
 
     for (const auto& message : messages) {
-        if (message.role == "user" && !message.content.empty()) {
+        if (message.role == "user"
+            && !core::agent::is_repository_context_message(message)
+            && !message.content.empty()) {
             if (signals.original_task.empty()) {
                 signals.original_task = clamp_line(message.content, 240);
             }

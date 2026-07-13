@@ -8,6 +8,8 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/tools/Tool.hpp"
 
+#include <simdjson.h>
+
 #include <filesystem>
 #include <fstream>
 
@@ -32,6 +34,13 @@ public:
         set_last_rate_limit_info(info);
     }
 };
+
+void require_valid_json(std::string_view payload) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string json{std::string(payload)};
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(json).get(document) == simdjson::SUCCESS);
+}
 
 } // namespace
 
@@ -138,6 +147,85 @@ TEST_CASE("ClaudeSerializer - automatic prompt caching enabled for tool-capable 
     const auto payload = AnthropicSerializer::serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("cache_control":{"type":"ephemeral"})"));
+}
+
+TEST_CASE("ClaudeSerializer - caches the stable prompt-plan prefix explicitly",
+          "[claude][serializer][cache]") {
+    ChatRequest req = make_simple_request();
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::RuntimeInstructions,
+        .stability = core::context::PromptStability::Stable,
+        .name = "runtime",
+        .content = "stable runtime",
+    });
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::WorkspaceFacts,
+        .stability = core::context::PromptStability::Workspace,
+        .name = "workspace",
+        .content = "stable workspace",
+    });
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::Memory,
+        .stability = core::context::PromptStability::Session,
+        .name = "memory",
+        .content = "session memory",
+    });
+    req.prompt_plan.append({
+        .kind = core::context::ContextLayerKind::ProjectFacts,
+        .stability = core::context::PromptStability::Dynamic,
+        .name = "project_facts",
+        .content = "dynamic project facts",
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    require_valid_json(payload);
+    const auto system_begin = payload.find(R"("system":[)");
+    const auto tools_begin = payload.find(R"(,"tools":[)");
+    const auto messages_begin = payload.find(R"(,"messages":[)");
+    REQUIRE(system_begin != std::string::npos);
+    REQUIRE(messages_begin != std::string::npos);
+    const auto system_end = tools_begin == std::string::npos ? messages_begin : tools_begin;
+    const auto system = payload.substr(system_begin, system_end - system_begin);
+
+    const auto workspace = system.find("stable workspace");
+    const auto cache = system.find(R"("cache_control":{"type":"ephemeral"})");
+    const auto memory = system.find("session memory");
+    REQUIRE(workspace != std::string::npos);
+    REQUIRE(cache != std::string::npos);
+    REQUIRE(memory != std::string::npos);
+    CHECK(workspace < cache);
+    CHECK(cache < memory);
+    CHECK(system.find(R"("cache_control":{"type":"ephemeral"})", cache + 1)
+          == std::string::npos);
+}
+
+TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
+          "[claude][serializer][cache]") {
+    ChatRequest req = make_simple_request();
+    Tool first;
+    first.function.name = "read_file";
+    Tool last;
+    last.function.name = "write_file";
+    req.tools = {first, last};
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    require_valid_json(payload);
+    const auto tools_begin = payload.find(R"("tools":[)");
+    const auto messages_begin = payload.find(R"(,"messages":[)");
+    REQUIRE(tools_begin != std::string::npos);
+    REQUIRE(messages_begin != std::string::npos);
+    const auto tools = payload.substr(tools_begin, messages_begin - tools_begin);
+
+    const auto first_tool = tools.find(R"("name":"read_file")");
+    const auto last_tool = tools.find(R"("name":"write_file")");
+    const auto cache = tools.find(R"("cache_control":{"type":"ephemeral"})");
+    REQUIRE(first_tool != std::string::npos);
+    REQUIRE(last_tool != std::string::npos);
+    REQUIRE(cache != std::string::npos);
+    CHECK(first_tool < last_tool);
+    CHECK(last_tool < cache);
+    CHECK(tools.find(R"("cache_control":{"type":"ephemeral"})", cache + 1)
+          == std::string::npos);
 }
 
 TEST_CASE("ClaudeSerializer - temperature omitted when not set", "[claude][serializer]") {

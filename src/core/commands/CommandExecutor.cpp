@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 #include "core/auth/AuthLogin.hpp"
+#include "core/agent/RepositoryContextMessage.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/config/ConfigManager.hpp"
@@ -476,19 +477,33 @@ std::string role_title(std::string_view role) {
     return std::string(role);
 }
 
+[[nodiscard]] bool is_visible_transcript_message(
+    const core::llm::Message& message) noexcept {
+    return !core::agent::is_repository_context_message(message);
+}
+
+[[nodiscard]] std::size_t visible_transcript_message_count(
+    const std::vector<core::llm::Message>& messages) {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(messages, is_visible_transcript_message));
+}
+
 std::string export_history_markdown(const std::vector<core::llm::Message>& messages) {
     const auto now = std::chrono::system_clock::now();
     const auto sec = std::chrono::floor<std::chrono::seconds>(now);
+    const std::size_t visible_message_count =
+        visible_transcript_message_count(messages);
 
     std::string out;
-    out.reserve(2048 + messages.size() * 256);
+    out.reserve(2048 + visible_message_count * 256);
     out += "# Filo Conversation Export\n\n";
     out += std::format("- Exported: {:%Y-%m-%d %H:%M:%S}\n", sec);
-    out += std::format("- Message count: {}\n\n", messages.size());
+    out += std::format("- Message count: {}\n\n", visible_message_count);
 
-    for (std::size_t i = 0; i < messages.size(); ++i) {
-        const auto& msg = messages[i];
-        out += std::format("## {}. {}\n\n", i + 1, role_title(msg.role));
+    std::size_t visible_index = 0;
+    for (const auto& msg : messages) {
+        if (!is_visible_transcript_message(msg)) continue;
+        out += std::format("## {}. {}\n\n", ++visible_index, role_title(msg.role));
 
         if (msg.role == "tool") {
             const std::string tool_name = msg.name.empty() ? std::string("tool") : msg.name;
@@ -2090,7 +2105,7 @@ private:
         }
 
         const auto messages = ctx.agent->get_history();
-        if (messages.empty()) {
+        if (visible_transcript_message_count(messages) == 0) {
             ctx.append_history_fn("\nℹ  Nothing to copy yet. No conversation transcript found.\n");
             return std::nullopt;
         }
@@ -2308,6 +2323,13 @@ public:
         }
 
         const auto messages = ctx.agent->get_history();
+        const std::size_t visible_message_count =
+            visible_transcript_message_count(messages);
+        if (visible_message_count == 0) {
+            ctx.append_history_fn(
+                "\nℹ  Nothing to export yet. No conversation transcript found.\n");
+            return;
+        }
         const std::string markdown = export_history_markdown(messages);
 
         std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
@@ -2328,7 +2350,7 @@ public:
 
         ctx.append_history_fn(std::format(
             "\n✓  Exported {} messages to {}.\n",
-            messages.size(),
+            visible_message_count,
             output_path.string()));
     }
 };

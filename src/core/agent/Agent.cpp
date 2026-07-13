@@ -3,6 +3,7 @@
 #include "ToolCallPlanner.hpp"
 #include "ToolCallScheduler.hpp"
 #include "ToolOutputHistory.hpp"
+#include "RepositoryContextMessage.hpp"
 #include "SemanticHistoryEditor.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
@@ -423,12 +424,6 @@ int Agent::sanitize_max_steps_per_turn(int value) noexcept {
         LoopLimits::kMaxMaxStepsPerTurn);
 }
 
-std::string Agent::build_stable_prompt_prefix() const {
-    return core::context::ContextBuilder(session_context_)
-        .with_mode(current_mode_)
-        .build();
-}
-
 std::string Agent::build_dynamic_prompt_suffix() const {
     std::string suffix = core::session::GoalManager::prompt_context(session_goal_);
     if (!context_summary_.empty()) {
@@ -437,11 +432,54 @@ std::string Agent::build_dynamic_prompt_suffix() const {
     return suffix;
 }
 
+void Agent::append_project_facts_update_unlocked(
+    std::optional<core::context::ProjectFactsSnapshot> current) {
+    if (!current.has_value()) {
+        return;
+    }
+
+    std::string content;
+    if (!project_facts_snapshot_.has_value()) {
+        content = core::context::render_project_facts(*current);
+        if (!content.empty()) {
+            content.insert(
+                0,
+                "Repository snapshot captured at the start of this turn. Later "
+                "[Project Context Update] messages supersede only the sections they include.");
+        }
+    } else {
+        content = core::context::render_project_facts_update(
+            *project_facts_snapshot_, *current);
+    }
+    project_facts_snapshot_ = std::move(current);
+
+    if (!content.empty()) {
+        for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+            if (!is_repository_context_message(*it)) continue;
+            it->input_text.clear();
+            break;
+        }
+        history_.push_back(core::llm::Message{
+            .role = "user",
+            .content = std::move(content),
+            .name = std::string(kRepositoryContextMessageName),
+            .input_text = encode_repository_context_state(
+                project_facts_snapshot_->status,
+                project_facts_snapshot_->tree),
+            .synthetic = true,
+        });
+    }
+}
+
 void Agent::refresh_stable_prompt_prefix_unlocked() {
     if (!stable_prompt_prefix_dirty_ && !stable_prompt_prefix_.empty()) {
         return;
     }
-    stable_prompt_prefix_ = build_stable_prompt_prefix();
+    stable_prompt_plan_ = core::context::ContextBuilder(session_context_)
+        .with_mode(current_mode_)
+        .include_project_facts(false)
+        .build_plan();
+    stable_prompt_prefix_ = stable_prompt_plan_.render();
     stable_prompt_prefix_tokens_ = stable_prompt_prefix_.empty()
         ? 0
         : core::context::ContextWindowTracker::estimate_tokens({
@@ -481,6 +519,7 @@ void Agent::clear_history() {
     std::lock_guard lock(history_mutex_);
     history_.clear();
     context_summary_.clear();
+    project_facts_snapshot_.reset();
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
     reset_efficiency_tracking_unlocked();
@@ -501,6 +540,7 @@ void Agent::compact_history(std::string summary) {
         context_summary_ += active_skill_context;
     }
     history_.clear();
+    project_facts_snapshot_.reset();
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
     reset_efficiency_tracking_unlocked();
@@ -567,7 +607,7 @@ bool Agent::has_user_turn() const {
 std::optional<core::llm::Message> Agent::last_user_turn() const {
     std::lock_guard lock(history_mutex_);
     for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
-        if (it->role == "user") {
+        if (it->role == "user" && !it->synthetic) {
             return *it;
         }
     }
@@ -698,9 +738,11 @@ void Agent::send_message(core::llm::Message user_message,
     const core::llm::Message hook_message = user_message;
     std::string mode_snapshot;
     const auto session_context = session_context_snapshot();
+    auto project_facts = core::context::capture_project_facts(session_context);
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
+        append_project_facts_update_unlocked(std::move(project_facts));
         mode_snapshot = current_mode_;
         history_.push_back(std::move(user_message));
         refresh_context_window_snapshot_unlocked();
@@ -786,6 +828,17 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
         mode_snapshot = current_mode_;
         dynamic_prompt_suffix = build_dynamic_prompt_suffix();
+        if (!turn_state->prompt_plan.has_value()) {
+            auto plan = stable_prompt_plan_;
+            plan.append(core::context::ContextLayer{
+                .kind = core::context::ContextLayerKind::ConversationState,
+                .stability = core::context::PromptStability::Dynamic,
+                .name = "conversation_state",
+                .content = std::move(dynamic_prompt_suffix),
+            });
+            turn_state->prompt_plan = std::move(plan);
+        }
+        request.prompt_plan = *turn_state->prompt_plan;
         provider_name_snapshot = turn_callbacks.provider_name_override.empty()
             ? active_provider_name_
             : turn_callbacks.provider_name_override;
@@ -795,19 +848,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         done_callback();
         return;
     }
-    if (!turn_state->prompt_plan.has_value()) {
-        auto plan = core::context::ContextBuilder(step_session_context)
-            .with_mode(mode_snapshot)
-            .build_plan();
-        plan.append(core::context::ContextLayer{
-            .kind = core::context::ContextLayerKind::ConversationState,
-            .stability = core::context::PromptStability::Dynamic,
-            .name = "conversation_state",
-            .content = std::move(dynamic_prompt_suffix),
-        });
-        turn_state->prompt_plan = std::move(plan);
-    }
-    request.prompt_plan = *turn_state->prompt_plan;
     const auto context_before_edit = core::context::ContextWindowTracker::snapshot(
         request.messages, provider, request.model);
     if (context_before_edit.max_context_tokens > 0
@@ -1582,6 +1622,17 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
 
     current_mode_ = clean_mode;
     context_summary_ = context_summary;
+    project_facts_snapshot_.reset();
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (!is_repository_context_message(*it)) continue;
+        if (const auto state = decode_repository_context_state(it->input_text)) {
+            project_facts_snapshot_ = core::context::ProjectFactsSnapshot{
+                .status = state->first,
+                .tree = state->second,
+            };
+        }
+        break;
+    }
     consecutive_failure_rounds_ = 0;
     orchestrator_.clear_sessions();
     reset_efficiency_tracking_unlocked();

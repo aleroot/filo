@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/agent/RepositoryContextMessage.hpp"
 #include "core/session/SessionEfficiencyController.hpp"
 #include "core/session/SessionHandoff.hpp"
 
@@ -97,6 +98,31 @@ TEST_CASE("Session handoff builder prefers existing summaries", "[session][hando
         "BUILD");
 
     REQUIRE(summary == "Carry forward the refactor summary.");
+}
+
+TEST_CASE("Session handoff ignores synthetic repository context", "[session][handoff]") {
+    std::vector<core::llm::Message> messages{
+        {
+            .role = "user",
+            .content = "[Project Context]\nStructure:\nlarge internal tree",
+            .name = std::string(core::agent::kRepositoryContextMessageName),
+            .synthetic = true,
+        },
+        {.role = "user", .content = "Implement append-only context updates."},
+        {
+            .role = "user",
+            .content = "$ cmake --build build\nBuild succeeded.",
+            .synthetic = true,
+        },
+        {.role = "assistant", .content = "Implemented and verified."},
+    };
+
+    const std::string summary = core::session::build_handoff_summary(messages, {}, "BUILD");
+
+    REQUIRE_THAT(summary,
+                 Catch::Matchers::ContainsSubstring("Implement append-only context updates."));
+    REQUIRE_THAT(summary, Catch::Matchers::ContainsSubstring("cmake --build build"));
+    CHECK(summary.find("large internal tree") == std::string::npos);
 }
 
 TEST_CASE("Session handoff builder captures recent files and commands", "[session][handoff]") {

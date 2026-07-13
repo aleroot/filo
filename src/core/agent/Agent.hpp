@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "../context/ContextBuilder.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../memory/MemoryBackgroundService.hpp"
@@ -239,8 +240,9 @@ private:
 
     void ensure_system_prompt();
 
-    [[nodiscard]] std::string build_stable_prompt_prefix() const;
     [[nodiscard]] std::string build_dynamic_prompt_suffix() const;
+    void append_project_facts_update_unlocked(
+        std::optional<core::context::ProjectFactsSnapshot> current);
     void refresh_stable_prompt_prefix_unlocked();
     void mark_stable_prompt_prefix_dirty() noexcept { stable_prompt_prefix_dirty_ = true; }
     void refresh_context_window_snapshot_unlocked() noexcept;
@@ -281,6 +283,8 @@ private:
     std::string effort_level_;
     std::string context_summary_;
     std::optional<core::session::SessionGoal> session_goal_;
+    std::optional<core::context::ProjectFactsSnapshot> project_facts_snapshot_;
+    core::context::PromptPlan stable_prompt_plan_;
     std::string stable_prompt_prefix_;
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;

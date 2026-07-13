@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../scm/SourceControlProvider.hpp"
+#include <cstddef>
 #include <filesystem>
 #include <string>
 
@@ -10,6 +11,8 @@ namespace core::utils {
 // Uses the SCM provider to respect ignore rules (like .gitignore).
 std::string get_file_tree(const std::filesystem::path &root,
                           const core::scm::SourceControlProvider &scm,
-                          int max_depth = 2);
+                          int max_depth = 2,
+                          std::size_t max_entries = 256,
+                          std::size_t max_chars = 16 * 1024);
 
 } // namespace core::utils

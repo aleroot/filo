@@ -13,6 +13,8 @@ public:
   [[nodiscard]] std::string name() const override { return "git"; }
   [[nodiscard]] bool
   is_ignored(const std::filesystem::path &path) const override;
+  [[nodiscard]] std::optional<std::vector<bool>>
+  ignored_paths(const std::vector<std::filesystem::path> &paths) const override;
   [[nodiscard]] std::string get_status_summary() const override;
   [[nodiscard]] std::vector<BranchRef> list_branch_refs() const override;
   [[nodiscard]] std::filesystem::path get_root_dir() const override {

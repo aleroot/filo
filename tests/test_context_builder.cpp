@@ -6,9 +6,12 @@
 #include "core/context/SteeringLoader.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/scm/ScmFactory.hpp"
+#include "core/utils/FileSystemUtils.hpp"
 #include "core/workspace/Workspace.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -34,6 +37,22 @@ public:
 
 private:
     std::filesystem::path path_;
+};
+
+class ScopedCurrentPath {
+public:
+    explicit ScopedCurrentPath(const std::filesystem::path& path)
+        : previous_(std::filesystem::current_path()) {
+        std::filesystem::current_path(path);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code ec;
+        std::filesystem::current_path(previous_, ec);
+    }
+
+private:
+    std::filesystem::path previous_;
 };
 
 [[nodiscard]] TempDir make_temp_workspace(std::string_view name) {
@@ -204,6 +223,91 @@ TEST_CASE("PromptPlan exposes a cacheable prefix without mutable project facts",
                Catch::Matchers::ContainsSubstring("Stable repository guidance"));
     CHECK(workspace_prefix.find("[Project Context]") == std::string::npos);
     CHECK_THAT(plan.render(), Catch::Matchers::ContainsSubstring("[Project Context]"));
+
+    const auto stable_plan = core::context::ContextBuilder(context)
+        .include_project_facts(false)
+        .build_plan();
+    CHECK(stable_plan.render().find("[Project Context]") == std::string::npos);
+}
+
+TEST_CASE("Project fact updates render only materially changed sections",
+          "[context][prompt-plan][project-facts]") {
+    const core::context::ProjectFactsSnapshot previous{
+        .status = " M src/main.cpp",
+        .tree = "src/\n  main.cpp",
+    };
+
+    auto current = previous;
+    current.status = "";
+    const std::string status_update =
+        core::context::render_project_facts_update(previous, current);
+    CHECK_THAT(status_update,
+               Catch::Matchers::ContainsSubstring("[Project Context Update]"));
+    CHECK_THAT(status_update, Catch::Matchers::ContainsSubstring("Working tree clean."));
+    CHECK(status_update.find("Structure:") == std::string::npos);
+
+    current = previous;
+    current.tree += "\n  worker.cpp";
+    const std::string tree_update =
+        core::context::render_project_facts_update(previous, current);
+    CHECK_THAT(tree_update, Catch::Matchers::ContainsSubstring("Structure:"));
+    CHECK_THAT(tree_update, Catch::Matchers::ContainsSubstring("worker.cpp"));
+    CHECK(tree_update.find("Status:") == std::string::npos);
+
+    CHECK(core::context::render_project_facts_update(previous, previous).empty());
+}
+
+TEST_CASE("Git project facts capture status and batch ignored paths",
+          "[context][project-facts][git]") {
+    auto workspace = make_temp_workspace("filo project facts git");
+    ScopedCurrentPath cwd(workspace.path());
+    REQUIRE(std::system("git init -q") == 0);
+
+    write_text(workspace.path() / ".gitignore", "build/\nignored space/\n");
+    write_text(workspace.path() / "src" / "main.cpp", "int main() { return 0; }\n");
+    write_text(workspace.path() / "build" / "ignored.o", "ignored\n");
+    write_text(workspace.path() / "ignored space" / "ignored.txt", "ignored\n");
+    REQUIRE(std::system("git add .") == 0);
+    REQUIRE(std::system(
+        "git -c user.name=Filo -c user.email=filo@example.invalid commit -qm initial") == 0);
+
+    const auto context = make_context(workspace.path());
+    const auto initial = core::context::capture_project_facts(context);
+    REQUIRE(initial.has_value());
+    CHECK_THAT(initial->status, Catch::Matchers::ContainsSubstring("## "));
+    CHECK_THAT(initial->tree, Catch::Matchers::ContainsSubstring("src/"));
+    CHECK_THAT(initial->tree, Catch::Matchers::ContainsSubstring("main.cpp"));
+    CHECK(initial->tree.find(".git/") == std::string::npos);
+    CHECK(initial->tree.find("build/") == std::string::npos);
+    CHECK(initial->tree.find("ignored space/") == std::string::npos);
+
+    write_text(workspace.path() / "src" / "main.cpp", "int main() { return 1; }\n");
+    const auto modified = core::context::capture_project_facts(context);
+    REQUIRE(modified.has_value());
+    CHECK_THAT(modified->status,
+               Catch::Matchers::ContainsSubstring(" M src/main.cpp"));
+    CHECK(modified->tree == initial->tree);
+
+    const auto update = core::context::render_project_facts_update(*initial, *modified);
+    CHECK_THAT(update, Catch::Matchers::ContainsSubstring("Status:"));
+    CHECK(update.find("Structure:") == std::string::npos);
+}
+
+TEST_CASE("Repository trees are deterministically bounded",
+          "[context][project-facts][tree]") {
+    auto workspace = make_temp_workspace("filo_project_tree_bounds");
+    for (int i = 0; i < 40; ++i) {
+        write_text(
+            workspace.path() / std::format("file_{:02}.txt", i),
+            "content\n");
+    }
+
+    auto scm = core::scm::ScmFactory::create(workspace.path());
+    const std::string tree = core::utils::get_file_tree(
+        workspace.path(), *scm, 2, 10, 512);
+    CHECK(tree.size() <= 512);
+    CHECK_THAT(tree,
+               Catch::Matchers::ContainsSubstring("repository tree truncated"));
 }
 
 TEST_CASE("SteeringLoader reports loaded project steering source labels",

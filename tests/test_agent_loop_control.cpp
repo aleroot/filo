@@ -2,13 +2,16 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/Agent.hpp"
+#include "core/agent/RepositoryContextMessage.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
+#include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -16,6 +19,7 @@
 #include <format>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <mutex>
 #include <ranges>
 #include <string>
@@ -409,7 +413,10 @@ TEST_CASE("Agent rejects overlapping turns", "[agent][loop]") {
     REQUIRE(first_done.get_future().wait_for(std::chrono::seconds(5)) == std::future_status::ready);
     first_turn.join();
 
-    const auto history = agent->get_history();
+    auto history = agent->get_history();
+    std::erase_if(history, [](const core::llm::Message& message) {
+        return message.synthetic;
+    });
     REQUIRE(history.size() == 2);
     CHECK(history[0].role == "user");
     CHECK(history[0].content == "first");
@@ -663,19 +670,150 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
 
     send_and_wait(agent, "second");
 
+    {
+        std::ofstream beta(tmp.path() / "beta.txt", std::ios::trunc);
+        beta << "beta changed without changing repository facts\n";
+    }
+
+    send_and_wait(agent, "third");
+
     const auto requests = provider->requests_snapshot();
-    REQUIRE(requests.size() == 2);
+    REQUIRE(requests.size() == 3);
     REQUIRE_FALSE(requests[0].messages.empty());
     REQUIRE_FALSE(requests[1].messages.empty());
+    REQUIRE_FALSE(requests[2].messages.empty());
     REQUIRE(requests[0].messages[0].role == "system");
     REQUIRE(requests[1].messages[0].role == "system");
+    REQUIRE(requests[2].messages[0].role == "system");
 
     const auto& first_system_prompt = requests[0].messages[0].content;
     const auto& second_system_prompt = requests[1].messages[0].content;
+    const auto& third_system_prompt = requests[2].messages[0].content;
+    const auto first_prompt_plan = requests[0].prompt_plan.render();
+    const auto second_prompt_plan = requests[1].prompt_plan.render();
+    const auto third_prompt_plan = requests[2].prompt_plan.render();
 
     CHECK(first_system_prompt == second_system_prompt);
-    CHECK(first_system_prompt.find("alpha.txt") != std::string::npos);
+    CHECK(second_system_prompt == third_system_prompt);
+    CHECK(first_prompt_plan == second_prompt_plan);
+    CHECK(second_prompt_plan == third_prompt_plan);
+    CHECK(first_prompt_plan == first_system_prompt);
+    CHECK(first_system_prompt.find("[Project Context]") == std::string::npos);
+    CHECK(first_system_prompt.find("alpha.txt") == std::string::npos);
     CHECK(second_system_prompt.find("beta.txt") == std::string::npos);
+    CHECK(second_prompt_plan.find("beta.txt") == std::string::npos);
+
+    const auto synthetic_messages = [](const core::llm::ChatRequest& request) {
+        std::vector<core::llm::Message> messages;
+        std::ranges::copy_if(
+            request.messages,
+            std::back_inserter(messages),
+            [](const core::llm::Message& message) {
+                return core::agent::is_repository_context_message(message);
+            });
+        return messages;
+    };
+    const auto first_context = synthetic_messages(requests[0]);
+    const auto second_context = synthetic_messages(requests[1]);
+    const auto third_context = synthetic_messages(requests[2]);
+    REQUIRE(first_context.size() == 1);
+    REQUIRE(second_context.size() == 2);
+    REQUIRE(third_context.size() == 2);
+    CHECK_THAT(first_context[0].content, Catch::Matchers::ContainsSubstring("alpha.txt"));
+    CHECK_THAT(second_context[1].content,
+               Catch::Matchers::ContainsSubstring("[Project Context Update]"));
+    CHECK_THAT(second_context[1].content, Catch::Matchers::ContainsSubstring("beta.txt"));
+    CHECK(second_context[1].content.find("Status:") == std::string::npos);
+
+    REQUIRE(requests[1].messages.size() >= requests[0].messages.size());
+    for (std::size_t i = 0; i < requests[0].messages.size(); ++i) {
+        CHECK(requests[1].messages[i].role == requests[0].messages[i].role);
+        CHECK(requests[1].messages[i].content == requests[0].messages[i].content);
+        CHECK(requests[1].messages[i].synthetic == requests[0].messages[i].synthetic);
+    }
+
+    const auto first_payload =
+        core::llm::protocols::AnthropicSerializer::serialize(requests[0]);
+    const auto second_payload =
+        core::llm::protocols::AnthropicSerializer::serialize(requests[1]);
+    const auto third_payload =
+        core::llm::protocols::AnthropicSerializer::serialize(requests[2]);
+    const auto first_messages = first_payload.find(R"(,"messages":[)");
+    const auto second_messages = second_payload.find(R"(,"messages":[)");
+    const auto third_messages = third_payload.find(R"(,"messages":[)");
+    REQUIRE(first_messages != std::string::npos);
+    REQUIRE(second_messages != std::string::npos);
+    REQUIRE(third_messages != std::string::npos);
+    CHECK(first_payload.substr(0, first_messages)
+          == second_payload.substr(0, second_messages));
+    CHECK(second_payload.substr(0, second_messages)
+          == third_payload.substr(0, third_messages));
+}
+
+TEST_CASE("Agent restores repository snapshot continuity across resume",
+          "[agent][prompt][resume]") {
+    TempDir tmp{
+        std::filesystem::temp_directory_path()
+        / std::format("filo_prompt_resume_test_{}",
+                      std::chrono::steady_clock::now().time_since_epoch().count())
+    };
+    {
+        std::ofstream alpha(tmp.path() / "alpha.txt");
+        alpha << "alpha\n";
+    }
+
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = tmp.path(),
+            .additional = {},
+            .enforce = true,
+            .version = 1,
+        },
+        core::context::SessionTransport::cli,
+        "prompt-resume-session");
+
+    auto first_provider = std::make_shared<CapturingProvider>();
+    auto first_agent = std::make_shared<core::agent::Agent>(
+        first_provider, tool_manager, session_context);
+    send_and_wait(first_agent, "first");
+    const auto saved_history = first_agent->get_history();
+    const auto initial_context_count = std::ranges::count_if(
+        saved_history,
+        core::agent::is_repository_context_message);
+    REQUIRE(initial_context_count == 1);
+    const auto initial_context = std::ranges::find_if(
+        saved_history,
+        core::agent::is_repository_context_message);
+    REQUIRE(initial_context != saved_history.end());
+    CHECK_FALSE(initial_context->input_text.empty());
+
+    auto resumed_provider = std::make_shared<CapturingProvider>();
+    auto resumed_agent = std::make_shared<core::agent::Agent>(
+        resumed_provider, tool_manager, session_context);
+    resumed_agent->load_history(saved_history, {}, "BUILD");
+    send_and_wait(resumed_agent, "second");
+
+    {
+        std::ofstream beta(tmp.path() / "beta.txt");
+        beta << "beta\n";
+    }
+    send_and_wait(resumed_agent, "third");
+
+    const auto requests = resumed_provider->requests_snapshot();
+    REQUIRE(requests.size() == 2);
+    CHECK(std::ranges::count_if(
+              requests[0].messages,
+              core::agent::is_repository_context_message) == 1);
+    CHECK(std::ranges::count_if(
+              requests[1].messages,
+              core::agent::is_repository_context_message) == 2);
+    CHECK(std::ranges::count_if(
+              requests[1].messages,
+              [](const core::llm::Message& message) {
+                  return core::agent::is_repository_context_message(message)
+                      && !message.input_text.empty();
+              }) == 1);
 }
 
 TEST_CASE("Agent project context follows the explicit SessionContext workspace",
@@ -718,8 +856,15 @@ TEST_CASE("Agent project context follows the explicit SessionContext workspace",
     REQUIRE(requests[0].messages[0].role == "system");
 
     const auto& system_prompt = requests[0].messages[0].content;
-    CHECK(system_prompt.find("workspace_marker.txt") != std::string::npos);
-    CHECK(system_prompt.find("cwd_marker.txt") == std::string::npos);
+    CHECK(system_prompt.find("workspace_marker.txt") == std::string::npos);
+    const auto context_message = std::ranges::find_if(
+        requests[0].messages,
+        [](const core::llm::Message& message) {
+            return core::agent::is_repository_context_message(message);
+        });
+    REQUIRE(context_message != requests[0].messages.end());
+    CHECK(context_message->content.find("workspace_marker.txt") != std::string::npos);
+    CHECK(context_message->content.find("cwd_marker.txt") == std::string::npos);
 }
 
 TEST_CASE("Agent loads FILO steering files into the system prompt",

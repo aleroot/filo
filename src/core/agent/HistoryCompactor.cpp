@@ -1,6 +1,8 @@
 #include "HistoryCompactor.hpp"
+#include "RepositoryContextMessage.hpp"
 #include "../utils/StringUtils.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <format>
 #include <thread>
@@ -88,6 +90,9 @@ core::llm::ChatRequest HistoryCompactor::build_request(
     core::llm::ChatRequest llm_request;
     llm_request.model = request.model;
     llm_request.messages = request.history;
+    std::erase_if(
+        llm_request.messages,
+        is_repository_context_message);
     llm_request.messages.push_back({
         "user",
         "Summarise the conversation so far in a single, dense paragraph. "

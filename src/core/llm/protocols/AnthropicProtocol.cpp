@@ -295,12 +295,6 @@ namespace {
         std::string base_system =
             "x-anthropic-billing-header: " + std::string(ANTHROPIC_BILLING_HEADER);
 
-        if (!req.prompt_plan.empty()) {
-            base_system += "\n\n";
-            base_system += req.prompt_plan.render();
-            return base_system;
-        }
-
         for (const auto& msg : req.messages) {
             if (msg.role != "system" || msg.content.empty()) continue;
 
@@ -315,6 +309,39 @@ namespace {
         }
 
         return base_system;
+    }
+
+    void append_anthropic_system_field(std::string& payload, const ChatRequest& req) {
+        payload += R"(,"system":)";
+        if (req.prompt_plan.empty()) {
+            payload += '"';
+            payload += core::utils::escape_json_string(compose_anthropic_system_prompt(req));
+            payload += '"';
+            return;
+        }
+
+        const auto& layers = req.prompt_plan.layers();
+        std::optional<std::size_t> workspace_cache_boundary;
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+            if (layers[i].stability <= core::context::PromptStability::Workspace) {
+                workspace_cache_boundary = i;
+            }
+        }
+
+        payload += R"([{"type":"text","text":")";
+        payload += core::utils::escape_json_string(
+            "x-anthropic-billing-header: " + std::string(ANTHROPIC_BILLING_HEADER));
+        payload += R"("})";
+        for (std::size_t i = 0; i < layers.size(); ++i) {
+            payload += R"(,{"type":"text","text":")";
+            payload += core::utils::escape_json_string(layers[i].content);
+            payload += '"';
+            if (workspace_cache_boundary == i) {
+                payload += R"(,"cache_control":{"type":"ephemeral"})";
+            }
+            payload += '}';
+        }
+        payload += ']';
     }
     
     // Parse ISO 8601 timestamp to unix seconds (Anthropic format: "2025-01-15T12:00:30Z").
@@ -710,10 +737,9 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
     }
 
     // Claude Code-style attribution is carried in the top-level system field.
-    // We always send it because Sonnet/Opus subscription quotas depend on it.
-    payload += R"(,"system":")";
-    payload += core::utils::escape_json_string(compose_anthropic_system_prompt(req));
-    payload += '"';
+    // Structured plans retain layer boundaries so the stable workspace prefix
+    // remains reusable when session or dynamic context changes.
+    append_anthropic_system_field(payload, req);
 
     // Tools (Anthropic uses "input_schema" instead of "parameters").
     if (!req.tools.empty()) {
@@ -726,6 +752,9 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
             payload += core::utils::escape_json_string(def.description);
             payload += R"(","input_schema":)";
             payload += core::tools::schema::canonical_input_schema(def);
+            if (i + 1 == req.tools.size()) {
+                payload += R"(,"cache_control":{"type":"ephemeral"})";
+            }
             payload += '}';
             if (i + 1 < req.tools.size()) payload += ',';
         }

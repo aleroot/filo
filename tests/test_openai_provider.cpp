@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/agent/RepositoryContextMessage.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/Models.hpp"
@@ -9,7 +10,9 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 
+#include <algorithm>
 #include <memory>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 
@@ -88,6 +91,27 @@ TEST_CASE("Serializer - user message content appears in payload", "[openai][seri
     auto payload = Serializer::serialize(make_simple_request("gpt-4o", "Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Tell me a joke"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("role":"user")"));
+}
+
+TEST_CASE("Serializer - repository context marker is compatible with strict participant names",
+          "[openai][serializer][context]") {
+    const auto marker = core::agent::kRepositoryContextMessageName;
+    REQUIRE_FALSE(marker.empty());
+    CHECK(std::ranges::all_of(marker, [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '_' || ch == '-';
+    }));
+
+    auto req = make_simple_request();
+    req.messages.insert(req.messages.begin(), Message{
+        .role = "user",
+        .content = "[Project Context]",
+        .name = std::string(marker),
+        .synthetic = true,
+    });
+    CHECK_THAT(
+        Serializer::serialize(req),
+        Catch::Matchers::ContainsSubstring(
+            R"("name":"filo_repository_context")"));
 }
 
 TEST_CASE("Serializer - user image content becomes image_url parts", "[openai][serializer][vision]") {
