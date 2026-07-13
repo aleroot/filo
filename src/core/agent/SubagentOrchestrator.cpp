@@ -262,6 +262,7 @@ std::string SubagentOrchestrator::execute_task(
         .parent_tool_call_id = context.parent_tool_call_id,
         .resume_state = std::move(resume_state),
         .timeout = std::chrono::minutes(30),
+        .cancellation_requested = context.cancellation_requested,
         .permission_check = adapt_permission_check(context),
         .on_event = context.on_subagent_event,
     });

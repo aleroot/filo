@@ -36,6 +36,9 @@ public:
         std::function<bool(const std::string&, const std::string&)> permission_check;
         std::string parent_tool_call_id;
         std::function<void(const SubagentEvent&)> on_subagent_event;
+        /// Polled by DelegatedAgentRunner while the worker runs; returning
+        /// true cancels the delegated task (e.g. parent agent stop request).
+        std::function<bool()> cancellation_requested;
     };
 
     struct ExecutionRequest {

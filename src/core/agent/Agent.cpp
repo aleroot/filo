@@ -1327,6 +1327,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 },
                                 .parent_tool_call_id = tc.id,
                                 .on_subagent_event = on_subagent_event,
+                                // Propagate the parent's stop request (Esc /
+                                // Ctrl+C) to the delegated worker so cancelling
+                                // a turn also cancels its running subagents.
+                                .cancellation_requested = [self]() {
+                                    return self->is_stop_requested();
+                                },
                             };
 
                             result = self->orchestrator_.execute_task(
