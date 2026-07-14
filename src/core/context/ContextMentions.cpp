@@ -461,6 +461,10 @@ ExpandedPrompt expand_prompt(std::string_view input,
             continue;
         }
 
+        if (std::filesystem::path(raw_path).is_absolute()) {
+            output.explicit_path_mentions.push_back(resolved);
+        }
+
         if (is_image_file(resolved)) {
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;

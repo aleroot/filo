@@ -298,9 +298,7 @@ void Agent::set_mode(const std::string& mode) {
         if (!history_.empty() && history_[0].role == "system") {
             history_.erase(history_.begin());
         }
-        mark_stable_prompt_prefix_dirty();
-        ensure_system_prompt();
-        refresh_context_window_snapshot_unlocked();
+        refresh_stable_prompt_state_unlocked();
     }
 }
 
@@ -309,6 +307,15 @@ void Agent::set_session_id(std::string session_id) {
     if (session_context_.session_id != session_id) {
         session_context_.session_id = std::move(session_id);
         mark_stable_prompt_prefix_dirty();
+    }
+}
+
+void Agent::grant_workspace_paths(
+    const std::vector<std::filesystem::path>& paths) {
+    std::lock_guard lock(history_mutex_);
+    const auto added = session_context_.extend_workspace(paths);
+    if (added > 0) {
+        refresh_stable_prompt_state_unlocked();
     }
 }
 
@@ -322,9 +329,7 @@ void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
 void Agent::set_memory_thread_policy(core::memory::MemoryThreadPolicy policy) {
     std::lock_guard lock(history_mutex_);
     session_context_.memory_policy = policy;
-    mark_stable_prompt_prefix_dirty();
-    ensure_system_prompt();
-    refresh_context_window_snapshot_unlocked();
+    refresh_stable_prompt_state_unlocked();
 }
 
 core::memory::MemoryThreadPolicy Agent::memory_thread_policy() const {
@@ -402,6 +407,10 @@ void Agent::run_memory_background_review(
 
 void Agent::refresh_system_prompt() {
     std::lock_guard lock(history_mutex_);
+    refresh_stable_prompt_state_unlocked();
+}
+
+void Agent::refresh_stable_prompt_state_unlocked() {
     mark_stable_prompt_prefix_dirty();
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
@@ -1643,9 +1652,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
     // Remove any stale system message — ensure_system_prompt() inserts a fresh one.
     std::erase_if(messages, [](const core::llm::Message& m){ return m.role == "system"; });
     history_ = std::move(messages);
-    mark_stable_prompt_prefix_dirty();
-    ensure_system_prompt();
-    refresh_context_window_snapshot_unlocked();
+    refresh_stable_prompt_state_unlocked();
 }
 
 std::string Agent::get_mode() const {

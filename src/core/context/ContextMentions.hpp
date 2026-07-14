@@ -29,6 +29,9 @@ struct MentionCompletion {
 struct ExpandedPrompt {
     std::string display_text;
     std::vector<core::llm::ContentPart> content_parts;
+    // Absolute paths explicitly referenced with @. This reports user input;
+    // the caller decides whether those references should change access scope.
+    std::vector<std::filesystem::path> explicit_path_mentions;
 };
 
 std::optional<ActiveMention> find_active_mention(std::string_view input,

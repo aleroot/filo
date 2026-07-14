@@ -3,8 +3,10 @@
 #include "Workspace.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <system_error>
+#include <vector>
 
 namespace core::workspace {
 
@@ -60,6 +62,41 @@ public:
         }
 
         return false;
+    }
+
+    // Extends an enforced workspace with existing absolute files or
+    // directories. Validation, normalization, de-duplication, and versioning
+    // live here so every caller observes the same workspace invariants.
+    std::size_t add_additional_paths(
+        const std::vector<std::filesystem::path>& paths) {
+        std::size_t added = 0;
+        for (const auto& path : paths) {
+            if (path.empty() || !path.is_absolute()) {
+                continue;
+            }
+
+            const auto normalized = normalize_path(path);
+            std::error_code ec;
+            const bool is_file = std::filesystem::is_regular_file(normalized, ec);
+            ec.clear();
+            const bool is_directory = std::filesystem::is_directory(normalized, ec);
+            if ((!is_file && !is_directory) || is_path_allowed(normalized)) {
+                continue;
+            }
+
+            if (is_directory) {
+                std::erase_if(snapshot_.additional, [&](const auto& existing) {
+                    return is_subpath(normalized, existing);
+                });
+            }
+            snapshot_.additional.push_back(normalized);
+            ++added;
+        }
+
+        if (added > 0) {
+            ++snapshot_.version;
+        }
+        return added;
     }
 
     [[nodiscard]] static WorkspaceSnapshot normalize_snapshot(WorkspaceSnapshot snapshot) {

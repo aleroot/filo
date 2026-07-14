@@ -4648,6 +4648,9 @@ RunResult run(RunOptions opts) {
                      assistant_message_id = std::move(assistant_message_id),
                      &save_session_snapshot]() mutable {
             const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
+            // An absolute @ mention is an explicit user selection. Finder
+            // drag-and-drop arrives through bracketed paste in this form.
+            agent->grant_workspace_paths(expanded_prompt.explicit_path_mentions);
 
             core::llm::Message user_message;
             user_message.role = "user";

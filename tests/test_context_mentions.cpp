@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -71,6 +72,24 @@ TEST_CASE("Context mentions expand shell-escaped absolute paths from drag-drop",
         expanded,
         Catch::Matchers::ContainsSubstring("[Context for " + external_file.string() + "]"));
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("1 | dragdrop line"));
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Context mentions report explicit absolute paths", "[context][workspace]") {
+    const fs::path sandbox = make_temp_dir("filo_context_grant");
+    const fs::path external_dir = sandbox / "external folder";
+    const fs::path external_file = external_dir / "report.txt";
+    write_text(external_file, "grant me\n");
+
+    const auto expanded = core::context::expand_prompt(
+        "Inspect @" + core::context::escape_unquoted_mention_path(external_dir.string()),
+        fs::current_path());
+
+    REQUIRE(expanded.explicit_path_mentions == std::vector<fs::path>{external_dir});
+
+    const auto relative = core::context::expand_prompt("Inspect @report.txt", external_dir);
+    REQUIRE(relative.explicit_path_mentions.empty());
 
     fs::remove_all(sandbox);
 }

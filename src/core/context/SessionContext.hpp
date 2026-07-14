@@ -3,10 +3,12 @@
 #include "../memory/MemoryPolicy.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace core::workspace {
 class PathVisibility;
@@ -43,6 +45,10 @@ struct SessionContext {
     [[nodiscard]] std::filesystem::path resolve_path(
         const std::filesystem::path& target_path) const;
     [[nodiscard]] bool is_path_allowed(const std::filesystem::path& target_path) const;
+
+    // Extends the workspace and invalidates visibility derived from its roots.
+    std::size_t extend_workspace(
+        const std::vector<std::filesystem::path>& paths);
 };
 
 [[nodiscard]] SessionContext make_session_context(

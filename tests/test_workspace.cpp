@@ -2,6 +2,7 @@
 
 #include "core/context/SessionContext.hpp"
 #include "core/scm/ScmFactory.hpp"
+#include "core/workspace/PathVisibility.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
 
@@ -132,6 +133,44 @@ TEST_CASE("SessionContext delegates to its owned SessionWorkspace", "[Workspace]
 
     std::filesystem::remove_all(primary, ec);
     std::filesystem::remove_all(extra, ec);
+}
+
+TEST_CASE("SessionContext grants existing absolute paths for the session", "[Workspace][SessionContext]") {
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-session-grant-{}", std::rand());
+    const auto primary = base / "primary";
+    const auto external = base / "external";
+    const auto external_file = base / "single.txt";
+    const auto missing = base / "missing";
+    std::filesystem::create_directories(primary, ec);
+    std::filesystem::create_directories(external, ec);
+    {
+        std::ofstream out(external_file);
+        out << "single\n";
+    }
+
+    auto context = core::context::make_session_context(WorkspaceSnapshot{
+        .primary = primary,
+        .additional = {},
+        .enforce = true,
+        .version = 4,
+    });
+    context.path_visibility = std::make_shared<core::workspace::PathVisibility>(
+        std::make_shared<core::workspace::AllowAllPathVisibilityPolicy>());
+
+    REQUIRE(context.extend_workspace({external, external_file, missing, "relative"}) == 2);
+    REQUIRE(context.effective_workspace().version == 5);
+    REQUIRE_FALSE(context.path_visibility);
+    REQUIRE(context.is_path_allowed(external / "nested.txt"));
+    REQUIRE(context.is_path_allowed(external_file));
+    REQUIRE_FALSE(context.is_path_allowed(base / "sibling.txt"));
+    REQUIRE(context.extend_workspace({external}) == 0);
+    REQUIRE(context.effective_workspace().version == 5);
+
+    std::filesystem::remove_all(base, ec);
 }
 
 TEST_CASE("SourceControlProvider lists branch refs through abstraction", "[Workspace][SCM]") {

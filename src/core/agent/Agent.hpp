@@ -14,6 +14,7 @@
 #include "SubagentEvents.hpp"
 #include "PermissionGate.hpp"
 #include "ToolCallDeduplicator.hpp"
+#include <filesystem>
 #include <memory>
 #include <vector>
 #include <string>
@@ -82,6 +83,11 @@ public:
 
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
+
+    // Atomically extends the session workspace and refreshes prompt state that
+    // describes or depends on its roots.
+    void grant_workspace_paths(
+        const std::vector<std::filesystem::path>& paths);
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
     void set_memory_thread_policy(core::memory::MemoryThreadPolicy policy);
     [[nodiscard]] core::memory::MemoryThreadPolicy memory_thread_policy() const;
@@ -239,6 +245,7 @@ private:
         std::function<void(const std::string&)> status_log_callback);
 
     void ensure_system_prompt();
+    void refresh_stable_prompt_state_unlocked();
 
     [[nodiscard]] std::string build_dynamic_prompt_suffix() const;
     void append_project_facts_update_unlocked(

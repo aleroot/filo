@@ -18,6 +18,15 @@ bool SessionContext::is_path_allowed(const std::filesystem::path& target_path) c
     return workspace_view().is_path_allowed(target_path);
 }
 
+std::size_t SessionContext::extend_workspace(
+    const std::vector<std::filesystem::path>& paths) {
+    const auto added = workspace.add_additional_paths(paths);
+    if (added > 0) {
+        path_visibility.reset();
+    }
+    return added;
+}
+
 SessionContext make_session_context(core::workspace::WorkspaceSnapshot snapshot,
                                     SessionTransport transport,
                                     std::string session_id) {
