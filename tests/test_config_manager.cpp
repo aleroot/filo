@@ -799,6 +799,12 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
 
+    REQUIRE(manager.persist_login_profile("x.ai", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "grok");
+    REQUIRE(manager.get_config().providers.at("grok").auth_type == "oauth_xai");
+    REQUIRE(manager.get_config().providers.at("grok").model == "grok-build");
+
     write_text(auth_overlay, R"({
         "default_provider": "zai",
         "default_model_selection": "manual",

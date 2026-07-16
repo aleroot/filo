@@ -50,6 +50,7 @@
  */
 
 #include "OpenAIProtocol.hpp"
+#include "OpenAIResponsesProtocol.hpp"
 #include <string_view>
 #include <optional>
 
@@ -89,11 +90,14 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
 class GrokProtocol : public OpenAIProtocol {
 public:
     /**
-     * @param effort  Reasoning effort level.  Pass `None` to omit the field
-     *                entirely (default; suitable for models that don't support it).
+     * @param effort        Reasoning effort level.  Pass `None` to omit the field
+     *                      entirely (default; suitable for models that don't support it).
+     * @param stream_usage  Append `stream_options:{include_usage:true}` to
+     *                      streaming requests (mirrors OpenAIProtocol).
      */
-    explicit GrokProtocol(GrokReasoningEffort effort = GrokReasoningEffort::None)
-        : OpenAIProtocol(/*stream_usage=*/false)
+    explicit GrokProtocol(GrokReasoningEffort effort = GrokReasoningEffort::None,
+                          bool stream_usage = false)
+        : OpenAIProtocol(stream_usage)
         , effort_(effort) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "grok"; }
@@ -140,6 +144,10 @@ public:
      */
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
 
+    void prepare_headers(cpr::Header& headers,
+                         const ChatRequest& request,
+                         std::string_view base_url) override;
+
     /**
      * @brief Returns rate limit info extracted from the most recent response.
      *
@@ -164,6 +172,27 @@ private:
     // Parse xAI rate limit headers into RateLimitInfo
     [[nodiscard]] static RateLimitInfo parse_rate_limit_headers(
         const cpr::Header& headers) noexcept;
+};
+
+/** xAI Responses API variant used by Grok OAuth session models. */
+class GrokResponsesProtocol final : public OpenAIResponsesProtocol {
+public:
+    explicit GrokResponsesProtocol(std::string service_tier = {})
+        : OpenAIResponsesProtocol(false, std::move(service_tier)) {}
+
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return "grok_responses";
+    }
+
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
+        auto cloned = std::make_unique<GrokResponsesProtocol>(default_service_tier_);
+        share_continuity_state_with(*cloned);
+        return cloned;
+    }
+
+    void prepare_headers(cpr::Header& headers,
+                         const ChatRequest& request,
+                         std::string_view base_url) override;
 };
 
 } // namespace core::llm::protocols

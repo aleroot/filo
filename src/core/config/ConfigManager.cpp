@@ -280,6 +280,13 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .default_model = "gpt-5.4",
         };
     }
+    if (normalized == "grok" || normalized == "xai" || normalized == "x.ai") {
+        return LoginProfileMapping{
+            .provider_name = "grok",
+            .auth_type = "oauth_xai",
+            .default_model = "grok-build",
+        };
+    }
     if (normalized == "openai-pkce"
         || normalized == "openai_pkce"
         || normalized == "openaipkce") {
@@ -1805,8 +1812,9 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
 
     ProviderConfig& provider_overlay = overlay.providers[mapping->provider_name];
     provider_overlay.auth_type = mapping->auth_type;
-    const bool force_login_default_model = mapping->auth_type == "oauth_kimi";
-    if (force_login_default_model) {
+    const bool force_session_default_model = mapping->auth_type == "oauth_kimi"
+        || mapping->auth_type == "oauth_xai";
+    if (force_session_default_model) {
         provider_overlay.model = mapping->default_model;
     } else if (provider_overlay.model.empty()) {
         if (const auto it = config_.providers.find(mapping->provider_name);

@@ -155,6 +155,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // xAI Grok Models
     // -----------------------------------------------------------------------
+    { "grok-build",       500000 },
     { "grok-4.5",         500000 },
     { "grok-",             128000 },
 
@@ -747,6 +748,21 @@ std::vector<ModelInfo> build_gemini_catalog() {
 // Grok models (xAI)
 std::vector<ModelInfo> build_grok_catalog() {
     return {
+        {
+            .canonical_id = "grok-build",
+            .aliases = {},
+            .display_name = "Grok Build",
+            .provider = "grok",
+            .context_window = 500000,
+            .max_output_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .tier = ModelTier::Powerful,
+            .pricing = {-1.0, -1.0, -1.0, -1.0},
+            .knowledge_cutoff = "",
+            .constraints = kStandardConstraints,
+        },
         {
             .canonical_id = "grok-4.5",
             .aliases = {"grok-4-5", "grok-reasoning"},

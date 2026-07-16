@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IOAuthFlow.hpp"
+#include "IOAuthTokenRevoker.hpp"
 #include "ui/AuthUI.hpp"
 #include <memory>
 #include <optional>
@@ -30,7 +31,7 @@ struct GoogleManualAuthInput {
  * The static methods build_auth_url() and parse_token_response() are pure
  * functions exposed for unit testing without network or browser side-effects.
  */
-class GoogleOAuthFlow : public IOAuthFlow {
+class GoogleOAuthFlow : public IOAuthFlow, public IOAuthTokenRevoker {
 public:
     explicit GoogleOAuthFlow(std::shared_ptr<ui::AuthUI> ui = nullptr);
 
@@ -43,6 +44,9 @@ public:
 
     OAuthToken login() override;
     OAuthToken refresh(std::string_view refresh_token) override;
+
+    /// Best-effort revocation via https://oauth2.googleapis.com/revoke.
+    void revoke(const OAuthToken& token) override;
 
     static std::string build_auth_url(std::string_view client_id,
                                       std::string_view redirect_uri,

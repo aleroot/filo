@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/auth/OAuthToken.hpp"
 #include "core/auth/ITokenStore.hpp"
 #include "core/auth/IOAuthFlow.hpp"
@@ -232,6 +233,13 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     original.account_id = "acct_123";
     original.organization_id = "org_123";
     original.project_id = "project_123";
+    original.issuer = "https://issuer.example";
+    original.client_id = "public-client";
+    original.user_id = "user_123";
+    original.email = "user@example.com";
+    original.principal_type = "team";
+    original.principal_id = "principal_123";
+    original.team_id = "team_123";
     store.save("google", original);
 
     auto loaded = store.load("google");
@@ -244,6 +252,13 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     REQUIRE(loaded->account_id == "acct_123");
     REQUIRE(loaded->organization_id == "org_123");
     REQUIRE(loaded->project_id == "project_123");
+    REQUIRE(loaded->issuer == "https://issuer.example");
+    REQUIRE(loaded->client_id == "public-client");
+    REQUIRE(loaded->user_id == "user_123");
+    REQUIRE(loaded->email == "user@example.com");
+    REQUIRE(loaded->principal_type == "team");
+    REQUIRE(loaded->principal_id == "principal_123");
+    REQUIRE(loaded->team_id == "team_123");
 }
 
 TEST_CASE("FileTokenStore — load accepts legacy organization_uuid field", "[FileTokenStore]") {
@@ -501,7 +516,7 @@ TEST_CASE("GoogleOAuthFlow::parse_manual_auth_input — callback URL requires co
 
 // ── OAuthTokenManager ─────────────────────────────────────────────────────────
 
-TEST_CASE("OAuthTokenManager — returns valid cached token without hitting flow/store", "[OAuthTokenManager]") {
+TEST_CASE("OAuthTokenManager — rechecks stored valid token without hitting flow", "[OAuthTokenManager]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
     store->stored = make_token(3600);
@@ -513,10 +528,10 @@ TEST_CASE("OAuthTokenManager — returns valid cached token without hitting flow
     REQUIRE(flow->login_calls   == 0);
     REQUIRE(flow->refresh_calls == 0);
 
-    // Second call should use in-memory cache — no extra store hits
+    // Re-read the source of truth so external logout/refresh is observable.
     int load_before = store->load_calls;
     mgr.get_valid_token();
-    REQUIRE(store->load_calls == load_before);
+    REQUIRE(store->load_calls == load_before + 1);
 }
 
 TEST_CASE("OAuthTokenManager — calls refresh() when token expired + has refresh_token", "[OAuthTokenManager]") {
@@ -590,7 +605,7 @@ TEST_CASE("OAuthTokenManager — logout() clears store and forces next get to lo
     flow->login_result = make_token(3600, "fresh-rt", "fresh-at");
 
     OAuthTokenManager mgr("google", flow, store);
-    mgr.get_valid_token(); // loads valid token, caches it
+    mgr.get_valid_token(); // loads the valid stored token
 
     mgr.logout();
     REQUIRE(store->clear_calls == 1);
@@ -1120,4 +1135,90 @@ TEST_CASE("AuthenticationManager exposes openai login provider without legacy al
     REQUIRE(std::find(providers.begin(), providers.end(), "zai-coding") == providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-pkce") == providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-api-key") == providers.end());
+}
+
+// ── AuthenticationManager::logout ────────────────────────────────────────────
+// revoke_remote=false keeps these tests offline; server-side revocation is
+// covered by flow-level unit tests of the pure parsing/URL helpers.
+
+TEST_CASE("AuthenticationManager logout clears the stored OAuth session", "[AuthenticationManager][logout]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    const auto seed_token = [&](std::string_view key) {
+        FileTokenStore store(tmp.path);
+        store.save(key, make_token(3600));
+        REQUIRE(store.load(key).has_value());
+    };
+
+    SECTION("claude (no public revocation endpoint)") {
+        seed_token("claude");
+        REQUIRE(manager.logout("claude", /*revoke_remote=*/false) == "Claude");
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("claude").has_value());
+    }
+
+    SECTION("qwen (no public revocation endpoint)") {
+        seed_token("qwen");
+        REQUIRE(manager.logout("qwen", /*revoke_remote=*/false) == "Qwen (chat.qwen.ai)");
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("qwen").has_value());
+    }
+
+    SECTION("kimi (no public revocation endpoint)") {
+        seed_token("kimi");
+        manager.logout("kimi", /*revoke_remote=*/false);
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("kimi").has_value());
+    }
+
+    SECTION("google") {
+        seed_token("google");
+        REQUIRE(manager.logout("google", /*revoke_remote=*/false) == "Google");
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("google").has_value());
+    }
+
+    SECTION("openai uses the openai-pkce store key") {
+        seed_token("openai-pkce");
+        REQUIRE(manager.logout("openai", /*revoke_remote=*/false)
+            == "OpenAI (ChatGPT login)");
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("openai-pkce").has_value());
+    }
+
+    SECTION("grok accepts the x.ai alias") {
+        seed_token("grok");
+        REQUIRE(manager.logout("x.ai", /*revoke_remote=*/false) == "Grok");
+        REQUIRE_FALSE(FileTokenStore(tmp.path).load("grok").has_value());
+    }
+}
+
+TEST_CASE("AuthenticationManager logout succeeds when no session is cached", "[AuthenticationManager][logout]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+    // No token on disk: logout is idempotent and still reports the provider.
+    REQUIRE(manager.logout("claude", /*revoke_remote=*/false) == "Claude");
+}
+
+TEST_CASE("OAuthTokenManager observes logout performed by another manager",
+          "[OAuthTokenManager][logout]") {
+    TempDir tmp;
+    auto store = std::make_shared<FileTokenStore>(tmp.path);
+    store->save("grok", make_token(3600));
+
+    auto manager = std::make_shared<OAuthTokenManager>(
+        "grok",
+        std::make_shared<StubFlow>(),
+        store,
+        /*allow_interactive_login=*/false);
+    REQUIRE(manager->get_valid_token().is_valid());
+
+    FileTokenStore(tmp.path).clear("grok");
+    REQUIRE_THROWS_WITH(
+        manager->get_valid_token(),
+        Catch::Matchers::ContainsSubstring("filo auth login grok"));
+}
+
+TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[AuthenticationManager][logout]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+    // API-key strategies have no OAuth session to clear.
+    REQUIRE_THROWS(manager.logout("zai", /*revoke_remote=*/false));
+    REQUIRE_THROWS(manager.logout("does-not-exist", /*revoke_remote=*/false));
 }

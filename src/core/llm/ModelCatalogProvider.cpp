@@ -355,8 +355,11 @@ ModelCatalogResult GeminiModelCatalogProvider::parse_models_response(std::string
     return result;
 }
 
-OpenAICompatibleModelCatalogProvider::OpenAICompatibleModelCatalogProvider(std::string provider_name)
-    : provider_name_(std::move(provider_name)) {
+OpenAICompatibleModelCatalogProvider::OpenAICompatibleModelCatalogProvider(
+    std::string provider_name,
+    bool include_session_only_models)
+    : provider_name_(std::move(provider_name))
+    , include_session_only_models_(include_session_only_models) {
     if (provider_name_.empty()) {
         provider_name_ = "openai";
     }
@@ -416,7 +419,8 @@ ModelCatalogResult OpenAICompatibleModelCatalogProvider::parse_models_response(s
         simdjson::dom::object object;
         if (element.get(object) != simdjson::SUCCESS) continue;
 
-        if (!get_bool_field(object, "supported_in_api", true)) {
+        if (!include_session_only_models_
+            && !get_bool_field(object, "supported_in_api", true)) {
             continue;
         }
 
@@ -573,6 +577,13 @@ ModelCatalogResult AnthropicModelCatalogProvider::parse_models_response(std::str
 
 std::unique_ptr<ModelCatalogProvider>
 make_model_catalog_provider(config::ApiType api_type, std::string_view provider_name) {
+    return make_model_catalog_provider(api_type, provider_name, false);
+}
+
+std::unique_ptr<ModelCatalogProvider>
+make_model_catalog_provider(config::ApiType api_type,
+                            std::string_view provider_name,
+                            bool include_session_only_models) {
     switch (api_type) {
         case config::ApiType::Gemini:
             return std::make_unique<GeminiModelCatalogProvider>(to_string_copy(provider_name));
@@ -582,7 +593,8 @@ make_model_catalog_provider(config::ApiType api_type, std::string_view provider_
             return std::make_unique<KimiModelCatalogProvider>(to_string_copy(provider_name));
         case config::ApiType::OpenAI:
         case config::ApiType::DashScope:
-            return std::make_unique<OpenAICompatibleModelCatalogProvider>(to_string_copy(provider_name));
+            return std::make_unique<OpenAICompatibleModelCatalogProvider>(
+                to_string_copy(provider_name), include_session_only_models);
         case config::ApiType::Unknown:
         case config::ApiType::Ollama:
         case config::ApiType::LlamaCppLocal:

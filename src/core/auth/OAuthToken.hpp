@@ -23,6 +23,13 @@ struct OAuthToken {
     std::string organization_id; // Optional organization UUID (Claude Team/Enterprise)
     std::string project_id;     // Optional Google Code Assist project identifier
     std::vector<std::string> scopes; // Optional OAuth scopes granted by provider
+    std::string issuer;         // OIDC issuer used to obtain this token
+    std::string client_id;      // OAuth public client associated with the token
+    std::string user_id;        // Provider user subject, when available
+    std::string email;          // Provider account email, when available
+    std::string principal_type; // xAI personal/team principal type
+    std::string principal_id;   // xAI selected principal identifier
+    std::string team_id;        // xAI team identifier, when selected
 
     bool is_valid() const noexcept {
         if (access_token.empty()) return false;

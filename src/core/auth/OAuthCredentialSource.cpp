@@ -65,7 +65,14 @@ AuthInfo OAuthCredentialSource::get_auth() {
     if (!token.account_id.empty()) {
         auth.properties["account_id"] = token.account_id;
     }
-    
+    if (!token.issuer.empty()) auth.properties["oauth_issuer"] = token.issuer;
+    if (!token.client_id.empty()) auth.properties["oauth_client_id"] = token.client_id;
+    if (!token.user_id.empty()) auth.properties["user_id"] = token.user_id;
+    if (!token.email.empty()) auth.properties["email"] = token.email;
+    if (!token.principal_type.empty()) auth.properties["principal_type"] = token.principal_type;
+    if (!token.principal_id.empty()) auth.properties["principal_id"] = token.principal_id;
+    if (!token.team_id.empty()) auth.properties["team_id"] = token.team_id;
+
     return auth;
 }
 

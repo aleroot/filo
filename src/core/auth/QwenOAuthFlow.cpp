@@ -1,6 +1,6 @@
 #include "QwenOAuthFlow.hpp"
 #include "AuthBrowserLauncher.hpp"
-#include "OpenAIOAuthFlow.hpp"
+#include "OAuthPkce.hpp"
 #include <cpr/cpr.h>
 #include <simdjson.h>
 #include <array>
@@ -238,8 +238,8 @@ OAuthToken QwenOAuthFlow::do_refresh(std::string_view refresh_token) {
 OAuthToken QwenOAuthFlow::login() {
     core::logging::info("Starting Qwen OAuth device flow...");
 
-    const std::string verifier  = OpenAIOAuthFlow::generate_code_verifier();
-    const std::string challenge = OpenAIOAuthFlow::compute_code_challenge(verifier);
+    const std::string verifier  = oauth_pkce::generate_code_verifier();
+    const std::string challenge = oauth_pkce::compute_code_challenge(verifier);
 
     auto auth = request_device_authorization(challenge, verifier);
 

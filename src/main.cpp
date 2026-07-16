@@ -51,6 +51,8 @@ int main(int argc, char** argv) {
     std::string host        = "127.0.0.1";
     std::string login_provider;
     bool        auth_login_command = false;
+    std::string logout_provider;
+    bool        auth_logout_command = false;
     std::string prompter_prompt;
     std::string output_format = "text";
     std::string input_format = "text";
@@ -127,7 +129,15 @@ int main(int argc, char** argv) {
     auth_login_sub->add_option(
         "provider",
         login_provider,
-        "Provider to authenticate (e.g. openai, claude, zai)");
+        "Provider to authenticate (e.g. grok, openai, claude, zai)");
+    auto* auth_logout_sub = auth_sub->add_subcommand(
+        "logout",
+        "Sign out of a provider OAuth session (best-effort server-side "
+        "revocation, then clear cached credentials) and exit.");
+    auth_logout_sub->add_option(
+        "provider", logout_provider,
+        "Provider to sign out (claude, google, grok, kimi, openai, qwen)")
+        ->required();
     auto* resume_opt = app.add_option(
         "-r,--resume", resume_session,
         "Resume a session by ID, 1-based index, or name (see --list-sessions and /rename). "
@@ -137,6 +147,7 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
     auth_login_command = auth_login_sub->parsed();
+    auth_logout_command = auth_logout_sub->parsed();
 
     core::logging::Logger::get_instance().configure_from_env();
     const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
@@ -228,6 +239,19 @@ int main(int argc, char** argv) {
         core::logging::warn("Could not load configuration: {}", e.what());
     }
 
+    if (auth_logout_command) {
+        try {
+            const std::string config_dir =
+                core::config::ConfigManager::get_instance().get_config_dir();
+            auto manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
+            std::cout << "Signed out of " << manager.logout(logout_provider) << ".\n";
+            return 0;
+        } catch (const std::exception& e) {
+            core::logging::error("Logout failed: {}", e.what());
+            return 1;
+        }
+    }
+
     // --login / auth login: run provider auth flow and exit immediately.
     if (!login_provider.empty() || auth_login_command) {
         auto config_dir = core::config::ConfigManager::get_instance().get_config_dir();
@@ -247,7 +271,8 @@ int main(int argc, char** argv) {
                 selected_provider = std::move(*chosen);
             }
 
-            const auto outcome = core::auth::login_and_persist(selected_provider, config_dir);
+            const auto outcome = core::auth::login_and_persist(
+                selected_provider, config_dir);
             core::logging::info("Successfully authenticated with {}.", outcome.result.provider);
             if (!outcome.profile_persisted) {
                 core::logging::warn(

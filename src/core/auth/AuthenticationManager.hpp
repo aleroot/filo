@@ -9,6 +9,8 @@
 
 namespace core::auth {
 
+class IOAuthTokenRevoker;
+
 struct LoginResult {
     std::string provider;
     std::string login_provider;
@@ -34,6 +36,21 @@ public:
     virtual std::vector<std::string> post_login_hints() const {
         return {};
     }
+
+    /** Persistent token-store key, or empty when this strategy is not token-backed. */
+    [[nodiscard]] virtual std::string_view token_store_key() const noexcept {
+        return {};
+    }
+
+    /**
+     * Flow used for best-effort server-side token revocation on logout.
+     * Return nullptr when the provider has no public revocation endpoint
+     * (logout then only clears local credentials).
+     */
+    [[nodiscard]] virtual std::shared_ptr<IOAuthTokenRevoker>
+    logout_revocation_flow() const {
+        return nullptr;
+    }
 };
 
 /**
@@ -55,6 +72,16 @@ public:
     void register_strategy(std::shared_ptr<IAuthStrategy> strategy);
 
     LoginResult login(std::string_view provider) const;
+
+    /**
+     * Sign out of a login provider: best-effort server-side token revocation
+     * (when the provider supports it), then clear cached local credentials.
+     *
+     * @param revoke_remote  Set to false to skip the network revocation step
+     *                       (used by tests and offline flows).
+     * @return The strategy display name for user feedback.
+     */
+    std::string logout(std::string_view provider, bool revoke_remote = true) const;
 
     /**
      * @param canonical_type  The canonical provider kind string (e.g. "claude",

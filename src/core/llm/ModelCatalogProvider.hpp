@@ -41,7 +41,9 @@ private:
 
 class OpenAICompatibleModelCatalogProvider final : public ModelCatalogProvider {
 public:
-    explicit OpenAICompatibleModelCatalogProvider(std::string provider_name = "openai");
+    explicit OpenAICompatibleModelCatalogProvider(
+        std::string provider_name = "openai",
+        bool include_session_only_models = false);
 
     [[nodiscard]] std::string_view provider_name() const noexcept override;
     [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
@@ -49,6 +51,7 @@ public:
 
 private:
     std::string provider_name_;
+    bool include_session_only_models_ = false;
 };
 
 class KimiModelCatalogProvider final : public ModelCatalogProvider {
@@ -77,5 +80,10 @@ private:
 
 [[nodiscard]] std::unique_ptr<ModelCatalogProvider>
 make_model_catalog_provider(config::ApiType api_type, std::string_view provider_name);
+
+[[nodiscard]] std::unique_ptr<ModelCatalogProvider>
+make_model_catalog_provider(config::ApiType api_type,
+                            std::string_view provider_name,
+                            bool include_session_only_models);
 
 } // namespace core::llm

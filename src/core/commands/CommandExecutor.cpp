@@ -807,7 +807,8 @@ void run_provider_auth(const std::string& provider,
     auto state = std::make_shared<AuthState>();
     suspend_fn([provider, config_dir, state, switch_model_fn]() {
         try {
-            const auto outcome = core::auth::login_and_persist(provider, config_dir);
+            const auto outcome = core::auth::login_and_persist(
+                provider, config_dir);
 
             std::cout << "\nAuthentication successful!\n";
             std::cout << "Provider: " << outcome.result.provider << "\n";
@@ -968,6 +969,7 @@ CommandCompletion apply_command_completion(std::string_view input,
 class AuthCommand : public Command {
 public:
     std::string get_name() const override { return "/auth"; }
+    std::vector<std::string> get_aliases() const override { return {"/login"}; }
     std::string get_description() const override { return "Interactive authentication wizard (use /auth or /auth <provider>)"; }
     bool accepts_arguments() const override { return true; }
 
@@ -979,7 +981,6 @@ public:
 
         const bool interactive_mode = static_cast<bool>(ctx.suspend_tui_fn);
         const auto arg = first_argument(ctx.text);
-
         if (!arg.has_value()) {
             if (!interactive_mode) {
                 ctx.append_history_fn(std::format(
@@ -1044,6 +1045,55 @@ public:
                           ctx.suspend_tui_fn,
                           ctx.append_history_fn,
                           ctx.switch_model_fn);
+    }
+};
+
+class LogoutCommand : public Command {
+public:
+    std::string get_name() const override { return "/logout"; }
+    std::string get_description() const override {
+        return "Sign out of a provider OAuth session (e.g. /logout grok, /logout openai)";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        const auto provider = first_argument(ctx.text);
+        if (!provider.has_value()) {
+            ctx.append_history_fn(
+                "\nℹ  Usage: /logout <provider> "
+                "(one of: claude, google, grok, kimi, openai, qwen)\n");
+            return;
+        }
+        const std::string provider_name(*provider);
+        std::string display_name;
+        std::string error_message;
+        const auto run_logout = [&provider_name, &display_name, &error_message]() {
+            try {
+                const std::string config_dir =
+                    core::config::ConfigManager::get_instance().get_config_dir();
+                auto manager =
+                    core::auth::AuthenticationManager::create_with_defaults(config_dir);
+                // Best-effort server-side revocation + local credential clearing.
+                display_name = manager.logout(provider_name);
+            } catch (const std::exception& error) {
+                error_message = error.what();
+            }
+        };
+
+        if (ctx.suspend_tui_fn) {
+            // Revocation performs blocking network requests; suspend the
+            // TUI so the interface does not appear frozen meanwhile.
+            ctx.suspend_tui_fn(run_logout);
+        } else {
+            run_logout();
+        }
+
+        if (error_message.empty()) {
+            ctx.append_history_fn("\n✓  Signed out of " + display_name + ".\n");
+        } else {
+            ctx.append_history_fn("\n✗  Logout failed: " + error_message + "\n");
+        }
     }
 };
 
@@ -3201,6 +3251,7 @@ public:
 
 CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<AuthCommand>());
+    register_command(std::make_unique<LogoutCommand>());
     register_command(std::make_unique<QuitCommand>());
     register_command(std::make_unique<ClearCommand>());
     register_command(std::make_unique<HelpCommand>());

@@ -197,6 +197,17 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::logging::debug("Using OpenAI PKCE endpoint: {}", base_url);
     }
 
+    // xAI account sessions use the Grok Build chat proxy. API keys continue
+    // to use the public xAI API endpoint and its independent billing model.
+    if (cred && canonical_type == "grok"
+        && (normalized_auth_type == "oauth_xai"
+            || normalized_auth_type == "oauth_grok")
+        && base_url == "https://api.x.ai/v1") {
+        base_url = "https://cli-chat-proxy.grok.com/v1";
+        if (wire_api.empty()) wire_api = "responses";
+        core::logging::debug("Using Grok OAuth session endpoint: {}", base_url);
+    }
+
     if (cred && canonical_type == "gemini"
         && normalized_auth_type == "oauth_google") {
         base_url = core::auth::google_code_assist::code_assist_endpoint();
@@ -248,7 +259,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     "Provider '{}': reasoning_effort is ignored for wire_api='responses'.",
                     name);
             }
-            if (base_url == "https://chatgpt.com/backend-api/codex") {
+            if (canonical_type.starts_with("grok")) {
+                protocol = std::make_unique<protocols::GrokResponsesProtocol>(
+                    config.service_tier);
+            } else if (base_url == "https://chatgpt.com/backend-api/codex") {
                 client_identity_source = make_codex_client_identity_source(config_dir);
                 protocol = std::make_unique<protocols::CodexResponsesProtocol>(
                     /*include_reasoning_encrypted=*/false,
@@ -262,19 +276,21 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     config.service_tier);
             }
         } else {
-            // Use GrokProtocol for grok-prefixed providers with reasoning_effort.
+            // Grok uses a thin OpenAI-compatible extension for xAI headers,
+            // errors, rate limits, and optional reasoning effort.
             if (canonical_type == "zai-coding") {
                 protocol = std::make_unique<protocols::ZaiCodingProtocol>(
                     config.stream_usage);
             } else if (canonical_type == "zai") {
                 protocol = std::make_unique<protocols::ZaiProtocol>(
                     config.stream_usage);
-            } else if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
+            } else if (canonical_type.starts_with("grok")) {
                 protocols::GrokReasoningEffort effort = protocols::GrokReasoningEffort::None;
                 if (config.reasoning_effort == "low")    effort = protocols::GrokReasoningEffort::Low;
                 if (config.reasoning_effort == "medium") effort = protocols::GrokReasoningEffort::Medium;
                 if (config.reasoning_effort == "high")   effort = protocols::GrokReasoningEffort::High;
-                protocol = std::make_unique<protocols::GrokProtocol>(effort);
+                protocol = std::make_unique<protocols::GrokProtocol>(
+                    effort, config.stream_usage);
             } else {
                 protocol = std::make_unique<protocols::OpenAIProtocol>(config.stream_usage);
             }

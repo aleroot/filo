@@ -136,7 +136,8 @@ Useful CLI flags:
 - `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional OpenAI/Anthropic-compatible proxy mode
-- `--login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
+- `filo auth login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
+- `filo auth logout <provider>` sign out of a saved OAuth session (claude, google, grok, kimi, openai, qwen); tokens are revoked server-side when the provider supports it (Google, OpenAI, Grok)
 - `--list-sessions` list resumable sessions
 - `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
 - `--prompter` force non-interactive mode
@@ -188,6 +189,22 @@ export KIMI_API_KEY="..."
 export ZAI_API_KEY="..."
 export DASHSCOPE_API_KEY="..."
 ```
+
+Grok supports the same account-based OAuth flow as Grok Build, while API-key
+authentication remains available:
+
+```bash
+# Browser-based OAuth with a local PKCE callback
+filo auth login grok
+
+# Clear the saved Grok OAuth session
+filo auth logout grok
+```
+
+Inside the interactive TUI, use `/login grok` and `/logout grok`. OAuth-backed
+Grok profiles use the Grok session proxy and expose
+the account's session-only models; `XAI_API_KEY` profiles continue to use the
+public xAI API.
 
 For local Ollama, default endpoint is:
 - `http://localhost:11434`

@@ -206,8 +206,7 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     ModelCatalogDiscoveryResult discovery;
 
     const std::string provider_key(provider_name);
-    auto catalog_provider = make_model_catalog_provider(api_type, provider_name);
-    if (!catalog_provider || should_skip_provider(api_type, base_url, protocol.name())) {
+    if (should_skip_provider(api_type, base_url, protocol.name())) {
         discovery.permanent_skip = true;
         return discovery;
     }
@@ -215,6 +214,14 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     core::auth::AuthInfo auth;
     if (cred_source) {
         auth = cred_source->get_auth();
+    }
+    const bool include_session_only_models = provider_name.starts_with("grok")
+        && auth.properties.contains("oauth");
+    auto catalog_provider = make_model_catalog_provider(
+        api_type, provider_name, include_session_only_models);
+    if (!catalog_provider) {
+        discovery.permanent_skip = true;
+        return discovery;
     }
     if (is_remote_without_auth(base_url, auth)) {
         discovery.error = "missing credentials for remote model discovery";

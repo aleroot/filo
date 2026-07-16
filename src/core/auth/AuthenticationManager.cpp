@@ -5,10 +5,13 @@
 #include "GoogleOAuthFlow.hpp"
 #include "KimiOAuthFlow.hpp"
 #include "QwenOAuthFlow.hpp"
+#include "XaiOAuthFlow.hpp"
+#include "XaiOAuthCredentialSource.hpp"
 #include "OpenAIOAuthFlow.hpp"
 #include "OAuthCredentialSource.hpp"
 #include "OAuthTokenManager.hpp"
 #include "ui/ConsoleAuthUI.hpp"
+#include "core/logging/Logger.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -29,6 +32,26 @@ std::string normalize(std::string_view value) {
         out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
     }
     return out;
+}
+
+std::string normalize_login_provider(std::string_view provider) {
+    std::string requested = normalize(provider);
+    if (requested == "openai-pkce" || requested == "openai_pkce"
+        || requested == "openaipkce") {
+        return "openai";
+    }
+    if (requested == "xai" || requested == "x.ai" || requested == "x-ai") {
+        return "grok";
+    }
+    if (requested == "z.ai" || requested == "z-ai" || requested == "zai-api") {
+        return "zai";
+    }
+    if (requested == "z.ai-coding" || requested == "z-ai-coding"
+        || requested == "zai_coding" || requested == "zai-coding-plan"
+        || requested == "z.aicodingplan") {
+        return "zai";
+    }
+    return requested;
 }
 
 std::string join(const std::vector<std::string>& values) {
@@ -239,6 +262,11 @@ class GoogleOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "google"; }
     std::string_view display_name() const noexcept override { return "Google"; }
+    std::string_view token_store_key() const noexcept override { return "google"; }
+
+    std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
+        return std::make_shared<GoogleOAuthFlow>();
+    }
 
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
@@ -275,6 +303,9 @@ class ClaudeOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "claude"; }
     std::string_view display_name() const noexcept override { return "Claude"; }
+    std::string_view token_store_key() const noexcept override { return "claude"; }
+    // Anthropic exposes no public OAuth revocation endpoint; logout clears
+    // local credentials only (same behaviour as the official Claude Code CLI).
 
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
@@ -315,6 +346,11 @@ class OpenAIPkceStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "openai"; }
     std::string_view display_name() const noexcept override { return "OpenAI (ChatGPT login)"; }
+    std::string_view token_store_key() const noexcept override { return "openai-pkce"; }
+
+    std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
+        return std::make_shared<OpenAIOAuthFlow>();
+    }
 
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
@@ -352,6 +388,8 @@ public:
 class KimiOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "kimi"; }
+    std::string_view token_store_key() const noexcept override { return "kimi"; }
+    // Moonshot documents no public OAuth revocation endpoint; local-only logout.
     std::string_view display_name() const noexcept override { return "Kimi Code"; }
 
     bool supports(std::string_view provider_type,
@@ -390,6 +428,8 @@ class QwenOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "qwen"; }
     std::string_view display_name() const noexcept override { return "Qwen (chat.qwen.ai)"; }
+    std::string_view token_store_key() const noexcept override { return "qwen"; }
+    // Qwen documents no public OAuth revocation endpoint; local-only logout.
 
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
@@ -424,6 +464,50 @@ public:
     }
 };
 
+class XaiOAuthStrategy final : public IAuthStrategy {
+public:
+    std::string_view login_provider() const noexcept override { return "grok"; }
+    std::string_view display_name() const noexcept override { return "Grok"; }
+    std::string_view token_store_key() const noexcept override { return "grok"; }
+
+    std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
+        return std::make_shared<XaiOAuthFlow>();
+    }
+
+    bool supports(std::string_view provider_type,
+                  std::string_view auth_type) const noexcept override {
+        return provider_type == "grok"
+            && (auth_type == "oauth_xai" || auth_type == "oauth_grok");
+    }
+
+    std::shared_ptr<ICredentialSource> create_credential_source(
+        const core::config::ProviderConfig& /*provider_config*/,
+        std::string_view config_dir) const override {
+        auto flow = std::make_shared<XaiOAuthFlow>();
+        auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
+        auto manager = std::make_shared<OAuthTokenManager>(
+            "grok", std::move(flow), std::move(store),
+            /*allow_interactive_login=*/false);
+        auto oauth = std::make_shared<OAuthCredentialSource>(std::move(manager));
+        return std::make_shared<XaiOAuthCredentialSource>(std::move(oauth));
+    }
+
+    void login(std::string_view config_dir) const override {
+        auto flow = std::make_shared<XaiOAuthFlow>();
+        auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
+        auto manager = std::make_shared<OAuthTokenManager>(
+            "grok", std::move(flow), std::move(store));
+        manager->login();
+    }
+
+    std::vector<std::string> post_login_hints() const override {
+        return {
+            "Grok OAuth is active through the Grok Build session endpoint.",
+            "Export XAI_API_KEY or set auth_type to api_key to use public API billing instead.",
+        };
+    }
+};
+
 } // namespace
 
 AuthenticationManager::AuthenticationManager(std::string config_dir)
@@ -436,6 +520,7 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<OpenAIPkceStrategy>());
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
+    manager.register_strategy(std::make_shared<XaiOAuthStrategy>());
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",
         "Z.AI",
@@ -459,20 +544,7 @@ void AuthenticationManager::register_strategy(std::shared_ptr<IAuthStrategy> str
 }
 
 LoginResult AuthenticationManager::login(std::string_view provider) const {
-    std::string requested = normalize(provider);
-
-    // Backward-compatible aliases.
-    if (requested == "openai-pkce" || requested == "openai_pkce" || requested == "openaipkce") {
-        requested = "openai";
-    }
-    if (requested == "z.ai" || requested == "z-ai" || requested == "zai-api") {
-        requested = "zai";
-    }
-    if (requested == "z.ai-coding" || requested == "z-ai-coding"
-        || requested == "zai_coding" || requested == "zai-coding-plan"
-        || requested == "z.aicodingplan") {
-        requested = "zai";
-    }
+    const std::string requested = normalize_login_provider(provider);
 
     for (const auto& strategy : strategies_) {
         if (normalize(strategy->login_provider()) == requested) {
@@ -489,6 +561,45 @@ LoginResult AuthenticationManager::login(std::string_view provider) const {
     throw std::runtime_error(
         "Unknown provider '" + std::string(provider)
         + "'. Available: " + join(available));
+}
+
+std::string AuthenticationManager::logout(std::string_view provider,
+                                          bool revoke_remote) const {
+    const std::string requested = normalize_login_provider(provider);
+    for (const auto& strategy : strategies_) {
+        if (normalize(strategy->login_provider()) != requested) continue;
+        const std::string_view store_key = strategy->token_store_key();
+        if (store_key.empty()) {
+            throw std::runtime_error(
+                "Provider '" + std::string(provider)
+                + "' does not use a cached OAuth session; nothing to sign out of.");
+        }
+
+        FileTokenStore store(config_dir_);
+        auto store_lock = store.acquire_refresh_lock(store_key);
+
+        // Best-effort server-side revocation before clearing local state,
+        // when the provider advertises support. Local credentials are removed
+        // even when the revocation request fails.
+        if (revoke_remote) {
+            if (const auto flow = strategy->logout_revocation_flow()) {
+                if (const auto token = store.load(store_key)) {
+                    try {
+                        flow->revoke(*token);
+                    } catch (const std::exception& error) {
+                        core::logging::warn(
+                            "Could not revoke {} session server-side: {}. "
+                            "Clearing local credentials anyway.",
+                            strategy->display_name(), error.what());
+                    }
+                }
+            }
+        }
+
+        store.clear(store_key);
+        return std::string(strategy->display_name());
+    }
+    throw std::runtime_error("Unknown authentication provider '" + std::string(provider) + "'.");
 }
 
 std::shared_ptr<ICredentialSource> AuthenticationManager::create_credential_source(

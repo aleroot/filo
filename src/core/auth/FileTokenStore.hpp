@@ -16,6 +16,8 @@ public:
     std::optional<OAuthToken> load(std::string_view provider_id) override;
     void save(std::string_view provider_id, const OAuthToken& token) override;
     void clear(std::string_view provider_id) override;
+    [[nodiscard]] std::unique_ptr<ITokenStoreLock>
+    acquire_refresh_lock(std::string_view provider_id) override;
 
 private:
     std::string token_path(std::string_view provider_id) const;

@@ -1,10 +1,51 @@
 #include "GrokProtocol.hpp"
+#include "core/auth/XaiGrokClientIdentity.hpp"
+#include "core/utils/AsciiUtils.hpp"
+#include "core/utils/UriUtils.hpp"
+#include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
 #include <cctype>
 #include <string_view>
 
 namespace core::llm::protocols {
+
+namespace {
+
+[[nodiscard]] bool is_xai_oauth_request(const ChatRequest& request) {
+    const auto oauth = request.auth_properties.find("oauth");
+    if (oauth == request.auth_properties.end() || oauth->second != "1") return false;
+    const auto issuer = request.auth_properties.find("oauth_issuer");
+    return issuer == request.auth_properties.end()
+        || issuer->second == "https://auth.x.ai";
+}
+
+void prepare_grok_session_headers(cpr::Header& headers,
+                                  const ChatRequest& request,
+                                  std::string_view base_url) {
+    const auto host = core::utils::uri::extract_http_host(base_url);
+    if (!is_xai_oauth_request(request)
+        || !core::utils::ascii::istarts_with(base_url, "https://")
+        || !host.has_value()
+        || !core::utils::ascii::iequals(*host, "cli-chat-proxy.grok.com")) {
+        return;
+    }
+
+    const std::string conversation_id = request.session_id.empty()
+        ? core::auth::xai_grok::process_agent_id()
+        : request.session_id;
+    const std::string request_id = request.transport_turn_id.empty()
+        ? core::utils::random_uuid_v4()
+        : request.transport_turn_id;
+
+    core::auth::xai_grok::apply_proxy_identity_headers(headers);
+    headers["x-grok-conv-id"] = conversation_id;
+    headers["x-grok-session-id"] = conversation_id;
+    headers["x-grok-req-id"] = request_id;
+    headers["x-grok-model-override"] = request.model;
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -29,6 +70,18 @@ void GrokProtocol::append_extra_fields(std::string&       payload,
 
 void GrokProtocol::on_response(const HttpResponse& response) {
     last_rate_limit_ = parse_rate_limit_headers(response.headers);
+}
+
+void GrokProtocol::prepare_headers(cpr::Header& headers,
+                                   const ChatRequest& request,
+                                   std::string_view base_url) {
+    prepare_grok_session_headers(headers, request, base_url);
+}
+
+void GrokResponsesProtocol::prepare_headers(cpr::Header& headers,
+                                            const ChatRequest& request,
+                                            std::string_view base_url) {
+    prepare_grok_session_headers(headers, request, base_url);
 }
 
 std::string GrokProtocol::format_error_message(const HttpResponse& response) const {
@@ -67,9 +120,9 @@ std::string GrokProtocol::format_error_message(const HttpResponse& response) con
         }
         
         case 401:
-            return "[xAI API Error 401: Authentication failed. Please check your XAI_API_KEY "
-                   "environment variable or configuration. Visit https://console.x.ai to verify "
-                   "your API key is valid and active.]";
+            return "[xAI API Error 401: Authentication failed. For a Grok account session, run "
+                   "'filo auth login grok' again. For public API access, check XAI_API_KEY and "
+                   "visit https://console.x.ai.]";
         
         case 403:
             return "[xAI API Error 403: Permission denied. Your account may not have access to "

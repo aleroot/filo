@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IOAuthFlow.hpp"
+#include "IOAuthTokenRevoker.hpp"
 #include <string>
 #include <vector>
 
@@ -29,7 +30,7 @@ namespace core::auth {
  *
  * The static pure functions are exposed for unit testing.
  */
-class OpenAIOAuthFlow : public IOAuthFlow {
+class OpenAIOAuthFlow : public IOAuthFlow, public IOAuthTokenRevoker {
 public:
     // Uses OPENAI_OAUTH_CLIENT_ID when provided, otherwise a built-in
     // Codex-compatible public client id.
@@ -44,6 +45,9 @@ public:
 
     OAuthToken login() override;
     OAuthToken refresh(std::string_view refresh_token) override;
+
+    /// Best-effort revocation via the sibling /oauth/revoke endpoint.
+    void revoke(const OAuthToken& token) override;
 
     // ── Pure functions exposed for unit testing ───────────────────────────
 

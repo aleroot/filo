@@ -1,6 +1,6 @@
 #include "ClaudeOAuthFlow.hpp"
 #include "AuthBrowserLauncher.hpp"
-#include "OpenAIOAuthFlow.hpp"
+#include "OAuthPkce.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/Base64.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -479,7 +479,7 @@ OAuthToken ClaudeOAuthFlow::login() {
     const std::string redirect_uri = "http://localhost:" + std::to_string(port) + "/callback";
     const std::string state = generate_random_state();
     const std::string code_verifier = generate_code_verifier();
-    const std::string code_challenge = OpenAIOAuthFlow::compute_code_challenge(code_verifier);
+    const std::string code_challenge = oauth_pkce::compute_code_challenge(code_verifier);
     const std::string auth_url = build_auth_url(
         client_id_, redirect_uri, scopes_, state, code_challenge, auth_url_);
     const std::string manual_auth_url = build_auth_url(

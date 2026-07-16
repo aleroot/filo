@@ -1,7 +1,7 @@
 #include "GoogleOAuthFlow.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "GoogleCodeAssist.hpp"
-#include "OpenAIOAuthFlow.hpp"
+#include "OAuthPkce.hpp"
 #include <cpr/cpr.h>
 #include <httplib.h>
 #include <simdjson.h>
@@ -362,8 +362,8 @@ OAuthToken GoogleOAuthFlow::login() {
     if (suppress_browser_launch) {
         const std::string redirect_uri = GOOGLE_CODE_ASSIST_REDIRECT_URI;
         const std::string state = generate_random_state();
-        const std::string code_verifier = OpenAIOAuthFlow::generate_code_verifier();
-        const std::string challenge = OpenAIOAuthFlow::compute_code_challenge(code_verifier);
+        const std::string code_verifier = oauth_pkce::generate_code_verifier();
+        const std::string challenge = oauth_pkce::compute_code_challenge(code_verifier);
         const std::string auth_url = build_auth_url(
             client_id_,
             redirect_uri,
@@ -469,8 +469,8 @@ OAuthToken GoogleOAuthFlow::login() {
         "/oauth2callback",
         redirect_host_override);
     const std::string state = generate_random_state();
-    const std::string code_verifier = OpenAIOAuthFlow::generate_code_verifier();
-    const std::string challenge = OpenAIOAuthFlow::compute_code_challenge(code_verifier);
+    const std::string code_verifier = oauth_pkce::generate_code_verifier();
+    const std::string challenge = oauth_pkce::compute_code_challenge(code_verifier);
     const std::string auth_url = build_auth_url(
         client_id_,
         redirect_uri,
@@ -587,6 +587,24 @@ OAuthToken GoogleOAuthFlow::refresh(std::string_view refresh_token) {
         token.refresh_token = std::string(refresh_token);
 
     return token;
+}
+
+void GoogleOAuthFlow::revoke(const OAuthToken& token) {
+    // https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke
+    // Revoking the refresh token also invalidates the associated access tokens.
+    const std::string& target = token.has_refresh_token()
+        ? token.refresh_token
+        : token.access_token;
+    if (target.empty()) return;
+
+    cpr::Response r = cpr::Post(
+        cpr::Url{"https://oauth2.googleapis.com/revoke"},
+        cpr::Payload{{"token", target}},
+        cpr::Timeout{10000});
+
+    if (r.status_code != 200)
+        throw std::runtime_error("Google token revocation failed (" +
+                                 std::to_string(r.status_code) + "): " + r.text);
 }
 
 } // namespace core::auth

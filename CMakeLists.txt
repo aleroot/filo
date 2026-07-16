@@ -182,11 +182,14 @@ set(FILO_CORE_SOURCES
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
+    src/core/auth/OAuthPkce.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp
     src/core/auth/QwenOAuthFlow.cpp
+    src/core/auth/XaiOAuthFlow.cpp
     src/core/auth/OAuthTokenManager.cpp
     src/core/auth/OAuthCredentialSource.cpp
+    src/core/auth/XaiOAuthCredentialSource.cpp
     src/core/auth/AuthenticationManager.cpp
     src/core/auth/AuthLogin.cpp
     src/core/auth/ui/ConsoleAuthUI.cpp
@@ -426,6 +429,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
+    tests/test_xai_oauth.cpp
     tests/test_zai_provider.cpp
     tests/test_ollama_provider.cpp
     tests/test_llamacpp_provider.cpp
