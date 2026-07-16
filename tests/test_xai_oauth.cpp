@@ -56,9 +56,9 @@ TEST_CASE("xAI OAuth uses the pinned Grok Build public client", "[xai][oauth]") 
     CHECK(core::auth::XaiOAuthFlow::kClientId
         == "b1a00492-073a-47ea-816f-4c329264a828");
     const auto scopes = core::auth::XaiOAuthFlow::default_scopes();
-    CHECK(std::ranges::find(scopes, "grok-cli:access") != scopes.end());
-    CHECK(std::ranges::find(scopes, "offline_access") != scopes.end());
-    CHECK(std::ranges::find(scopes, "conversations:write") != scopes.end());
+    CHECK(std::ranges::find(scopes, std::string{"grok-cli:access"}) != scopes.end());
+    CHECK(std::ranges::find(scopes, std::string{"offline_access"}) != scopes.end());
+    CHECK(std::ranges::find(scopes, std::string{"conversations:write"}) != scopes.end());
 }
 
 TEST_CASE("xAI authorization URL carries PKCE OIDC and Grok referrer fields",

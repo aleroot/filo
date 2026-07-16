@@ -1212,7 +1212,7 @@ TEST_CASE("OAuthTokenManager observes logout performed by another manager",
     FileTokenStore(tmp.path).clear("grok");
     REQUIRE_THROWS_WITH(
         manager->get_valid_token(),
-        Catch::Matchers::ContainsSubstring("filo auth login grok"));
+        Catch::Matchers::ContainsSubstring("filo --auth grok"));
 }
 
 TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[AuthenticationManager][logout]") {

@@ -56,7 +56,7 @@ OAuthToken OAuthTokenManager::get_valid_token() {
     if (!allow_interactive_login_) {
         throw std::runtime_error(
             "No usable OAuth session for provider '" + provider_id_
-            + "'. Run `filo auth login " + provider_id_ + "` first.");
+            + "'. Run `filo --auth " + provider_id_ + "` first.");
     }
     OAuthToken token = flow_->login();
     store_->save(provider_id_, token);

@@ -121,7 +121,7 @@ std::string GrokProtocol::format_error_message(const HttpResponse& response) con
         
         case 401:
             return "[xAI API Error 401: Authentication failed. For a Grok account session, run "
-                   "'filo auth login grok' again. For public API access, check XAI_API_KEY and "
+                   "'filo --auth grok' again. For public API access, check XAI_API_KEY and "
                    "visit https://console.x.ai.]";
         
         case 403:

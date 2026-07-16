@@ -136,8 +136,7 @@ Useful CLI flags:
 - `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional OpenAI/Anthropic-compatible proxy mode
-- `filo auth login <provider>` authenticate and exit (`openai` uses ChatGPT OAuth)
-- `filo auth logout <provider>` sign out of a saved OAuth session (claude, google, grok, kimi, openai, qwen); tokens are revoked server-side when the provider supports it (Google, OpenAI, Grok)
+- `filo --auth <provider> [login|logout]` authenticate or sign out and exit; the action defaults to `login`, so `filo --auth openai` starts ChatGPT OAuth. Tokens are revoked server-side on logout when the provider supports it (Google, OpenAI, Grok)
 - `--list-sessions` list resumable sessions
 - `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
 - `--prompter` force non-interactive mode
@@ -195,10 +194,10 @@ authentication remains available:
 
 ```bash
 # Browser-based OAuth with a local PKCE callback
-filo auth login grok
+filo --auth grok
 
 # Clear the saved Grok OAuth session
-filo auth logout grok
+filo --auth grok logout
 ```
 
 Inside the interactive TUI, use `/login grok` and `/logout grok`. OAuth-backed

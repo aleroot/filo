@@ -50,9 +50,9 @@ int main(int argc, char** argv) {
     int         port        = 8080;
     std::string host        = "127.0.0.1";
     std::string login_provider;
-    bool        auth_login_command = false;
-    std::string logout_provider;
-    bool        auth_logout_command = false;
+    std::vector<std::string> auth_args;
+    std::string auth_action;
+    std::string auth_provider;
     std::string prompter_prompt;
     std::string output_format = "text";
     std::string input_format = "text";
@@ -119,25 +119,14 @@ int main(int argc, char** argv) {
         "Enable optional OpenAI/Anthropic-compatible proxy endpoints "
         "(/v1/models, /v1/chat/completions, /v1/messages). "
         "Starts the HTTP daemon even without --mcp.");
-    app.add_option("--login", login_provider,
-                   "Authenticate with a provider and exit (e.g. --login openai, --login claude)");
-    auto* auth_sub = app.add_subcommand("auth", "Authentication commands");
-    auth_sub->require_subcommand(1);
-    auto* auth_login_sub = auth_sub->add_subcommand(
-        "login",
-        "Authenticate with a provider and exit. If provider is omitted, show a selector.");
-    auth_login_sub->add_option(
-        "provider",
-        login_provider,
-        "Provider to authenticate (e.g. grok, openai, claude, zai)");
-    auto* auth_logout_sub = auth_sub->add_subcommand(
-        "logout",
-        "Sign out of a provider OAuth session (best-effort server-side "
-        "revocation, then clear cached credentials) and exit.");
-    auth_logout_sub->add_option(
-        "provider", logout_provider,
-        "Provider to sign out (claude, google, grok, kimi, openai, qwen)")
-        ->required();
+    auto* login_opt = app.add_option(
+        "--login", login_provider,
+        "Deprecated alias for --auth <provider> (authenticate and exit)");
+    auto* auth_opt = app.add_option(
+        "--auth", auth_args,
+        "Authenticate or sign out and exit: --auth <provider> [login|logout]. "
+        "The action defaults to login and may also precede the provider.");
+    auth_opt->expected(1, 2)->excludes(login_opt);
     auto* resume_opt = app.add_option(
         "-r,--resume", resume_session,
         "Resume a session by ID, 1-based index, or name (see --list-sessions and /rename). "
@@ -146,8 +135,29 @@ int main(int argc, char** argv) {
     app.add_flag("--list-sessions", list_sessions, "List available sessions and exit");
 
     CLI11_PARSE(app, argc, argv);
-    auth_login_command = auth_login_sub->parsed();
-    auth_logout_command = auth_logout_sub->parsed();
+
+    if (!auth_args.empty()) {
+        auth_action = "login";
+        if (auth_args.size() == 1) {
+            if (auth_args.front() == "login" || auth_args.front() == "logout") {
+                std::cerr << "--auth requires a provider.\n";
+                return 2;
+            }
+            auth_provider = auth_args.front();
+        } else {
+            const bool first_is_action = auth_args.front() == "login"
+                || auth_args.front() == "logout";
+            const bool second_is_action = auth_args.back() == "login"
+                || auth_args.back() == "logout";
+            if (first_is_action == second_is_action) {
+                std::cerr << "--auth expects one provider and, optionally, "
+                             "one action (login or logout).\n";
+                return 2;
+            }
+            auth_action = first_is_action ? auth_args.front() : auth_args.back();
+            auth_provider = first_is_action ? auth_args.back() : auth_args.front();
+        }
+    }
 
     core::logging::Logger::get_instance().configure_from_env();
     const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
@@ -239,12 +249,12 @@ int main(int argc, char** argv) {
         core::logging::warn("Could not load configuration: {}", e.what());
     }
 
-    if (auth_logout_command) {
+    if (auth_action == "logout") {
         try {
             const std::string config_dir =
                 core::config::ConfigManager::get_instance().get_config_dir();
             auto manager = core::auth::AuthenticationManager::create_with_defaults(config_dir);
-            std::cout << "Signed out of " << manager.logout(logout_provider) << ".\n";
+            std::cout << "Signed out of " << manager.logout(auth_provider) << ".\n";
             return 0;
         } catch (const std::exception& e) {
             core::logging::error("Logout failed: {}", e.what());
@@ -252,24 +262,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --login / auth login: run provider auth flow and exit immediately.
-    if (!login_provider.empty() || auth_login_command) {
+    // --auth <provider> (or the deprecated --login alias): authenticate and exit.
+    if (!auth_provider.empty() || !login_provider.empty()) {
         auto config_dir = core::config::ConfigManager::get_instance().get_config_dir();
         try {
-            std::string selected_provider = login_provider;
-            if (selected_provider.empty()) {
-                auto available = core::auth::available_login_providers(config_dir);
-                auto chosen = core::auth::choose_login_provider_console(
-                    available,
-                    "Add credential",
-                    std::cin,
-                    std::cout);
-                if (!chosen.has_value()) {
-                    core::logging::info("Authentication cancelled.");
-                    return 0;
-                }
-                selected_provider = std::move(*chosen);
-            }
+            std::string selected_provider = auth_provider.empty()
+                ? login_provider
+                : auth_provider;
 
             const auto outcome = core::auth::login_and_persist(
                 selected_provider, config_dir);
