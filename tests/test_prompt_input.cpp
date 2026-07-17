@@ -500,24 +500,9 @@ TEST_CASE("PromptInput - Ctrl+U in multiline deletes to start of current line on
 // ── Large-document virtualization ────────────────────────────────────────────
 // Regression guard for the O(document) per-frame render bug: feeding FTXUI's
 // non-virtualizing `frame` every line of a huge paste made each keystroke scale
-// with the whole document. These tests pin the two guarantees of the fix:
-//   (1) correctness — the cursor line stays visible no matter how large the doc,
-//   (2) performance — per-frame render cost is O(viewport), independent of size.
-
-static std::string make_big_document(int lines, const std::string& marker_line) {
-    std::string s;
-    s.reserve(static_cast<size_t>(lines) * 40);
-    for (int i = 0; i < lines; ++i) {
-        if (i == lines - 1) {
-            s += marker_line;
-        } else {
-            s += "padding line number ";
-            s += std::to_string(i);
-        }
-        s += '\n';
-    }
-    return s;
-}
+// with the whole document. These unit tests pin the correctness guarantee that
+// the cursor line stays visible no matter how large the document. The
+// timing-sensitive performance guard lives in the integration suite.
 
 // Renders `comp` twice. The first call assigns `box_` (via reflect); the
 // second call is the one that actually exercises the virtualized window built
@@ -640,28 +625,4 @@ TEST_CASE("PromptInput - large paste never squeezes surrounding chrome off scree
     // Cursor (end of paste) must still be visible inside the capped viewport.
     REQUIRE(rendered.find("pasted line " + std::to_string(kLines - 1))
             != std::string::npos);
-}
-
-TEST_CASE("PromptInput - large document render cost is viewport-bounded",
-          "[prompt_input][perf]") {
-    auto render_n = [](int lines, int iters) {
-        std::string content = make_big_document(lines, "end");
-        int cursor = static_cast<int>(content.size());
-        auto comp = make_input(content, cursor, true);
-        using clk = std::chrono::steady_clock;
-        auto t0 = clk::now();
-        for (int i = 0; i < iters; ++i) {
-            Screen screen(90, 24);
-            Render(screen, comp->Render());
-        }
-        auto t1 = clk::now();
-        return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
-    };
-
-    // Virtualized rendering is ~constant in document size; the old O(n) path
-    // was ~10x slower per frame at 5000 vs 500 lines. A 4x budget cleanly
-    // separates the two while tolerating CI hardware variance.
-    const double small = render_n(500, 60);
-    const double large = render_n(5000, 60);
-    REQUIRE(large < 4.0 * small);
 }

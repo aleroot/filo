@@ -486,6 +486,7 @@ set(FILO_UNIT_TEST_SOURCES
 set(FILO_INTEGRATION_TEST_SOURCES
     tests/test_integration_daemon_reliability.cpp
     tests/test_integration_mcp_client_session.cpp
+    tests/test_integration_prompt_input.cpp
     tests/test_integration_provider_http.cpp
     tests/test_integration_shell_tool.cpp
     tests/test_integration_web_tools.cpp
@@ -624,6 +625,7 @@ source_group(
         tests/test_mcp_client_session.cpp
         tests/test_integration_daemon_reliability.cpp
         tests/test_integration_mcp_client_session.cpp
+        tests/test_integration_prompt_input.cpp
         tests/test_integration_provider_http.cpp
         tests/test_integration_shell_tool.cpp
         tests/test_integration_web_tools.cpp
