@@ -1,5 +1,6 @@
 #include "AnthropicProtocol.hpp"
 #include "SseUtils.hpp"
+#include "../ModelEffort.hpp"
 #include "../Models.hpp"
 #include "../ModelRegistry.hpp"
 #include "../../utils/JsonUtils.hpp"
@@ -167,35 +168,6 @@ namespace {
         std::string_view type;
         if (doc["type"].get(type) != simdjson::SUCCESS) return {};
         return std::string(type);
-    }
-
-    bool anthropic_model_supports_effort(std::string_view model) {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-        return lowered.find("fable") != std::string::npos
-            || lowered.find("mythos") != std::string::npos
-            || lowered.find("sonnet-5") != std::string::npos
-            || lowered.find("opus-4-8") != std::string::npos
-            || lowered.find("opus-4-7") != std::string::npos
-            || lowered.find("sonnet-4-6") != std::string::npos;
-    }
-
-    bool anthropic_model_supports_max_effort(std::string_view model) {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-        return lowered.find("fable") != std::string::npos
-            || lowered.find("mythos") != std::string::npos
-            || lowered.find("sonnet-5") != std::string::npos
-            || lowered.find("opus-4-8") != std::string::npos
-            || lowered.find("opus-4-7") != std::string::npos
-            || lowered.find("sonnet-4-6") != std::string::npos;
-    }
-
-    bool anthropic_model_supports_xhigh_effort(std::string_view model) {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-        return lowered.find("fable") != std::string::npos
-            || lowered.find("mythos") != std::string::npos
-            || lowered.find("sonnet-5") != std::string::npos
-            || lowered.find("opus-4-8") != std::string::npos
-            || lowered.find("opus-4-7") != std::string::npos;
     }
 
     bool anthropic_model_rejects_manual_thinking(std::string_view model) {

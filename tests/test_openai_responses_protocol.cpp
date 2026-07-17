@@ -63,6 +63,20 @@ TEST_CASE("OpenAIResponsesProtocol - serializer emits responses request fields",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("parallel_tool_calls":false)"));
 }
 
+TEST_CASE("OpenAIResponsesProtocol - GPT-5.6 preserves max reasoning effort",
+          "[openai][responses][serializer][effort]") {
+    OpenAIResponsesProtocol protocol;
+
+    ChatRequest req;
+    req.model = "gpt-5.6-terra";
+    req.effort = "max";
+    req.messages.push_back(Message{.role = "user", .content = "Solve this."});
+
+    const std::string payload = protocol.serialize(req);
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+}
+
 TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
           "[openai][responses][serializer][vision]") {
     OpenAIResponsesProtocol protocol;

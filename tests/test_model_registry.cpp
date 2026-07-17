@@ -18,6 +18,8 @@ using namespace core::llm;
 
 TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known models", "[llm][registry]") {
     // Kimi (via new registry)
+    REQUIRE(get_max_context_size("kimi-k3") == 1048576);
+    REQUIRE(get_max_context_size("k3") == 1048576);
     REQUIRE(get_max_context_size("kimi-k2.7-code") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.6") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.5") == 256000);
@@ -35,6 +37,10 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("opus") == 200000);
     
     // OpenAI (via new registry)
+    REQUIRE(get_max_context_size("gpt-5.6-sol") == 1050000);
+    REQUIRE(get_max_context_size("gpt-5.6") == 1050000);
+    REQUIRE(get_max_context_size("gpt-5.6-terra") == 1050000);
+    REQUIRE(get_max_context_size("gpt-5.6-luna") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.4") == 200000);
     REQUIRE(get_max_context_size("gpt-4o") == 128000);
     REQUIRE(get_max_context_size("gpt-4o-mini") == 128000);
@@ -53,9 +59,17 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("grok-4.5") == 500000);
     REQUIRE(get_max_context_size("grok-1") == 128000);
 
+    // Mistral (via new registry)
+    REQUIRE(get_max_context_size("mistral-vibe-cli-latest") == 256000);
+    REQUIRE(get_max_context_size("mistral-medium-3.5") == 256000);
+    REQUIRE(get_max_context_size("mistral-medium-latest") == 256000);
+    REQUIRE(get_max_context_size("mistral-small-latest") == 256000);
+    REQUIRE(get_max_context_size("mistral-large-latest") == 256000);
+    REQUIRE(get_max_context_size("codestral-latest") == 128000);
+
     // Local (via new registry)
     REQUIRE(get_max_context_size("llama-3.3-70b") == 128000);
-    REQUIRE(get_max_context_size("mistral-large") == 128000);
+    REQUIRE(get_max_context_size("mistral-large") == 256000);
 }
 
 TEST_CASE("ModelRegistry - Legacy API returns 0 for unknown models", "[llm][registry]") {
@@ -78,18 +92,28 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.size() > 0);
     
     // Check some known models were loaded
+    REQUIRE(registry.has_model("gpt-5.6-sol"));
+    REQUIRE(registry.has_model("gpt-5.6-terra"));
+    REQUIRE(registry.has_model("gpt-5.6-luna"));
     REQUIRE(registry.has_model("gpt-5.4"));
     REQUIRE(registry.has_model("gpt-4o"));
     REQUIRE(registry.has_model("claude-sonnet-5"));
     REQUIRE(registry.has_model("claude-fable-5"));
     REQUIRE(registry.has_model("claude-haiku-4-5"));
     REQUIRE(registry.has_model("kimi-k2.7-code"));
+    REQUIRE(registry.has_model("kimi-k3"));
+    REQUIRE(registry.has_model("k3"));
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
     REQUIRE(registry.has_model("kimi-for-coding"));
     REQUIRE(registry.has_model("grok-4.5"));
     REQUIRE(registry.has_model("gemini-2.5-pro"));
     REQUIRE(registry.has_model("gemini-3.1-pro-preview"));
+    REQUIRE(registry.has_model("mistral-vibe-cli-latest"));
+    REQUIRE(registry.has_model("mistral-medium-3.5"));
+    REQUIRE(registry.has_model("mistral-medium-latest"));
+    REQUIRE(registry.has_model("mistral-small-latest"));
+    REQUIRE(registry.has_model("mistral-large-latest"));
 }
 
 TEST_CASE("ModelRegistry::lookup - finds models by canonical ID", "[llm][registry]") {
@@ -120,6 +144,14 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
     const auto kimi_for_coding = registry.lookup("kimi-for-coding");
     REQUIRE(kimi_for_coding != nullptr);
     REQUIRE(kimi_for_coding->canonical_id == "kimi-for-coding");
+
+    const auto kimi_k3 = registry.lookup("kimi-k3");
+    REQUIRE(kimi_k3 != nullptr);
+    CHECK(kimi_k3->context_window == 1'048'576);
+    CHECK(kimi_k3->max_output_tokens == 1'048'576);
+    CHECK(kimi_k3->supports(ModelCapability::Reasoning));
+    CHECK(kimi_k3->supports(ModelCapability::Vision));
+    CHECK(kimi_k3->supports(ModelCapability::VideoInput));
 
     const auto opus = registry.lookup("opus");
     REQUIRE(opus != nullptr);
@@ -237,6 +269,9 @@ TEST_CASE("ModelRegistry::get_tier - returns correct tier classification", "[llm
     REQUIRE(registry.get_tier("claude-opus-4-8") == ModelTier::Powerful);
     
     // Reasoning tier models
+    REQUIRE(registry.get_tier("gpt-5.6-sol") == ModelTier::Reasoning);
+    REQUIRE(registry.get_tier("gpt-5.6-terra") == ModelTier::Reasoning);
+    REQUIRE(registry.get_tier("gpt-5.6-luna") == ModelTier::Reasoning);
     REQUIRE(registry.get_tier("gpt-5.4") == ModelTier::Reasoning);
     REQUIRE(registry.get_tier("o1") == ModelTier::Reasoning);
     REQUIRE(registry.get_tier("o3-mini") == ModelTier::Reasoning);
@@ -267,6 +302,8 @@ TEST_CASE("ModelRegistry::supports - checks capability flags", "[llm][registry]"
     
     // Reasoning models have special flag
     REQUIRE(registry.supports("o1", ModelCapability::Reasoning));
+    REQUIRE(registry.supports("gpt-5.6-sol", ModelCapability::Reasoning));
+    REQUIRE(registry.supports("gpt-5.6-sol", ModelCapability::PromptCaching));
     REQUIRE(registry.supports("gpt-5.4", ModelCapability::Reasoning));
     REQUIRE_FALSE(registry.supports("gpt-4o", ModelCapability::Reasoning));
     
@@ -431,6 +468,12 @@ TEST_CASE("ModelRegistry::get_by_provider - returns provider models", "[llm][reg
     
     auto anthropic_models = registry.get_by_provider("anthropic");
     REQUIRE(anthropic_models.size() >= 3);  // Sonnet, Haiku, Opus
+
+    auto mistral_models = registry.get_by_provider("mistral");
+    REQUIRE(mistral_models.size() >= 5);
+    for (const auto& model : mistral_models) {
+        REQUIRE(model.provider == "mistral");
+    }
 }
 
 TEST_CASE("ModelRegistry::list_models - returns all canonical IDs", "[llm][registry]") {

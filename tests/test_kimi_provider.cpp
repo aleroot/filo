@@ -110,6 +110,15 @@ TEST_CASE("KimiSerializer - k2.7 code model is serialized correctly", "[kimi][se
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"kimi-k2.7-code")"));
 }
 
+TEST_CASE("KimiSerializer - K3 public and subscription model IDs are preserved", "[kimi][serializer]") {
+    for (const std::string model : {"kimi-k3", "k3"}) {
+        const auto payload = KimiProtocol{}.serialize(make_simple_request(model));
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":")" + model + "\""));
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
+        REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+    }
+}
+
 TEST_CASE("KimiSerializer - stream true is included", "[kimi][serializer]") {
     auto req = make_simple_request();
     req.stream = true;
@@ -149,7 +158,7 @@ TEST_CASE("KimiProtocol - effort enables Kimi thinking for kimi-for-coding",
 
     const auto payload = protocol.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"medium")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
@@ -161,22 +170,23 @@ TEST_CASE("KimiProtocol - effort enables Kimi thinking for K2 models",
 
     const auto payload = protocol.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
-TEST_CASE("KimiProtocol - max effort maps to high", "[kimi][serializer][effort]") {
+TEST_CASE("KimiProtocol - K2 max effort enables thinking without legacy effort",
+          "[kimi][serializer][effort]") {
     KimiProtocol protocol;
     auto req = make_simple_request("kimi-for-coding");
     req.effort = "max";
 
     const auto payload = protocol.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
-TEST_CASE("KimiProtocol - auto effort omits Kimi thinking fields",
+TEST_CASE("KimiProtocol - Kimi Code K2.7 enables thinking on auto effort",
           "[kimi][serializer][effort]") {
     KimiProtocol protocol;
     auto req = make_simple_request("kimi-for-coding");
@@ -185,7 +195,7 @@ TEST_CASE("KimiProtocol - auto effort omits Kimi thinking fields",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
 TEST_CASE("KimiProtocol - K2.7 Code enables thinking on auto effort",
@@ -196,11 +206,11 @@ TEST_CASE("KimiProtocol - K2.7 Code enables thinking on auto effort",
 
     const auto payload = protocol.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
-TEST_CASE("KimiProtocol - K2.7 Code respects disabled thinking",
+TEST_CASE("KimiProtocol - K2.7 Code remains thinking when effort is off",
           "[kimi][serializer][effort]") {
     KimiProtocol protocol;
     auto req = make_simple_request("kimi-k2.7-code");
@@ -209,7 +219,7 @@ TEST_CASE("KimiProtocol - K2.7 Code respects disabled thinking",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
 }
 
 TEST_CASE("KimiProtocol - effort is omitted on legacy Moonshot models",
@@ -224,7 +234,7 @@ TEST_CASE("KimiProtocol - effort is omitted on legacy Moonshot models",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
 }
 
-TEST_CASE("KimiProtocol - off effort disables Kimi thinking",
+TEST_CASE("KimiProtocol - off effort cannot disable Kimi Code K2.7",
           "[kimi][serializer][effort]") {
     KimiProtocol protocol;
     auto req = make_simple_request("kimi-for-coding");
@@ -233,7 +243,51 @@ TEST_CASE("KimiProtocol - off effort disables Kimi thinking",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+}
+
+TEST_CASE("KimiProtocol - off effort disables switchable K2.6 thinking",
+          "[kimi][serializer][effort]") {
+    auto req = make_simple_request("kimi-k2.6");
+    req.effort = "off";
+
+    const auto payload = KimiProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+}
+
+TEST_CASE("KimiProtocol - K3 always uses max reasoning even when effort is off",
+          "[kimi][serializer][effort]") {
+    auto req = make_simple_request("k3");
+    req.effort = "off";
+
+    const auto payload = KimiProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+}
+
+TEST_CASE("KimiProtocol - session id becomes stable prompt cache key",
+          "[kimi][serializer][cache]") {
+    auto req = make_simple_request("k3");
+    req.session_id = "session-123";
+
+    const auto payload = KimiProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("prompt_cache_key":"session-123")"));
+}
+
+TEST_CASE("KimiProtocol - explicit prompt cache key wins over session id",
+          "[kimi][serializer][cache]") {
+    auto req = make_simple_request("k3");
+    req.session_id = "session-123";
+    req.prompt_cache_key = "gateway-key";
+
+    const auto payload = KimiProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("prompt_cache_key":"gateway-key")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("session-123"));
 }
 
 TEST_CASE("KimiSerializer - user message content appears in payload", "[kimi][serializer]") {
@@ -1234,7 +1288,7 @@ TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
     const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
 
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
-    REQUIRE(headers.at("X-Msh-Version") == "1.46.0");
+    REQUIRE(headers.at("X-Msh-Version") == "1.49.0");
     REQUIRE_FALSE(headers.at("X-Msh-Device-Name").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Device-Model").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Os-Version").empty());
@@ -1274,7 +1328,7 @@ TEST_CASE("KimiProtocol - headers identify Kimi CLI and preserve OAuth device id
 
     const auto headers = protocol.build_headers(auth);
 
-    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/1.46.0");
+    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/1.49.0");
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
     REQUIRE(headers.at("X-Msh-Device-Id") == "device-from-jwt");
     REQUIRE(headers.at("Authorization") == "Bearer token");
@@ -1299,6 +1353,33 @@ TEST_CASE("ProviderFactory - kimi api-key mode keeps cost estimation enabled", "
     auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
     REQUIRE(provider != nullptr);
     REQUIRE(provider->should_estimate_cost());
+}
+
+TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][factory][oauth][k3]") {
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3";
+    cfg.auth_type = "oauth_kimi";
+
+    const auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
+    CHECK(metadata->default_model == "k3");
+    CHECK(provider->max_context_size() == 1'048'576);
+}
+
+TEST_CASE("ProviderFactory - public Kimi K3 keeps Moonshot API endpoint", "[kimi][factory][k3]") {
+    core::config::ProviderConfig cfg;
+    cfg.model = "kimi-k3";
+    cfg.api_key = "test-key";
+
+    const auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.moonshot.cn/v1");
+    CHECK(metadata->default_model == "kimi-k3");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

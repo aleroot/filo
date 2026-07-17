@@ -274,6 +274,14 @@ TEST_CASE("OpenAIProtocol - max effort maps to high", "[openai][serializer][effo
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
 }
 
+TEST_CASE("OpenAIProtocol - GPT-5.6 preserves max effort", "[openai][serializer][effort]") {
+    auto req = make_simple_request("gpt-5.6-sol");
+    req.effort = "max";
+    OpenAIProtocol protocol;
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
+}
+
 TEST_CASE("OpenAIProtocol - effort omitted on unsupported models", "[openai][serializer][effort]") {
     auto req = make_simple_request("gpt-4o");
     req.effort = "low";

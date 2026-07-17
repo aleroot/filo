@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/llm/LLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelCatalogProvider.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
@@ -10,6 +11,43 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 
 using namespace core::llm;
+
+namespace {
+
+class CatalogCapabilityProbe final : public LLMProvider,
+                                     public ModelCatalogDiscoverable {
+public:
+    void stream_response(const ChatRequest&,
+                         std::function<void(const StreamChunk&)>) override {}
+
+    void discover_models(const ModelCatalogDiscoveryOptions& options) const override {
+        ++refresh_count;
+        last_timeout_ms = options.timeout_ms;
+    }
+
+    mutable int refresh_count = 0;
+    mutable int last_timeout_ms = 0;
+};
+
+class ProviderWithoutCatalog final : public LLMProvider {
+public:
+    void stream_response(const ChatRequest&,
+                         std::function<void(const StreamChunk&)>) override {}
+};
+
+} // namespace
+
+TEST_CASE("Model discovery dispatches through an optional provider capability",
+          "[llm][model-catalog][discovery]") {
+    auto discoverable = std::make_shared<CatalogCapabilityProbe>();
+    request_model_catalog_discovery(discoverable, {.timeout_ms = 1234});
+
+    CHECK(discoverable->refresh_count == 1);
+    CHECK(discoverable->last_timeout_ms == 1234);
+
+    auto unsupported = std::make_shared<ProviderWithoutCatalog>();
+    CHECK_NOTHROW(request_model_catalog_discovery(unsupported));
+}
 
 TEST_CASE("GeminiModelCatalogProvider parses live model catalog shape", "[llm][model-catalog]") {
     GeminiModelCatalogProvider provider;
@@ -232,17 +270,26 @@ TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[ll
 
     const auto result = provider.parse_models_response(R"JSON({
       "data": [
+        {"id": "k3"},
+        {"id": "kimi-k3"},
         {"id": "moonshot-v1-8k"},
         {"id": "kimi-for-coding"}
       ]
     })JSON");
 
     REQUIRE(result.ok());
-    REQUIRE(result.models.size() == 2);
-    CHECK(result.models[0].context_window == 8192);
-    CHECK(result.models[1].context_window == 256000);
-    CHECK(result.models[1].supports(ModelCapability::Reasoning));
-    CHECK(result.models[1].supports(ModelCapability::Vision));
+    REQUIRE(result.models.size() == 4);
+    for (std::size_t index : {std::size_t{0}, std::size_t{1}}) {
+        CHECK(result.models[index].context_window == 1'048'576);
+        CHECK(result.models[index].max_output_tokens == 1'048'576);
+        CHECK(result.models[index].supports(ModelCapability::Reasoning));
+        CHECK(result.models[index].supports(ModelCapability::Vision));
+        CHECK(result.models[index].supports(ModelCapability::VideoInput));
+    }
+    CHECK(result.models[2].context_window == 8192);
+    CHECK(result.models[3].context_window == 256000);
+    CHECK(result.models[3].supports(ModelCapability::Reasoning));
+    CHECK(result.models[3].supports(ModelCapability::Vision));
 }
 
 TEST_CASE("AnthropicModelCatalogProvider parses v1 models response", "[llm][model-catalog]") {

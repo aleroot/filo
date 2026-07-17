@@ -20,10 +20,36 @@
 
 namespace core::llm {
 
+class LLMProvider;
+
 struct ModelCatalogDiscoveryOptions {
     int max_pages = 8;
     int timeout_ms = 2500;
 };
+
+/**
+ * @brief Optional provider capability for refreshing a remote model catalog.
+ *
+ * Callers depend on this capability instead of knowing which concrete provider
+ * owns the transport. Providers without live catalog discovery simply do not
+ * implement it.
+ */
+class ModelCatalogDiscoverable {
+public:
+    virtual ~ModelCatalogDiscoverable() = default;
+
+    virtual void discover_models(
+        const ModelCatalogDiscoveryOptions& options = {}) const = 0;
+};
+
+/**
+ * @brief Request catalog discovery when the provider exposes that capability.
+ *
+ * This is intentionally a no-op for providers without model discovery.
+ */
+void request_model_catalog_discovery(
+    const std::shared_ptr<LLMProvider>& provider,
+    const ModelCatalogDiscoveryOptions& options = {});
 
 struct ModelCatalogDiscoveryResult {
     bool attempted = false;

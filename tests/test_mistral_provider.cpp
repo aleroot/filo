@@ -6,6 +6,7 @@
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/llm/protocols/MistralProtocol.hpp"
 
 #include <memory>
 
@@ -79,6 +80,35 @@ TEST_CASE("Mistral serializer - max_tokens included when set", "[mistral][serial
                  Catch::Matchers::ContainsSubstring(R"("max_tokens":2048)"));
 }
 
+TEST_CASE("Mistral protocol mirrors Vibe reasoning effort semantics",
+          "[mistral][serializer][effort]") {
+    MistralProtocol protocol;
+
+    auto high = make_mistral_request("mistral-vibe-cli-latest");
+    high.effort = "max";
+    high.temperature = 0.2F;
+    const auto high_payload = protocol.serialize(high);
+    REQUIRE_THAT(high_payload,
+                 Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(high_payload,
+                 Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
+
+    auto low = make_mistral_request("mistral-vibe-cli-latest");
+    low.effort = "low";
+    REQUIRE_THAT(protocol.serialize(low),
+                 Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+
+    auto off = make_mistral_request("mistral-vibe-cli-latest");
+    off.effort = "off";
+    REQUIRE_THAT(protocol.serialize(off),
+                 !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+
+    auto non_reasoning = make_mistral_request("codestral-latest");
+    non_reasoning.effort = "high";
+    REQUIRE_THAT(protocol.serialize(non_reasoning),
+                 !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+}
+
 TEST_CASE("Mistral serializer - tool definition uses OpenAI parameters format",
           "[mistral][serializer][tools]") {
     auto req = make_mistral_request();
@@ -109,6 +139,32 @@ TEST_CASE("Mistral SSE - text content extracted via OpenAI parser", "[mistral][s
         R"({"choices":[{"delta":{"content":"Hello from Mistral"},"index":0}]})");
     REQUIRE(content == "Hello from Mistral");
     REQUIRE(tools.empty());
+}
+
+TEST_CASE("Mistral SSE - Vibe thinking and text blocks are preserved",
+          "[mistral][sse][thinking]") {
+    MistralProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: "
+        R"({"choices":[{"delta":{"content":[{"type":"thinking","thinking":[{"type":"text","text":"reason"}]},{"type":"text","text":"answer"}]},"index":0}]})"
+        "\n\n");
+
+    REQUIRE(result.chunks.size() == 1);
+    CHECK(result.chunks[0].reasoning_content == "reason");
+    CHECK(result.chunks[0].content == "answer");
+}
+
+TEST_CASE("Mistral SSE - direct reasoning content is preserved",
+          "[mistral][sse][thinking]") {
+    MistralProtocol protocol;
+    const auto result = protocol.parse_event(
+        "data: "
+        R"({"choices":[{"delta":{"reasoning_content":"reason","content":"answer"},"index":0}]})"
+        "\n\n");
+
+    REQUIRE(result.chunks.size() == 1);
+    CHECK(result.chunks[0].reasoning_content == "reason");
+    CHECK(result.chunks[0].content == "answer");
 }
 
 TEST_CASE("Mistral SSE - tool call extracted via OpenAI parser", "[mistral][sse][tools]") {

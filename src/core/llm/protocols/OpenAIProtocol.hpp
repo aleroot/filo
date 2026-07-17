@@ -7,7 +7,6 @@
  * OpenAIProtocol covers every service that speaks the OpenAI Chat Completions
  * wire format without modification:
  *   - OpenAI (`api.openai.com`)
- *   - Mistral (`api.mistral.ai`)
  *   - DeepSeek (`api.deepseek.com`)
  *   - Groq, Together AI, Fireworks AI, OpenRouter
  *   - llama.cpp HTTP server, LM Studio, vLLM, Jan
@@ -15,7 +14,7 @@
  *
  * Vendor quirks that require extra JSON fields are handled by subclassing
  * and overriding protocol behavior in a dedicated subclass (for example,
- * `GrokProtocol` or `KimiProtocol`).
+ * `MistralProtocol`, `GrokProtocol`, or `KimiProtocol`).
  */
 
 #include "ApiProtocol.hpp"

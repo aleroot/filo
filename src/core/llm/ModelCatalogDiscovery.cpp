@@ -1,5 +1,6 @@
 #include "ModelCatalogDiscovery.hpp"
 
+#include "LLMProvider.hpp"
 #include "ModelRegistry.hpp"
 #include "OpenAIEndpointUtils.hpp"
 #include "core/logging/Logger.hpp"
@@ -16,6 +17,16 @@
 #include <unordered_map>
 
 namespace core::llm {
+
+void request_model_catalog_discovery(
+    const std::shared_ptr<LLMProvider>& provider,
+    const ModelCatalogDiscoveryOptions& options) {
+    if (auto discoverable =
+            std::dynamic_pointer_cast<ModelCatalogDiscoverable>(provider)) {
+        discoverable->discover_models(options);
+    }
+}
+
 namespace {
 
 constexpr auto kCatalogSuccessRefreshTtl = std::chrono::minutes{15};

@@ -6,7 +6,6 @@
 
 #include "../core/config/ConfigManager.hpp"
 #include "../core/budget/BudgetTracker.hpp"
-#include "../core/llm/HttpLLMProvider.hpp"
 #include "../core/llm/ModelCatalogDiscovery.hpp"
 #include "../core/llm/Models.hpp"
 #include "../core/llm/ProviderManager.hpp"
@@ -1447,11 +1446,7 @@ void request_model_discovery_if_needed(const GatewayRuntime& runtime,
     }
 
     try {
-        auto llm_provider = runtime.provider_manager.get_provider(provider.name);
-        if (auto http_provider =
-                std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(llm_provider)) {
-            http_provider->discover_models({.timeout_ms = 1000});
-        }
+        core::llm::request_model_catalog_discovery(runtime.provider_manager.get_provider(provider.name), {.timeout_ms = 1000});
     } catch (const std::exception& ex) {
         core::logging::debug(
             "Model discovery unavailable for provider '{}': {}",

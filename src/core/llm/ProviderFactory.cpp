@@ -6,6 +6,7 @@
 #endif
 #include "protocols/OpenAIProtocol.hpp"
 #include "protocols/OpenAIResponsesProtocol.hpp"
+#include "protocols/MistralProtocol.hpp"
 #include "protocols/KimiProtocol.hpp"
 #include "protocols/GrokProtocol.hpp"
 #include "protocols/DashScopeProtocol.hpp"
@@ -98,7 +99,9 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
 
 [[nodiscard]] bool model_prefers_kimi_code_endpoint(std::string_view model) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-    return lowered == "kimi-for-coding";
+    return lowered == "k3"
+        || lowered == "kimi-for-coding"
+        || lowered == "kimi-for-coding-highspeed";
 }
 
 } // namespace
@@ -291,6 +294,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 if (config.reasoning_effort == "high")   effort = protocols::GrokReasoningEffort::High;
                 protocol = std::make_unique<protocols::GrokProtocol>(
                     effort, config.stream_usage);
+            } else if (canonical_type == "mistral") {
+                protocol = std::make_unique<protocols::MistralProtocol>(
+                    config.stream_usage);
             } else {
                 protocol = std::make_unique<protocols::OpenAIProtocol>(config.stream_usage);
             }

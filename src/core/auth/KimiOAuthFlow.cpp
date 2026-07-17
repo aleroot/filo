@@ -28,7 +28,7 @@ constexpr std::string_view KIMI_OAUTH_HOST = "https://auth.kimi.com";
 constexpr std::string_view KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 constexpr std::string_view KIMI_PLATFORM = "kimi_code_cli";
 constexpr std::string_view KIMI_USER_AGENT_PRODUCT = "kimi-code-cli";
-constexpr std::string_view KIMI_CLIENT_VERSION = "1.46.0";
+constexpr std::string_view KIMI_CLIENT_VERSION = "1.49.0";
 constexpr int KIMI_OAUTH_TIMEOUT_MS = 30'000;
 
 /**

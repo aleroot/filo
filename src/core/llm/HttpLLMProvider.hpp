@@ -63,6 +63,7 @@ class CurlWebSocketTransport;
  *       `?key=…` query parameters.
  */
 class HttpLLMProvider : public LLMProvider,
+                        public ModelCatalogDiscoverable,
                         public std::enable_shared_from_this<HttpLLMProvider> {
 public:
     /**
@@ -142,7 +143,7 @@ public:
      * @brief Start model discovery on a detached background worker.
      */
     void discover_models(
-        const ModelCatalogDiscoveryOptions& options = {}) const;
+        const ModelCatalogDiscoveryOptions& options = {}) const override;
 
 private:
     struct WebSocketTransportState {

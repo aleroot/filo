@@ -27,8 +27,8 @@
 #include <ftxui/component/app.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
-#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
+#include "core/llm/ModelEffort.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderManager.hpp"
@@ -757,6 +757,12 @@ RunResult run(RunOptions opts) {
         active_provider_name = manual_provider_name;
         active_model_name = manual_model_name;
     }
+
+    // Providers decide whether live model discovery is supported. For Kimi
+    // Code this also refreshes the account-specific K3 context limit.
+    core::llm::request_model_catalog_discovery(
+        llm_provider,
+        {.timeout_ms = 3000});
 
     bool ui_show_banner = visibility_setting_enabled(config.ui_banner, true);
     bool ui_show_footer = visibility_setting_enabled(config.ui_footer, true);
@@ -2406,11 +2412,10 @@ RunResult run(RunOptions opts) {
             if (!core::llm::is_local_provider(registered_providers, name)
                 && snapshot.refresh_due()) {
                 try {
-                    if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
-                            provider_manager.get_provider(name))) {
-                        http_provider->discover_models({.timeout_ms = 1000});
-                        snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(name);
-                    }
+                    core::llm::request_model_catalog_discovery(
+                        provider_manager.get_provider(name),
+                        {.timeout_ms = 1000});
+                    snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(name);
                 } catch (const std::exception&) {
                 }
             }
@@ -2721,11 +2726,10 @@ RunResult run(RunOptions opts) {
             if (!core::llm::is_local_provider(registered_providers, source_provider)
                 && snapshot.refresh_due()) {
                 try {
-                    if (auto http_provider = std::dynamic_pointer_cast<core::llm::HttpLLMProvider>(
-                            provider_manager.get_provider(source_provider))) {
-                        http_provider->discover_models({.timeout_ms = 1000});
-                        snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
-                    }
+                    core::llm::request_model_catalog_discovery(
+                        provider_manager.get_provider(source_provider),
+                        {.timeout_ms = 1000});
+                    snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
                 } catch (const std::exception&) {
                 }
             }
@@ -2859,20 +2863,13 @@ RunResult run(RunOptions opts) {
         return rows;
     };
 
-    auto model_supports_openai_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
-        return lowered.starts_with("gpt-5")
-            || lowered.starts_with("o1")
-            || lowered.starts_with("o3")
-            || lowered.starts_with("o4");
-    };
-
-    auto model_supports_kimi_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
-        return lowered == "kimi-for-coding"
-            || lowered.starts_with("kimi-k2")
-            || lowered.find("thinking") != std::string::npos;
-    };
+    // Effort capability is protocol knowledge — delegate to the single
+    // source of truth shared with the wire serializers so the picker can
+    // never drift from what actually gets sent.
+    const auto& model_supports_openai_effort =
+        core::llm::openai_model_supports_reasoning_effort;
+    const auto& model_supports_kimi_effort =
+        core::llm::kimi_model_supports_thinking;
 
     auto provider_supports_effort = [&](std::string_view provider_name,
                                         std::string_view model_name_override = {}) -> bool {
@@ -2909,13 +2906,7 @@ RunResult run(RunOptions opts) {
         return false;
     };
 
-    auto model_supports_max_effort = [&](std::string_view model_name) -> bool {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(model_name);
-        return lowered.find("mythos") != std::string::npos
-            || lowered.find("sonnet-5") != std::string::npos
-            || lowered.find("opus-4-8") != std::string::npos
-            || lowered.find("sonnet-4-6") != std::string::npos;
-    };
+    const auto& model_supports_max_effort = core::llm::model_supports_max_effort;
 
     auto resolve_effective_effort = [&](std::string_view configured,
                                         std::string_view model_name) -> std::string {

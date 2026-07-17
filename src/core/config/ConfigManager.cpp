@@ -277,7 +277,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            .default_model = "gpt-5.4",
+            .default_model = "gpt-5.6-sol",
         };
     }
     if (normalized == "grok" || normalized == "xai" || normalized == "x.ai") {
@@ -293,7 +293,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "openai",
             .auth_type = "oauth_openai_pkce",
-            .default_model = "gpt-5.4",
+            .default_model = "gpt-5.6-sol",
         };
     }
     if (normalized == "google") {
@@ -307,7 +307,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "kimi",
             .auth_type = "oauth_kimi",
-            .default_model = "kimi-k2.7-code",
+            .default_model = "k3",
         };
     }
     if (normalized == "qwen") {
@@ -502,8 +502,8 @@ AppConfig make_default_config() {
         config.providers[name] = std::move(p);
     };
 
-    add_provider("openai",         "gpt-5.4");
-    add_provider("mistral",        "devstral-small-latest");
+    add_provider("openai",         "gpt-5.6-sol");
+    add_provider("mistral",        "mistral-vibe-cli-latest", "high");
     add_provider("grok",           "grok-code-fast-1");
     add_provider("grok-4-5",       "grok-4.5", {}, {}, {}, "responses");
     add_provider("grok-4",         "grok-4");
@@ -514,7 +514,10 @@ AppConfig make_default_config() {
     add_provider("grok-mini-fast", "grok-3-mini-fast", "low");
     add_provider("claude",         "claude-sonnet-5");
     add_provider("gemini",         "gemini-2.5-flash");
-    add_provider("kimi",           "kimi-k2.7-code", "high");
+    add_provider("kimi",           "kimi-k3", "max");
+    add_provider("kimi-code",      "k3", "max", {}, "https://api.kimi.com/coding/v1");
+    add_provider("kimi-code-fast", "kimi-for-coding-highspeed", {}, {},
+                 "https://api.kimi.com/coding/v1");
     add_provider("kimi-k2-6",      "kimi-k2.6");
     add_provider("kimi-k2-5",      "kimi-k2.5");
     add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.com/coding/v1");
@@ -573,13 +576,15 @@ std::string default_config_json() {
         "grok-fast":      { "model": "grok-4.20-non-reasoning" },
         "grok-mini":      { "model": "grok-3-mini",      "reasoning_effort": "high" },
         "grok-mini-fast": { "model": "grok-3-mini-fast", "reasoning_effort": "low" },
-        "openai":         { "model": "gpt-5.4" },
-        "mistral":        { "model": "devstral-small-latest" },
+        "openai":         { "model": "gpt-5.6-sol" },
+        "mistral":        { "model": "mistral-vibe-cli-latest", "reasoning_effort": "high" },
         "claude":         { "model": "claude-sonnet-5" },
         "claude-thinking":{ "model": "claude-sonnet-4-6", "thinking_budget": 10000 },
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
-        "kimi":           { "model": "kimi-k2.7-code", "reasoning_effort": "high" },
+        "kimi":           { "model": "kimi-k3", "reasoning_effort": "max" },
+        "kimi-code":     { "model": "k3", "reasoning_effort": "max", "base_url": "https://api.kimi.com/coding/v1" },
+        "kimi-code-fast":{ "model": "kimi-for-coding-highspeed", "base_url": "https://api.kimi.com/coding/v1" },
         "kimi-k2-6":      { "model": "kimi-k2.6" },
         "kimi-k2-5":      { "model": "kimi-k2.5" },
         "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.com/coding/v1" },
@@ -624,7 +629,7 @@ std::string default_config_json() {
                 "defaults": [
                     { "provider": "grok", "model": "grok-code-fast-1", "weight": 5 },
                     { "provider": "grok-mini-fast", "model": "grok-3-mini-fast", "weight": 3 },
-                    { "provider": "openai", "model": "gpt-5.4", "weight": 2 }
+                    { "provider": "openai", "model": "gpt-5.6-sol", "weight": 2 }
                 ],
                 "rules": [
                     {
@@ -638,7 +643,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
                             { "provider": "grok-4-5", "model": "grok-4.5", "retries": 1 },
-                            { "provider": "openai", "model": "gpt-5.4", "retries": 1 }
+                            { "provider": "openai", "model": "gpt-5.6-sol", "retries": 1 }
                         ]
                     },
                     {
@@ -649,7 +654,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "grok", "model": "grok-code-fast-1", "latency_bias_ms": 15 },
                             { "provider": "gemini", "model": "gemini-2.5-flash", "latency_bias_ms": 10 },
-                            { "provider": "openai", "model": "gpt-5.4", "latency_bias_ms": 20 }
+                            { "provider": "openai", "model": "gpt-5.6-sol", "latency_bias_ms": 20 }
                         ]
                     },
                     {

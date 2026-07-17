@@ -1,5 +1,6 @@
 #include "OpenAIResponsesProtocol.hpp"
 #include "SseUtils.hpp"
+#include "../ModelEffort.hpp"
 #include "../Models.hpp"
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
@@ -287,7 +288,8 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
     return lowered;
 }
 
-[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort) {
+[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort,
+                                                  std::string_view model) {
     std::string effort = lower_ascii(raw_effort);
     std::erase_if(effort, [](unsigned char ch) {
         return std::isspace(ch);
@@ -299,17 +301,9 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         return effort;
     }
     if (effort == "max") {
-        return "high";
+        return openai_model_supports_max_effort(model) ? "max" : "high";
     }
     return {};
-}
-
-[[nodiscard]] bool model_supports_openai_reasoning_effort(std::string_view model) {
-    const std::string lowered = lower_ascii(model);
-    return lowered.starts_with("gpt-5")
-        || lowered.starts_with("o1")
-        || lowered.starts_with("o3")
-        || lowered.starts_with("o4");
 }
 
 void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& result) {
@@ -483,8 +477,8 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
     }
-    if (model_supports_openai_reasoning_effort(req.model)) {
-        const std::string effort = normalize_openai_effort(req.effort);
+    if (openai_model_supports_reasoning_effort(req.model)) {
+        const std::string effort = normalize_openai_effort(req.effort, req.model);
         if (!effort.empty()) {
             payload += R"(,"reasoning":{"effort":")";
             payload += core::utils::escape_json_string(effort);

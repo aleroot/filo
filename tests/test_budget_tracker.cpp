@@ -57,6 +57,10 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
     }
 
     SECTION("OpenAI models") {
+        CHECK(context_window_for_model("gpt-5.6-sol")            == 1'050'000);
+        CHECK(context_window_for_model("gpt-5.6")                == 1'050'000);
+        CHECK(context_window_for_model("gpt-5.6-terra")          == 1'050'000);
+        CHECK(context_window_for_model("gpt-5.6-luna")           == 1'050'000);
         CHECK(context_window_for_model("gpt-5.4")                == 200'000);
         CHECK(context_window_for_model("gpt-4o")                 == 128'000);
         CHECK(context_window_for_model("gpt-4o-mini")            == 128'000);
@@ -65,7 +69,23 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
         CHECK(context_window_for_model("gpt-3.5-turbo")          ==  16'385);
     }
 
+    SECTION("Mistral models") {
+        CHECK(context_window_for_model("mistral-vibe-cli-latest") == 256'000);
+        CHECK(context_window_for_model("mistral-medium-3.5")       == 256'000);
+        CHECK(context_window_for_model("mistral-medium-3-5")      == 256'000);
+        CHECK(context_window_for_model("mistral-medium-latest")   == 256'000);
+        CHECK(context_window_for_model("mistral-small-2603")      == 256'000);
+        CHECK(context_window_for_model("mistral-small-latest")    == 256'000);
+        CHECK(context_window_for_model("mistral-large-2512")      == 256'000);
+        CHECK(context_window_for_model("mistral-large-latest")    == 256'000);
+        CHECK(context_window_for_model("ministral-8b-2512")       == 256'000);
+        CHECK(context_window_for_model("codestral-2508")          == 128'000);
+        CHECK(context_window_for_model("codestral-latest")        == 128'000);
+    }
+
     SECTION("Kimi / Moonshot models") {
+        CHECK(context_window_for_model("kimi-k3")               == 1'048'576);
+        CHECK(context_window_for_model("k3")                    == 1'048'576);
         CHECK(context_window_for_model("moonshot-v1-8k")         ==   8'192);
         CHECK(context_window_for_model("moonshot-v1-32k")        ==  32'768);
         CHECK(context_window_for_model("moonshot-v1-128k")       == 128'000);

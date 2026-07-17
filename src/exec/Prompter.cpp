@@ -4,6 +4,7 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/logging/Logger.hpp"
@@ -536,6 +537,8 @@ void register_default_tools(core::tools::ToolManager& tool_manager) {
         error = std::format("Failed to initialize provider '{}': {}", provider_name, ex.what());
         return {};
     }
+
+    core::llm::request_model_catalog_discovery(provider, {.timeout_ms = 3000});
 
     std::string model_name;
     if (const auto it = config.providers.find(provider_name);

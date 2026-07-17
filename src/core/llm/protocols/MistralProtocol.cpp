@@ -1,0 +1,113 @@
+#include "MistralProtocol.hpp"
+
+#include "../ModelEffort.hpp"
+#include "SseUtils.hpp"
+#include "core/utils/AsciiUtils.hpp"
+#include <simdjson.h>
+
+namespace core::llm::protocols {
+namespace {
+
+[[nodiscard]] std::string_view normalize_mistral_effort(
+    std::string_view effort) noexcept {
+    using core::utils::ascii::iequals;
+
+    if (iequals(effort, "low")) return "none";
+    if (iequals(effort, "medium")
+        || iequals(effort, "high")
+        || iequals(effort, "max")) {
+        return "high";
+    }
+    return {};
+}
+
+} // namespace
+
+std::string MistralProtocol::serialize(const ChatRequest& req) const {
+    ChatRequest adjusted = req;
+    if (mistral_model_supports_reasoning_effort(req.model)
+        && !normalize_mistral_effort(req.effort).empty()) {
+        // Mirrors mistral-vibe: reasoning requests require temperature 1.
+        adjusted.temperature = 1.0F;
+    }
+    return OpenAIProtocol::serialize(adjusted);
+}
+
+void MistralProtocol::append_extra_fields(std::string& payload,
+                                          const ChatRequest& req) const {
+    if (!mistral_model_supports_reasoning_effort(req.model)) return;
+
+    const std::string_view effort = normalize_mistral_effort(req.effort);
+    if (effort.empty()) return;
+
+    payload += R"(,"reasoning_effort":")";
+    payload += effort;
+    payload += '"';
+}
+
+ParseResult MistralProtocol::parse_event(std::string_view raw_event) {
+    // Preserve the shared OpenAI-compatible handling for string content, tool
+    // calls, usage, and terminal events.
+    ParseResult result = OpenAIProtocol::parse_event(raw_event);
+    if (result.done) return result;
+
+    sse::ParsedEventView parsed;
+    if (!sse::parse_event_payload(raw_event, parsed) || parsed.is_done) return result;
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string padded(parsed.data);
+    simdjson::dom::element document;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS) return result;
+
+    std::string content;
+    std::string reasoning;
+    simdjson::dom::array choices;
+    if (document["choices"].get(choices) != simdjson::SUCCESS) return result;
+
+    for (simdjson::dom::element choice : choices) {
+        simdjson::dom::object delta;
+        if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
+
+        // Some compatible deployments expose the reasoning text directly.
+        std::string_view direct_reasoning;
+        if (delta["reasoning_content"].get(direct_reasoning) == simdjson::SUCCESS) {
+            reasoning.append(direct_reasoning);
+        }
+
+        // Current Mistral models can stream typed content blocks.  This is the
+        // wire representation consumed by mistral-vibe's ThinkChunk/TextChunk
+        // mapper and is not part of the generic OpenAI protocol.
+        simdjson::dom::array blocks;
+        if (delta["content"].get(blocks) != simdjson::SUCCESS) continue;
+        for (simdjson::dom::element block : blocks) {
+            std::string_view type;
+            if (block["type"].get(type) != simdjson::SUCCESS) continue;
+
+            if (type == "text") {
+                std::string_view text;
+                if (block["text"].get(text) == simdjson::SUCCESS) content.append(text);
+                continue;
+            }
+            if (type != "thinking") continue;
+
+            simdjson::dom::array thinking_blocks;
+            if (block["thinking"].get(thinking_blocks) != simdjson::SUCCESS) continue;
+            for (simdjson::dom::element thinking_block : thinking_blocks) {
+                std::string_view text;
+                if (thinking_block["text"].get(text) == simdjson::SUCCESS) {
+                    reasoning.append(text);
+                } else if (thinking_block.get(text) == simdjson::SUCCESS) {
+                    reasoning.append(text);
+                }
+            }
+        }
+    }
+
+    if (content.empty() && reasoning.empty()) return result;
+    if (result.chunks.empty()) result.chunks.emplace_back();
+    result.chunks.front().content += content;
+    result.chunks.front().reasoning_content += reasoning;
+    return result;
+}
+
+} // namespace core::llm::protocols

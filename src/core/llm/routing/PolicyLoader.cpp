@@ -510,7 +510,7 @@ RouterConfig make_default_router_config() {
     policy.defaults = {
         RouteCandidate{.provider = "grok", .model = "grok-code-fast-1", .weight = 5},
         RouteCandidate{.provider = "grok-mini-fast", .model = "grok-3-mini-fast", .weight = 3},
-        RouteCandidate{.provider = "openai", .model = "gpt-5.4", .weight = 2},
+        RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 2},
     };
 
     RouteRule deep_reasoning;
@@ -524,7 +524,7 @@ RouterConfig make_default_router_config() {
     deep_reasoning.candidates = {
         RouteCandidate{.provider = "claude", .model = "claude-sonnet-5", .weight = 1, .retries = 1},
         RouteCandidate{.provider = "grok-4-5", .model = "grok-4.5", .weight = 1, .retries = 1},
-        RouteCandidate{.provider = "openai", .model = "gpt-5.4", .weight = 1, .retries = 1},
+        RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 1, .retries = 1},
     };
 
     RouteRule quick_iteration;
@@ -546,7 +546,7 @@ RouterConfig make_default_router_config() {
     tool_heavy.candidates = {
         RouteCandidate{.provider = "grok", .model = "grok-code-fast-1", .weight = 1, .latency_bias_ms = 15},
         RouteCandidate{.provider = "gemini", .model = "gemini-2.5-flash", .weight = 1, .latency_bias_ms = 10},
-        RouteCandidate{.provider = "openai", .model = "gpt-5.4", .weight = 1, .latency_bias_ms = 20},
+        RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 1, .latency_bias_ms = 20},
     };
 
     policy.rules = {deep_reasoning, tool_heavy, quick_iteration};

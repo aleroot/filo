@@ -199,6 +199,7 @@ bool get_string_field(simdjson::dom::object object,
 }
 
 [[nodiscard]] int32_t infer_kimi_context_window(std::string_view model_id) {
+    if (model_id == "k3" || contains_ascii(model_id, "kimi-k3")) return 1'048'576;
     if (contains_ascii(model_id, "moonshot-v1-8k")) return 8192;
     if (contains_ascii(model_id, "moonshot-v1-32k")) return 32768;
     if (contains_ascii(model_id, "moonshot-v1-128k")) return 128000;
@@ -213,12 +214,20 @@ bool get_string_field(simdjson::dom::object object,
     return 128000;
 }
 
+[[nodiscard]] int32_t infer_kimi_max_output_tokens(std::string_view model_id) {
+    return model_id == "k3" || contains_ascii(model_id, "kimi-k3")
+        ? 1'048'576
+        : 8192;
+}
+
 [[nodiscard]] ModelCapabilities kimi_capabilities(std::string_view model_id,
                                                   bool supports_reasoning,
                                                   bool supports_image_in,
                                                   bool supports_video_in) {
     ModelCapabilities caps = CAP_TOOLS | static_cast<uint32_t>(ModelCapability::JsonMode);
     if (supports_reasoning ||
+        model_id == "k3" ||
+        contains_ascii(model_id, "kimi-k3") ||
         contains_ascii(model_id, "thinking") ||
         contains_ascii(model_id, "reason") ||
         contains_ascii(model_id, "kimi-for-coding") ||
@@ -227,6 +236,8 @@ bool get_string_field(simdjson::dom::object object,
     }
     if (supports_image_in ||
         supports_video_in ||
+        model_id == "k3" ||
+        contains_ascii(model_id, "kimi-k3") ||
         contains_ascii(model_id, "vl") ||
         contains_ascii(model_id, "vision") ||
         contains_ascii(model_id, "kimi-k2") ||
@@ -235,6 +246,8 @@ bool get_string_field(simdjson::dom::object object,
         caps |= static_cast<uint32_t>(ModelCapability::Vision);
     }
     if (supports_video_in ||
+        model_id == "k3" ||
+        contains_ascii(model_id, "kimi-k3") ||
         contains_ascii(model_id, "kimi-k2") ||
         contains_ascii(model_id, "kimi-for-coding") ||
         contains_ascii(model_id, "kimi-code")) {
@@ -500,7 +513,10 @@ ModelCatalogResult KimiModelCatalogProvider::parse_models_response(std::string_v
             object,
             "context_length",
             infer_kimi_context_window(info.canonical_id));
-        info.max_output_tokens = get_int_field(object, "max_output_tokens", 8192);
+        info.max_output_tokens = get_int_field(
+            object,
+            "max_output_tokens",
+            infer_kimi_max_output_tokens(info.canonical_id));
 
         const bool supports_reasoning = get_bool_field(object, "supports_reasoning");
         const bool supports_image_in = get_bool_field(object, "supports_image_in");

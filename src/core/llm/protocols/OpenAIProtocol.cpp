@@ -1,5 +1,6 @@
 #include "OpenAIProtocol.hpp"
 #include "SseUtils.hpp"
+#include "../ModelEffort.hpp"
 #include "../Models.hpp"
 #include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
@@ -371,7 +372,8 @@ void merge_zai_usage_snapshot(RateLimitInfo& info, const ZaiUsageSnapshot& snaps
         });
 }
 
-[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort) {
+[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort,
+                                                  std::string_view model) {
     std::string effort = lower_ascii(raw_effort);
     std::erase_if(effort, [](unsigned char ch) {
         return std::isspace(ch);
@@ -383,20 +385,9 @@ void merge_zai_usage_snapshot(RateLimitInfo& info, const ZaiUsageSnapshot& snaps
         return effort;
     }
     if (effort == "max") {
-        // OpenAI uses high/xhigh style naming; map max to the safest common value.
-        return "high";
+        return openai_model_supports_max_effort(model) ? "max" : "high";
     }
     return {};
-}
-
-[[nodiscard]] bool model_supports_openai_reasoning_effort(std::string_view model) {
-    const std::string lowered = lower_ascii(model);
-    // Conservative allow-list to avoid sending vendor-specific fields to
-    // unrelated OpenAI-compatible providers/models.
-    return lowered.starts_with("gpt-5")
-        || lowered.starts_with("o1")
-        || lowered.starts_with("o3")
-        || lowered.starts_with("o4");
 }
 
 [[nodiscard]] bool is_zai_coding_model(std::string_view model) {
@@ -611,8 +602,8 @@ std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
 
     if (payload.ends_with('}')) {
         payload.pop_back();
-        if (model_supports_openai_reasoning_effort(req.model)) {
-            const std::string effort = normalize_openai_effort(req.effort);
+        if (openai_model_supports_reasoning_effort(req.model)) {
+            const std::string effort = normalize_openai_effort(req.effort, req.model);
             if (!effort.empty()) {
                 payload += R"(,"reasoning_effort":")";
                 payload += core::utils::escape_json_string(effort);

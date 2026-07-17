@@ -1,5 +1,6 @@
 #include "KimiProtocol.hpp"
 #include "SseUtils.hpp"
+#include "../ModelEffort.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
@@ -414,23 +415,10 @@ parse_string_field(const simdjson::dom::object* obj, std::string_view key) {
     if (effort == "low" || effort == "medium" || effort == "high") {
         return effort;
     }
-    if (effort == "max" || effort == "xhigh") {
-        // Kimi's public control surface caps effort at "high".
-        return "high";
+    if (effort == "max" || effort == "xhigh" || effort == "ultra") {
+        return "max";
     }
     return {};
-}
-
-[[nodiscard]] bool model_supports_kimi_thinking(std::string_view model) {
-    const std::string lowered = lower_ascii(model);
-    return lowered == "kimi-for-coding"
-        || lowered.starts_with("kimi-k2")
-        || lowered.find("thinking") != std::string::npos;
-}
-
-[[nodiscard]] bool model_requires_kimi_thinking(std::string_view model) {
-    const std::string lowered = lower_ascii(model);
-    return lowered == "kimi-k2.7-code";
 }
 
 [[nodiscard]] std::string normalize_kimi_tool_schema(
@@ -975,12 +963,32 @@ void KimiProtocol::prepare_media_uploads(ChatRequest& request,
 }
 
 void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& req) const {
-    if (!model_supports_kimi_thinking(req.model)) {
+    // kimi-cli uses one stable cache key per agent session. This lets Kimi's
+    // automatic prefix cache survive tool turns without changing semantics.
+    const std::string_view prompt_cache_key = req.prompt_cache_key.empty()
+        ? std::string_view{req.session_id}
+        : std::string_view{req.prompt_cache_key};
+    if (!prompt_cache_key.empty()) {
+        payload += R"(,"prompt_cache_key":")";
+        payload += core::utils::escape_json_string(prompt_cache_key);
+        payload += '"';
+    }
+
+    if (!kimi_model_supports_thinking(req.model)) {
+        return;
+    }
+
+    // K3 is an always-reasoning model and does not accept the K2.x `thinking`
+    // switch. At launch, max is its only accepted effort on both the public
+    // `kimi-k3` model and the Kimi Code subscription model `k3`.
+    if (kimi_model_is_k3(req.model)) {
+        payload += R"(,"reasoning_effort":"max")";
         return;
     }
 
     std::string effort = normalize_kimi_effort(req.effort);
-    if (model_requires_kimi_thinking(req.model) && effort.empty()) {
+    if (kimi_model_requires_thinking(req.model)
+        && (effort.empty() || effort == "off")) {
         effort = "high";
     }
     if (effort.empty()) {
@@ -992,9 +1000,10 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         return;
     }
 
-    payload += R"(,"reasoning_effort":")";
-    payload += core::utils::escape_json_string(effort);
-    payload += R"(","thinking":{"type":"enabled"})";
+    // Match current kimi-cli: K2 thinking is controlled exclusively through
+    // `thinking.type`. Sending legacy reasoning_effort as well can make
+    // current Kimi-compatible endpoints reject the request.
+    payload += R"(,"thinking":{"type":"enabled"})";
 }
 
 cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const {
@@ -1072,7 +1081,8 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
         
         case 404:
             return "[Kimi API Error 404: Model or endpoint not found. Verify the model name "
-                   "is correct. Available models: kimi-k2.7-code, kimi-k2.6, moonshot-v1-8k, etc.]";
+                   "is correct. Public API models include kimi-k3 and kimi-k2.7-code; "
+                   "the Kimi Code subscription endpoint uses k3.]";
         
         case 429:
             return "[Kimi API Error 429: Rate limit exceeded. Please reduce request frequency. "

@@ -99,6 +99,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Kimi Models (Moonshot AI)
     // -----------------------------------------------------------------------
+    { "kimi-k3",           1048576 },
     { "kimi-k2.6",         256000 },
     { "kimi-k2-6",         256000 },
     { "kimi-k2.5",         256000 },
@@ -132,6 +133,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // OpenAI GPT Models
     // -----------------------------------------------------------------------
+    { "gpt-5.6",          1050000 },
     { "gpt-5.4",           200000 },
     { "gpt-5",             200000 },
     { "gpt-4o",            128000 },
@@ -141,6 +143,17 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     { "gpt-3.5-turbo-16k", 16000 },
     { "gpt-3.5-turbo",     4096 },
     { "gpt-3.5",           4096 },
+
+    // -----------------------------------------------------------------------
+    // Mistral Models
+    // -----------------------------------------------------------------------
+    { "mistral-vibe-cli-latest", 256000 },
+    { "mistral-medium-3.5", 256000 },
+    { "mistral-medium-3-5", 256000 },
+    { "mistral-small-2603", 256000 },
+    { "mistral-large-2512", 256000 },
+    { "ministral-8b-2512",  256000 },
+    { "codestral-2508",     128000 },
 
     // -----------------------------------------------------------------------
     // Google Gemini Models
@@ -300,13 +313,51 @@ std::vector<ModelInfo> build_anthropic_catalog() {
     };
 }
 
-// OpenAI models (updated March 2026)
+[[nodiscard]] ModelInfo make_gpt56_model(
+    std::string canonical_id,
+    std::vector<std::string> aliases,
+    std::string display_name,
+    ModelPricing pricing) {
+    return ModelInfo{
+        .canonical_id = std::move(canonical_id),
+        .aliases = std::move(aliases),
+        .display_name = std::move(display_name),
+        .provider = "openai",
+        .context_window = 1'050'000,
+        .max_output_tokens = 128'000,
+        .max_reasoning_tokens = 128'000,
+        .capabilities = CAP_FULL |
+            static_cast<uint32_t>(ModelCapability::Reasoning) |
+            static_cast<uint32_t>(ModelCapability::PromptCaching),
+        .tier = ModelTier::Reasoning,
+        .pricing = pricing,
+        .knowledge_cutoff = "2026-02-16",
+        .constraints = kStandardConstraints,
+    };
+}
+
+// OpenAI models (updated July 2026)
 std::vector<ModelInfo> build_openai_catalog() {
     return {
-        // GPT-5.4 (recommended Codex default model)
+        make_gpt56_model(
+            "gpt-5.6-sol",
+            {"gpt-5.6", "gpt5"},
+            "GPT-5.6 Sol",
+            {5.00, 30.00, 0.50, 6.25}),
+        make_gpt56_model(
+            "gpt-5.6-terra",
+            {},
+            "GPT-5.6 Terra",
+            {2.50, 15.00, 0.25, 3.125}),
+        make_gpt56_model(
+            "gpt-5.6-luna",
+            {},
+            "GPT-5.6 Luna",
+            {1.00, 6.00, 0.10, 1.25}),
+        // Retained for existing configurations and explicit older-model use.
         {
             .canonical_id = "gpt-5.4",
-            .aliases = {"gpt-5.4-latest", "gpt-5", "gpt5"},
+            .aliases = {"gpt-5.4-latest"},
             .display_name = "GPT-5.4",
             .provider = "openai",
             .context_window = 200000,
@@ -418,11 +469,105 @@ std::vector<ModelInfo> build_openai_catalog() {
     };
 }
 
+// Mistral API models (updated July 2026)
+std::vector<ModelInfo> build_mistral_catalog() {
+    constexpr ModelCapabilities CAP_MISTRAL_REASONING =
+        CAP_FULL | static_cast<uint32_t>(ModelCapability::Reasoning);
+
+    return {
+        {
+            .canonical_id = "mistral-vibe-cli-latest",
+            .aliases = {
+                "mistral-medium-3.5",
+                "mistral-medium-3-5",
+                "mistral-medium-latest",
+            },
+            .display_name = "Mistral Medium 3.5 (Vibe)",
+            .provider = "mistral",
+            .context_window = 256'000,
+            .capabilities = CAP_MISTRAL_REASONING,
+            .tier = ModelTier::Reasoning,
+            .pricing = {1.50, 7.50, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mistral-small-2603",
+            .aliases = {"mistral-small-latest"},
+            .display_name = "Mistral Small 4",
+            .provider = "mistral",
+            .context_window = 256'000,
+            .capabilities = CAP_MISTRAL_REASONING,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.15, 0.60, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mistral-large-2512",
+            .aliases = {"mistral-large-latest", "mistral-large", "mistral"},
+            .display_name = "Mistral Large 3",
+            .provider = "mistral",
+            .context_window = 256'000,
+            .capabilities = CAP_FULL,
+            .tier = ModelTier::Powerful,
+            .pricing = {0.50, 1.50, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "ministral-8b-2512",
+            .aliases = {"ministral-8b-latest"},
+            .display_name = "Ministral 3 8B",
+            .provider = "mistral",
+            .context_window = 256'000,
+            .capabilities = CAP_FULL,
+            .tier = ModelTier::Fast,
+            .pricing = {0.15, 0.15, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "codestral-2508",
+            .aliases = {"codestral-latest"},
+            .display_name = "Codestral",
+            .provider = "mistral",
+            .context_window = 128'000,
+            .capabilities = CAP_TOOLS | CAP_JSON,
+            .tier = ModelTier::Fast,
+            .pricing = {0.30, 0.90, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+    };
+}
+
 // Kimi models (Moonshot AI)
 std::vector<ModelInfo> build_kimi_catalog() {
     constexpr ModelCapabilities CAP_KIMI_MULTIMODAL =
         CAP_FULL | static_cast<uint32_t>(ModelCapability::VideoInput);
     return {
+        {
+            .canonical_id = "kimi-k3",
+            .aliases = {},
+            .display_name = "Kimi K3",
+            .provider = "kimi",
+            .context_window = 1'048'576,
+            .max_output_tokens = 1'048'576,
+            .max_reasoning_tokens = 1'048'576,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Reasoning,
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "k3",
+            .aliases = {},
+            .display_name = "Kimi K3 (Kimi Code)",
+            .provider = "kimi",
+            .context_window = 1'048'576,
+            .max_output_tokens = 1'048'576,
+            .max_reasoning_tokens = 1'048'576,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Reasoning,
+            .constraints = kStandardConstraints,
+        },
         {
             .canonical_id = "kimi-k2.7-code",
             .aliases = {"k2.7-code"},
@@ -433,6 +578,19 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .capabilities = CAP_KIMI_MULTIMODAL | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier = ModelTier::Balanced,
             .pricing = {0.95, 4.0, 0.19, -1.0},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "kimi-k2.7-code-highspeed",
+            .aliases = {},
+            .display_name = "Kimi K2.7 Code HighSpeed",
+            .provider = "kimi",
+            .context_window = 256000,
+            .max_output_tokens = 8192,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Fast,
             .knowledge_cutoff = "2026-06",
             .constraints = kStandardConstraints,
         },
@@ -473,6 +631,19 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .tier = ModelTier::Balanced,
             .pricing = {5.0, 20.0, -1.0, -1.0},
             .knowledge_cutoff = "2024-06",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "kimi-for-coding-highspeed",
+            .aliases = {},
+            .display_name = "Kimi for Coding HighSpeed",
+            .provider = "kimi",
+            .context_window = 256000,
+            .max_output_tokens = 8192,
+            .capabilities = CAP_KIMI_MULTIMODAL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Fast,
+            .knowledge_cutoff = "2026-06",
             .constraints = kStandardConstraints,
         },
         {
@@ -1009,19 +1180,6 @@ std::vector<ModelInfo> build_local_catalog() {
             .knowledge_cutoff = "2023-06",
             .constraints = kStandardConstraints,
         },
-        {
-            .canonical_id = "mistral-large-2407",
-            .aliases = {"mistral-large", "mistral"},
-            .display_name = "Mistral Large",
-            .provider = "local",
-            .context_window = 128000,
-            .max_output_tokens = 4096,
-            .capabilities = CAP_TOOLS | CAP_JSON,
-            .tier = ModelTier::Balanced,
-            .pricing = {2.0, 6.0, 0.0, 0.0},  // API pricing if using Mistral API
-            .knowledge_cutoff = "2024-07",
-            .constraints = kStandardConstraints,
-        },
     };
 }
 
@@ -1057,6 +1215,7 @@ void ModelRegistry::load_defaults() {
     
     register_all(build_anthropic_catalog());
     register_all(build_openai_catalog());
+    register_all(build_mistral_catalog());
     register_all(build_kimi_catalog());
     register_all(build_zai_catalog());
     register_all(build_gemini_catalog());

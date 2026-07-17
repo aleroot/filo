@@ -665,9 +665,19 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.contains("grok-reasoning"));
     REQUIRE(config.providers.at("grok-reasoning").model == "grok-4.5");
     REQUIRE(config.providers.at("grok-reasoning").wire_api == "responses");
+    REQUIRE(config.providers.contains("openai"));
+    REQUIRE(config.providers.at("openai").model == "gpt-5.6-sol");
+    REQUIRE(config.providers.contains("mistral"));
+    REQUIRE(config.providers.at("mistral").model == "mistral-vibe-cli-latest");
+    REQUIRE(config.providers.at("mistral").reasoning_effort == "high");
     REQUIRE(config.providers.contains("kimi"));
-    REQUIRE(config.providers.at("kimi").model == "kimi-k2.7-code");
-    REQUIRE(config.providers.at("kimi").reasoning_effort == "high");
+    REQUIRE(config.providers.at("kimi").model == "kimi-k3");
+    REQUIRE(config.providers.at("kimi").reasoning_effort == "max");
+    REQUIRE(config.providers.contains("kimi-code"));
+    REQUIRE(config.providers.at("kimi-code").model == "k3");
+    REQUIRE(config.providers.at("kimi-code").base_url == "https://api.kimi.com/coding/v1");
+    REQUIRE(config.providers.contains("kimi-code-fast"));
+    REQUIRE(config.providers.at("kimi-code-fast").model == "kimi-for-coding-highspeed");
     REQUIRE(config.providers.contains("kimi-k2-6"));
     REQUIRE(config.providers.at("kimi-k2-6").model == "kimi-k2.6");
     REQUIRE(config.providers.contains("kimi-k2-5"));
@@ -692,7 +702,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K2.7 Code default",
+TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K3 default",
           "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_login_kimi_profile");
     const fs::path xdg_home = sandbox / "xdg";
@@ -721,7 +731,7 @@ TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K2
     REQUIRE(config.default_model_selection == "manual");
     REQUIRE(config.providers.contains("kimi"));
     REQUIRE(config.providers.at("kimi").auth_type == "oauth_kimi");
-    REQUIRE(config.providers.at("kimi").model == "kimi-k2.7-code");
+    REQUIRE(config.providers.at("kimi").model == "k3");
 
     fs::remove_all(sandbox);
 }
@@ -794,10 +804,12 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(manager.get_config().default_provider == "openai");
     REQUIRE(manager.get_config().default_model_selection == "manual");
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
+    REQUIRE(manager.get_config().providers.at("openai").model == "gpt-5.4");
 
     REQUIRE(manager.persist_login_profile("openai-pkce", &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
+    REQUIRE(manager.get_config().providers.at("openai").model == "gpt-5.4");
 
     REQUIRE(manager.persist_login_profile("x.ai", &error));
     REQUIRE(error.empty());
