@@ -85,6 +85,7 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
                 "Return a concise, actionable final summary for the parent agent.",
             .provider_override = "",
             .model_override = "",
+            .response_format = std::nullopt,
             .allowed_tools = {},
             .use_allow_list = false,
             .allow_task_tool = false,
@@ -100,6 +101,7 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
                 "Do not edit files. Cite concrete files and findings in your final summary.",
             .provider_override = "",
             .model_override = "",
+            .response_format = std::nullopt,
             .allowed_tools = [] {
                 std::unordered_set<std::string> tool_names;
                 for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
@@ -251,6 +253,7 @@ std::string SubagentOrchestrator::execute_task(
         .session_context = context.session_context,
         .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
         .model = plan->model_name,
+        .response_format = plan->response_format,
         .allowed_tools = plan->allowed_tool_names(),
         .max_steps = plan->max_steps,
         .prompt = prompt,
@@ -416,6 +419,7 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
         .provider = std::move(resolved_provider),
         .provider_name = std::move(provider_name),
         .model_name = std::move(model_name),
+        .response_format = profile->response_format,
         .tools = std::move(tools),
         .allow_task_tool = profile->allow_task_tool,
         .max_steps = max_steps,
@@ -443,6 +447,7 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
                     name),
                 .provider_override = "",
                 .model_override = "",
+                .response_format = std::nullopt,
                 .allowed_tools = {},
                 .use_allow_list = false,
                 .allow_task_tool = false,
@@ -456,6 +461,9 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
         if (!config_profile.prompt.empty()) it->prompt = config_profile.prompt;
         if (!config_profile.provider.empty()) it->provider_override = config_profile.provider;
         if (!config_profile.model.empty()) it->model_override = config_profile.model;
+        if (config_profile.response_format.has_value()) {
+            it->response_format = config_profile.response_format;
+        }
 
         if (config_profile.allowed_tools.has_value()) {
             it->allowed_tools.clear();

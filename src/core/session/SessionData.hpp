@@ -42,11 +42,37 @@ struct SessionGoal {
     std::string completed_at;
 };
 
+enum class TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+};
+
+[[nodiscard]] inline std::string_view to_string(TodoStatus status) noexcept {
+    switch (status) {
+    case TodoStatus::Pending:    return "pending";
+    case TodoStatus::InProgress: return "in_progress";
+    case TodoStatus::Completed:  return "completed";
+    }
+    return "pending";
+}
+
+[[nodiscard]] inline TodoStatus todo_status_from_string(std::string_view status) noexcept {
+    if (status == "in_progress") return TodoStatus::InProgress;
+    if (status == "completed" || status == "complete") return TodoStatus::Completed;
+    return TodoStatus::Pending;
+}
+
+[[nodiscard]] inline bool is_completed(TodoStatus status) noexcept {
+    return status == TodoStatus::Completed;
+}
+
 struct SessionTodoItem {
     std::string id;
     std::string text;
-    bool completed = false;
+    TodoStatus status = TodoStatus::Pending;
     std::string created_at;
+    std::string updated_at;
     std::string completed_at;
 };
 
@@ -56,7 +82,7 @@ struct SessionTodoItem {
 // data type with no external dependencies.
 // ---------------------------------------------------------------------------
 struct SessionData {
-    static constexpr int kVersion = 3;
+    static constexpr int kVersion = 4;
 
     int         version         = kVersion;
     std::string session_id;

@@ -331,7 +331,7 @@ std::string build_handoff_summary(const SessionData& data) {
     if (!data.todos.empty()) {
         std::vector<std::string> pending_todos;
         for (const auto& todo : data.todos) {
-            if (todo.completed) {
+            if (is_completed(todo.status)) {
                 continue;
             }
             append_unique_limited(pending_todos, todo.text, 5, 140);

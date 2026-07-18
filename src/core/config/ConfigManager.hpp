@@ -6,6 +6,7 @@
 #include <optional>
 #include <filesystem>
 #include <string_view>
+#include "core/llm/ResponseFormat.hpp"
 #include "core/llm/routing/PolicyConfig.hpp"
 
 namespace core::config {
@@ -160,6 +161,7 @@ struct SubagentConfig {
     std::string prompt;
     std::string provider;
     std::string model;
+    std::optional<core::llm::ResponseFormat> response_format;
 
     std::optional<std::vector<std::string>> allowed_tools;
     std::optional<bool> use_allow_list;

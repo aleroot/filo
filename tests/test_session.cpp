@@ -6,13 +6,17 @@
 #include "core/session/SessionReport.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/TodoManager.hpp"
 #include "core/session/TodoUtils.hpp"
+#include "core/tools/TodoTool.hpp"
+#include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -23,6 +27,10 @@
 // Helpers
 // ---------------------------------------------------------------------------
 namespace {
+
+std::string fixed_todo_time() {
+    return "2026-07-18T12:00:00Z";
+}
 
 core::session::SessionData make_test_session(std::string_view id) {
     core::session::SessionData data;
@@ -291,15 +299,17 @@ TEST_CASE("SessionStore round-trips session todos", "[session][json]") {
     data.todos.push_back(core::session::SessionTodoItem{
         .id = "1",
         .text = "Investigate steering prompt",
-        .completed = false,
+        .status = core::session::TodoStatus::Pending,
         .created_at = "2026-03-22T10:20:00Z",
+        .updated_at = "2026-03-22T10:20:00Z",
         .completed_at = {},
     });
     data.todos.push_back(core::session::SessionTodoItem{
         .id = "2",
         .text = "Ship MCP command",
-        .completed = true,
+        .status = core::session::TodoStatus::Completed,
         .created_at = "2026-03-22T10:21:00Z",
+        .updated_at = "2026-03-22T10:22:00Z",
         .completed_at = "2026-03-22T10:30:00Z",
     });
 
@@ -308,9 +318,51 @@ TEST_CASE("SessionStore round-trips session todos", "[session][json]") {
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->todos.size() == 2);
     CHECK(loaded->todos[0].text == "Investigate steering prompt");
-    CHECK_FALSE(loaded->todos[0].completed);
-    CHECK(loaded->todos[1].completed);
+    CHECK(loaded->todos[0].status == core::session::TodoStatus::Pending);
+    CHECK(loaded->todos[1].status == core::session::TodoStatus::Completed);
     CHECK(loaded->todos[1].completed_at == "2026-03-22T10:30:00Z");
+}
+
+TEST_CASE("SessionStore migrates legacy completed todo flags", "[session][json][migration]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_legacy_todos"};
+    const auto path = tmp.path / "session-20260718-120000-legacy01.json";
+    std::ofstream{path} << R"({
+        "version":3,
+        "session_id":"legacy01",
+        "todos":[
+            {"id":"1","text":"Done","completed":true,"created_at":"old","completed_at":"done"},
+            {"id":"2","text":"Open","completed":false,"created_at":"old","completed_at":""}
+        ]
+    })";
+
+    const core::session::SessionStore store{tmp.path};
+    const auto loaded = store.load_by_id("legacy01");
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->version == core::session::SessionData::kVersion);
+    REQUIRE(loaded->todos.size() == 2);
+    CHECK(loaded->todos[0].status == core::session::TodoStatus::Completed);
+    CHECK(loaded->todos[1].status == core::session::TodoStatus::Pending);
+}
+
+TEST_CASE("SessionStore rejects future schemas and always writes the current version",
+          "[session][json][migration]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_future_session"};
+    core::session::SessionData current = make_test_session("current01");
+    current.version = 1;
+    const core::session::SessionStore store{tmp.path};
+    REQUIRE(store.save(current));
+    std::ifstream saved{store.compute_path(current)};
+    const std::string serialized{
+        std::istreambuf_iterator<char>{saved},
+        std::istreambuf_iterator<char>{}};
+    CHECK(serialized.starts_with(
+        std::format("{{\"version\":{}", core::session::SessionData::kVersion)));
+
+    const auto path = tmp.path / "session-20260718-120000-future01.json";
+    std::ofstream{path} << std::format(
+        R"({{"version":{},"session_id":"future01"}})",
+        core::session::SessionData::kVersion + 1);
+    CHECK_FALSE(store.load_by_id("future01").has_value());
 }
 
 TEST_CASE("SessionStore round-trips session goal", "[session][json]") {
@@ -424,6 +476,65 @@ TEST_CASE("Todo utils fall back to row indexes when IDs are prefixed", "[session
     CHECK(*core::session::todo::resolve_index(todos, "2") == 1);
     REQUIRE(core::session::todo::resolve_index(todos, "t2").has_value());
     CHECK(*core::session::todo::resolve_index(todos, "t2") == 0);
+}
+
+TEST_CASE("TodoManager replaces plans transactionally and preserves stable metadata", "[session][todos]") {
+    core::session::TodoManager manager{&fixed_todo_time};
+    auto initial = manager.replace({
+        {.text = "Inspect parser", .status = core::session::TodoStatus::InProgress},
+        {.text = "Add tests", .status = core::session::TodoStatus::Pending},
+    });
+    REQUIRE(initial.has_value());
+    REQUIRE(initial->size() == 2);
+    CHECK((*initial)[0].id == "t1");
+    CHECK((*initial)[0].created_at == fixed_todo_time());
+
+    auto updated = manager.replace({
+        {.id = "t1", .text = "Inspect parser", .status = core::session::TodoStatus::Completed},
+        {.id = "t2", .text = "Add tests", .status = core::session::TodoStatus::InProgress},
+    });
+    REQUIRE(updated.has_value());
+    CHECK((*updated)[0].created_at == (*initial)[0].created_at);
+    CHECK((*updated)[0].status == core::session::TodoStatus::Completed);
+
+    const auto before_invalid = manager.current();
+    auto invalid = manager.replace({
+        {.id = "t1", .text = "One", .status = core::session::TodoStatus::InProgress},
+        {.id = "t2", .text = "Two", .status = core::session::TodoStatus::InProgress},
+    });
+    CHECK_FALSE(invalid.has_value());
+    CHECK(manager.current()[0].text == before_invalid[0].text);
+}
+
+TEST_CASE("TodoManager reserves explicit ids before assigning new ids", "[session][todos]") {
+    core::session::TodoManager manager{&fixed_todo_time};
+    const auto result = manager.replace({
+        {.text = "New first item", .status = core::session::TodoStatus::Pending},
+        {.id = "t1", .text = "Existing item", .status = core::session::TodoStatus::InProgress},
+    });
+    REQUIRE(result.has_value());
+    REQUIRE(result->size() == 2);
+    CHECK((*result)[0].id == "t2");
+    CHECK((*result)[1].id == "t1");
+}
+
+TEST_CASE("TodoTool validates and writes the agent plan", "[session][todos][tools]") {
+    core::session::TodoManager manager{&fixed_todo_time};
+    core::tools::TodoTool tool{manager};
+    auto context = test_support::make_workspace_session_context();
+
+    const auto result = tool.execute(
+        R"({"todos":[{"content":"Implement fast path","status":"in_progress"},{"content":"Benchmark","status":"pending"}]})",
+        context);
+    CHECK(result.contains("\"ok\":true"));
+    CHECK(result.contains("\"id\":\"t1\""));
+    REQUIRE(manager.current().size() == 2);
+
+    const auto invalid = tool.execute(
+        R"({"todos":[{"content":"A","status":"in_progress"},{"content":"B","status":"in_progress"}]})",
+        context);
+    CHECK(invalid.contains("\"error\""));
+    CHECK(manager.current().size() == 2);
 }
 
 // ---------------------------------------------------------------------------

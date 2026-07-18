@@ -677,7 +677,6 @@ RunDiagnostics run_for_test(const RunOptions& options,
     std::string session_id = core::session::SessionStore::generate_id();
     std::string session_name;
     std::string created_at = core::session::SessionStore::now_iso8601();
-    std::vector<core::session::SessionTodoItem> session_todos;
     core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
 
     std::optional<core::session::SessionData> resumed_session;
@@ -701,8 +700,8 @@ RunDiagnostics run_for_test(const RunOptions& options,
         diagnostics.used_resumed_session = true;
         diagnostics.resumed_session_id = resumed_session->session_id;
         goal_manager.restore(resumed_session->goal);
+        agent->restore_todos(resumed_session->todos);
         if (options.continue_last) {
-            session_todos = resumed_session->todos;
             auto handoff_source = *resumed_session;
             handoff_source.goal.reset();
             agent->load_history(
@@ -714,7 +713,6 @@ RunDiagnostics run_for_test(const RunOptions& options,
             session_id = resumed_session->session_id;
             session_name = resumed_session->name;
             created_at = resumed_session->created_at;
-            session_todos = resumed_session->todos;
             agent->load_history(
                 resumed_session->messages,
                 resumed_session->context_summary,
@@ -731,7 +729,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     const std::string emitted_session_id = session_id;
 
     agent->set_efficiency_decision_fn(
-        [agent, &store, &session_id, &session_name, &created_at, &runtime, &session_todos](
+        [agent, &store, &session_id, &session_name, &created_at, &runtime](
             const core::session::SessionEfficiencyDecision&) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
@@ -748,7 +746,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
             archived.mode = snap_mode;
             archived.context_summary = snap_context;
             archived.messages = snap_messages;
-            archived.todos = session_todos;
+            archived.todos = agent->get_todos();
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
             const auto total = budget.session_total();
@@ -976,7 +974,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     data.context_summary = agent->get_context_summary();
     data.messages = history_after;
     data.goal = goal_manager.current();
-    data.todos = session_todos;
+    data.todos = agent->get_todos();
     data.stats.prompt_tokens = totals.prompt_tokens;
     data.stats.completion_tokens = totals.completion_tokens;
     data.stats.cost_usd = cost_usd;

@@ -6,9 +6,11 @@
 #include "../llm/ProviderManager.hpp"
 #include "../memory/MemoryBackgroundService.hpp"
 #include "../session/GoalManager.hpp"
+#include "../session/TodoManager.hpp"
 #include "../session/SessionData.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../tools/ToolManager.hpp"
+#include "../tools/TodoTool.hpp"
 #include "HistoryCompactor.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "SubagentEvents.hpp"
@@ -89,6 +91,16 @@ public:
     void grant_workspace_paths(
         const std::vector<std::filesystem::path>& paths);
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
+    void restore_todos(std::vector<core::session::SessionTodoItem> todos);
+    [[nodiscard]] std::vector<core::session::SessionTodoItem> get_todos() const;
+    [[nodiscard]] std::expected<core::session::SessionTodoItem, std::string>
+    add_todo(std::string_view text);
+    [[nodiscard]] std::expected<core::session::SessionTodoItem, std::string>
+    set_todo_status(std::string_view selector, core::session::TodoStatus status);
+    [[nodiscard]] std::expected<core::session::SessionTodoItem, std::string>
+    remove_todo(std::string_view selector);
+    [[nodiscard]] std::size_t clear_completed_todos();
+    void clear_todos();
     void set_memory_thread_policy(core::memory::MemoryThreadPolicy policy);
     [[nodiscard]] core::memory::MemoryThreadPolicy memory_thread_policy() const;
     void run_memory_review_async(std::function<void(std::string)> status_callback = {});
@@ -268,6 +280,8 @@ private:
     core::tools::ToolManager& skill_manager_;
     core::context::SessionContext session_context_;
     SubagentOrchestrator orchestrator_;
+    core::session::TodoManager todo_manager_;
+    core::tools::TodoTool todo_tool_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
     std::string current_mode_ = "BUILD";

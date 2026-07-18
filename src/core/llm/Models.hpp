@@ -17,6 +17,7 @@
 #include "../utils/Base64.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/MimeUtils.hpp"
+#include "ResponseFormat.hpp"
 
 namespace core::llm {
 
@@ -465,28 +466,6 @@ struct Tool {
     core::tools::ToolDefinition function;
 };
 
-/**
- * @brief Response format configuration for structured outputs (JSON mode).
- */
-struct ResponseFormat {
-    enum class Type { Text, JsonObject, JsonSchema };
-    
-    Type type = Type::Text;
-    std::string schema;  // JSON schema when type is JsonSchema
-    
-    [[nodiscard]] std::string to_string() const noexcept {
-        switch (type) {
-            case Type::JsonObject: return "json_object";
-            case Type::JsonSchema: return "json_schema";
-            default: return "text";
-        }
-    }
-    
-    [[nodiscard]] bool is_structured() const noexcept {
-        return type == Type::JsonObject || type == Type::JsonSchema;
-    }
-};
-
 struct ChatRequest {
     std::string model;
     std::vector<Message> messages;
@@ -673,7 +652,9 @@ struct Serializer {
         
         // Response format (JSON mode / structured outputs)
         if (req.response_format.is_structured()) {
-            payload += R"(,"response_format":{"type":")" + req.response_format.to_string() + '"';
+            payload += R"(,"response_format":{"type":")";
+            payload += req.response_format.to_string();
+            payload += '"';
             if (req.response_format.type == ResponseFormat::Type::JsonSchema && !req.response_format.schema.empty()) {
                 payload += R"(,"schema":)" + req.response_format.schema;
             }

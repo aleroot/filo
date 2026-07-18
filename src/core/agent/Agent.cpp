@@ -10,6 +10,7 @@
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../session/SessionStats.hpp"
+#include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
 #include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
@@ -247,7 +248,9 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     : provider_(std::move(provider))
     , skill_manager_(skill_manager)
     , session_context_(std::move(session_context))
-    , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config()) {
+    , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config())
+    , todo_manager_(&core::session::SessionStore::now_iso8601)
+    , todo_tool_(todo_manager_) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
@@ -324,6 +327,37 @@ void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
     session_goal_ = std::move(goal);
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
+}
+
+void Agent::restore_todos(std::vector<core::session::SessionTodoItem> todos) {
+    todo_manager_.restore(std::move(todos));
+}
+
+std::vector<core::session::SessionTodoItem> Agent::get_todos() const {
+    return todo_manager_.current();
+}
+
+std::expected<core::session::SessionTodoItem, std::string>
+Agent::add_todo(std::string_view text) {
+    return todo_manager_.add(text);
+}
+
+std::expected<core::session::SessionTodoItem, std::string>
+Agent::set_todo_status(std::string_view selector, core::session::TodoStatus status) {
+    return todo_manager_.set_status(selector, status);
+}
+
+std::expected<core::session::SessionTodoItem, std::string>
+Agent::remove_todo(std::string_view selector) {
+    return todo_manager_.remove(selector);
+}
+
+std::size_t Agent::clear_completed_todos() {
+    return todo_manager_.clear_completed();
+}
+
+void Agent::clear_todos() {
+    todo_manager_.clear();
 }
 
 void Agent::set_memory_thread_policy(core::memory::MemoryThreadPolicy policy) {
@@ -435,6 +469,7 @@ int Agent::sanitize_max_steps_per_turn(int value) noexcept {
 
 std::string Agent::build_dynamic_prompt_suffix() const {
     std::string suffix = core::session::GoalManager::prompt_context(session_goal_);
+    suffix += todo_manager_.prompt_context();
     if (!context_summary_.empty()) {
         suffix += "\n\nSummary of earlier conversation context:\n" + context_summary_;
     }
@@ -881,6 +916,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         if (tool_is_allowed_for_turn(SubagentOrchestrator::kTaskToolName, turn_callbacks)) {
             request.tools.push_back(orchestrator_.task_tool_definition());
         }
+        if (tool_is_allowed_for_turn(core::tools::names::kWriteTodos, turn_callbacks)) {
+            request.tools.push_back(core::llm::Tool{
+                .function = todo_tool_.get_definition(),
+            });
+        }
     }
 
     if (turn_callbacks.on_step_begin) {
@@ -1221,6 +1261,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 std::optional<core::tools::ToolDefinition> definition;
                 if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
                     definition = self->orchestrator_.task_tool_definition().function;
+                } else if (tc.function.name == core::tools::names::kWriteTodos) {
+                    definition = self->todo_tool_.get_definition();
                 } else {
                     definition = self->skill_manager_.get_tool_definition(tc.function.name);
                 }
@@ -1388,6 +1430,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 tc.function.arguments,
                                 provider_for_task,
                                 run_context);
+                        } else if (tc.function.name == core::tools::names::kWriteTodos) {
+                            result = self->todo_tool_.execute(
+                                tc.function.arguments,
+                                session_context);
                         } else {
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,

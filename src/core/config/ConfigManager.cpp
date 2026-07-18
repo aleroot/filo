@@ -439,6 +439,7 @@ SubagentConfig merge_subagent(const SubagentConfig& base, const SubagentConfig& 
     if (!overlay.prompt.empty()) merged.prompt = overlay.prompt;
     if (!overlay.provider.empty()) merged.provider = overlay.provider;
     if (!overlay.model.empty()) merged.model = overlay.model;
+    if (overlay.response_format.has_value()) merged.response_format = overlay.response_format;
     if (overlay.allowed_tools.has_value()) merged.allowed_tools = overlay.allowed_tools;
     if (overlay.use_allow_list.has_value()) merged.use_allow_list = overlay.use_allow_list;
     if (overlay.allow_task_tool.has_value()) merged.allow_task_tool = overlay.allow_task_tool;
@@ -782,6 +783,32 @@ SubagentConfig parse_subagent(simdjson::dom::object subagent_obj) {
     if (!subagent_obj["prompt"].get(value)) subagent.prompt = std::string(value);
     if (!subagent_obj["provider"].get(value)) subagent.provider = std::string(value);
     if (!subagent_obj["model"].get(value)) subagent.model = std::string(value);
+
+    simdjson::dom::object format_object;
+    if (!subagent_obj["response_format"].get(format_object)) {
+        std::string_view type;
+        if (!format_object["type"].get(type)) {
+            if (type == "json_object") {
+                subagent.response_format = core::llm::ResponseFormat{
+                    .type = core::llm::ResponseFormat::Type::JsonObject,
+                };
+            } else if (type == "json_schema") {
+                simdjson::dom::element schema;
+                if (!format_object["schema"].get(schema)
+                    && schema.type() == simdjson::dom::element_type::OBJECT) {
+                    subagent.response_format = core::llm::ResponseFormat{
+                        .type = core::llm::ResponseFormat::Type::JsonSchema,
+                        .schema = simdjson::to_string(schema),
+                    };
+                }
+            }
+        }
+    } else if (!subagent_obj["response_format"].get(value)
+               && value == "json_object") {
+        subagent.response_format = core::llm::ResponseFormat{
+            .type = core::llm::ResponseFormat::Type::JsonObject,
+        };
+    }
 
     bool bool_value = false;
     if (!subagent_obj["use_allow_list"].get(bool_value)) {

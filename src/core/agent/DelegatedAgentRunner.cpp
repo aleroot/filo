@@ -124,6 +124,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
          provider = request.provider,
          provider_name = std::move(request.provider_name),
          model = request.model,
+         response_format = std::move(request.response_format),
          allowed_tools = std::move(request.allowed_tools),
          ledger_actor = std::move(ledger_actor),
          emit_event]() mutable {
@@ -189,6 +190,7 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                     .provider_override = std::move(provider),
                     .provider_name_override = std::move(provider_name),
                     .model_override = std::move(model),
+                    .response_format_override = std::move(response_format),
                     .allowed_tools = std::move(allowed_tools),
                     .ledger_actor = std::move(ledger_actor),
                     .allow_efficiency_rotation = false,

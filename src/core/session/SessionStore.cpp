@@ -215,10 +215,12 @@ void append_todo_json(std::string& out, const core::session::SessionTodoItem& to
     core::utils::append_escaped(out, todo.id);
     out += "\",\"text\":\"";
     core::utils::append_escaped(out, todo.text);
-    out += "\",\"completed\":";
-    out += todo.completed ? "true" : "false";
-    out += ",\"created_at\":\"";
+    out += "\",\"status\":\"";
+    core::utils::append_escaped(out, core::session::to_string(todo.status));
+    out += "\",\"created_at\":\"";
     core::utils::append_escaped(out, todo.created_at);
+    out += "\",\"updated_at\":\"";
+    core::utils::append_escaped(out, todo.updated_at);
     out += "\",\"completed_at\":\"";
     core::utils::append_escaped(out, todo.completed_at);
     out += "\"}";
@@ -247,7 +249,7 @@ std::string SessionStore::to_json(const SessionData& data) {
     out.reserve(4096 + data.messages.size() * 512);
 
     out += "{\"version\":";
-    out += std::to_string(data.version);
+    out += std::to_string(SessionData::kVersion);
     out += ",\"session_id\":\"";
     core::utils::append_escaped(out, data.session_id);
     out += "\",\"name\":\"";
@@ -312,13 +314,19 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
             return std::nullopt;
         }
 
-        SessionData data;
-
-        int64_t version = 1;
-        if (doc["version"].get(version) != simdjson::SUCCESS) {
-            version = 1;
+        int64_t stored_version = 1;
+        if (doc["version"].get(stored_version) != simdjson::SUCCESS) {
+            stored_version = 1;
         }
-        data.version = static_cast<int>(version);
+        if (stored_version > SessionData::kVersion) {
+            return std::nullopt;
+        }
+
+        SessionData data;
+        // Successful parsing normalizes the in-memory representation. Any
+        // subsequent save must advertise the schema it actually emits, not
+        // the legacy version found on disk.
+        data.version = SessionData::kVersion;
 
         auto get_str = [&](const char* key, std::string& out) {
             std::string_view sv;
@@ -465,12 +473,19 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                 if (todo_el["text"].get(sv) == simdjson::SUCCESS) {
                     todo.text = std::string(sv);
                 }
-                bool completed = false;
-                if (todo_el["completed"].get(completed) == simdjson::SUCCESS) {
-                    todo.completed = completed;
+                if (todo_el["status"].get(sv) == simdjson::SUCCESS) {
+                    todo.status = core::session::todo_status_from_string(sv);
+                } else {
+                    bool completed = false;
+                    if (todo_el["completed"].get(completed) == simdjson::SUCCESS && completed) {
+                        todo.status = core::session::TodoStatus::Completed;
+                    }
                 }
                 if (todo_el["created_at"].get(sv) == simdjson::SUCCESS) {
                     todo.created_at = std::string(sv);
+                }
+                if (todo_el["updated_at"].get(sv) == simdjson::SUCCESS) {
+                    todo.updated_at = std::string(sv);
                 }
                 if (todo_el["completed_at"].get(sv) == simdjson::SUCCESS) {
                     todo.completed_at = std::string(sv);

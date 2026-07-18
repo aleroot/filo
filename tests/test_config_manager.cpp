@@ -217,6 +217,15 @@ TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[confi
             "analysis": {
                 "description": "Custom analysis worker",
                 "prompt": "Investigate and summarize.",
+                "response_format": {
+                    "type": "json_schema",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"summary": {"type": "string"}},
+                        "required": ["summary"],
+                        "additionalProperties": false
+                    }
+                },
                 "max_steps": 4
             }
         }
@@ -247,6 +256,9 @@ TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[confi
     REQUIRE(analysis.prompt == "Investigate and summarize.");
     REQUIRE(analysis.max_steps.has_value());
     REQUIRE(analysis.max_steps.value() == 4);
+    REQUIRE(analysis.response_format.has_value());
+    REQUIRE(analysis.response_format->type == core::llm::ResponseFormat::Type::JsonSchema);
+    REQUIRE(analysis.response_format->schema.contains("summary"));
 
     fs::remove_all(sandbox);
 }

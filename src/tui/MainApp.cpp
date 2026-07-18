@@ -19,7 +19,6 @@
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
-#include "core/session/TodoUtils.hpp"
 #include "core/memory/MemoryStore.hpp"
 #include "core/scm/ScmFactory.hpp"
 #include "core/history/PromptHistoryStore.hpp"
@@ -1289,7 +1288,6 @@ RunResult run(RunOptions opts) {
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
     std::string session_file_path;  // computed after first save
     core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
-    std::vector<core::session::SessionTodoItem> session_todos;
     struct SessionSaveState {
         std::mutex write_mutex;
         std::atomic<std::uint64_t> latest_requested{0};
@@ -1330,7 +1328,7 @@ RunResult run(RunOptions opts) {
         session_name       = data.name;
         session_created_at = data.created_at;
         goal_manager.restore(data.goal);
-        session_todos      = data.todos;
+        agent->restore_todos(data.todos);
 
         // Restore agent state.
         agent->load_history(data.messages, data.context_summary, data.mode);
@@ -1390,12 +1388,12 @@ RunResult run(RunOptions opts) {
             if (const auto message = startup_history_message(); !message.empty()) {
                 append_ui_message(ui_messages, make_system_message(message));
             }
-            session_todos.clear();
             goal_manager.clear();
         }
         reset_history_view();
         animation_cv.notify_one();
         agent->set_session_goal(std::nullopt);
+        agent->clear_todos();
         agent->clear_history();
         core::budget::BudgetTracker::get_instance().reset_session();
         core::session::SessionStats::get_instance().reset();
@@ -1798,7 +1796,7 @@ RunResult run(RunOptions opts) {
             session_name       = data.name;
             session_created_at = data.created_at;
             goal_manager.restore(data.goal);
-            session_todos      = data.todos;
+            agent->restore_todos(data.todos);
 
             // Restore agent state.
             agent->load_history(data.messages, data.context_summary, data.mode);
@@ -1899,7 +1897,7 @@ RunResult run(RunOptions opts) {
         std::string provider_name;
         std::string model_name;
         std::optional<core::session::SessionGoal> snap_goal;
-        std::vector<core::session::SessionTodoItem> snap_todos;
+        auto snap_todos = agent->get_todos();
         {
             std::lock_guard lock(ui_mutex);
             old_session_id = session_id;
@@ -1908,7 +1906,6 @@ RunResult run(RunOptions opts) {
             provider_name = active_provider_name;
             model_name = active_model_name;
             snap_goal = goal_manager.current();
-            snap_todos = session_todos;
         }
 
         core::session::SessionData original;
@@ -1992,10 +1989,11 @@ RunResult run(RunOptions opts) {
     agent->set_efficiency_decision_fn(
         [agent, session_store, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &wake_ui, &goal_manager, &session_todos](const core::session::SessionEfficiencyDecision& decision) {
+         &ui_messages, &wake_ui, &goal_manager](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
             auto snap_context = agent->get_context_summary();
+            auto snap_todos = agent->get_todos();
 
             core::session::SessionData archived;
             {
@@ -2006,7 +2004,7 @@ RunResult run(RunOptions opts) {
                 archived.provider = active_provider_name;
                 archived.model = active_model_name;
                 archived.goal = goal_manager.current();
-                archived.todos = session_todos;
+                archived.todos = std::move(snap_todos);
             }
             archived.last_active_at = core::session::SessionStore::now_iso8601();
             archived.working_dir = std::filesystem::current_path().string();
@@ -3929,7 +3927,7 @@ RunResult run(RunOptions opts) {
         std::string provider_name;
         std::string model_name;
         std::optional<core::session::SessionGoal> snap_goal;
-        std::vector<core::session::SessionTodoItem> snap_todos;
+        auto snap_todos = agent->get_todos();
         {
             std::lock_guard lock(ui_mutex);
             sid = session_id;
@@ -3938,7 +3936,6 @@ RunResult run(RunOptions opts) {
             provider_name = active_provider_name;
             model_name = active_model_name;
             snap_goal = goal_manager.current();
-            snap_todos = session_todos;
         }
 
         const std::uint64_t generation =
@@ -4058,14 +4055,8 @@ RunResult run(RunOptions opts) {
             branch->first));
     };
 
-    auto resolve_todo_index_locked = [&](std::string_view selector)
-        -> std::optional<std::size_t> {
-        return core::session::todo::resolve_index(session_todos, selector);
-    };
-
     auto list_todos = [&]() {
-        std::lock_guard lock(ui_mutex);
-        return session_todos;
+        return agent->get_todos();
     };
 
     auto add_todo = [&](std::string_view text) -> core::commands::CommandOperationResult {
@@ -4074,37 +4065,22 @@ RunResult run(RunOptions opts) {
             return {.ok = false, .message = "Todo text cannot be empty."};
         }
 
-        std::string assigned_id;
-        {
-            std::lock_guard lock(ui_mutex);
-            assigned_id = core::session::todo::next_id(session_todos);
-            session_todos.push_back(core::session::SessionTodoItem{
-                .id = assigned_id,
-                .text = trimmed_text,
-                .completed = false,
-                .created_at = core::session::SessionStore::now_iso8601(),
-                .completed_at = {},
-            });
-        }
+        auto added = agent->add_todo(trimmed_text);
+        if (!added.has_value()) return {.ok = false, .message = added.error()};
         save_session_snapshot();
-        return {.ok = true, .message = std::format("Added todo {{{}}}.", assigned_id)};
+        return {.ok = true, .message = std::format("Added todo {{{}}}.", added->id)};
     };
 
     auto set_todo_completed = [&](std::string_view selector, bool completed)
         -> core::commands::CommandOperationResult {
-        std::string todo_label;
-        {
-            std::lock_guard lock(ui_mutex);
-            const auto index = resolve_todo_index_locked(selector);
-            if (!index.has_value()) {
-                return {.ok = false, .message = "Todo not found."};
-            }
-
-            auto& todo = session_todos[*index];
-            todo.completed = completed;
-            todo.completed_at = completed ? core::session::SessionStore::now_iso8601() : std::string{};
-            todo_label = todo.id.empty() ? todo.text : std::format("{{{}}}", todo.id);
-        }
+        auto updated = agent->set_todo_status(
+            selector,
+            completed ? core::session::TodoStatus::Completed
+                      : core::session::TodoStatus::Pending);
+        if (!updated.has_value()) return {.ok = false, .message = updated.error()};
+        const auto todo_label = updated->id.empty()
+            ? updated->text
+            : std::format("{{{}}}", updated->id);
         save_session_snapshot();
         return {
             .ok = true,
@@ -4115,33 +4091,17 @@ RunResult run(RunOptions opts) {
     };
 
     auto remove_todo = [&](std::string_view selector) -> core::commands::CommandOperationResult {
-        std::string todo_label;
-        {
-            std::lock_guard lock(ui_mutex);
-            const auto index = resolve_todo_index_locked(selector);
-            if (!index.has_value()) {
-                return {.ok = false, .message = "Todo not found."};
-            }
-            todo_label = session_todos[*index].id.empty()
-                ? session_todos[*index].text
-                : std::format("{{{}}}", session_todos[*index].id);
-            session_todos.erase(
-                session_todos.begin() + static_cast<std::ptrdiff_t>(*index));
-        }
+        auto removed = agent->remove_todo(selector);
+        if (!removed.has_value()) return {.ok = false, .message = removed.error()};
+        const auto todo_label = removed->id.empty()
+            ? removed->text
+            : std::format("{{{}}}", removed->id);
         save_session_snapshot();
         return {.ok = true, .message = std::format("Removed todo {}.", todo_label)};
     };
 
     auto clear_completed_todos = [&]() -> core::commands::CommandOperationResult {
-        std::size_t removed = 0;
-        {
-            std::lock_guard lock(ui_mutex);
-            const auto original_size = session_todos.size();
-            std::erase_if(session_todos, [](const core::session::SessionTodoItem& todo) {
-                return todo.completed;
-            });
-            removed = original_size - session_todos.size();
-        }
+        const auto removed = agent->clear_completed_todos();
         save_session_snapshot();
         return {
             .ok = true,

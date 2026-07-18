@@ -247,6 +247,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/AskUserQuestionTool.cpp
     src/core/tools/ActivateSkillTool.cpp
     src/core/tools/MemoryTool.cpp
+    src/core/tools/TodoTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
@@ -269,6 +270,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/TaskTool.cpp
     src/core/session/SessionStore.cpp
     src/core/session/GoalManager.cpp
+    src/core/session/TodoManager.cpp
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp

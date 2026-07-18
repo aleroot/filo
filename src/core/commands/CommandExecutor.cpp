@@ -554,8 +554,11 @@ std::string format_todos(const std::vector<core::session::SessionTodoItem>& todo
 
     std::size_t index = 1;
     for (const auto& todo : todos) {
+        const std::string_view marker = todo.status == core::session::TodoStatus::Completed
+            ? "[x] "
+            : todo.status == core::session::TodoStatus::InProgress ? "[~] " : "[ ] ";
         out << "  " << index++ << ". "
-            << (todo.completed ? "[x] " : "[ ] ")
+            << marker
             << todo.text;
         if (!todo.id.empty()) {
             out << "  {" << todo.id << "}";

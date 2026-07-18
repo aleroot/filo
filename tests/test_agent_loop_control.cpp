@@ -9,6 +9,7 @@
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/ToolNames.hpp"
 #include "TestSessionContext.hpp"
 
 #include <algorithm>
@@ -748,6 +749,28 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
           == second_payload.substr(0, second_messages));
     CHECK(second_payload.substr(0, second_messages)
           == third_payload.substr(0, third_messages));
+}
+
+TEST_CASE("Agent exposes write_todos and injects its current plan", "[agent][prompt][todos]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    const auto added = agent->add_todo("Inspect the request pipeline");
+    REQUIRE(added.has_value());
+    send_and_wait(agent, "continue");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    CHECK(std::ranges::any_of(requests[0].tools, [](const core::llm::Tool& tool) {
+        return tool.function.name == core::tools::names::kWriteTodos;
+    }));
+    const auto prompt = requests[0].prompt_plan.render();
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Current task plan"));
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("t1: Inspect the request pipeline"));
 }
 
 TEST_CASE("Agent restores repository snapshot continuity across resume",

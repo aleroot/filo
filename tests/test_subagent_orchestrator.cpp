@@ -119,6 +119,36 @@ TEST_CASE("SubagentOrchestrator executes delegated tasks and returns a task_id",
     REQUIRE(events.back().summary == "delegated-response-1");
 }
 
+TEST_CASE("SubagentOrchestrator forwards profile response schemas to the provider", "[agent][orchestration][structured]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::config::AppConfig config;
+    core::config::SubagentConfig extractor;
+    extractor.response_format = core::llm::ResponseFormat{
+        .type = core::llm::ResponseFormat::Type::JsonSchema,
+        .schema = R"({"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false})",
+    };
+    config.subagents.emplace("extractor", std::move(extractor));
+    core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"extract result","prompt":"return the result","subagent_type":"extractor"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests[0].response_format.type == core::llm::ResponseFormat::Type::JsonSchema);
+    CHECK(requests[0].response_format.schema.contains("summary"));
+}
+
 TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", "[agent][orchestration]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

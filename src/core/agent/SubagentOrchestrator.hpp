@@ -61,6 +61,7 @@ public:
         std::shared_ptr<core::llm::LLMProvider> provider;
         std::string provider_name;
         std::string model_name;
+        std::optional<core::llm::ResponseFormat> response_format;
         std::vector<core::llm::Tool> tools;
         bool allow_task_tool = false;
         int max_steps = 0;
@@ -91,6 +92,7 @@ private:
         std::string prompt;
         std::string provider_override;
         std::string model_override;
+        std::optional<core::llm::ResponseFormat> response_format;
         std::unordered_set<std::string> allowed_tools;
         bool use_allow_list = false;
         bool allow_task_tool = false;

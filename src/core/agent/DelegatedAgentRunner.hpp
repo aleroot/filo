@@ -35,6 +35,7 @@ public:
         core::context::SessionContext session_context;
         std::string mode = "BUILD";
         std::string model;
+        std::optional<core::llm::ResponseFormat> response_format;
         std::vector<std::string> allowed_tools;
         int max_steps = 0;
         std::string prompt;
