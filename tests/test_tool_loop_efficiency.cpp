@@ -107,6 +107,38 @@ TEST_CASE("tool scheduler serializes overlapping write conflicts", "[agent][tool
     REQUIRE(max_active.load(std::memory_order_acquire) == 1);
 }
 
+TEST_CASE("tool scheduler overlaps workspace-wide readers", "[agent][tools][parallel]") {
+    std::atomic<int> active{0};
+    std::atomic<int> max_active{0};
+
+    std::vector<core::agent::ScheduledToolTask<int>> tasks;
+    tasks.push_back(counted_task(core::agent::read_all_tool_access(), active, max_active, 1));
+    tasks.push_back(counted_task(core::agent::read_all_tool_access(), active, max_active, 2));
+
+    core::agent::ToolCallScheduler<int> scheduler;
+    REQUIRE(scheduler.run(std::move(tasks)) == std::vector<int>{1, 2});
+    REQUIRE(max_active.load(std::memory_order_acquire) >= 2);
+}
+
+TEST_CASE("workspace-wide readers wait behind writes", "[agent][tools][parallel]") {
+    std::atomic<int> active{0};
+    std::atomic<int> max_active{0};
+
+    std::vector<core::agent::ScheduledToolTask<int>> tasks;
+    tasks.push_back(counted_task(
+        {core::agent::ToolAccess::file_access(
+            core::agent::ToolFileOperation::Write,
+            "/tmp/filo/output.txt")},
+        active,
+        max_active,
+        1));
+    tasks.push_back(counted_task(core::agent::read_all_tool_access(), active, max_active, 2));
+
+    core::agent::ToolCallScheduler<int> scheduler;
+    REQUIRE(scheduler.run(std::move(tasks)) == std::vector<int>{1, 2});
+    REQUIRE(max_active.load(std::memory_order_acquire) == 1);
+}
+
 TEST_CASE("tool deduplicator reuses same-step identical calls", "[agent][tools]") {
     core::agent::ToolCallDeduplicator dedup;
     dedup.begin_step();

@@ -174,10 +174,12 @@ void backoff_sleep(int attempt) {
 
 RouterProvider::RouterProvider(core::llm::ProviderManager& provider_manager,
                                std::shared_ptr<core::llm::routing::RouterEngine> router_engine,
-                               std::unordered_map<std::string, std::string> provider_default_models)
+                               std::unordered_map<std::string, std::string> provider_default_models,
+                               bool isolate_target_requests)
     : provider_manager_(provider_manager)
     , router_engine_(std::move(router_engine))
-    , provider_default_models_(std::move(provider_default_models)) {}
+    , provider_default_models_(std::move(provider_default_models))
+    , isolate_target_requests_(isolate_target_requests) {}
 
 void RouterProvider::stream_response(
     const ChatRequest& request,
@@ -228,6 +230,13 @@ void RouterProvider::stream_response(
         } catch (const std::exception& e) {
             last_error = std::format("failed to resolve provider '{}': {}", decision.provider, e.what());
             continue; // try next candidate
+        }
+        if (isolate_target_requests_) {
+            if (auto isolated = target_provider->fork_for_parallel_request()) {
+                target_provider = std::move(isolated);
+            }
+            std::lock_guard lock(state_mutex_);
+            active_isolated_provider_ = target_provider;
         }
 
         // Resolve model: use decision.model if set, else provider default.
@@ -369,12 +378,37 @@ std::string RouterProvider::get_last_model() const {
     return last_model_;
 }
 
+ProviderCapabilities RouterProvider::capabilities() const {
+    return ProviderCapabilities{
+        .supports_tool_calls = true,
+        .is_local = false,
+        .supports_parallel_requests = true,
+    };
+}
+
+std::shared_ptr<LLMProvider> RouterProvider::fork_for_parallel_request() const {
+    return std::make_shared<RouterProvider>(
+        provider_manager_,
+        router_engine_,
+        provider_default_models_,
+        true);
+}
+
 bool RouterProvider::should_estimate_cost() const {
     std::lock_guard lock(state_mutex_);
     return last_should_estimate_cost_;
 }
 
 void RouterProvider::cancel() {
+    if (isolate_target_requests_) {
+        std::shared_ptr<LLMProvider> active_provider;
+        {
+            std::lock_guard lock(state_mutex_);
+            active_provider = active_isolated_provider_;
+        }
+        if (active_provider) active_provider->cancel();
+        return;
+    }
     for (const auto& [provider_name, _] : provider_default_models_) {
         try {
             if (auto provider = provider_manager_.get_provider(provider_name)) {
@@ -387,6 +421,15 @@ void RouterProvider::cancel() {
 }
 
 void RouterProvider::reset_conversation_state() {
+    if (isolate_target_requests_) {
+        std::shared_ptr<LLMProvider> active_provider;
+        {
+            std::lock_guard lock(state_mutex_);
+            active_provider = active_isolated_provider_;
+        }
+        if (active_provider) active_provider->reset_conversation_state();
+        return;
+    }
     for (const auto& [provider_name, _] : provider_default_models_) {
         try {
             if (auto provider = provider_manager_.get_provider(provider_name)) {

@@ -27,6 +27,7 @@ inline constexpr std::string_view kWebSearch = "web_search";
 inline constexpr std::string_view kFetchUrl = "fetch_url";
 inline constexpr std::string_view kMemory = "memory";
 inline constexpr std::string_view kWriteTodos = "write_todos";
+inline constexpr std::string_view kReadToolResult = "read_tool_result";
 
 inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
     kReadFile,

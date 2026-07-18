@@ -92,6 +92,7 @@ public:
     [[nodiscard]] std::string get_last_model() const override;
 
     [[nodiscard]] ProviderCapabilities capabilities() const override;
+    [[nodiscard]] std::shared_ptr<LLMProvider> fork_for_parallel_request() const override;
     [[nodiscard]] std::optional<ProviderMetadata> metadata() const override;
 
     /**

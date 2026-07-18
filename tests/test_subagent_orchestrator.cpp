@@ -237,6 +237,13 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     REQUIRE_FALSE(names.contains("write_file"));
     REQUIRE_FALSE(names.contains("run_terminal_command"));
     REQUIRE_FALSE(names.contains("task"));
+    REQUIRE(names.contains("read_tool_result"));
+    REQUIRE(orchestrator.task_is_read_only(
+        R"({"description":"scan repo","prompt":"find routes","subagent_type":"explore"})",
+        "BUILD"));
+    REQUIRE_FALSE(orchestrator.task_is_read_only(
+        R"({"description":"change repo","prompt":"make changes","subagent_type":"general"})",
+        "BUILD"));
 }
 
 TEST_CASE("SubagentOrchestrator rejects unknown subagent_type", "[agent][orchestration]") {

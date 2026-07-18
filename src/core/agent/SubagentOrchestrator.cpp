@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <format>
 #include <mutex>
 #include <ranges>
@@ -25,6 +26,33 @@ namespace {
 
 constexpr int kMinSubagentSteps = 1;
 constexpr int kMaxSubagentSteps = 64;
+
+class ReadOnlySlot final {
+public:
+    explicit ReadOnlySlot(
+        std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>& slots)
+        : slots_(slots) {}
+
+    ReadOnlySlot(const ReadOnlySlot&) = delete;
+    ReadOnlySlot& operator=(const ReadOnlySlot&) = delete;
+
+    ~ReadOnlySlot() {
+        if (acquired_) slots_.release();
+    }
+
+    [[nodiscard]] bool acquire(const std::function<bool()>& cancellation_requested) {
+        using namespace std::chrono_literals;
+        while (!slots_.try_acquire_for(25ms)) {
+            if (cancellation_requested && cancellation_requested()) return false;
+        }
+        acquired_ = true;
+        return true;
+    }
+
+private:
+    std::counting_semaphore<SubagentOrchestrator::kMaxParallelReadOnlySubagents>& slots_;
+    bool acquired_ = false;
+};
 
 [[nodiscard]] bool is_write_destructive_tool(std::string_view tool_name) {
     return core::tools::names::is_write_destructive_tool(tool_name);
@@ -53,13 +81,14 @@ constexpr int kMaxSubagentSteps = 64;
 
 std::vector<std::string> SubagentOrchestrator::ExecutionPlan::allowed_tool_names() const {
     std::vector<std::string> names;
-    names.reserve(tools.size() + (allow_task_tool ? 1 : 0));
+    names.reserve(tools.size() + (allow_task_tool ? 2 : 1));
     for (const auto& tool : tools) {
         names.push_back(tool.function.name);
     }
     if (allow_task_tool) {
         names.push_back(std::string(SubagentOrchestrator::kTaskToolName));
     }
+    names.push_back(std::string(core::tools::names::kReadToolResult));
     return names;
 }
 
@@ -231,6 +260,27 @@ std::string SubagentOrchestrator::execute_task(
         return render_error_json(session_error.empty() ? "Failed to create task session." : session_error);
     }
 
+    // A task_id identifies mutable conversational state. Only one invocation may
+    // advance that state at a time, even when the parent emits duplicate resumes.
+    std::unique_lock session_run_lock(session->run_mutex);
+    ReadOnlySlot read_only_slot(read_only_slots_);
+    if (plan->read_only
+        && !read_only_slot.acquire(context.cancellation_requested)) {
+        return render_error_json("Delegated task was cancelled while waiting to run.");
+    }
+
+    auto execution_provider = plan->provider;
+    std::unique_lock serial_provider_lock(serial_provider_mutex_, std::defer_lock);
+    if (plan->read_only) {
+        if (execution_provider->capabilities().supports_parallel_requests) {
+            if (auto isolated = execution_provider->fork_for_parallel_request()) {
+                execution_provider = std::move(isolated);
+            }
+        } else {
+            serial_provider_lock.lock();
+        }
+    }
+
     std::optional<DelegatedAgentRunner::ResumeState> resume_state;
     {
         std::lock_guard session_lock(session->mutex);
@@ -247,7 +297,7 @@ std::string SubagentOrchestrator::execute_task(
     }
 
     const auto result = DelegatedAgentRunner::run({
-        .provider = plan->provider,
+        .provider = std::move(execution_provider),
         .provider_name = plan->provider_name,
         .tool_manager = tool_manager_,
         .session_context = context.session_context,
@@ -338,6 +388,25 @@ std::string SubagentOrchestrator::available_worker_names() const {
     return names;
 }
 
+bool SubagentOrchestrator::task_is_read_only(
+    std::string_view json_args,
+    std::string_view parent_mode) const {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(json_args)};
+    simdjson::dom::object object;
+    if (parser.parse(padded).get(object) != simdjson::SUCCESS) return false;
+
+    std::string_view worker;
+    if (object["subagent_type"].get(worker) != simdjson::SUCCESS) return false;
+    const auto profile = find_profile(worker);
+    if (!profile || profile->allow_task_tool) return false;
+
+    const auto tools = build_tools_for_profile(*profile, parent_mode);
+    return std::ranges::all_of(tools, [](const core::llm::Tool& tool) {
+        return tool.function.annotations.read_only_hint;
+    });
+}
+
 std::expected<SubagentOrchestrator::ExecutionPlan, std::string>
 SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) const {
     const std::optional<Profile> profile = find_profile(request.worker.empty() ? "general" : request.worker);
@@ -408,6 +477,10 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
     }
 
     auto tools = build_tools_for_profile(*profile, request.parent_mode);
+    const bool read_only = !profile->allow_task_tool
+        && std::ranges::all_of(tools, [](const core::llm::Tool& tool) {
+            return tool.function.annotations.read_only_hint;
+        });
     const int max_steps = sanitize_max_steps(
         request.max_steps_override.value_or(0),
         profile->max_steps);
@@ -422,6 +495,7 @@ SubagentOrchestrator::build_execution_plan(const ExecutionRequest& request) cons
         .response_format = profile->response_format,
         .tools = std::move(tools),
         .allow_task_tool = profile->allow_task_tool,
+        .read_only = read_only,
         .max_steps = max_steps,
     };
 }
@@ -514,7 +588,9 @@ std::string SubagentOrchestrator::build_task_description() const {
 
     description +=
         "\\nWhen finished, the subagent returns a concise final result to this conversation. "
-        "Use task_id to resume the same delegated thread later.";
+        "Use task_id to resume the same delegated thread later. "
+        "For multiple independent read-only investigations, issue several explore task calls "
+        "together in one response so Filo can run them concurrently.";
 
     return description;
 }

@@ -373,7 +373,21 @@ ProviderCapabilities HttpLLMProvider::capabilities() const {
     return ProviderCapabilities{
         .supports_tool_calls = true,
         .is_local = is_ollama && looks_like_loopback_base_url(base_url_),
+        .supports_parallel_requests = true,
     };
+}
+
+std::shared_ptr<LLMProvider> HttpLLMProvider::fork_for_parallel_request() const {
+    std::lock_guard lock(state_mutex_);
+    if (!protocol_) return {};
+    return std::make_shared<HttpLLMProvider>(
+        base_url_,
+        cred_source_,
+        default_model_,
+        protocol_->clone(),
+        api_type_,
+        provider_name_,
+        client_identity_source_);
 }
 
 void HttpLLMProvider::reset_conversation_state() {

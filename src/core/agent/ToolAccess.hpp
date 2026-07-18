@@ -25,6 +25,7 @@ struct ToolFileAccess {
 struct ToolAccess {
     enum class Kind {
         None,
+        ReadAll,
         All,
         File,
     };
@@ -38,6 +39,10 @@ struct ToolAccess {
 
     [[nodiscard]] static ToolAccess all() noexcept {
         return {.kind = Kind::All};
+    }
+
+    [[nodiscard]] static ToolAccess read_all() noexcept {
+        return {.kind = Kind::ReadAll};
     }
 
     [[nodiscard]] static ToolAccess file_access(ToolFileOperation operation,
@@ -62,6 +67,10 @@ using ToolAccessSet = std::vector<ToolAccess>;
 
 [[nodiscard]] inline ToolAccessSet all_tool_access() {
     return {ToolAccess::all()};
+}
+
+[[nodiscard]] inline ToolAccessSet read_all_tool_access() {
+    return {ToolAccess::read_all()};
 }
 
 [[nodiscard]] inline bool tool_file_operation_writes(ToolFileOperation operation) noexcept {
@@ -117,6 +126,18 @@ using ToolAccessSet = std::vector<ToolAccess>;
     }
     if (left.kind == ToolAccess::Kind::All || right.kind == ToolAccess::Kind::All) {
         return true;
+    }
+    if (left.kind == ToolAccess::Kind::ReadAll
+        && right.kind == ToolAccess::Kind::ReadAll) {
+        return false;
+    }
+    if (left.kind == ToolAccess::Kind::ReadAll) {
+        return right.kind == ToolAccess::Kind::File
+            && tool_file_operation_writes(right.file.operation);
+    }
+    if (right.kind == ToolAccess::Kind::ReadAll) {
+        return left.kind == ToolAccess::Kind::File
+            && tool_file_operation_writes(left.file.operation);
     }
     if (!tool_file_operations_conflict(left.file.operation, right.file.operation)) {
         return false;

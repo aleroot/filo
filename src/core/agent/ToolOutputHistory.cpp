@@ -1189,6 +1189,9 @@ Limits limits_for_tool(std::string_view tool_name) {
     if (tool_name == core::tools::names::kReadFile) {
         return Limits{.max_chars = 12 * 1024, .head_chars = 8 * 1024, .tail_chars = 4 * 1024};
     }
+    if (tool_name == core::tools::names::kReadToolResult) {
+        return Limits{.max_chars = 32 * 1024, .head_chars = 24 * 1024, .tail_chars = 8 * 1024};
+    }
     if (tool_name == core::tools::names::kRunTerminalCommand
         || tool_name == core::tools::names::kGrepSearch
         || tool_name == core::tools::names::kFileSearch

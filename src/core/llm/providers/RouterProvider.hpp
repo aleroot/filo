@@ -15,12 +15,15 @@ class RouterProvider final : public LLMProvider {
 public:
     RouterProvider(core::llm::ProviderManager& provider_manager,
                    std::shared_ptr<core::llm::routing::RouterEngine> router_engine,
-                   std::unordered_map<std::string, std::string> provider_default_models);
+                   std::unordered_map<std::string, std::string> provider_default_models,
+                   bool isolate_target_requests = false);
 
     void stream_response(const ChatRequest& request,
                          std::function<void(const StreamChunk&)> callback) override;
 
     [[nodiscard]] std::string get_last_model() const override;
+    [[nodiscard]] ProviderCapabilities capabilities() const override;
+    [[nodiscard]] std::shared_ptr<LLMProvider> fork_for_parallel_request() const override;
     [[nodiscard]] bool should_estimate_cost() const override;
     void cancel() override;
     void reset_conversation_state() override;
@@ -39,6 +42,8 @@ private:
     std::string last_route_summary_;
     std::string last_guardrail_summary_;
     bool last_should_estimate_cost_ = true;
+    bool isolate_target_requests_ = false;
+    std::shared_ptr<LLMProvider> active_isolated_provider_;
 };
 
 } // namespace core::llm::providers

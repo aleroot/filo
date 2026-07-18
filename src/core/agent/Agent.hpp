@@ -10,12 +10,14 @@
 #include "../session/SessionData.hpp"
 #include "../session/SessionEfficiencyController.hpp"
 #include "../tools/ToolManager.hpp"
+#include "../tools/ReadToolResultTool.hpp"
 #include "../tools/TodoTool.hpp"
 #include "HistoryCompactor.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "SubagentEvents.hpp"
 #include "PermissionGate.hpp"
 #include "ToolCallDeduplicator.hpp"
+#include "ToolResultStore.hpp"
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -68,7 +70,8 @@ public:
 
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
           core::tools::ToolManager& skill_manager,
-          core::context::SessionContext session_context);
+          core::context::SessionContext session_context,
+          std::filesystem::path tool_result_root = ToolResultStore::default_root());
 
     // -----------------------------------------------------------------------
     // Cancellation support — stop the current LLM response generation.
@@ -282,6 +285,8 @@ private:
     SubagentOrchestrator orchestrator_;
     core::session::TodoManager todo_manager_;
     core::tools::TodoTool todo_tool_;
+    ToolResultStore tool_result_store_;
+    core::tools::ReadToolResultTool read_tool_result_tool_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
     std::string current_mode_ = "BUILD";
@@ -295,6 +300,7 @@ private:
     LoopLimits loop_limits_{};
 
     // Callbacks set by the TUI
+    std::mutex permission_check_mutex_;
     std::function<bool(std::string_view, std::string_view)> permission_fn_;
     std::function<void(int)> on_loop_break_;
 

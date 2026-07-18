@@ -244,13 +244,16 @@ struct HookFieldPayload {
 
 Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              core::tools::ToolManager& skill_manager,
-             core::context::SessionContext session_context)
+             core::context::SessionContext session_context,
+             std::filesystem::path tool_result_root)
     : provider_(std::move(provider))
     , skill_manager_(skill_manager)
     , session_context_(std::move(session_context))
     , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config())
     , todo_manager_(&core::session::SessionStore::now_iso8601)
-    , todo_tool_(todo_manager_) {
+    , todo_tool_(todo_manager_)
+    , tool_result_store_(std::move(tool_result_root))
+    , read_tool_result_tool_(tool_result_store_) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
@@ -695,6 +698,9 @@ bool Agent::check_permission(const std::string& tool_name, const std::string& ar
         return true;   // no gate registered → headless mode, allow all
     }
 
+    // PermissionGate exposes one pending prompt at a time. Parallel read-only
+    // workers may still request open-world access, so keep those prompts ordered.
+    std::lock_guard permission_lock(permission_check_mutex_);
     return fn(tool_name, args);
 }
 
@@ -919,6 +925,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         if (tool_is_allowed_for_turn(core::tools::names::kWriteTodos, turn_callbacks)) {
             request.tools.push_back(core::llm::Tool{
                 .function = todo_tool_.get_definition(),
+            });
+        }
+        if (tool_is_allowed_for_turn(core::tools::names::kReadToolResult, turn_callbacks)) {
+            request.tools.push_back(core::llm::Tool{
+                .function = read_tool_result_tool_.get_definition(),
             });
         }
     }
@@ -1205,9 +1216,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 SkippedAfterEarlierDenial,
             };
             std::vector<bool> approved(tool_calls_accum->size());
+            std::vector<bool> read_only_tasks(tool_calls_accum->size(), false);
             std::vector<DeniedReason> denied_reasons(tool_calls_accum->size(), DeniedReason::None);
             std::vector<std::string> hook_denial_reasons(tool_calls_accum->size());
             std::vector<std::string> argument_errors(tool_calls_accum->size());
+            std::string permission_mode;
+            {
+                std::lock_guard lock(self->history_mutex_);
+                permission_mode = self->current_mode_;
+            }
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
                 if (self->is_stop_requested()) {
@@ -1245,7 +1262,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             : "[blocked by PreToolUse hook: " + hook_decision.reason + "]");
                     continue;
                 }
+                read_only_tasks[i] =
+                    tc.function.name == SubagentOrchestrator::kTaskToolName
+                    && self->orchestrator_.task_is_read_only(
+                        tc.function.arguments,
+                        permission_mode);
                 approved[i] = hook_decision.approved
+                    || read_only_tasks[i]
                     || self->check_permission(tc.function.name, tc.function.arguments);
                 if (!approved[i]) {
                     denied_reasons[i] = DeniedReason::UserDenied;
@@ -1263,6 +1286,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     definition = self->orchestrator_.task_tool_definition().function;
                 } else if (tc.function.name == core::tools::names::kWriteTodos) {
                     definition = self->todo_tool_.get_definition();
+                } else if (tc.function.name == core::tools::names::kReadToolResult) {
+                    definition = self->read_tool_result_tool_.get_definition();
                 } else {
                     definition = self->skill_manager_.get_tool_definition(tc.function.name);
                 }
@@ -1392,6 +1417,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 original_task_index_by_dedup_index[dedup_decision.original_index] =
                     scheduled_tasks.size();
                 auto planned = plan_tool_call(tc, step_session_context);
+                if (read_only_tasks[i]) {
+                    planned.accesses = read_all_tool_access();
+                }
                 scheduled_tasks.push_back({
                     .accesses = std::move(planned.accesses),
                     .run = [self, tc, &tool_callback,
@@ -1434,6 +1462,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             result = self->todo_tool_.execute(
                                 tc.function.arguments,
                                 session_context);
+                        } else if (tc.function.name == core::tools::names::kReadToolResult) {
+                            result = self->read_tool_result_tool_.execute(
+                                tc.function.arguments,
+                                session_context);
                         } else {
                             result = self->skill_manager_.execute_tool(
                                 tc.function.name,
@@ -1452,9 +1484,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 result)) {
                             self->refresh_system_prompt();
                         }
-                        result = tool_output_history::clamp_for_history(
+                        const auto history_limits = tool_output_history::limits_for_tool(
+                            tc.function.name);
+                        auto compact_result = tool_output_history::clamp_for_history(
                             tc.function.name,
                             result,
+                            history_limits,
                             core::config::ConfigManager::get_instance()
                                 .get_config()
                                 .context_compression,
@@ -1462,6 +1497,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 .tool_arguments = tc.function.arguments,
                                 .session_id = session_context.session_id,
                             });
+                        if (result.size() > history_limits.max_chars) {
+                            if (auto stored = self->tool_result_store_.store(
+                                    session_context.session_id,
+                                    tc.id,
+                                    result);
+                                stored.has_value()) {
+                                compact_result = ToolResultStore::attach_reference(
+                                    std::move(compact_result),
+                                    *stored);
+                            } else {
+                                core::logging::warn(
+                                    "[Agent] Could not offload oversized {} result: {}",
+                                    tc.function.name,
+                                    stored.error());
+                            }
+                        }
+                        result = std::move(compact_result);
                         auto dedup_final = deduplicator->finalize_for_model(
                             dedup_index,
                             std::move(result));

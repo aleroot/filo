@@ -21,6 +21,7 @@ class IProviderClientIdentitySource;
 struct ProviderCapabilities {
     bool supports_tool_calls = true;
     bool is_local = false;
+    bool supports_parallel_requests = false;
 };
 
 struct ProviderMetadata {
@@ -73,6 +74,15 @@ public:
      *        construction for local or reduced-capability backends.
      */
     [[nodiscard]] virtual ProviderCapabilities capabilities() const { return {}; }
+
+    /**
+     * Create an independent provider instance for a concurrent request.
+     * Providers may return null when they are internally serialized instead.
+     */
+    [[nodiscard]] virtual std::shared_ptr<LLMProvider>
+    fork_for_parallel_request() const {
+        return {};
+    }
 
     /**
      * @brief Return transport/auth metadata for provider-aware local services.

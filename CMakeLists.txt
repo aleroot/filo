@@ -212,6 +212,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
+    src/core/agent/ToolResultStore.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/tools/ToolSchema.cpp
     src/core/scm/GitProvider.cpp
@@ -248,6 +249,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ActivateSkillTool.cpp
     src/core/tools/MemoryTool.cpp
     src/core/tools/TodoTool.cpp
+    src/core/tools/ReadToolResultTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp

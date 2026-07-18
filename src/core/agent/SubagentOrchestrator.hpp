@@ -7,11 +7,13 @@
 #include "SubagentEvents.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <expected>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -27,6 +29,7 @@ namespace core::agent {
 class SubagentOrchestrator {
 public:
     static constexpr std::string_view kTaskToolName = "task";
+    static constexpr std::ptrdiff_t kMaxParallelReadOnlySubagents = 4;
 
     struct RunContext {
         std::string active_provider_name;
@@ -64,6 +67,7 @@ public:
         std::optional<core::llm::ResponseFormat> response_format;
         std::vector<core::llm::Tool> tools;
         bool allow_task_tool = false;
+        bool read_only = false;
         int max_steps = 0;
 
         [[nodiscard]] std::vector<std::string> allowed_tool_names() const;
@@ -76,6 +80,9 @@ public:
     [[nodiscard]] std::expected<ExecutionPlan, std::string> build_execution_plan(
         const ExecutionRequest& request) const;
     [[nodiscard]] std::string available_worker_names() const;
+    [[nodiscard]] bool task_is_read_only(
+        std::string_view json_args,
+        std::string_view parent_mode) const;
 
     [[nodiscard]] std::string execute_task(
         std::string_view json_args,
@@ -108,6 +115,7 @@ private:
         std::string context_summary;
         std::vector<core::llm::Message> history;
         std::mutex mutex;
+        std::mutex run_mutex;
     };
 
     [[nodiscard]] std::optional<Profile> find_profile(std::string_view name) const;
@@ -147,6 +155,9 @@ private:
 
     mutable std::mutex sessions_mutex_;
     std::unordered_map<std::string, std::shared_ptr<TaskSession>> sessions_;
+    std::counting_semaphore<kMaxParallelReadOnlySubagents> read_only_slots_{
+        kMaxParallelReadOnlySubagents};
+    std::mutex serial_provider_mutex_;
 };
 
 } // namespace core::agent

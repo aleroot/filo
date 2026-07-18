@@ -318,6 +318,101 @@ private:
     std::atomic<int> reset_calls_{0};
 };
 
+class ParallelExploreProvider final : public core::llm::LLMProvider {
+public:
+    [[nodiscard]] core::llm::ProviderCapabilities capabilities() const override {
+        return {
+            .supports_tool_calls = true,
+            .is_local = false,
+            .supports_parallel_requests = true,
+        };
+    }
+
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        const bool parent_follow_up = std::ranges::any_of(
+            request.messages,
+            [](const core::llm::Message& message) { return message.role == "tool"; });
+        if (parent_follow_up) {
+            callback(core::llm::StreamChunk::make_content("parallel exploration complete"));
+            callback(core::llm::StreamChunk::make_final());
+            return;
+        }
+
+        const bool delegated_worker = std::ranges::any_of(
+            request.messages,
+            [](const core::llm::Message& message) {
+                return message.role == "user" && message.content.contains("worker-");
+            });
+        if (delegated_worker) {
+            run_worker(std::move(callback));
+            return;
+        }
+
+        std::vector<core::llm::ToolCall> calls;
+        calls.reserve(6);
+        for (int i = 0; i < 6; ++i) {
+            core::llm::ToolCall call;
+            call.index = i;
+            call.id = std::format("parallel-task-{}", i);
+            call.type = "function";
+            call.function.name = "task";
+            call.function.arguments = std::format(
+                R"({{"description":"worker {}","prompt":"worker-{} inspect independently","subagent_type":"explore"}})",
+                i,
+                i);
+            calls.push_back(std::move(call));
+        }
+        core::llm::StreamChunk chunk;
+        chunk.tools = std::move(calls);
+        chunk.is_final = true;
+        callback(chunk);
+    }
+
+    [[nodiscard]] int max_active() const {
+        std::lock_guard lock(mutex_);
+        return max_active_;
+    }
+
+    [[nodiscard]] int completed() const {
+        std::lock_guard lock(mutex_);
+        return completed_;
+    }
+
+private:
+    void run_worker(std::function<void(const core::llm::StreamChunk&)> callback) {
+        {
+            std::unique_lock lock(mutex_);
+            ++active_;
+            max_active_ = std::max(max_active_, active_);
+            if (max_active_ >= core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents) {
+                ready_.notify_all();
+            }
+            (void)ready_.wait_for(lock, std::chrono::milliseconds(500), [&] {
+                return max_active_
+                    >= core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents;
+            });
+        }
+
+        callback(core::llm::StreamChunk::make_content("worker complete"));
+        callback(core::llm::StreamChunk::make_final());
+
+        {
+            std::lock_guard lock(mutex_);
+            --active_;
+            ++completed_;
+        }
+        ready_.notify_all();
+    }
+
+    mutable std::mutex mutex_;
+    std::condition_variable ready_;
+    int active_ = 0;
+    int max_active_ = 0;
+    int completed_ = 0;
+};
+
 void send_and_wait(const std::shared_ptr<core::agent::Agent>& agent,
                    const std::string& prompt,
                    core::agent::Agent::TurnCallbacks callbacks) {
@@ -378,6 +473,34 @@ TEST_CASE("Agent appends history-only user messages without model turn", "[agent
     REQUIRE_THAT(history[0].content,
                  Catch::Matchers::ContainsSubstring("This produced the following result"));
     CHECK(provider->requests_snapshot().empty());
+}
+
+TEST_CASE("Agent runs independent explore subagents concurrently with a bounded fan-out",
+          "[agent][orchestration][parallel]") {
+    auto provider = std::make_shared<ParallelExploreProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+    std::atomic<int> permission_requests{0};
+    agent->set_permission_profile(core::agent::PermissionProfile::Interactive);
+    agent->set_permission_fn([&](std::string_view, std::string_view) {
+        permission_requests.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    });
+
+    send_and_wait(agent, "Run independent parallel explorations");
+
+    CHECK(provider->completed() == 6);
+    CHECK(permission_requests.load(std::memory_order_relaxed) == 0);
+    CHECK(provider->max_active()
+          == core::agent::SubagentOrchestrator::kMaxParallelReadOnlySubagents);
+
+    const auto history = agent->get_history();
+    CHECK(std::ranges::count_if(history, [](const core::llm::Message& message) {
+        return message.role == "tool" && message.name == "task";
+    }) == 6);
 }
 
 TEST_CASE("Agent rejects overlapping turns", "[agent][loop]") {

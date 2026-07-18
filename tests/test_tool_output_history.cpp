@@ -3,6 +3,7 @@
 
 #include "core/agent/Agent.hpp"
 #include "core/agent/ToolOutputHistory.hpp"
+#include "core/agent/ToolResultStore.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
@@ -11,8 +12,12 @@
 #include "core/tools/ToolNames.hpp"
 #include "TestSessionContext.hpp"
 
+#include <simdjson.h>
+
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <format>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -22,6 +27,27 @@ namespace {
 
 constexpr std::string_view kLargeOutputToolName = "test_large_output_history_tool";
 constexpr std::string_view kLargeErrorToolName = "test_large_error_history_tool";
+
+class TempDir final {
+public:
+    TempDir()
+        : path_(std::filesystem::temp_directory_path()
+                / std::format(
+                    "filo_tool_result_test_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count())) {
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
 
 class LargeOutputTool final : public core::tools::Tool {
 public:
@@ -847,6 +873,7 @@ TEST_CASE("ToolOutputHistory preserves large activate_skill payloads", "[agent][
 }
 
 TEST_CASE("Agent stores oversized tool output in compact history format", "[agent][tool-history]") {
+    TempDir offload_root;
     auto provider = std::make_shared<ToolThenFinalProvider>(std::string(kLargeOutputToolName));
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<LargeOutputTool>());
@@ -854,7 +881,8 @@ TEST_CASE("Agent stores oversized tool output in compact history format", "[agen
     auto agent = std::make_shared<core::agent::Agent>(
         provider,
         tool_manager,
-        test_support::make_workspace_session_context());
+        test_support::make_workspace_session_context(),
+        offload_root.path());
     send_and_wait(agent, "Run large output tool");
 
     const auto history = agent->get_history();
@@ -865,12 +893,38 @@ TEST_CASE("Agent stores oversized tool output in compact history format", "[agen
             CHECK(msg.content.size() < 40 * 1024);
             CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
             CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("original_chars":)"));
+            CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("offload":)"));
+            CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("reader":"read_tool_result")"));
+
+            simdjson::dom::parser parser;
+            simdjson::padded_string padded{msg.content};
+            simdjson::dom::element document;
+            REQUIRE(parser.parse(padded).get(document) == simdjson::SUCCESS);
+            std::string_view reference;
+            REQUIRE(document["offload"]["reference"].get(reference) == simdjson::SUCCESS);
+
+            core::agent::ToolResultStore store(offload_root.path());
+            std::string restored;
+            std::uint64_t offset = 0;
+            while (true) {
+                const auto chunk = store.read({}, reference, offset, 4096);
+                REQUIRE(chunk.has_value());
+                restored += chunk->content;
+                if (chunk->complete) break;
+                REQUIRE(chunk->next_offset > offset);
+                offset = chunk->next_offset;
+            }
+            const std::string expected =
+                std::string(R"({"output":")") + std::string(120 * 1024, 'x') + R"("})";
+            CHECK(restored == expected);
+            CHECK_FALSE(store.read("another-session", reference, 0, 4096).has_value());
         }
     }
     REQUIRE(found);
 }
 
 TEST_CASE("Agent keeps error marker when compacting oversized error payloads", "[agent][tool-history]") {
+    TempDir offload_root;
     auto provider = std::make_shared<ToolThenFinalProvider>(std::string(kLargeErrorToolName));
     auto& tool_manager = core::tools::ToolManager::get_instance();
     tool_manager.register_tool(std::make_shared<LargeErrorTool>());
@@ -878,7 +932,8 @@ TEST_CASE("Agent keeps error marker when compacting oversized error payloads", "
     auto agent = std::make_shared<core::agent::Agent>(
         provider,
         tool_manager,
-        test_support::make_workspace_session_context());
+        test_support::make_workspace_session_context(),
+        offload_root.path());
     send_and_wait(agent, "Run large error tool");
 
     const auto history = agent->get_history();
@@ -888,6 +943,7 @@ TEST_CASE("Agent keeps error marker when compacting oversized error payloads", "
             found = true;
             CHECK(msg.content.size() < 40 * 1024);
             CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("error":"Tool output truncated for history)"));
+            CHECK_THAT(msg.content, Catch::Matchers::ContainsSubstring(R"("offload":)"));
         }
     }
     REQUIRE(found);
