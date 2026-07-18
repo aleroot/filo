@@ -5,6 +5,7 @@
 #include "tui/Conversation.hpp"
 
 #include <ftxui/dom/node.hpp>
+#include <ftxui/dom/selection.hpp>
 #include <ftxui/screen/screen.hpp>
 
 #include <algorithm>
@@ -66,6 +67,27 @@ std::string render_history_viewport(tui::HistoryComponent& history,
                                         ftxui::Dimension::Fixed(height));
     ftxui::Render(screen, panel);
     return strip_ansi(screen.ToString());
+}
+
+std::string render_reference_viewport(const std::vector<tui::UiMessage>& messages,
+                                      int width,
+                                      int height) {
+    auto panel = tui::render_history_panel(messages, 0, mock_options());
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(height));
+    ftxui::Render(screen, panel);
+    return strip_ansi(screen.ToString());
+}
+
+std::string select_history_viewport(tui::HistoryComponent& history,
+                                    int width,
+                                    int height,
+                                    ftxui::Selection selection) {
+    auto panel = history.OnRender();
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(height));
+    ftxui::Render(screen, panel.get(), selection);
+    return selection.GetParts();
 }
 
 int rendered_row_containing(std::string_view text, std::string_view marker) {
@@ -624,6 +646,203 @@ TEST_CASE("large animated transcript retains one structural render",
     }
 
     REQUIRE(history.CacheBuildCount() == 1);
+}
+
+TEST_CASE("cached transcript frames perform no transcript-sized work",
+          "[tui][history_component][render_cache][performance]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(200);
+    for (int i = 0; i < 200; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "## Result " + std::to_string(i)
+                + "\n\nA detailed paragraph with **formatting**, `code`, and wrapping.",
+            "",
+            false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(std::move(source));
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 100, 20));
+    const auto measured = history.MessageMeasureCount();
+    const auto viewport_builds = history.ViewportBuildCount();
+    REQUIRE(measured == messages->size());
+    REQUIRE(viewport_builds == 1);
+
+    for (int frame = 0; frame < 30; ++frame) {
+        static_cast<void>(render_history_viewport(history, 100, 20));
+    }
+
+    REQUIRE(history.CacheBuildCount() == 1);
+    REQUIRE(history.MessageMeasureCount() == measured);
+    REQUIRE(history.ViewportBuildCount() == viewport_builds);
+}
+
+TEST_CASE("virtualized viewport matches the canonical FTXUI transcript layout",
+          "[tui][history_component][render_cache][layout]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.push_back(tui::make_user_message(
+        "Explain why a cached DOM can still be expensive to lay out.", "12:34"));
+    source.push_back(tui::make_assistant_message(
+        "## Layout\n\nThe **visible result** must match the canonical renderer, including "
+        "wrapping, borders, spacing, and the bottom scroll anchor.\n\n"
+        "- first item\n- second item\n- third item",
+        "",
+        false));
+    for (int i = 0; i < 12; ++i) {
+        source.push_back(tui::make_info_message("status line " + std::to_string(i)));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    const auto reference = render_reference_viewport(source, 72, 14);
+    const auto virtualized = render_history_viewport(history, 72, 14);
+    REQUIRE(virtualized == reference);
+}
+
+TEST_CASE("viewport raster composes with outer FTXUI decorators",
+          "[tui][history_component][render_cache][layout]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source{
+        tui::make_user_message("outer style remains visible", ""),
+        tui::make_assistant_message("inner **styles** still win", "", false),
+    };
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    auto render = [](ftxui::Element panel) {
+        panel = std::move(panel) | ftxui::color(ftxui::Color::Blue);
+        auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(64),
+                                            ftxui::Dimension::Fixed(10));
+        ftxui::Render(screen, panel);
+        return screen.ToString();
+    };
+
+    auto reference_panel = tui::render_history_panel(source, 0, mock_options());
+    REQUIRE(render(history.OnRender()) == render(std::move(reference_panel)));
+}
+
+TEST_CASE("scrolling rebuilds only the bounded viewport",
+          "[tui][history_component][render_cache][performance]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(150);
+    for (int i = 0; i < 150; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "message " + std::to_string(i) + " with enough content to wrap", "", false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(std::move(source));
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 80, 10));
+    const auto measured = history.MessageMeasureCount();
+    const auto viewport_builds = history.ViewportBuildCount();
+    history.ScrollPageUp();
+    static_cast<void>(render_history_viewport(history, 80, 10));
+
+    REQUIRE(history.MessageMeasureCount() == measured);
+    REQUIRE(history.ViewportBuildCount() == viewport_builds + 1);
+}
+
+TEST_CASE("terminal resize remeasures once and then returns to bounded frames",
+          "[tui][history_component][render_cache][performance][layout]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(40);
+    for (int i = 0; i < 40; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "A wrapping message " + std::to_string(i)
+                + " with enough words to have a width-dependent height.",
+            "",
+            false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 100, 12));
+    REQUIRE(history.MessageMeasureCount() == messages->size());
+
+    const auto resized = render_history_viewport(history, 52, 12);
+    REQUIRE(history.MessageMeasureCount() == 2 * messages->size());
+    REQUIRE(resized == render_reference_viewport(source, 52, 12));
+
+    const auto measured = history.MessageMeasureCount();
+    static_cast<void>(render_history_viewport(history, 52, 12));
+    REQUIRE(history.MessageMeasureCount() == measured);
+}
+
+TEST_CASE("streaming update remeasures only the changed message",
+          "[tui][history_component][render_cache][performance]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(80);
+    for (int i = 0; i < 80; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "stable message " + std::to_string(i), "", false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [&messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 90, 12));
+    const auto measured = history.MessageMeasureCount();
+
+    source.back().text += "\nstreamed continuation";
+    messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    static_cast<void>(render_history_viewport(history, 90, 12));
+
+    REQUIRE(history.CacheBuildCount() == 2);
+    REQUIRE(history.MessageMeasureCount() == measured + 1);
+}
+
+TEST_CASE("transcript selection keeps native visible-card semantics",
+          "[tui][history_component][render_cache][selection]") {
+    std::atomic<size_t> tick{0};
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{
+            tui::make_user_message("SELECT_THIS_EXACT_TEXT", "")
+        });
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 60, 6));
+    const auto selected = select_history_viewport(
+        history, 60, 6, ftxui::Selection(0, 0, 58, 5));
+    REQUIRE_THAT(selected, Catch::Matchers::ContainsSubstring("SELECT_THIS_EXACT_TEXT"));
 }
 
 TEST_CASE("HistoryComponent invalidates render cache when tool approval changes",

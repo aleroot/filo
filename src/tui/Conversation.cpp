@@ -1383,41 +1383,53 @@ Element render_history_content(const std::vector<UiMessage>& messages,
                                std::size_t tick,
                                ConversationRenderOptions options) {
     std::vector<Element> msg_elements;
-    msg_elements.reserve(messages.size() * 2);
+    msg_elements.reserve(messages.size());
 
     for (const auto& msg : messages) {
-        switch (msg.type) {
-            case MessageType::User:
-                msg_elements.push_back(render_user_message(msg, options));
-                break;
-            case MessageType::ShellCommand:
-                msg_elements.push_back(render_shell_command_message(msg, tick, options));
-                msg_elements.push_back(ftxui::text(""));
-                break;
-            case MessageType::Assistant:
-                msg_elements.push_back(render_assistant_message(msg, tick, options));
-                msg_elements.push_back(ftxui::text(""));
-                break;
-            case MessageType::Info:
-                msg_elements.push_back(render_info_message(msg));
-                break;
-            case MessageType::Warning:
-                msg_elements.push_back(render_warning_message(msg));
-                break;
-            case MessageType::Error:
-                msg_elements.push_back(render_error_message(msg));
-                break;
-            case MessageType::ToolGroup:
-                msg_elements.push_back(render_tool_group(msg, tick, options));
-                msg_elements.push_back(ftxui::text(""));
-                break;
-            case MessageType::System:
-                msg_elements.push_back(render_system_message(msg, options));
-                break;
-        }
+        msg_elements.push_back(render_history_message(msg, tick, options));
     }
 
     return vbox(std::move(msg_elements));
+}
+
+Element render_history_message(const UiMessage& message,
+                               std::size_t tick,
+                               const ConversationRenderOptions& options) {
+    Element card;
+    bool trailing_space = false;
+    switch (message.type) {
+        case MessageType::User:
+            card = render_user_message(message, options);
+            break;
+        case MessageType::ShellCommand:
+            card = render_shell_command_message(message, tick, options);
+            trailing_space = true;
+            break;
+        case MessageType::Assistant:
+            card = render_assistant_message(message, tick, options);
+            trailing_space = true;
+            break;
+        case MessageType::Info:
+            card = render_info_message(message);
+            break;
+        case MessageType::Warning:
+            card = render_warning_message(message);
+            break;
+        case MessageType::Error:
+            card = render_error_message(message);
+            break;
+        case MessageType::ToolGroup:
+            card = render_tool_group(message, tick, options);
+            trailing_space = true;
+            break;
+        case MessageType::System:
+            card = render_system_message(message, options);
+            break;
+    }
+    if (!trailing_space) {
+        return card;
+    }
+    return vbox({std::move(card), ftxui::text("")});
 }
 
 Element render_history_panel(const std::vector<UiMessage>& messages,

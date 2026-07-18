@@ -36,32 +36,18 @@ HistoryComponent::HistoryComponent(
 
 ftxui::Element HistoryComponent::OnRender() {
     const auto snapshot = get_messages_();
-    static const auto empty = std::make_shared<const std::vector<UiMessage>>();
-    const auto& messages = *(snapshot ? snapshot : empty);
     auto options = get_options_();
     options.system_disclosure_expanded = &disclosure_expanded_;
 
-    // ── Intent-aware auto-scroll ─────────────────────────────────────────────
-    // This state machine is cheap (bookkeeping only) and must run every frame,
-    // independent of whether the content tree is rebuilt or served from cache.
-    const bool snapshot_changed = snapshot.get() != last_message_snapshot_.get();
-    const std::size_t content_fingerprint = snapshot_changed || !has_content_snapshot_
-        ? history_content_fingerprint(messages)
-        : last_content_fingerprint_;
-    const bool content_changed = has_content_snapshot_
-        && content_fingerprint != last_content_fingerprint_;
-    last_content_fingerprint_ = content_fingerprint;
-    has_content_snapshot_ = true;
-    last_message_snapshot_ = snapshot;
+    const auto sync = transcript_viewport_.Sync(
+        snapshot,
+        compute_render_cache_key(options));
 
-    const std::size_t prev_message_count = last_message_count_;
-    last_message_count_ = messages.size();
-
-    if (messages.size() < prev_message_count) {
+    if (sync.current_count < sync.previous_count) {
         // The transcript was cleared or replaced; any prior user-held scroll
         // position belongs to the old content.
         ResetToBottom();
-    } else if (messages.size() > prev_message_count) {
+    } else if (sync.current_count > sync.previous_count) {
         // A new message card was added (user turn, tool card, assistant card, …).
         if (scroll_intent_ == ScrollIntent::FollowBottom) {
             scroll_anchor_->follow_bottom = true;  // keep pinned to the bottom
@@ -73,43 +59,14 @@ ftxui::Element HistoryComponent::OnRender() {
     // A streamed update can change an existing card without adding a message.
     // Surface it to a reader, but leave the anchor untouched: the scroll
     // decorator keeps the same FTXUI line in view.
-    if (content_changed && scroll_intent_ == ScrollIntent::UserHeld) {
+    if (sync.content_changed && scroll_intent_ == ScrollIntent::UserHeld) {
         new_content_while_held_ = true;
     }
 
-    // ── Content Element cache ────────────────────────────────────────────────
-    // Rebuilding the transcript tree (markdown parsing, tool cards, borders) is
-    // by far the most expensive part of a frame. While scrolling or reading,
-    // nothing about the *content* changes — only the scroll offset does — so we
-    // build the tree once per content change and reuse it on every other frame,
-    // re-applying only the cheap scroll decorator below.
-    //
-    // The cache key folds together every signal that can alter the built tree.
-    // Animated fields are reactive leaf nodes. The transcript tree therefore
-    // remains cached across ticks instead of reparsing Markdown and rebuilding
-    // every tool card for a three-character pulse or one-cell spinner.
     const std::size_t tick = animation_tick_.load(std::memory_order_relaxed);
     options.animation_tick = &animation_tick_;
-    const std::size_t key = compute_render_cache_key(content_fingerprint, options);
-
-    if (!has_cache_ || key != cache_key_) {
-        cache_key_ = key;
-        has_cache_ = true;
-        // Drop the old tree first so its reflect() nodes release their Box
-        // references before we clear the hitbox map and rebuild.
-        cached_content_.reset();
-        disclosure_hitboxes_.clear();
-        options.system_disclosure_hitboxes = &disclosure_hitboxes_;
-        cached_content_ = render_history_content(messages, tick, options);
-        ++cache_build_count_;
-    }
-    // On a cache hit we intentionally leave disclosure_hitboxes_ alone: the
-    // cached reflect() nodes still reference its entries and refresh their
-    // coordinates on every frame during layout (SetBox).
-
-    // ── Scroll viewport (cheap; recomputed every frame) ─────────────────────
-    auto panel = apply_scroll_viewport(
-        cached_content_, ScrollPosition(), scroll_anchor_);
+    auto panel = transcript_viewport_.Render(
+        tick, options, scroll_anchor_, &disclosure_hitboxes_);
 
     // Overlay a "\u2193 new content" badge when new content arrived while the
     // user was scrolled up. It disappears as soon as they return to the bottom.
@@ -236,7 +193,15 @@ float HistoryComponent::ScrollPosition() const noexcept {
 }
 
 std::size_t HistoryComponent::CacheBuildCount() const noexcept {
-    return cache_build_count_;
+    return transcript_viewport_.CacheBuildCount();
+}
+
+std::size_t HistoryComponent::ViewportBuildCount() const noexcept {
+    return transcript_viewport_.ViewportBuildCount();
+}
+
+std::size_t HistoryComponent::MessageMeasureCount() const noexcept {
+    return transcript_viewport_.MessageMeasureCount();
 }
 
 void HistoryComponent::SetScrollIntent(ScrollIntent intent) {
@@ -313,9 +278,8 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
 }
 
 std::size_t HistoryComponent::compute_render_cache_key(
-    std::size_t content_fingerprint,
     const ConversationRenderOptions& options) const {
-    std::size_t seed = content_fingerprint;
+    std::size_t seed = 0;
     seed = combine_hash(seed, options.show_timestamps ? 1 : 0);
     seed = combine_hash(seed, options.show_spinner ? 1 : 0);
     seed = combine_hash(seed, options.expand_system_details ? 1 : 0);
@@ -332,90 +296,6 @@ std::size_t HistoryComponent::compute_render_cache_key(
 std::size_t HistoryComponent::combine_hash(std::size_t seed, std::size_t value) {
     constexpr std::size_t kMix = static_cast<std::size_t>(0x9e3779b97f4a7c15ULL);
     seed ^= value + kMix + (seed << 6) + (seed >> 2);
-    return seed;
-}
-
-std::size_t HistoryComponent::history_content_fingerprint(
-    const std::vector<UiMessage>& messages) {
-    std::size_t seed = messages.size();
-    const auto add_value = [&seed](std::size_t value) {
-        seed = combine_hash(seed, value);
-    };
-    const auto add_text = [&add_value](std::string_view value) {
-        add_value(std::hash<std::string_view>{}(value));
-    };
-    const auto add_optional_int = [&add_value](const std::optional<int>& value) {
-        add_value(value.has_value() ? 1U : 0U);
-        if (value.has_value()) {
-            add_value(static_cast<std::size_t>(*value));
-        }
-    };
-
-    for (const auto& msg : messages) {
-        add_text(msg.id);
-        add_value(static_cast<std::size_t>(msg.type));
-        add_text(msg.text);
-        add_text(msg.secondary_text);
-        add_text(msg.disclosure_text);
-        add_text(msg.icon);
-        add_value(msg.repeat_count);
-        add_value(msg.custom_color.has_value() ? 1U : 0U);
-        if (msg.custom_color.has_value()) {
-            add_text(msg.custom_color->Print(false));
-        }
-        add_value(static_cast<std::size_t>(msg.margin_top));
-        add_value(static_cast<std::size_t>(msg.pending));
-        add_value(static_cast<std::size_t>(msg.thinking));
-        add_value(static_cast<std::size_t>(msg.show_lightbulb));
-        add_value(static_cast<std::size_t>(msg.stopped));
-        add_text(msg.activity_elapsed);
-        add_text(msg.timestamp);
-        add_value(msg.tools.size());
-
-        for (const auto& tool : msg.tools) {
-            add_text(tool.id);
-            add_text(tool.name);
-            add_text(tool.description);
-            add_text(tool.result.summary);
-            add_optional_int(tool.result.exit_code);
-            add_value(static_cast<std::size_t>(tool.result.truncated));
-            add_value(static_cast<std::size_t>(tool.auto_approved));
-            add_value(static_cast<std::size_t>(tool.status));
-            add_optional_int(tool.progress);
-            add_optional_int(tool.progress_total);
-            add_text(tool.progress_message);
-
-            add_text(tool.diff_preview.title);
-            add_value(tool.diff_preview.lines.size());
-            for (const auto& line : tool.diff_preview.lines) {
-                add_value(static_cast<std::size_t>(line.kind));
-                add_text(line.content);
-            }
-            add_value(tool.diff_preview.hidden_line_count);
-
-            add_value(tool.subagents.size());
-            for (const auto& subagent : tool.subagents) {
-                add_text(subagent.id);
-                add_text(subagent.worker_name);
-                add_text(subagent.description);
-                add_text(subagent.provider);
-                add_text(subagent.model);
-                add_text(subagent.latest_text);
-                add_text(subagent.summary);
-                add_value(static_cast<std::size_t>(subagent.steps));
-                add_value(static_cast<std::size_t>(subagent.tool_calls));
-                add_value(static_cast<std::size_t>(subagent.status));
-
-                add_value(subagent.recent_tools.size());
-                for (const auto& child_tool : subagent.recent_tools) {
-                    add_text(child_tool.id);
-                    add_text(child_tool.name);
-                    add_text(child_tool.description);
-                    add_value(static_cast<std::size_t>(child_tool.status));
-                }
-            }
-        }
-    }
     return seed;
 }
 

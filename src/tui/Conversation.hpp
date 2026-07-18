@@ -340,6 +340,13 @@ ftxui::Element render_history_content(const std::vector<UiMessage>& messages,
                                       std::size_t tick,
                                       ConversationRenderOptions options = {});
 
+// Build one complete transcript card, including its type-specific trailing
+// spacing. Shared by the canonical full renderer and the virtualized viewport
+// so message appearance has one source of truth.
+ftxui::Element render_history_message(const UiMessage& message,
+                                      std::size_t tick,
+                                      const ConversationRenderOptions& options);
+
 // Build the full panel: cached-friendly content plus the scroll viewport.
 // Kept for direct callers and tests; internally delegates to render_history_content.
 ftxui::Element render_history_panel(const std::vector<UiMessage>& messages,

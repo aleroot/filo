@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Conversation.hpp"
+#include "TranscriptViewport.hpp"
 
 #include <atomic>
 #include <functional>
@@ -49,6 +50,8 @@ public:
     [[nodiscard]] bool  HasNewContentIndicator() const noexcept;
     [[nodiscard]] float ScrollPosition()         const noexcept;
     [[nodiscard]] std::size_t CacheBuildCount() const noexcept;
+    [[nodiscard]] std::size_t ViewportBuildCount() const noexcept;
+    [[nodiscard]] std::size_t MessageMeasureCount() const noexcept;
 
 private:
     // ── Scroll-intent state machine ──────────────────────────────────────
@@ -63,25 +66,9 @@ private:
 
     bool OnMouseEvent(ftxui::Event event);
 
-    // Folding hash of every signal that can change the built transcript tree.
-    // Animation state is deliberately excluded: reactive leaf nodes read the
-    // live tick without invalidating Markdown and tool-card structure.
-    std::size_t compute_render_cache_key(std::size_t content_fingerprint,
-                                         const ConversationRenderOptions& options) const;
+    // Folding hash of every option/disclosure signal that changes card layout.
+    std::size_t compute_render_cache_key(const ConversationRenderOptions& options) const;
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
-    static std::size_t history_content_fingerprint(const std::vector<UiMessage>& messages);
-
-    // ── Render cache ────────────────────────────────────────────────────
-    // The transcript Element tree is expensive to build (markdown parsing,
-    // tool cards, borders). It only depends on content/options, NOT on the
-    // scroll offset or terminal width, so we reuse it across frames while the
-    // user scrolls or reads. This is what keeps scrolling responsive — even a
-    // huge conversation costs one full rebuild per content change instead of
-    // per frame.
-    ftxui::Element cached_content_;
-    std::size_t    cache_key_  = 0;
-    bool           has_cache_  = false;
-    std::size_t    cache_build_count_ = 0;
 
     std::function<MessageSnapshot()> get_messages_;
     const std::atomic<size_t>& animation_tick_;
@@ -89,10 +76,7 @@ private:
 
     ScrollIntent   scroll_intent_           = ScrollIntent::FollowBottom;
     bool           new_content_while_held_  = false;
-    size_t         last_message_count_      = 0;
-    std::size_t    last_content_fingerprint_ = 0;
-    bool           has_content_snapshot_     = false;
-    MessageSnapshot last_message_snapshot_;
+    TranscriptViewport transcript_viewport_;
     std::shared_ptr<ConversationScrollAnchor> scroll_anchor_ =
         std::make_shared<ConversationScrollAnchor>();
     std::unordered_map<std::string, bool>        disclosure_expanded_;

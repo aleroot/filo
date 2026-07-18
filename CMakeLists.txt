@@ -140,6 +140,7 @@ set(FILO_CORE_SOURCES
     src/tui/Conversation.cpp
     src/tui/DiffPreview.cpp
     src/tui/HistoryComponent.cpp
+    src/tui/TranscriptViewport.cpp
     src/tui/MarkdownRenderer.cpp
     src/tui/MainApp.cpp
     src/tui/KeyInput.cpp
