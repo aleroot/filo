@@ -88,6 +88,7 @@ enum class SchemaType {
         case simdjson::dom::element_type::BOOL: return SchemaType::Boolean;
         case simdjson::dom::element_type::INT64: return SchemaType::Integer;
         case simdjson::dom::element_type::UINT64: return SchemaType::Integer;
+        case simdjson::dom::element_type::BIGINT: return SchemaType::Integer;
         case simdjson::dom::element_type::DOUBLE: return SchemaType::Number;
         case simdjson::dom::element_type::OBJECT: return SchemaType::Object;
         case simdjson::dom::element_type::ARRAY: return SchemaType::Array;
@@ -249,6 +250,7 @@ namespace json::schema {
 std::string ensure_property_types(std::string_view schema,
                                   RootRole root_role) {
     simdjson::dom::parser parser;
+    parser.number_as_string(true);
     simdjson::padded_string padded(schema);
     simdjson::dom::element root;
     if (parser.parse(padded).get(root) != simdjson::SUCCESS) {

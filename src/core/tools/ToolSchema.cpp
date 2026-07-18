@@ -63,6 +63,7 @@ void write_canonical(core::utils::JsonWriter& writer, Element value) {
 
 [[nodiscard]] std::string canonicalize_json(std::string_view json) {
     simdjson::dom::parser parser;
+    parser.number_as_string(true);
     simdjson::padded_string padded(json);
     Element root;
     if (parser.parse(padded).get(root) != simdjson::SUCCESS) {
@@ -131,7 +132,8 @@ void write_canonical(core::utils::JsonWriter& writer, Element value) {
         case simdjson::dom::element_type::ARRAY: return "array";
         case simdjson::dom::element_type::OBJECT: return "object";
         case simdjson::dom::element_type::INT64:
-        case simdjson::dom::element_type::UINT64: return "integer";
+        case simdjson::dom::element_type::UINT64:
+        case simdjson::dom::element_type::BIGINT: return "integer";
         case simdjson::dom::element_type::DOUBLE: return "number";
         case simdjson::dom::element_type::STRING: return "string";
         case simdjson::dom::element_type::BOOL: return "boolean";
@@ -355,6 +357,7 @@ std::expected<std::string, std::string> normalize_arguments(
     const std::string schema_json = canonical_input_schema(definition);
 
     simdjson::dom::parser arguments_parser;
+    arguments_parser.number_as_string(true);
     simdjson::padded_string padded_arguments(arguments_json);
     Element arguments_root;
     if (arguments_parser.parse(padded_arguments).get(arguments_root) != simdjson::SUCCESS) {
@@ -366,6 +369,7 @@ std::expected<std::string, std::string> normalize_arguments(
     }
 
     simdjson::dom::parser schema_parser;
+    schema_parser.number_as_string(true);
     simdjson::padded_string padded_schema(schema_json);
     Element schema_root;
     Object schema_object;
@@ -376,6 +380,7 @@ std::expected<std::string, std::string> normalize_arguments(
 
     const std::string normalized = strip_optional_nulls(arguments, schema_object);
     simdjson::dom::parser normalized_parser;
+    normalized_parser.number_as_string(true);
     simdjson::padded_string padded_normalized(normalized);
     Element normalized_root;
     if (normalized_parser.parse(padded_normalized).get(normalized_root) != simdjson::SUCCESS) {

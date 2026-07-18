@@ -31,10 +31,10 @@ set(CMAKE_FOLDER "Dependencies")
 CPMAddPackage("gh:CLIutils/CLI11@2.6.2")
 
 # Add simdjson for MCP communication (replacing nlohmann/json)
-CPMAddPackage("gh:simdjson/simdjson@4.2.4")
+CPMAddPackage("gh:simdjson/simdjson@4.6.4")
 
 # Terminal UI
-set(FILO_FTXUI_VERSION 7.0.0)
+set(FILO_FTXUI_VERSION 7.0.1)
 string(REGEX REPLACE "[^0-9]" "" FILO_FTXUI_ABI_EPOCH "${FILO_FTXUI_VERSION}")
 CPMAddPackage("gh:ArthurSonzogni/FTXUI@${FILO_FTXUI_VERSION}")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -67,8 +67,8 @@ endif()
 CPMAddPackage(
     NAME cpr
     GITHUB_REPOSITORY libcpr/cpr
-    GIT_TAG 1.13.0
-    VERSION 1.13.0
+    GIT_TAG 1.14.2
+    VERSION 1.14.2
 )
 
 # Add cpp-httplib for HTTP server support.
@@ -79,23 +79,28 @@ CPMAddPackage(
 if(APPLE)
     set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 endif()
-CPMAddPackage("gh:yhirose/cpp-httplib@0.28.0")
+CPMAddPackage("gh:yhirose/cpp-httplib@0.50.1")
 
 if(FILO_ENABLE_PYTHON)
     set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
     CPMAddPackage(
         NAME pybind11
         GITHUB_REPOSITORY pybind/pybind11
-        GIT_TAG v3.0.2
-        VERSION 3.0.2
+        GIT_TAG v3.0.4
+        VERSION 3.0.4
     )
 endif()
 
 if(FILO_ENABLE_LLAMACPP)
+    # llama.cpp declares C++17 as its supported language level and explicitly
+    # asks downstreams not to raise it. Isolate the dependency from Filo's
+    # C++26 default, then restore the application standard immediately.
+    set(_filo_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
+    set(CMAKE_CXX_STANDARD 17)
     CPMAddPackage(
         NAME llama_cpp
         GITHUB_REPOSITORY ggml-org/llama.cpp
-        GIT_TAG bd6992180bd1
+        GIT_TAG b10066
         OPTIONS
             "BUILD_SHARED_LIBS OFF"
             "LLAMA_BUILD_COMMON ON"
@@ -105,17 +110,21 @@ if(FILO_ENABLE_LLAMACPP)
             "LLAMA_BUILD_SERVER OFF"
             "LLAMA_OPENSSL OFF"
     )
+    set(CMAKE_CXX_STANDARD "${_filo_saved_cxx_standard}")
+    unset(_filo_saved_cxx_standard)
 
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-        if(TARGET llama)
-            # Upstream bd6992180bd1 misses <algorithm> in llama-quant.cpp on this toolchain.
-            target_compile_options(llama PRIVATE -include algorithm)
-        endif()
-        if(TARGET common)
-            # Upstream common sources also rely on std algorithms without including <algorithm>.
-            target_compile_options(common PRIVATE -include algorithm)
-        endif()
+    if(TARGET llama-common)
+        set(FILO_LLAMACPP_COMMON_TARGET llama-common)
+    elseif(TARGET common)
+        set(FILO_LLAMACPP_COMMON_TARGET common)
+    else()
+        message(FATAL_ERROR "llama.cpp did not provide its common utilities target")
     endif()
+
+    # Treat upstream headers as external at the consumer boundary. llama.cpp's
+    # public Jinja headers intentionally contain TU-local helpers that otherwise
+    # trip Filo's warnings-as-errors policy when included from C++26 sources.
+    set_property(TARGET llama ${FILO_LLAMACPP_COMMON_TARGET} PROPERTY SYSTEM TRUE)
 endif()
 
 set(CMAKE_FOLDER "${_filo_saved_folder}")
@@ -373,7 +382,7 @@ if(FILO_ENABLE_PYTHON)
 endif()
 
 if(FILO_ENABLE_LLAMACPP)
-    target_link_libraries(filo_core PUBLIC llama PRIVATE common)
+    target_link_libraries(filo_core PUBLIC llama PRIVATE ${FILO_LLAMACPP_COMMON_TARGET})
     target_compile_definitions(filo_core PUBLIC FILO_ENABLE_LLAMACPP)
 endif()
 
@@ -389,7 +398,7 @@ set_target_properties(filo PROPERTIES
 enable_testing()
 set(_filo_saved_folder "${CMAKE_FOLDER}")
 set(CMAKE_FOLDER "Dependencies")
-CPMAddPackage("gh:catchorg/Catch2@3.11.0")
+CPMAddPackage("gh:catchorg/Catch2@3.15.2")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     foreach(catch2_target Catch2 Catch2WithMain)
         if(TARGET ${catch2_target})

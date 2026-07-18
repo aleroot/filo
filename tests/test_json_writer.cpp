@@ -70,6 +70,14 @@ TEST_CASE("JsonUtils: raw JSON field accessors parse object fields",
           == "fallback");
 }
 
+TEST_CASE("JsonUtils: schema inference treats arbitrary-precision integers as integers",
+          "[json_utils][schema]") {
+    CHECK(core::utils::json::schema::ensure_property_types(
+              R"({"const":123456789012345678901})",
+              core::utils::json::schema::RootRole::Property)
+          == R"({"const":123456789012345678901,"type":"integer"})");
+}
+
 // -----------------------------------------------------------------------------
 // Integer number serialization
 // -----------------------------------------------------------------------------
