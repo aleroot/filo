@@ -64,6 +64,7 @@ int main(int argc, char** argv) {
     bool        list_sessions = false;  // --list-sessions
     std::vector<std::string> work_dirs;
     std::vector<std::string> trusted_tools;
+    std::string startup_model;
 
     auto* mcp_opt = app.add_option(
         "--mcp",
@@ -133,6 +134,11 @@ int main(int argc, char** argv) {
         "If no value is provided, resumes the most recent session.");
     resume_opt->expected(0, 1);
     app.add_flag("--list-sessions", list_sessions, "List available sessions and exit");
+    auto* model_opt = app.add_option(
+        "--model",
+        startup_model,
+        "Model for this process only: MODEL, PROVIDER, or PROVIDER/MODEL. "
+        "Does not change saved defaults.");
 
     CLI11_PARSE(app, argc, argv);
 
@@ -361,6 +367,9 @@ int main(int argc, char** argv) {
             .session_allow_rules = trust_resolution.session_allow_rules,
         };
         run_opts.continue_last = continue_last;
+        if (model_opt->count() > 0) {
+            run_opts.startup_model = startup_model;
+        }
         const auto run_result = tui::run(run_opts);
 
         if (mcp_stdio_mode) exec::mcp::stop_server();

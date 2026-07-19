@@ -1,4 +1,5 @@
 #include "PromptHistoryStore.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -39,6 +40,17 @@ std::string PromptHistoryStore::now_iso8601() {
 }
 
 bool PromptHistoryStore::load(std::string* error) {
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
+    return load_unlocked(error);
+}
+
+bool PromptHistoryStore::load_unlocked(std::string* error) {
     std::error_code ec;
     if (!std::filesystem::exists(history_file_, ec)) {
         // No history file yet — not an error.
@@ -75,47 +87,45 @@ bool PromptHistoryStore::load(std::string* error) {
 }
 
 bool PromptHistoryStore::save(std::string* error) const {
-    // Ensure parent directory exists.
-    std::error_code ec;
-    std::filesystem::create_directories(history_file_.parent_path(), ec);
-    if (ec) {
-        if (error) {
-            *error = std::format("Cannot create history directory: {}", ec.message());
-        }
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
         return false;
     }
+    return save_unlocked(error);
+}
 
-    const auto target_path = history_file_;
-    const auto tmp_path    = std::filesystem::path(target_path.string() + ".tmp");
-
+bool PromptHistoryStore::save_unlocked(std::string* error) const {
     const std::string json = to_json(entries_);
-    {
-        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            if (error) {
-                *error = std::format("Cannot write history file '{}'", tmp_path.string());
-            }
-            return false;
-        }
-        out.write(json.data(), static_cast<std::streamsize>(json.size()));
-        if (!out) {
-            if (error) {
-                *error = std::format("Failed to write history data to '{}'", tmp_path.string());
-            }
-            return false;
-        }
-    }
+    return core::utils::atomic_write_file(history_file_, json, error);
+}
 
-    std::filesystem::rename(tmp_path, target_path, ec);
-    if (ec) {
-        if (error) {
-            *error = std::format("Cannot finalize history file '{}': {}",
-                                 target_path.string(), ec.message());
-        }
-        std::filesystem::remove(tmp_path, ec);
+bool PromptHistoryStore::append_and_save(std::string_view text, std::string* error) {
+    if (text.empty()) return true;
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
         return false;
     }
-    return true;
+    if (!load_unlocked(error)) return false;
+    add(text);
+    return save_unlocked(error);
+}
+
+bool PromptHistoryStore::clear_and_save(std::string* error) {
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
+    clear();
+    return save_unlocked(error);
 }
 
 void PromptHistoryStore::add(std::string_view text) {
@@ -271,9 +281,7 @@ void PersistentPromptHistory::save(std::string_view text) {
     idx_ = -1;
     saved_input_.clear();
 
-    // Add to store and persist.
-    store_->add(text);
-    static_cast<void>(store_->save(nullptr));  // Silent save (best effort).
+    static_cast<void>(store_->append_and_save(text, nullptr));  // Best effort.
 }
 
 void PersistentPromptHistory::reload() {
@@ -286,8 +294,7 @@ void PersistentPromptHistory::reload() {
 
 void PersistentPromptHistory::clear() {
     if (store_) {
-        store_->clear();
-        static_cast<void>(store_->save(nullptr));
+        static_cast<void>(store_->clear_and_save(nullptr));
     }
     idx_ = -1;
     saved_input_.clear();

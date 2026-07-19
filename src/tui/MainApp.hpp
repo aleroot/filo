@@ -19,6 +19,9 @@ struct RunOptions {
     bool continue_last = false;
     /// Optional startup trust settings applied before the first turn.
     StartupTrust startup_trust;
+    /// Optional process-scoped model selector. Accepted forms are MODEL,
+    /// PROVIDER, or PROVIDER/MODEL. This never changes saved defaults.
+    std::optional<std::string> startup_model;
 };
 
 struct RunResult {

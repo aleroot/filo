@@ -162,6 +162,8 @@ set(FILO_CORE_SOURCES
     src/tui/SelectionClipboardCopier.cpp
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
+    src/core/config/ModelDefaultsPersistence.cpp
+    src/core/config/SessionModelOverride.cpp
     src/core/llm/providers/RouterProvider.cpp
     src/core/llm/providers/QwenModelCatalogSelector.cpp
     src/core/llm/QwenModelTraits.cpp
@@ -220,6 +222,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitProvider.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
+    src/core/utils/InterprocessFile.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
@@ -273,6 +276,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp
     src/core/session/SessionStore.cpp
+    src/core/session/ActiveSessionLease.cpp
     src/core/session/GoalManager.cpp
     src/core/session/TodoManager.cpp
     src/core/session/SessionReport.cpp
@@ -423,6 +427,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mime_utils.cpp
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
+    tests/test_interprocess_file.cpp
     tests/test_network_traffic.cpp
     tests/test_memory_store.cpp
     tests/test_agent_ignore.cpp
@@ -430,6 +435,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_commands.cpp
     tests/test_history.cpp
     tests/test_config_manager.cpp
+    tests/test_model_defaults_persistence.cpp
+    tests/test_session_model_override.cpp
     tests/test_context_mentions.cpp
     tests/test_context_builder.cpp
     tests/test_context_window.cpp
@@ -587,6 +594,8 @@ source_group(
         tests/test_commands.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp
+        tests/test_model_defaults_persistence.cpp
+        tests/test_session_model_override.cpp
         tests/test_context_mentions.cpp
         tests/test_context_window.cpp
         tests/test_openai_provider.cpp

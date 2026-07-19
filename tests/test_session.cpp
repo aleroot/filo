@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/session/SessionData.hpp"
+#include "core/session/ActiveSessionLease.hpp"
 #include "core/session/GoalManager.hpp"
 #include "core/session/SessionReport.hpp"
 #include "core/session/SessionStats.hpp"
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -705,6 +707,54 @@ TEST_CASE("SessionStore removes a session by ID", "[session][store]") {
 
     REQUIRE(store.remove("del00001"));
     CHECK(!store.load_by_id("del00001").has_value());
+}
+
+TEST_CASE("SessionStore refuses to remove an actively leased session", "[session][store][concurrency]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_active_del"};
+    core::session::SessionStore store{tmp.path};
+    const auto data = make_test_session("active01");
+    REQUIRE(store.save(data));
+
+    std::string error;
+    auto active_lease = core::session::ActiveSessionLease::acquire(store, data);
+    REQUIRE(active_lease.has_value());
+
+    auto competing_lease = core::session::ActiveSessionLease::acquire(store, data);
+    REQUIRE_FALSE(competing_lease.has_value());
+    CHECK(competing_lease.error().contains("already open"));
+
+    CHECK_FALSE(store.remove(data.session_id, &error));
+    CHECK(error.contains("currently open"));
+
+    active_lease->reset();
+    competing_lease = core::session::ActiveSessionLease::acquire(store, data);
+    REQUIRE(competing_lease.has_value());
+    competing_lease->reset();
+    REQUIRE(store.remove(data.session_id, &error));
+}
+
+TEST_CASE("ActiveSessionLeaseManager commits ownership transactionally",
+          "[session][concurrency]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_lease_manager"};
+    core::session::SessionStore store{tmp.path};
+    const auto data = make_test_session("managed1");
+
+    auto owner = std::make_unique<core::session::ActiveSessionLeaseManager>(store);
+    auto reservation = owner->reserve(data);
+    REQUIRE(reservation.has_value());
+    reservation->commit();
+    REQUIRE(owner->retain());
+    CHECK(owner->retain()->session_id() == data.session_id);
+
+    core::session::ActiveSessionLeaseManager follower{store};
+    auto blocked = follower.reserve(data);
+    REQUIRE_FALSE(blocked.has_value());
+
+    owner.reset();
+    auto successor = follower.reserve(data);
+    REQUIRE(successor.has_value());
+    successor->commit();
+    CHECK(follower.retain()->session_id() == data.session_id);
 }
 
 // ---------------------------------------------------------------------------

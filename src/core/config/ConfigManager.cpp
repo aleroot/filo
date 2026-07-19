@@ -10,6 +10,7 @@
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/JsonWriter.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "core/utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
@@ -1420,55 +1421,17 @@ bool apply_profile_overlay(const std::string& profile_name,
 bool write_text_atomic(const fs::path& path,
                        std::string_view content,
                        std::string& error_out) {
-    std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    if (ec) {
-        error_out = std::format(
-            "could not create config directory '{}': {}",
-            path.parent_path().string(),
-            ec.message());
-        return false;
-    }
+    return core::utils::atomic_write_file(path, content, &error_out);
+}
 
-    const fs::path tmp_path = path.parent_path() / (path.filename().string() + ".tmp");
-    {
-        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            error_out = std::format(
-                "could not write temporary config file '{}'",
-                tmp_path.string());
-            return false;
-        }
-        out.write(content.data(), static_cast<std::streamsize>(content.size()));
-        out.flush();
-        if (!out) {
-            error_out = std::format(
-                "failed while writing temporary config file '{}'",
-                tmp_path.string());
-            return false;
-        }
-    }
-
-    fs::rename(tmp_path, path, ec);
-    if (ec) {
-        // Windows cannot rename over an existing file: remove then retry.
-        std::error_code remove_ec;
-        fs::remove(path, remove_ec);
-        ec.clear();
-        fs::rename(tmp_path, path, ec);
-    }
-
-    if (ec) {
-        std::error_code ignore_ec;
-        fs::remove(tmp_path, ignore_ec);
-        error_out = std::format(
-            "could not replace config file '{}': {}",
-            path.string(),
-            ec.message());
-        return false;
-    }
-
-    return true;
+std::optional<core::utils::InterprocessFileLock> acquire_write_lock(
+    const fs::path& path,
+    std::string* error) {
+    std::string lock_error;
+    auto lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path), &lock_error);
+    if (!lock && error) *error = std::move(lock_error);
+    return lock;
 }
 
 std::string serialize_mcp_servers_overlay(const std::vector<McpServerConfig>& servers) {
@@ -1592,11 +1555,21 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
     std::optional<std::string> selected_profile;
 
     if (!fs::exists(global_config_path)) {
-        std::error_code ec;
-        fs::create_directories(config_dir, ec);
-        std::ofstream out(global_config_path);
-        if (out) {
-            out << default_config_json();
+        std::string lock_error;
+        auto file_lock = core::utils::InterprocessFileLock::acquire(
+            core::utils::lock_path_for(global_config_path), &lock_error);
+        if (!file_lock) {
+            core::logging::warn(
+                "Could not lock default configuration '{}': {}",
+                global_config_path.string(), lock_error);
+        } else if (!fs::exists(global_config_path)) {
+            std::string write_error;
+            if (!write_text_atomic(
+                    global_config_path, default_config_json(), write_error)) {
+                core::logging::warn(
+                    "Could not create default configuration '{}': {}",
+                    global_config_path.string(), write_error);
+            }
         }
     }
 
@@ -1639,13 +1612,26 @@ bool ConfigManager::persist_managed_setting(SettingsScope scope,
                                             std::string* error) {
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
-    ManagedSettings next_settings =
-        scope == SettingsScope::User ? user_settings_ : workspace_settings_;
+    const fs::path settings_path = get_settings_path(scope, cwd);
+    auto file_lock = acquire_write_lock(settings_path, error);
+    if (!file_lock) return false;
+
+    ManagedSettings next_settings;
+    if (fs::exists(settings_path)) {
+        try {
+            next_settings = parse_managed_settings_file(settings_path);
+        } catch (const std::exception& e) {
+            if (error) {
+                *error = std::format("could not parse settings file '{}': {}",
+                                     settings_path.string(), e.what());
+            }
+            return false;
+        }
+    }
 
     auto& slot = managed_setting_slot(next_settings, key);
     slot = std::move(value);
 
-    const fs::path settings_path = get_settings_path(scope, cwd);
     if (next_settings.empty()) {
         std::error_code remove_ec;
         fs::remove(settings_path, remove_ec);
@@ -1690,6 +1676,8 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
     const std::string selection_str(default_model_selection);
     const std::string model_str(specific_model);
     const fs::path overlay_path = model_defaults_overlay_path(get_config_dir());
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
 
     // Build the JSON payload, including specific model override if provided
     std::string payload;
@@ -1776,6 +1764,8 @@ bool ConfigManager::persist_active_profile(
     }
 
     const fs::path overlay_path = get_profile_defaults_path();
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
     if (!normalized_profile.has_value()) {
         std::error_code remove_ec;
         fs::remove(overlay_path, remove_ec);
@@ -1829,6 +1819,8 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
     }
 
     const fs::path overlay_path = auth_defaults_overlay_path(get_config_dir());
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
     AppConfig overlay;
     if (fs::exists(overlay_path)) {
         try {
@@ -1899,6 +1891,8 @@ bool ConfigManager::persist_local_provider(std::string_view model_path,
                                             std::string_view model_label,
                                             std::string* error) {
     const fs::path overlay_path = model_defaults_overlay_path(get_config_dir());
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
 
     const std::string payload = std::format(
         "{{\n"
@@ -1957,6 +1951,8 @@ bool ConfigManager::persist_mcp_server(const McpServerConfig& server,
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
     const fs::path overlay_path = get_mcp_overlay_path(scope, cwd);
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
 
     std::vector<McpServerConfig> servers;
     if (fs::exists(overlay_path)) {
@@ -2007,6 +2003,8 @@ bool ConfigManager::remove_mcp_server(std::string_view server_name,
     const fs::path cwd = working_dir.value_or(
         last_working_dir_.empty() ? fs::current_path() : last_working_dir_);
     const fs::path overlay_path = get_mcp_overlay_path(scope, cwd);
+    auto file_lock = acquire_write_lock(overlay_path, error);
+    if (!file_lock) return false;
 
     std::vector<McpServerConfig> servers;
     if (fs::exists(overlay_path)) {

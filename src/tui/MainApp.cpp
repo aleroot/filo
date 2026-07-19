@@ -19,6 +19,7 @@
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/ActiveSessionLease.hpp"
 #include "core/memory/MemoryStore.hpp"
 #include "core/scm/ScmFactory.hpp"
 #include "core/history/PromptHistoryStore.hpp"
@@ -33,6 +34,8 @@
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/config/ModelDefaultsPersistence.hpp"
+#include "core/config/SessionModelOverride.hpp"
 #include "core/llm/routing/RouterEngine.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/BuiltinToolRegistry.hpp"
@@ -626,6 +629,15 @@ RunResult run(RunOptions opts) {
     auto config              = config_manager.get_config();
     auto& provider_manager   = core::llm::ProviderManager::get_instance();
     const auto settings_working_dir = std::filesystem::current_path();
+
+    core::config::ModelDefaultsPersistence model_defaults{config_manager};
+    if (opts.startup_model.has_value()) {
+        if (auto applied = core::config::apply_session_model_override(
+                config, *opts.startup_model); !applied) {
+            core::logging::error("{}", applied.error());
+            return {};
+        }
+    }
 
     enum class ModelSelectionMode {
         Manual,
@@ -1329,6 +1341,21 @@ RunResult run(RunOptions opts) {
             std::filesystem::current_path().string());
     }
 
+    core::session::ActiveSessionLeaseManager session_leases{*session_store};
+    if (startup_data.has_value()) {
+        auto lease = session_leases.reserve(*startup_data);
+        if (lease) {
+            lease->commit();
+        } else {
+            append_ui_message(ui_messages, make_warning_message(std::format(
+                "Session '{}' was not resumed because {}. Starting a fresh session instead.",
+                startup_data->session_id,
+                lease.error())));
+            startup_data.reset();
+            missing_session_label.clear();
+        }
+    }
+
     if (startup_data.has_value()) {
         const auto& data = *startup_data;
         session_id         = data.session_id;
@@ -1363,6 +1390,19 @@ RunResult run(RunOptions opts) {
     }
 
     compute_session_path();
+    if (!session_leases.retain()) {
+        core::session::SessionData fresh_session;
+        fresh_session.session_id = session_id;
+        fresh_session.created_at = session_created_at;
+        auto lease = session_leases.reserve(fresh_session);
+        if (!lease) {
+            core::logging::error(
+                "Could not reserve fresh session '{}': {}",
+                session_id, lease.error());
+            return {};
+        }
+        lease->commit();
+    }
     core::budget::BudgetTracker::get_instance().set_session_id(session_id);
     core::budget::BudgetTracker::get_instance().reset_session();
     core::session::SessionStats::get_instance().reset();
@@ -1790,7 +1830,10 @@ RunResult run(RunOptions opts) {
             std::move(sampling_model));
     };
 
-    auto resume_session = [&](const core::session::SessionData& data) {
+    auto resume_session = [&](const core::session::SessionData& data)
+        -> std::optional<std::string> {
+        auto next_lease = session_leases.reserve(data);
+        if (!next_lease) return next_lease.error();
         {
             std::lock_guard lock(stream_chunk_timing_mutex);
             stream_chunk_last_at.clear();
@@ -1837,10 +1880,12 @@ RunResult run(RunOptions opts) {
                 } catch(...) {}
             }
             refresh_status_labels();
+            next_lease->commit();
         }
         reset_history_view();
         animation_cv.notify_one();
         wake_ui();
+        return std::nullopt;
     };
 
     auto open_sessions_picker = [&]() -> bool {
@@ -1952,6 +1997,12 @@ RunResult run(RunOptions opts) {
         branch.messages = branch_messages;
         branch.handoff_summary = core::session::build_handoff_summary(branch);
 
+        auto branch_lease = session_leases.reserve(branch);
+        if (!branch_lease) {
+            return std::unexpected(std::format(
+                "Failed to reserve branch session: {}", branch_lease.error()));
+        }
+
         std::string error;
         session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel);
         {
@@ -1975,6 +2026,7 @@ RunResult run(RunOptions opts) {
             session_name.clear();
             session_created_at = new_created_at;
             session_file_path = session_store->compute_path(branch).string();
+            branch_lease->commit();
         }
         core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
         agent->set_session_id(new_session_id);
@@ -1996,7 +2048,8 @@ RunResult run(RunOptions opts) {
     agent->set_efficiency_decision_fn(
         [agent, session_store, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &wake_ui, &goal_manager](const core::session::SessionEfficiencyDecision& decision) {
+         &ui_messages, &wake_ui, &goal_manager,
+         &session_leases](const core::session::SessionEfficiencyDecision& decision) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
             auto snap_context = agent->get_context_summary();
@@ -2047,21 +2100,28 @@ RunResult run(RunOptions opts) {
                 return;
             }
 
-            agent->compact_history(archived.handoff_summary);
-            core::budget::BudgetTracker::get_instance().reset_session();
-            core::session::SessionStats::get_instance().reset();
-
             const std::string old_session_id = archived.session_id;
             const std::string new_session_id = core::session::SessionStore::generate_id();
             const std::string new_created_at = core::session::SessionStore::now_iso8601();
+            core::session::SessionData new_segment;
+            new_segment.session_id = new_session_id;
+            new_segment.created_at = new_created_at;
+            auto new_segment_lease = session_leases.reserve(new_segment);
+            if (!new_segment_lease) {
+                core::logging::warn(
+                    "Skipping TUI session rotation because the new segment could not be reserved: {}",
+                    new_segment_lease.error());
+                return;
+            }
+
+            agent->compact_history(archived.handoff_summary);
+            core::budget::BudgetTracker::get_instance().reset_session();
+            core::session::SessionStats::get_instance().reset();
             core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
             agent->set_session_id(new_session_id);
 
             {
                 std::lock_guard lock(ui_mutex);
-                core::session::SessionData new_segment;
-                new_segment.session_id = new_session_id;
-                new_segment.created_at = new_created_at;
                 session_id = new_session_id;
                 session_created_at = new_created_at;
                 session_file_path = session_store->compute_path(new_segment).string();
@@ -2075,6 +2135,7 @@ RunResult run(RunOptions opts) {
                         old_session_id,
                         new_session_id,
                         reason)));
+                new_segment_lease->commit();
             }
             wake_ui();
         });
@@ -2471,29 +2532,35 @@ RunResult run(RunOptions opts) {
             join_values(policy_names));
     };
 
-    auto persist_model_preferences = [&]() -> std::optional<std::string> {
+    auto persist_model_preferences = [&]() {
         const std::string mode =
             model_selection_mode == ModelSelectionMode::Router ? "router" :
             model_selection_mode == ModelSelectionMode::Auto   ? "auto"   : "manual";
-        std::string error;
         const std::string specific_model =
             (model_selection_mode == ModelSelectionMode::Manual && !manual_model_name.empty())
                 ? manual_model_name
                 : "";
-        if (!config_manager.persist_model_defaults(manual_provider_name, mode, specific_model, &error)) {
-            return std::format("Could not persist model defaults: {}", error);
+        return model_defaults.persist(manual_provider_name, mode, specific_model);
+    };
+
+    auto with_model_persistence_notice = [](
+        std::string message,
+        const core::config::ModelPersistenceResult& persistence) {
+        using enum core::config::ModelPersistenceStatus;
+        if (persistence.status == SessionOnly) {
+            message += std::format("\n        ℹ  {}", persistence.detail);
+        } else if (persistence.status == Failed) {
+            message += std::format("\n        ⚠  {}", persistence.detail);
         }
-        return std::nullopt;
+        return message;
     };
 
     auto with_persisted_model_preferences = [&](std::string message) -> std::string {
         if (!message.starts_with("Switched")) {
             return message;
         }
-        if (const auto persist_error = persist_model_preferences(); persist_error.has_value()) {
-            message += std::format("\n        ⚠  {}", *persist_error);
-        }
-        return message;
+        return with_model_persistence_notice(
+            std::move(message), persist_model_preferences());
     };
 
     auto current_model_selection_snapshot = [&]() -> ModelSelectionSnapshot {
@@ -3343,10 +3410,9 @@ RunResult run(RunOptions opts) {
         std::string result = activate_manual_mode();
         if (result.starts_with("Switched")) {
             remember_previous_model_selection(before);
-            std::string persist_error;
-            if (!config_manager.persist_local_provider(model_path_str, model_label, &persist_error)) {
-                result += std::format("\n        \xe2\x9a\xa0  Could not persist: {}", persist_error);
-            }
+            result = with_model_persistence_notice(
+                std::move(result),
+                model_defaults.persist_local(model_path_str, model_label));
         }
         return result;
     };
@@ -3917,6 +3983,7 @@ RunResult run(RunOptions opts) {
         std::string created_at;
         std::string provider_name;
         std::string model_name;
+        core::session::ActiveSessionLease::Ptr session_lease;
         std::optional<core::session::SessionGoal> snap_goal;
         auto snap_todos = agent->get_todos();
         {
@@ -3926,6 +3993,7 @@ RunResult run(RunOptions opts) {
             created_at = session_created_at;
             provider_name = active_provider_name;
             model_name = active_model_name;
+            session_lease = session_leases.retain();
             snap_goal = goal_manager.current();
         }
 
@@ -3939,8 +4007,12 @@ RunResult run(RunOptions opts) {
                      snap_mode, snap_context,
                      snap_goal = std::move(snap_goal),
                      snap_todos = std::move(snap_todos),
+                     session_lease = std::move(session_lease),
                      session_save_state,
                      generation]() {
+            // Keep this session exclusive until its detached snapshot completes.
+            (void)session_lease;
+
             core::session::SessionData data;
             data.session_id        = sid;
             data.name              = sname;
@@ -4837,7 +4909,10 @@ RunResult run(RunOptions opts) {
                         id_or_idx.empty() ? std::string("most recent") : std::string(id_or_idx)));
                     return;
                 }
-                resume_session(*data_opt);
+                if (const auto resume_error = resume_session(*data_opt);
+                    resume_error.has_value()) {
+                    append_history(std::format("\n✗  {}\n", *resume_error));
+                }
             },
             .rename_session_fn = [&](std::string_view new_name)
                 -> core::commands::CommandOperationResult {
@@ -5684,7 +5759,10 @@ RunResult run(RunOptions opts) {
                 }
                 auto data_opt = session_store->load_by_id(info.session_id);
                 if (data_opt) {
-                    resume_session(*data_opt);
+                    if (const auto resume_error = resume_session(*data_opt);
+                        resume_error.has_value()) {
+                        append_history(std::format("\n✗  {}\n", *resume_error));
+                    }
                 } else {
                     append_history(std::format("\n\xe2\x9c\x97  Failed to load session {}.\n", info.session_id));
                 }
@@ -5859,10 +5937,7 @@ RunResult run(RunOptions opts) {
                 const bool success = result.starts_with("Switched");
                 if (success) {
                     remember_previous_model_selection(before);
-                    if (const auto persist_error = persist_model_preferences();
-                        persist_error.has_value()) {
-                        result += std::format("\n        \xe2\x9a\xa0  {}", *persist_error);
-                    }
+                    result = with_persisted_model_preferences(std::move(result));
                 }
                 append_history(std::format(
                     "\n{}\n",

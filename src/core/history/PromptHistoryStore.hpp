@@ -18,8 +18,8 @@ namespace core::history {
 // Features:
 //   - Automatic deduplication (consecutive duplicates are collapsed)
 //   - Size limit with FIFO eviction (default: 10,000 entries)
-//   - Atomic writes (temp file → rename)
-//   - Thread-safe save operations
+//   - Crash-safe atomic writes (unique temp file → fsync → rename)
+//   - Cross-process-safe append and clear operations
 // -----------------------------------------------------------------------------
 
 struct PromptHistoryEntry {
@@ -36,6 +36,13 @@ public:
 
     // Save history to disk atomically.
     [[nodiscard]] bool save(std::string* error = nullptr) const;
+
+    // Reload, append one entry, and save as one cross-process transaction.
+    [[nodiscard]] bool append_and_save(std::string_view text,
+                                       std::string* error = nullptr);
+
+    // Clear in-memory and on-disk history as one cross-process transaction.
+    [[nodiscard]] bool clear_and_save(std::string* error = nullptr);
 
     // Add a new entry. Empty strings are ignored. Consecutive duplicates are collapsed.
     void add(std::string_view text);
@@ -84,6 +91,8 @@ private:
     [[nodiscard]] static std::optional<std::vector<std::string>> from_json(std::string_view json);
 
     void enforce_size_limit();
+    [[nodiscard]] bool load_unlocked(std::string* error = nullptr);
+    [[nodiscard]] bool save_unlocked(std::string* error = nullptr) const;
 
     std::filesystem::path history_file_;
     std::vector<std::string> entries_;

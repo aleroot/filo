@@ -1,4 +1,7 @@
 #include "SessionStore.hpp"
+
+#include "ActiveSessionLease.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -528,33 +531,16 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
     if (!ensure_dir(error)) return false;
 
     const auto target_path = compute_path(data);
-    const auto tmp_path    = std::filesystem::path(target_path.string() + ".tmp");
-
-    const std::string json = to_json(data);
-    {
-        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            if (error) *error = std::format("Cannot write session file '{}'", tmp_path.string());
-            return false;
-        }
-        out.write(json.data(), static_cast<std::streamsize>(json.size()));
-        if (!out) {
-            if (error) *error = std::format("Failed to write session data to '{}'", tmp_path.string());
-            return false;
-        }
-    }
-
-    std::error_code ec;
-    std::filesystem::rename(tmp_path, target_path, ec);
-    if (ec) {
-        if (error) {
-            *error = std::format("Cannot finalize session file '{}': {}",
-                                 target_path.string(), ec.message());
-        }
-        std::filesystem::remove(tmp_path, ec);
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(target_path), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
         return false;
     }
-    return true;
+
+    const std::string json = to_json(data);
+    return core::utils::atomic_write_file(target_path, json, error);
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +714,24 @@ bool SessionStore::remove(std::string_view session_id, std::string* error) const
             std::string_view(fname).substr(dash_pos + 1, dot_pos - dash_pos - 1);
         if (file_id != session_id) continue;
 
+        std::string lock_error;
+        auto active_lock = core::utils::InterprocessFileLock::try_acquire(
+            active_session_lease_path(p), &lock_error);
+        if (!active_lock) {
+            if (error) {
+                *error = lock_error.empty()
+                    ? std::format("Session '{}' is currently open in a Filo process",
+                                  session_id)
+                    : lock_error;
+            }
+            return false;
+        }
+        auto file_lock = core::utils::InterprocessFileLock::acquire(
+            core::utils::lock_path_for(p), &lock_error);
+        if (!file_lock) {
+            if (error) *error = lock_error;
+            return false;
+        }
         std::filesystem::remove(p, ec);
         if (ec && error) {
             *error = std::format("Cannot remove session file '{}': {}",

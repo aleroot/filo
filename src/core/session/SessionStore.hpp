@@ -28,16 +28,16 @@ struct SessionInfo {
 // File naming: session-YYYYMMDD-HHMMSS-<8hex-id>.json
 //   (lexicographic sort equals chronological sort)
 //
-// Thread-safety:
-//   save()       — atomic write (temp file → rename); safe to call from any thread.
+// Concurrency safety:
+//   save()       — cross-process lock + unique fsynced temp file + atomic rename.
 //   list/load    — read-only; safe for concurrent reads.
-//   remove()     — deletes one file; avoid concurrent remove + list.
+//   remove()     — serialized with save and rejects actively leased sessions.
 // ---------------------------------------------------------------------------
 class SessionStore {
 public:
     explicit SessionStore(std::filesystem::path sessions_dir);
 
-    // Serialize and atomically write session data (.tmp → rename to .json).
+    // Serialize and atomically write session data under a cross-process lock.
     bool save(const SessionData& data, std::string* error = nullptr) const;
 
     // Load by 8-char hex session ID.

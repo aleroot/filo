@@ -11,7 +11,9 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -67,7 +69,7 @@ TEST_CASE("MemoryStore deduplicates identical remembered content", "[memory]") {
     CHECK(entries[0].use_count == 2);
 }
 
-TEST_CASE("MemoryStore serializes concurrent remembers for the same file", "[memory]") {
+TEST_CASE("MemoryStore serializes concurrent remembers for the same file", "[memory][concurrency]") {
     TempDir dir{"filo_memory_store_concurrent"};
     const auto memory_path = dir.path / "memory.json";
 
@@ -90,6 +92,32 @@ TEST_CASE("MemoryStore serializes concurrent remembers for the same file", "[mem
         CHECK(result.ok);
     }
     CHECK(core::memory::MemoryStore{memory_path}.list().size() == kCount);
+}
+
+TEST_CASE("MemoryStore serializes remembers across processes", "[memory][concurrency]") {
+    TempDir dir{"filo_memory_store_process_concurrency"};
+    const auto memory_path = dir.path / "memory.json";
+
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        core::memory::MemoryStore store{memory_path};
+        for (int i = 0; i < 15; ++i) {
+            if (!store.remember("Child memory " + std::to_string(i)).ok) _exit(10);
+        }
+        _exit(0);
+    }
+
+    core::memory::MemoryStore store{memory_path};
+    for (int i = 0; i < 15; ++i) {
+        REQUIRE(store.remember("Parent memory " + std::to_string(i)).ok);
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
+    CHECK(store.list().size() == 30);
 }
 
 TEST_CASE("MemoryStore archives and cleans without deleting history", "[memory]") {

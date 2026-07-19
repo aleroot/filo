@@ -2,6 +2,7 @@
 
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/InterprocessFile.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <simdjson.h>
@@ -214,6 +215,13 @@ std::string MemoryStore::now_iso8601() {
 
 MemoryState MemoryStore::load(std::string* error) const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return {};
+    }
     return load_unlocked(error);
 }
 
@@ -286,19 +294,17 @@ MemoryState MemoryStore::load_unlocked(std::string* error) const {
 
 bool MemoryStore::save(const MemoryState& state, std::string* error) const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
     return save_unlocked(state, error);
 }
 
 bool MemoryStore::save_unlocked(const MemoryState& state, std::string* error) const {
-    std::error_code ec;
-    if (const auto parent = path_.parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
-            if (error) *error = std::format("Cannot create '{}': {}", parent.string(), ec.message());
-            return false;
-        }
-    }
-
     std::string json;
     json.reserve(1024 + state.entries.size() * 256);
     core::utils::JsonWriter writer(256);
@@ -328,22 +334,8 @@ bool MemoryStore::save_unlocked(const MemoryState& state, std::string* error) co
     }
     json += "]}";
 
-    const auto tmp = path_.string() + ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file) {
-            if (error) *error = std::format("Cannot write temporary memory store '{}'.", tmp);
-            return false;
-        }
-        file << json << '\n';
-    }
-    std::filesystem::rename(tmp, path_, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ec);
-        if (error) *error = std::format("Cannot replace memory store '{}': {}", path_.string(), ec.message());
-        return false;
-    }
-    return true;
+    json.push_back('\n');
+    return core::utils::atomic_write_file(path_, json, error);
 }
 
 MemorySettings MemoryStore::settings(std::string* error) const {
@@ -352,6 +344,13 @@ MemorySettings MemoryStore::settings(std::string* error) const {
 
 bool MemoryStore::save_settings(MemorySettings settings, std::string* error) const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
     auto state = load_unlocked(error);
     state.settings = settings;
     return save_unlocked(state, error);
@@ -359,6 +358,13 @@ bool MemoryStore::save_settings(MemorySettings settings, std::string* error) con
 
 std::vector<MemoryEntry> MemoryStore::list(bool include_archived, std::string* error) const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return {};
+    }
     auto state = load_unlocked(error);
     std::vector<MemoryEntry> entries;
     entries.reserve(state.entries.size());
@@ -382,6 +388,10 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
     }
 
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) return {.ok = false, .message = lock_error};
     auto state = load_unlocked();
     const std::string fingerprint = normalize_for_match(clean_content);
     const std::string now = now_iso8601();
@@ -429,6 +439,10 @@ MemoryMutationResult MemoryStore::forget(std::string_view selector) const {
         return {.ok = false, .message = "Memory id is required."};
     }
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) return {.ok = false, .message = lock_error};
     auto state = load_unlocked();
     for (auto& entry : state.entries) {
         if (entry.id != id) continue;
@@ -445,6 +459,10 @@ MemoryMutationResult MemoryStore::forget(std::string_view selector) const {
 
 MemoryMutationResult MemoryStore::clean() const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) return {.ok = false, .message = lock_error};
     auto state = load_unlocked();
     std::vector<MemoryEntry> kept;
     kept.reserve(state.entries.size());
@@ -481,6 +499,10 @@ MemoryMutationResult MemoryStore::clean() const {
 
 MemoryMutationResult MemoryStore::clear() const {
     std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) return {.ok = false, .message = lock_error};
     auto state = load_unlocked();
     std::size_t changed = 0;
     const std::string now = now_iso8601();

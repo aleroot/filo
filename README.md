@@ -138,6 +138,7 @@ Useful CLI flags:
 - `--api` enable optional OpenAI/Anthropic-compatible proxy mode
 - `filo --auth <provider> [login|logout]` authenticate or sign out and exit; the action defaults to `login`, so `filo --auth openai` starts ChatGPT OAuth. Tokens are revoked server-side on logout when the provider supports it (Google, OpenAI, Grok)
 - `--list-sessions` list resumable sessions
+- `--model <MODEL|PROVIDER|PROVIDER/MODEL>` select a model for this process only without changing saved defaults
 - `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
 - `--prompter` force non-interactive mode
 - `--prompt`, `-p` prompt text
@@ -222,6 +223,27 @@ Config files are layered in this order:
 
 Use `config.json` for providers/router/subagents.
 Use `settings.json` for managed UI/workflow preferences.
+
+### Concurrent instances
+
+Filo supports multiple interactive processes with independent active models.
+The first running interactive process owns the saved model defaults for its
+lifetime. Model changes in that process are saved for future launches as usual;
+model changes in later concurrent processes are session-only and are labeled as
+such in the TUI. When the owner exits, another running process can take ownership
+on its next model switch.
+
+Use `--model` when launching intentionally different processes without changing
+the saved default:
+
+```bash
+filo --model openai/gpt-5.4
+filo --model claude/claude-sonnet-5
+```
+
+Prompt history and memory mutations are serialized across processes. Saved
+conversation files are written atomically, and Filo will not resume or delete a
+conversation that is already active in another process.
 
 Optional context compression can be enabled in `config.json`:
 

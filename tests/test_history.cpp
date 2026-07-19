@@ -1,7 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include "core/history/PromptHistoryStore.hpp"
+#include "core/utils/InterprocessFile.hpp"
 #include <filesystem>
 #include <fstream>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace core::history;
 
@@ -235,6 +238,65 @@ TEST_CASE("PersistentPromptHistory save persists to disk", "[history]") {
     }
     
     std::filesystem::remove(temp_path);
+}
+
+TEST_CASE("PersistentPromptHistory merges entries written by concurrent instances", "[history][concurrency]") {
+    auto temp_path = std::filesystem::temp_directory_path()
+        / std::format("filo_test_history_concurrent_{}.json", ::getpid());
+    std::filesystem::remove(temp_path);
+
+    auto first_store = std::make_shared<PromptHistoryStore>(temp_path);
+    auto second_store = std::make_shared<PromptHistoryStore>(temp_path);
+    PersistentPromptHistory first(first_store);
+    PersistentPromptHistory second(second_store);
+
+    first.save("from first instance");
+    second.save("from second instance");
+
+    PromptHistoryStore loaded(temp_path);
+    REQUIRE(loaded.load());
+    REQUIRE(loaded.size() == 2);
+    CHECK(loaded.entries()[0] == "from first instance");
+    CHECK(loaded.entries()[1] == "from second instance");
+
+    std::error_code ec;
+    std::filesystem::remove(temp_path, ec);
+    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
+}
+
+TEST_CASE("Prompt history remains valid under concurrent processes", "[history][concurrency]") {
+    auto temp_path = std::filesystem::temp_directory_path()
+        / std::format("filo_test_history_processes_{}.json", ::getpid());
+    std::error_code ec;
+    std::filesystem::remove(temp_path, ec);
+    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
+
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        PromptHistoryStore store(temp_path);
+        for (int i = 0; i < 25; ++i) {
+            if (!store.append_and_save(std::format("child-{}", i))) _exit(10);
+        }
+        _exit(0);
+    }
+
+    PromptHistoryStore parent_store(temp_path);
+    for (int i = 0; i < 25; ++i) {
+        REQUIRE(parent_store.append_and_save(std::format("parent-{}", i)));
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
+
+    PromptHistoryStore loaded(temp_path);
+    REQUIRE(loaded.load());
+    CHECK(loaded.size() == 50);
+
+    std::filesystem::remove(temp_path, ec);
+    std::filesystem::remove(core::utils::lock_path_for(temp_path), ec);
 }
 
 TEST_CASE("PromptHistoryStore handles corrupted JSON gracefully", "[history]") {
