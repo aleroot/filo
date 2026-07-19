@@ -748,6 +748,55 @@ TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K3
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("ConfigManager persist_login_profile('qwen') selects Token Plan and preserves its key",
+          "[config][qwen]") {
+    const fs::path sandbox = make_temp_dir("filo_config_login_qwen_profile");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+    const fs::path auth_overlay = xdg_home / "filo" / "auth_defaults.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "default_provider": "openai",
+        "default_model_selection": "manual",
+        "providers": {
+            "openai": { "type": "openai", "model": "gpt-5.4" }
+        }
+    })");
+    write_text(auth_overlay, R"({
+        "providers": {
+            "qwen-token-plan": {
+                "api_key": "test-token-plan-key"
+            }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    std::string error;
+    REQUIRE(manager.persist_login_profile("qwen", &error));
+    REQUIRE(error.empty());
+
+    const auto& config = manager.get_config();
+    REQUIRE(config.default_provider == "qwen-token-plan");
+    REQUIRE(config.default_model_selection == "manual");
+    REQUIRE(config.providers.contains("qwen-token-plan"));
+    REQUIRE(config.providers.at("qwen-token-plan").auth_type.empty());
+    REQUIRE(config.providers.at("qwen-token-plan").model.empty());
+    REQUIRE(config.providers.at("qwen-token-plan").api_key == "test-token-plan-key");
+
+    manager.load(project_dir);
+    const auto& reloaded = manager.get_config();
+    REQUIRE(reloaded.default_provider == "qwen-token-plan");
+    REQUIRE(reloaded.providers.at("qwen-token-plan").model.empty());
+    REQUIRE(reloaded.providers.at("qwen-token-plan").api_key == "test-token-plan-key");
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager persists /model defaults across reloads", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_model_persist");
     const fs::path xdg_home = sandbox / "xdg";

@@ -1,6 +1,7 @@
 #include "OpenAIResponsesProtocol.hpp"
+#include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
-#include "../ModelEffort.hpp"
+#include "OpenAIProtocol.hpp"
 #include "../Models.hpp"
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
@@ -47,9 +48,21 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
     return url + "/responses";
 }
 
-void append_tool_schema(std::string& payload, const std::vector<Tool>& tools) {
+void append_tool_schema(std::string& payload,
+                        const std::vector<Tool>& tools,
+                        std::span<const std::string_view> hosted_tool_types = {}) {
     payload += R"(,"tools":[)";
+    bool first = true;
+    for (const std::string_view type : hosted_tool_types) {
+        if (!first) payload += ',';
+        first = false;
+        payload += R"({"type":")";
+        payload += core::utils::escape_json_string(type);
+        payload += R"("})";
+    }
     for (std::size_t i = 0; i < tools.size(); ++i) {
+        if (!first) payload += ',';
+        first = false;
         const auto& def = tools[i].function;
         payload += R"({"type":"function","name":")";
         payload += core::utils::escape_json_string(def.name);
@@ -58,7 +71,6 @@ void append_tool_schema(std::string& payload, const std::vector<Tool>& tools) {
         payload += R"(","strict":false,"parameters":)";
         payload += core::tools::schema::canonical_input_schema(def);
         payload += "}";
-        if (i + 1 < tools.size()) payload += ",";
     }
     payload += "]";
 }
@@ -301,7 +313,8 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
         return effort;
     }
     if (effort == "max") {
-        return openai_model_supports_max_effort(model) ? "max" : "high";
+        return openai_reasoning_capabilities(model).supports(
+            ReasoningCapability::MaxEffort) ? "max" : "high";
     }
     return {};
 }
@@ -313,24 +326,7 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
     simdjson::dom::object usage_obj;
     if (response_obj["usage"].get(usage_obj) != simdjson::SUCCESS) return;
 
-    int64_t input_tokens = 0;
-    int64_t output_tokens = 0;
-
-    if (usage_obj["input_tokens"].get(input_tokens) != simdjson::SUCCESS) {
-        [[maybe_unused]] auto _ = usage_obj["prompt_tokens"].get(input_tokens);
-    }
-    if (usage_obj["output_tokens"].get(output_tokens) != simdjson::SUCCESS) {
-        [[maybe_unused]] auto _ = usage_obj["completion_tokens"].get(output_tokens);
-    }
-
-    if (input_tokens > 0) {
-        result.prompt_tokens = static_cast<int32_t>(
-            std::min<int64_t>(input_tokens, INT32_MAX));
-    }
-    if (output_tokens > 0) {
-        result.completion_tokens = static_cast<int32_t>(
-            std::min<int64_t>(output_tokens, INT32_MAX));
-    }
+    (void)parse_openai_usage(usage_obj, result);
 }
 
 [[nodiscard]] std::string parse_response_id(simdjson::dom::element doc) {
@@ -449,6 +445,16 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     const ChatRequest& req,
     const std::vector<std::string>& input_items,
     std::optional<std::string_view> previous_response_id_override) const {
+    const SerializationOptions options;
+    return serialize_with_input_items(
+        req, input_items, previous_response_id_override, options);
+}
+
+std::string OpenAIResponsesProtocol::serialize_with_input_items(
+    const ChatRequest& req,
+    const std::vector<std::string>& input_items,
+    std::optional<std::string_view> previous_response_id_override,
+    const SerializationOptions& options) const {
     std::string payload;
     payload.reserve(8192);
 
@@ -458,7 +464,9 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     payload += core::utils::escape_json_string(collect_instructions(req));
     payload += R"(","stream":)";
     payload += req.stream ? "true" : "false";
-    payload += R"(,"store":false)";
+    if (options.include_store) {
+        payload += R"(,"store":false)";
+    }
 
     const std::string_view previous_response_id = previous_response_id_override.has_value()
         ? *previous_response_id_override
@@ -477,8 +485,11 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
     }
-    if (openai_model_supports_reasoning_effort(req.model)) {
-        const std::string effort = normalize_openai_effort(req.effort, req.model);
+    if (options.reasoning_effort_override.has_value()
+        || reasoning_capabilities(req.model).supports_effort()) {
+        const std::string effort = options.reasoning_effort_override.has_value()
+            ? std::string(*options.reasoning_effort_override)
+            : normalize_openai_effort(req.effort, req.model);
         if (!effort.empty()) {
             payload += R"(,"reasoning":{"effort":")";
             payload += core::utils::escape_json_string(effort);
@@ -488,14 +499,15 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
 
     append_input_items(payload, input_items);
 
+    const bool has_tools = !req.tools.empty() || !options.hosted_tool_types.empty();
     payload += R"(,"tool_choice":"auto","parallel_tool_calls":)";
-    payload += req.tools.empty() ? "false" : "true";
+    payload += has_tools ? "true" : "false";
 
-    if (!req.tools.empty()) {
-        append_tool_schema(payload, req.tools);
+    if (has_tools) {
+        append_tool_schema(payload, req.tools, options.hosted_tool_types);
     }
 
-    if (!req.prompt_cache_key.empty()) {
+    if (options.include_prompt_cache_key && !req.prompt_cache_key.empty()) {
         payload += R"(,"prompt_cache_key":")";
         payload += core::utils::escape_json_string(req.prompt_cache_key);
         payload += '"';
@@ -510,10 +522,12 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += '"';
     }
 
-    if (include_reasoning_encrypted_) {
-        payload += R"(,"include":["reasoning.encrypted_content"])";
-    } else {
-        payload += R"(,"include":[])";
+    if (options.include_response_include) {
+        if (include_reasoning_encrypted_) {
+            payload += R"(,"include":["reasoning.encrypted_content"])";
+        } else {
+            payload += R"(,"include":[])";
+        }
     }
 
     if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
@@ -529,7 +543,14 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
 }
 
 std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
-    return serialize_with_input_items(req, build_input_items(req.messages));
+    const SerializationOptions options;
+    return serialize_with_options(req, options);
+}
+
+std::string OpenAIResponsesProtocol::serialize_with_options(
+    const ChatRequest& req,
+    const SerializationOptions& options) const {
+    return serialize_with_input_items(req, build_input_items(req.messages), std::nullopt, options);
 }
 
 cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& auth) const {
@@ -549,6 +570,11 @@ cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& a
     }
 
     return headers;
+}
+
+ReasoningCapabilities OpenAIResponsesProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    return openai_reasoning_capabilities(model);
 }
 
 std::string OpenAIResponsesProtocol::build_url(std::string_view base_url,

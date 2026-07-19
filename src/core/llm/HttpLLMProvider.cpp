@@ -51,6 +51,17 @@ namespace {
         return std::string(model);
     }
 
+    [[nodiscard]] TokenUsage token_usage_from(const protocols::ParseResult& result) noexcept {
+        return TokenUsage{
+            .prompt_tokens = result.prompt_tokens,
+            .completion_tokens = result.completion_tokens,
+            .total_tokens = result.prompt_tokens + result.completion_tokens,
+            .cached_prompt_tokens = result.cached_prompt_tokens,
+            .cache_creation_prompt_tokens = result.cache_creation_prompt_tokens,
+            .reasoning_tokens = result.reasoning_tokens,
+        };
+    }
+
     [[nodiscard]] PreparedHttpStreamRequest prepare_stream_request(
         const ChatRequest& request,
         std::string_view default_model,
@@ -177,7 +188,8 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
                                  std::unique_ptr<protocols::ApiProtocolBase>    protocol,
                                  core::config::ApiType                          api_type,
                                  std::string                                    provider_name,
-                                 std::shared_ptr<IProviderClientIdentitySource>  client_identity_source)
+                                 std::shared_ptr<IProviderClientIdentitySource>  client_identity_source,
+                                 std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
@@ -185,6 +197,7 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
     , api_type_(api_type)
     , provider_name_(std::move(provider_name))
     , client_identity_source_(std::move(client_identity_source))
+    , model_catalog_selector_(std::move(model_catalog_selector))
 {}
 
 HttpLLMProvider::~HttpLLMProvider() = default;
@@ -236,6 +249,30 @@ void HttpLLMProvider::discover_models(
         cred_source_,
         protocol_->clone(),
         options);
+}
+
+std::string HttpLLMProvider::resolve_default_model() const {
+    if (!default_model_.empty() || !model_catalog_selector_) {
+        return default_model_;
+    }
+
+    auto snapshot = ModelCatalogAvailability::instance().snapshot(provider_name_);
+    if (snapshot.models.empty() && snapshot.refresh_due()) {
+        discover_models({.timeout_ms = 2500});
+    }
+    if (snapshot.models.empty()) {
+        snapshot = ModelCatalogAvailability::instance().wait_for_snapshot(
+            provider_name_, std::chrono::milliseconds{3000});
+    }
+
+    const ModelCatalogSelection selection = model_catalog_selector_->select(snapshot.models);
+    if (!selection.ok()) {
+        throw std::runtime_error(
+            selection.error.empty()
+                ? "Live model catalog did not provide a usable default model."
+                : selection.error);
+    }
+    return selection.model;
 }
 
 std::string HttpLLMProvider::get_last_model() const {
@@ -368,6 +405,11 @@ bool HttpLLMProvider::should_estimate_cost() const {
     return !cred_source_ || !cred_source_->uses_subscription_billing();
 }
 
+ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    return protocol_ ? protocol_->reasoning_capabilities(model) : ReasoningCapabilities{};
+}
+
 ProviderCapabilities HttpLLMProvider::capabilities() const {
     const bool is_ollama = protocol_ && protocol_->name() == "ollama";
     return ProviderCapabilities{
@@ -387,7 +429,8 @@ std::shared_ptr<LLMProvider> HttpLLMProvider::fork_for_parallel_request() const 
         protocol_->clone(),
         api_type_,
         provider_name_,
-        client_identity_source_);
+        client_identity_source_,
+        model_catalog_selector_);
 }
 
 void HttpLLMProvider::reset_conversation_state() {
@@ -416,9 +459,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
     ChatRequest effective_request = request;
 
     try {
+        const std::string effective_default_model = effective_request.model.empty()
+            ? resolve_default_model()
+            : default_model_;
+        if (effective_request.model.empty() && !effective_default_model.empty()) {
+            effective_request.model = effective_default_model;
+        }
+
         const std::string metadata_model = normalize_metadata_model(
             effective_request.model.empty()
-                ? std::string_view(default_model_)
+                ? std::string_view(effective_default_model)
                 : std::string_view(effective_request.model),
             protocol_.get());
         const auto metadata_info = ModelRegistry::instance().get_info(metadata_model);
@@ -444,7 +494,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         }
 
         prepared = prepare_stream_request(
-            effective_request, default_model_, base_url_, cred_source_, *protocol_);
+            effective_request, effective_default_model, base_url_, cred_source_, *protocol_);
         {
             std::lock_guard lock(state_mutex_);
             last_model_ = prepared.model;
@@ -526,8 +576,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                                 if (!websocket_frame.suppress_output
                                     && (result.prompt_tokens > 0 || result.completion_tokens > 0)) {
-                                    self->set_last_usage(
-                                        result.prompt_tokens, result.completion_tokens);
+                                    self->set_last_usage(token_usage_from(result));
                                 }
 
                                 if (result.done) {
@@ -691,7 +740,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     // Report token usage before emitting the final chunk so that
                     // get_last_usage() is populated before callers observe is_final.
                     if (result.prompt_tokens > 0 || result.completion_tokens > 0) {
-                        self->set_last_usage(result.prompt_tokens, result.completion_tokens);
+                        self->set_last_usage(token_usage_from(result));
                     }
 
                     if (result.done) {

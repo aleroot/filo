@@ -19,6 +19,7 @@ struct ProviderCatalogFamily {
 constexpr std::array kProviderCatalogFamilies{
     ProviderCatalogFamily{"grok"},
     ProviderCatalogFamily{"kimi"},
+    ProviderCatalogFamily{"qwen"},
     ProviderCatalogFamily{"zai"},
 };
 
@@ -71,6 +72,10 @@ find_family(std::string_view provider_name) {
         || lowered.starts_with("kimi-for-coding-");
 }
 
+[[nodiscard]] bool is_qwen_token_plan_source(std::string_view provider_name) {
+    return normalized(provider_name).starts_with("qwen-token-plan");
+}
+
 template <std::size_t N>
 [[nodiscard]] ProviderCatalogModelFilter model_filter(
     ProviderCatalogModelRule rule,
@@ -99,6 +104,13 @@ template <std::size_t N>
     return model_filter(ProviderCatalogModelRule::Include, kKimiCodeModels);
 }
 
+[[nodiscard]] ProviderCatalogModelFilter qwen_token_plan_filter() {
+    // Token Plan availability is account- and subscription-specific. An empty
+    // include filter intentionally disables static-registry fallback; the live
+    // /models response is the source of truth for this endpoint.
+    return ProviderCatalogModelFilter{.rule = ProviderCatalogModelRule::Include};
+}
+
 [[nodiscard]] ProviderCatalogSource source_for_provider(std::string_view provider_name,
                                                         std::string_view group_name) {
     ProviderCatalogSource source{
@@ -117,6 +129,9 @@ template <std::size_t N>
         source.registry_model_filter = kimi_code_filter();
     } else if (group_name == "kimi") {
         source.registry_model_filter = kimi_regular_filter();
+    } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
+        source.category_label = "Token Plan endpoint.";
+        source.registry_model_filter = qwen_token_plan_filter();
     }
 
     return source;

@@ -3,6 +3,8 @@
 #include "../agent/Agent.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../llm/ModelRegistry.hpp"
+#include "../llm/ModelCatalogDiscovery.hpp"
+#include "../llm/ProviderCatalogGrouping.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -84,6 +86,29 @@ inline std::string model_family_key(std::string_view model_hint) {
         return "openai";
     }
     return {};
+}
+
+inline std::vector<std::string> filter_by_live_model_catalog(
+    const std::vector<std::string>& candidates,
+    std::string_view requested_model) {
+    std::vector<std::string> confirmed;
+    std::vector<std::string> unknown;
+    for (const auto& candidate : candidates) {
+        const auto contains = core::llm::ModelCatalogAvailability::instance()
+            .contains_model(candidate, requested_model);
+        if (!contains.has_value()) {
+            const auto group = core::llm::provider_catalog_group_for(candidate, candidates);
+            if (const auto* source = group.find_source(candidate);
+                source != nullptr
+                && !source->includes_registry_model(requested_model)) {
+                continue;
+            }
+            unknown.push_back(candidate);
+        } else if (*contains) {
+            confirmed.push_back(candidate);
+        }
+    }
+    return confirmed.empty() ? unknown : confirmed;
 }
 
 inline bool try_select_provider(
@@ -205,6 +230,7 @@ inline SkillTurnResolution resolve_skill_turn(
             exact_model_matches.push_back(provider_name);
         }
     }
+    exact_model_matches = filter_by_live_model_catalog(exact_model_matches, trimmed_hint);
     if (try_select_from_candidates(
             exact_model_matches,
             trimmed_hint,
@@ -226,6 +252,7 @@ inline SkillTurnResolution resolve_skill_turn(
                 family_matches.push_back(provider_name);
             }
         }
+        family_matches = filter_by_live_model_catalog(family_matches, trimmed_hint);
 
         if (try_select_from_candidates(
                 family_matches,
@@ -254,6 +281,7 @@ inline SkillTurnResolution resolve_skill_turn(
                 family_matches.push_back(provider_name);
             }
         }
+        family_matches = filter_by_live_model_catalog(family_matches, trimmed_hint);
 
         if (try_select_from_candidates(
                 family_matches,

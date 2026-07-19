@@ -41,6 +41,15 @@ TEST_CASE("str::trim_ascii_view trims leading and trailing ASCII whitespace",
     REQUIRE(trimmed == "hello");
 }
 
+TEST_CASE("str::contains_case_insensitive finds ASCII substrings without allocation",
+          "[utils][string]") {
+    REQUIRE(core::utils::str::contains_case_insensitive("claude-SONNET-5", "sonnet-5"));
+    REQUIRE(core::utils::str::contains_case_insensitive("ReasoningModel", "REASONING"));
+    REQUIRE(core::utils::str::contains_case_insensitive("anything", ""));
+    REQUIRE_FALSE(core::utils::str::contains_case_insensitive("claude-haiku", "sonnet"));
+    REQUIRE_FALSE(core::utils::str::contains_case_insensitive("short", "longer"));
+}
+
 TEST_CASE("str::trim_ascii_view returns empty view for all-whitespace input",
           "[utils][string]") {
     const auto trimmed = core::utils::str::trim_ascii_view(" \t\r\n  ");

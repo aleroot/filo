@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/auth/QwenOAuthFlow.hpp"
 #include "core/auth/OpenAIOAuthFlow.hpp"
 #include "core/auth/AuthenticationManager.hpp"
@@ -145,32 +146,14 @@ TEST_CASE("AuthenticationManager — qwen is an available login provider", "[Qwe
     REQUIRE(it != providers.end());
 }
 
-TEST_CASE("AuthenticationManager — oauth_qwen creates a credential source", "[QwenOAuthStrategy]") {
-    // Seed a pre-existing token so the OAuthTokenManager doesn't attempt a live login.
-    const std::string dir = "/tmp/filo_qwen_oauth_test_" + std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    std::filesystem::create_directories(dir);
-
-    {
-        // Write a valid token file that OAuthTokenManager can load
-        std::ofstream f(dir + "/oauth_qwen.json");
-        f << R"({"access_token":"test-qwen-token","refresh_token":"rt","token_type":"Bearer","expires_at":)"
-          << (now_unix() + 3600) << R"(})";
-    }
-
+TEST_CASE("AuthenticationManager — oauth_qwen is rejected for Token Plan", "[QwenOAuthStrategy]") {
     core::config::ProviderConfig cfg;
     cfg.auth_type = "oauth_qwen";
 
-    auto manager = AuthenticationManager::create_with_defaults(dir);
-    auto cred    = manager.create_credential_source("qwen", cfg);
-
-    REQUIRE(cred != nullptr);
-
-    auto auth = cred->get_auth();
-    REQUIRE(auth.headers.count("Authorization") == 1);
-    REQUIRE(auth.headers.at("Authorization") == "Bearer test-qwen-token");
-
-    std::filesystem::remove_all(dir);
+    auto manager = AuthenticationManager::create_with_defaults("/tmp");
+    REQUIRE_THROWS_WITH(
+        manager.create_credential_source("qwen-token-plan", cfg),
+        Catch::Matchers::ContainsSubstring("does not support OAuth"));
 }
 
 TEST_CASE("AuthenticationManager — oauth_qwen not activated for api_key auth_type", "[QwenOAuthStrategy]") {

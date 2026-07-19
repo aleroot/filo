@@ -163,15 +163,17 @@ set(FILO_CORE_SOURCES
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
     src/core/llm/providers/RouterProvider.cpp
+    src/core/llm/providers/QwenModelCatalogSelector.cpp
+    src/core/llm/QwenModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
-    src/core/llm/ModelEffort.cpp
     src/core/llm/ModelRegistry.cpp
     src/core/llm/ProviderCatalogGrouping.cpp
     src/core/llm/ProviderClientIdentity.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
+    src/core/llm/protocols/OpenAIUsage.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
     src/core/llm/protocols/MistralProtocol.cpp
     src/core/llm/protocols/KimiProtocol.cpp
@@ -414,7 +416,7 @@ set(CMAKE_FOLDER "${_filo_saved_folder}")
 unset(_filo_saved_folder)
 
 set(FILO_UNIT_TEST_SOURCES
-    tests/test_model_effort.cpp
+    tests/test_reasoning_capabilities.cpp
     tests/test_tools.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp

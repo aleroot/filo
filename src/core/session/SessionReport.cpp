@@ -259,6 +259,15 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
             fmt_tokens(total.completion_tokens),
             fmt_tokens(total.total_tokens)),
         kReset);
+    if (total.cached_prompt_tokens > 0) {
+        row("Cached input", fmt_tokens(total.cached_prompt_tokens), kGreen);
+    }
+    if (total.cache_creation_prompt_tokens > 0) {
+        row("Cache creation", fmt_tokens(total.cache_creation_prompt_tokens), kReset);
+    }
+    if (total.reasoning_tokens > 0) {
+        row("Reasoning", fmt_tokens(total.reasoning_tokens), kCyan);
+    }
     if (!snap.network_traffic.empty()) {
         row("Network traffic", core::net::format_network_traffic(snap.network_traffic), kReset);
     }

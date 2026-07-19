@@ -86,6 +86,8 @@ public:
     KimiProtocol() : OpenAIProtocol(/*stream_usage=*/true) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "kimi"; }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<KimiProtocol>(*this);

@@ -101,6 +101,11 @@ public:
         , effort_(effort) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "grok"; }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override {
+        if (!grok_supports_reasoning_effort(model)) return {};
+        return ReasoningCapabilities{ReasoningCapability::Effort};
+    }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<GrokProtocol>(*this);

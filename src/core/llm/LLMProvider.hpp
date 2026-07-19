@@ -7,6 +7,7 @@
 #include <atomic>
 #include <optional>
 #include "Models.hpp"
+#include "ReasoningCapabilities.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "../config/ConfigManager.hpp"
 
@@ -102,6 +103,12 @@ public:
      */
     [[nodiscard]] virtual bool should_estimate_cost() const { return true; }
 
+    /** Reasoning controls supported by this provider for a concrete model. */
+    [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(
+        [[maybe_unused]] std::string_view model) const noexcept {
+        return {};
+    }
+
     /**
      * @brief Reset provider-managed conversation continuity state.
      *
@@ -125,9 +132,8 @@ public:
      *        Returns zero-initialized struct if the provider does not track usage.
      */
     [[nodiscard]] TokenUsage get_last_usage() const noexcept {
-        const int32_t p = last_prompt_.load(std::memory_order_acquire);
-        const int32_t c = last_completion_.load(std::memory_order_acquire);
-        return TokenUsage{ .prompt_tokens = p, .completion_tokens = c, .total_tokens = p + c };
+        auto snapshot = load_last_usage_snapshot();
+        return snapshot ? *snapshot : TokenUsage{};
     }
     
     /**
@@ -152,8 +158,19 @@ protected:
      *        to guarantee visibility at the call-site.
      */
     void set_last_usage(int32_t prompt, int32_t completion) noexcept {
-        last_prompt_.store(prompt,     std::memory_order_release);
-        last_completion_.store(completion, std::memory_order_release);
+        set_last_usage(TokenUsage{
+            .prompt_tokens = prompt,
+            .completion_tokens = completion,
+            .total_tokens = prompt + completion,
+        });
+    }
+
+    void set_last_usage(const TokenUsage& usage) noexcept {
+        try {
+            store_last_usage_snapshot(std::make_shared<const TokenUsage>(usage));
+        } catch (...) {
+            // OOM: retain the previous complete snapshot.
+        }
     }
 
     /**
@@ -181,6 +198,7 @@ protected:
     }
 
 private:
+    using TokenUsageSnapshotPtr = std::shared_ptr<const TokenUsage>;
     using RateLimitSnapshotPtr = std::shared_ptr<const protocols::RateLimitInfo>;
 #if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
     using RateLimitSnapshotStore = std::atomic<RateLimitSnapshotPtr>;
@@ -206,8 +224,17 @@ private:
 #endif
     }
 
-    std::atomic<int32_t> last_prompt_{0};
-    std::atomic<int32_t> last_completion_{0};
+    [[nodiscard]] TokenUsageSnapshotPtr load_last_usage_snapshot() const noexcept {
+        return std::atomic_load_explicit(
+            &last_usage_snapshot_, std::memory_order_acquire);
+    }
+
+    void store_last_usage_snapshot(TokenUsageSnapshotPtr snapshot) noexcept {
+        std::atomic_store_explicit(
+            &last_usage_snapshot_, std::move(snapshot), std::memory_order_release);
+    }
+
+    TokenUsageSnapshotPtr last_usage_snapshot_ = std::make_shared<const TokenUsage>();
 
     // Immutable snapshot of the last rate-limit response.  Written by the
     // streaming thread via set_last_rate_limit_info(); read lock-free by the

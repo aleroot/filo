@@ -1,10 +1,10 @@
 #include "KimiProtocol.hpp"
 #include "SseUtils.hpp"
-#include "../ModelEffort.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
+#include "../../utils/AsciiUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -26,6 +26,34 @@
 namespace core::llm::protocols {
 
 namespace {
+
+[[nodiscard]] ReasoningCapabilities kimi_reasoning_capabilities(
+    std::string_view model) noexcept {
+    using core::utils::ascii::iequals;
+    using core::utils::ascii::istarts_with;
+
+    if (iequals(model, "k3") || iequals(model, "kimi-k3")) {
+        return ReasoningCapability::Effort
+            | ReasoningCapability::MaxEffort
+            | ReasoningCapability::Required
+            | ReasoningCapability::FixedMax;
+    }
+
+    const bool required = iequals(model, "kimi-k2.7-code")
+        || iequals(model, "kimi-k2.7-code-highspeed")
+        || iequals(model, "kimi-for-coding")
+        || iequals(model, "kimi-for-coding-highspeed");
+    const bool supported = required
+        || istarts_with(model, "kimi-k2")
+        || core::utils::str::contains_case_insensitive(model, "thinking");
+    if (!supported) return {};
+
+    ReasoningCapabilities features{ReasoningCapability::Effort};
+    features = features | (required
+        ? ReasoningCapability::Required
+        : ReasoningCapability::Disable);
+    return features;
+}
 
 [[nodiscard]] std::optional<std::string_view>
 find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
@@ -974,20 +1002,21 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         payload += '"';
     }
 
-    if (!kimi_model_supports_thinking(req.model)) {
+    const ReasoningCapabilities capabilities = reasoning_capabilities(req.model);
+    if (!capabilities.supports_effort()) {
         return;
     }
 
     // K3 is an always-reasoning model and does not accept the K2.x `thinking`
     // switch. At launch, max is its only accepted effort on both the public
     // `kimi-k3` model and the Kimi Code subscription model `k3`.
-    if (kimi_model_is_k3(req.model)) {
+    if (capabilities.supports(ReasoningCapability::FixedMax)) {
         payload += R"(,"reasoning_effort":"max")";
         return;
     }
 
     std::string effort = normalize_kimi_effort(req.effort);
-    if (kimi_model_requires_thinking(req.model)
+    if (capabilities.supports(ReasoningCapability::Required)
         && (effort.empty() || effort == "off")) {
         effort = "high";
     }
@@ -1004,6 +1033,11 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
     // `thinking.type`. Sending legacy reasoning_effort as well can make
     // current Kimi-compatible endpoints reject the request.
     payload += R"(,"thinking":{"type":"enabled"})";
+}
+
+ReasoningCapabilities KimiProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    return kimi_reasoning_capabilities(model);
 }
 
 cpr::Header KimiProtocol::build_headers(const core::auth::AuthInfo& auth) const {

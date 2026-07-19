@@ -111,6 +111,28 @@ TEST_CASE("Provider catalog grouping collapses Kimi presets and keeps endpoint m
     REQUIRE(alias_group.provider_name == "kimi");
 }
 
+TEST_CASE("Provider catalog grouping keeps Qwen Token Plan availability live-only",
+          "[llm][provider-catalog][qwen][token-plan]") {
+    const std::vector<std::string> providers{"qwen", "qwen-token-plan"};
+    const auto group = core::llm::provider_catalog_group_for("qwen-token-plan", providers);
+
+    REQUIRE(group.provider_name == "qwen");
+    REQUIRE(group.sources.size() == 2);
+    const auto* public_api = group.find_source("qwen");
+    const auto* token_plan = group.find_source("qwen-token-plan");
+    REQUIRE(public_api != nullptr);
+    REQUIRE(token_plan != nullptr);
+    REQUIRE(token_plan->category_label == "Token Plan endpoint.");
+    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
+                             "qwen3.7-plus", "qwen3.6-flash",
+                             "qwen4.0-max"}) {
+        CHECK_FALSE(token_plan->includes_registry_model(model));
+        CHECK(public_api->includes_registry_model(model));
+    }
+    CHECK_FALSE(token_plan->includes_registry_model("qwen3-coder-plus"));
+    CHECK(public_api->includes_registry_model("qwen3-coder-plus"));
+}
+
 TEST_CASE("Provider catalog family matching respects provider-name boundaries",
           "[llm][provider-catalog]") {
     const std::vector<std::string> providers{

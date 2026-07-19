@@ -88,6 +88,9 @@ struct TokenLedgerBucketSnapshot {
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;
+    int64_t cached_prompt_tokens = 0;
+    int64_t cache_creation_prompt_tokens = 0;
+    int64_t reasoning_tokens = 0;
     int64_t cost_micro_usd = 0;
 
     [[nodiscard]] double cost_usd() const noexcept {
@@ -100,6 +103,9 @@ struct TokenLedgerSnapshot {
     int64_t prompt_tokens = 0;
     int64_t completion_tokens = 0;
     int64_t total_tokens = 0;
+    int64_t cached_prompt_tokens = 0;
+    int64_t cache_creation_prompt_tokens = 0;
+    int64_t reasoning_tokens = 0;
     int64_t cost_micro_usd = 0;
     std::vector<TokenLedgerBucketSnapshot> by_source;
     std::vector<TokenLedgerBucketSnapshot> by_model;

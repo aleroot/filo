@@ -28,6 +28,7 @@
 
 #include "LLMProvider.hpp"
 #include "ModelCatalogDiscovery.hpp"
+#include "ModelCatalogSelector.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "../config/ConfigManager.hpp"
@@ -83,7 +84,8 @@ public:
                     std::unique_ptr<protocols::ApiProtocolBase>    protocol,
                     core::config::ApiType                          api_type = core::config::ApiType::Unknown,
                     std::string                                    provider_name = {},
-                    std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {});
+                    std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {},
+                    std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector = {});
     ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
@@ -102,6 +104,8 @@ public:
      * display misleading per-token USD totals in session reports.
      */
     [[nodiscard]] bool should_estimate_cost() const override;
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
     void reset_conversation_state() override;
 
     /**
@@ -147,6 +151,8 @@ public:
         const ModelCatalogDiscoveryOptions& options = {}) const override;
 
 private:
+    [[nodiscard]] std::string resolve_default_model() const;
+
     struct WebSocketTransportState {
         WebSocketTransportState();
         ~WebSocketTransportState();
@@ -171,6 +177,7 @@ private:
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;
     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
+    std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector_;
     WebSocketTransportState                        websocket_;
     std::atomic_bool                               cancel_requested_{false};
 };

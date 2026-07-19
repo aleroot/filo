@@ -87,6 +87,9 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Qwen / DashScope Models (Alibaba Cloud)
     // -----------------------------------------------------------------------
+    { "qwen3.8-",           1000000 },
+    { "qwen3.7-",           1000000 },
+    { "qwen3.6-",           1000000 },
     { "qwen3-coder-",      1000000 },
     { "qwen3-vl-",         1000000 },
     { "qwen3.5-",          1000000 },
@@ -1024,6 +1027,63 @@ std::vector<ModelInfo> build_qwen_catalog() {
         static_cast<uint32_t>(ModelCapability::PromptCaching);
 
     return {
+        // ── Current Qwen Cloud / Token Plan family ───────────────────────
+        {
+            .canonical_id      = "qwen3.8-max-preview",
+            .aliases           = {},
+            .display_name      = "Qwen3.8 Max Preview (Token Plan)",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 256'000,
+            .capabilities      = CAP_QWEN_CODER,
+            .tier              = ModelTier::Powerful,
+            .pricing           = {0.0, 0.0, 0.0, 0.0},
+            .knowledge_cutoff  = "2026-06",
+            .constraints       = kStandardConstraints,
+        },
+        {
+            .canonical_id      = "qwen3.7-max",
+            .aliases           = {},
+            .display_name      = "Qwen3.7 Max",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 256'000,
+            .capabilities      = CAP_QWEN_CODER,
+            .tier              = ModelTier::Powerful,
+            .pricing           = {2.50, 7.50, 0.50, 0.25},
+            .knowledge_cutoff  = "2026-06",
+            .constraints       = kStandardConstraints,
+        },
+        {
+            .canonical_id      = "qwen3.7-plus",
+            .aliases           = {},
+            .display_name      = "Qwen3.7 Plus",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 256'000,
+            .capabilities      = CAP_QWEN_VL,
+            .tier              = ModelTier::Balanced,
+            .pricing           = {0.40, 1.60, -1.0, -1.0},
+            .knowledge_cutoff  = "2026-05",
+            .constraints       = kStandardConstraints,
+        },
+        {
+            .canonical_id      = "qwen3.6-flash",
+            .aliases           = {},
+            .display_name      = "Qwen3.6 Flash",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 80'000,
+            .capabilities      = CAP_QWEN_VL,
+            .tier              = ModelTier::Fast,
+            .pricing           = {0.25, 1.50, -1.0, -1.0},
+            .knowledge_cutoff  = "2026-04",
+            .constraints       = kStandardConstraints,
+        },
         // ── Qwen3-Coder family ────────────────────────────────────────────
         // Specialist coding models; 1M-token context window.
         {

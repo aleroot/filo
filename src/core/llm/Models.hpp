@@ -31,16 +31,28 @@ struct TokenUsage {
     int32_t prompt_tokens     = 0;
     int32_t completion_tokens = 0;
     int32_t total_tokens      = 0;  // may be computed as prompt + completion
+    int32_t cached_prompt_tokens = 0;
+    int32_t cache_creation_prompt_tokens = 0;
+    int32_t reasoning_tokens = 0;
 
     [[nodiscard]] TokenUsage operator+(const TokenUsage& o) const noexcept {
-        return { prompt_tokens     + o.prompt_tokens,
-                 completion_tokens + o.completion_tokens,
-                 total_tokens      + o.total_tokens };
+        return {
+            .prompt_tokens = prompt_tokens + o.prompt_tokens,
+            .completion_tokens = completion_tokens + o.completion_tokens,
+            .total_tokens = total_tokens + o.total_tokens,
+            .cached_prompt_tokens = cached_prompt_tokens + o.cached_prompt_tokens,
+            .cache_creation_prompt_tokens =
+                cache_creation_prompt_tokens + o.cache_creation_prompt_tokens,
+            .reasoning_tokens = reasoning_tokens + o.reasoning_tokens,
+        };
     }
     TokenUsage& operator+=(const TokenUsage& o) noexcept {
         prompt_tokens     += o.prompt_tokens;
         completion_tokens += o.completion_tokens;
         total_tokens      += o.total_tokens;
+        cached_prompt_tokens += o.cached_prompt_tokens;
+        cache_creation_prompt_tokens += o.cache_creation_prompt_tokens;
+        reasoning_tokens += o.reasoning_tokens;
         return *this;
     }
     [[nodiscard]] bool has_data() const noexcept { return prompt_tokens > 0 || completion_tokens > 0; }

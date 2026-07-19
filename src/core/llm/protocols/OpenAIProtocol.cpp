@@ -1,6 +1,7 @@
 #include "OpenAIProtocol.hpp"
+#include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
-#include "../ModelEffort.hpp"
+#include "core/utils/AsciiUtils.hpp"
 #include "../Models.hpp"
 #include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
@@ -17,6 +18,22 @@
 #include <unordered_map>
 
 namespace core::llm::protocols {
+
+ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noexcept {
+    using core::utils::ascii::istarts_with;
+    if (!istarts_with(model, "gpt-5")
+        && !istarts_with(model, "o1")
+        && !istarts_with(model, "o3")
+        && !istarts_with(model, "o4")) {
+        return {};
+    }
+
+    ReasoningCapabilities features{ReasoningCapability::Effort};
+    if (istarts_with(model, "gpt-5.6")) {
+        features = features | ReasoningCapability::MaxEffort;
+    }
+    return features;
+}
 
 namespace {
 
@@ -385,7 +402,8 @@ void merge_zai_usage_snapshot(RateLimitInfo& info, const ZaiUsageSnapshot& snaps
         return effort;
     }
     if (effort == "max") {
-        return openai_model_supports_max_effort(model) ? "max" : "high";
+        return openai_reasoning_capabilities(model).supports(
+            ReasoningCapability::MaxEffort) ? "max" : "high";
     }
     return {};
 }
@@ -602,7 +620,7 @@ std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
 
     if (payload.ends_with('}')) {
         payload.pop_back();
-        if (openai_model_supports_reasoning_effort(req.model)) {
+        if (openai_reasoning_capabilities(req.model).supports_effort()) {
             const std::string effort = normalize_openai_effort(req.effort, req.model);
             if (!effort.empty()) {
                 payload += R"(,"reasoning_effort":")";
@@ -679,13 +697,7 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
         if (usage_parser.parse(ps).get(doc) == simdjson::SUCCESS) {
             simdjson::dom::object usage_obj;
             if (doc["usage"].get(usage_obj) == simdjson::SUCCESS) {
-                int64_t pt = 0, ct = 0;
-                [[maybe_unused]] auto e1 = usage_obj["prompt_tokens"].get(pt);
-                [[maybe_unused]] auto e2 = usage_obj["completion_tokens"].get(ct);
-                if (pt > 0 || ct > 0) {
-                    result.prompt_tokens     = static_cast<int32_t>(pt);
-                    result.completion_tokens = static_cast<int32_t>(ct);
-                }
+                (void)parse_openai_usage(usage_obj, result);
             }
         }
     }

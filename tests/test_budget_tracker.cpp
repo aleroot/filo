@@ -155,6 +155,12 @@ TEST_CASE("TokenUsageStatusFormatter renders token status lines", "[BudgetTracke
         .prompt_tokens = 1'000,
         .completion_tokens = 2'000,
     }, 0.123456) == "↑1k ↓2k  $0.1235");
+    CHECK(formatter.format({
+        .prompt_tokens = 2'000,
+        .completion_tokens = 1'000,
+        .cached_prompt_tokens = 1'500,
+        .reasoning_tokens = 700,
+    }) == "↑2k ↓1k cache:1.5k think:700");
 }
 
 TEST_CASE("TokenUsageStatusFormatter accepts concept-based formatter implementations",

@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -45,6 +46,8 @@ public:
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name() const noexcept override { return "openai_responses"; }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
 
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
@@ -58,6 +61,14 @@ public:
     }
 
 protected:
+    struct SerializationOptions {
+        bool include_store = true;
+        bool include_prompt_cache_key = true;
+        bool include_response_include = true;
+        std::optional<std::string_view> reasoning_effort_override;
+        std::span<const std::string_view> hosted_tool_types;
+    };
+
     struct SharedState {
         struct SessionState {
             std::string previous_response_id;
@@ -77,6 +88,14 @@ protected:
         const ChatRequest& request,
         const std::vector<std::string>& input_items,
         std::optional<std::string_view> previous_response_id_override = std::nullopt) const;
+    [[nodiscard]] std::string serialize_with_input_items(
+        const ChatRequest& request,
+        const std::vector<std::string>& input_items,
+        std::optional<std::string_view> previous_response_id_override,
+        const SerializationOptions& options) const;
+    [[nodiscard]] std::string serialize_with_options(
+        const ChatRequest& request,
+        const SerializationOptions& options) const;
 
     bool include_reasoning_encrypted_ = false;
     std::string default_service_tier_;

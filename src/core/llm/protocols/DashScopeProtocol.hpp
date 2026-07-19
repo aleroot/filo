@@ -40,8 +40,14 @@
  */
 
 #include "OpenAIProtocol.hpp"
+#include "OpenAIResponsesProtocol.hpp"
 
 namespace core::llm::protocols {
+
+enum class DashScopeDeployment {
+    Standard,
+    TokenPlan,
+};
 
 /**
  * @brief Alibaba Cloud DashScope protocol — OpenAI format + DashScope extensions.
@@ -75,15 +81,23 @@ public:
      *                         that do not support thinking, so it is safe to
      *                         always pass a non-zero value for Qwen3 providers.
      */
-    explicit DashScopeProtocol(int thinking_budget = 0)
+    explicit DashScopeProtocol(int thinking_budget = 0,
+                               std::string default_effort = {},
+                               DashScopeDeployment deployment = DashScopeDeployment::Standard)
         : OpenAIProtocol(/*stream_usage=*/true)  // DashScope supports usage in stream
-        , thinking_budget_(thinking_budget) {}
+        , thinking_budget_(thinking_budget)
+        , default_effort_(std::move(default_effort))
+        , deployment_(deployment) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "dashscope"; }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<DashScopeProtocol>(*this);
     }
+
+    [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
 
     // ── Request building ─────────────────────────────────────────────────────
 
@@ -155,7 +169,47 @@ protected:
 
 private:
     int           thinking_budget_;  ///< 0 = disabled; >0 = thinking token budget
+    std::string   default_effort_;   ///< Provider default used when the turn is auto.
+    DashScopeDeployment deployment_ = DashScopeDeployment::Standard;
     RateLimitInfo last_rate_limit_;  ///< Populated by on_response()
+};
+
+/**
+ * Qwen Cloud implementation of the OpenAI Responses API.
+ *
+ * Token Plan uses this by default because it exposes Qwen's native reasoning
+ * effort scale, server-side conversation cache, and hosted Harness tools while
+ * retaining Filo's local function tools.
+ */
+class DashScopeResponsesProtocol final : public OpenAIResponsesProtocol {
+public:
+    struct Options {
+        std::string default_effort = "high";
+        bool enable_hosted_tools = true;
+        DashScopeDeployment deployment = DashScopeDeployment::TokenPlan;
+    };
+
+    DashScopeResponsesProtocol();
+    explicit DashScopeResponsesProtocol(Options options);
+
+    [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
+    [[nodiscard]] cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
+    [[nodiscard]] std::string format_error_message(const HttpResponse& response) const override;
+    [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return "dashscope_responses";
+    }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
+        auto cloned = std::make_unique<DashScopeResponsesProtocol>(
+            options_);
+        share_continuity_state_with(*cloned);
+        return cloned;
+    }
+
+private:
+    Options options_;
 };
 
 } // namespace core::llm::protocols

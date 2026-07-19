@@ -1,6 +1,7 @@
 #include "ProviderFactory.hpp"
 #include "HttpLLMProvider.hpp"
 #include "ProviderClientIdentity.hpp"
+#include "providers/QwenModelCatalogSelector.hpp"
 #ifdef FILO_ENABLE_LLAMACPP
 #include "providers/LlamaCppProvider.hpp"
 #endif
@@ -20,6 +21,7 @@
 #include "../auth/GoogleCodeAssist.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/StringUtils.hpp"
+#include "../utils/UriUtils.hpp"
 #include <algorithm>
 #include <cstdlib>
 
@@ -53,7 +55,8 @@ static constexpr BuiltinDef kBuiltins[] = {
     { "ollama",  ApiType::Ollama,     "http://localhost:11434",                                          "",                    AuthStyle::None,       "" },
     { "zai-coding", ApiType::OpenAI,  "https://api.z.ai/api/coding/paas/v4",                            "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
     { "zai",     ApiType::OpenAI,     "https://api.z.ai/api/paas/v4",                                   "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
-    { "qwen",    ApiType::DashScope,  "https://dashscope.aliyuncs.com/compatible-mode/v1",               "DASHSCOPE_API_KEY",   AuthStyle::Bearer,     "" },
+    { "qwen-token-plan", ApiType::DashScope, "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "QWEN_TOKEN_PLAN_API_KEY", AuthStyle::Bearer, "responses" },
+    { "qwen",    ApiType::DashScope,  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",          "DASHSCOPE_API_KEY",   AuthStyle::Bearer,     "chat_completions" },
 };
 
 const BuiltinDef* find_builtin(std::string_view name) noexcept {
@@ -102,6 +105,13 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
     return lowered == "k3"
         || lowered == "kimi-for-coding"
         || lowered == "kimi-for-coding-highspeed";
+}
+
+[[nodiscard]] bool is_qwen_token_plan_endpoint(std::string_view base_url) noexcept {
+    const auto host = core::utils::uri::extract_http_host(base_url);
+    return host.has_value()
+        && core::utils::ascii::iequals(
+            *host, "token-plan.ap-southeast-1.maas.aliyuncs.com");
 }
 
 } // namespace
@@ -173,6 +183,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     std::shared_ptr<core::auth::ICredentialSource> cred =
         auth_manager.create_credential_source(canonical_type, config);
     std::shared_ptr<IProviderClientIdentitySource> client_identity_source;
+    std::shared_ptr<const IModelCatalogSelector> model_catalog_selector;
     const std::string normalized_auth_type =
         core::utils::str::to_lower_ascii_copy(config.auth_type);
 
@@ -217,6 +228,15 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::logging::debug("Using Gemini Code Assist endpoint: {}", base_url);
     }
 
+    const bool qwen_token_plan = canonical_type == "qwen-token-plan"
+        || is_qwen_token_plan_endpoint(base_url);
+    if (qwen_token_plan && (!env_var || !*env_var)) {
+        env_var = "QWEN_TOKEN_PLAN_API_KEY";
+    }
+    if (qwen_token_plan && config.model.empty()) {
+        model_catalog_selector = providers::make_qwen_model_catalog_selector();
+    }
+
     if (!cred) {
         const std::string key = resolve_key(config.api_key, env_var);
         switch (auth_style) {
@@ -227,7 +247,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             } else {
                 cred = core::auth::ApiKeyCredentialSource::as_bearer(
                     key,
-                    canonical_type == "zai-coding");
+                    canonical_type == "zai-coding" || qwen_token_plan);
             }
             break;
         case AuthStyle::QueryParam:
@@ -309,9 +329,31 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         protocol = std::make_unique<protocols::KimiProtocol>();
         break;
     case ApiType::DashScope:
-        // DashScope (Qwen) uses OpenAI wire format with X-DashScope-* headers,
-        // prompt caching, and optional Qwen3 thinking mode via thinking_budget.
-        protocol = std::make_unique<protocols::DashScopeProtocol>(config.thinking_budget);
+        // Token Plan defaults to the Responses API for native effort levels,
+        // hosted tools, and server-side session caching. Ordinary DashScope
+        // remains on Chat Completions unless explicitly configured otherwise.
+        if (parse_openai_wire_api(
+                wire_api,
+                builtin ? builtin->default_wire_api : "chat_completions")
+            == OpenAIWireApi::Responses) {
+            protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
+                protocols::DashScopeResponsesProtocol::Options{
+                    .default_effort = config.reasoning_effort.empty()
+                        ? "high"
+                        : config.reasoning_effort,
+                    .enable_hosted_tools = qwen_token_plan,
+                    .deployment = qwen_token_plan
+                        ? protocols::DashScopeDeployment::TokenPlan
+                        : protocols::DashScopeDeployment::Standard,
+                });
+        } else {
+            protocol = std::make_unique<protocols::DashScopeProtocol>(
+                config.thinking_budget,
+                config.reasoning_effort,
+                qwen_token_plan
+                    ? protocols::DashScopeDeployment::TokenPlan
+                    : protocols::DashScopeDeployment::Standard);
+        }
         break;
     case ApiType::Anthropic: {
         protocols::AnthropicThinkingConfig thinking;
@@ -346,7 +388,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         std::move(protocol),
         api_type,
         std::string(name),
-        std::move(client_identity_source));
+        std::move(client_identity_source),
+        std::move(model_catalog_selector));
 }
 
 } // namespace core::llm

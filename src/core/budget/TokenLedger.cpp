@@ -46,6 +46,9 @@ void add_to_bucket(std::unordered_map<std::string, TokenLedgerBucketSnapshot>& b
     bucket.prompt_tokens += event.usage.prompt_tokens;
     bucket.completion_tokens += event.usage.completion_tokens;
     bucket.total_tokens += event.usage.total_tokens;
+    bucket.cached_prompt_tokens += event.usage.cached_prompt_tokens;
+    bucket.cache_creation_prompt_tokens += event.usage.cache_creation_prompt_tokens;
+    bucket.reasoning_tokens += event.usage.reasoning_tokens;
     bucket.cost_micro_usd += event.cost_micro_usd;
 }
 
@@ -168,6 +171,9 @@ TokenLedgerSnapshot TokenLedger::snapshot(const TokenLedgerFilter& filter) const
         snapshot.prompt_tokens += event.usage.prompt_tokens;
         snapshot.completion_tokens += event.usage.completion_tokens;
         snapshot.total_tokens += event.usage.total_tokens;
+        snapshot.cached_prompt_tokens += event.usage.cached_prompt_tokens;
+        snapshot.cache_creation_prompt_tokens += event.usage.cache_creation_prompt_tokens;
+        snapshot.reasoning_tokens += event.usage.reasoning_tokens;
         snapshot.cost_micro_usd += event.cost_micro_usd;
 
         add_to_bucket(by_source, std::string(to_string(event.source)), event);

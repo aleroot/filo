@@ -51,6 +51,10 @@ std::string normalize_login_provider(std::string_view provider) {
         || requested == "z.aicodingplan") {
         return "zai";
     }
+    if (requested == "qwen-token-plan" || requested == "qwen_token_plan"
+        || requested == "qwencloud" || requested == "qwen-cloud") {
+        return "qwen";
+    }
     return requested;
 }
 
@@ -236,8 +240,13 @@ public:
 
     std::vector<std::string> post_login_hints() const override {
         std::vector<std::string> hints;
-        hints.push_back("Default provider is set to '" + provider_name_
-                        + "' with model '" + default_model_ + "'.");
+        if (default_model_.empty()) {
+            hints.push_back("Default provider is set to '" + provider_name_
+                            + "'; Filo will select the newest model from its live catalog.");
+        } else {
+            hints.push_back("Default provider is set to '" + provider_name_
+                            + "' with model '" + default_model_ + "'.");
+        }
         if (!env_var_.empty()) {
             hints.push_back("For CI or one-off use, you can also export "
                             + env_var_ + ".");
@@ -426,40 +435,36 @@ public:
 
 class QwenOAuthStrategy final : public IAuthStrategy {
 public:
-    std::string_view login_provider() const noexcept override { return "qwen"; }
-    std::string_view display_name() const noexcept override { return "Qwen (chat.qwen.ai)"; }
+    // Hidden guard that turns stale oauth_qwen configurations into an
+    // actionable error instead of silently sending an unauthenticated request.
+    std::string_view login_provider() const noexcept override { return {}; }
+    std::string_view display_name() const noexcept override {
+        return "Qwen OAuth (unsupported for Token Plan)";
+    }
     std::string_view token_store_key() const noexcept override { return "qwen"; }
     // Qwen documents no public OAuth revocation endpoint; local-only logout.
 
     bool supports(std::string_view provider_type,
                   std::string_view auth_type) const noexcept override {
-        return provider_type == "qwen" && auth_type == "oauth_qwen";
+        return provider_type.starts_with("qwen") && auth_type == "oauth_qwen";
     }
 
     std::shared_ptr<ICredentialSource> create_credential_source(
         const core::config::ProviderConfig& /*provider_config*/,
-        std::string_view config_dir) const override {
-        auto flow    = std::make_shared<QwenOAuthFlow>();
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
-        auto manager = std::make_shared<OAuthTokenManager>(
-            "qwen", std::move(flow), std::move(store));
-        return std::make_shared<OAuthCredentialSource>(std::move(manager));
+        std::string_view /*config_dir*/) const override {
+        throw std::runtime_error(
+            "Qwen Cloud Token Plan does not support OAuth. Run `filo --auth qwen` "
+            "and paste its dedicated API key instead.");
     }
 
-    void login(std::string_view config_dir) const override {
-        auto flow    = std::make_shared<QwenOAuthFlow>();
-        auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
-        auto manager = std::make_shared<OAuthTokenManager>(
-            "qwen", std::move(flow), std::move(store));
-        manager->login();
+    void login(std::string_view /*config_dir*/) const override {
+        throw std::runtime_error(
+            "Qwen Cloud Token Plan does not support OAuth. Use its dedicated API key.");
     }
 
     std::vector<std::string> post_login_hints() const override {
         return {
-            "Set \"auth_type\": \"oauth_qwen\" on a Qwen provider in "
-            "~/.config/filo/config.json to use the stored OAuth token.",
-            "The free tier provides 1000 requests/day via the \"coder-model\" alias.",
-            "You can also export DASHSCOPE_API_KEY for API key authentication.",
+            "Run `filo --auth qwen` to configure a Token Plan API key.",
         };
     }
 };
@@ -521,6 +526,16 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
     manager.register_strategy(std::make_shared<XaiOAuthStrategy>());
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "qwen",
+        "Qwen Cloud Token Plan",
+        "qwen-token-plan",
+        "",
+        std::vector<ApiKeyProviderSeed>{},
+        "QWEN_TOKEN_PLAN_API_KEY",
+        "Uses the Token Plan Responses API with Qwen reasoning, hosted tools, "
+        "session cache, and subscription billing. Manage usage at "
+        "https://home.qwencloud.com/token-plan."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",
         "Z.AI",

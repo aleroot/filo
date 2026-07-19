@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -100,10 +101,17 @@ public:
                        std::vector<ModelInfo> models);
 
     [[nodiscard]] ProviderModelCatalogSnapshot snapshot(std::string_view provider_name) const;
+    [[nodiscard]] ProviderModelCatalogSnapshot wait_for_snapshot(
+        std::string_view provider_name,
+        std::chrono::milliseconds timeout) const;
+    [[nodiscard]] std::optional<bool> contains_model(
+        std::string_view provider_name,
+        std::string_view model_id) const;
     [[nodiscard]] std::unordered_map<std::string, ProviderModelCatalogSnapshot> snapshots() const;
 
 private:
     mutable std::shared_mutex mutex_;
+    mutable std::condition_variable_any snapshot_cv_;
     std::unordered_map<std::string, ProviderModelCatalogSnapshot> providers_;
 };
 

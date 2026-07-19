@@ -27,7 +27,6 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
 #include "core/llm/ModelCatalogDiscovery.hpp"
-#include "core/llm/ModelEffort.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderManager.hpp"
@@ -755,6 +754,9 @@ RunResult run(RunOptions opts) {
         }
         active_provider_name = manual_provider_name;
         active_model_name = manual_model_name;
+        if (active_model_name.empty() && llm_provider) {
+            active_model_name = llm_provider->get_last_model();
+        }
     }
 
     // Providers decide whether live model discovery is supported. For Kimi
@@ -820,6 +822,11 @@ RunResult run(RunOptions opts) {
             return "Set XAI_API_KEY to start chatting with Grok.\n"
                    "Get a key at: console.x.ai  (sign up → API Keys)\n"
                    "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
+        }
+        if (provider_name.starts_with("qwen-token-plan") && it->second.api_key.empty()) {
+            return "Run `filo --auth qwen` and paste your dedicated Token Plan API key.\n"
+                   "Alternatively set QWEN_TOKEN_PLAN_API_KEY. Do not use a pay-as-you-go or Coding Plan key.\n"
+                   "Usage: https://home.qwencloud.com/token-plan\n";
         }
         return "";
     };
@@ -2861,55 +2868,25 @@ RunResult run(RunOptions opts) {
         return rows;
     };
 
-    // Effort capability is protocol knowledge — delegate to the single
-    // source of truth shared with the wire serializers so the picker can
-    // never drift from what actually gets sent.
-    const auto& model_supports_openai_effort =
-        core::llm::openai_model_supports_reasoning_effort;
-    const auto& model_supports_kimi_effort =
-        core::llm::kimi_model_supports_thinking;
-
-    auto provider_supports_effort = [&](std::string_view provider_name,
-                                        std::string_view model_name_override = {}) -> bool {
-        const auto it = config.providers.find(std::string(provider_name));
-        if (it == config.providers.end()) {
-            return false;
+    // The active wire protocol owns model-specific effort policy. UI code
+    // consumes the provider-neutral capability value and never switches on
+    // provider names or API families.
+    auto reasoning_capabilities = [&](std::string_view provider_name,
+                                      std::string_view model_name) {
+        try {
+            return provider_manager.get_provider(std::string(provider_name))
+                ->reasoning_capabilities(model_name);
+        } catch (...) {
+            return core::llm::ReasoningCapabilities{};
         }
-        const std::string_view model_name = model_name_override.empty()
-            ? std::string_view{it->second.model}
-            : model_name_override;
-        if (it->second.api_type == core::config::ApiType::Anthropic) {
-            return true;
-        }
-        if (it->second.api_type == core::config::ApiType::OpenAI) {
-            return model_supports_openai_effort(model_name);
-        }
-        if (it->second.api_type == core::config::ApiType::Kimi) {
-            return model_supports_kimi_effort(model_name);
-        }
-        if (it->second.api_type != core::config::ApiType::Unknown) {
-            return false;
-        }
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(provider_name);
-        if (lowered.starts_with("claude")
-            || lowered.find("anthropic") != std::string::npos) {
-            return true;
-        }
-        if (lowered.starts_with("openai")) {
-            return model_supports_openai_effort(model_name);
-        }
-        if (lowered.starts_with("kimi")) {
-            return model_supports_kimi_effort(model_name);
-        }
-        return false;
     };
 
-    const auto& model_supports_max_effort = core::llm::model_supports_max_effort;
-
     auto resolve_effective_effort = [&](std::string_view configured,
-                                        std::string_view model_name) -> std::string {
+                                        const core::llm::ReasoningCapabilities& capabilities)
+        -> std::string {
         if (configured.empty()) return "high (auto default)";
-        if (configured == "max" && !model_supports_max_effort(model_name)) {
+        if (configured == "max"
+            && !capabilities.supports(core::llm::ReasoningCapability::MaxEffort)) {
             return "high (max unsupported on current model)";
         }
         return std::string(configured);
@@ -2919,21 +2896,29 @@ RunResult run(RunOptions opts) {
         const std::string configured = session_effort_value.empty()
             ? "auto"
             : session_effort_value;
-        const std::string model_for_status = active_model_name.empty()
+        const bool manual_mode = model_selection_mode == ModelSelectionMode::Manual;
+        const std::string model_for_status = manual_mode
             ? manual_model_name
-            : active_model_name;
+            : (active_model_name.empty() ? manual_model_name : active_model_name);
+        const std::string provider_for_status = manual_mode
+            ? manual_provider_name
+            : (active_provider_name.empty() ? manual_provider_name : active_provider_name);
+        const auto capabilities = reasoning_capabilities(
+            provider_for_status, model_for_status);
         const std::string effective = resolve_effective_effort(
             session_effort_value,
-            model_for_status);
+            capabilities);
 
-        std::string applies_note = "Applies on Anthropic, Kimi thinking-capable, and OpenAI reasoning-capable models.";
+        std::string applies_note =
+            "Applies when the active provider protocol supports effort for this model.";
         if (model_selection_mode == ModelSelectionMode::Manual
-            && !provider_supports_effort(manual_provider_name, model_for_status)) {
+            && !capabilities.supports_effort()) {
             applies_note = std::format(
-                "Current manual provider '{}' does not support effort; switch to Claude, Kimi Code/K2, or an OpenAI reasoning model to apply it.",
+                "Current manual provider '{}' does not support effort for this model.",
                 manual_provider_name);
         } else if (model_selection_mode != ModelSelectionMode::Manual) {
-            applies_note = "Router/auto mode may choose providers that ignore effort; it applies only on supported Anthropic/Kimi/OpenAI reasoning turns.";
+            applies_note =
+                "Router/auto mode applies effort only when the selected protocol reports support.";
         }
 
         return std::format(
@@ -2942,10 +2927,10 @@ RunResult run(RunOptions opts) {
             "        Active provider: {}\n"
             "        Active model: {}\n"
             "        {}\n"
-            "        Levels: auto, low, medium, high, max",
+            "        Levels: auto, off, low, medium, high, max",
             configured,
             effective,
-            active_provider_name,
+            provider_for_status,
             model_for_status.empty() ? std::string("<provider default>") : model_for_status,
             applies_note);
     };
@@ -2960,7 +2945,7 @@ RunResult run(RunOptions opts) {
 
         const std::string_view trimmed = trim_ascii(requested);
         if (trimmed.empty()) {
-            return "Usage: /effort auto|low|medium|high|max";
+            return "Usage: /effort auto|off|low|medium|high|max";
         }
 
         std::string normalized;
@@ -2972,10 +2957,16 @@ RunResult run(RunOptions opts) {
         }
 
         if (normalized == "auto" || normalized == "unset"
-            || normalized == "default" || normalized == "off") {
+            || normalized == "default") {
             session_effort_value.clear();
             agent->set_effort_level(session_effort_value);
             return "Set effort to auto (provider default, typically high).";
+        }
+
+        if (normalized == "off" || normalized == "none" || normalized == "disabled") {
+            session_effort_value = "none";
+            agent->set_effort_level(session_effort_value);
+            return "Disabled reasoning for providers with switchable thinking.";
         }
 
         if (normalized != "low" && normalized != "medium"
@@ -6593,14 +6584,10 @@ RunResult run(RunOptions opts) {
         // Check for quota notifications
         check_and_notify_quota();
 
-        // Detect subscription/OAuth mode: from config auth_type (reliable before first
-        // response) or from received unified windows (works in router/auto mode).
-        const bool is_subscription = [&]() -> bool {
-            if (auto it = config.providers.find(active_provider_name); it != config.providers.end()) {
-                if (it->second.auth_type.starts_with("oauth_")) return true;
-            }
-            return !rate_limit_info.usage_windows.empty();
-        }();
+        // Billing behavior belongs to the active provider. Usage windows remain
+        // a fallback for aggregate/router providers that expose subscription quota.
+        const bool is_subscription = !llm_provider->should_estimate_cost()
+            || !rate_limit_info.usage_windows.empty();
 
         // Format current working directory for display
         auto format_cwd = []() -> std::string {
@@ -6658,7 +6645,13 @@ RunResult run(RunOptions opts) {
                     budget_el = text("  \xe2\x86\x91"
                                      + token_formatter.format(total.prompt_tokens)
                                      + " \xe2\x86\x93"
-                                     + token_formatter.format(total.completion_tokens))
+                                     + token_formatter.format(total.completion_tokens)
+                                     + (total.cached_prompt_tokens > 0
+                                            ? " C:" + token_formatter.format(total.cached_prompt_tokens)
+                                            : std::string{})
+                                     + (total.reasoning_tokens > 0
+                                            ? " R:" + token_formatter.format(total.reasoning_tokens)
+                                            : std::string{}))
                                 | color(Color::GrayLight);
                 }
             } else {

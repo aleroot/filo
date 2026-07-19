@@ -7,6 +7,8 @@
 #include "../llm/Models.hpp"
 
 #include <cstdint>
+#include <algorithm>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -122,12 +124,18 @@ public:
     [[nodiscard]] core::llm::TokenUsage session_total() const noexcept {
         try {
             const auto snapshot = actual_snapshot();
-            const int32_t prompt = static_cast<int32_t>(snapshot.prompt_tokens);
-            const int32_t completion = static_cast<int32_t>(snapshot.completion_tokens);
+            const auto token_count = [](int64_t value) {
+                return static_cast<int32_t>(std::clamp<int64_t>(
+                    value, 0, std::numeric_limits<int32_t>::max()));
+            };
             return {
-                .prompt_tokens = prompt,
-                .completion_tokens = completion,
-                .total_tokens = prompt + completion,
+                .prompt_tokens = token_count(snapshot.prompt_tokens),
+                .completion_tokens = token_count(snapshot.completion_tokens),
+                .total_tokens = token_count(snapshot.total_tokens),
+                .cached_prompt_tokens = token_count(snapshot.cached_prompt_tokens),
+                .cache_creation_prompt_tokens = token_count(
+                    snapshot.cache_creation_prompt_tokens),
+                .reasoning_tokens = token_count(snapshot.reasoning_tokens),
             };
         } catch (...) {
             return {};

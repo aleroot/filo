@@ -982,6 +982,28 @@ TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and c
             != std::string::npos);
 }
 
+TEST_CASE("AuthenticationManager login(qwen) configures Token Plan API key",
+          "[AuthenticationManager][qwen][token-plan]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("test-token-plan-key\n");
+    ScopedCinRedirect redirect(input);
+    auto result = manager.login("qwen");
+
+    REQUIRE(result.provider == "Qwen Cloud Token Plan");
+    REQUIRE(result.login_provider == "qwen");
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+    REQUIRE(overlay.find(R"("default_provider":"qwen-token-plan")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("qwen-token-plan":{"api_key":"test-token-plan-key"})")
+        != std::string::npos);
+}
+
 // ── OpenAIOAuthFlow — static pure functions ───────────────────────────────────
 
 TEST_CASE("OpenAIOAuthFlow default constructor works without OPENAI_OAUTH_CLIENT_ID",
@@ -1157,10 +1179,10 @@ TEST_CASE("AuthenticationManager logout clears the stored OAuth session", "[Auth
         REQUIRE_FALSE(FileTokenStore(tmp.path).load("claude").has_value());
     }
 
-    SECTION("qwen (no public revocation endpoint)") {
-        seed_token("qwen");
-        REQUIRE(manager.logout("qwen", /*revoke_remote=*/false) == "Qwen (chat.qwen.ai)");
-        REQUIRE_FALSE(FileTokenStore(tmp.path).load("qwen").has_value());
+    SECTION("qwen Token Plan is API-key based and has no OAuth logout") {
+        REQUIRE_THROWS_WITH(
+            manager.logout("qwen", /*revoke_remote=*/false),
+            Catch::Matchers::ContainsSubstring("does not use a cached OAuth session"));
     }
 
     SECTION("kimi (no public revocation endpoint)") {

@@ -387,6 +387,53 @@ TEST_CASE("resolve_skill_turn matches Qwen model hints to DashScope providers",
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("resolve_skill_turn routes Token Plan model hints to Token Plan only",
+          "[skill_commands][model_resolution][qwen]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_qwen_token_plan");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "providers": {
+            "dashscope-prod": {
+                "api_type": "dashscope",
+                "base_url": "https://example.test/compatible-mode/v1",
+                "model": "qwen3-max"
+            },
+            "qwen-token-plan": {
+                "api_type": "dashscope",
+                "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                "model": "qwen3.8-max-preview"
+            }
+        }
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    core::llm::ProviderManager::get_instance().register_provider(
+        "qwen-token-plan",
+        std::make_shared<DummyProvider>());
+    core::llm::ModelCatalogDiscoveryResult discovery;
+    discovery.attempted = true;
+    discovery.fetched = 1;
+    core::llm::ModelCatalogAvailability::instance().record_result(
+        "qwen-token-plan",
+        discovery,
+        {core::llm::ModelInfo{.canonical_id = "qwen3.7-plus"}});
+
+    const auto resolution = resolve_skill_turn(
+        "qwen3.7-plus",
+        {"read_file"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override != nullptr);
+    CHECK(resolution.callbacks.model_override == "qwen3.7-plus");
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("parse_manifest: parses 'allowed-tools' into allowed_tools vector",
           "[skill_commands]") {
     auto root = make_temp_root("manifest_tools");

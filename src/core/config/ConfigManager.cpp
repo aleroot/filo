@@ -312,9 +312,9 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
     }
     if (normalized == "qwen") {
         return LoginProfileMapping{
-            .provider_name = "qwen",
-            .auth_type = "oauth_qwen",
-            .default_model = "coder-model",
+            .provider_name = "qwen-token-plan",
+            .auth_type = "",
+            .default_model = "",
         };
     }
     if (normalized == "zai" || normalized == "z.ai" || normalized == "z-ai") {
@@ -524,6 +524,7 @@ AppConfig make_default_config() {
     add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.com/coding/v1");
     add_provider("kimi-32k",       "moonshot-v1-32k");
     add_provider("kimi-128k",      "moonshot-v1-128k");
+    add_provider("qwen-token-plan", {}, "high", {}, {}, "responses");
     add_provider("zai",            "glm-5.1");
     add_provider("zai-coding",     "glm-4.7");
     add_provider("ollama",         "llama3", {}, {}, "http://localhost:11434");
@@ -591,6 +592,7 @@ std::string default_config_json() {
         "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.com/coding/v1" },
         "kimi-32k":       { "model": "moonshot-v1-32k" },
         "kimi-128k":      { "model": "moonshot-v1-128k" },
+        "qwen-token-plan":{ "reasoning_effort": "high", "wire_api": "responses" },
         "zai":            { "model": "glm-5.1" },
         "zai-coding":     { "model": "glm-4.7" },
         "ollama":         { "model": "llama3", "base_url": "http://localhost:11434" }

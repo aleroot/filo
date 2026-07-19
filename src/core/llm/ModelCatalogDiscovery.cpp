@@ -190,6 +190,8 @@ void ModelCatalogAvailability::record_result(
     }
 
     providers_[std::move(key)] = std::move(snapshot);
+    lock.unlock();
+    snapshot_cv_.notify_all();
 }
 
 ProviderModelCatalogSnapshot ModelCatalogAvailability::snapshot(
@@ -199,6 +201,40 @@ ProviderModelCatalogSnapshot ModelCatalogAvailability::snapshot(
         return it->second;
     }
     return {};
+}
+
+ProviderModelCatalogSnapshot ModelCatalogAvailability::wait_for_snapshot(
+    std::string_view provider_name,
+    std::chrono::milliseconds timeout) const {
+    const std::string key(provider_name);
+    std::unique_lock lock(mutex_);
+    snapshot_cv_.wait_for(lock, timeout, [&] {
+        const auto it = providers_.find(key);
+        return it != providers_.end()
+            && it->second.checked
+            && !it->second.refresh_in_progress;
+    });
+    if (const auto it = providers_.find(key); it != providers_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::optional<bool> ModelCatalogAvailability::contains_model(
+    std::string_view provider_name,
+    std::string_view model_id) const {
+    std::shared_lock lock(mutex_);
+    const auto it = providers_.find(std::string(provider_name));
+    if (it == providers_.end()) return std::nullopt;
+
+    const auto& snapshot = it->second;
+    const bool authoritative = snapshot.state == ModelCatalogDiscoveryState::Succeeded;
+    const bool has_stale_catalog = !snapshot.models.empty();
+    if (!authoritative && !has_stale_catalog) return std::nullopt;
+
+    return std::ranges::any_of(snapshot.models, [&](const ModelInfo& model) {
+        return model.canonical_id == model_id;
+    });
 }
 
 std::unordered_map<std::string, ProviderModelCatalogSnapshot>

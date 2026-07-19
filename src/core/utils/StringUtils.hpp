@@ -51,9 +51,15 @@ namespace core::utils::str {
 }
 
 [[nodiscard]] inline bool contains_case_insensitive(std::string_view haystack,
-                                                    std::string_view needle) {
+                                                    std::string_view needle) noexcept {
     if (needle.empty()) return true;
-    return to_lower_ascii_copy(haystack).find(to_lower_ascii_copy(needle)) != std::string::npos;
+    if (haystack.size() < needle.size()) return false;
+    for (std::size_t pos = 0; pos + needle.size() <= haystack.size(); ++pos) {
+        if (core::utils::ascii::iequals(haystack.substr(pos, needle.size()), needle)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 [[nodiscard]] inline std::optional<std::size_t>

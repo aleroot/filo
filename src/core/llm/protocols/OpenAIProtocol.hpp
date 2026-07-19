@@ -35,6 +35,10 @@ namespace core::llm::protocols {
 [[nodiscard]] std::pair<std::string, std::vector<ToolCall>>
 parse_openai_sse_chunk(std::string_view json_str);
 
+/** OpenAI-native model reasoning policy shared by both OpenAI wire APIs. */
+[[nodiscard]] ReasoningCapabilities openai_reasoning_capabilities(
+    std::string_view model) noexcept;
+
 /**
  * @brief OpenAI Chat Completions wire protocol.
  *
@@ -86,6 +90,10 @@ public:
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
     [[nodiscard]] ParseResult      parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name()  const noexcept override { return "openai"; }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override {
+        return openai_reasoning_capabilities(model);
+    }
 
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }

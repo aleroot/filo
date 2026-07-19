@@ -6,9 +6,12 @@
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ModelRegistry.hpp"
+#include "core/llm/providers/QwenModelCatalogSelector.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+
+#include <simdjson.h>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -46,6 +49,42 @@ struct ScopedResponse {
 static ScopedResponse make_response(int code, std::string body = "",
                                      cpr::Header hdrs = {}) {
     return {code, std::move(body), std::move(hdrs)};
+}
+
+static void require_valid_json(std::string_view payload) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string json{std::string(payload)};
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(json).get(document) == simdjson::SUCCESS);
+}
+
+TEST_CASE("Qwen catalog selector chooses the highest live server generation",
+          "[qwen][model-catalog]") {
+    const auto selector = core::llm::providers::make_qwen_model_catalog_selector();
+    const std::vector<ModelInfo> models{
+        ModelInfo{.canonical_id = "qwen3.7-plus"},
+        ModelInfo{.canonical_id = "deepseek-v4-pro"},
+        ModelInfo{.canonical_id = "qwen3.10-max-preview"},
+        ModelInfo{.canonical_id = "qwen3.9-max"},
+        ModelInfo{.canonical_id = "qwen-image-2.0"},
+    };
+
+    const auto selected = selector->select(models);
+    REQUIRE(selected.ok());
+    REQUIRE(selected.model == "qwen3.10-max-preview");
+}
+
+TEST_CASE("Qwen catalog selector preserves server order within one generation",
+          "[qwen][model-catalog]") {
+    const auto selector = core::llm::providers::make_qwen_model_catalog_selector();
+    const std::vector<ModelInfo> models{
+        ModelInfo{.canonical_id = "qwen3.8-plus"},
+        ModelInfo{.canonical_id = "qwen3.8-max"},
+    };
+
+    const auto selected = selector->select(models);
+    REQUIRE(selected.ok());
+    REQUIRE(selected.model == "qwen3.8-plus");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -153,6 +192,85 @@ TEST_CASE("DashScopeProtocol - both thinking fields co-exist in the same payload
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking_budget":16000)"));
     // Sanity: the model is still in there.
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"qwen3-max")"));
+}
+
+TEST_CASE("DashScopeProtocol - preserves assistant reasoning across tool turns",
+          "[qwen][serializer][thinking][tools]") {
+    auto req = make_simple_request("qwen3.7-plus");
+    Message assistant;
+    assistant.role = "assistant";
+    assistant.reasoning_content = "Need to inspect the repository first.";
+    assistant.tool_calls.push_back(ToolCall{
+        .id = "call_1",
+        .function = {.name = "read_file", .arguments = R"({"path":"README.md"})"},
+    });
+    req.messages.insert(req.messages.begin() + 1, std::move(assistant));
+
+    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"Need to inspect the repository first.")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+}
+
+TEST_CASE("DashScopeProtocol - effort can disable hybrid thinking",
+          "[qwen][serializer][thinking][effort]") {
+    auto req = make_simple_request("qwen3.7-plus");
+    req.effort = "none";
+    const auto payload = DashScopeProtocol(8192, "high").serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":false)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+}
+
+TEST_CASE("DashScope Responses - Token Plan payload enables native features",
+          "[qwen][responses][token-plan]") {
+    auto req = make_simple_request("qwen3.8-max-preview");
+    req.prompt_cache_key = "filo-session";
+    req.effort = "max";
+
+    const auto payload = DashScopeResponsesProtocol({
+        .default_effort = "high",
+        .enable_hosted_tools = true,
+    }).serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"max"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"web_search"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"code_interpreter"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"web_extractor"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("store")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("prompt_cache_key"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("include":[])"));
+}
+
+TEST_CASE("DashScope Responses - sends only incremental messages with previous response",
+          "[qwen][responses][continuity]") {
+    ChatRequest req;
+    req.model = "qwen3.7-plus";
+    req.stream = true;
+    req.previous_response_id = "resp_previous";
+    req.messages = {
+        Message{.role = "system", .content = "Always be concise."},
+        Message{.role = "user", .content = "old question"},
+        Message{.role = "assistant", .content = "old answer"},
+        Message{.role = "user", .content = "new question"},
+    };
+
+    const auto payload = DashScopeResponsesProtocol({
+        .default_effort = "high",
+        .enable_hosted_tools = false,
+    }).serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_previous")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Always be concise."));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("new question"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("old question"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("old answer"));
+}
+
+TEST_CASE("DashScope Responses - session cache headers are enabled",
+          "[qwen][responses][headers]") {
+    const auto headers = DashScopeResponsesProtocol{}.build_headers(make_auth("sk-sp-test"));
+    REQUIRE(headers.at("X-DashScope-Session-Cache") == "enable");
+    REQUIRE(headers.at("Authorization") == "Bearer sk-sp-test");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,6 +460,32 @@ TEST_CASE("DashScopeProtocol - parse_event extracts token usage from stream_opti
     REQUIRE(result.completion_tokens == 17);
 }
 
+TEST_CASE("DashScopeProtocol - parses cached and reasoning token details",
+          "[qwen][sse][usage]") {
+    DashScopeProtocol proto;
+    const auto result = proto.parse_event(
+        R"(data: {"choices":[],"usage":{"prompt_tokens":1520,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1480,"cache_creation_input_tokens":20},"completion_tokens_details":{"reasoning_tokens":245}}})");
+    REQUIRE(result.prompt_tokens == 1520);
+    REQUIRE(result.completion_tokens == 300);
+    REQUIRE(result.cached_prompt_tokens == 1480);
+    REQUIRE(result.cache_creation_prompt_tokens == 20);
+    REQUIRE(result.reasoning_tokens == 245);
+}
+
+TEST_CASE("DashScope Responses - parses detailed Token Plan usage",
+          "[qwen][responses][usage]") {
+    DashScopeResponsesProtocol proto;
+    const auto result = proto.parse_event(
+        "event: response.completed\n"
+        R"(data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1520,"output_tokens":300,"input_tokens_details":{"cached_tokens":1480,"cache_creation_input_tokens":20},"output_tokens_details":{"reasoning_tokens":245}}}})");
+    REQUIRE(result.done);
+    REQUIRE(result.prompt_tokens == 1520);
+    REQUIRE(result.completion_tokens == 300);
+    REQUIRE(result.cached_prompt_tokens == 1480);
+    REQUIRE(result.cache_creation_prompt_tokens == 20);
+    REQUIRE(result.reasoning_tokens == 245);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Retry policy
 // ─────────────────────────────────────────────────────────────────────────────
@@ -476,6 +620,51 @@ TEST_CASE("ProviderFactory - qwen with thinking_budget creates provider", "[qwen
     REQUIRE(provider != nullptr);
 }
 
+TEST_CASE("ProviderFactory - Qwen Token Plan is subscription-backed Responses API",
+          "[qwen][factory][token-plan]") {
+    core::config::ProviderConfig cfg;
+    cfg.api_key = "sk-sp-test";
+
+    auto provider = core::llm::ProviderFactory::create_provider("qwen-token-plan", cfg);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->should_estimate_cost());
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    REQUIRE(metadata->default_model.empty());
+    REQUIRE(metadata->base_url ==
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1");
+}
+
+TEST_CASE("ProviderFactory - custom Token Plan endpoint keeps subscription billing",
+          "[qwen][factory][token-plan]") {
+    core::config::ProviderConfig cfg;
+    cfg.api_type = core::config::ApiType::DashScope;
+    cfg.base_url =
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+    cfg.model = "qwen3.7-plus";
+    cfg.api_key = "sk-sp-test";
+    cfg.wire_api = "responses";
+
+    auto provider = core::llm::ProviderFactory::create_provider("company-qwen", cfg);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->should_estimate_cost());
+}
+
+TEST_CASE("ProviderFactory - Token Plan classification requires an exact URL host",
+          "[qwen][factory][token-plan][security]") {
+    core::config::ProviderConfig cfg;
+    cfg.api_type = core::config::ApiType::DashScope;
+    cfg.base_url =
+        "https://example.test/token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+    cfg.model = "qwen3.7-plus";
+    cfg.api_key = "test-key";
+    cfg.wire_api = "responses";
+
+    auto provider = core::llm::ProviderFactory::create_provider("company-qwen", cfg);
+    REQUIRE(provider != nullptr);
+    REQUIRE(provider->should_estimate_cost());
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ModelRegistry — Qwen model catalog
 // ─────────────────────────────────────────────────────────────────────────────
@@ -483,6 +672,36 @@ TEST_CASE("ProviderFactory - qwen with thinking_budget creates provider", "[qwen
 TEST_CASE("ModelRegistry - qwen3-coder-plus is registered", "[qwen][registry]") {
     auto& reg = ModelRegistry::instance();
     REQUIRE(reg.has_model("qwen3-coder-plus"));
+}
+
+TEST_CASE("ModelRegistry - Token Plan featured models have first-class cards",
+          "[qwen][registry][token-plan]") {
+    const auto& registry = ModelRegistry::instance();
+    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
+                             "qwen3.7-plus", "qwen3.6-flash"}) {
+        CAPTURE(model);
+        const auto info = registry.get_info(model);
+        REQUIRE(info.has_value());
+        REQUIRE(info->context_window == 1'000'000);
+        REQUIRE(info->max_output_tokens == 64'000);
+        REQUIRE(info->supports(ModelCapability::Reasoning));
+        REQUIRE(info->supports(ModelCapability::FunctionCalling));
+    }
+}
+
+TEST_CASE("ModelRegistry - Token Plan vision and structured-output capabilities match docs",
+          "[qwen][registry][token-plan]") {
+    const auto& registry = ModelRegistry::instance();
+    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max"}) {
+        CAPTURE(model);
+        REQUIRE_FALSE(registry.supports(model, ModelCapability::Vision));
+        REQUIRE_FALSE(registry.supports(model, ModelCapability::JsonMode));
+    }
+    for (const auto model : {"qwen3.7-plus", "qwen3.6-flash"}) {
+        CAPTURE(model);
+        REQUIRE(registry.supports(model, ModelCapability::Vision));
+        REQUIRE(registry.supports(model, ModelCapability::JsonMode));
+    }
 }
 
 TEST_CASE("ModelRegistry - qwen3-coder-plus has 1M context window", "[qwen][registry]") {

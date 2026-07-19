@@ -86,6 +86,7 @@
  */
 
 #include "../Models.hpp"
+#include "../ReasoningCapabilities.hpp"
 #include "../../auth/ICredentialSource.hpp"
 #include <cpr/cpr.h>
 #include <algorithm>
@@ -222,6 +223,9 @@ struct ParseResult {
     bool    retryable_stream_error = false; ///< True if the in-stream error can be retried.
     int32_t prompt_tokens     = 0;          ///< Input token count (non-zero when reported).
     int32_t completion_tokens = 0;          ///< Output token count (non-zero when reported).
+    int32_t cached_prompt_tokens = 0;       ///< Input tokens served from cache.
+    int32_t cache_creation_prompt_tokens = 0; ///< Input tokens used to create cache entries.
+    int32_t reasoning_tokens = 0;           ///< Reasoning tokens included in completion tokens.
     RateLimitInfo rate_limit;               ///< Rate limit info from HTTP headers (if available).
     std::string stream_error_type;          ///< Provider error type for stream_error.
     std::string stream_error_message;       ///< Provider error message for stream_error.
@@ -360,6 +364,12 @@ public:
      */
     [[nodiscard]] virtual std::string_view
     name() const noexcept = 0;
+
+    /** Provider/model reasoning controls accepted by this wire protocol. */
+    [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(
+        [[maybe_unused]] std::string_view model) const noexcept {
+        return {};
+    }
 
     /**
      * @brief Create an independent copy with fresh per-stream state.

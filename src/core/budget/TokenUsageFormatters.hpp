@@ -109,9 +109,16 @@ public:
                 token_formatter_.format(usage.completion_tokens),
                 cost_formatter_.format_fixed_4(cost_usd));
         }
-        return std::format("↑{} ↓{}",
+        std::string result = std::format("↑{} ↓{}",
             token_formatter_.format(usage.prompt_tokens),
             token_formatter_.format(usage.completion_tokens));
+        if (usage.cached_prompt_tokens > 0) {
+            result += " cache:" + token_formatter_.format(usage.cached_prompt_tokens);
+        }
+        if (usage.reasoning_tokens > 0) {
+            result += " think:" + token_formatter_.format(usage.reasoning_tokens);
+        }
+        return result;
     }
 
 private:

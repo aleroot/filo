@@ -1,8 +1,8 @@
 #include "MistralProtocol.hpp"
 
-#include "../ModelEffort.hpp"
 #include "SseUtils.hpp"
 #include "core/utils/AsciiUtils.hpp"
+#include <array>
 #include <simdjson.h>
 
 namespace core::llm::protocols {
@@ -21,11 +21,26 @@ namespace {
     return {};
 }
 
+[[nodiscard]] bool is_mistral_reasoning_model(std::string_view model) noexcept {
+    using core::utils::ascii::iequals;
+    static constexpr std::array<std::string_view, 6> kModels{
+        "mistral-vibe-cli-latest",
+        "mistral-medium-3.5",
+        "mistral-medium-3-5",
+        "mistral-medium-latest",
+        "mistral-small-2603",
+        "mistral-small-latest",
+    };
+    return std::ranges::any_of(kModels, [&](std::string_view candidate) {
+        return iequals(model, candidate);
+    });
+}
+
 } // namespace
 
 std::string MistralProtocol::serialize(const ChatRequest& req) const {
     ChatRequest adjusted = req;
-    if (mistral_model_supports_reasoning_effort(req.model)
+    if (reasoning_capabilities(req.model).supports_effort()
         && !normalize_mistral_effort(req.effort).empty()) {
         // Mirrors mistral-vibe: reasoning requests require temperature 1.
         adjusted.temperature = 1.0F;
@@ -35,7 +50,7 @@ std::string MistralProtocol::serialize(const ChatRequest& req) const {
 
 void MistralProtocol::append_extra_fields(std::string& payload,
                                           const ChatRequest& req) const {
-    if (!mistral_model_supports_reasoning_effort(req.model)) return;
+    if (!reasoning_capabilities(req.model).supports_effort()) return;
 
     const std::string_view effort = normalize_mistral_effort(req.effort);
     if (effort.empty()) return;
@@ -43,6 +58,12 @@ void MistralProtocol::append_extra_fields(std::string& payload,
     payload += R"(,"reasoning_effort":")";
     payload += effort;
     payload += '"';
+}
+
+ReasoningCapabilities MistralProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    if (!is_mistral_reasoning_model(model)) return {};
+    return ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
 }
 
 ParseResult MistralProtocol::parse_event(std::string_view raw_event) {
