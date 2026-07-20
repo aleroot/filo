@@ -1,4 +1,6 @@
 #include "HookManager.hpp"
+#include "../landrun/LandrunPolicyCompiler.hpp"
+#include "../landrun/LandrunSettings.hpp"
 
 #include "../config/ConfigManager.hpp"
 #include "../logging/Logger.hpp"
@@ -171,6 +173,9 @@ using core::tools::detail::shell_single_quote;
     const int timeout_seconds = std::max(1, hook.timeout_seconds);
 
     auto executor = core::tools::shell::make_shell_executor();
+    executor->configure_landrun(core::landrun::LandrunPolicyCompiler::compile(
+        session_context.workspace_view(),
+        core::landrun::LandrunSettings::instance().mode()));
     return executor->run(
         command,
         working_dir,

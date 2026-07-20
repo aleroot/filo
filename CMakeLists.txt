@@ -237,6 +237,18 @@ set(FILO_CORE_SOURCES
     src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
     src/core/context/SteeringLoader.cpp
+    src/core/landrun/LandrunDriverFactory.cpp
+    src/core/landrun/LandrunDescriptorSanitizer.cpp
+    src/core/landrun/LandrunEnvironment.cpp
+    src/core/landrun/LandrunHelper.cpp
+    src/core/landrun/LandrunLaunch.cpp
+    src/core/landrun/LandrunPolicyCompiler.cpp
+    src/core/landrun/LandrunReadiness.cpp
+    src/core/landrun/LandrunRuntime.cpp
+    src/core/landrun/LandrunStatus.cpp
+    src/core/landrun/linux/LinuxLandlockDriver.cpp
+    src/core/landrun/linux/LinuxSeccompHardening.cpp
+    src/core/landrun/macos/MacOSSeatbeltDriver.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/PathVisibilityToolDecorator.cpp
@@ -367,6 +379,7 @@ target_link_libraries(filo_core
         ${FILO_FTXUI_TARGETS}
         cpr::cpr
         httplib::httplib
+        ${CMAKE_DL_LIBS}
 )
 
 if(APPLE)
@@ -504,6 +517,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
+    tests/test_landrun.cpp
 )
 
 set(FILO_INTEGRATION_TEST_SOURCES
@@ -552,7 +566,16 @@ set_target_properties(test_tui_freeze PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
-foreach(filo_ftxui_consumer filo filo_tests test_integration test_agent_freeze test_tui_freeze)
+add_executable(test_landrun_native tests/test_landrun_native.cpp)
+target_link_libraries(test_landrun_native PRIVATE filo_core)
+set_target_properties(test_landrun_native PROPERTIES FOLDER "Tests")
+add_test(NAME landrun_native_confinement COMMAND test_landrun_native)
+set_tests_properties(landrun_native_confinement PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 30
+)
+
+foreach(filo_ftxui_consumer filo filo_tests test_integration test_agent_freeze test_tui_freeze test_landrun_native)
     target_compile_definitions(${filo_ftxui_consumer}
         PRIVATE FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH}
     )

@@ -1,6 +1,9 @@
 #include "ApplyPatchTool.hpp"
 #include "ToolNames.hpp"
 #include "shell/ShellUtils.hpp"
+#include "shell/ShellExecutorFactory.hpp"
+#include "../landrun/LandrunPolicyCompiler.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "ToolArgumentUtils.hpp"
 #include <simdjson.h>
@@ -199,7 +202,12 @@ std::string ApplyPatchTool::execute(const std::string& json_args, const core::co
     }
 
     // Write patch to a collision-safe temp file.
-    std::string tmp_patch_file = "/tmp/filo_patch_" + unique_suffix() + ".diff";
+    auto temp_root = core::landrun::LandrunSettings::instance().runtime_tmp();
+    if (temp_root.empty()) {
+        temp_root = std::filesystem::temp_directory_path(ec);
+    }
+    const auto tmp_patch_path = temp_root / ("filo_patch_" + unique_suffix() + ".diff");
+    const std::string tmp_patch_file = tmp_patch_path.string();
     {
         std::ofstream out(tmp_patch_file);
         if (!out) {
@@ -215,27 +223,16 @@ std::string ApplyPatchTool::execute(const std::string& json_args, const core::co
     }
     command += " -p1 < '" + shell_single_quote(tmp_patch_file) + "' 2>&1";
 
-    std::array<char, 4096> buffer;
-    std::string result;
-
-    auto pclose_wrapper = [](FILE* f) { pclose(f); };
-    std::unique_ptr<FILE, decltype(pclose_wrapper)> pipe(popen(command.c_str(), "r"), pclose_wrapper);
-    if (!pipe) {
-        std::filesystem::remove(tmp_patch_file);
-        return R"({"error":"popen() failed to execute patch command."})";
-    }
-
-    size_t bytes_read;
-    while ((bytes_read = std::fread(buffer.data(), 1, buffer.size(), pipe.get())) > 0) {
-        result.append(buffer.data(), bytes_read);
-    }
-
-    int ret = pclose(pipe.release());
+    auto executor = shell::make_shell_executor();
+    executor->configure_landrun(core::landrun::LandrunPolicyCompiler::compile(
+        context.workspace_view(),
+        core::landrun::LandrunSettings::instance().mode()));
+    const auto execution = executor->run(command, {}, std::chrono::seconds{30});
     std::filesystem::remove(tmp_patch_file);
 
-    std::string escaped_output = core::utils::escape_json_string(result);
+    std::string escaped_output = core::utils::escape_json_string(execution.output);
 
-    if (ret != 0) {
+    if (execution.exit_code != 0) {
         return std::format(R"({{"error":"Patch failed","output":"{}"}})", escaped_output);
     }
     return std::format(R"({{"success":true,"output":"{}"}})", escaped_output);

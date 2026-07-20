@@ -1,4 +1,5 @@
 #include "SkillRegistry.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/AsciiUtils.hpp"
 
@@ -250,18 +251,21 @@ field(const ParsedFrontmatter& parsed, std::string_view key) {
 std::vector<SkillSearchRoot>
 SkillRegistry::default_search_roots(const fs::path& project_root) {
     std::vector<SkillSearchRoot> roots;
-    if (const char* home = std::getenv("HOME")) {
-        const fs::path home_path(home);
-        roots.push_back({
-            .path = home_path / ".claude" / "skills",
-            .scope = SkillScope::User,
-            .label = "user-claude",
-        });
-        roots.push_back({
-            .path = home_path / ".agents" / "skills",
-            .scope = SkillScope::User,
-            .label = "user-agent",
-        });
+    const bool include_user_roots = !core::landrun::LandrunSettings::instance().enabled();
+    if (include_user_roots) {
+        if (const char* home = std::getenv("HOME")) {
+            const fs::path home_path(home);
+            roots.push_back({
+                .path = home_path / ".claude" / "skills",
+                .scope = SkillScope::User,
+                .label = "user-claude",
+            });
+            roots.push_back({
+                .path = home_path / ".agents" / "skills",
+                .scope = SkillScope::User,
+                .label = "user-agent",
+            });
+        }
     }
 
     roots.push_back({
@@ -274,13 +278,15 @@ SkillRegistry::default_search_roots(const fs::path& project_root) {
         .scope = SkillScope::Project,
         .label = "project-agent",
     });
-    if (const char* home = std::getenv("HOME")) {
-        const fs::path home_path(home);
-        roots.push_back({
-            .path = home_path / ".config" / "filo" / "skills",
-            .scope = SkillScope::User,
-            .label = "user-filo",
-        });
+    if (include_user_roots) {
+        if (const char* home = std::getenv("HOME")) {
+            const fs::path home_path(home);
+            roots.push_back({
+                .path = home_path / ".config" / "filo" / "skills",
+                .scope = SkillScope::User,
+                .label = "user-filo",
+            });
+        }
     }
     roots.push_back({
         .path = project_root / ".filo" / "skills",

@@ -4,6 +4,7 @@
 #include "PythonTool.hpp"
 #endif
 #include "../logging/Logger.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -28,6 +29,12 @@ SkillLoader::parse_manifest(const fs::path& skill_dir) {
 #ifdef FILO_ENABLE_PYTHON
 
 int SkillLoader::load_from_directory(const fs::path& root, ToolManager& tool_manager) {
+    if (!core::landrun::LandrunSettings::instance().permits(
+            core::landrun::LandrunCapability::in_process_untrusted_code)) {
+        core::logging::warn(
+            "landrun secure mode: refusing to import executable Python skill code");
+        return 0;
+    }
     if (!fs::exists(root) || !fs::is_directory(root)) return 0;
 
     int count = 0;
@@ -75,6 +82,10 @@ int SkillLoader::load_from_directory(const fs::path& root, ToolManager& tool_man
 }
 
 int SkillLoader::discover_and_register(ToolManager& tool_manager) {
+    if (!core::landrun::LandrunSettings::instance().permits(
+            core::landrun::LandrunCapability::in_process_untrusted_code)) {
+        return 0;
+    }
     int total = 0;
     for (const auto& root : default_search_paths()) {
         total += load_from_directory(root, tool_manager);

@@ -1,4 +1,5 @@
 #include "McpClientSession.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include "core/net/NetworkTraffic.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
@@ -573,6 +574,12 @@ StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config,
                            : std::chrono::seconds(60)) {
     if (config.command.empty()) {
         throw std::runtime_error("MCP stdio session: 'command' is empty");
+    }
+    if (!core::landrun::LandrunSettings::instance().permits(
+            core::landrun::LandrunCapability::unsandboxed_child_process)) {
+        throw std::runtime_error(
+            "landrun secure mode refuses unsandboxed stdio MCP servers; "
+            "use a remote MCP transport or explicitly start Filo with --sandbox off");
     }
     client_sampling_enabled_.store(
         static_cast<bool>(sampling_callback_),

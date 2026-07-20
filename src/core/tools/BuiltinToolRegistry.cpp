@@ -23,6 +23,8 @@
 #include "WebFetchTool.hpp"
 #include "WebSearchTool.hpp"
 #include "WriteFileTool.hpp"
+#include "../landrun/LandrunSettings.hpp"
+#include "../logging/Logger.hpp"
 
 #ifdef FILO_ENABLE_PYTHON
 #include "PythonInterpreterTool.hpp"
@@ -79,7 +81,9 @@ void register_builtin_tools(ToolManager& tool_manager,
     tool_manager.register_tool(with_path_visibility(std::make_shared<CreateDirectoryTool>()));
     tool_manager.register_tool(std::make_shared<WebSearchTool>());
     tool_manager.register_tool(std::make_shared<WebFetchTool>());
-    tool_manager.register_tool(std::make_shared<MemoryTool>());
+    if (!core::landrun::LandrunSettings::instance().enabled()) {
+        tool_manager.register_tool(std::make_shared<MemoryTool>());
+    }
 
     if (options.include_workspace_config) {
         tool_manager.register_tool(std::make_shared<GetWorkspaceConfigTool>());
@@ -105,11 +109,17 @@ void register_builtin_tools(ToolManager& tool_manager,
     }
 
 #ifdef FILO_ENABLE_PYTHON
-    if (options.include_python) {
+    const bool secure_mode = !core::landrun::LandrunSettings::instance().permits(
+        core::landrun::LandrunCapability::in_process_untrusted_code);
+    if (options.include_python && !secure_mode) {
         tool_manager.register_tool(std::make_shared<PythonInterpreterTool>());
     }
-    if (options.discover_python_skills) {
+    if (options.discover_python_skills && !secure_mode) {
         SkillLoader::discover_and_register(tool_manager);
+    }
+    if (secure_mode && (options.include_python || options.discover_python_skills)) {
+        core::logging::warn(
+            "landrun secure mode: embedded Python and executable Python skills are disabled");
     }
 #else
     (void)options;

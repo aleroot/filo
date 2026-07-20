@@ -2,6 +2,7 @@
 #include <CLI/CLI.hpp>
 #include "core/config/ConfigManager.hpp"
 #include "core/workspace/Workspace.hpp"
+#include "core/workspace/SessionWorkspace.hpp"
 #include "core/auth/AuthLogin.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/budget/BudgetTracker.hpp"
@@ -10,6 +11,13 @@
 #include "core/session/SessionStore.hpp"
 #include "core/utils/StringUtils.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
+#include "core/landrun/LandrunHelper.hpp"
+#include "core/landrun/LandrunDriverFactory.hpp"
+#include "core/landrun/LandrunPolicyCompiler.hpp"
+#include "core/landrun/LandrunReadiness.hpp"
+#include "core/landrun/LandrunRuntime.hpp"
+#include "core/landrun/LandrunSettings.hpp"
+#include "core/landrun/LandrunStatus.hpp"
 #include "tui/MainApp.hpp"
 #include "exec/Server.hpp"
 #include "exec/Daemon.hpp"
@@ -18,7 +26,10 @@
 #include <filesystem>
 #include <iostream>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
+#include <memory>
+#include <string_view>
 #include <signal.h>
 #include <unistd.h>
 
@@ -40,6 +51,9 @@ namespace {
  * @author Alessio Pollero
  */
 int main(int argc, char** argv) {
+    if (core::landrun::is_landrun_helper_invocation(argc, argv)) {
+        return core::landrun::run_landrun_helper(argc - 2, argv + 2);
+    }
     ::signal(SIGPIPE, SIG_IGN);
     CLI::App app{"Filo - AI Coding Assistant"};
 
@@ -65,6 +79,10 @@ int main(int argc, char** argv) {
     std::vector<std::string> work_dirs;
     std::vector<std::string> trusted_tools;
     std::string startup_model;
+    std::string sandbox_mode = "workspace-write";
+    bool sandbox_status = false;
+    std::vector<std::filesystem::path> sandbox_excluded_paths;
+    std::unique_ptr<core::landrun::LandrunRuntime> landrun_runtime;
 
     auto* mcp_opt = app.add_option(
         "--mcp",
@@ -139,8 +157,32 @@ int main(int argc, char** argv) {
         startup_model,
         "Model for this process only: MODEL, PROVIDER, or PROVIDER/MODEL. "
         "Does not change saved defaults.");
+    app.add_option(
+        "--sandbox",
+        sandbox_mode,
+        "OS process sandbox: workspace-write (default) or off.")
+        ->check(CLI::IsMember({"workspace-write", "off"}))
+        ->capture_default_str();
+    app.add_option(
+        "--sandbox-exclude",
+        sandbox_excluded_paths,
+        "Path to exclude from sandboxed child access; repeat for additional paths.")
+        ->expected(1);
+    app.add_flag(
+        "--sandbox-status",
+        sandbox_status,
+        "Verify and print the effective sandbox guarantees, then exit.");
 
     CLI11_PARSE(app, argc, argv);
+
+    auto& landrun_settings = core::landrun::LandrunSettings::instance();
+    landrun_settings.configure_startup({
+        .mode = sandbox_mode == "off"
+            ? core::landrun::LandrunMode::off
+            : core::landrun::LandrunMode::workspace_write,
+        .excluded_paths = std::move(sandbox_excluded_paths),
+    });
+    landrun_settings.freeze_startup_configuration();
 
     if (!auth_args.empty()) {
         auth_action = "login";
@@ -166,6 +208,31 @@ int main(int argc, char** argv) {
     }
 
     core::logging::Logger::get_instance().configure_from_env();
+    if (core::landrun::LandrunSettings::instance().mode()
+        != core::landrun::LandrunMode::off) {
+        const auto driver = core::landrun::make_landrun_driver();
+        const auto probe = driver->probe();
+        if (!probe.available) {
+            const auto message = std::format(
+                "Requested sandbox backend '{}' is unavailable: {}. "
+                "Use --sandbox off only if you explicitly accept unrestricted commands.",
+                probe.backend,
+                probe.detail);
+            core::logging::error("{}", message);
+            std::cerr << message << '\n';
+            return 1;
+        }
+        core::logging::info("landrun enabled: {} ({})", probe.backend, probe.detail);
+        try {
+            landrun_runtime = std::make_unique<core::landrun::LandrunRuntime>();
+        } catch (const std::exception& error) {
+            const auto message = std::format(
+                "Failed to initialize landrun: {}", error.what());
+            core::logging::error("{}", message);
+            std::cerr << message << '\n';
+            return 1;
+        }
+    }
     const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
 
     std::string normalized_mcp_transport = core::utils::str::to_lower_ascii_copy(mcp_transport);
@@ -214,11 +281,36 @@ int main(int argc, char** argv) {
     for (std::size_t i = 1; i < work_dirs.size(); ++i) {
         additional_work_dirs.emplace_back(work_dirs[i]);
     }
-    const bool enforce_workspace = !work_dirs.empty();
     core::workspace::Workspace::get_instance().initialize(
         std::filesystem::current_path(),
         additional_work_dirs,
-        enforce_workspace);
+        true);
+
+    if (core::landrun::LandrunSettings::instance().mode()
+        != core::landrun::LandrunMode::off) {
+        const char* home_value = std::getenv("HOME");
+        if (home_value && *home_value) {
+            const auto home = core::workspace::SessionWorkspace::normalize_path(home_value);
+            const auto workspace_root = core::workspace::SessionWorkspace::normalize_path(
+                std::filesystem::current_path());
+            bool exposes_home = core::landrun::is_landrun_path_within(
+                workspace_root, home);
+            for (const auto& additional : additional_work_dirs) {
+                exposes_home = exposes_home
+                    || core::landrun::is_landrun_path_within(
+                        core::workspace::SessionWorkspace::normalize_path(additional),
+                        home);
+            }
+            if (exposes_home) {
+                constexpr std::string_view message =
+                    "Refusing secure mode with the entire home directory as the workspace. "
+                    "Start Filo inside a project directory or explicitly use --sandbox off.";
+                core::logging::error("{}", message);
+                std::cerr << message << '\n';
+                return 1;
+            }
+        }
+    }
 
     // --list-sessions: print available sessions and exit.
     if (list_sessions) {
@@ -295,6 +387,38 @@ int main(int argc, char** argv) {
             core::logging::error("Authentication failed: {}", e.what());
             return 1;
         }
+        return 0;
+    }
+
+    if (core::landrun::LandrunSettings::instance().enabled()) {
+        const core::workspace::SessionWorkspace workspace_view(
+            core::workspace::Workspace::get_instance().snapshot());
+        core::landrun::LandrunResult readiness;
+        try {
+            const auto policy = core::landrun::LandrunPolicyCompiler::compile(
+                workspace_view,
+                core::landrun::LandrunSettings::instance().mode());
+            readiness = core::landrun::verify_landrun_readiness(policy);
+        } catch (const std::exception& error) {
+            readiness = {
+                .success = false,
+                .detail = std::format("policy compilation failed: {}", error.what()),
+            };
+        }
+        if (!readiness.success) {
+            const auto message = std::format(
+                "Sandbox readiness check failed: {}. Filo will not start with a sandbox "
+                "it cannot enforce. If Filo is already inside another sandbox, launch it "
+                "outside that sandbox; use --sandbox off only if you explicitly accept "
+                "unrestricted commands.", readiness.detail);
+            core::logging::error("{}", message);
+            std::cerr << message << '\n';
+            return 1;
+        }
+    }
+    if (sandbox_status) {
+        std::cout << core::landrun::landrun_status_label() << '\n'
+                  << core::landrun::landrun_status_detail() << '\n';
         return 0;
     }
 

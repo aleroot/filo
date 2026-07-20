@@ -1,5 +1,9 @@
 #pragma once
 
+#include "../../landrun/LandrunLaunch.hpp"
+#include "../../landrun/LandrunPolicy.hpp"
+#include "../../landrun/LandrunEnvironment.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -9,6 +13,7 @@
 #include <cstring>
 #include <format>
 #include <poll.h>
+#include <spawn.h>
 #include <random>
 #include <signal.h>
 #include <string>
@@ -16,6 +21,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
+
+extern char** environ;
 
 namespace core::tools::detail {
 
@@ -102,6 +111,12 @@ public:
 
     ShellSession(const ShellSession&)            = delete;
     ShellSession& operator=(const ShellSession&) = delete;
+
+    void configure_landrun(core::landrun::LandrunPolicy policy) {
+        if (policy == landrun_policy_) return;
+        stop();
+        landrun_policy_ = std::move(policy);
+    }
 
     /**
      * @brief Execute a shell command and return its merged stdout+stderr.
@@ -192,6 +207,29 @@ private:
     void start() {
         sentinel_ = make_sentinel();
 
+        core::landrun::LandrunLaunch launch;
+        try {
+            launch = core::landrun::prepare_shell_launch(landrun_policy_);
+        } catch (...) {
+            return;
+        }
+
+        std::vector<char*> launch_argv;
+        launch_argv.reserve(launch.arguments.size() + 1);
+        for (auto& argument : launch.arguments) {
+            launch_argv.push_back(argument.data());
+        }
+        launch_argv.push_back(nullptr);
+
+        auto environment_storage = core::landrun::build_landrun_environment(
+            landrun_policy_, environ);
+        std::vector<char*> spawn_environment;
+        spawn_environment.reserve(environment_storage.size() + 1);
+        for (auto& entry : environment_storage) {
+            spawn_environment.push_back(entry.data());
+        }
+        spawn_environment.push_back(nullptr);
+
         int stdin_pipe[2];   // parent writes commands here
         int stdout_pipe[2];  // parent reads output from here
 
@@ -202,37 +240,75 @@ private:
             return;
         }
 
-        const pid_t child_pid = ::fork();
-        if (child_pid < 0) {
+        posix_spawn_file_actions_t file_actions;
+        if (::posix_spawn_file_actions_init(&file_actions) != 0) {
+            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
+            ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
+            return;
+        }
+        posix_spawnattr_t attributes;
+        if (::posix_spawnattr_init(&attributes) != 0) {
+            ::posix_spawn_file_actions_destroy(&file_actions);
+            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
+            ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
+            return;
+        }
+
+        const auto abandon_spawn_setup = [&] {
+            ::posix_spawn_file_actions_destroy(&file_actions);
+            ::posix_spawnattr_destroy(&attributes);
+            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
+            ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
+        };
+        const bool file_actions_ready =
+            ::posix_spawn_file_actions_adddup2(
+                &file_actions, stdin_pipe[0], STDIN_FILENO) == 0
+            && ::posix_spawn_file_actions_adddup2(
+                &file_actions, stdout_pipe[1], STDOUT_FILENO) == 0
+            && ::posix_spawn_file_actions_adddup2(
+                &file_actions, stdout_pipe[1], STDERR_FILENO) == 0
+            && ::posix_spawn_file_actions_addclose(&file_actions, stdin_pipe[0]) == 0
+            && ::posix_spawn_file_actions_addclose(&file_actions, stdin_pipe[1]) == 0
+            && ::posix_spawn_file_actions_addclose(&file_actions, stdout_pipe[0]) == 0
+            && ::posix_spawn_file_actions_addclose(&file_actions, stdout_pipe[1]) == 0;
+        if (!file_actions_ready) {
+            abandon_spawn_setup();
+            return;
+        }
+
+        sigset_t default_signals;
+        if (sigemptyset(&default_signals) != 0
+            || sigaddset(&default_signals, SIGINT) != 0
+            || ::posix_spawnattr_setsigdefault(&attributes, &default_signals) != 0
+            || ::posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+            abandon_spawn_setup();
+            return;
+        }
+        short spawn_flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+        // Only stdio recreated by the file actions crosses the helper boundary.
+        spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+        if (::posix_spawnattr_setflags(&attributes, spawn_flags) != 0) {
+            abandon_spawn_setup();
+            return;
+        }
+
+        pid_t child_pid = -1;
+        const int spawn_error = ::posix_spawn(
+            &child_pid,
+            launch.executable.c_str(),
+            &file_actions,
+            &attributes,
+            launch_argv.data(),
+            spawn_environment.data());
+        ::posix_spawn_file_actions_destroy(&file_actions);
+        ::posix_spawnattr_destroy(&attributes);
+        if (spawn_error != 0) {
             ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
             pid_.store(-1, std::memory_order_release);
             return;
-        }
-
-        if (child_pid == 0) {
-            // ---- child ----
-            // Place child in its own process group so killpg() on timeout
-            // terminates bash AND all sub-processes it spawned.
-            ::setpgid(0, 0);
-
-            ::dup2(stdin_pipe[0],  STDIN_FILENO);
-            ::dup2(stdout_pipe[1], STDOUT_FILENO);
-            ::dup2(stdout_pipe[1], STDERR_FILENO);
-            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
-            ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
-
-            ::setenv("HISTFILE", "/dev/null", 1);
-            ::setenv("HISTSIZE", "0", 1);
-            ::signal(SIGINT, SIG_DFL);
-
-            const bool has_bash = ::access("/bin/bash", X_OK) == 0;
-            if (has_bash) {
-                ::execl("/bin/bash", "bash", "--norc", "--noprofile",
-                        nullptr);
-            }
-            ::execl("/bin/sh", "sh", nullptr);
-            ::_exit(127);
         }
 
         // ---- parent ----
@@ -550,6 +626,7 @@ private:
     std::atomic<pid_t> pgid_{-1};   // process group id (== pid_ while alive)
     std::atomic<bool>  interrupted_{false};
     std::string        sentinel_;
+    core::landrun::LandrunPolicy landrun_policy_;
 };
 
 } // namespace core::tools::detail

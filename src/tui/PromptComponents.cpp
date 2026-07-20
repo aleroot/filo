@@ -3,6 +3,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/landrun/LandrunStatus.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -587,6 +588,9 @@ Element render_startup_banner_panel(std::string_view provider_name,
     } else {
         rows.push_back(paragraph(summary) | color(Color::White) | xflex);
     }
+
+    rows.push_back(paragraph(core::landrun::landrun_status_label())
+                   | color(Color::GrayLight) | xflex);
 
     const auto hint_lines = split_lines(std::string(provider_setup_hint));
     for (const auto& line : hint_lines) {

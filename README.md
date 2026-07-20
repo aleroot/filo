@@ -147,6 +147,7 @@ Useful CLI flags:
 - `--include-partial-messages` include deltas in `stream-json`
 - `-c, --continue` continue the latest project-scoped session (TUI + prompter)
 - `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
+- `--sandbox workspace-write|off` controls `landrun` (default: `workspace-write`). Secure mode uses native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`.
 
 Prompter examples:
 

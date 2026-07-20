@@ -1,4 +1,5 @@
 #include "ContextBuilder.hpp"
+#include "../landrun/LandrunSettings.hpp"
 
 #include "SteeringLoader.hpp"
 #include "../scm/ScmFactory.hpp"
@@ -190,7 +191,8 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         build_workspace_facts(session_context_));
 
     if (!include_project_context_) {
-        if (session_context_.memory_policy.use_memories) {
+        if (session_context_.memory_policy.use_memories
+            && !core::landrun::LandrunSettings::instance().enabled()) {
             append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
                          "memory", core::memory::build_memory_prompt_block(
                              core::memory::MemoryStore{}.load(), 24,
@@ -231,7 +233,8 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         // Context discovery must not prevent agent startup.
     }
 
-    if (session_context_.memory_policy.use_memories) {
+    if (session_context_.memory_policy.use_memories
+        && !core::landrun::LandrunSettings::instance().enabled()) {
         append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
                      "memory", core::memory::build_memory_prompt_block(
                          core::memory::MemoryStore{}.load(), 24,

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../landrun/LandrunPolicy.hpp"
+
 #include <chrono>
 #include <string>
 #include <string_view>
@@ -28,6 +30,10 @@ public:
     };
 
     virtual ~IShellExecutor() = default;
+
+    // Configure the OS sandbox for subsequent process starts. The default is
+    // intentionally a no-op so platform/test executors remain substitutable.
+    virtual void configure_landrun(core::landrun::LandrunPolicy) {}
 
     // Execute a shell command and return its merged output + exit code.
     //

@@ -5,6 +5,8 @@
 #include "ToolPolicy.hpp"
 #include "shell/ShellUtils.hpp"
 #include "../context/SessionContext.hpp"
+#include "../landrun/LandrunPolicyCompiler.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../workspace/Workspace.hpp"
 #include <simdjson.h>
@@ -56,7 +58,10 @@ void mark_session_shell_used(const std::shared_ptr<SessionShellState>& state) {
 }
 
 [[nodiscard]] std::shared_ptr<SessionShellState>
-get_or_create_session_shell(const std::string& session_id, const std::filesystem::path& initial_working_dir) {
+get_or_create_session_shell(
+    const std::string& session_id,
+    const std::filesystem::path& initial_working_dir,
+    const core::landrun::LandrunPolicy& landrun_policy) {
     std::shared_ptr<SessionShellState> evicted;
     std::lock_guard<std::mutex> lock(g_session_shells_mutex);
     if (auto it = g_session_shells.find(session_id); it != g_session_shells.end()) {
@@ -65,6 +70,7 @@ get_or_create_session_shell(const std::string& session_id, const std::filesystem
     }
 
     auto state = std::make_shared<SessionShellState>();
+    state->executor->configure_landrun(landrun_policy);
     if (!initial_working_dir.empty()) {
         [[maybe_unused]] const auto ignored = state->executor->run(
             std::format("cd '{}'", shell_single_quote(initial_working_dir.string())),
@@ -458,9 +464,13 @@ std::string ShellTool::execute_impl(
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
     shell::IShellExecutor::Result result;
+    const auto landrun_policy = core::landrun::LandrunPolicyCompiler::compile(
+        context.workspace_view(),
+        core::landrun::LandrunSettings::instance().mode());
     const std::string_view session_id = context.session_id;
     if (session_id.empty()) {
         std::lock_guard<std::mutex> lock(executor_mutex_);
+        executor_->configure_landrun(landrun_policy);
         result = executor_->run(command_view, working_dir, timeout);
     } else {
         ActiveCommandRegistration active_command({
@@ -472,10 +482,12 @@ std::string ShellTool::execute_impl(
         });
         const auto state = get_or_create_session_shell(
             std::string(session_id),
-            context.workspace_view().primary());
+            context.workspace_view().primary(),
+            landrun_policy);
         mark_session_shell_used(state);
         {
             std::lock_guard<std::mutex> lock(state->mutex);
+            state->executor->configure_landrun(landrun_policy);
             result = state->executor->run(command_view, working_dir, timeout);
         }
         mark_session_shell_used(state);

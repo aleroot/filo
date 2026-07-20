@@ -59,6 +59,7 @@
 #include "core/tools/SkillLoader.hpp"
 #endif
 #include "core/logging/Logger.hpp"
+#include "core/landrun/LandrunStatus.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/agent/PermissionGate.hpp"
 #include "core/permissions/PermissionSystem.hpp"
@@ -856,6 +857,8 @@ RunResult run(RunOptions opts) {
             summary += "  —  ";
             summary += context_sources_label;
         }
+        summary.push_back('\n');
+        summary += core::landrun::landrun_status_label();
         summary.push_back('\n');
         summary += provider_setup_hint(active_provider_name);
         return summary;

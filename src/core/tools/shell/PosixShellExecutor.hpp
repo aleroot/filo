@@ -24,6 +24,10 @@ public:
     PosixShellExecutor()  = default;
     ~PosixShellExecutor() = default;
 
+    void configure_landrun(core::landrun::LandrunPolicy policy) override {
+        session_.configure_landrun(std::move(policy));
+    }
+
     Result run(std::string_view command,
                std::string_view working_dir = {},
                std::chrono::milliseconds timeout = kDefaultTimeout) override

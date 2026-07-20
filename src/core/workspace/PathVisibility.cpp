@@ -1,7 +1,9 @@
 #include "PathVisibility.hpp"
 
 #include "AgentIgnore.hpp"
+#include "SensitivePathPolicy.hpp"
 #include "../context/SessionContext.hpp"
+#include "../landrun/LandrunSettings.hpp"
 
 #include <memory>
 #include <stdexcept>
@@ -70,7 +72,28 @@ private:
     AgentIgnoreMatcher matcher_;
 };
 
+class SensitivePathVisibilityPolicy final : public IPathVisibilityPolicy {
+public:
+    [[nodiscard]] bool empty() const noexcept override { return false; }
+
+    [[nodiscard]] std::optional<std::string> hidden_reason(
+        std::string_view,
+        const std::filesystem::path& path,
+        PathVisibilityKind) const override {
+        if (!is_sensitive_agent_path(path)) return std::nullopt;
+        return std::string(kSensitivePathReason);
+    }
+
+    [[nodiscard]] bool should_prune_directory(
+        const std::filesystem::path& path) const override {
+        return is_sensitive_agent_path(path);
+    }
+};
+
 [[nodiscard]] std::shared_ptr<const IPathVisibilityPolicy> base_policy() {
+    if (core::landrun::LandrunSettings::instance().enabled()) {
+        return std::make_shared<SensitivePathVisibilityPolicy>();
+    }
     return std::make_shared<AllowAllPathVisibilityPolicy>();
 }
 
