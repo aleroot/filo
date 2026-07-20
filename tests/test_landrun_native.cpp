@@ -35,11 +35,17 @@ std::string shell_quote(std::string_view value) {
     return quoted;
 }
 
-std::filesystem::path find_repository_root() {
+std::filesystem::path find_source_root() {
     std::error_code ec;
     auto path = std::filesystem::current_path(ec);
     while (!ec && !path.empty()) {
-        if (std::filesystem::exists(path / ".git", ec) && !ec) return path;
+        const bool has_build_definition =
+            std::filesystem::is_regular_file(path / "CMakeLists.txt", ec);
+        ec.clear();
+        const bool has_landrun_sources =
+            std::filesystem::is_directory(path / "src/core/landrun", ec);
+        if (!ec && has_build_definition && has_landrun_sources) return path;
+        ec.clear();
         const auto parent = path.parent_path();
         if (parent == path) break;
         path = parent;
@@ -226,13 +232,13 @@ int main(int argc, char** argv) {
 
     core::landrun::LandrunRuntime runtime;
     core::tools::shell::PosixShellExecutor shell;
-    const auto repository_root = find_repository_root();
-    if (repository_root.empty()) {
-        std::cerr << "could not locate the Git repository root\n";
+    const auto source_root = find_source_root();
+    if (source_root.empty()) {
+        std::cerr << "could not locate the Filo source root\n";
         std::filesystem::remove_all(base, ec);
         return 26;
     }
-    const auto shell_denied_file = repository_root
+    const auto shell_denied_file = source_root
         / (".filo-native-denied-" + std::to_string(::getpid()));
     int shell_denied_fd = ::open(
         shell_denied_file.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -248,7 +254,7 @@ int main(int argc, char** argv) {
         core::workspace::WorkspaceSnapshot{.primary = allowed, .enforce = true}};
     auto shell_policy = core::landrun::LandrunPolicyCompiler::compile(
         workspace, core::landrun::LandrunMode::workspace_write);
-    core::landrun::add_readable_root(shell_policy, repository_root);
+    core::landrun::add_readable_root(shell_policy, source_root);
     if (const auto readiness = core::landrun::verify_landrun_readiness(shell_policy);
         !readiness.success) {
         std::cerr << readiness.detail << '\n';
@@ -274,7 +280,7 @@ int main(int argc, char** argv) {
         return 26;
     }
     ::setenv("OPENAI_API_KEY", "must-not-leak", 1);
-    const std::string command =
+    std::string command =
         "if { true <&" + std::to_string(inherited_fd)
         + "; } 2>/dev/null; then exit 32; fi; printf shell-ok > '"
         + (allowed / "from-shell").string()
@@ -285,10 +291,13 @@ int main(int argc, char** argv) {
         + "')\" = shell-ok; test \"$HOME\" = '"
         + (runtime.root() / "home").string()
         + "'; test \"$TMPDIR\" = '" + effective_tmpdir.string()
-        + "'; printf temp-ok > \"$TMPDIR/probe\"; git --version >/dev/null; clang --version >/dev/null; "
-          "python3 -c 'print(1)' >/dev/null; git -C "
-        + shell_quote(repository_root.string())
-        + " --no-pager diff --stat HEAD >/dev/null";
+        + "'; printf temp-ok > \"$TMPDIR/probe\"; git --version >/dev/null; c++ --version >/dev/null; "
+          "python3 -c 'print(1)' >/dev/null; test -r "
+        + shell_quote((source_root / "CMakeLists.txt").string());
+    if (std::filesystem::exists(source_root / ".git", ec) && !ec) {
+        command += "; git -C " + shell_quote(source_root.string())
+            + " --no-pager diff --stat HEAD >/dev/null";
+    }
     const auto shell_result = shell.run(command, {}, std::chrono::seconds{10});
     ::unsetenv("OPENAI_API_KEY");
     ::close(inherited_fd);
