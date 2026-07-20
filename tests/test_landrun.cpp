@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -124,9 +125,11 @@ TEST_CASE("secure landrun environment strips credentials and selects allowed tem
     const auto environment = core::landrun::build_landrun_environment(
         policy, inherited);
 
-    REQUIRE(std::ranges::find(environment, "OPENAI_API_KEY=must-not-leak")
+    REQUIRE(std::ranges::find(
+                environment, std::string{"OPENAI_API_KEY=must-not-leak"})
             == environment.end());
-    REQUIRE(std::ranges::find(environment, "SSH_AUTH_SOCK=/tmp/agent.sock")
+    REQUIRE(std::ranges::find(
+                environment, std::string{"SSH_AUTH_SOCK=/tmp/agent.sock"})
             == environment.end());
     REQUIRE(std::ranges::any_of(environment, [&](const std::string& entry) {
         return entry == "HOME=" + (runtime.root() / "home").string();
@@ -258,7 +261,8 @@ TEST_CASE("enabled landrun launch transports roots as exact argv entries", "[lan
     REQUIRE(launch.arguments[1] == "__landrun-exec");
     REQUIRE(launch.arguments[2] == "--rw");
     REQUIRE(launch.arguments[3] == "/tmp/a root with spaces");
-    REQUIRE(std::ranges::find(launch.arguments, "--") != launch.arguments.end());
+    REQUIRE(std::ranges::find(launch.arguments, std::string{"--"})
+            != launch.arguments.end());
 }
 
 TEST_CASE("platform landrun driver reports an explicit backend", "[landrun]") {
