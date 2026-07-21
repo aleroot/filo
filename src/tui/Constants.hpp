@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/version/Version.hpp"
+
 #include <chrono>
 #include <compare>
 #include <cstddef>
@@ -8,7 +10,7 @@
 namespace tui {
 
 // ── Application identity ──────────────────────────────────────────────────────
-inline constexpr const char* kAppVersion = "Filo v0.1.0";
+inline constexpr std::string_view kAppVersion = core::version::display_name;
 
 // ── Autocomplete ──────────────────────────────────────────────────────────────
 

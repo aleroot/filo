@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace core::version {
+
+inline constexpr std::string_view product_name{"filo"};
+inline constexpr std::string_view value{"@PROJECT_VERSION@"};
+inline constexpr std::string_view display_name{"Filo v@PROJECT_VERSION@"};
+inline constexpr std::string_view user_agent{"filo/@PROJECT_VERSION@"};
+
+} // namespace core::version

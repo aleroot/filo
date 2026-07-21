@@ -78,6 +78,23 @@ cmake --build --preset xcode-debug --target run_integration_tests
 ./build/Darwin/xcode-debug/Debug/filo
 ```
 
+### Install
+
+Install the configured build using CMake's standard prefix handling:
+
+```bash
+cmake --install build/Linux/linux-debug --prefix "$HOME/.local"
+```
+
+For the Xcode preset, select the configuration explicitly:
+
+```bash
+cmake --install build/Darwin/xcode-debug --config Debug --prefix "$HOME/.local"
+```
+
+The executable is installed to `<prefix>/bin/filo`. Verify it with
+`filo --version`.
+
 ## Enable Embedded `llama.cpp`
 
 Linux:
@@ -133,6 +150,7 @@ Daemon transport notes:
   - `<provider>` routes to that provider's default configured model.
 
 Useful CLI flags:
+- `--version` print the Filo version and exit
 - `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional OpenAI/Anthropic-compatible proxy mode

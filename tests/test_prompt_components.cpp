@@ -94,13 +94,21 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     ftxui::Render(screen, panel);
 
     const auto output = strip_ansi(screen.ToString());
-    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Filo AI Agent"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("Filo AI Agent"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("provider: local-qwen"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("model: qwen2.5-coder-7b-instruct-q4_k_m"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MCP servers: 0"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("AGENTS.md, FILO.md"));
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("context:"));
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("sandbox:"));
+}
+
+TEST_CASE("runtime status summary has one compact canonical format",
+          "[tui][banner]") {
+    CHECK(format_runtime_status_summary("openai", "gpt-5", 2)
+          == "provider: openai  —  model: gpt-5  —  MCP servers: 2");
+    CHECK(format_runtime_status_summary("openai", "", 0)
+          == "provider: openai  —  model: <provider default>  —  MCP servers: 0");
 }
 
 TEST_CASE("workspace status uses a lock only for an enabled sandbox",

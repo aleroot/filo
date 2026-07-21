@@ -851,10 +851,9 @@ RunResult run(RunOptions opts) {
         if (ui_show_banner) {
             return std::string{};
         }
-        std::string summary = std::format(
-            "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}",
+        std::string summary = format_runtime_status_summary(
             active_provider_name,
-            active_model_name.empty() ? "<provider default>" : active_model_name,
+            active_model_name,
             core::mcp::McpConnectionManager::get_instance().connected_count());
         if (!context_sources_label.empty()) {
             summary += "  —  ";

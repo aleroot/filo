@@ -8,6 +8,7 @@
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
+#include "core/version/Version.hpp"
 
 #include <cpr/cpr.h>
 #include <simdjson.h>
@@ -89,8 +90,9 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
 
 [[nodiscard]] std::string mcp_initialize_payload() {
     return std::format(
-        R"({{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","capabilities":{{}},"clientInfo":{{"name":"filo","version":"0.1.0"}}}}}})",
-        kMcpProtocolVersion);
+        R"({{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"{}","capabilities":{{}},"clientInfo":{{"name":"filo","version":"{}"}}}}}})",
+        kMcpProtocolVersion,
+        core::version::value);
 }
 
 [[nodiscard]] std::string mcp_initialized_payload() {

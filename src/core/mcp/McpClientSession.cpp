@@ -1,6 +1,7 @@
 #include "McpClientSession.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include "core/net/NetworkTraffic.hpp"
+#include "core/version/Version.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include <simdjson.h>
@@ -159,9 +160,13 @@ namespace {
 // Build the initialize params JSON.
 [[nodiscard]] std::string make_initialize_params(bool enable_sampling) {
     if (enable_sampling) {
-        return R"({"protocolVersion":"2025-11-25","capabilities":{"sampling":{"tools":{}}},"clientInfo":{"name":"filo","version":"0.1.0"}})";
+        return std::format(
+            R"({{"protocolVersion":"2025-11-25","capabilities":{{"sampling":{{"tools":{{}}}}}},"clientInfo":{{"name":"filo","version":"{}"}}}})",
+            core::version::value);
     }
-    return R"({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"filo","version":"0.1.0"}})";
+    return std::format(
+        R"({{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"filo","version":"{}"}}}})",
+        core::version::value);
 }
 
 struct ParsedServerCapabilities {

@@ -71,6 +71,11 @@ enum class ReviewPickerMode {
     std::string_view workspace_path,
     bool sandbox_enabled);
 
+[[nodiscard]] std::string format_runtime_status_summary(
+    std::string_view provider_name,
+    std::string_view model_name,
+    int mcp_server_count);
+
 ftxui::Element render_default_prompt_panel(ftxui::Element input_line,
                                            std::string_view input_text);
 

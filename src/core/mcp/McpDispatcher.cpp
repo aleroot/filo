@@ -28,6 +28,7 @@
 #include "../utils/MimeUtils.hpp"
 #include "../utils/UriUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "core/version/Version.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cstdint>
@@ -804,7 +805,7 @@ struct ParsedPromptGetRequest {
         {
             auto _si = rw.object();
             rw.kv_str("name", "filo-mcp").comma()
-                .kv_str("version", "0.1.0");
+                .kv_str("version", core::version::value);
         }
 
         const auto& workspace = context.workspace_view();

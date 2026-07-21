@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.28...4.3)
 project(filo VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
+set(FILO_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(FILO_GENERATED_VERSION_HEADER
+    "${FILO_GENERATED_INCLUDE_DIR}/core/version/Version.hpp")
+configure_file(
+    cmake/Version.hpp.in
+    "${FILO_GENERATED_VERSION_HEADER}"
+    @ONLY
+)
+
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -69,6 +80,7 @@ CPMAddPackage(
     GITHUB_REPOSITORY libcpr/cpr
     GIT_TAG 1.14.2
     VERSION 1.14.2
+    EXCLUDE_FROM_ALL YES
 )
 
 # Add cpp-httplib for HTTP server support.
@@ -101,6 +113,7 @@ if(FILO_ENABLE_LLAMACPP)
         NAME llama_cpp
         GITHUB_REPOSITORY ggml-org/llama.cpp
         GIT_TAG b10066
+        EXCLUDE_FROM_ALL YES
         OPTIONS
             "BUILD_SHARED_LIBS OFF"
             "LLAMA_BUILD_COMMON ON"
@@ -376,8 +389,14 @@ if(FILO_ENABLE_IPO)
 endif()
 
 add_library(filo_core STATIC ${FILO_CORE_SOURCES})
-target_sources(filo_core PRIVATE ${FILO_HEADER_FILES})
-target_include_directories(filo_core PUBLIC src)
+target_sources(filo_core PRIVATE
+    ${FILO_HEADER_FILES}
+    "${FILO_GENERATED_VERSION_HEADER}"
+)
+target_include_directories(filo_core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${FILO_GENERATED_INCLUDE_DIR}"
+)
 target_compile_definitions(filo_core PUBLIC FILO_FTXUI_ABI_EPOCH=${FILO_FTXUI_ABI_EPOCH})
 target_link_libraries(filo_core
     PUBLIC
@@ -425,6 +444,15 @@ set_target_properties(filo PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ${FILO_IPO_SUPPORTED}
     INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ${FILO_IPO_SUPPORTED}
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
+)
+
+install(TARGETS filo
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    COMPONENT Runtime
+)
+install(FILES LICENSE NOTICE
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+    COMPONENT Runtime
 )
 
 enable_testing()
@@ -584,6 +612,12 @@ add_test(NAME landrun_native_confinement COMMAND test_landrun_native)
 set_tests_properties(landrun_native_confinement PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 30
+)
+
+add_test(NAME filo_version COMMAND filo --version)
+set_tests_properties(filo_version PROPERTIES
+    PASS_REGULAR_EXPRESSION "^filo ${PROJECT_VERSION}"
+    TIMEOUT 10
 )
 
 foreach(filo_ftxui_consumer filo filo_tests test_integration test_agent_freeze test_tui_freeze test_landrun_native)

@@ -18,6 +18,7 @@
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunStatus.hpp"
+#include "core/version/Version.hpp"
 #include "tui/MainApp.hpp"
 #include "exec/Server.hpp"
 #include "exec/Daemon.hpp"
@@ -57,6 +58,9 @@ int main(int argc, char** argv) {
     }
     ::signal(SIGPIPE, SIG_IGN);
     CLI::App app{"Filo - AI Coding Assistant"};
+    app.set_version_flag(
+        "--version",
+        std::format("{} {}", core::version::product_name, core::version::value));
 
     std::string mcp_transport = "stdio";
     bool        daemon_mode_legacy = false;

@@ -560,6 +560,16 @@ std::string format_workspace_status_label(std::string_view workspace_path,
         : " " + std::string(workspace_path) + " ";
 }
 
+std::string format_runtime_status_summary(std::string_view provider_name,
+                                          std::string_view model_name,
+                                          int mcp_server_count) {
+    return std::format(
+        "provider: {}  —  model: {}  —  MCP servers: {}",
+        provider_name,
+        model_name.empty() ? "<provider default>" : model_name,
+        mcp_server_count);
+}
+
 Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view model_name,
                                     int mcp_server_count,
@@ -582,10 +592,9 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }
 
     rows.push_back(text(""));
-    std::string summary = std::format(
-        "Filo AI Agent  —  provider: {}  —  model: {}  —  MCP servers: {}",
+    const std::string summary = format_runtime_status_summary(
         provider_name,
-        model_name.empty() ? "<provider default>" : std::string(model_name),
+        model_name,
         mcp_server_count);
 
     if (!context_sources_label.empty()) {
