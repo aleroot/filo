@@ -44,6 +44,25 @@ constexpr std::string_view kMaxOutputRecoveryPrompt =
     "Output token limit hit. Resume directly with the next unfinished action or text. "
     "Do not apologize or recap. If a tool call was cut off, emit the complete tool call again.";
 
+class TurnCompletionState final {
+public:
+    explicit TurnCompletionState(
+        std::shared_ptr<core::power::SleepInhibitionLease> inhibition) noexcept
+        : sleep_inhibition_(std::move(inhibition)) {}
+
+    [[nodiscard]] std::optional<std::shared_ptr<core::power::SleepInhibitionLease>>
+    claim_completion() noexcept {
+        if (completed_.exchange(true, std::memory_order_acq_rel)) {
+            return std::nullopt;
+        }
+        return std::move(sleep_inhibition_);
+    }
+
+private:
+    std::atomic_bool completed_{false};
+    std::shared_ptr<core::power::SleepInhibitionLease> sleep_inhibition_;
+};
+
 // Returns true if the tool result JSON looks like an error response.
 // All Filo tools return {"error": "..."} on failure.
 [[nodiscard]] bool is_tool_error(const std::string& result) noexcept {
@@ -245,8 +264,12 @@ struct HookFieldPayload {
 Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              core::tools::ToolManager& skill_manager,
              core::context::SessionContext session_context,
-             std::filesystem::path tool_result_root)
+             std::filesystem::path tool_result_root,
+             std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor)
     : provider_(std::move(provider))
+    , sleep_inhibitor_(sleep_inhibitor
+          ? std::move(sleep_inhibitor)
+          : core::power::make_sleep_inhibitor())
     , skill_manager_(skill_manager)
     , session_context_(std::move(session_context))
     , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config())
@@ -764,18 +787,27 @@ void Agent::send_message(core::llm::Message user_message,
         return;
     }
 
-    auto done_once = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<core::power::SleepInhibitionLease> sleep_inhibition;
+    try {
+        sleep_inhibition = sleep_inhibitor_->inhibit("Filo is working on an agent turn");
+    } catch (const std::exception& error) {
+        core::logging::warn("Could not prevent idle system sleep: {}", error.what());
+    } catch (...) {
+        core::logging::warn("Could not prevent idle system sleep: unknown error");
+    }
+
+    auto completion = std::make_shared<TurnCompletionState>(
+        std::move(sleep_inhibition));
     auto finish_turn = [this,
                         done_callback = std::move(done_callback),
-                        done_once]() mutable {
-        bool expected = false;
-        if (!done_once->compare_exchange_strong(
-                expected,
-                true,
-                std::memory_order_acq_rel,
-                std::memory_order_acquire)) {
+                        completion = std::move(completion)]() mutable {
+        auto sleep_inhibition = completion->claim_completion();
+        if (!sleep_inhibition.has_value()) {
             return;
         }
+
+        // The winning callback now owns the assertion through completion.
+        // Any callback copies that outlive the turn retain only empty state.
         turn_in_progress_.store(false, std::memory_order_release);
         done_callback();
     };

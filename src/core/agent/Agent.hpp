@@ -5,6 +5,7 @@
 #include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../memory/MemoryBackgroundService.hpp"
+#include "../power/SleepInhibitor.hpp"
 #include "../session/GoalManager.hpp"
 #include "../session/TodoManager.hpp"
 #include "../session/SessionData.hpp"
@@ -71,7 +72,8 @@ public:
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
           core::tools::ToolManager& skill_manager,
           core::context::SessionContext session_context,
-          std::filesystem::path tool_result_root = ToolResultStore::default_root());
+          std::filesystem::path tool_result_root = ToolResultStore::default_root(),
+          std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor = {});
 
     // -----------------------------------------------------------------------
     // Cancellation support — stop the current LLM response generation.
@@ -280,6 +282,7 @@ private:
     [[nodiscard]] core::context::SessionContext session_context_snapshot() const;
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
+    std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor_;
     core::tools::ToolManager& skill_manager_;
     core::context::SessionContext session_context_;
     SubagentOrchestrator orchestrator_;

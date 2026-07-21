@@ -227,6 +227,9 @@ set(FILO_CORE_SOURCES
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
     src/core/memory/MemoryStore.cpp
+    src/core/power/SleepInhibitor.cpp
+    src/core/power/linux/LinuxSleepInhibitor.cpp
+    src/core/power/macos/MacOSSleepInhibitor.cpp
     src/core/workspace/AgentIgnore.cpp
     src/core/workspace/PathVisibility.cpp
     src/core/workspace/Workspace.cpp
@@ -385,10 +388,12 @@ target_link_libraries(filo_core
 if(APPLE)
     find_library(CFNETWORK_FRAMEWORK CFNetwork REQUIRED)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
     target_link_libraries(filo_core
         PUBLIC
             ${CFNETWORK_FRAMEWORK}
             ${COREFOUNDATION_FRAMEWORK}
+            ${IOKIT_FRAMEWORK}
     )
 endif()
 
@@ -518,6 +523,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
     tests/test_landrun.cpp
+    tests/test_sleep_inhibitor.cpp
 )
 
 set(FILO_INTEGRATION_TEST_SOURCES
@@ -685,4 +691,5 @@ source_group(
         tests/test_semantic_history_editor.cpp
         tests/test_mcp_resources.cpp
         tests/test_trust_flag_resolver.cpp
+        tests/test_sleep_inhibitor.cpp
 )
