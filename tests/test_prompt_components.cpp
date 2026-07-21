@@ -100,6 +100,14 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("MCP servers: 0"));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("AGENTS.md, FILO.md"));
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("context:"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("sandbox:"));
+}
+
+TEST_CASE("workspace status uses a lock only for an enabled sandbox",
+          "[tui][status-bar][sandbox]") {
+    CHECK(format_workspace_status_label("~/project", false) == " ~/project ");
+    CHECK(format_workspace_status_label("~/project", true) == " 🔒 ~/project ");
+    CHECK(format_workspace_status_label("", true).empty());
 }
 
 // ============================================================================

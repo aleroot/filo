@@ -59,7 +59,7 @@
 #include "core/tools/SkillLoader.hpp"
 #endif
 #include "core/logging/Logger.hpp"
-#include "core/landrun/LandrunStatus.hpp"
+#include "core/landrun/LandrunSettings.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/agent/PermissionGate.hpp"
 #include "core/permissions/PermissionSystem.hpp"
@@ -857,10 +857,10 @@ RunResult run(RunOptions opts) {
             summary += "  —  ";
             summary += context_sources_label;
         }
-        summary.push_back('\n');
-        summary += core::landrun::landrun_status_label();
-        summary.push_back('\n');
-        summary += provider_setup_hint(active_provider_name);
+        if (const auto hint = provider_setup_hint(active_provider_name); !hint.empty()) {
+            summary.push_back('\n');
+            summary += hint;
+        }
         return summary;
     };
 
@@ -6695,10 +6695,14 @@ RunResult run(RunOptions opts) {
                 | color(Color::GrayDark);
         } else {
             Elements right_items;
-            // Current working directory
+            // Keep the workspace protection affordance quiet and colocated with its scope.
             std::string cwd_str = format_cwd();
             if (!cwd_str.empty()) {
-                right_items.push_back(text(" " + cwd_str + " ") | color(Color::GrayLight));
+                right_items.push_back(
+                    text(format_workspace_status_label(
+                        cwd_str,
+                        core::landrun::LandrunSettings::instance().enabled()))
+                    | color(Color::GrayLight));
             }
             // Context left percentage
             if (ui_show_context_usage && ctx_pct >= 0) {

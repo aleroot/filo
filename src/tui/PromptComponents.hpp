@@ -66,6 +66,10 @@ enum class ReviewPickerMode {
     EnterCustomPrompt,
 };
 
+[[nodiscard]] std::string format_workspace_status_label(
+    std::string_view workspace_path,
+    bool sandbox_enabled);
+
 ftxui::Element render_default_prompt_panel(ftxui::Element input_line,
                                            std::string_view input_text);
 
