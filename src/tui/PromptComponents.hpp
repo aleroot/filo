@@ -99,7 +99,8 @@ ftxui::Element render_startup_banner_panel(std::string_view provider_name,
                                            std::string_view model_name,
                                            int mcp_server_count,
                                            std::string_view context_sources_label,
-                                           std::string_view provider_setup_hint);
+                                           std::string_view provider_setup_hint,
+                                           std::string_view clock_label = {});
 
 ftxui::Element render_model_selection_panel(int selected_index,
                                             std::string_view manual_description,

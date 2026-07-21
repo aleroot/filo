@@ -574,7 +574,8 @@ Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view model_name,
                                     int mcp_server_count,
                                     std::string_view context_sources_label,
-                                    std::string_view provider_setup_hint) {
+                                    std::string_view provider_setup_hint,
+                                    std::string_view clock_label) {
     static constexpr std::array<std::string_view, 6> kBannerLogoLines = {
         "  ███████╗██╗██╗      ██████╗",
         "  ██╔════╝██║██║     ██╔═══██╗",
@@ -587,9 +588,23 @@ Element render_startup_banner_panel(std::string_view provider_name,
     Elements rows;
     rows.reserve(kBannerLogoLines.size() + 6);
 
+    // The logo anchors the top-left of the banner. A live clock is pinned to
+    // the opposite top-right corner: the logo block sets the row height and the
+    // single-line clock is top-aligned within that hbox, so it lands on the
+    // first row, flush right. (AGENTS.md and friends stay at the bottom-right.)
+    Elements logo_rows;
+    logo_rows.reserve(kBannerLogoLines.size());
     for (const auto line : kBannerLogoLines) {
-        rows.push_back(text(std::string(line)) | color(ColorYellowBright) | ftxui::bold);
+        logo_rows.push_back(text(std::string(line)) | color(ColorYellowBright) | ftxui::bold);
     }
+    Element clock_el = clock_label.empty()
+        ? emptyElement()
+        : text(std::string(clock_label)) | color(Color::GrayLight);
+    rows.push_back(hbox({
+        vbox(std::move(logo_rows)),
+        filler(),
+        std::move(clock_el),
+    }));
 
     rows.push_back(text(""));
     const std::string summary = format_runtime_status_summary(

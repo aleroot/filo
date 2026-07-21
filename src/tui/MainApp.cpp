@@ -1563,11 +1563,18 @@ RunResult run(RunOptions opts) {
             conversation_animation_active =
                 conversation_uses_animation(ui_messages, true);
         }
-        return select_animation_cadence(
+        const auto cadence = select_animation_cadence(
             ui_show_spinner.load(std::memory_order_relaxed),
             assistant_active,
             review_active,
             conversation_animation_active);
+        if (!cadence.has_value() && ui_show_banner) {
+            return AnimationCadence{
+                .period = std::chrono::seconds(1),
+                .advance_frame = false,
+            };
+        }
+        return cadence;
     };
 
     auto refresh_conversation_search_locked = [&]() {
@@ -6578,7 +6585,8 @@ RunResult run(RunOptions opts) {
                 active_model_name.empty() ? "<provider default>" : active_model_name,
                 core::mcp::McpConnectionManager::get_instance().connected_count(),
                 context_sources_label,
-                provider_setup_hint(active_provider_name));
+                provider_setup_hint(active_provider_name),
+                current_time_str());
         }
 
         // ── Permission overlay ───────────────────────────────────────────
