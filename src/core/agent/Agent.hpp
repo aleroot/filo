@@ -95,6 +95,7 @@ public:
     // describes or depends on its roots.
     void grant_workspace_paths(
         const std::vector<std::filesystem::path>& paths);
+    [[nodiscard]] core::workspace::SessionWorkspace workspace_snapshot() const;
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
     void restore_todos(std::vector<core::session::SessionTodoItem> todos);
     [[nodiscard]] std::vector<core::session::SessionTodoItem> get_todos() const;

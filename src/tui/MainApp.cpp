@@ -5,6 +5,8 @@
 #include "HistoryComponent.hpp"
 #include "PickerState.hpp"
 #include "Conversation.hpp"
+#include "CodeBlockRunner.hpp"
+#include "CodeBlockRunServices.hpp"
 #include "KeyInput.hpp"
 #include "SessionReplay.hpp"
 #include "SelectionClipboardCopier.hpp"
@@ -60,6 +62,7 @@
 #endif
 #include "core/logging/Logger.hpp"
 #include "core/landrun/LandrunSettings.hpp"
+#include "core/landrun/LandrunPolicyCompiler.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/agent/PermissionGate.hpp"
 #include "core/permissions/PermissionSystem.hpp"
@@ -1136,6 +1139,29 @@ RunResult run(RunOptions opts) {
     SessionPickerState session_picker_state;
 
     RewindPickerState rewind_picker_state;
+    const auto code_run_script_directory = select_code_run_script_directory(
+        opts.landrun_mode,
+        opts.landrun_environment.runtime_root,
+        std::filesystem::temp_directory_path());
+    CodeBlockRunServices code_block_run_services(CodeBlockRunDependencies{
+        .runner = core::code::make_interactive_code_runner(),
+        .working_directory = [] { return std::filesystem::current_path(); },
+        .script_directory = code_run_script_directory,
+        .landrun_policy = [agent,
+                           mode = opts.landrun_mode,
+                           compiler = core::landrun::LandrunPolicyCompiler(
+                               std::move(opts.landrun_environment))] {
+            return compiler.build(agent->workspace_snapshot(), mode);
+        },
+        .with_restored_terminal = [&screen](std::function<void()> task) {
+            auto closure = screen.WithRestoredIO(std::move(task));
+            closure();
+        },
+        .copy_to_clipboard = core::commands::copy_text_to_clipboard,
+        .transcript_directory = std::filesystem::temp_directory_path()
+            / "filo" / "code-runs",
+    });
+    CodeBlockRunnerController code_block_runner(code_block_run_services);
 
     struct ConversationSearchState {
         bool active = false;
@@ -4057,6 +4083,29 @@ RunResult run(RunOptions opts) {
         }).detach();
     };
 
+    auto latest_completed_assistant_output = [&]() {
+        std::lock_guard lock(ui_mutex);
+        return latest_completed_assistant_source(ui_messages);
+    };
+
+    auto open_code_blocks = [&](std::optional<std::size_t> one_based_block)
+        -> core::commands::CommandOperationResult {
+        if (assistant_turn_active.load(std::memory_order_acquire)) {
+            return {.ok = false, .message = "Stop the active turn before running response code."};
+        }
+        const std::string response = latest_completed_assistant_output();
+        if (response.empty()) {
+            return {.ok = false, .message = "There is no completed assistant response to inspect."};
+        }
+
+        auto opened = code_block_runner.open(response, one_based_block);
+        if (!opened) {
+            return {.ok = false, .message = std::move(opened.error())};
+        }
+        wake_ui();
+        return {.ok = true, .message = {}};
+    };
+
     auto open_rewind_menu = [&]() -> bool {
         if (assistant_turn_active.load(std::memory_order_acquire)) {
             append_history("\nℹ  Stop the active turn before rewinding.\n");
@@ -4711,6 +4760,9 @@ RunResult run(RunOptions opts) {
                             message.show_lightbulb = true;
                         }
 
+                        // Keep provider bytes separate from display-only pause markers.
+                        message.assistant_source_text += chunk;
+
                         if (message.text.empty()) {
                             message.text = chunk;
                         } else {
@@ -4873,6 +4925,7 @@ RunResult run(RunOptions opts) {
                 || review_picker_state.active
                 || local_model_picker_state.active
                 || rewind_picker_state.active
+                || code_block_runner.active()
                 || conversation_search_state.active
                 || settings_panel_state.active) return;
         }
@@ -4968,19 +5021,7 @@ RunResult run(RunOptions opts) {
                 auto closure = screen.WithRestoredIO(task);
                 closure();
             },
-            .latest_assistant_output_fn = [&]() {
-                std::lock_guard lock(ui_mutex);
-                for (auto it = ui_messages.rbegin(); it != ui_messages.rend(); ++it) {
-                    if (it->type != MessageType::Assistant || it->pending) {
-                        continue;
-                    }
-
-                    if (!it->text.empty()) {
-                        return it->text;
-                    }
-                }
-                return std::string{};
-            },
+            .latest_assistant_output_fn = latest_completed_assistant_output,
             .history_store_fn = history_store,
             .clear_history_fn = [&]() {
                 prompt_history.clear();
@@ -5019,6 +5060,7 @@ RunResult run(RunOptions opts) {
             .list_active_terminals_fn = list_active_terminals,
             .stop_active_terminal_fn = stop_active_terminal,
             .direct_shell_command_fn = submit_direct_shell_command,
+            .open_code_block_runner_fn = open_code_blocks,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;
@@ -5039,6 +5081,7 @@ RunResult run(RunOptions opts) {
                 || review_picker_state.active
                 || local_model_picker_state.active
                 || rewind_picker_state.active
+                || code_block_runner.active()
                 || conversation_search_state.active
                 || settings_panel_state.active) {
                 return true;
@@ -5203,6 +5246,26 @@ RunResult run(RunOptions opts) {
                 stderr_panel_state.active = false;
                 return true;
             }
+        }
+
+        const auto code_block_outcome = code_block_runner.handle(
+            event,
+            is_ctrl_c_event(event) || is_ctrl_g_event(event));
+        if (code_block_outcome.handled) {
+            if (code_block_outcome.attachment.has_value()) {
+                insert_token_with_spacing(
+                    input_text,
+                    input_cursor_position,
+                    std::format("@\"{}\"", code_block_outcome.attachment->string()));
+            }
+            if (code_block_outcome.notice.has_value()) {
+                append_history(std::format(
+                    "\n{}  {}\n",
+                    code_block_outcome.notice->success ? "✓" : "✗",
+                    code_block_outcome.notice->message));
+            }
+            wake_ui();
+            return true;
         }
 
         RewindPickerEventResult rewind_result;
@@ -6158,6 +6221,14 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
+        if (is_ctrl_g_event(event)) {
+            const auto result = open_code_blocks(std::nullopt);
+            if (!result.ok) {
+                append_history(std::format("\n✗  {}\n", result.message));
+            }
+            return true;
+        }
+
         if (event == Event::Escape
             && assistant_turn_active.load(std::memory_order_relaxed)) {
             [[maybe_unused]] const auto ignored = stop_active_terminal();
@@ -6421,6 +6492,7 @@ RunResult run(RunOptions opts) {
         bool                            rewind_picker_active = false;
         int                             rewind_picker_selected = 0;
         std::vector<RewindPickerOption> rewind_picker_options;
+        CodeBlockRunnerState            code_block_runner_snapshot;
         bool                            conversation_search_active = false;
         int                             conversation_search_selected = 0;
         std::string                     conversation_search_query;
@@ -6480,6 +6552,7 @@ RunResult run(RunOptions opts) {
             rewind_picker_active = rewind_picker_state.active;
             rewind_picker_selected = rewind_picker_state.selected;
             rewind_picker_options = rewind_picker_state.options;
+            code_block_runner_snapshot = code_block_runner.state();
             conversation_search_active = conversation_search_state.active;
             conversation_search_selected = conversation_search_state.selected;
             conversation_search_query = conversation_search_state.query;
@@ -6536,6 +6609,8 @@ RunResult run(RunOptions opts) {
                 settings_panel_status);
         } else if (question_state_copy.active) {
             bottom_el = render_question_dialog_panel(question_state_copy);
+        } else if (code_block_runner_snapshot.active) {
+            bottom_el = render_code_block_runner_panel(code_block_runner_snapshot);
         } else if (rewind_picker_active) {
             bottom_el = render_rewind_picker_panel(
                 rewind_picker_options,

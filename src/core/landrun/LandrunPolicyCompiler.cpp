@@ -6,15 +6,14 @@
 
 namespace core::landrun {
 
-LandrunPolicy LandrunPolicyCompiler::compile(
+LandrunPolicy LandrunPolicyCompiler::build(
     const core::workspace::SessionWorkspace& workspace,
-    LandrunMode mode)
+    LandrunMode mode) const
 {
     LandrunPolicy policy{.mode = mode};
     if (!policy.enabled()) return policy;
 
-    const auto& settings = LandrunSettings::instance();
-    const auto excluded_paths = settings.excluded_paths();
+    const auto& excluded_paths = environment_.excluded_paths;
     const auto excluded_root = [&](const std::filesystem::path& root) {
         const auto normalized = normalize_landrun_path(root);
         return std::ranges::any_of(excluded_paths, [&](const auto& excluded) {
@@ -35,7 +34,7 @@ LandrunPolicy LandrunPolicyCompiler::compile(
         add_workspace(root);
     }
 
-    const auto runtime_root = LandrunSettings::instance().runtime_root();
+    const auto& runtime_root = environment_.runtime_root;
     add_readable_root(policy, runtime_root);
     add_writable_root(policy, runtime_root);
 
@@ -49,7 +48,7 @@ LandrunPolicy LandrunPolicyCompiler::compile(
         }
     };
     add_shared_temp("/tmp");
-    add_shared_temp(settings.host_tmpdir());
+    add_shared_temp(environment_.host_tmpdir);
 
     const auto add_system_root = [&](const std::filesystem::path& root) {
         std::error_code ec;
@@ -88,6 +87,18 @@ LandrunPolicy LandrunPolicyCompiler::compile(
         if (nested_in_writable) add_protected_write_path(policy, excluded);
     }
     return policy;
+}
+
+LandrunPolicy LandrunPolicyCompiler::compile(
+    const core::workspace::SessionWorkspace& workspace,
+    LandrunMode mode)
+{
+    const auto& settings = LandrunSettings::instance();
+    return LandrunPolicyCompiler(LandrunPolicyEnvironment{
+        .excluded_paths = settings.excluded_paths(),
+        .runtime_root = settings.runtime_root(),
+        .host_tmpdir = settings.host_tmpdir(),
+    }).build(workspace, mode);
 }
 
 } // namespace core::landrun

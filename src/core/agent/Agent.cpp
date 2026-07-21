@@ -348,6 +348,10 @@ void Agent::grant_workspace_paths(
     }
 }
 
+core::workspace::SessionWorkspace Agent::workspace_snapshot() const {
+    return session_context_snapshot().workspace_view();
+}
+
 void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
     std::lock_guard lock(history_mutex_);
     session_goal_ = std::move(goal);

@@ -1327,6 +1327,132 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
       | size(HEIGHT, GREATER_THAN, 8);
 }
 
+Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
+    Elements rows;
+    rows.push_back(hbox({
+        text(" RUN CODE ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        filler(),
+        text("Ctrl+G · Esc: close/back") | color(Color::GrayDark),
+    }));
+    rows.push_back(separator());
+
+    const auto* selected_item = selected_code_block(state);
+    if (state.mode == CodeBlockRunnerMode::Select) {
+        constexpr std::size_t kMaxVisible = 7;
+        const std::size_t selected = state.selected_block < 0
+            ? 0 : static_cast<std::size_t>(state.selected_block);
+        const std::size_t first = state.items.size() <= kMaxVisible ? 0 : std::min(
+            selected > kMaxVisible / 2 ? selected - kMaxVisible / 2 : 0,
+            state.items.size() - kMaxVisible);
+        const std::size_t last = std::min(state.items.size(), first + kMaxVisible);
+        for (std::size_t index = first; index < last; ++index) {
+            const auto& item = state.items[index];
+            const bool selected_row = static_cast<int>(index) == state.selected_block;
+            const std::string language = item.block.language.empty()
+                ? "shell (inferred)" : item.block.language;
+            Element row = hbox({
+                text(selected_row ? " > " : "   ") | color(ColorYellowBright),
+                text(std::format("[{}] ", index + 1)) | color(ColorYellowDark),
+                text(language) | ftxui::bold,
+                text(std::format("  L{}-{}  ", item.block.first_line, item.block.last_line)) | dim,
+                paragraph(core::code::code_block_preview(item.block.source)) | xflex,
+                text(item.plan.has_value() ? " runnable" : " copy only")
+                    | color(item.plan.has_value() ? Color::Green : Color::GrayDark),
+            });
+            rows.push_back(selected_row
+                ? row | bgcolor(ColorYellowDark) | color(Color::Black)
+                : std::move(row));
+        }
+        rows.push_back(separator());
+        rows.push_back(text("Up/Down: select  Enter: inspect  1-9: quick choose")
+                       | color(Color::GrayDark));
+    } else if (state.mode == CodeBlockRunnerMode::Confirm && selected_item != nullptr) {
+        const std::string language = selected_item->block.language.empty()
+            ? "shell (inferred)" : selected_item->block.language;
+        rows.push_back(text(std::format(
+            "Block {} · {} · assistant lines {}-{}",
+            selected_item->block.ordinal,
+            language,
+            selected_item->block.first_line,
+            selected_item->block.last_line)) | ftxui::bold);
+        rows.push_back(paragraph(core::code::code_block_preview(
+            selected_item->block.source, 180)) | color(Color::White));
+        if (selected_item->plan.has_value()) {
+            rows.push_back(text(std::format(
+                "Runs with '{}' in {}. Filo's current workspace sandbox policy is preserved.",
+                selected_item->plan->interpreter,
+                std::filesystem::current_path().string())) | dim);
+            static constexpr std::array<std::string_view, 3> actions{
+                "Run interactively", "Copy source", "Back to blocks"};
+            for (int index = 0; index < static_cast<int>(actions.size()); ++index) {
+                rows.push_back(make_selection_row(
+                    actions[static_cast<std::size_t>(index)],
+                    index == 0 ? "Restore terminal I/O; Ctrl+C interrupts only the child."
+                               : index == 1 ? "Copy the exact fenced source without executing it."
+                                            : "Choose another fenced block.",
+                    state.selected_action == index,
+                    ColorYellowDark));
+            }
+        } else {
+            rows.push_back(paragraph(selected_item->unavailable_reason)
+                           | color(Color::Yellow));
+            static constexpr std::array<std::string_view, 2> actions{
+                "Copy source", "Back to blocks"};
+            for (int index = 0; index < static_cast<int>(actions.size()); ++index) {
+                rows.push_back(make_selection_row(
+                    actions[static_cast<std::size_t>(index)],
+                    index == 0 ? "Copy without executing." : "Choose another fenced block.",
+                    state.selected_action == index,
+                    ColorYellowDark));
+            }
+        }
+        rows.push_back(separator());
+        rows.push_back(text("Up/Down: select  Enter: confirm  Esc: back")
+                       | color(Color::GrayDark));
+    } else {
+        if (state.result) {
+            const auto& result = *state.result;
+            const std::string outcome = result.terminating_signal != 0
+                ? std::format("Interrupted by signal {}", result.terminating_signal)
+                : std::format("Exited with status {}", result.exit_code);
+            rows.push_back(text(std::format(
+                "{} · {:.2f}s · {} bytes{}",
+                outcome,
+                static_cast<double>(result.duration.count()) / 1000.0,
+                result.output_bytes,
+                result.output_truncated ? " · bounded transcript" : ""))
+                | ftxui::bold
+                | color(result.succeeded() ? Color::Green : Color::Yellow));
+            rows.push_back(paragraph(core::code::code_block_preview(result.output, 180)) | dim);
+        } else {
+            rows.push_back(paragraph("Runner error: " + state.error) | color(Color::Red));
+        }
+        const std::vector<std::string_view> actions = state.result
+            ? std::vector<std::string_view>{
+                "Attach output to prompt", "Copy output", "Run again", "Dismiss"}
+            : std::vector<std::string_view>{"Try again", "Dismiss"};
+        for (int index = 0; index < static_cast<int>(actions.size()); ++index) {
+            rows.push_back(make_selection_row(
+                actions[static_cast<std::size_t>(index)],
+                !state.result
+                    ? (index == 0 ? "Return to the execution confirmation."
+                                  : "Return to the prompt.")
+                    : index == 0 ? "Save a sanitized transcript and add it as @context."
+                    : index == 1 ? "Copy the sanitized bounded transcript."
+                    : index == 2 ? "Return to the execution confirmation."
+                                 : "Return to the prompt.",
+                state.selected_action == index,
+                ColorYellowDark));
+        }
+        rows.push_back(separator());
+        rows.push_back(text("Up/Down: select  Enter: confirm  Esc: dismiss")
+                       | color(Color::GrayDark));
+    }
+
+    return vbox(std::move(rows)) | UiBorder(ColorYellowBright)
+      | size(HEIGHT, GREATER_THAN, 9);
+}
+
 Element render_stderr_panel(const std::vector<std::string>& lines) {
     constexpr std::size_t kMaxVisibleLines = 6;
     const std::size_t start = lines.size() > kMaxVisibleLines

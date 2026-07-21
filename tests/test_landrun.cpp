@@ -218,6 +218,42 @@ TEST_CASE("landrun policy compiler confines writes to workspace and scratch root
     }
 }
 
+TEST_CASE("landrun policy compiler accepts explicit immutable dependencies",
+          "[landrun]") {
+    namespace landrun = core::landrun;
+    const auto primary = std::filesystem::current_path();
+    const auto excluded = primary / "tests";
+    const auto process_temp = std::filesystem::temp_directory_path();
+    const auto runtime = process_temp / ".filo-explicit-runtime";
+    const core::workspace::SessionWorkspace workspace{
+        core::workspace::WorkspaceSnapshot{
+            .primary = primary,
+            .additional = {excluded},
+            .enforce = true,
+        }};
+
+    const landrun::LandrunPolicyCompiler compiler({
+        .excluded_paths = {excluded, process_temp},
+        .runtime_root = runtime,
+        .host_tmpdir = process_temp,
+    });
+    const auto policy = compiler.build(
+        workspace, landrun::LandrunMode::workspace_write);
+
+    CHECK(std::ranges::find(policy.writable_roots,
+                            landrun::normalize_landrun_path(primary))
+          != policy.writable_roots.end());
+    CHECK(std::ranges::find(policy.writable_roots,
+                            landrun::normalize_landrun_path(excluded))
+          == policy.writable_roots.end());
+    CHECK(std::ranges::find(policy.writable_roots,
+                            landrun::normalize_landrun_path(runtime))
+          != policy.writable_roots.end());
+    CHECK(std::ranges::find(policy.writable_roots,
+                            landrun::normalize_landrun_path(process_temp))
+          == policy.writable_roots.end());
+}
+
 TEST_CASE("read-only policy keeps workspaces readable and private scratch writable",
           "[landrun]") {
     namespace landrun = core::landrun;

@@ -125,6 +125,7 @@ struct UiMessage {
     
     // Assistant-specific fields
     std::vector<ToolActivity> tools;     // Tool calls in this turn
+    std::string assistant_source_text;   // Exact provider text; excludes presentation markers
     bool pending = false;                // Still streaming/receiving
     bool finalized = false;              // Turn completed; must not revert to pending
     bool thinking = false;               // Show thinking indicator
@@ -152,6 +153,9 @@ struct UiMessage {
 };
 
 bool remove_latest_ui_turn(std::vector<UiMessage>& messages);
+
+[[nodiscard]] std::string latest_completed_assistant_source(
+    const std::vector<UiMessage>& messages);
 
 /// Removes the selected user turn and every visible message after it.
 /// Returns false when the requested user ordinal is not present.

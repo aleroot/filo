@@ -120,6 +120,7 @@ struct CommandContext {
     std::function<std::vector<ActiveTerminalInfo>()> list_active_terminals_fn = {};
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
     std::function<void(std::string)> direct_shell_command_fn = {};
+    std::function<CommandOperationResult(std::optional<std::size_t>)> open_code_block_runner_fn = {};
 };
 
 struct CommandDescriptor {

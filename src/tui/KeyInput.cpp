@@ -134,6 +134,10 @@ bool is_ctrl_f_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 'f');
 }
 
+bool is_ctrl_g_event(const ftxui::Event& event) {
+    return is_ctrl_letter_event(event, 'g');
+}
+
 bool is_ctrl_v_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 'v');
 }

@@ -15,6 +15,7 @@
 #include <sstream>
 #include <filesystem>
 #include <chrono>
+#include <charconv>
 #include <simdjson.h>
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <unistd.h>
@@ -1347,11 +1348,13 @@ public:
             "  /todo [action]      Manage session-backed todo items\n"
             "  /memory [action]    Manage opt-in durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
+            "  /run [block]        Inspect and run a fenced block from the latest response\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
             "  Ctrl+P/N Navigate input history (alternative to arrows)\n"
             "  Ctrl+F   Search the conversation history\n"
+            "  Ctrl+G   Inspect and run fenced code from the latest response\n"
             "  F2       Cycle agent mode (BUILD → DEBUG → RESEARCH → EXECUTE)\n"
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
             "  Ctrl+O   Toggle verbose output view (compact/full)\n"
@@ -3248,6 +3251,42 @@ public:
     }
 };
 
+class RunCodeBlockCommand : public Command {
+public:
+    std::string get_name() const override { return "/run"; }
+    std::string get_description() const override {
+        return "Inspect and run a fenced block from the latest response";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.open_code_block_runner_fn) {
+            ctx.append_history_fn("\n✗  Code-block execution is unavailable in this context.\n");
+            return;
+        }
+
+        std::string_view argument = trim(std::string_view(ctx.text).substr(
+            std::min(ctx.text.size(), std::string::size_type{4})));
+        std::optional<std::size_t> selected;
+        if (!argument.empty()) {
+            std::size_t number = 0;
+            const auto [end, error] = std::from_chars(
+                argument.data(), argument.data() + argument.size(), number);
+            if (error != std::errc{} || end != argument.data() + argument.size() || number == 0) {
+                ctx.append_history_fn("\n✗  Usage: /run [positive block number]\n");
+                return;
+            }
+            selected = number;
+        }
+
+        const auto result = ctx.open_code_block_runner_fn(selected);
+        if (!result.ok && !result.message.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", result.message));
+        }
+    }
+};
+
 // ---------------------------------------------------------
 // Executor Implementation
 // ---------------------------------------------------------
@@ -3286,6 +3325,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<TodoCommand>());
     register_command(std::make_unique<MemoryCommand>());
     register_command(std::make_unique<McpCommand>());
+    register_command(std::make_unique<RunCodeBlockCommand>());
     register_command(std::make_unique<ShellCommand>());
 }
 

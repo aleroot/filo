@@ -153,6 +153,18 @@ bool remove_latest_ui_turn(std::vector<UiMessage>& messages) {
     return false;
 }
 
+std::string latest_completed_assistant_source(
+    const std::vector<UiMessage>& messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->type == MessageType::Assistant && !it->pending && !it->text.empty()) {
+            return it->assistant_source_text.empty()
+                ? it->text
+                : it->assistant_source_text;
+        }
+    }
+    return {};
+}
+
 bool truncate_ui_before_user_turn(
     std::vector<UiMessage>& messages,
     std::size_t user_ordinal) {
@@ -828,6 +840,7 @@ UiMessage make_assistant_message(std::string text, std::string timestamp, bool p
     msg.type = MessageType::Assistant;
     msg.id = generate_message_id();
     msg.text = std::move(text);
+    msg.assistant_source_text = msg.text;
     msg.timestamp = std::move(timestamp);
     msg.pending = pending;
     // A message created in a non-pending state is already complete and must

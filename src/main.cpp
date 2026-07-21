@@ -503,6 +503,12 @@ int main(int argc, char** argv) {
             .session_allow_rules = trust_resolution.session_allow_rules,
         };
         run_opts.continue_last = continue_last;
+        run_opts.landrun_mode = *parsed_sandbox_mode;
+        run_opts.landrun_environment = {
+            .excluded_paths = landrun_settings.excluded_paths(),
+            .runtime_root = landrun_settings.runtime_root(),
+            .host_tmpdir = landrun_settings.host_tmpdir(),
+        };
         if (model_opt->count() > 0) {
             run_opts.startup_model = startup_model;
         }

@@ -147,6 +147,8 @@ set(FILO_CORE_SOURCES
     src/tui/ActivityTimer.cpp
     src/tui/Autocomplete.cpp
     src/tui/Conversation.cpp
+    src/tui/CodeBlockRunner.cpp
+    src/tui/CodeBlockRunServices.cpp
     src/tui/DiffPreview.cpp
     src/tui/HistoryComponent.cpp
     src/tui/TranscriptViewport.cpp
@@ -240,6 +242,8 @@ set(FILO_CORE_SOURCES
     src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
     src/core/context/SteeringLoader.cpp
+    src/core/code/CodeBlock.cpp
+    src/core/code/InteractiveCodeRunner.cpp
     src/core/landrun/LandrunDriverFactory.cpp
     src/core/landrun/LandrunDescriptorSanitizer.cpp
     src/core/landrun/LandrunEnvironment.cpp
@@ -501,6 +505,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_skill_commands.cpp
     tests/test_activity_timer.cpp
     tests/test_conversation.cpp
+    tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
     tests/test_history_component.cpp

@@ -98,6 +98,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         }});
     auto stop_called = std::make_shared<bool>(false);
     auto direct_shell_commands = std::make_shared<std::vector<std::string>>();
+    auto requested_code_block = std::make_shared<std::optional<std::size_t>>();
 
     CommandContext ctx{
         .text = "",
@@ -263,6 +264,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .direct_shell_command_fn = [direct_shell_commands](std::string command) {
             direct_shell_commands->push_back(std::move(command));
         },
+        .open_code_block_runner_fn = [requested_code_block](std::optional<std::size_t> block) {
+            *requested_code_block = block;
+            return CommandOperationResult{.ok = true};
+        },
     };
 
     SECTION("Unknown commands fall through") {
@@ -366,6 +371,23 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(handled == true);
         CHECK(direct_shell_commands->empty());
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Shell command is empty"));
+    }
+
+    SECTION("/run opens the shared code-block workflow") {
+        requested_code_block->reset();
+        ctx.text = "/run 2";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        REQUIRE(requested_code_block->has_value());
+        CHECK(**requested_code_block == 2);
+    }
+
+    SECTION("/run rejects invalid block indices") {
+        requested_code_block->reset();
+        *mock_history = "";
+        ctx.text = "/run zero";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK_FALSE(requested_code_block->has_value());
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("positive block number"));
     }
 
     SECTION("/goal sets and shows the session goal") {

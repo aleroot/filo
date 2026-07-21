@@ -2,6 +2,7 @@
 
 #include "Autocomplete.hpp"
 #include "DiffPreview.hpp"
+#include "CodeBlockRunner.hpp"
 #include "RewindPicker.hpp"
 #include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionStore.hpp"
@@ -149,6 +150,8 @@ ftxui::Element render_conversation_search_panel(
 ftxui::Element render_rewind_picker_panel(
     const std::vector<RewindPickerOption>& options,
     int selected_index);
+
+ftxui::Element render_code_block_runner_panel(const CodeBlockRunnerState& state);
 
 ftxui::Element render_stderr_panel(const std::vector<std::string>& lines);
 
