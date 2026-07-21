@@ -161,7 +161,7 @@ TEST_CASE("ConfigManager prefers project config and merges provider overrides", 
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("ConfigManager parses context compression setting", "[config]") {
+TEST_CASE("ConfigManager parses tool output history settings", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_context_compression");
     const fs::path xdg_home = sandbox / "xdg";
     const fs::path project_dir = sandbox / "project";
@@ -170,6 +170,7 @@ TEST_CASE("ConfigManager parses context compression setting", "[config]") {
     ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
 
     write_text(local_config, R"({
+        "tool_output_token_limit": 6144,
         "context_compression": "light"
     })");
 
@@ -177,6 +178,7 @@ TEST_CASE("ConfigManager parses context compression setting", "[config]") {
     manager.load(project_dir);
     const auto& config = manager.get_config();
 
+    REQUIRE(config.tool_output_token_limit == 6144);
     REQUIRE(config.context_compression == "light");
 
     fs::remove_all(sandbox);
@@ -669,6 +671,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.ui_context_usage == "show");
     REQUIRE(config.ui_timestamps == "show");
     REQUIRE(config.ui_spinner == "show");
+    REQUIRE(config.tool_output_token_limit == 3072);
     REQUIRE(config.providers.contains("grok"));
     REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
     REQUIRE(config.providers.contains("grok-4-5"));

@@ -1208,6 +1208,27 @@ Limits limits_for_tool(std::string_view tool_name) {
     return Limits{};
 }
 
+Limits limits_for_tool(std::string_view tool_name, std::size_t token_limit) {
+    Limits limits = limits_for_tool(tool_name);
+    if (token_limit == 0
+        || token_limit == 3072
+        || tool_name == core::tools::names::kActivateSkill
+        || tool_name == core::tools::names::kReadToolResult) {
+        return limits;
+    }
+
+    constexpr std::size_t kDefaultTokenLimit = 3072;
+    const auto scaled = [token_limit](std::size_t chars) {
+        return std::max<std::size_t>(
+            1,
+            chars * token_limit / kDefaultTokenLimit);
+    };
+    limits.max_chars = scaled(limits.max_chars);
+    limits.head_chars = scaled(limits.head_chars);
+    limits.tail_chars = scaled(limits.tail_chars);
+    return limits;
+}
+
 std::string clamp_for_history(
     std::string_view tool_name,
     std::string_view raw_output) {

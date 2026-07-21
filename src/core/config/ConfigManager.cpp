@@ -484,6 +484,7 @@ AppConfig make_default_config() {
     config.ui_timestamps = "show";
     config.ui_spinner = "show";
     config.auto_compact_threshold = 25000;
+    config.tool_output_token_limit = 3072;
     config.context_compression = "off";
     config.router = core::llm::routing::make_default_router_config();
 
@@ -569,6 +570,7 @@ std::string default_config_json() {
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
     "auto_compact_threshold": 25000,
+    "tool_output_token_limit": 3072,
     "context_compression": "off",
     "providers": {
         "grok":           { "model": "grok-code-fast-1" },
@@ -1050,6 +1052,12 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
         parsed.auto_compact_threshold = static_cast<int>(threshold);
         parsed.auto_compact_threshold_explicit = true;
     }
+    int64_t tool_output_token_limit = 0;
+    if (!doc["tool_output_token_limit"].get(tool_output_token_limit)
+        && tool_output_token_limit >= 256
+        && tool_output_token_limit <= 32768) {
+        parsed.tool_output_token_limit = static_cast<int>(tool_output_token_limit);
+    }
 
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
@@ -1256,6 +1264,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (overlay.auto_compact_threshold_explicit || overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;
         base.auto_compact_threshold_explicit = overlay.auto_compact_threshold_explicit;
+    }
+    if (overlay.tool_output_token_limit > 0) {
+        base.tool_output_token_limit = overlay.tool_output_token_limit;
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;

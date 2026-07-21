@@ -1521,7 +1521,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             self->refresh_system_prompt();
                         }
                         const auto history_limits = tool_output_history::limits_for_tool(
-                            tc.function.name);
+                            tc.function.name,
+                            static_cast<std::size_t>(std::max(
+                                0,
+                                core::config::ConfigManager::get_instance()
+                                    .get_config()
+                                    .tool_output_token_limit)));
                         auto compact_result = tool_output_history::clamp_for_history(
                             tc.function.name,
                             result,

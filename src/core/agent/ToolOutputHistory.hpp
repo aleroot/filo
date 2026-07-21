@@ -19,6 +19,10 @@ struct Limits {
 
 [[nodiscard]] Limits limits_for_tool(std::string_view tool_name);
 
+[[nodiscard]] Limits limits_for_tool(
+    std::string_view tool_name,
+    std::size_t token_limit);
+
 [[nodiscard]] std::string clamp_for_history(
     std::string_view tool_name,
     std::string_view raw_output);

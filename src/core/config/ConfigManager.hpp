@@ -211,6 +211,7 @@ struct AppConfig {
     std::string ui_spinner;
     int         auto_compact_threshold = 0;
     bool        auto_compact_threshold_explicit = false;
+    int         tool_output_token_limit = 0;
     std::string context_compression;
     std::unordered_map<std::string, ProviderConfig> providers;
     std::unordered_map<std::string, SubagentConfig> subagents;

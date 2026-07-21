@@ -223,6 +223,18 @@ TEST_CASE("ToolOutputHistory leaves compact outputs unchanged", "[agent][tool-hi
     CHECK(clamped == small);
 }
 
+TEST_CASE("ToolOutputHistory scales limits from a regression-free token budget",
+          "[agent][tool-history]") {
+    using core::agent::tool_output_history::limits_for_tool;
+
+    CHECK(limits_for_tool("read_file", 3072).max_chars == 12 * 1024);
+    CHECK(limits_for_tool("run_terminal_command", 3072).max_chars == 10 * 1024);
+    CHECK(limits_for_tool("read_file", 1536).max_chars == 6 * 1024);
+    CHECK(limits_for_tool("run_terminal_command", 6144).max_chars == 20 * 1024);
+    CHECK(limits_for_tool("activate_skill", 1536).max_chars == 2 * 1024 * 1024);
+    CHECK(limits_for_tool("read_tool_result", 256).max_chars == 32 * 1024);
+}
+
 TEST_CASE("ToolOutputHistory truncates oversized non-error outputs", "[agent][tool-history]") {
     const std::string large = std::string(R"({"output":")") + std::string(80 * 1024, 'a') + R"("})";
     const std::string clamped = core::agent::tool_output_history::clamp_for_history("write_file", large);
