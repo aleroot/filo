@@ -308,6 +308,47 @@ int main(int argc, char** argv) {
         std::filesystem::remove_all(base, ec);
         return 26;
     }
+
+    core::tools::shell::PosixShellExecutor read_only_shell;
+    auto read_only_policy = core::landrun::LandrunPolicyCompiler::compile(
+        workspace, core::landrun::LandrunMode::read_only);
+    core::landrun::add_readable_root(read_only_policy, source_root);
+    if (const auto readiness = core::landrun::verify_landrun_readiness(read_only_policy);
+        !readiness.success) {
+        std::cerr << readiness.detail << '\n';
+        std::filesystem::remove(shell_denied_file, ec);
+        std::filesystem::remove_all(base, ec);
+        return 26;
+    }
+    read_only_shell.configure_landrun(std::move(read_only_policy));
+    const auto read_only_denied_file = allowed / "read-only-write-must-fail";
+    const auto read_only_temp_file =
+        core::landrun::LandrunSettings::instance().effective_tmpdir(
+            core::landrun::LandrunMode::read_only)
+        / "read-only-temp-probe";
+    const std::string read_only_command =
+        "if printf denied > " + shell_quote(read_only_denied_file.string())
+        + "; then exit 41; fi; printf temp-ok > "
+        + shell_quote(read_only_temp_file.string())
+        + "; test -r " + shell_quote((allowed / "from-shell").string());
+    const auto read_only_result = read_only_shell.run(
+        read_only_command, {}, std::chrono::seconds{10});
+    if (read_only_result.exit_code != 0) {
+        std::cerr << "read-only sandbox failed with exit code "
+                  << read_only_result.exit_code << ": "
+                  << read_only_result.output << '\n';
+        std::filesystem::remove(shell_denied_file, ec);
+        std::filesystem::remove_all(base, ec);
+        return 26;
+    }
+    if (std::filesystem::exists(read_only_denied_file, ec)
+        || !std::filesystem::exists(read_only_temp_file, ec)) {
+        std::filesystem::remove(shell_denied_file, ec);
+        std::filesystem::remove_all(base, ec);
+        return 26;
+    }
+    std::filesystem::remove(read_only_temp_file, ec);
+
     std::filesystem::remove(shell_denied_file, ec);
     if (!std::filesystem::exists(global_tmp_file, ec)) {
         std::filesystem::remove_all(base, ec);

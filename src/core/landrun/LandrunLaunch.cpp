@@ -55,13 +55,15 @@ LandrunLaunch prepare_landrun_launch(
     }
     std::vector<std::string> arguments;
     arguments.reserve(
-        5 + (policy.readable_roots.size()
+        7 + (policy.readable_roots.size()
              + policy.writable_roots.size()
              + policy.protected_read_paths.size()
              + policy.protected_write_paths.size()) * 2
         + target_arguments.size());
     arguments.push_back(executable);
     arguments.emplace_back("__landrun-exec");
+    arguments.emplace_back("--mode");
+    arguments.emplace_back(landrun_mode_name(policy.mode));
     for (const auto& root : policy.readable_roots) {
         arguments.emplace_back("--ro");
         arguments.push_back(root.string());

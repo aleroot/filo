@@ -73,7 +73,7 @@ std::vector<std::string> build_landrun_environment(
     }
 #endif
     append_override(result, names, "HOME", root / "home");
-    const auto temp = LandrunSettings::instance().effective_tmpdir();
+    const auto temp = LandrunSettings::instance().effective_tmpdir(policy.mode);
     append_override(result, names, "TMPDIR", temp);
     append_override(result, names, "TMP", temp);
     append_override(result, names, "TEMP", temp);

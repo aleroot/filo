@@ -37,7 +37,7 @@ public:
     }
 
     [[nodiscard]] bool enabled() const noexcept {
-        return mode() != LandrunMode::off;
+        return landrun_enabled(mode());
     }
 
     [[nodiscard]] bool permits(LandrunCapability capability) const noexcept {
@@ -111,11 +111,21 @@ public:
         return root.empty() ? root : root / "tmp";
     }
 
-    [[nodiscard]] std::filesystem::path effective_tmpdir() const {
+    [[nodiscard]] std::filesystem::path effective_tmpdir(
+        LandrunMode effective_mode) const
+    {
+        if (landrun_enabled(effective_mode)
+            && !landrun_workspace_writable(effective_mode)) {
+            return runtime_tmp();
+        }
         if (!host_tmpdir_.empty() && !is_excluded(host_tmpdir_)) {
             return host_tmpdir_;
         }
         return runtime_tmp();
+    }
+
+    [[nodiscard]] std::filesystem::path effective_tmpdir() const {
+        return effective_tmpdir(mode());
     }
 
 private:

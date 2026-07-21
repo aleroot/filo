@@ -139,10 +139,6 @@ LandrunResult LinuxLandlockDriver::apply(const LandrunPolicy& policy) const {
             .detail = "build headers lack Landlock ABI 6 process scopes"};
 #else
     if (!policy.enabled()) return {.success = true};
-    if (policy.writable_roots.empty()) {
-        return {.success = false,
-                .detail = "workspace-write policy has no writable root"};
-    }
     if (!policy.protected_read_paths.empty()
         || !policy.protected_write_paths.empty()) {
         return {.success = false,

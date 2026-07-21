@@ -31,13 +31,28 @@ int run_landrun_helper(int argc, char* const argv[]) {
         return kLandrunHelperFailure;
     }
 
-    LandrunPolicy policy{.mode = LandrunMode::workspace_write};
+    LandrunPolicy policy;
+    bool mode_provided = false;
     int index = 0;
     for (; index < argc; ++index) {
         const std::string_view argument = argv[index] ? argv[index] : "";
         if (argument == "--") {
             ++index;
             break;
+        }
+        if (argument == "--mode") {
+            if (++index >= argc || !argv[index]) {
+                std::cerr << "[landrun] --mode requires a sandbox mode\n";
+                return kLandrunHelperFailure;
+            }
+            const auto parsed = parse_landrun_mode(argv[index]);
+            if (!parsed.has_value() || !landrun_enabled(*parsed)) {
+                std::cerr << "[landrun] --mode requires an enabled sandbox mode\n";
+                return kLandrunHelperFailure;
+            }
+            policy.mode = *parsed;
+            mode_provided = true;
+            continue;
         }
         if (argument == "--rw") {
             if (++index >= argc || !argv[index] || argv[index][0] != '/') {
@@ -86,8 +101,8 @@ int run_landrun_helper(int argc, char* const argv[]) {
         std::cerr << "[landrun] missing absolute target executable\n";
         return kLandrunHelperFailure;
     }
-    if (policy.writable_roots.empty()) {
-        std::cerr << "[landrun] workspace-write requires at least one writable root\n";
+    if (!mode_provided) {
+        std::cerr << "[landrun] missing --mode\n";
         return kLandrunHelperFailure;
     }
 

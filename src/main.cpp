@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <signal.h>
 #include <unistd.h>
@@ -79,7 +80,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> work_dirs;
     std::vector<std::string> trusted_tools;
     std::string startup_model;
-    std::string sandbox_mode = "workspace-write";
+    std::string sandbox_mode = "off";
+    std::optional<std::string> requested_sandbox_mode;
     bool sandbox_status = false;
     std::vector<std::filesystem::path> sandbox_excluded_paths;
     std::unique_ptr<core::landrun::LandrunRuntime> landrun_runtime;
@@ -157,12 +159,13 @@ int main(int argc, char** argv) {
         startup_model,
         "Model for this process only: MODEL, PROVIDER, or PROVIDER/MODEL. "
         "Does not change saved defaults.");
-    app.add_option(
+    auto* sandbox_opt = app.add_option(
         "--sandbox",
-        sandbox_mode,
-        "OS process sandbox: workspace-write (default) or off.")
-        ->check(CLI::IsMember({"workspace-write", "off"}))
-        ->capture_default_str();
+        requested_sandbox_mode,
+        "OS process sandbox: bare --sandbox enables workspace-write; "
+        "otherwise off (default), read-only, or workspace-write.")
+        ->expected(0, 1)
+        ->check(CLI::IsMember(core::landrun::landrun_mode_names()));
     app.add_option(
         "--sandbox-exclude",
         sandbox_excluded_paths,
@@ -175,11 +178,22 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    if (sandbox_opt->count() > 0) {
+        sandbox_mode = requested_sandbox_mode.has_value()
+                && !requested_sandbox_mode->empty()
+            ? *requested_sandbox_mode
+            : "workspace-write";
+    }
+
+    const auto parsed_sandbox_mode = core::landrun::parse_landrun_mode(sandbox_mode);
+    if (!parsed_sandbox_mode.has_value()) {
+        std::cerr << "Unsupported sandbox mode: " << sandbox_mode << '\n';
+        return 2;
+    }
+
     auto& landrun_settings = core::landrun::LandrunSettings::instance();
     landrun_settings.configure_startup({
-        .mode = sandbox_mode == "off"
-            ? core::landrun::LandrunMode::off
-            : core::landrun::LandrunMode::workspace_write,
+        .mode = *parsed_sandbox_mode,
         .excluded_paths = std::move(sandbox_excluded_paths),
     });
     landrun_settings.freeze_startup_configuration();
@@ -208,8 +222,7 @@ int main(int argc, char** argv) {
     }
 
     core::logging::Logger::get_instance().configure_from_env();
-    if (core::landrun::LandrunSettings::instance().mode()
-        != core::landrun::LandrunMode::off) {
+    if (core::landrun::LandrunSettings::instance().enabled()) {
         const auto driver = core::landrun::make_landrun_driver();
         const auto probe = driver->probe();
         if (!probe.available) {
@@ -286,8 +299,7 @@ int main(int argc, char** argv) {
         additional_work_dirs,
         true);
 
-    if (core::landrun::LandrunSettings::instance().mode()
-        != core::landrun::LandrunMode::off) {
+    if (core::landrun::LandrunSettings::instance().enabled()) {
         const char* home_value = std::getenv("HOME");
         if (home_value && *home_value) {
             const auto home = core::workspace::SessionWorkspace::normalize_path(home_value);

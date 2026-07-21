@@ -7,6 +7,10 @@
 #include "core/landrun/LandrunPolicyCompiler.hpp"
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
+#include "core/landrun/LandrunStatus.hpp"
+#include "core/tools/LandrunToolPolicy.hpp"
+#include "core/tools/ToolManager.hpp"
+#include "core/tools/ToolNames.hpp"
 #include "core/workspace/SensitivePathPolicy.hpp"
 #include "core/workspace/PathVisibility.hpp"
 
@@ -17,6 +21,109 @@
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
+
+namespace {
+
+class WorkspaceMutationProbeTool final : public core::tools::Tool {
+public:
+    core::tools::ToolDefinition get_definition() const override {
+        return {.name = std::string(core::tools::names::kWriteFile)};
+    }
+
+    std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override
+    {
+        return R"({"executed":true})";
+    }
+};
+
+} // namespace
+
+TEST_CASE("landrun modes expose one authoritative capability contract",
+          "[landrun]") {
+    using core::landrun::LandrunMode;
+
+    REQUIRE(core::landrun::parse_landrun_mode("off") == LandrunMode::off);
+    REQUIRE(core::landrun::parse_landrun_mode("read-only") == LandrunMode::read_only);
+    REQUIRE(core::landrun::parse_landrun_mode("workspace-write")
+            == LandrunMode::workspace_write);
+    REQUIRE_FALSE(core::landrun::parse_landrun_mode("workspace-read").has_value());
+
+    REQUIRE_FALSE(core::landrun::landrun_enabled(LandrunMode::off));
+    REQUIRE(core::landrun::landrun_enabled(LandrunMode::read_only));
+    REQUIRE(core::landrun::landrun_workspace_writable(LandrunMode::off));
+    REQUIRE_FALSE(core::landrun::landrun_workspace_writable(LandrunMode::read_only));
+    REQUIRE(core::landrun::landrun_workspace_writable(LandrunMode::workspace_write));
+}
+
+TEST_CASE("read-only landrun mode blocks native mutation tools only",
+          "[landrun]") {
+    using core::landrun::LandrunMode;
+    using core::tools::landrun_allows_tool;
+    using namespace core::tools::names;
+
+    REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kWriteFile));
+    REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kApplyPatch));
+    REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kCreateDirectory));
+    REQUIRE(landrun_allows_tool(LandrunMode::read_only, kReadFile));
+    REQUIRE(landrun_allows_tool(LandrunMode::read_only, kRunTerminalCommand));
+    REQUIRE(landrun_allows_tool(LandrunMode::workspace_write, kWriteFile));
+    REQUIRE(landrun_allows_tool(LandrunMode::off, kWriteFile));
+}
+
+TEST_CASE("tool manager enforces read-only mode at advertise and execute boundaries",
+          "[landrun]") {
+    // Isolate the singleton registry and settings in a child so this test does
+    // not alter tool registrations used by randomized sibling tests.
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        auto& settings = core::landrun::LandrunSettings::instance();
+        settings.configure_startup({
+            .mode = core::landrun::LandrunMode::read_only,
+        });
+        auto& tools = core::tools::ToolManager::get_instance();
+        tools.register_tool(std::make_shared<WorkspaceMutationProbeTool>());
+
+        const auto advertised = tools.get_all_tools();
+        if (std::ranges::any_of(advertised, [](const core::llm::Tool& tool) {
+                return tool.function.name == core::tools::names::kWriteFile;
+            })) {
+            ::_exit(1);
+        }
+        const core::context::SessionContext context{
+            "landrun-tool-policy-test",
+            core::workspace::SessionWorkspace{
+                core::workspace::WorkspaceSnapshot{
+                    .primary = std::filesystem::current_path(),
+                    .enforce = true,
+                }},
+        };
+        const auto denied = tools.execute_tool(
+            std::string(core::tools::names::kWriteFile),
+            "{}",
+            context);
+        if (denied.find("unavailable while sandbox mode is read-only")
+            == std::string::npos) {
+            ::_exit(2);
+        }
+
+        settings.configure_startup({
+            .mode = core::landrun::LandrunMode::workspace_write,
+        });
+        const auto allowed = tools.execute_tool(
+            std::string(core::tools::names::kWriteFile),
+            "{}",
+            context);
+        ::_exit(allowed.find("\"executed\":true") != std::string::npos ? 0 : 3);
+    }
+
+    int status = 0;
+    REQUIRE(::waitpid(child, &status, 0) == child);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 0);
+}
 
 TEST_CASE("landrun path containment is component-safe and resolves symlink prefixes",
           "[landrun]") {
@@ -109,6 +216,71 @@ TEST_CASE("landrun policy compiler confines writes to workspace and scratch root
         REQUIRE(std::ranges::find(policy.writable_roots, host_tmpdir)
                 != policy.writable_roots.end());
     }
+}
+
+TEST_CASE("read-only policy keeps workspaces readable and private scratch writable",
+          "[landrun]") {
+    namespace landrun = core::landrun;
+    auto& settings = landrun::LandrunSettings::instance();
+    const auto previous = settings.startup_configuration();
+    struct RestoreConfiguration {
+        landrun::LandrunSettings& settings;
+        landrun::LandrunStartupConfiguration configuration;
+        ~RestoreConfiguration() {
+            settings.configure_startup(std::move(configuration));
+        }
+    } restore{settings, previous};
+    settings.configure_startup({
+        .mode = landrun::LandrunMode::read_only,
+        .excluded_paths = previous.excluded_paths,
+    });
+    landrun::LandrunRuntime runtime;
+    const auto primary = std::filesystem::current_path();
+    const auto additional = primary / "tests";
+    const core::workspace::SessionWorkspace workspace{
+        core::workspace::WorkspaceSnapshot{
+            .primary = primary,
+            .additional = {additional},
+            .enforce = true,
+        }};
+
+    const auto policy = landrun::LandrunPolicyCompiler::compile(
+        workspace, landrun::LandrunMode::read_only);
+    const auto normalized_primary = landrun::normalize_landrun_path(primary);
+    const auto normalized_additional = landrun::normalize_landrun_path(additional);
+
+    REQUIRE(policy.enabled());
+    REQUIRE_FALSE(policy.allow_network);
+    REQUIRE(std::ranges::find(policy.readable_roots, normalized_primary)
+            != policy.readable_roots.end());
+    REQUIRE(std::ranges::find(policy.readable_roots, normalized_additional)
+            != policy.readable_roots.end());
+    REQUIRE(std::ranges::find(policy.writable_roots, normalized_primary)
+            == policy.writable_roots.end());
+    REQUIRE(std::ranges::find(policy.writable_roots, normalized_additional)
+            == policy.writable_roots.end());
+    REQUIRE(std::ranges::find(
+                policy.writable_roots, landrun::normalize_landrun_path("/tmp"))
+            == policy.writable_roots.end());
+    REQUIRE(std::ranges::find(
+                policy.writable_roots,
+                landrun::normalize_landrun_path(runtime.root()))
+            != policy.writable_roots.end());
+    REQUIRE(settings.effective_tmpdir(landrun::LandrunMode::read_only)
+            == runtime.root() / "tmp");
+}
+
+TEST_CASE("landrun status distinguishes read-only from workspace-write",
+          "[landrun]") {
+    namespace landrun = core::landrun;
+    REQUIRE(landrun::landrun_status_label(landrun::LandrunMode::off)
+            == "sandbox: off");
+    REQUIRE(landrun::landrun_status_label(landrun::LandrunMode::read_only)
+            .find("workspace read-only") != std::string::npos);
+    REQUIRE(landrun::landrun_status_label(landrun::LandrunMode::workspace_write)
+            .find("workspace/temp write") != std::string::npos);
+    REQUIRE(landrun::landrun_status_detail(landrun::LandrunMode::read_only)
+            .find("Workspace writes are denied") != std::string::npos);
 }
 
 TEST_CASE("secure landrun environment strips credentials and selects allowed temp",
@@ -257,10 +429,12 @@ TEST_CASE("enabled landrun launch transports roots as exact argv entries", "[lan
     };
     const auto launch = core::landrun::prepare_shell_launch(policy);
     REQUIRE_FALSE(launch.executable.empty());
-    REQUIRE(launch.arguments.size() >= 8);
+    REQUIRE(launch.arguments.size() >= 10);
     REQUIRE(launch.arguments[1] == "__landrun-exec");
-    REQUIRE(launch.arguments[2] == "--rw");
-    REQUIRE(launch.arguments[3] == "/tmp/a root with spaces");
+    REQUIRE(launch.arguments[2] == "--mode");
+    REQUIRE(launch.arguments[3] == "workspace-write");
+    REQUIRE(launch.arguments[4] == "--rw");
+    REQUIRE(launch.arguments[5] == "/tmp/a root with spaces");
     REQUIRE(std::ranges::find(launch.arguments, std::string{"--"})
             != launch.arguments.end());
 }

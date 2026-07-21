@@ -1,5 +1,6 @@
 #pragma once
 
+#include "LandrunMode.hpp"
 #include "LandrunPath.hpp"
 
 #include <algorithm>
@@ -8,11 +9,6 @@
 #include <vector>
 
 namespace core::landrun {
-
-enum class LandrunMode {
-    off,
-    workspace_write,
-};
 
 /**
  * Platform-neutral policy consumed by every landrun driver.
@@ -30,7 +26,7 @@ struct LandrunPolicy {
     bool allow_network{false};
 
     [[nodiscard]] bool enabled() const noexcept {
-        return mode != LandrunMode::off;
+        return landrun_enabled(mode);
     }
 
     [[nodiscard]] friend bool operator==(const LandrunPolicy&,

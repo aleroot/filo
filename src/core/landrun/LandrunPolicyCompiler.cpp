@@ -25,7 +25,9 @@ LandrunPolicy LandrunPolicyCompiler::compile(
     const auto add_workspace = [&](const std::filesystem::path& root) {
         if (excluded_root(root)) return;
         add_readable_root(policy, root);
-        add_writable_root(policy, root);
+        if (landrun_workspace_writable(mode)) {
+            add_writable_root(policy, root);
+        }
     };
 
     add_workspace(workspace.primary());
@@ -42,7 +44,9 @@ LandrunPolicy LandrunPolicyCompiler::compile(
         if (root.empty() || excluded_root(root)
             || !std::filesystem::is_directory(root, ec)) return;
         add_readable_root(policy, root);
-        add_writable_root(policy, root);
+        if (landrun_workspace_writable(mode)) {
+            add_writable_root(policy, root);
+        }
     };
     add_shared_temp("/tmp");
     add_shared_temp(settings.host_tmpdir());

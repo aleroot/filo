@@ -1,8 +1,10 @@
 #pragma once
 
 #include "Tool.hpp"
+#include "LandrunToolPolicy.hpp"
 #include "ToolSchema.hpp"
 #include "../context/SessionContext.hpp"
+#include "../landrun/LandrunSettings.hpp"
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -56,6 +58,11 @@ public:
             core::llm::Tool entry;
             entry.type = "function";
             entry.function = impl->get_definition();
+            if (!landrun_allows_tool(
+                    core::landrun::LandrunSettings::instance().mode(),
+                    entry.function.name)) {
+                continue;
+            }
             tools.push_back(entry);
         }
         std::ranges::sort(tools, [](const core::llm::Tool& a, const core::llm::Tool& b) {
@@ -91,6 +98,15 @@ public:
                 return "{\"error\": \"Tool not found: " + name + "\"}";
             tool = it->second;
             definition = tool->get_definition();
+        }
+        const auto sandbox_mode =
+            core::landrun::LandrunSettings::instance().mode();
+        if (!landrun_allows_tool(sandbox_mode, definition.name)) {
+            return "{\"error\":\"Tool "
+                + core::utils::escape_json_string(name)
+                + " is unavailable while sandbox mode is "
+                + std::string(core::landrun::landrun_mode_name(sandbox_mode))
+                + ".\"}";
         }
         const auto normalized = schema::normalize_arguments(definition, json_args);
         if (!normalized.has_value()) {

@@ -70,6 +70,15 @@ namespace {
         + (workspace.enforce() ? "enabled" : "disabled") + "\n";
     context_section += "Relative paths resolve against the primary workspace.";
 
+    const auto sandbox_mode = core::landrun::LandrunSettings::instance().mode();
+    if (core::landrun::landrun_enabled(sandbox_mode)) {
+        context_section += "\nOS sandbox: ";
+        context_section += core::landrun::landrun_mode_name(sandbox_mode);
+        context_section += core::landrun::landrun_workspace_writable(sandbox_mode)
+            ? " (workspace/temp writes allowed; child network denied)."
+            : " (workspace read-only; private temp writes allowed; child network denied).";
+    }
+
     return context_section;
 }
 

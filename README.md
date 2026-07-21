@@ -147,7 +147,7 @@ Useful CLI flags:
 - `--include-partial-messages` include deltas in `stream-json`
 - `-c, --continue` continue the latest project-scoped session (TUI + prompter)
 - `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
-- `--sandbox workspace-write|off` controls `landrun` (default: `workspace-write`). Secure mode uses native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`.
+- `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Normal permission prompts remain active, while shell commands retain ordinary filesystem and internet access when the sandbox is off. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
 
 Prompter examples:
 

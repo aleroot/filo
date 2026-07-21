@@ -52,10 +52,6 @@ LandrunResult MacOSSeatbeltDriver::apply(const LandrunPolicy& policy) const {
                 .detail = "sandbox_init_with_parameters is unavailable"};
     }
     if (!policy.enabled()) return {.success = true};
-    if (policy.writable_roots.empty()) {
-        return {.success = false,
-                .detail = "workspace-write policy has no writable root"};
-    }
 
     std::string profile = R"SBPL(
 (version 1)
