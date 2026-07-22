@@ -91,6 +91,30 @@ TEST_CASE("Session replay handles failed tool calls and multiple assistant messa
     REQUIRE(messages[2].text == "I failed to run that.");
 }
 
+TEST_CASE("Session replay restores reasoning duration for the disclosure",
+          "[tui][session_replay][reasoning]") {
+    core::session::SessionData data;
+    data.session_id = "sess_reasoning";
+
+    core::llm::Message assistant;
+    assistant.role = "assistant";
+    assistant.content = "Here is the answer.";
+    assistant.reasoning_content = "Private chain of thought.";
+    assistant.reasoning_elapsed = "7s";
+    data.messages.push_back(assistant);
+
+    const auto messages = tui::build_resumed_ui_messages(data);
+    REQUIRE(messages.size() == 2);  // System banner + assistant
+    REQUIRE(messages[1].type == tui::MessageType::Assistant);
+    // The finished trace must carry both the text and its duration so the
+    // disclosure renders "Thought for 7s" instead of a bare "Thought".
+    REQUIRE(messages[1].reasoning_text == "Private chain of thought.");
+    REQUIRE(messages[1].reasoning_elapsed == "7s");
+    REQUIRE(messages[1].activity_recorded);
+    REQUIRE(!messages[1].reasoning_active);
+    REQUIRE(messages[1].reasoning_kind == tui::UiMessage::ActivityKind::Thinking);
+}
+
 TEST_CASE("Session replay does not render synthetic user context as prompts",
           "[tui][session_replay][rewind]") {
     core::session::SessionData data;

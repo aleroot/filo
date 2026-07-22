@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <format>
 #include <memory>
@@ -116,6 +117,48 @@ ftxui::Element live_text(std::function<std::string()> value) {
     return std::make_shared<LiveText>(std::move(value));
 }
 
+// A single-glyph leaf whose glyph is fixed but whose foreground color is
+// recomputed every frame. Used for the "breathing" lightbulb: the bulb stays
+// on-screen (no jarring on/off flicker) and instead smoothly glows brighter and
+// dimmer in sync with the thinking dots. Kept deliberately tiny — no selection
+// handling — since it is a decorative indicator, never selectable text.
+class LiveColorText final : public ftxui::Node {
+public:
+    LiveColorText(std::string glyph, std::function<ftxui::Color()> color)
+        : glyph_(std::move(glyph)), color_(std::move(color)) {
+        glyphs_ = ftxui::Utf8ToGlyphs(glyph_);
+    }
+
+    void ComputeRequirement() override {
+        requirement_ = {};
+        requirement_.min_x = static_cast<int>(glyphs_.size());
+        requirement_.min_y = 1;
+    }
+
+    void Render(ftxui::Screen& screen) override {
+        const ftxui::Color fg = color_();
+        int x = box_.x_min;
+        for (const auto& glyph : glyphs_) {
+            if (x > box_.x_max) {
+                break;
+            }
+            auto& cell = screen.CellAt(x, box_.y_min);
+            cell.character = glyph;
+            cell.foreground_color = fg;
+            ++x;
+        }
+    }
+
+private:
+    std::string glyph_;
+    std::vector<std::string> glyphs_;
+    std::function<ftxui::Color()> color_;
+};
+
+ftxui::Element live_color_text(std::string glyph, std::function<ftxui::Color()> color) {
+    return std::make_shared<LiveColorText>(std::move(glyph), std::move(color));
+}
+
 ftxui::Element pulse_text(std::string prefix,
                           std::size_t fallback_tick,
                           const ConversationRenderOptions& options) {
@@ -138,6 +181,61 @@ ftxui::Element status_spinner_text(std::size_t fallback_tick,
             ? tick->load(std::memory_order_relaxed)
             : fallback_tick;
         return std::string(tool_status_spinner(frame));
+    });
+}
+
+// A lightbulb prefix that gently "breathes" while an activity phase is live.
+// Rather than a hard on/off blink (which reads as a glitch and fights the
+// rhythm of the thinking dots), the bulb stays on-screen and its color is
+// smoothly interpolated between a dim amber and a bright glow over the SAME
+// 6-frame period as thinking_pulse_frame(). Peak brightness lines up with the
+// fullest dots, so the bulb and the "..." pulse feel like one coherent effect.
+// Trailing spacing matches render_lightbulb_prefix so layout is identical.
+ftxui::Element render_live_lightbulb_prefix(const ConversationRenderOptions& options,
+                                            std::size_t fallback_tick) {
+    const auto* tick = options.animation_tick;
+    auto glow = live_color_text("💡", [tick, fallback_tick]() -> ftxui::Color {
+        const auto frame = tick != nullptr
+            ? tick->load(std::memory_order_relaxed)
+            : fallback_tick;
+        // Triangle wave over the 6-frame dots cycle: phase 0 (no dots) is
+        // dimmest, phase 3 (full "...") is brightest, then eases back down.
+        constexpr std::size_t kPeriod = 6;
+        const std::size_t phase = frame % kPeriod;
+        const std::size_t half = kPeriod / 2;  // 3
+        const std::size_t up = phase <= half ? phase : (kPeriod - phase);
+        const float t = static_cast<float>(up) / static_cast<float>(half);  // 0..1
+        // Interpolate dim amber -> bright glow. Keeps the bulb clearly visible
+        // at its dimmest so it never appears to vanish.
+        const auto lerp = [t](unsigned char lo, unsigned char hi) -> int {
+            return static_cast<int>(lo + (hi - lo) * t);
+        };
+        return ftxui::Color::RGB(
+            static_cast<uint8_t>(lerp(150, 255)),
+            static_cast<uint8_t>(lerp(110, 246)),
+            static_cast<uint8_t>(lerp(20, 90)));
+    });
+    return hbox({
+        std::move(glow),
+        ftxui::text("  "),
+    });
+}
+
+// Generic agent progress is intentionally distinct from model reasoning. The
+// neutral spinner says the turn is still active without implying that there is
+// hidden thought text to reveal.
+ftxui::Element render_working_prefix(bool active,
+                                     const ConversationRenderOptions& options,
+                                     std::size_t fallback_tick) {
+    if (!active) {
+        return ftxui::text("  ");
+    }
+    Element glyph = options.show_spinner
+        ? status_spinner_text(fallback_tick, options)
+        : ftxui::text("○");
+    return hbox({
+        std::move(glyph) | ftxui::color(Color::GrayDark) | dim,
+        ftxui::text(" "),
     });
 }
 
@@ -1095,6 +1193,166 @@ Element render_shell_command_message(const UiMessage& msg,
     return vbox(std::move(rows)) | UiBorder(border_color);
 }
 
+namespace {
+
+// Sub-key under which an assistant message's activity-box expand state and
+// hitbox are tracked. Distinct from the message id so a card can carry both an
+// activity box and other disclosures without collisions.
+[[nodiscard]] std::string reasoning_disclosure_key(std::string_view message_id) {
+    return std::string(message_id) + ":reasoning";
+}
+
+// Present-continuous verb for the live phase ("Thinking" / "Analyzing").
+[[nodiscard]] std::string_view activity_present_label(UiMessage::ActivityKind kind) {
+    return kind == UiMessage::ActivityKind::Analyzing ? "Analyzing" : "Thinking";
+}
+
+// Past-tense verb for the finished trace ("Thought" / "Analyzed").
+[[nodiscard]] std::string_view activity_past_label(UiMessage::ActivityKind kind) {
+    return kind == UiMessage::ActivityKind::Analyzing ? "Analyzed" : "Thought";
+}
+
+// A reasoning disclosure only exists when there is actual provider-supplied
+// reasoning content to reveal.
+[[nodiscard]] bool activity_is_expandable(const UiMessage& msg) {
+    return !msg.reasoning_text.empty();
+}
+
+// Generic activity is represented by the neutral working indicator. The
+// lightbulb disclosure is reserved exclusively for real reasoning content.
+[[nodiscard]] bool has_activity_disclosure(const UiMessage& msg,
+                                           const ConversationRenderOptions& options) {
+    if (!options.show_reasoning) {
+        return false;
+    }
+    return !msg.reasoning_text.empty();
+}
+
+// Renders the provider-supplied reasoning disclosure for an assistant turn.
+//
+// States, one code path:
+//   * Live: a collapsed disclosure with a pulsing "Thinking…" header + timer.
+//   * Finished with text: collapsed "▶ Thought for Ns", expandable via click or
+//     Ctrl+O to reveal the chain of thought.
+//
+// Reuses the existing system-disclosure state map + hitbox machinery (keyed by
+// reasoning_disclosure_key) so toggle persistence, cache invalidation and mouse
+// handling all come for free.
+[[nodiscard]] Element render_reasoning_disclosure(
+    const UiMessage& msg,
+    std::size_t tick,
+    const ConversationRenderOptions& options) {
+    const std::string key = reasoning_disclosure_key(msg.id);
+    const bool expandable = activity_is_expandable(msg);
+    // The disclosure is live while the turn is still running; its header
+    // animates and shows the present-tense label.
+    const bool is_live = msg.pending && !msg.finalized;
+
+    // Reasoning boxes are collapsed by default so the transcript stays compact.
+    // The header animates "Thinking…" live and shows "Thought for Ns" when
+    // finished; the user expands it via click or Ctrl+O.
+    bool expanded = options.expand_system_details;
+    if (options.system_disclosure_expanded != nullptr) {
+        if (const auto it = options.system_disclosure_expanded->find(key);
+            it != options.system_disclosure_expanded->end()) {
+            expanded = expanded || it->second;
+        }
+    }
+    expanded = expanded && expandable;
+
+    std::vector<Element> lines;
+
+    // --- Summary / header line -------------------------------------------------
+    Elements header;
+    // The lightbulb is reserved for genuine provider reasoning. While the
+    // disclosure is live it gently breathes; once finished it is static.
+    header.push_back(is_live
+        ? render_live_lightbulb_prefix(options, tick)
+        : render_lightbulb_prefix(true));
+    // A disclosure always has content, so it always gets an interactive chevron.
+    if (expandable) {
+        header.push_back(
+            ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(ColorYellowDark));
+    }
+
+    if (is_live) {
+        const std::string present(activity_present_label(msg.reasoning_kind));
+        header.push_back(
+            (options.show_spinner ? pulse_text(present, tick, options)
+                                  : ftxui::text(present + "..."))
+            | ftxui::color(ColorYellowDark) | dim);
+        if (options.activity_elapsed) {
+            const auto elapsed = options.activity_elapsed;
+            const auto message_id = msg.id;
+            header.push_back(
+                live_text([elapsed, message_id]() {
+                    const auto value = elapsed(message_id);
+                    return value.empty() ? std::string{} : std::format(" ({})", value);
+                })
+                | ftxui::color(Color::GrayDark) | dim);
+        } else if (!msg.activity_elapsed.empty()) {
+            header.push_back(
+                ftxui::text(std::format(" ({})", msg.activity_elapsed))
+                | ftxui::color(Color::GrayDark) | dim);
+        }
+    } else {
+        const std::string past(activity_past_label(msg.reasoning_kind));
+        std::string summary = msg.reasoning_elapsed.empty()
+            ? past
+            : std::format("{} for {}", past, msg.reasoning_elapsed);
+        if (expandable && !expanded) {
+            summary += "  (click or Ctrl+O to expand)";
+        }
+        header.push_back(ftxui::text(std::move(summary)) | ftxui::color(ColorYellowDark) | dim);
+    }
+
+    Element header_el = hbox(std::move(header));
+    // Register a click hitbox for the disclosure header.
+    if (expandable && options.system_disclosure_hitboxes != nullptr) {
+        auto& box = (*options.system_disclosure_hitboxes)[key];
+        header_el = std::move(header_el) | reflect(box);
+    }
+    lines.push_back(std::move(header_el));
+
+    // --- Body ------------------------------------------------------------------
+    if (expanded) {
+        // While streaming, clamp to the tail so the box does not grow without
+        // bound; when finished/expanded, show the full text.
+        std::string body = msg.reasoning_text;
+        if (msg.reasoning_active
+            && options.reasoning_stream_preview_max_lines > 0) {
+            const auto all = split_lines(body);
+            if (all.size() > options.reasoning_stream_preview_max_lines) {
+                const std::size_t start =
+                    all.size() - options.reasoning_stream_preview_max_lines;
+                std::string clamped;
+                for (std::size_t i = start; i < all.size(); ++i) {
+                    if (!clamped.empty()) {
+                        clamped.push_back('\n');
+                    }
+                    clamped += all[i];
+                }
+                body = std::move(clamped);
+            }
+        }
+        for (const auto& line : split_lines(body)) {
+            if (line.empty()) {
+                lines.push_back(ftxui::text(""));
+                continue;
+            }
+            lines.push_back(
+                hbox({
+                    ftxui::text("  "),
+                    paragraph(line) | ftxui::color(Color::GrayDark) | dim | xflex,
+                }) | xflex);
+        }
+    }
+
+    return vbox(std::move(lines));
+}
+
+} // namespace
+
 Element render_assistant_message(const UiMessage& msg,
                                  std::size_t tick,
                                  const ConversationRenderOptions& options) {
@@ -1104,10 +1362,10 @@ Element render_assistant_message(const UiMessage& msg,
     // Show waiting state when empty and not thinking
     if (msg.text.empty() && msg.tools.empty() && !msg.thinking) {
         const auto label = msg.pending ? "Waiting for the model..." : "No response.";
-        const bool show = msg.pending || msg.show_lightbulb;
+        const bool show = msg.pending || msg.show_activity_status;
         elements.push_back(
             hbox({
-                render_lightbulb_prefix(show),
+                render_working_prefix(show, options, tick),
                 ftxui::text(label) | ftxui::color(Color::GrayLight) | dim
             }));
     }
@@ -1119,30 +1377,39 @@ Element render_assistant_message(const UiMessage& msg,
         elements.push_back(render_tool_group(tool_group, tick, options));
     }
 
+    // Render real provider reasoning above the answer. Generic model activity
+    // stays in the neutral working indicator below.
+    const bool has_reasoning = has_activity_disclosure(msg, options);
+    // A live reasoning disclosure owns the activity label, avoiding duplication.
+    const bool disclosure_owns_live_indicator =
+        has_reasoning && msg.pending && !msg.finalized;
+    if (has_reasoning) {
+        if (!msg.tools.empty()) {
+            elements.push_back(ftxui::text(""));
+        }
+        elements.push_back(render_reasoning_disclosure(msg, tick, options));
+    }
+
     // Render text response (middle)
     if (!msg.text.empty()) {
-        if (!msg.tools.empty()) {
+        if (!msg.tools.empty() || has_reasoning) {
             elements.push_back(ftxui::text(""));
         }
         elements.push_back(render_markdown(msg.text, Color::White));
     }
 
     // Render thinking indicator at the BOTTOM (current activity)
-    // This ensures users see what's happening NOW when looking at the bottom
-    if (activity.show_thinking) {
+    // This ensures users see what's happening NOW when looking at the bottom.
+    // Suppressed while the disclosure above is already streaming a live label
+    // (avoids a double indicator).
+    if (activity.show_thinking && !disclosure_owns_live_indicator) {
         Element label;
-        if (activity.has_completed_tools && !activity.has_executing_tools && !msg.thinking) {
-            label = options.show_spinner
-                ? pulse_text("Analyzing", tick, options)
-                : ftxui::text("Analyzing...");
-        } else {
-            label = options.show_spinner
-                ? pulse_text("Thinking", tick, options)
-                : ftxui::text("Thinking...");
-        }
+        label = options.show_spinner
+            ? pulse_text("Working", tick, options)
+            : ftxui::text("Working...");
         Elements indicator_row = {
-            render_lightbulb_prefix(true),
-            std::move(label) | ftxui::color(ColorYellowDark) | dim
+            render_working_prefix(true, options, tick),
+            std::move(label) | ftxui::color(Color::GrayLight) | dim
         };
         if (options.activity_elapsed) {
             const auto elapsed = options.activity_elapsed;

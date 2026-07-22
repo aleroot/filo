@@ -8,6 +8,60 @@
 
 namespace core::utils {
 
+namespace {
+
+[[nodiscard]] bool is_utf8_continuation(unsigned char byte) noexcept {
+    return (byte & 0xC0u) == 0x80u;
+}
+
+[[nodiscard]] std::size_t valid_utf8_sequence_length(const char* p,
+                                                     const char* end) noexcept {
+    const auto remaining = static_cast<std::size_t>(end - p);
+    const auto b0 = static_cast<unsigned char>(p[0]);
+
+    if (b0 >= 0xC2u && b0 <= 0xDFu) {
+        return remaining >= 2
+                && is_utf8_continuation(static_cast<unsigned char>(p[1]))
+            ? 2
+            : 0;
+    }
+
+    if (b0 >= 0xE0u && b0 <= 0xEFu) {
+        if (remaining < 3) return 0;
+        const auto b1 = static_cast<unsigned char>(p[1]);
+        const auto b2 = static_cast<unsigned char>(p[2]);
+        const bool valid_second =
+            (b0 == 0xE0u && b1 >= 0xA0u && b1 <= 0xBFu)
+            || (b0 == 0xEDu && b1 >= 0x80u && b1 <= 0x9Fu)
+            || ((b0 >= 0xE1u && b0 <= 0xECu)
+                && is_utf8_continuation(b1))
+            || ((b0 >= 0xEEu && b0 <= 0xEFu)
+                && is_utf8_continuation(b1));
+        return valid_second && is_utf8_continuation(b2) ? 3 : 0;
+    }
+
+    if (b0 >= 0xF0u && b0 <= 0xF4u) {
+        if (remaining < 4) return 0;
+        const auto b1 = static_cast<unsigned char>(p[1]);
+        const auto b2 = static_cast<unsigned char>(p[2]);
+        const auto b3 = static_cast<unsigned char>(p[3]);
+        const bool valid_second =
+            (b0 == 0xF0u && b1 >= 0x90u && b1 <= 0xBFu)
+            || ((b0 >= 0xF1u && b0 <= 0xF3u)
+                && is_utf8_continuation(b1))
+            || (b0 == 0xF4u && b1 >= 0x80u && b1 <= 0x8Fu);
+        return valid_second
+                && is_utf8_continuation(b2)
+                && is_utf8_continuation(b3)
+            ? 4
+            : 0;
+    }
+
+    return 0;
+}
+
+} // namespace
+
 void append_escaped(std::string& out, std::string_view sv) {
     const char* p         = sv.data();
     const char* const end = p + sv.size();
@@ -36,6 +90,49 @@ void append_escaped(std::string& out, std::string_view sv) {
             }
         }
         p = q + 1;
+    }
+}
+
+void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
+    // simdjson validates in vector-width chunks. Keeping validation separate
+    // lets valid external data use the bulk escaper without per-code-point
+    // branches; only malformed byte streams enter the repair path below.
+    if (simdjson::validate_utf8(sv)) {
+        append_escaped(out, sv);
+        return;
+    }
+
+    const char* p = sv.data();
+    const char* const end = p + sv.size();
+    while (p != end) {
+        const char* q = std::find_if(
+            p,
+            end,
+            [](unsigned char c) noexcept {
+                return kEscapeTable[c] != 0u || c >= 0x80u;
+            });
+        out.append(p, q);
+        if (q == end) break;
+
+        const auto byte = static_cast<unsigned char>(*q);
+        if (byte < 0x80u) {
+            append_escaped(out, std::string_view(q, 1));
+            p = q + 1;
+            continue;
+        }
+
+        const std::size_t sequence_length =
+            valid_utf8_sequence_length(q, end);
+        if (sequence_length == 0) {
+            // JSON exchanged with providers must be Unicode. Preserve the
+            // surrounding output while making an arbitrary byte stream safe
+            // to serialize.
+            out += "\\ufffd";
+            p = q + 1;
+        } else {
+            out.append(q, sequence_length);
+            p = q + sequence_length;
+        }
     }
 }
 

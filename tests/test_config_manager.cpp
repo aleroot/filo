@@ -78,6 +78,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.ui_timestamps;
         case core::config::ManagedSettingKey::UiSpinner:
             return settings.ui_spinner;
+        case core::config::ManagedSettingKey::UiReasoning:
+            return settings.ui_reasoning;
         case core::config::ManagedSettingKey::AutoCompactThreshold:
             return settings.auto_compact_threshold;
         case core::config::ManagedSettingKey::ContextCompression:
@@ -107,6 +109,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return config.ui_timestamps;
         case core::config::ManagedSettingKey::UiSpinner:
             return config.ui_spinner;
+        case core::config::ManagedSettingKey::UiReasoning:
+            return config.ui_reasoning;
         case core::config::ManagedSettingKey::AutoCompactThreshold:
             return std::to_string(config.auto_compact_threshold);
         case core::config::ManagedSettingKey::ContextCompression:

@@ -38,6 +38,11 @@ inline constexpr auto kEscapeTable = [] noexcept {
 // ---------------------------------------------------------------------------
 void append_escaped(std::string& out, std::string_view sv);
 
+// Validates arbitrary external bytes before JSON escaping. Malformed UTF-8 is
+// replaced with U+FFFD. Use this at byte-producing I/O boundaries; ordinary
+// application strings should use append_escaped() and avoid the extra scan.
+void append_escaped_utf8_safe(std::string& out, std::string_view sv);
+
 // ---------------------------------------------------------------------------
 // escape_json_string — convenience wrapper.
 // Accepts std::string_view: implicit conversions from std::string and
@@ -47,6 +52,14 @@ void append_escaped(std::string& out, std::string_view sv);
     std::string out;
     out.reserve(sv.size() + sv.size() / 8);
     append_escaped(out, sv);
+    return out;
+}
+
+[[nodiscard]] inline std::string escape_json_string_utf8_safe(
+    std::string_view sv) {
+    std::string out;
+    out.reserve(sv.size() + sv.size() / 8);
+    append_escaped_utf8_safe(out, sv);
     return out;
 }
 

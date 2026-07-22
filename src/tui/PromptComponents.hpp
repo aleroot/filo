@@ -76,6 +76,13 @@ enum class ReviewPickerMode {
     std::string_view model_name,
     int mcp_server_count);
 
+/// Compact footer signal for an active assistant turn. Uses a native FTXUI
+/// single-cell spinner when animation is enabled and a static dot otherwise.
+/// Returns an empty element as soon as the turn is no longer active.
+ftxui::Element render_turn_activity_indicator(bool active,
+                                              bool animate,
+                                              std::size_t tick);
+
 ftxui::Element render_default_prompt_panel(ftxui::Element input_line,
                                            std::string_view input_text);
 

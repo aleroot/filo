@@ -1040,6 +1040,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         if (!chunk.reasoning_content.empty()) {
             core::logging::debug("[Agent] Accumulating reasoning_content: '{}'", chunk.reasoning_content.substr(0, 50));
             *reasoning_accum += chunk.reasoning_content;
+            if (turn_callbacks.on_reasoning) {
+                turn_callbacks.on_reasoning(chunk.reasoning_content);
+            }
         }
         continuation_accum->insert(
             continuation_accum->end(),

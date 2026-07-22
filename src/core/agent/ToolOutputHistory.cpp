@@ -204,12 +204,34 @@ split_preview(std::string_view text, Limits limits) {
         return {text, {}};
     }
 
-    const std::size_t head = std::min(limits.head_chars, text.size());
+    // Limits are byte budgets. Do not split a multi-byte UTF-8 code point:
+    // these fragments are JSON-escaped and replayed to providers later.
+    const auto utf8_prefix_boundary = [&](std::size_t offset) {
+        offset = std::min(offset, text.size());
+        while (offset > 0 && offset < text.size()
+               && (static_cast<unsigned char>(text[offset]) & 0xC0U) == 0x80U) {
+            --offset;
+        }
+        return offset;
+    };
+    const auto utf8_suffix_boundary = [&](std::size_t offset) {
+        while (offset < text.size()
+               && (static_cast<unsigned char>(text[offset]) & 0xC0U) == 0x80U) {
+            ++offset;
+        }
+        return offset;
+    };
+
+    const std::size_t head = utf8_prefix_boundary(
+        std::min(limits.head_chars, text.size()));
     const std::size_t remaining = text.size() - head;
     const std::size_t tail = std::min(limits.tail_chars, remaining);
 
     std::string_view head_view = text.substr(0, head);
-    std::string_view tail_view = tail > 0 ? text.substr(text.size() - tail, tail) : std::string_view{};
+    const std::size_t tail_start = tail > 0
+        ? utf8_suffix_boundary(text.size() - tail)
+        : text.size();
+    std::string_view tail_view = text.substr(tail_start);
     return {head_view, tail_view};
 }
 

@@ -129,9 +129,23 @@ struct UiMessage {
     bool pending = false;                // Still streaming/receiving
     bool finalized = false;              // Turn completed; must not revert to pending
     bool thinking = false;               // Show thinking indicator
-    bool show_lightbulb = false;         // Show 💡 prefix
+    bool show_activity_status = false;   // Show a neutral working-status prefix
     bool stopped = false;                // Generation was stopped by user
     std::string activity_elapsed;        // Elapsed timer for active thinking/analyzing state
+
+    // Activity disclosure (display-only; never part of the visible answer body).
+    //
+    // A disclosure exists only when the provider streamed separate reasoning
+    // text. Generic model/tool activity uses the neutral working-status UI;
+    // it must never masquerade as reasoning or borrow the lightbulb icon.
+    // Reasoning text is never replayed as answer content; the wire-level replay
+    // is governed separately by the serializer.
+    enum class ActivityKind { Thinking, Analyzing };
+    ActivityKind reasoning_kind = ActivityKind::Thinking;  // Semantic label of the phase
+    std::string reasoning_text;          // Accumulated reasoning (may stream in; may be empty)
+    bool reasoning_active = false;       // Currently in the live activity phase
+    std::string reasoning_elapsed;       // e.g. "7s" — phase duration once finished
+    bool activity_recorded = false;      // A reasoning disclosure exists for this turn
     
     // ToolGroup-specific
     bool tool_group_border_top = true;
@@ -225,9 +239,15 @@ struct ConversationRenderOptions {
     bool        show_spinner = true;
     bool        expand_system_details = false;
     bool        expand_tool_results = false;
+    // Reasoning disclosure. When false, chain-of-thought is never rendered.
+    // When true, it stays collapsed until the user expands it.
+    bool        show_reasoning = true;
     std::unordered_map<std::string, bool>* system_disclosure_expanded = nullptr;
     std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
+    // Max reasoning lines shown while streaming (0 = unlimited). The collapsed
+    // finished box always shows the full text on expand.
+    std::size_t reasoning_stream_preview_max_lines = kReasoningStreamPreviewMaxLines;
     float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
     std::shared_ptr<ConversationScrollAnchor> scroll_anchor;
 

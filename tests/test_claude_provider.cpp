@@ -229,7 +229,10 @@ TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
 }
 
 TEST_CASE("ClaudeSerializer - temperature omitted when not set", "[claude][serializer]") {
-    REQUIRE_THAT(AnthropicSerializer::serialize(make_simple_request()),
+    // With effort off there is no thinking block, so temperature is not forced.
+    auto req = make_simple_request();
+    req.effort = "off";
+    REQUIRE_THAT(AnthropicSerializer::serialize(req),
                  !Catch::Matchers::ContainsSubstring("temperature"));
 }
 
@@ -370,10 +373,44 @@ TEST_CASE("ClaudeSerializer - system message with special chars is escaped", "[c
 // ClaudeSerializer — extended thinking
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("ClaudeSerializer - thinking disabled omits field", "[claude][serializer][thinking]") {
+TEST_CASE("ClaudeSerializer - thinking omitted when effort is off", "[claude][serializer][thinking]") {
+    // With config thinking disabled AND effort explicitly off, no thinking block.
     AnthropicThinkingConfig cfg{.enabled = false};
-    REQUIRE_THAT(AnthropicSerializer::serialize(make_simple_request(), 8096, cfg),
+    auto req = make_simple_request("claude-sonnet-4-6");
+    req.effort = "off";
+    REQUIRE_THAT(AnthropicSerializer::serialize(req, 8096, cfg),
                  !Catch::Matchers::ContainsSubstring("thinking"));
+}
+
+TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
+          "[claude][serializer][thinking][effort]") {
+    // The user's single control is /effort: auto (empty) or any positive level
+    // streams reasoning for effort-capable Claude models, without needing a
+    // config thinking_budget. Opus uses adaptive thinking.
+    AnthropicThinkingConfig cfg{.enabled = false};  // thinking_budget == 0
+
+    // auto (empty effort) → thinking on for Sonnet 4.6 (manual thinking model).
+    {
+        auto req = make_simple_request("claude-sonnet-4-6");
+        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled")"));
+    }
+    // high effort on Opus → adaptive thinking block.
+    {
+        auto req = make_simple_request("claude-opus-4-8");
+        req.effort = "high";
+        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"adaptive"})"));
+    }
+    // off → no thinking block on Opus.
+    {
+        auto req = make_simple_request("claude-opus-4-8");
+        req.effort = "off";
+        const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
+        REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+    }
 }
 
 TEST_CASE("ClaudeSerializer - thinking enabled emits type enabled", "[claude][serializer][thinking]") {
@@ -902,13 +939,17 @@ TEST_CASE("AnthropicSSEParser - invalid request stream error is not retryable",
 // AnthropicSSEParser — thinking delta (must be ignored)
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("AnthropicSSEParser - thinking_delta is silently ignored", "[claude][sse][thinking]") {
+TEST_CASE("AnthropicSSEParser - thinking_delta is mirrored to the reasoning channel",
+          "[claude][sse][thinking]") {
     AnthropicSSEParser p;
     // Simulate extended thinking block
     p.process_event("content_block_start",
         R"({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})");
     auto r = p.process_event("content_block_delta",
         R"({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me analyze..."}})");
+    // Thinking is surfaced for the UI reasoning disclosure, kept out of the
+    // visible answer body (text) and out of tool/stop signalling.
+    REQUIRE(r.reasoning_delta == "Let me analyze...");
     REQUIRE(r.text.empty());
     REQUIRE(r.completed_tools.empty());
     REQUIRE(!r.done);
@@ -940,6 +981,47 @@ TEST_CASE("AnthropicSSEParser preserves thinking signatures for replay",
     const std::string payload = AnthropicSerializer::serialize(request);
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"thinking")"));
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("signature":"signed-state")"));
+}
+
+TEST_CASE("AnthropicProtocol - thinking streams as reasoning chunks while replay stays signed",
+          "[claude][sse][thinking][reasoning][integration]") {
+    AnthropicProtocol protocol;
+
+    [[maybe_unused]] auto begin = protocol.parse_event(
+        "event: content_block_start\n"
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n");
+    auto r1 = protocol.parse_event(
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Step one. \"}}\n");
+    auto r2 = protocol.parse_event(
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Step two.\"}}\n");
+
+    // Each thinking delta surfaces exactly one reasoning chunk (display channel),
+    // and never leaks into the visible answer body.
+    REQUIRE(r1.chunks.size() == 1);
+    REQUIRE(r1.chunks[0].reasoning_content == "Step one. ");
+    REQUIRE(r1.chunks[0].content.empty());
+    REQUIRE(r2.chunks.size() == 1);
+    REQUIRE(r2.chunks[0].reasoning_content == "Step two.");
+
+    // Signature + block-stop still yield the signed continuation item for replay.
+    [[maybe_unused]] auto sig = protocol.parse_event(
+        "event: content_block_delta\n"
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-xyz\"}}\n");
+    auto stop = protocol.parse_event(
+        "event: content_block_stop\n"
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n");
+    bool has_continuation = false;
+    for (const auto& chunk : stop.chunks) {
+        if (!chunk.continuation_items.empty()) {
+            has_continuation = true;
+            const auto& item = chunk.continuation_items[0];
+            CHECK_THAT(item.payload, Catch::Matchers::ContainsSubstring("Step one. Step two."));
+            CHECK_THAT(item.payload, Catch::Matchers::ContainsSubstring("sig-xyz"));
+        }
+    }
+    REQUIRE(has_continuation);
 }
 
 TEST_CASE("AnthropicSSEParser - text follows thinking block correctly", "[claude][sse][thinking]") {
@@ -1229,6 +1311,7 @@ TEST_CASE("ClaudeSerializer - thinking with no temperature still emits temperatu
 
 TEST_CASE("ClaudeSerializer - temperature without thinking is passed through unchanged", "[claude][serializer][thinking]") {
     auto req = make_simple_request();
+    req.effort = "off";  // no thinking block → temperature not forced to 1
     req.temperature = 0.5f;
     auto payload = AnthropicSerializer::serialize(req);
     // Not forced to 1.

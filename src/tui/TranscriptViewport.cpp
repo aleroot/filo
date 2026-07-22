@@ -12,6 +12,7 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/dom/selection.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <ftxui/util/autoreset.hpp>
 
 namespace tui {
 namespace {
@@ -56,9 +57,16 @@ std::size_t message_fingerprint(const UiMessage& msg) {
     add_value(static_cast<std::size_t>(msg.pending));
     add_value(static_cast<std::size_t>(msg.finalized));
     add_value(static_cast<std::size_t>(msg.thinking));
-    add_value(static_cast<std::size_t>(msg.show_lightbulb));
+    add_value(static_cast<std::size_t>(msg.show_activity_status));
     add_value(static_cast<std::size_t>(msg.stopped));
     add_text(msg.activity_elapsed);
+    // Activity disclosure state — streaming reasoning grows text, and the phase
+    // kind/label/finished-trace all change the rendered box.
+    add_value(static_cast<std::size_t>(msg.reasoning_kind));
+    add_text(msg.reasoning_text);
+    add_value(static_cast<std::size_t>(msg.reasoning_active));
+    add_text(msg.reasoning_elapsed);
+    add_value(static_cast<std::size_t>(msg.activity_recorded));
     add_text(msg.timestamp);
     add_value(static_cast<std::size_t>(msg.tool_group_border_top));
     add_value(static_cast<std::size_t>(msg.tool_group_border_bottom));
@@ -360,6 +368,16 @@ public:
 
     void Render(ftxui::Screen& screen) override {
         if (!selection_elements_.empty()) {
+            // Selection needs the native message nodes so FTXUI can collect
+            // their text and apply per-cell highlighting. Those nodes are laid
+            // out in transcript coordinates, which means the first/last visible
+            // card can extend beyond this viewport. Clip the direct render just
+            // like FTXUI's frame decorator does; otherwise an active selection
+            // can paint the offscreen portion over siblings such as the startup
+            // banner, prompt, and status bar.
+            const ftxui::AutoReset<ftxui::Box> stencil(
+                &screen.stencil,
+                ftxui::Box::Intersection(box_, screen.stencil));
             for (const auto& element : selection_elements_) {
                 element->Render(screen);
             }

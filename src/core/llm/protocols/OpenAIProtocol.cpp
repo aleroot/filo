@@ -550,7 +550,7 @@ struct ZaiParseResult {
 // parse_openai_sse_chunk — shared pure parser for any OpenAI-compatible stream
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::pair<std::string, std::vector<ToolCall>>
+OpenAIChatChunk
 parse_openai_sse_chunk(std::string_view json_str) {
     if (json_str.empty()) {
         return {};
@@ -569,6 +569,7 @@ parse_openai_sse_chunk(std::string_view json_str) {
     }
     std::string              content_str;
     std::vector<ToolCall>    tools;
+    std::string              reasoning;
 
     for (simdjson::dom::element choice : choices) {
         simdjson::dom::object delta;
@@ -579,6 +580,15 @@ parse_openai_sse_chunk(std::string_view json_str) {
         std::string_view content;
         if (delta["content"].get(content) == simdjson::SUCCESS) {
             content_str = std::string(content);
+        }
+
+        // OpenAI-compatible thinking models (DeepSeek-R1, Qwen-thinking via
+        // OpenRouter, etc.) stream chain-of-thought as delta.reasoning_content.
+        // Capture it so the TUI reasoning disclosure lights up for these models.
+        std::string_view reasoning_delta;
+        if (delta["reasoning_content"].get(reasoning_delta) == simdjson::SUCCESS
+            && !reasoning_delta.empty()) {
+            reasoning.append(reasoning_delta.data(), reasoning_delta.size());
         }
 
         simdjson::dom::array tool_calls_arr;
@@ -608,7 +618,7 @@ parse_openai_sse_chunk(std::string_view json_str) {
         }
     }
 
-    return {std::move(content_str), std::move(tools)};
+    return {std::move(content_str), std::move(tools), std::move(reasoning)};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -702,11 +712,17 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
         }
     }
 
-    auto [content, tools] = parse_openai_sse_chunk(json_sv);
-    if (!content.empty() || !tools.empty()) {
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json_sv);
+    if (!content.empty() || !tools.empty() || !reasoning.empty()) {
+        // Combine content, tool calls, and reasoning into a single chunk. The
+        // Agent routes each field independently, and merging here (mirroring the
+        // Z.ai parser) keeps reasoning on the same chunk as its content so that
+        // subclasses which call this base and then augment (e.g. Mistral) don't
+        // end up with a duplicate reasoning-only chunk.
         StreamChunk chunk;
-        chunk.content = std::move(content);
-        chunk.tools   = std::move(tools);
+        chunk.content           = std::move(content);
+        chunk.tools             = std::move(tools);
+        chunk.reasoning_content = std::move(reasoning);
         result.chunks.push_back(std::move(chunk));
     }
 

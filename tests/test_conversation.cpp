@@ -551,14 +551,14 @@ TEST_CASE("animation cadence covers review and hidden elapsed indicators",
 // LiveText reactive-leaf selection
 // ============================================================================
 //
-// The animated "Thinking..." label is a custom LiveText node (its surrounding
+// The animated "Working..." label is a custom LiveText node (its surrounding
 // transcript tree is cached and reused across ticks). Selection must behave
 // exactly like ftxui::text(): only the actually-selected cells are copied to
 // the clipboard and only those cells receive the selection highlight.
 
-TEST_CASE("animated thinking label supports per-cell selection",
+TEST_CASE("animated working label supports per-cell selection",
           "[tui][conversation][render][selection]") {
-    // thinking_pulse_frame(3) == "..." so the live label reads "Thinking...".
+    // thinking_pulse_frame(3) == "..." so the live label reads "Working...".
     std::atomic<std::size_t> tick{3};
     auto msg = make_assistant_message("", "", true);  // pending + thinking
     ConversationRenderOptions options;
@@ -570,20 +570,19 @@ TEST_CASE("animated thinking label supports per-cell selection",
                                         ftxui::Dimension::Fit(element));
     ftxui::Render(screen, element);
 
-    // Locate the screen cell where the "Thinking" label begins by scanning the
-    // rendered cells (robust against the lightbulb prefix width/encoding).
+    // Locate the screen cell where the "Working" label begins by scanning the
+    // rendered cells (robust against the animated prefix width).
     int label_row = -1;
     int label_col = -1;
     for (int y = 0; y < screen.dimy() && label_row < 0; ++y) {
-        for (int x = 0; x + 7 < screen.dimx(); ++x) {
-            if (screen.CellAt(x,     y).character == "T"
-                && screen.CellAt(x + 1, y).character == "h"
-                && screen.CellAt(x + 2, y).character == "i"
-                && screen.CellAt(x + 3, y).character == "n"
-                && screen.CellAt(x + 4, y).character == "k"
-                && screen.CellAt(x + 5, y).character == "i"
-                && screen.CellAt(x + 6, y).character == "n"
-                && screen.CellAt(x + 7, y).character == "g") {
+        for (int x = 0; x + 6 < screen.dimx(); ++x) {
+            if (screen.CellAt(x,     y).character == "W"
+                && screen.CellAt(x + 1, y).character == "o"
+                && screen.CellAt(x + 2, y).character == "r"
+                && screen.CellAt(x + 3, y).character == "k"
+                && screen.CellAt(x + 4, y).character == "i"
+                && screen.CellAt(x + 5, y).character == "n"
+                && screen.CellAt(x + 6, y).character == "g") {
                 label_row = y;
                 label_col = x;
                 break;
@@ -592,16 +591,16 @@ TEST_CASE("animated thinking label supports per-cell selection",
     }
     REQUIRE(label_row >= 0);
 
-    // A partial selection over just the "Think" cells copies exactly those
+    // A partial selection over just the "Worki" cells copies exactly those
     // glyphs — not the whole cached label (the previous whole-node behavior).
     ftxui::Selection partial(label_col, label_row, label_col + 4, label_row);
     ftxui::Render(screen, element.get(), partial);
-    REQUIRE(partial.GetParts() == "Think");
+    REQUIRE(partial.GetParts() == "Worki");
 
     // A full-row selection copies the entire live label exactly once.
     ftxui::Selection full_row(0, label_row, screen.dimx() - 1, label_row);
     ftxui::Render(screen, element.get(), full_row);
-    REQUIRE_THAT(full_row.GetParts(), ContainsSubstring("Thinking..."));
+    REQUIRE_THAT(full_row.GetParts(), ContainsSubstring("Working..."));
 }
 
 // ============================================================================
@@ -721,6 +720,198 @@ TEST_CASE("render_history_panel — repeated system disclosure shows counter and
     REQUIRE_THAT(expanded_output, ContainsSubstring("Previous segment: seg-c"));
 }
 
+// ============================================================================
+// Reasoning (chain-of-thought) disclosure
+// ============================================================================
+
+namespace {
+std::string render_panel_text(const std::vector<UiMessage>& messages,
+                              ConversationRenderOptions options = {}) {
+    auto panel = render_history_panel(messages, 0, std::move(options));
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+    return strip_ansi(screen.ToString());
+}
+} // namespace
+
+TEST_CASE("render — active reasoning stays collapsed by default",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", true);
+    msg.reasoning_active = true;
+    msg.reasoning_text = "Consider the failure mode.\nThen verify the fix.";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    // Collapsed by default even while streaming: the live "Thinking" header and
+    // a collapsed chevron render, but the chain-of-thought body stays hidden
+    // until the user expands the box.
+    REQUIRE_THAT(output, ContainsSubstring("▶"));
+    REQUIRE_THAT(output, ContainsSubstring("Thinking"));
+    REQUIRE_THAT(output, !ContainsSubstring("Consider the failure mode."));
+}
+
+TEST_CASE("render — finished reasoning collapses to a Thought summary",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Here is the answer.", "", false);
+    msg.finalized = true;
+    msg.reasoning_active = false;
+    msg.reasoning_elapsed = "7s";
+    msg.reasoning_text = "Private chain of thought that stays hidden.";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    // Collapsed by default: summary + hint shown, body hidden, answer visible.
+    REQUIRE_THAT(output, ContainsSubstring("▶"));
+    REQUIRE_THAT(output, ContainsSubstring("Thought for 7s"));
+    REQUIRE_THAT(output, ContainsSubstring("click or Ctrl+O to expand"));
+    REQUIRE_THAT(output, ContainsSubstring("Here is the answer."));
+    REQUIRE_THAT(output, !ContainsSubstring("Private chain of thought"));
+}
+
+TEST_CASE("render — finished reasoning expands with the global option",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Answer.", "", false);
+    msg.finalized = true;
+    msg.reasoning_elapsed = "3s";
+    msg.reasoning_text = "Revealed chain of thought.";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(
+        messages, ConversationRenderOptions{.expand_system_details = true});
+    REQUIRE_THAT(output, ContainsSubstring("▼"));
+    REQUIRE_THAT(output, ContainsSubstring("Revealed chain of thought."));
+}
+
+TEST_CASE("render — reasoning is suppressed when show_reasoning is false",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Answer.", "", false);
+    msg.finalized = true;
+    msg.reasoning_elapsed = "9s";
+    msg.reasoning_text = "Suppressed thoughts.";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(
+        messages, ConversationRenderOptions{.show_reasoning = false});
+    REQUIRE_THAT(output, !ContainsSubstring("Thought for 9s"));
+    REQUIRE_THAT(output, !ContainsSubstring("Suppressed thoughts."));
+    REQUIRE_THAT(output, ContainsSubstring("Answer."));
+}
+
+TEST_CASE("render — generic work uses a neutral status indicator",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", true);  // pending + thinking, no reasoning
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    // No disclosure or lightbulb: this is progress, not provider reasoning.
+    REQUIRE_THAT(output, ContainsSubstring("Working"));
+    REQUIRE_THAT(output, !ContainsSubstring("💡"));
+    REQUIRE_THAT(output, !ContainsSubstring("▼"));
+    REQUIRE_THAT(output, !ContainsSubstring("Thought for"));
+}
+
+TEST_CASE("render — generic completed activity leaves no faux thought trace",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Done.", "", false);
+    msg.finalized = true;
+    msg.activity_recorded = true;
+    msg.reasoning_kind = UiMessage::ActivityKind::Analyzing;
+    msg.reasoning_elapsed = "4s";
+    // No reasoning_text — the phase produced no inner tokens.
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    REQUIRE_THAT(output, !ContainsSubstring("Analyzed for 4s"));
+    REQUIRE_THAT(output, !ContainsSubstring("Thought for"));
+    REQUIRE_THAT(output, !ContainsSubstring("💡"));
+    REQUIRE_THAT(output, ContainsSubstring("Done."));
+}
+
+TEST_CASE("render — generic completed thinking leaves no faux thought trace",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Answer.", "", false);
+    msg.finalized = true;
+    msg.activity_recorded = true;
+    msg.reasoning_kind = UiMessage::ActivityKind::Thinking;
+    msg.reasoning_elapsed = "2s";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    REQUIRE_THAT(output, !ContainsSubstring("Thought for 2s"));
+    REQUIRE_THAT(output, !ContainsSubstring("💡"));
+}
+
+TEST_CASE("render — live generic activity uses a neutral status indicator",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", true);
+    msg.thinking = true;
+    msg.activity_recorded = true;
+    msg.reasoning_kind = UiMessage::ActivityKind::Analyzing;
+    // reasoning_active stays false because no reasoning text streamed.
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(messages);
+    REQUIRE_THAT(output, ContainsSubstring("Working"));
+    REQUIRE_THAT(output, !ContainsSubstring("💡"));
+}
+
+TEST_CASE("render — reasoning text always uses the Thought (not Analyzed) label",
+          "[tui][conversation][render][reasoning]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("Answer.", "", false);
+    msg.finalized = true;
+    msg.activity_recorded = true;
+    // Even if the kind was tagged Analyzing, presence of text means it is a
+    // chain of thought — the past-tense label follows the kind, but the box is
+    // expandable. Here we assert the Thinking kind path with text.
+    msg.reasoning_kind = UiMessage::ActivityKind::Thinking;
+    msg.reasoning_elapsed = "6s";
+    msg.reasoning_text = "step by step.";
+    messages.push_back(std::move(msg));
+
+    const auto output = render_panel_text(
+        messages, ConversationRenderOptions{.expand_system_details = true});
+    REQUIRE_THAT(output, ContainsSubstring("Thought for 6s"));
+    REQUIRE_THAT(output, ContainsSubstring("step by step."));
+}
+
+TEST_CASE("render — activity disclosure always leads with the lightbulb",
+          "[tui][conversation][render][reasoning]") {
+    // Live streaming reasoning: header must carry the lightbulb + present label.
+    {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("", "", true);
+        msg.reasoning_active = true;
+        msg.reasoning_text = "live thoughts.";
+        messages.push_back(std::move(msg));
+        const auto output = render_panel_text(messages);
+        REQUIRE_THAT(output, ContainsSubstring("💡"));
+        REQUIRE_THAT(output, ContainsSubstring("Thinking"));
+    }
+    // Finished collapsed trace: still leads with the lightbulb.
+    {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("Answer.", "", false);
+        msg.finalized = true;
+        msg.activity_recorded = true;
+        msg.reasoning_elapsed = "5s";
+        msg.reasoning_text = "hidden thoughts.";
+        messages.push_back(std::move(msg));
+        const auto output = render_panel_text(messages);
+        REQUIRE_THAT(output, ContainsSubstring("💡"));
+        REQUIRE_THAT(output, ContainsSubstring("Thought for 5s"));
+    }
+}
+
 TEST_CASE("render_history_panel — tool group", "[tui][conversation][render]") {
     std::vector<UiMessage> messages;
     std::vector<ToolActivity> tools;
@@ -829,7 +1020,7 @@ TEST_CASE("render_history_panel — mixed conversation", "[tui][conversation][re
     // Assistant with tools and response
     auto asst = make_assistant_message("Here are the files:", "", false);
     asst.tools.push_back(make_tool_activity("t1", "list_directory", "{}", "."));
-    asst.show_lightbulb = true;
+    asst.show_activity_status = true;
     messages.push_back(std::move(asst));
     
     // Status messages

@@ -30,10 +30,19 @@ namespace core::llm::protocols {
  * OpenAI Chat Completions wire format.  Pure function — no side effects.
  *
  * @param json_str  The JSON string after stripping the leading `"data: "` prefix.
- * @return `{content_text, tool_calls}`.  Both empty on malformed or no-op input.
+ * @return `{content, tool_calls, reasoning_content}`. Reasoning captures the
+ *         `delta.reasoning_content` field emitted by OpenAI-compatible thinking
+ *         models (e.g. DeepSeek-R1, Qwen-thinking via OpenRouter) so the TUI can
+ *         surface it in the reasoning disclosure. All fields empty on malformed
+ *         or no-op input.
  */
-[[nodiscard]] std::pair<std::string, std::vector<ToolCall>>
-parse_openai_sse_chunk(std::string_view json_str);
+struct OpenAIChatChunk {
+    std::string              content;
+    std::vector<ToolCall>    tool_calls;
+    std::string              reasoning_content;
+};
+
+[[nodiscard]] OpenAIChatChunk parse_openai_sse_chunk(std::string_view json_str);
 
 /** OpenAI-native model reasoning policy shared by both OpenAI wire APIs. */
 [[nodiscard]] ReasoningCapabilities openai_reasoning_capabilities(

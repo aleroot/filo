@@ -246,6 +246,33 @@ TEST_CASE("ToolOutputHistory truncates oversized non-error outputs", "[agent][to
     CHECK_THAT(clamped, Catch::Matchers::ContainsSubstring(R"("head":)"));
 }
 
+TEST_CASE("ToolOutputHistory keeps UTF-8 previews valid at byte boundaries",
+          "[agent][tool-history]") {
+    const std::string box = "\xE2\x94\x80"; // U+2500 BOX DRAWINGS LIGHT HORIZONTAL
+    const std::string raw = std::string(R"({"output":")")
+        + box + std::string(16, 'x') + box + R"("})";
+
+    const std::string clamped = core::agent::tool_output_history::clamp_for_history(
+        "replace", raw,
+        core::agent::tool_output_history::Limits{
+            .max_chars = 16,
+            .head_chars = 12,
+            .tail_chars = 4,
+        });
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{clamped};
+    simdjson::dom::object document;
+    REQUIRE(parser.parse(padded).get(document) == simdjson::SUCCESS);
+
+    std::string_view head;
+    std::string_view tail;
+    REQUIRE(document["head"].get(head) == simdjson::SUCCESS);
+    REQUIRE(document["tail"].get(tail) == simdjson::SUCCESS);
+    CHECK(head == R"({"output":")");
+    CHECK(tail == R"("})");
+}
+
 TEST_CASE("ToolOutputHistory light-compresses oversized read_file output", "[agent][tool-history]") {
     std::string source;
     for (int i = 0; i < 500; ++i) {

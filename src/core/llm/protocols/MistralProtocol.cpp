@@ -89,11 +89,10 @@ ParseResult MistralProtocol::parse_event(std::string_view raw_event) {
         simdjson::dom::object delta;
         if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
 
-        // Some compatible deployments expose the reasoning text directly.
-        std::string_view direct_reasoning;
-        if (delta["reasoning_content"].get(direct_reasoning) == simdjson::SUCCESS) {
-            reasoning.append(direct_reasoning);
-        }
+        // Note: delta.reasoning_content is already captured by the base
+        // OpenAIProtocol::parse_event call above (combined into the front
+        // chunk's reasoning_content), so it is not re-parsed here. This loop
+        // only handles Mistral's typed content blocks.
 
         // Current Mistral models can stream typed content blocks.  This is the
         // wire representation consumed by mistral-vibe's ThinkChunk/TextChunk

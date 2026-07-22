@@ -26,6 +26,7 @@ enum class ManagedSettingKey {
     UiContextUsage,
     UiTimestamps,
     UiSpinner,
+    UiReasoning,
     AutoCompactThreshold,
     ContextCompression,
 };
@@ -40,6 +41,7 @@ struct ManagedSettings {
     std::optional<std::string> ui_context_usage;
     std::optional<std::string> ui_timestamps;
     std::optional<std::string> ui_spinner;
+    std::optional<std::string> ui_reasoning;
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
 
@@ -209,6 +211,7 @@ struct AppConfig {
     std::string ui_context_usage;
     std::string ui_timestamps;
     std::string ui_spinner;
+    std::string ui_reasoning;
     int         auto_compact_threshold = 0;
     bool        auto_compact_threshold_explicit = false;
     int         tool_output_token_limit = 0;

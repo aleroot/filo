@@ -500,7 +500,7 @@ std::string ShellTool::execute_impl(
             temp_snapshots);
     }
 
-    const std::string escaped = core::utils::escape_json_string(result.output);
+    const std::string escaped = core::utils::escape_json_string_utf8_safe(result.output);
     // Field is named "output" because both stdout and stderr are captured.
     return std::format(R"({{"output":"{}","exit_code":{}}})", escaped, result.exit_code);
 }

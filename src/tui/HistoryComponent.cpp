@@ -282,6 +282,7 @@ std::size_t HistoryComponent::compute_render_cache_key(
     std::size_t seed = 0;
     seed = combine_hash(seed, options.show_timestamps ? 1 : 0);
     seed = combine_hash(seed, options.show_spinner ? 1 : 0);
+    seed = combine_hash(seed, options.show_reasoning ? 1 : 0);
     seed = combine_hash(seed, options.expand_system_details ? 1 : 0);
     seed = combine_hash(seed, options.expand_tool_results ? 1 : 0);
     seed = combine_hash(seed, options.tool_result_preview_max_lines);

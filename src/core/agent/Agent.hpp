@@ -51,6 +51,12 @@ public:
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
         std::function<void(const SubagentEvent&)> on_subagent_event = {};
+        // Live reasoning/thinking deltas, streamed separately from the assistant
+        // answer body. Display-only: routing reasoning here keeps chain-of-thought
+        // out of the visible response text while still allowing the UI to show it
+        // in a disclosure. Upstream replay is governed independently by the
+        // serializer (Message::reasoning_content / continuation_items).
+        std::function<void(const std::string&)> on_reasoning = {};
         // Out-of-band status/log sink for lifecycle messages (e.g. auto-compaction
         // progress). Must NOT be the streaming assistant-message chunk callback:
         // routing status here keeps it out of the assistant response body and

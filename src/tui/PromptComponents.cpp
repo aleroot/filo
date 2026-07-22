@@ -26,6 +26,8 @@ namespace tui {
 
 namespace {
 
+constexpr int kTurnActivitySpinnerCharset = 12;
+
 int estimated_prompt_lines(std::string_view input_text) {
     const auto explicit_lines =
         static_cast<int>(std::count(input_text.begin(), input_text.end(), '\n')) + 1;
@@ -568,6 +570,25 @@ std::string format_runtime_status_summary(std::string_view provider_name,
         provider_name,
         model_name.empty() ? "<provider default>" : model_name,
         mcp_server_count);
+}
+
+Element render_turn_activity_indicator(bool active,
+                                       bool animate,
+                                       std::size_t tick) {
+    if (!active) {
+        return text("");
+    }
+
+    Element signal = animate
+        ? spinner(kTurnActivitySpinnerCharset, tick)
+        : text("●");
+    return hbox({
+        text(" "),
+        std::move(signal)
+            | color(ColorYellowBright)
+            | ftxui::bold
+            | size(WIDTH, EQUAL, 1),
+    });
 }
 
 Element render_startup_banner_panel(std::string_view provider_name,

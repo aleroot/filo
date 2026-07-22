@@ -235,6 +235,16 @@ namespace {
         return {};
     }
 
+    // True when the user explicitly turned reasoning off via `/effort off`
+    // (mapped to "none"/"off"/"disabled"). Distinct from "auto"/empty, which
+    // both normalize to an empty effort but mean "provider default".
+    bool effort_explicitly_disabled(std::string_view raw) {
+        std::string normalized =
+            core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_copy(raw));
+        std::erase_if(normalized, [](unsigned char ch) { return std::isspace(ch); });
+        return normalized == "none" || normalized == "off" || normalized == "disabled";
+    }
+
     bool ends_with_1m_suffix(std::string_view model) {
         if (model.size() < 4) return false;
         const std::size_t tail = model.size() - 4;
@@ -703,13 +713,24 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         }
     }
 
+    // Thinking is wanted when either the config enabled it (thinking_budget > 0)
+    // OR the model supports effort-based reasoning and the user has not turned
+    // effort off. This makes `/effort` the single user-facing control for Claude
+    // reasoning: `auto`/low/medium/high/max stream chain-of-thought, `off`
+    // suppresses it. `thinking_budget` remains an explicit override for manual
+    // budgets and never forces thinking off.
+    const bool effort_wants_thinking =
+        reasoning_capabilities.supports_effort()
+        && !effort_explicitly_disabled(req.effort);
+    const bool thinking_wanted = thinking.enabled || effort_wants_thinking;
+
     const bool use_adaptive_thinking =
-        thinking.enabled
+        thinking_wanted
         && reasoning_policy != nullptr
         && reasoning_policy->rejects_manual_thinking
         && reasoning_policy->needs_adaptive_thinking;
     const bool use_manual_thinking =
-        thinking.enabled
+        thinking_wanted
         && (reasoning_policy == nullptr || !reasoning_policy->rejects_manual_thinking);
 
     // Anthropic requires temperature=1 when extended thinking is enabled.
@@ -990,7 +1011,12 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
         } else if (delta_type == "thinking_delta" && current_continuation_.has_value()) {
             std::string_view thinking;
             if (delta["thinking"].get(thinking) == simdjson::SUCCESS) {
+                // Authoritative, signed thinking accumulated for upstream replay.
                 current_continuation_->thinking += thinking;
+                // Display-only mirror surfaced to the UI reasoning channel. This
+                // is a copy: the signed block above remains the source of truth
+                // for API continuation and is never derived from this field.
+                result.reasoning_delta.append(thinking.data(), thinking.size());
             }
         } else if (delta_type == "signature_delta" && current_continuation_.has_value()) {
             std::string_view signature;
@@ -1167,6 +1193,7 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     if (!r.stop_reason.empty()) last_stop_reason_ = r.stop_reason;
 
     if (!r.text.empty())           result.chunks.push_back(StreamChunk::make_content(r.text));
+    if (!r.reasoning_delta.empty()) result.chunks.push_back(StreamChunk::make_reasoning(std::move(r.reasoning_delta)));
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
     if (!r.continuation_items.empty()) {
         StreamChunk chunk;

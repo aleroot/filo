@@ -38,6 +38,11 @@ inline constexpr std::size_t kToolDiffPreviewMaxLines = 10;
 /// Additional lines are collapsed to keep long transcripts scrollable.
 inline constexpr std::size_t kToolResultPreviewMaxLines = 12;
 
+/// Maximum number of reasoning (chain-of-thought) lines shown while it streams
+/// live. Older lines scroll out of the box; the finished, collapsed box still
+/// expands to the full text on demand.
+inline constexpr std::size_t kReasoningStreamPreviewMaxLines = 8;
+
 /// Maximum number of diff lines rendered in the permission overlay.
 inline constexpr std::size_t kPermissionDiffPreviewMaxLines = 28;
 

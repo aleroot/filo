@@ -424,6 +424,42 @@ TEST_CASE("HistoryComponent toggles system disclosure by mouse click",
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("New segment: seg-b"));
 }
 
+TEST_CASE("HistoryComponent toggles a finished reasoning box by mouse click",
+          "[tui][history_component][reasoning]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    auto msg = tui::make_assistant_message("Final answer.", "", false);
+    msg.finalized = true;
+    msg.reasoning_elapsed = "5s";
+    msg.reasoning_text = "Hidden chain of thought.";
+    messages.push_back(std::move(msg));
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    const auto collapsed = render_history_text(history);
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("Thought for 5s"));
+    REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("Hidden chain of thought."));
+
+    // The reasoning header is not necessarily on row 0 (tools/answer text render
+    // first), so click the row that actually carries the "Thought for" summary.
+    const int summary_row = rendered_row_containing(collapsed, "Thought for 5s");
+    REQUIRE(summary_row >= 0);
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = 1;
+    mouse.y = summary_row;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+
+    const auto expanded = render_history_text(history);
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("Hidden chain of thought."));
+}
+
 // ============================================================================
 // Render-cache regression tests
 // ============================================================================
@@ -529,7 +565,7 @@ TEST_CASE("animation frames update without rebuilding transcript cache",
 
     REQUIRE(history.CacheBuildCount() == 1);
     REQUIRE(frame_0 != frame_1);
-    REQUIRE_THAT(frame_1, Catch::Matchers::ContainsSubstring("Thinking."));
+    REQUIRE_THAT(frame_1, Catch::Matchers::ContainsSubstring("Working."));
 }
 
 TEST_CASE("shell pulse updates without rebuilding transcript cache",
@@ -843,6 +879,42 @@ TEST_CASE("transcript selection keeps native visible-card semantics",
     const auto selected = select_history_viewport(
         history, 60, 6, ftxui::Selection(0, 0, 58, 5));
     REQUIRE_THAT(selected, Catch::Matchers::ContainsSubstring("SELECT_THIS_EXACT_TEXT"));
+}
+
+TEST_CASE("transcript selection cannot paint outside its viewport",
+          "[tui][history_component][render_cache][selection][regression]") {
+    std::atomic<size_t> tick{0};
+    std::string long_message;
+    for (int line = 0; line < 30; ++line) {
+        long_message += "OFFSCREEN_TRANSCRIPT_LINE_" + std::to_string(line) + "\n";
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{
+            tui::make_assistant_message(std::move(long_message), "", false)
+        });
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    constexpr int kWidth = 60;
+    constexpr int kHeight = 8;
+    auto panel = ftxui::vbox({
+        ftxui::text("BANNER_MUST_STAY_VISIBLE"),
+        history.OnRender() | ftxui::flex,
+    });
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(kWidth),
+                                        ftxui::Dimension::Fixed(kHeight));
+    ftxui::Selection selection(0, 1, kWidth - 1, kHeight - 1);
+    ftxui::Render(screen, panel.get(), selection);
+
+    const auto rendered = strip_ansi(screen.ToString());
+    REQUIRE(rendered.starts_with("BANNER_MUST_STAY_VISIBLE"));
+    const auto first_transcript_line = rendered.find("OFFSCREEN_TRANSCRIPT_LINE_");
+    REQUIRE(first_transcript_line != std::string::npos);
+    REQUIRE(first_transcript_line > rendered.find('\n'));
 }
 
 TEST_CASE("HistoryComponent invalidates render cache when tool approval changes",

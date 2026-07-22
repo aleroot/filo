@@ -86,6 +86,11 @@ class AnthropicSSEParser {
 public:
     struct Result {
         std::string          text;             ///< Non-empty on `text_delta` events.
+        /// Display-only thinking text streamed on `thinking_delta` events. This
+        /// is a copy of the chain-of-thought surfaced for the UI; the signed,
+        /// authoritative thinking block is preserved separately in
+        /// `continuation_items` for upstream replay and is never derived from it.
+        std::string          reasoning_delta;
         std::vector<ToolCall> completed_tools; ///< Non-empty on `content_block_stop` with a tool.
         std::vector<ContinuationItem> continuation_items; ///< Completed signed thinking blocks.
         bool    done          = false;         ///< True on `message_stop`.

@@ -210,6 +210,7 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
     data.messages.push_back(core::llm::Message{
         .role = "assistant",
         .reasoning_content = "interleaved GLM reasoning",
+        .reasoning_elapsed = "7s",
         .continuation_items = {{
             .provider = "openai",
             .kind = "reasoning",
@@ -222,6 +223,7 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages.size() == 3);
     CHECK(loaded->messages[2].reasoning_content == "interleaved GLM reasoning");
+    CHECK(loaded->messages[2].reasoning_elapsed == "7s");
     REQUIRE(loaded->messages[2].continuation_items.size() == 1);
     CHECK(loaded->messages[2].continuation_items[0].payload
           == R"({"type":"reasoning","encrypted_content":"secret"})");

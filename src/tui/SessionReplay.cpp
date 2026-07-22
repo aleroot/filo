@@ -60,6 +60,18 @@ std::vector<UiMessage> build_resumed_ui_messages(
 
         if (msg.role == "assistant") {
             UiMessage asst_msg = make_assistant_message(msg.content, "", false);
+            // Restore reasoning as a finished, collapsed disclosure. The phase
+            // duration is persisted alongside the reasoning text so a resumed
+            // session still renders "Thought for Ns". Only turns that produced
+            // reasoning text get a restored trace; a bare Analyzing phase is not
+            // persisted on the wire.
+            if (!msg.reasoning_content.empty()) {
+                asst_msg.reasoning_kind = UiMessage::ActivityKind::Thinking;
+                asst_msg.reasoning_text = msg.reasoning_content;
+                asst_msg.reasoning_elapsed = msg.reasoning_elapsed;
+                asst_msg.reasoning_active = false;
+                asst_msg.activity_recorded = true;
+            }
             for (const auto& tc : msg.tool_calls) {
                 asst_msg.tools.push_back(make_tool_activity(
                     tc.id,

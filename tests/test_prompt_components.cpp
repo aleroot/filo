@@ -130,6 +130,27 @@ TEST_CASE("workspace status uses a lock only for an enabled sandbox",
     CHECK(format_workspace_status_label("", true).empty());
 }
 
+TEST_CASE("turn activity indicator spins only while a response is active",
+          "[tui][status-bar][activity]") {
+    const auto render_indicator = [](bool active, bool animate, std::size_t tick) {
+        auto indicator = render_turn_activity_indicator(active, animate, tick);
+        auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(2),
+                                            ftxui::Dimension::Fixed(1));
+        ftxui::Render(screen, indicator);
+        return strip_ansi(screen.ToString());
+    };
+
+    const auto idle = render_indicator(false, true, 0);
+    const auto active_frame_0 = render_indicator(true, true, 0);
+    const auto active_frame_1 = render_indicator(true, true, 1);
+    const auto static_active = render_indicator(true, false, 0);
+
+    CHECK(idle.find_first_not_of(" \n") == std::string::npos);
+    CHECK(active_frame_0 != active_frame_1);
+    CHECK(active_frame_0.find_first_not_of(" \n") != std::string::npos);
+    CHECK(static_active.find("●") != std::string::npos);
+}
+
 // ============================================================================
 // render_mention_prompt_panel — smoke tests
 // ============================================================================

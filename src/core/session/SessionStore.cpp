@@ -135,6 +135,11 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         core::utils::append_escaped(out, msg.reasoning_content);
         out += '"';
     }
+    if (!msg.reasoning_elapsed.empty()) {
+        out += ",\"reasoning_elapsed\":\"";
+        core::utils::append_escaped(out, msg.reasoning_elapsed);
+        out += '"';
+    }
     if (!msg.continuation_items.empty()) {
         out += ",\"continuation_items\":[";
         for (std::size_t i = 0; i < msg.continuation_items.size(); ++i) {
@@ -391,6 +396,9 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
                 }
                 if (msg_el["reasoning_content"].get(sv) == simdjson::SUCCESS) {
                     msg.reasoning_content = std::string(sv);
+                }
+                if (msg_el["reasoning_elapsed"].get(sv) == simdjson::SUCCESS) {
+                    msg.reasoning_elapsed = std::string(sv);
                 }
                 simdjson::dom::array continuation_arr;
                 if (msg_el["continuation_items"].get(continuation_arr)

@@ -467,6 +467,7 @@ struct Message {
     std::string tool_call_id = {};         // Optional, for tool role
     std::vector<ToolCall> tool_calls = {}; // Optional, for assistant role
     std::string reasoning_content = {};    // Optional provider-specific reasoning text
+    std::string reasoning_elapsed = {};    // Display-only phase duration (e.g. "7s"); persisted for resume, never sent upstream
     std::vector<ContentPart> content_parts = {}; // Optional, for multimodal user input
     std::string input_text = {};            // Original editable prompt before mention/media expansion
     bool synthetic = false;                // Internal context record, not a visible user prompt

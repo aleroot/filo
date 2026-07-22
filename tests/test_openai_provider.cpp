@@ -473,27 +473,27 @@ TEST_CASE("Serializer - tab in content is escaped", "[openai][serializer][escapi
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("parse_openai_sse_chunk - text content is extracted", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"content":"Hello"},"index":0}]})");
     REQUIRE(content == "Hello");
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - multi-word content is preserved", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"content":"Hello World"},"index":0}]})");
     REQUIRE(content == "Hello World");
 }
 
 TEST_CASE("parse_openai_sse_chunk - role-only delta produces empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"role":"assistant"},"index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - finish_reason chunk produces empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{},"finish_reason":"stop","index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
@@ -501,7 +501,7 @@ TEST_CASE("parse_openai_sse_chunk - finish_reason chunk produces empty result", 
 
 TEST_CASE("parse_openai_sse_chunk - usage-only chunk produces empty result", "[openai][sse]") {
     // The usage chunk arrives before [DONE] when stream_options.include_usage=true
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"usage":{"prompt_tokens":10,"completion_tokens":5},"choices":[]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
@@ -509,9 +509,28 @@ TEST_CASE("parse_openai_sse_chunk - usage-only chunk produces empty result", "[o
 
 TEST_CASE("parse_openai_sse_chunk - null content produces empty string", "[openai][sse]") {
     // null content occurs when the model is making a tool call
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"content":null},"index":0}]})");
     REQUIRE(content.empty());
+}
+
+TEST_CASE("parse_openai_sse_chunk - reasoning_content is extracted",
+          "[openai][sse][reasoning]") {
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
+        R"({"choices":[{"delta":{"reasoning_content":"Let me think..."},"index":0}]})");
+    REQUIRE(content.empty());
+    REQUIRE(tools.empty());
+    REQUIRE(reasoning == "Let me think...");
+}
+
+TEST_CASE("OpenAIProtocol parse_event - reasoning streams on the reasoning channel",
+          "[openai][sse][reasoning]") {
+    OpenAIProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data: {"choices":[{"delta":{"reasoning_content":"step by step"},"index":0}]})");
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].reasoning_content == "step by step");
+    REQUIRE(result.chunks[0].content.empty());
 }
 
 TEST_CASE("OpenAIProtocol parse_event - accepts data prefix without a space",
@@ -554,7 +573,7 @@ TEST_CASE("OpenAIProtocol parse_event - joins multiline data payloads",
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("parse_openai_sse_chunk - tool call id and name extracted", "[openai][sse][tools]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":""}}]},"index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.size() == 1);
@@ -565,21 +584,21 @@ TEST_CASE("parse_openai_sse_chunk - tool call id and name extracted", "[openai][
 }
 
 TEST_CASE("parse_openai_sse_chunk - tool call argument chunk is accumulated", "[openai][sse][tools]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"loc"}}]},"index":0}]})");
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].function.arguments == R"({"loc)");
 }
 
 TEST_CASE("parse_openai_sse_chunk - tool call index is captured", "[openai][sse][tools]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_xyz","type":"function","function":{"name":"shell","arguments":""}}]}}]})");
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].index == 2);
 }
 
 TEST_CASE("parse_openai_sse_chunk - multiple tool calls in one chunk", "[openai][sse][tools]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"c1","type":"function","function":{"name":"f1","arguments":""}},
             {"index":1,"id":"c2","type":"function","function":{"name":"f2","arguments":""}}
@@ -594,38 +613,38 @@ TEST_CASE("parse_openai_sse_chunk - multiple tool calls in one chunk", "[openai]
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("parse_openai_sse_chunk - empty string returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk("");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - malformed JSON returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk("{not valid json");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("{not valid json");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - missing choices key returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"id":"chatcmpl-1"})");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"id":"chatcmpl-1"})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - empty choices array returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"choices":[]})");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"choices":[]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - choice without delta returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk(
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(
         R"({"choices":[{"finish_reason":"stop","index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_openai_sse_chunk - pure whitespace returns empty result", "[openai][sse]") {
-    auto [content, tools] = parse_openai_sse_chunk("   ");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("   ");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }

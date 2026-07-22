@@ -6,6 +6,8 @@
 #include "core/tools/ShellTool.hpp"
 #include "TestSessionContext.hpp"
 
+#include <simdjson.h>
+
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -225,6 +227,20 @@ TEST_CASE("ShellTool preserves partial-line stdout and stderr",
         R"({"command":"printf partial_stdout; printf partial_stderr >&2"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("partial_stdout"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("partial_stderr"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool repairs malformed UTF-8 emitted by binary commands",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    const auto res = tool.execute(
+        R"({"command":"printf '\\355\\240\\200\\377'"})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    REQUIRE(parser.parse(res).get(document) == simdjson::SUCCESS);
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring(R"(\ufffd)"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 

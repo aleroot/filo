@@ -123,8 +123,6 @@ constexpr std::string_view kDisableTerminalInputModes =
     "\x1B[>4;0m";
 
 constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
-constexpr auto kStreamChunkPauseBreakThreshold = std::chrono::milliseconds(1500);
-constexpr std::string_view kStreamChunkResumeMarker = "💡";
 constexpr int kReviewActivitySpinnerCharset = 12; // Compact circle spinner (single-cell frames).
 constexpr std::size_t kMaxStderrPanelLines = 20;
 
@@ -788,6 +786,7 @@ RunResult run(RunOptions opts) {
     bool ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
     std::atomic_bool ui_show_spinner{
         visibility_setting_enabled(config.ui_spinner, true)};
+    bool ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
     bool tool_output_expanded = false;
 
     // ── Tool registration ───────────────────────────────────────────────────
@@ -881,9 +880,7 @@ RunResult run(RunOptions opts) {
     std::chrono::steady_clock::time_point quit_confirm_deadline =
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
-    std::mutex stream_chunk_timing_mutex;
     auto direct_shell_state = std::make_shared<DirectShellState>();
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> stream_chunk_last_at;
     std::atomic_bool assistant_turn_active{false};
     std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAgentTurn {
@@ -1301,6 +1298,12 @@ RunResult run(RunOptions opts) {
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::UiReasoning,
+            .label = "UI · Reasoning",
+            .description = "Show or hide the model's collapsible thinking/analyzing disclosure.",
+            .choices = visibility_choices(),
+        });
+        settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::AutoCompactThreshold,
             .label = "Session · Auto-Compaction",
             .description = "Total tokens before the conversation is summarised. 0 = disabled.",
@@ -1447,10 +1450,6 @@ RunResult run(RunOptions opts) {
     };
 
     auto clear_screen = [&]() {
-        {
-            std::lock_guard lock(stream_chunk_timing_mutex);
-            stream_chunk_last_at.clear();
-        }
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
         {
@@ -1869,10 +1868,6 @@ RunResult run(RunOptions opts) {
         -> std::optional<std::string> {
         auto next_lease = session_leases.reserve(data);
         if (!next_lease) return next_lease.error();
-        {
-            std::lock_guard lock(stream_chunk_timing_mutex);
-            stream_chunk_last_at.clear();
-        }
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
         {
@@ -2345,6 +2340,7 @@ RunResult run(RunOptions opts) {
         ui_show_context_usage = visibility_setting_enabled(config.ui_context_usage, true);
         ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
+        ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
         agent->set_auto_compact_threshold(
             config.auto_compact_threshold,
             !config.auto_compact_threshold_explicit);
@@ -3474,6 +3470,8 @@ RunResult run(RunOptions opts) {
                 return settings.ui_timestamps;
             case core::config::ManagedSettingKey::UiSpinner:
                 return settings.ui_spinner;
+            case core::config::ManagedSettingKey::UiReasoning:
+                return settings.ui_reasoning;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return settings.auto_compact_threshold;
             case core::config::ManagedSettingKey::ContextCompression:
@@ -3505,6 +3503,8 @@ RunResult run(RunOptions opts) {
                 return effective.ui_timestamps;
             case core::config::ManagedSettingKey::UiSpinner:
                 return effective.ui_spinner;
+            case core::config::ManagedSettingKey::UiReasoning:
+                return effective.ui_reasoning;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return std::to_string(effective.auto_compact_threshold);
             case core::config::ManagedSettingKey::ContextCompression:
@@ -3543,6 +3543,7 @@ RunResult run(RunOptions opts) {
         config.ui_context_usage = after.ui_context_usage;
         config.ui_timestamps = after.ui_timestamps;
         config.ui_spinner = after.ui_spinner;
+        config.ui_reasoning = after.ui_reasoning;
         config.context_compression = after.context_compression;
 
         if (before.default_mode != after.default_mode) {
@@ -3577,6 +3578,7 @@ RunResult run(RunOptions opts) {
         ui_show_context_usage = visibility_setting_enabled(after.ui_context_usage, true);
         ui_show_timestamps = visibility_setting_enabled(after.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(after.ui_spinner, true);
+        ui_show_reasoning = visibility_setting_enabled(after.ui_reasoning, true);
         animation_cv.notify_one();
 
         return std::nullopt;
@@ -4008,7 +4010,32 @@ RunResult run(RunOptions opts) {
     };
 
     auto save_session_snapshot = [&, session_save_state]() {
-        const auto snap_messages = agent->get_history();
+        auto snap_messages = agent->get_history();
+        // Stamp the live activity-phase duration onto the persisted assistant
+        // messages so a resumed session can still render "Thought for Ns"
+        // disclosures. The duration lives on the UI message; match it back to
+        // the wire message by its reasoning text (both carry the same
+        // accumulated chain of thought).
+        {
+            std::unordered_map<std::string, std::string> elapsed_by_reasoning;
+            {
+                std::lock_guard lock(ui_mutex);
+                for (const auto& m : ui_messages) {
+                    if (m.type == MessageType::Assistant && m.finalized
+                        && !m.reasoning_elapsed.empty() && !m.reasoning_text.empty()) {
+                        elapsed_by_reasoning.emplace(m.reasoning_text, m.reasoning_elapsed);
+                    }
+                }
+            }
+            for (auto& m : snap_messages) {
+                if (m.role == "assistant" && !m.reasoning_content.empty()) {
+                    if (const auto it = elapsed_by_reasoning.find(m.reasoning_content);
+                        it != elapsed_by_reasoning.end()) {
+                        m.reasoning_elapsed = it->second;
+                    }
+                }
+            }
+        }
         const auto snap_mode = agent->get_mode();
         const auto snap_context = agent->get_context_summary();
         const auto working_dir = std::filesystem::current_path().string();
@@ -4433,6 +4460,22 @@ RunResult run(RunOptions opts) {
                 message.thinking = true;
             });
         };
+        callbacks.on_reasoning =
+            [assistant_message_id, &update_assistant_message](
+                const std::string& delta) {
+                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                    // Reasoning that arrives after finalization is dropped; a
+                    // completed card must not reopen its live thinking box.
+                    if (message.finalized) {
+                        return;
+                    }
+                    // Streamed reasoning belongs to the Thinking phase.
+                    message.reasoning_kind = UiMessage::ActivityKind::Thinking;
+                    message.reasoning_active = true;
+                    message.activity_recorded = true;
+                    message.reasoning_text += delta;
+                });
+            };
         callbacks.on_tool_start =
             [assistant_message_id, &update_assistant_message](
                 const core::llm::ToolCall& tool_call) {
@@ -4442,7 +4485,7 @@ RunResult run(RunOptions opts) {
                     }
                     message.pending = true;
                     message.thinking = false;
-                    message.show_lightbulb = true;
+                    message.show_activity_status = true;
                     message.tools.push_back(make_tool_activity(
                         tool_call.id,
                         tool_call.function.name,
@@ -4483,7 +4526,7 @@ RunResult run(RunOptions opts) {
                     }
                     if (!has_pending_tools && message.pending) {
                         message.thinking = true;
-                        message.show_lightbulb = true;
+                        message.show_activity_status = true;
                     }
                 });
             };
@@ -4612,7 +4655,7 @@ RunResult run(RunOptions opts) {
 
                     message.pending = true;
                     message.thinking = false;
-                    message.show_lightbulb = true;
+                    message.show_activity_status = true;
                 });
             };
         // Route out-of-band lifecycle status (auto-compaction progress) to the
@@ -4715,8 +4758,6 @@ RunResult run(RunOptions opts) {
                      &take_queued_steering_turn_or_mark_idle,
                      &assistant_turn_active,
                      &turn_activity_timers,
-                     &stream_chunk_timing_mutex,
-                     &stream_chunk_last_at,
                      assistant_message_id = std::move(assistant_message_id),
                      &save_session_snapshot]() mutable {
             const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
@@ -4735,23 +4776,7 @@ RunResult run(RunOptions opts) {
             agent->send_message(user_message,
                 [assistant_message_id,
                  &update_assistant_message,
-                 &assistant_turn_active,
-                 &stream_chunk_timing_mutex,
-                 &stream_chunk_last_at](const std::string& chunk) {
-                    const auto now = std::chrono::steady_clock::now();
-                    bool resumed_after_pause = false;
-                    {
-                        std::lock_guard lock(stream_chunk_timing_mutex);
-                        if (const auto it = stream_chunk_last_at.find(assistant_message_id);
-                            it != stream_chunk_last_at.end()) {
-                            resumed_after_pause =
-                                (now - it->second) >= kStreamChunkPauseBreakThreshold;
-                            it->second = now;
-                        } else {
-                            stream_chunk_last_at.emplace(assistant_message_id, now);
-                        }
-                    }
-
+                 &assistant_turn_active](const std::string& chunk) {
                     update_assistant_message(assistant_message_id, [&](UiMessage& message) {
                         // Never revert a finalized assistant message back to
                         // pending. Late/out-of-band callbacks (e.g. compaction
@@ -4763,7 +4788,7 @@ RunResult run(RunOptions opts) {
                         }
                         if (message.thinking) {
                             message.thinking = false;
-                            message.show_lightbulb = true;
+                            message.show_activity_status = true;
                         }
 
                         // Keep provider bytes separate from display-only pause markers.
@@ -4772,15 +4797,6 @@ RunResult run(RunOptions opts) {
                         if (message.text.empty()) {
                             message.text = chunk;
                         } else {
-                            if (resumed_after_pause) {
-                                if (!ends_with_line_break(message.text)) {
-                                    message.text.push_back('\n');
-                                }
-                                message.text += kStreamChunkResumeMarker;
-                                if (!starts_with_line_break(chunk)) {
-                                    message.text.push_back('\n');
-                                }
-                            }
                             message.text += chunk;
                         }
                     });
@@ -4791,13 +4807,11 @@ RunResult run(RunOptions opts) {
                  &submit_agent_turn,
                  &take_queued_steering_turn_or_mark_idle,
                  &turn_activity_timers,
-                 &stream_chunk_timing_mutex,
-                 &stream_chunk_last_at,
                  &save_session_snapshot]() {
-                    {
-                        std::lock_guard lock(stream_chunk_timing_mutex);
-                        stream_chunk_last_at.erase(assistant_message_id);
-                    }
+                    // Capture the elapsed duration before stopping the timer so
+                    // a real reasoning disclosure can show its duration.
+                    const auto reasoning_elapsed_secs =
+                        turn_activity_timers.elapsed(assistant_message_id);
                     turn_activity_timers.stop(assistant_message_id);
                     const bool was_stopped = agent->is_stop_requested();
                     update_assistant_message(assistant_message_id, [&](UiMessage& message) {
@@ -4805,8 +4819,21 @@ RunResult run(RunOptions opts) {
                         message.finalized = true;
                         message.thinking = false;
                         message.stopped = was_stopped;
+                        // Finalize a real reasoning disclosure. Generic work has
+                        // no hidden content and therefore leaves no faux thought
+                        // trace in the transcript.
+                        message.reasoning_active = false;
+                        if (!message.reasoning_text.empty()
+                            && message.reasoning_elapsed.empty()) {
+                            // Always stamp a duration so the header reads
+                            // "Thought for Ns" rather than a bare "Thought".
+                            // If the timer was somehow missing,
+                            // fall back to 0s instead of leaving it blank.
+                            message.reasoning_elapsed = format_elapsed_compact(
+                                reasoning_elapsed_secs.value_or(std::chrono::seconds{0}));
+                        }
                         if (!message.text.empty() || !message.tools.empty()) {
-                            message.show_lightbulb = true;
+                            message.show_activity_status = true;
                         }
                     });
                     save_session_snapshot();
@@ -5225,6 +5252,7 @@ RunResult run(RunOptions opts) {
                 .show_spinner = ui_show_spinner.load(std::memory_order_relaxed),
                 .expand_system_details = tool_output_expanded,
                 .expand_tool_results = tool_output_expanded,
+                .show_reasoning = ui_show_reasoning,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
                 .activity_elapsed = [&turn_activity_timers](std::string_view message_id) {
@@ -6721,6 +6749,7 @@ RunResult run(RunOptions opts) {
 
         // ── Status bar ───────────────────────────────────────────────────
         const std::size_t tick = animation_tick.load(std::memory_order_relaxed);
+        const bool response_in_progress = assistant_turn_active.load(std::memory_order_acquire);
         std::string budget_str = core::budget::BudgetTracker::get_instance().status_string();
         const auto context_window = agent->context_window_snapshot();
         const int32_t ctx_pct = context_window.remaining_pct;
@@ -6931,11 +6960,18 @@ RunResult run(RunOptions opts) {
         }
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
+        left_items.push_back(render_turn_activity_indicator(
+            response_in_progress,
+            ui_show_spinner.load(std::memory_order_relaxed),
+            tick));
         left_items.push_back(guardrail_el);
         left_items.push_back(queued_steering_el);
         left_items.push_back(review_activity_el);
         const bool show_status_footer =
-            ui_show_footer || review_activity_active || queued_steering_count > 0;
+            ui_show_footer
+            || response_in_progress
+            || review_activity_active
+            || queued_steering_count > 0;
         auto left_el = show_status_footer
             ? hbox(std::move(left_items)) | xflex
             : text("");

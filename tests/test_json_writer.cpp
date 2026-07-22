@@ -596,6 +596,33 @@ TEST_CASE("JsonUtils: escape_json_string handles all control chars", "[json_writ
     CHECK(result.length() > with_controls.length());
 }
 
+TEST_CASE("JsonUtils: escape_json_string preserves valid UTF-8", "[json_writer]") {
+    CHECK(escape_json_string("caffè \xf0\x9f\x98\x80")
+          == "caffè \xf0\x9f\x98\x80");
+}
+
+TEST_CASE("JsonUtils: UTF-8-safe JSON escaping replaces malformed bytes",
+          "[json_writer]") {
+    const std::string malformed =
+        std::string("prefix ")
+        + "\x80"                  // Isolated continuation byte.
+        + "\xc0\xaf"             // Overlong encoding.
+        + "\xed\xa0\x80"         // UTF-8 encoding of a surrogate.
+        + "\xf4\x90\x80\x80"     // Code point above U+10FFFF.
+        + "\xe2\x82"             // Truncated sequence.
+        + " suffix";
+
+    const auto escaped = escape_json_string_utf8_safe(malformed);
+    CHECK(escaped.starts_with("prefix "));
+    CHECK(escaped.ends_with(" suffix"));
+    CHECK(escaped.find("\\ufffd") != std::string::npos);
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string json{"\"" + escaped + "\""};
+    simdjson::dom::element document;
+    CHECK(parser.parse(json).get(document) == simdjson::SUCCESS);
+}
+
 // -----------------------------------------------------------------------------
 // Pre-reservation and buffer behavior
 // -----------------------------------------------------------------------------

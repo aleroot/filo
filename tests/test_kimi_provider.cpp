@@ -809,7 +809,7 @@ TEST_CASE("parse_kimi_sse_chunk - extracts text content from delta", "[kimi][par
         "object": "chat.completion.chunk",
         "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hello"}, "finish_reason": null}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content == "Hello");
     REQUIRE(tools.empty());
 }
@@ -820,7 +820,7 @@ TEST_CASE("parse_kimi_sse_chunk - handles empty delta with only role", "[kimi][p
         "id": "chatcmpl-123",
         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
@@ -830,7 +830,7 @@ TEST_CASE("parse_kimi_sse_chunk - finish reason stop produces no content", "[kim
         "id": "chatcmpl-123",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
@@ -840,7 +840,7 @@ TEST_CASE("parse_kimi_sse_chunk - finish reason tool_calls produces no content",
         "id": "chatcmpl-abc",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
@@ -850,7 +850,7 @@ TEST_CASE("parse_kimi_sse_chunk - multi-word content returned intact", "[kimi][p
         "id": "chatcmpl-123",
         "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": null}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content == " world");
     REQUIRE(tools.empty());
 }
@@ -951,7 +951,7 @@ TEST_CASE("parse_kimi_sse_chunk - first tool call chunk with id and name", "[kim
             "finish_reason": null
         }]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].id == "call_xyz789");
@@ -976,7 +976,7 @@ TEST_CASE("parse_kimi_sse_chunk - argument streaming chunk (no id/name)", "[kimi
             "finish_reason": null
         }]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].index == 0);
@@ -1000,7 +1000,7 @@ TEST_CASE("parse_kimi_sse_chunk - multiple tool calls in single chunk", "[kimi][
             "finish_reason": null
         }]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content.empty());
     REQUIRE(tools.size() == 2);
     REQUIRE(tools[0].index == 0);
@@ -1023,7 +1023,7 @@ TEST_CASE("parse_kimi_sse_chunk - tool call index matches correctly", "[kimi][pa
             "finish_reason": null
         }]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(tools.size() == 1);
     REQUIRE(tools[0].index == 2);
 }
@@ -1033,37 +1033,37 @@ TEST_CASE("parse_kimi_sse_chunk - tool call index matches correctly", "[kimi][pa
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("parse_kimi_sse_chunk - empty string returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk("");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - malformed JSON returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk("{not valid json!!!}");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("{not valid json!!!}");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - truncated JSON returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"id": "chatcmpl-123", "choices": [)");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"id": "chatcmpl-123", "choices": [)");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - empty choices array returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"id": "x", "choices": []})");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"id": "x", "choices": []})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - missing choices key returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"id": "x", "object": "chat.completion.chunk"})");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"id": "x", "object": "chat.completion.chunk"})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - choice without delta returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk(R"({"id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]})");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(R"({"id": "x", "choices": [{"index": 0, "finish_reason": "stop"}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
@@ -1074,14 +1074,14 @@ TEST_CASE("parse_kimi_sse_chunk - null content value returns empty string", "[ki
         "id": "chatcmpl-123",
         "choices": [{"index": 0, "delta": {"content": null}, "finish_reason": null}]
     })";
-    auto [content, tools] = parse_openai_sse_chunk(json);
+    auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     // null is not a string — parser should handle gracefully and return empty
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
 
 TEST_CASE("parse_kimi_sse_chunk - pure whitespace JSON returns empty results", "[kimi][parser][errors]") {
-    auto [content, tools] = parse_openai_sse_chunk("   ");
+    auto [content, tools, reasoning] = parse_openai_sse_chunk("   ");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
 }
