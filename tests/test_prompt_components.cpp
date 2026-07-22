@@ -104,6 +104,15 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("12:34:56"));
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("context:"));
     REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("sandbox:"));
+
+    const auto clock_end = output.find("12:34:56") + std::string_view("12:34:56").size();
+    const auto clock_line_end = output.find('\n', clock_end);
+    const auto context_start = output.find("AGENTS.md, FILO.md");
+    const auto context_line_end = output.find('\n', context_start);
+    const auto context_end = context_start + std::string_view("AGENTS.md, FILO.md").size();
+    REQUIRE(clock_line_end != std::string::npos);
+    REQUIRE(context_line_end != std::string::npos);
+    REQUIRE(clock_line_end - clock_end == context_line_end - context_end);
 }
 
 TEST_CASE("runtime status summary has one compact canonical format",

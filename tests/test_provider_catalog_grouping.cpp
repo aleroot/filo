@@ -71,7 +71,7 @@ TEST_CASE("Provider catalog grouping collapses Grok presets under Grok",
     REQUIRE(alias_group.provider_name == "grok");
 }
 
-TEST_CASE("Provider catalog grouping collapses Kimi presets and keeps endpoint models separate",
+TEST_CASE("Provider catalog grouping exposes only Kimi API and Kimi Code",
           "[llm][provider-catalog]") {
     const std::vector<std::string> providers{
         "kimi",
@@ -88,27 +88,50 @@ TEST_CASE("Provider catalog grouping collapses Kimi presets and keeps endpoint m
 
     REQUIRE(groups.size() == 1);
     REQUIRE(groups[0].provider_name == "kimi");
-    REQUIRE(groups[0].sources.size() == providers.size());
+    REQUIRE(groups[0].sources.size() == 2);
     for (const auto& provider : providers) {
         REQUIRE(groups[0].contains_source_provider(provider));
     }
+    CHECK(groups[0].find_source("kimi-code-fast") == nullptr);
+    CHECK(groups[0].find_source("kimi-for-coding") == nullptr);
+    CHECK(groups[0].find_source("kimi-k2-6") == nullptr);
 
     const auto* public_api = groups[0].find_source("kimi");
     REQUIRE(public_api != nullptr);
+    REQUIRE(public_api->category_label == "Kimi API.");
     REQUIRE(public_api->includes_registry_model("kimi-k3"));
     REQUIRE_FALSE(public_api->includes_registry_model("k3"));
     REQUIRE_FALSE(public_api->includes_registry_model("kimi-for-coding"));
 
     const auto* code_api = groups[0].find_source("kimi-code");
     REQUIRE(code_api != nullptr);
-    REQUIRE(code_api->category_label == "Kimi Code endpoint.");
-    REQUIRE(code_api->includes_registry_model("k3"));
-    REQUIRE(code_api->includes_registry_model("kimi-for-coding"));
-    REQUIRE(code_api->includes_registry_model("kimi-for-coding-highspeed"));
+    REQUIRE(code_api->category_label == "Kimi Code subscription.");
+    REQUIRE_FALSE(code_api->includes_registry_model("k3"));
+    REQUIRE_FALSE(code_api->includes_registry_model("kimi-for-coding"));
+    REQUIRE_FALSE(code_api->includes_registry_model("kimi-for-coding-highspeed"));
     REQUIRE_FALSE(code_api->includes_registry_model("kimi-k3"));
 
     const auto alias_group = core::llm::provider_catalog_group_for("kimi-code", providers);
     REQUIRE(alias_group.provider_name == "kimi");
+}
+
+TEST_CASE("Provider catalog grouping chooses one Kimi source per endpoint without canonical presets",
+          "[llm][provider-catalog]") {
+    const std::vector<std::string> providers{
+        "kimi-k2-6",
+        "kimi-code-fast",
+        "kimi-for-coding",
+    };
+
+    const auto group = core::llm::provider_catalog_group_for("kimi-code-fast", providers);
+
+    REQUIRE(group.provider_name == "kimi");
+    REQUIRE(group.sources.size() == 2);
+    CHECK(group.sources[0].provider_name == "kimi-k2-6");
+    CHECK(group.sources[0].category_label == "Kimi API.");
+    CHECK(group.sources[1].provider_name == "kimi-code-fast");
+    CHECK(group.sources[1].category_label == "Kimi Code subscription.");
+    CHECK(group.contains_source_provider("kimi-for-coding"));
 }
 
 TEST_CASE("Provider catalog grouping keeps Qwen Token Plan availability live-only",

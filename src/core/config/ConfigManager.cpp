@@ -201,6 +201,33 @@ void apply_api_key_fallback(std::string_view name, ProviderConfig& provider) {
     }
 }
 
+[[nodiscard]] bool is_kimi_code_preset(std::string_view name,
+                                       const ProviderConfig& provider) {
+    const bool managed_name = name == "kimi-code"
+        || name.starts_with("kimi-code-")
+        || name == "kimi-for-coding"
+        || name.starts_with("kimi-for-coding-");
+    return managed_name && provider.base_url.find("/coding/") != std::string::npos;
+}
+
+void inherit_kimi_oauth_for_code_presets(AppConfig& config) {
+    const auto primary = config.providers.find("kimi");
+    if (primary == config.providers.end()
+        || primary->second.auth_type != "oauth_kimi") {
+        return;
+    }
+
+    for (auto& [name, provider] : config.providers) {
+        if (!is_kimi_code_preset(name, provider)) continue;
+
+        // An explicitly configured credential mode belongs to this preset and
+        // must win over family-level OAuth inheritance. Environment API keys
+        // have already been materialized into provider.api_key at this point.
+        if (!provider.auth_type.empty() || !provider.api_key.empty()) continue;
+        provider.auth_type = "oauth_kimi";
+    }
+}
+
 ProviderConfig merge_provider(std::string_view name, const ProviderConfig& base, const ProviderConfig& overlay) {
     ProviderConfig merged = base;
     if (overlay.api_type != ApiType::Unknown) merged.api_type = overlay.api_type;
@@ -1614,6 +1641,7 @@ void ConfigManager::load(std::optional<std::filesystem::path> working_dir) {
 
     std::optional<std::string> ignored_profile;
     load_optional_config(model_overlay_path, config_, profiles_, ignored_profile);
+    inherit_kimi_oauth_for_code_presets(config_);
 }
 
 bool ConfigManager::persist_managed_setting(SettingsScope scope,
@@ -1893,6 +1921,8 @@ bool ConfigManager::persist_login_profile(std::string_view login_provider,
             configured_provider.model = overlay_provider.model;
         }
     }
+
+    inherit_kimi_oauth_for_code_presets(config_);
 
     if (error) error->clear();
     return true;

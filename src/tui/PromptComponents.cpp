@@ -591,7 +591,8 @@ Element render_startup_banner_panel(std::string_view provider_name,
     // The logo anchors the top-left of the banner. A live clock is pinned to
     // the opposite top-right corner: the logo block sets the row height and the
     // single-line clock is top-aligned within that hbox, so it lands on the
-    // first row, flush right. (AGENTS.md and friends stay at the bottom-right.)
+    // first row. Match the context label's trailing cell so their visible
+    // right edges align. (AGENTS.md and friends stay at the bottom-right.)
     Elements logo_rows;
     logo_rows.reserve(kBannerLogoLines.size());
     for (const auto line : kBannerLogoLines) {
@@ -599,7 +600,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }
     Element clock_el = clock_label.empty()
         ? emptyElement()
-        : text(std::string(clock_label)) | color(Color::GrayLight);
+        : text(std::string(clock_label) + " ") | color(Color::GrayLight);
     rows.push_back(hbox({
         vbox(std::move(logo_rows)),
         filler(),

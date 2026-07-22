@@ -747,6 +747,64 @@ TEST_CASE("ConfigManager persist_login_profile('kimi') selects oauth_kimi and K3
     REQUIRE(config.providers.contains("kimi"));
     REQUIRE(config.providers.at("kimi").auth_type == "oauth_kimi");
     REQUIRE(config.providers.at("kimi").model == "k3");
+    REQUIRE(config.providers.at("kimi-code").auth_type == "oauth_kimi");
+    REQUIRE(config.providers.at("kimi-code-fast").auth_type == "oauth_kimi");
+    REQUIRE(config.providers.at("kimi-for-coding").auth_type == "oauth_kimi");
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager applies an existing Kimi OAuth login to code presets",
+          "[config][kimi][oauth]") {
+    const fs::path sandbox = make_temp_dir("filo_config_existing_kimi_oauth");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path config_dir = xdg_home / "filo";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+    write_text(config_dir / "auth_defaults.json", R"({
+        "providers": {
+            "kimi": {
+                "model": "kimi-for-coding",
+                "auth_type": "oauth_kimi"
+            }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& providers = manager.get_config().providers;
+
+    REQUIRE(providers.at("kimi").auth_type == "oauth_kimi");
+    REQUIRE(providers.at("kimi-code").auth_type == "oauth_kimi");
+    REQUIRE(providers.at("kimi-code-fast").auth_type == "oauth_kimi");
+    REQUIRE(providers.at("kimi-for-coding").auth_type == "oauth_kimi");
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("ConfigManager preserves explicit Kimi Code credentials over inherited OAuth",
+          "[config][kimi][oauth]") {
+    const fs::path sandbox = make_temp_dir("filo_config_explicit_kimi_code_key");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path config_dir = xdg_home / "filo";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+    write_text(config_dir / "auth_defaults.json", R"({
+        "providers": {
+            "kimi": { "auth_type": "oauth_kimi" },
+            "kimi-code": { "api_key": "explicit-code-key" }
+        }
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+    const auto& providers = manager.get_config().providers;
+
+    REQUIRE(providers.at("kimi-code").api_key == "explicit-code-key");
+    REQUIRE(providers.at("kimi-code").auth_type.empty());
+    REQUIRE(providers.at("kimi-code-fast").auth_type == "oauth_kimi");
 
     fs::remove_all(sandbox);
 }
