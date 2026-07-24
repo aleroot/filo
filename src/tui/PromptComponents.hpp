@@ -6,15 +6,12 @@
 #include "RewindPicker.hpp"
 #include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionStore.hpp"
-#include "core/tools/AskUserQuestionTool.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <utility>
-#include <future>
-#include <memory>
 
 namespace tui {
 
@@ -80,20 +77,26 @@ enum class ReviewPickerMode {
 enum class TurnActivityState {
     Idle,       ///< No turn activity to report: renders nothing.
     Active,     ///< A turn is running: animated quadrant-filling circle.
-    Completed,  ///< The last turn finished: static success tick.
+    Completed,  ///< The last turn finished successfully: static success tick.
+    Failed,     ///< The last turn was cancelled or errored: static cross.
 };
 
 /// Compact footer signal for the assistant turn. While a turn runs it shows
 /// the same quadrant-filling circle animation as the tool call rows; once the
-/// work is finished it settles on a static tick, mirroring a completed
-/// subagent. Returns an empty element when there is no turn activity to
-/// report. When animation is disabled an active turn shows a static dot.
+/// work is finished it settles on a static outcome glyph, mirroring a
+/// completed subagent: a tick on success, a cross when the turn was cancelled
+/// or ended with an error. Returns an empty element when there is no turn
+/// activity to report. When animation is disabled an active turn shows a
+/// static dot.
 ftxui::Element render_turn_activity_indicator(TurnActivityState state,
                                               bool animate,
                                               std::size_t tick);
 
 ftxui::Element render_default_prompt_panel(ftxui::Element input_line,
                                            std::string_view input_text);
+
+ftxui::Element render_prompt_box(ftxui::Element input_line,
+                                 ftxui::Color accent);
 
 ftxui::Element render_command_prompt_panel(const std::vector<CommandSuggestion>& suggestions,
                                            int selected_index,
@@ -176,47 +179,5 @@ ftxui::Element render_rewind_picker_panel(
 ftxui::Element render_code_block_runner_panel(const CodeBlockRunnerState& state);
 
 ftxui::Element render_stderr_panel(const std::vector<std::string>& lines);
-
-// ---------------------------------------------------------------------------
-// Question Dialog (AskUserQuestion tool)
-// ---------------------------------------------------------------------------
-
-struct QuestionDialogOption {
-    std::string label;
-    std::string description;
-};
-
-struct QuestionDialogItem {
-    std::string question;
-    std::string header;
-    std::vector<QuestionDialogOption> options;
-    bool multi_select = false;
-    std::string body;
-};
-
-struct QuestionDialogState {
-    bool active = false;
-    std::vector<QuestionDialogItem> questions;
-    int current_question_index = 0;
-    int selected_option = 0;
-    std::vector<std::pair<std::string, std::string>> answers;  // completed answers
-    std::vector<int> multi_selected;  // indices for multi-select
-    bool show_other_input = false;
-    std::string other_input_text;
-    std::shared_ptr<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>> promise;
-};
-
-/**
- * @brief Render the question dialog panel.
- * 
- * Mimics the kimi-cli question panel style:
- * - Cyan border with "? QUESTION" title
- * - Question text in yellow with ? prefix
- * - Options numbered [1], [2], etc.
- * - Selected option marked with →
- * - Multi-select shows [ ] / [✓] checkboxes
- * - Descriptions shown dimmed below each option
- */
-ftxui::Element render_question_dialog_panel(const QuestionDialogState& state);
 
 } // namespace tui

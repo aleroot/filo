@@ -94,6 +94,9 @@ public:
     /// Clear the stop flag (call before starting a new turn).
     void clear_stop_request();
 
+    /// Check if the current/last turn ended with an error (provider, transport, or configuration failure). Reset when a new turn starts.
+    [[nodiscard]] bool last_turn_failed() const;
+
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
 
@@ -333,6 +336,8 @@ private:
     // Cancellation support
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> turn_in_progress_{false};
+    // Turn outcome: set when a turn ends through an error path.
+    std::atomic<bool> turn_failed_{false};
     std::atomic<std::uint64_t> next_transport_turn_id_{1};
 };
 

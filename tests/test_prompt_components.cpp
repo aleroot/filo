@@ -130,7 +130,7 @@ TEST_CASE("workspace status uses a lock only for an enabled sandbox",
     CHECK(format_workspace_status_label("", true).empty());
 }
 
-TEST_CASE("turn activity indicator mirrors the tool rows and settles on a tick",
+TEST_CASE("turn activity indicator mirrors the tool rows and settles on an outcome glyph",
           "[tui][status-bar][activity]") {
     const auto render_indicator = [](TurnActivityState state,
                                      bool animate,
@@ -150,6 +150,8 @@ TEST_CASE("turn activity indicator mirrors the tool rows and settles on a tick",
     const auto static_active = render_indicator(TurnActivityState::Active, false, 0);
     const auto completed = render_indicator(TurnActivityState::Completed, true, 0);
     const auto completed_unanimated = render_indicator(TurnActivityState::Completed, false, 0);
+    const auto failed = render_indicator(TurnActivityState::Failed, true, 0);
+    const auto failed_unanimated = render_indicator(TurnActivityState::Failed, false, 0);
 
     CHECK(idle.find_first_not_of(" \n") == std::string::npos);
     // While active it runs the same quadrant-filling circle as the tool rows.
@@ -158,9 +160,14 @@ TEST_CASE("turn activity indicator mirrors the tool rows and settles on a tick",
     CHECK(active_frame_2.find("◑") != std::string::npos);
     CHECK(active_frame_3.find("◕") != std::string::npos);
     CHECK(static_active.find("●") != std::string::npos);
-    // Finished work settles on the same tick glyph as a completed subagent.
+    // Successfully finished work settles on the same tick glyph as a
+    // completed subagent.
     CHECK(completed.find("✓") != std::string::npos);
     CHECK(completed_unanimated.find("✓") != std::string::npos);
+    // Cancelled or errored work settles on the same cross glyph as a failed
+    // tool call.
+    CHECK(failed.find("✗") != std::string::npos);
+    CHECK(failed_unanimated.find("✗") != std::string::npos);
 }
 
 // ============================================================================

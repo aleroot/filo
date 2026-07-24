@@ -172,6 +172,9 @@ set(FILO_CORE_SOURCES
     src/tui/Text.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
+    src/tui/QuestionDialog.cpp
+    src/tui/QuestionDialogController.cpp
+    src/tui/QuestionDialogView.cpp
     src/tui/RewindActions.cpp
     src/tui/RewindPicker.cpp
     src/tui/SelectionClipboardCopier.cpp
@@ -536,6 +539,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
+    tests/test_question_dialog.cpp
     tests/test_history_component.cpp
     tests/test_key_input.cpp
     tests/test_session_replay.cpp
@@ -705,6 +709,7 @@ source_group(
         tests/test_conversation.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
+        tests/test_question_dialog.cpp
         tests/test_history_component.cpp
         tests/test_key_input.cpp
         tests/test_session_replay.cpp

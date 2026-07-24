@@ -578,13 +578,17 @@ Element render_turn_activity_indicator(TurnActivityState state,
         return text("");
     }
 
-    // Finished work settles on the same success tick used by completed tool
-    // calls and subagents.
-    if (state == TurnActivityState::Completed) {
+    // Finished work settles on the same outcome glyph used by completed tool
+    // calls and subagents: a tick on success, a cross when the turn was
+    // cancelled or ended with an error.
+    if (state == TurnActivityState::Completed || state == TurnActivityState::Failed) {
+        const auto status = state == TurnActivityState::Completed
+            ? ToolActivity::Status::Succeeded
+            : ToolActivity::Status::Failed;
         return hbox({
             text(" "),
-            text(std::string(tool_status_icon(ToolActivity::Status::Succeeded)))
-                | color(tool_status_color(ToolActivity::Status::Succeeded))
+            text(std::string(tool_status_icon(status)))
+                | color(tool_status_color(status))
                 | ftxui::bold
                 | size(WIDTH, EQUAL, 1),
         });
@@ -675,6 +679,11 @@ Element render_default_prompt_panel(Element input_line,
         separator(),
         make_prompt_box(std::move(input_line), ColorYellowBright) | xflex
     });
+}
+
+Element render_prompt_box(Element input_line,
+                          Color accent) {
+    return make_prompt_box(std::move(input_line), accent);
 }
 
 Element render_command_prompt_panel(const std::vector<CommandSuggestion>& suggestions,
@@ -1535,167 +1544,6 @@ Element render_stderr_panel(const std::vector<std::string>& lines) {
         Color::Red,
         Color::White)
         | size(HEIGHT, LESS_THAN, 9);
-}
-
-// ---------------------------------------------------------------------------
-// Question Dialog (AskUserQuestion tool) - kimi-cli style
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// Cyan color matching kimi-cli's question panel
-inline constexpr RgbColor ColorQuestionCyan{0, 180, 220};
-inline constexpr RgbColor ColorQuestionYellow{255, 200, 80};
-
-Element render_question_tabs(const QuestionDialogState& state) {
-    if (state.questions.size() <= 1) {
-        return emptyElement();
-    }
-    
-    Elements tabs;
-    for (size_t i = 0; i < state.questions.size(); ++i) {
-        const auto& q = state.questions[i];
-        std::string label = q.header.empty() ? std::format("Q{}", i + 1) : q.header;
-        
-        std::string icon;
-        ftxui::Color style;
-        if (static_cast<int>(i) == state.current_question_index) {
-            icon = "\xe2\x97\x8f";  // ●
-            style = ColorQuestionCyan;
-        } else if (i < state.answers.size()) {
-            icon = "\xe2\x9c\x93";  // ✓
-            style = Color::Green;
-        } else {
-            icon = "\xe2\x97\x8b";  // ○
-            style = Color::GrayDark;
-        }
-        
-        if (i > 0) {
-            tabs.push_back(text("  ") | color(Color::GrayDark));
-        }
-        tabs.push_back(text(std::format("{} {}", icon, label)) | color(style));
-    }
-    
-    return hbox(std::move(tabs));
-}
-
-Element render_question_option(const QuestionDialogOption& opt,
-                                int index,
-                                int selected_index,
-                                bool multi_select,
-                                const std::vector<int>& multi_selected,
-                                bool show_other_input,
-                                const std::string& other_input) {
-    const int num = index + 1;
-    const bool is_selected = (index == selected_index);
-    const bool is_other_opt = (opt.label == "Other");
-    
-    Elements lines;
-    
-    // Main option line
-    Element option_line;
-    if (multi_select) {
-        // Checkbox style for multi-select
-        bool checked = std::find(multi_selected.begin(), multi_selected.end(), index) != multi_selected.end();
-        std::string checkbox = checked ? "[\xe2\x9c\x93]" : "[ ]";  // [✓] or [ ]
-        
-        if (is_selected) {
-            option_line = text(std::format("{} {}", checkbox, opt.label)) | color(ColorQuestionCyan);
-        } else {
-            option_line = text(std::format("{} {}", checkbox, opt.label)) | color(Color::GrayLight);
-        }
-    } else {
-        // Radio style for single-select
-        if (is_selected) {
-            if (is_other_opt && show_other_input) {
-                // Show inline input for Other option
-                std::string display = other_input.empty() ? "" : other_input;
-                option_line = text(std::format("\xe2\x86\x92 [{}] {}: {}\xe2\x96\x88", num, opt.label, display)) | color(ColorQuestionCyan);
-            } else {
-                option_line = text(std::format("\xe2\x86\x92 [{}] {}", num, opt.label)) | color(ColorQuestionCyan);
-            }
-        } else {
-            option_line = text(std::format("  [{}] {}", num, opt.label)) | color(Color::GrayLight);
-        }
-    }
-    lines.push_back(option_line);
-    
-    // Description (if any)
-    if (!opt.description.empty() && !(is_other_opt && show_other_input)) {
-        lines.push_back(text(std::format("      {}", opt.description)) | dim);
-    }
-    
-    return vbox(std::move(lines));
-}
-
-} // namespace
-
-Element render_question_dialog_panel(const QuestionDialogState& state) {
-    if (state.questions.empty() || state.current_question_index >= static_cast<int>(state.questions.size())) {
-        return emptyElement();
-    }
-    
-    const auto& current_q = state.questions[state.current_question_index];
-    Elements children;
-    
-    // Tab navigation (if multiple questions)
-    auto tabs = render_question_tabs(state);
-    if (tabs != emptyElement()) {
-        children.push_back(std::move(tabs));
-        children.push_back(text(""));  // Empty line
-    }
-    
-    // Question text with ? prefix in yellow
-    children.push_back(text(std::format("? {}", current_q.question)) | color(ColorQuestionYellow));
-    
-    // Multi-select hint
-    if (current_q.multi_select) {
-        children.push_back(text("  (SPACE to toggle, ENTER to submit)") | dim);
-    }
-    children.push_back(text(""));  // Empty line
-    
-    // Body content hint (if present)
-    if (!current_q.body.empty()) {
-        children.push_back(text("  \xe2\x96\xb6 Press ctrl-e to view full content") | color(ColorQuestionCyan));
-        children.push_back(text(""));
-    }
-    
-    // Options
-    for (size_t i = 0; i < current_q.options.size(); ++i) {
-        children.push_back(render_question_option(
-            current_q.options[i],
-            static_cast<int>(i),
-            state.selected_option,
-            current_q.multi_select,
-            state.multi_selected,
-            state.show_other_input,
-            state.other_input_text
-        ));
-    }
-    
-    // Other input hint
-    if (state.show_other_input) {
-        children.push_back(text(""));
-        children.push_back(text("  Type your answer, then press Enter to submit.") | dim);
-    } else if (state.questions.size() > 1) {
-        children.push_back(text(""));
-        children.push_back(text("  \xe2\x97\x84/\xe2\x96\xba switch  \xe2\x96\xb2/\xe2\x96\xbc select  Enter: submit  Esc: exit") | dim);
-    }
-    
-    // Build the panel with cyan border and "? QUESTION" title
-    auto content = vbox(std::move(children));
-    
-    return vbox({
-        hbox({
-            text(" ? QUESTION ") | ftxui::bold | color(ColorQuestionCyan),
-            filler(),
-            text("Up/Down: select  Enter: confirm  1-5: quick select  Esc: exit") | color(Color::GrayDark)
-        }),
-        separator(),
-        content,
-        filler(),
-    }) | UiBorder(ColorQuestionCyan)
-      | size(HEIGHT, GREATER_THAN, 12);
 }
 
 } // namespace tui

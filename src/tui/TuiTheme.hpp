@@ -23,6 +23,7 @@ inline constexpr RgbColor ColorWarn{255, 120, 30};
 inline constexpr RgbColor ColorToolDone{255, 221, 92};
 inline constexpr RgbColor ColorToolFail{255, 150, 92};
 inline constexpr RgbColor ColorToolPending{255, 205, 110};
+inline constexpr RgbColor ColorQuestionCyan{0, 180, 220};
 
 #if defined(__APPLE__)
 inline constexpr auto UiBorderStyle = ftxui::LIGHT;

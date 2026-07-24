@@ -13,6 +13,7 @@
 #include "Text.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
+#include "QuestionDialogController.hpp"
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
 #include "TuiTheme.hpp"
@@ -647,6 +648,14 @@ RunResult run(RunOptions opts) {
         Auto,   // Smart routing with AutoClassifier task classification
     };
 
+    // Outcome of the most recent assistant turn. Drives the footer marker
+    // shown once the turn winds down: tick on success, cross otherwise.
+    enum class TurnCompletionStatus {
+        None,       // Nothing to report yet: no marker.
+        Succeeded,  // The response was generated successfully: tick.
+        Failed,     // The turn was cancelled or ended with an error: cross.
+    };
+
     auto parse_model_selection_mode = [](std::string_view mode) {
         std::string normalized;
         normalized.reserve(mode.size());
@@ -882,7 +891,8 @@ RunResult run(RunOptions opts) {
     std::mutex  ui_mutex;
     auto direct_shell_state = std::make_shared<DirectShellState>();
     std::atomic_bool assistant_turn_active{false};
-    std::atomic_bool assistant_turn_show_completion{false};
+    std::atomic<TurnCompletionStatus> assistant_turn_completion_status{
+        TurnCompletionStatus::None};
     std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAgentTurn {
         std::string text;
@@ -1168,8 +1178,7 @@ RunResult run(RunOptions opts) {
     };
     ConversationSearchState conversation_search_state;
 
-    // Question dialog state (AskUserQuestion tool)
-    tui::QuestionDialogState question_dialog_state;
+    QuestionDialogController question_dialog;
 
     struct SettingsChoice {
         std::string value;
@@ -1453,7 +1462,8 @@ RunResult run(RunOptions opts) {
     auto clear_screen = [&]() {
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
-        assistant_turn_show_completion.store(false, std::memory_order_relaxed);
+        assistant_turn_completion_status.store(TurnCompletionStatus::None,
+                                               std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.clear();
@@ -1872,7 +1882,8 @@ RunResult run(RunOptions opts) {
         if (!next_lease) return next_lease.error();
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
-        assistant_turn_show_completion.store(false, std::memory_order_relaxed);
+        assistant_turn_completion_status.store(TurnCompletionStatus::None,
+                                               std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
@@ -3937,38 +3948,7 @@ RunResult run(RunOptions opts) {
 
     // ── AskUserQuestion callback ─────────────────────────────────────────────
     ask_user_tool->setQuestionCallback([&](core::tools::QuestionRequest request) {
-        std::shared_ptr<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>
-            displaced_promise;
-
-        // Convert core::tools types to tui types
-        std::vector<tui::QuestionDialogItem> dialog_questions;
-        for (const auto& q : request.questions) {
-            tui::QuestionDialogItem item;
-            item.question = q.question;
-            item.header = q.header;
-            item.multi_select = q.multi_select;
-            item.body = q.body;
-            for (const auto& opt : q.options) {
-                item.options.push_back({opt.label, opt.description});
-            }
-            dialog_questions.push_back(std::move(item));
-        }
-        
-        {
-            std::lock_guard lock(ui_mutex);
-            if (question_dialog_state.active && question_dialog_state.promise) {
-                displaced_promise = std::move(question_dialog_state.promise);
-            }
-            question_dialog_state.active = true;
-            question_dialog_state.questions = std::move(dialog_questions);
-            question_dialog_state.current_question_index = 0;
-            question_dialog_state.selected_option = 0;
-            question_dialog_state.answers.clear();
-            question_dialog_state.multi_selected.clear();
-            question_dialog_state.show_other_input = false;
-            question_dialog_state.other_input_text.clear();
-            question_dialog_state.promise = request.promise;
-        }
+        auto displaced_promise = question_dialog.open(std::move(request));
         wake_ui();
 
         if (displaced_promise) {
@@ -4680,13 +4660,18 @@ RunResult run(RunOptions opts) {
     // agent turn (with user message card + tool cards) via send_user_message_fn.
     std::function<void(std::string, core::agent::Agent::TurnCallbacks)> submit_agent_turn;
 
-    auto take_queued_steering_turn_or_mark_idle = [&]() -> std::optional<PendingAgentTurn> {
+    auto take_queued_steering_turn_or_mark_idle =
+        [&](bool turn_succeeded) -> std::optional<PendingAgentTurn> {
         std::lock_guard lock(ui_mutex);
         if (queued_steering_turns.empty()) {
             assistant_turn_active.store(false, std::memory_order_release);
             // The turn wound down with nothing queued behind it: let the status
-            // bar settle on the completion tick.
-            assistant_turn_show_completion.store(true, std::memory_order_release);
+            // bar settle on the outcome marker — a tick when the response was
+            // generated successfully, a cross when it was cancelled or errored.
+            assistant_turn_completion_status.store(
+                turn_succeeded ? TurnCompletionStatus::Succeeded
+                               : TurnCompletionStatus::Failed,
+                std::memory_order_release);
             wake_ui();
             return std::nullopt;
         }
@@ -4732,7 +4717,8 @@ RunResult run(RunOptions opts) {
             return;
         }
         assistant_turn_active.store(true, std::memory_order_release);
-        assistant_turn_show_completion.store(false, std::memory_order_release);
+        assistant_turn_completion_status.store(TurnCompletionStatus::None,
+                                               std::memory_order_release);
         std::string timestamp = current_time_str();
         std::string assistant_message_id;
         {
@@ -4821,6 +4807,9 @@ RunResult run(RunOptions opts) {
                         turn_activity_timers.elapsed(assistant_message_id);
                     turn_activity_timers.stop(assistant_message_id);
                     const bool was_stopped = agent->is_stop_requested();
+                    // A turn only counts as successfully completed when it was
+                    // neither cancelled (ESC/Ctrl+C) nor ended with an error.
+                    const bool turn_succeeded = !was_stopped && !agent->last_turn_failed();
                     update_assistant_message(assistant_message_id, [&](UiMessage& message) {
                         message.pending = false;
                         message.finalized = true;
@@ -4844,7 +4833,7 @@ RunResult run(RunOptions opts) {
                         }
                     });
                     save_session_snapshot();
-                    if (auto next_turn = take_queued_steering_turn_or_mark_idle();
+                    if (auto next_turn = take_queued_steering_turn_or_mark_idle(turn_succeeded);
                         next_turn.has_value()) {
                         submit_agent_turn(std::move(next_turn->text),
                                           std::move(next_turn->callbacks));
@@ -4956,7 +4945,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             if (perm_state.active
-                || question_dialog_state.active
+                || question_dialog.active()
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
@@ -5112,7 +5101,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             if (perm_state.active
-                || question_dialog_state.active
+                || question_dialog.active()
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
@@ -5240,6 +5229,10 @@ RunResult run(RunOptions opts) {
     };
 
     auto input_component = PromptInput(&input_text, "Ask anything", input_option);
+    auto input_stack = Container::Stacked({
+        input_component,
+        question_dialog.editor_component(),
+    });
     std::size_t history_snapshot_revision = 0;
     auto history_snapshot = std::make_shared<const std::vector<UiMessage>>();
     auto history_component = Make<HistoryComponent>(
@@ -5274,7 +5267,7 @@ RunResult run(RunOptions opts) {
     };
 
     // ── Event handling ───────────────────────────────────────────────────────
-    auto component = CatchEvent(input_component, [&](Event event) {
+    auto component = CatchEvent(input_stack, [&](Event event) {
         reset_double_escape_on_non_escape(double_escape_state, event);
 
         if (event == Event::Escape
@@ -5438,99 +5431,18 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        // ── Question dialog input handling ────────────────────────────────────────
-        bool question_dialog_was_active = false;
-        bool question_dialog_submitted = false;
-        bool question_dialog_dismissed = false;
-        std::shared_ptr<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>> question_promise;
-        std::optional<std::vector<std::pair<std::string, std::string>>> question_result;
-        {
-            std::lock_guard lock(ui_mutex);
-            if (question_dialog_state.active) {
-                question_dialog_was_active = true;
-                auto& state = question_dialog_state;
-                const auto& current_q = state.questions[state.current_question_index];
-                const int option_count = static_cast<int>(current_q.options.size());
-                
-                if (event == Event::ArrowUp) {
-                    state.selected_option = (state.selected_option + option_count - 1) % option_count;
-                } else if (event == Event::ArrowDown) {
-                    state.selected_option = (state.selected_option + 1) % option_count;
-                } else if (event == Event::Character(' ') && current_q.multi_select) {
-                    // Toggle selection for multi-select
-                    auto it = std::find(state.multi_selected.begin(), state.multi_selected.end(), state.selected_option);
-                    if (it != state.multi_selected.end()) {
-                        state.multi_selected.erase(it);
-                    } else {
-                        state.multi_selected.push_back(state.selected_option);
-                    }
-                } else if (event == Event::Return) {
-                    if (current_q.options[state.selected_option].label == "Other") {
-                        // Show Other input (not implemented inline - just dismiss for now)
-                        question_dialog_dismissed = true;
-                        state.active = false;
-                        question_promise = std::move(state.promise);
-                    } else {
-                        // Submit answer
-                        state.answers.push_back({current_q.question, current_q.options[state.selected_option].label});
-                        
-                        // Move to next question or finish
-                        if (state.current_question_index + 1 < static_cast<int>(state.questions.size())) {
-                            state.current_question_index++;
-                            state.selected_option = 0;
-                        } else {
-                            // All questions answered
-                            question_dialog_submitted = true;
-                            state.active = false;
-                            question_result = state.answers;
-                            question_promise = std::move(state.promise);
-                        }
-                    }
-                } else if (event == Event::Escape || is_ctrl_c_event(event)) {
-                    question_dialog_dismissed = true;
-                    state.active = false;
-                    question_promise = std::move(state.promise);
-                    if (is_ctrl_c_event(event)) {
-                        agent->request_stop();
-                    }
-                } else {
-                    // Number keys 1-5 for quick select
-                    for (int n = 1; n <= std::min(option_count, 5); ++n) {
-                        if (event == Event::Character(static_cast<char>('0' + n))) {
-                            state.selected_option = n - 1;
-                            if (!current_q.multi_select) {
-                                // Auto-submit on number press for single-select
-                                if (current_q.options[state.selected_option].label == "Other") {
-                                    question_dialog_dismissed = true;
-                                    state.active = false;
-                                    question_promise = std::move(state.promise);
-                                } else {
-                                    state.answers.push_back({current_q.question, current_q.options[state.selected_option].label});
-                                    if (state.current_question_index + 1 < static_cast<int>(state.questions.size())) {
-                                        state.current_question_index++;
-                                        state.selected_option = 0;
-                                    } else {
-                                        question_dialog_submitted = true;
-                                        state.active = false;
-                                        question_result = state.answers;
-                                        question_promise = std::move(state.promise);
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
+        // ── Question dialog input handling ───────────────────────────────
+        auto question_result = question_dialog.handle_event(
+            event,
+            is_ctrl_c_event(event));
+        if (question_result.handled) {
+            if (question_result.restore_main_input_focus) {
+                input_component->TakeFocus();
             }
-        }
-        if (question_dialog_was_active) {
-            if (question_promise) {
-                if (question_dialog_submitted && question_result.has_value()) {
-                    question_promise->set_value(*question_result);
-                } else if (question_dialog_dismissed) {
-                    question_promise->set_value(std::nullopt);
-                }
+            if (question_result.stop_agent) {
+                agent->request_stop();
             }
+            question_result.resolve();
             return true;
         }
 
@@ -6598,12 +6510,7 @@ RunResult run(RunOptions opts) {
             queued_steering_count = queued_steering_turns.size();
         }
         
-        // Question dialog state (copy for rendering)
-        QuestionDialogState question_state_copy;
-        {
-            std::lock_guard lock(ui_mutex);
-            question_state_copy = question_dialog_state;
-        }
+        const bool question_dialog_active = question_dialog.active();
         
         auto history_el = history_component->Render() | flex;
 
@@ -6643,8 +6550,8 @@ RunResult run(RunOptions opts) {
                 settings_rows,
                 settings_panel_selected,
                 settings_panel_status);
-        } else if (question_state_copy.active) {
-            bottom_el = render_question_dialog_panel(question_state_copy);
+        } else if (question_dialog_active) {
+            bottom_el = question_dialog.render();
         } else if (code_block_runner_snapshot.active) {
             bottom_el = render_code_block_runner_panel(code_block_runner_snapshot);
         } else if (rewind_picker_active) {
@@ -6729,7 +6636,8 @@ RunResult run(RunOptions opts) {
                 perm_allow_label,
                 perm_selected);
         } else {
-            Element input_el = component->Render() | color(tui::ColorYellowBright) | xflex;
+            Element input_el =
+                input_component->Render() | color(tui::ColorYellowBright) | xflex;
 
             if (command_snapshot.active.has_value() && !command_snapshot.suggestions.empty() && !command_picker.suppressed) {
                 bottom_el = render_command_prompt_panel(
@@ -6961,12 +6869,21 @@ RunResult run(RunOptions opts) {
         }
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
-        const TurnActivityState turn_activity_state =
-            response_in_progress
-                ? TurnActivityState::Active
-                : (assistant_turn_show_completion.load(std::memory_order_acquire)
-                       ? TurnActivityState::Completed
-                       : TurnActivityState::Idle);
+        TurnActivityState turn_activity_state = TurnActivityState::Idle;
+        if (response_in_progress) {
+            turn_activity_state = TurnActivityState::Active;
+        } else {
+            switch (assistant_turn_completion_status.load(std::memory_order_acquire)) {
+                case TurnCompletionStatus::Succeeded:
+                    turn_activity_state = TurnActivityState::Completed;
+                    break;
+                case TurnCompletionStatus::Failed:
+                    turn_activity_state = TurnActivityState::Failed;
+                    break;
+                case TurnCompletionStatus::None:
+                    break;
+            }
+        }
         left_items.push_back(render_turn_activity_indicator(
             turn_activity_state,
             ui_show_spinner.load(std::memory_order_relaxed),

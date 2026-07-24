@@ -310,6 +310,10 @@ void Agent::clear_stop_request() {
     stop_requested_.store(false, std::memory_order_release);
 }
 
+bool Agent::last_turn_failed() const {
+    return turn_failed_.load(std::memory_order_acquire);
+}
+
 // ---------------------------------------------------------------------------
 // Mode management
 // ---------------------------------------------------------------------------
@@ -787,6 +791,7 @@ void Agent::send_message(core::llm::Message user_message,
             std::memory_order_acq_rel,
             std::memory_order_acquire)) {
         text_callback("\n[Error: another agent turn is already running. Wait for it to finish or stop it before sending a new message.]\n");
+        turn_failed_.store(true, std::memory_order_release);
         done_callback();
         return;
     }
@@ -817,6 +822,7 @@ void Agent::send_message(core::llm::Message user_message,
     };
 
     clear_stop_request();  // Reset cancellation flag for new turn
+    turn_failed_.store(false, std::memory_order_release);  // Reset outcome for new turn
     auto turn_state = std::make_shared<TurnState>();
     if (user_message.role.empty()) {
         user_message.role = "user";
@@ -931,6 +937,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
     if (!provider) {
         text_callback("\n[Error: no active provider configured]\n");
+        turn_failed_.store(true, std::memory_order_release);
         done_callback();
         return;
     }
@@ -1073,6 +1080,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // ── Final chunk ──────────────────────────────────────────────────
         // Record API call outcome (is_error is true for HTTP 4XX/5XX or connection errors)
         core::session::SessionStats::get_instance().record_api_call(!chunk.is_error);
+        if (chunk.is_error) {
+            self->turn_failed_.store(true, std::memory_order_release);
+        }
 
         // Record token usage in the ledger and session stats.
         {
