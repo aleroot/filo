@@ -1352,7 +1352,7 @@ public:
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
-            "  Ctrl+P/N Navigate input history (alternative to arrows)\n"
+            "  Ctrl+P   Open the model picker without clearing the current input\n"
             "  Ctrl+F   Search the conversation history\n"
             "  Ctrl+G   Inspect and run fenced code from the latest response\n"
             "  F2       Cycle agent mode (BUILD → DEBUG → RESEARCH → EXECUTE)\n"
@@ -2221,7 +2221,7 @@ public:
 
             std::ostringstream oss;
             oss << "\n📜  Input History (" << total << " total, showing last " << std::min(limit, total) << ")\n";
-            oss << "   Use ↑/↓ or Ctrl+P/Ctrl+N to navigate in the prompt.\n\n";
+            oss << "   Use ↑/↓ to navigate in the prompt.\n\n";
 
             const std::size_t start = total > limit ? total - limit : 0;
             for (std::size_t i = total; i > start; --i) {

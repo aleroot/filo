@@ -6347,6 +6347,9 @@ RunResult run(RunOptions opts) {
             agent->set_mode(modes[current_mode_idx].first);
             return true;
         }
+        if (is_ctrl_p_event(event)) {
+            return open_model_picker();
+        }
         if (is_ctrl_l_event(event)) {  // Ctrl+L — clear screen (same as /clear)
             clear_screen();
             return true;
@@ -6413,15 +6416,6 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        // ── History navigation (Gemini CLI compat) ───────────────────────────
-        // Ctrl+P → previous history entry
-        if (event == Event::Special({16})) {
-            return navigate_history_prev();
-        }
-        // Ctrl+N → next history entry
-        if (event == Event::Special({14})) {
-            return navigate_history_next();
-        }
         // Up/Down arrows with no active autocomplete → navigate history
         if (event == Event::ArrowUp) {
             return navigate_history_prev();

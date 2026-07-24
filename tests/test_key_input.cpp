@@ -20,12 +20,14 @@ TEST_CASE("KeyInput detects all supported Ctrl events", "[tui][key_input]") {
     REQUIRE(tui::is_ctrl_f_event(ftxui::Event::Special({6})));
     REQUIRE(tui::is_ctrl_g_event(ftxui::Event::Special({7})));
     REQUIRE(tui::is_ctrl_v_event(ftxui::Event::Special({22})));
+    REQUIRE(tui::is_ctrl_p_event(ftxui::Event::Special({16})));
 }
 
 TEST_CASE("KeyInput detects kitty keyboard protocol events", "[tui][key_input]") {
     REQUIRE(tui::is_ctrl_letter_event(ftxui::Event::Special("\x1B[120;5u"), 'x'));
     REQUIRE(tui::is_ctrl_g_event(ftxui::Event::Special("\x1B[103;5u")));
     REQUIRE(tui::is_ctrl_letter_event(ftxui::Event::Special("\x1B[68;5u"), 'd'));
+    REQUIRE(tui::is_ctrl_p_event(ftxui::Event::Special("\x1B[112;5u")));
     REQUIRE_FALSE(tui::is_ctrl_letter_event(ftxui::Event::Special("\x1B[120;1u"), 'x'));
 }
 

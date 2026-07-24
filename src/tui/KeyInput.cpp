@@ -150,4 +150,8 @@ bool is_ctrl_c_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 'c');
 }
 
+bool is_ctrl_p_event(const ftxui::Event& event) {
+    return is_ctrl_letter_event(event, 'p');
+}
+
 } // namespace tui
