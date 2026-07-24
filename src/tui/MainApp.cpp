@@ -882,6 +882,7 @@ RunResult run(RunOptions opts) {
     std::mutex  ui_mutex;
     auto direct_shell_state = std::make_shared<DirectShellState>();
     std::atomic_bool assistant_turn_active{false};
+    std::atomic_bool assistant_turn_show_completion{false};
     std::atomic<std::size_t> direct_shell_animation_count{0};
     struct PendingAgentTurn {
         std::string text;
@@ -1452,6 +1453,7 @@ RunResult run(RunOptions opts) {
     auto clear_screen = [&]() {
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
+        assistant_turn_show_completion.store(false, std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             ui_messages.clear();
@@ -1870,6 +1872,7 @@ RunResult run(RunOptions opts) {
         if (!next_lease) return next_lease.error();
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
+        assistant_turn_show_completion.store(false, std::memory_order_relaxed);
         {
             std::lock_guard lock(ui_mutex);
             session_id         = data.session_id;
@@ -4681,6 +4684,9 @@ RunResult run(RunOptions opts) {
         std::lock_guard lock(ui_mutex);
         if (queued_steering_turns.empty()) {
             assistant_turn_active.store(false, std::memory_order_release);
+            // The turn wound down with nothing queued behind it: let the status
+            // bar settle on the completion tick.
+            assistant_turn_show_completion.store(true, std::memory_order_release);
             wake_ui();
             return std::nullopt;
         }
@@ -4726,6 +4732,7 @@ RunResult run(RunOptions opts) {
             return;
         }
         assistant_turn_active.store(true, std::memory_order_release);
+        assistant_turn_show_completion.store(false, std::memory_order_release);
         std::string timestamp = current_time_str();
         std::string assistant_message_id;
         {
@@ -6954,8 +6961,14 @@ RunResult run(RunOptions opts) {
         }
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
+        const TurnActivityState turn_activity_state =
+            response_in_progress
+                ? TurnActivityState::Active
+                : (assistant_turn_show_completion.load(std::memory_order_acquire)
+                       ? TurnActivityState::Completed
+                       : TurnActivityState::Idle);
         left_items.push_back(render_turn_activity_indicator(
-            response_in_progress,
+            turn_activity_state,
             ui_show_spinner.load(std::memory_order_relaxed),
             tick));
         left_items.push_back(guardrail_el);

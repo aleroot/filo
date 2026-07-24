@@ -130,25 +130,37 @@ TEST_CASE("workspace status uses a lock only for an enabled sandbox",
     CHECK(format_workspace_status_label("", true).empty());
 }
 
-TEST_CASE("turn activity indicator spins only while a response is active",
+TEST_CASE("turn activity indicator mirrors the tool rows and settles on a tick",
           "[tui][status-bar][activity]") {
-    const auto render_indicator = [](bool active, bool animate, std::size_t tick) {
-        auto indicator = render_turn_activity_indicator(active, animate, tick);
+    const auto render_indicator = [](TurnActivityState state,
+                                     bool animate,
+                                     std::size_t tick) {
+        auto indicator = render_turn_activity_indicator(state, animate, tick);
         auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(2),
                                             ftxui::Dimension::Fixed(1));
         ftxui::Render(screen, indicator);
         return strip_ansi(screen.ToString());
     };
 
-    const auto idle = render_indicator(false, true, 0);
-    const auto active_frame_0 = render_indicator(true, true, 0);
-    const auto active_frame_1 = render_indicator(true, true, 1);
-    const auto static_active = render_indicator(true, false, 0);
+    const auto idle = render_indicator(TurnActivityState::Idle, true, 0);
+    const auto active_frame_0 = render_indicator(TurnActivityState::Active, true, 0);
+    const auto active_frame_1 = render_indicator(TurnActivityState::Active, true, 1);
+    const auto active_frame_2 = render_indicator(TurnActivityState::Active, true, 2);
+    const auto active_frame_3 = render_indicator(TurnActivityState::Active, true, 3);
+    const auto static_active = render_indicator(TurnActivityState::Active, false, 0);
+    const auto completed = render_indicator(TurnActivityState::Completed, true, 0);
+    const auto completed_unanimated = render_indicator(TurnActivityState::Completed, false, 0);
 
     CHECK(idle.find_first_not_of(" \n") == std::string::npos);
-    CHECK(active_frame_0 != active_frame_1);
-    CHECK(active_frame_0.find_first_not_of(" \n") != std::string::npos);
+    // While active it runs the same quadrant-filling circle as the tool rows.
+    CHECK(active_frame_0.find("○") != std::string::npos);
+    CHECK(active_frame_1.find("◔") != std::string::npos);
+    CHECK(active_frame_2.find("◑") != std::string::npos);
+    CHECK(active_frame_3.find("◕") != std::string::npos);
     CHECK(static_active.find("●") != std::string::npos);
+    // Finished work settles on the same tick glyph as a completed subagent.
+    CHECK(completed.find("✓") != std::string::npos);
+    CHECK(completed_unanimated.find("✓") != std::string::npos);
 }
 
 // ============================================================================

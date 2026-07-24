@@ -1,5 +1,6 @@
 #include "PromptComponents.hpp"
 #include "Constants.hpp"
+#include "Conversation.hpp"
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionStore.hpp"
@@ -25,8 +26,6 @@ using namespace ftxui;
 namespace tui {
 
 namespace {
-
-constexpr int kTurnActivitySpinnerCharset = 12;
 
 int estimated_prompt_lines(std::string_view input_text) {
     const auto explicit_lines =
@@ -572,15 +571,29 @@ std::string format_runtime_status_summary(std::string_view provider_name,
         mcp_server_count);
 }
 
-Element render_turn_activity_indicator(bool active,
+Element render_turn_activity_indicator(TurnActivityState state,
                                        bool animate,
                                        std::size_t tick) {
-    if (!active) {
+    if (state == TurnActivityState::Idle) {
         return text("");
     }
 
+    // Finished work settles on the same success tick used by completed tool
+    // calls and subagents.
+    if (state == TurnActivityState::Completed) {
+        return hbox({
+            text(" "),
+            text(std::string(tool_status_icon(ToolActivity::Status::Succeeded)))
+                | color(tool_status_color(ToolActivity::Status::Succeeded))
+                | ftxui::bold
+                | size(WIDTH, EQUAL, 1),
+        });
+    }
+
+    // While the turn runs, spin the same quadrant-filling circle as the tool
+    // call rows so every activity glyph in the UI moves in lockstep.
     Element signal = animate
-        ? spinner(kTurnActivitySpinnerCharset, tick)
+        ? text(std::string(tool_status_spinner(tick)))
         : text("●");
     return hbox({
         text(" "),

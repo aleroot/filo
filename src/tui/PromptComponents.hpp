@@ -76,10 +76,19 @@ enum class ReviewPickerMode {
     std::string_view model_name,
     int mcp_server_count);
 
-/// Compact footer signal for an active assistant turn. Uses a native FTXUI
-/// single-cell spinner when animation is enabled and a static dot otherwise.
-/// Returns an empty element as soon as the turn is no longer active.
-ftxui::Element render_turn_activity_indicator(bool active,
+/// Lifecycle of the compact footer signal for the assistant turn.
+enum class TurnActivityState {
+    Idle,       ///< No turn activity to report: renders nothing.
+    Active,     ///< A turn is running: animated quadrant-filling circle.
+    Completed,  ///< The last turn finished: static success tick.
+};
+
+/// Compact footer signal for the assistant turn. While a turn runs it shows
+/// the same quadrant-filling circle animation as the tool call rows; once the
+/// work is finished it settles on a static tick, mirroring a completed
+/// subagent. Returns an empty element when there is no turn activity to
+/// report. When animation is disabled an active turn shows a static dot.
+ftxui::Element render_turn_activity_indicator(TurnActivityState state,
                                               bool animate,
                                               std::size_t tick);
 
