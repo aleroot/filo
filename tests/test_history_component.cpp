@@ -98,6 +98,35 @@ int rendered_row_containing(std::string_view text, std::string_view marker) {
     return static_cast<int>(std::count(text.begin(), text.begin() + pos, '\n'));
 }
 
+// Cell coordinates of a marker within a rendered screen dump. Columns are
+// counted in glyphs rather than bytes, because transcript rows are full of
+// multi-byte box-drawing and status characters.
+struct RenderedCell {
+    int row = -1;
+    int column = -1;
+};
+
+RenderedCell rendered_cell_of(std::string_view text, std::string_view marker) {
+    const auto pos = text.find(marker);
+    if (pos == std::string_view::npos) {
+        return {};
+    }
+    const auto line_break = text.rfind('\n', pos);
+    const std::size_t line_start = line_break == std::string_view::npos ? 0 : line_break + 1;
+
+    int column = 0;
+    for (std::size_t i = line_start; i < pos; ++i) {
+        // Continuation bytes (10xxxxxx) share a cell with their lead byte.
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
+            ++column;
+        }
+    }
+    return {
+        .row = static_cast<int>(std::count(text.begin(), text.begin() + pos, '\n')),
+        .column = column,
+    };
+}
+
 // FTXUI flexbox nodes recompute their required height several times per frame.
 // This small node models a wrapped layout whose provisional height shrinks and
 // then returns to its final value within the same Render() call.
@@ -458,6 +487,44 @@ TEST_CASE("HistoryComponent toggles a finished reasoning box by mouse click",
 
     const auto expanded = render_history_text(history);
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("Hidden chain of thought."));
+}
+
+TEST_CASE("HistoryComponent toggles a tool result by mouse click",
+          "[tui][history_component]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    auto msg = tui::make_assistant_message("", "", false);
+    auto tool = tui::make_tool_activity(
+        "read-click",
+        "read_file",
+        R"({"path":"src/main.cpp"})",
+        "src/main.cpp");
+    tui::apply_tool_result(tool, R"({"content":"hidden source line\n"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    const auto collapsed = render_history_text(history);
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("▶ Read"));
+    REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("hidden source line"));
+    const auto chevron = rendered_cell_of(collapsed, "▶ Read");
+    REQUIRE(chevron.row >= 0);
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = chevron.column;
+    mouse.y = chevron.row;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+
+    const auto expanded = render_history_text(history);
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("▼ Read"));
+    REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("hidden source line"));
 }
 
 // ============================================================================

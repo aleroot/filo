@@ -73,11 +73,16 @@ std::vector<UiMessage> build_resumed_ui_messages(
                 asst_msg.activity_recorded = true;
             }
             for (const auto& tc : msg.tool_calls) {
+                // Replayed calls belong to a past session; a diff built against
+                // the current on-disk file would be stale, and replaying a long
+                // session would trigger one file read per historical edit. Leave
+                // the preview empty — the transcript degrades to plain results.
                 asst_msg.tools.push_back(make_tool_activity(
                     tc.id,
                     tc.function.name,
                     tc.function.arguments,
-                    summarize_tool_arguments(tc.function.name, tc.function.arguments)));
+                    summarize_tool_arguments(tc.function.name, tc.function.arguments),
+                    /*build_diff_preview=*/false));
             }
             current_asst_idx = static_cast<int>(ui_messages.size());
             ui_messages.push_back(std::move(asst_msg));

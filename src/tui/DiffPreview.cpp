@@ -31,11 +31,18 @@ void for_each_line(std::string_view text, Fn&& fn) {
     }
 }
 
+/// Splits `text` into lines, preserving interior blanks. A single trailing
+/// newline is treated as a terminator rather than the start of another line, so
+/// "alpha\nbeta\n" is two lines — matching how editors count them and keeping the
+/// transcript's "+N -M" stats and the rendered diff free of a phantom last line.
 std::vector<std::string> split_lines_keep_empty(std::string_view text) {
     std::vector<std::string> lines;
     for_each_line(text, [&](std::string_view line) {
         lines.emplace_back(line);
     });
+    if (lines.size() > 1 && lines.back().empty()) {
+        lines.pop_back();
+    }
     if (lines.empty()) {
         lines.emplace_back();
     }

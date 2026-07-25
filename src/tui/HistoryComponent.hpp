@@ -70,6 +70,9 @@ private:
     std::size_t compute_render_cache_key(const ConversationRenderOptions& options) const;
     static std::size_t combine_hash(std::size_t seed, std::size_t value);
 
+    // Expanded state a disclosure shows before the user has ever toggled it.
+    bool default_disclosure_expanded(const std::string& disclosure_id) const;
+
     std::function<MessageSnapshot()> get_messages_;
     const std::atomic<size_t>& animation_tick_;
     std::function<ConversationRenderOptions()> get_options_;
@@ -79,6 +82,7 @@ private:
     TranscriptViewport transcript_viewport_;
     std::shared_ptr<ConversationScrollAnchor> scroll_anchor_ =
         std::make_shared<ConversationScrollAnchor>();
+    // Explicit user toggles only; absent entries fall back to the pure default.
     std::unordered_map<std::string, bool>        disclosure_expanded_;
     std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
 };

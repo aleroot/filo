@@ -735,6 +735,318 @@ std::string render_panel_text(const std::vector<UiMessage>& messages,
 }
 } // namespace
 
+TEST_CASE("tool presentation uses semantic labels and compact result metrics",
+          "[tui][conversation][render][tool]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "read-1",
+        "read_file",
+        R"({"path":"src/main.cpp","offset_line":10})",
+        "src/main.cpp");
+    apply_tool_result(tool, R"({"content":"alpha\nbeta\n"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto compact = render_panel_text(messages);
+    REQUIRE_THAT(compact, ContainsSubstring("Read"));
+    REQUIRE_THAT(compact, ContainsSubstring("2 lines"));
+    REQUIRE(compact.find("read_file") == std::string::npos);
+    REQUIRE(compact.find("alpha") == std::string::npos);
+
+    const auto expanded = render_panel_text(
+        messages,
+        ConversationRenderOptions{.expand_tool_results = true});
+    REQUIRE_THAT(expanded, ContainsSubstring("alpha"));
+    REQUIRE_THAT(expanded, ContainsSubstring("beta"));
+    REQUIRE_THAT(expanded, ContainsSubstring("10"));
+    REQUIRE_THAT(expanded, ContainsSubstring("11"));
+}
+
+TEST_CASE("tool presentation groups grep results by file",
+          "[tui][conversation][render][tool]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "grep-1",
+        "grep_search",
+        R"({"pattern":"Widget","path":"src"})",
+        "Widget in src");
+    apply_tool_result(
+        tool,
+        R"({"matches":[{"path":"src/a.cpp","line":12,"text":"class Widget {};"},{"path":"src/a.cpp","line":31,"text":"Widget value;"}]})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto compact = render_panel_text(messages);
+    REQUIRE_THAT(compact, ContainsSubstring("Search"));
+    REQUIRE_THAT(compact, ContainsSubstring("2 matches"));
+    REQUIRE(compact.find("src/a.cpp") == std::string::npos);
+
+    const auto expanded = render_panel_text(
+        messages,
+        ConversationRenderOptions{.expand_tool_results = true});
+    REQUIRE_THAT(expanded, ContainsSubstring("src/a.cpp"));
+    REQUIRE_THAT(expanded, ContainsSubstring("class Widget"));
+    REQUIRE_THAT(expanded, ContainsSubstring("31"));
+}
+
+TEST_CASE("tool presentation renders todos as a checklist",
+          "[tui][conversation][render][tool]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "todo-1",
+        "write_todos",
+        R"({"todos":[{"content":"Inspect renderer","status":"completed"},{"content":"Add tests","status":"in_progress"}]})",
+        "");
+    apply_tool_result(
+        tool,
+        R"({"ok":true,"todos":[{"id":"1","content":"Inspect renderer","status":"completed"},{"id":"2","content":"Add tests","status":"in_progress"}]})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto compact = render_panel_text(messages);
+    REQUIRE_THAT(compact, ContainsSubstring("Plan"));
+    REQUIRE_THAT(compact, ContainsSubstring("2 items"));
+
+    const auto expanded = render_panel_text(
+        messages,
+        ConversationRenderOptions{.expand_tool_results = true});
+    REQUIRE_THAT(expanded, ContainsSubstring("Inspect renderer"));
+    REQUIRE_THAT(expanded, ContainsSubstring("Add tests"));
+    REQUIRE_THAT(expanded, ContainsSubstring("✓"));
+    REQUIRE_THAT(expanded, ContainsSubstring("●"));
+}
+
+TEST_CASE("tool header always labels a finished tool that produced no metric",
+          "[tui][conversation][render][tool][regression]") {
+    // A structured tool that fails has no JSON to count, so its metric is empty.
+    // The header must fall back to the status label rather than render blank —
+    // otherwise only the glyph colour distinguishes success from failure.
+    const auto render_single_tool = [](ToolActivity tool) {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("", "", false);
+        msg.tools.push_back(std::move(tool));
+        messages.push_back(std::move(msg));
+        return render_panel_text(messages);
+    };
+
+    SECTION("failed search") {
+        auto tool = make_tool_activity(
+            "grep-fail", "grep_search", R"({"pattern":"["})", "bad pattern");
+        apply_tool_result(tool, R"({"error":"regex compile failed"})");
+        REQUIRE(tool.status == ToolActivity::Status::Failed);
+        REQUIRE_THAT(render_single_tool(std::move(tool)),
+                     ContainsSubstring(std::string(tool_status_label(
+                         ToolActivity::Status::Failed))));
+    }
+
+    SECTION("denied file search") {
+        auto tool = make_tool_activity(
+            "files-denied", "file_search", R"({"pattern":"*.c"})", "find");
+        tool.status = ToolActivity::Status::Denied;
+        tool.result.summary = "Permission denied by user.";
+        REQUIRE_THAT(render_single_tool(std::move(tool)),
+                     ContainsSubstring(std::string(tool_status_label(
+                         ToolActivity::Status::Denied))));
+    }
+
+    SECTION("failed read") {
+        auto tool = make_tool_activity(
+            "read-fail", "read_file", R"({"path":"missing.txt"})", "missing.txt");
+        apply_tool_result(tool, R"({"error":"no such file"})");
+        REQUIRE(tool.status == ToolActivity::Status::Failed);
+        REQUIRE_THAT(render_single_tool(std::move(tool)),
+                     ContainsSubstring(std::string(tool_status_label(
+                         ToolActivity::Status::Failed))));
+    }
+}
+
+TEST_CASE("cancelled shell reports cancellation rather than the killed exit code",
+          "[tui][conversation][render][tool][regression]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "shell-cancel",
+        "run_terminal_command",
+        R"({"command":"sleep 100"})",
+        "sleep 100");
+    // The process was killed, so the payload still carries a zero exit status.
+    apply_tool_result(tool, R"({"exit_code":0,"output":"partial\n[INTERRUPTED: user]"})");
+    REQUIRE(tool.status == ToolActivity::Status::Cancelled);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto rendered = render_panel_text(messages);
+    REQUIRE_THAT(rendered, ContainsSubstring(std::string(tool_status_label(
+                               ToolActivity::Status::Cancelled))));
+    REQUIRE(rendered.find("exit 0") == std::string::npos);
+}
+
+TEST_CASE("successful shell still reports its exit code",
+          "[tui][conversation][render][tool]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "shell-fail", "run_terminal_command", R"({"command":"false"})", "false");
+    apply_tool_result(tool, R"({"exit_code":1,"output":"boom"})");
+    REQUIRE(tool.status == ToolActivity::Status::Failed);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    REQUIRE_THAT(render_panel_text(messages), ContainsSubstring("exit 1"));
+}
+
+TEST_CASE("structured tools keep the payload their renderers need",
+          "[tui][conversation][tool][regression]") {
+    // These renderers used to rely on apply_tool_result happening to fall
+    // through and leave the raw JSON in `summary`. Adding an "output" field
+    // upstream would have silently emptied them, so the retention is explicit.
+    const auto payload_visible_to_renderer = [](std::string_view name,
+                                                std::string_view args,
+                                                std::string_view result) {
+        auto tool = make_tool_activity("id", std::string(name), std::string(args), "");
+        apply_tool_result(tool, result);
+        return tool.result.raw_payload.empty() ? tool.result.summary
+                                               : tool.result.raw_payload;
+    };
+
+    CHECK_THAT(payload_visible_to_renderer(
+                   "grep_search", R"({"pattern":"x"})",
+                   R"({"output":"2 hits","matches":[{"path":"a.cpp","line":1,"text":"x"}]})"),
+               ContainsSubstring("\"matches\""));
+    CHECK_THAT(payload_visible_to_renderer(
+                   "list_directory", R"({"path":"src"})",
+                   R"({"output":"1 entry","entries":[{"type":"dir","name":"core"}]})"),
+               ContainsSubstring("\"entries\""));
+    CHECK_THAT(payload_visible_to_renderer(
+                   "fetch_url", R"({"url":"https://example.com"})",
+                   R"({"content":"body text","status_code":200})"),
+               ContainsSubstring("\"status_code\""));
+
+    // Tools with no structured renderer must not pay for a second copy.
+    auto plain = make_tool_activity("id", "read_file", R"({"path":"a"})", "");
+    apply_tool_result(plain, R"({"content":"line one\n"})");
+    CHECK(plain.result.raw_payload.empty());
+}
+
+TEST_CASE("list and file results render their entries",
+          "[tui][conversation][render][tool]") {
+    const auto render_expanded = [](std::string_view name,
+                                    std::string_view args,
+                                    std::string_view result) {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("", "", false);
+        auto tool = make_tool_activity("id", std::string(name), std::string(args), "");
+        apply_tool_result(tool, result);
+        msg.tools.push_back(std::move(tool));
+        messages.push_back(std::move(msg));
+        return render_panel_text(
+            messages, ConversationRenderOptions{.expand_tool_results = true});
+    };
+
+    const auto listing = render_expanded(
+        "list_directory", R"({"path":"src"})",
+        R"({"entries":[{"type":"dir","name":"core"},{"type":"file","name":"main.cpp"}]})");
+    CHECK_THAT(listing, ContainsSubstring("core"));
+    CHECK_THAT(listing, ContainsSubstring("main.cpp"));
+
+    const auto files = render_expanded(
+        "file_search", R"({"pattern":"*.cpp"})",
+        R"({"files":["src/a.cpp","src/b.cpp"]})");
+    CHECK_THAT(files, ContainsSubstring("src/a.cpp"));
+    CHECK_THAT(files, ContainsSubstring("src/b.cpp"));
+}
+
+TEST_CASE("web search reports its result count",
+          "[tui][conversation][render][tool]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("web-1", "web_search", R"({"query":"x"})", "x");
+    apply_tool_result(
+        tool,
+        R"({"results":[{"title":"First","url":"https://example.com/1"},)"
+        R"({"title":"Second","url":"https://example.com/2"}]})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto rendered = render_panel_text(messages);
+    CHECK_THAT(rendered, ContainsSubstring("Web search"));
+    CHECK_THAT(rendered, ContainsSubstring("2 results"));
+}
+
+TEST_CASE("web search results honour the compact preview limit",
+          "[tui][conversation][render][tool]") {
+    constexpr int kResultCount = 25;
+    std::string payload = R"({"results":[)";
+    for (int i = 0; i < kResultCount; ++i) {
+        if (i != 0) payload += ",";
+        payload += std::format(
+            R"({{"title":"Result {0}","url":"https://example.com/{0}"}})", i);
+    }
+    payload += "]}";
+
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("web-1", "web_search", R"({"query":"x"})", "x");
+    apply_tool_result(tool, payload);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    // Open the disclosure the way a click does, without the global "show
+    // everything" toggle, so the compact preview limit is the thing under test.
+    std::unordered_map<std::string, bool> disclosure_state;
+    disclosure_state[tool_disclosure_key(messages.front().tools.front(), 0)] = true;
+
+    ConversationRenderOptions clicked_open;
+    clicked_open.system_disclosure_expanded = &disclosure_state;
+
+    // The previous implementation ignored the shared limit and hardcoded its own.
+    const auto compact = render_panel_text(messages, clicked_open);
+    CHECK_THAT(compact, ContainsSubstring("more results"));
+    CHECK(compact.find("Result 24") == std::string::npos);
+
+    const auto expanded = render_panel_text(
+        messages, ConversationRenderOptions{.expand_tool_results = true});
+    CHECK_THAT(expanded, ContainsSubstring("Result 24"));
+}
+
+TEST_CASE("tool disclosure defaults follow tool outcome",
+          "[tui][conversation][tool]") {
+    auto tool = make_tool_activity("d1", "read_file", R"({"path":"a"})", "a");
+    apply_tool_result(tool, R"({"content":"x\n"})");
+    CHECK_FALSE(tool_disclosure_defaults_expanded(tool));
+
+    tool.status = ToolActivity::Status::Failed;
+    CHECK(tool_disclosure_defaults_expanded(tool));
+
+    auto edit = make_tool_activity(
+        "d2", "write_file", R"({"path":"a.md","content":"hi\n"})", "a.md");
+    CHECK(tool_disclosure_defaults_expanded(edit));
+}
+
+TEST_CASE("tool disclosure keys separate identical id-less calls",
+          "[tui][conversation][tool][regression]") {
+    auto first = make_tool_activity("", "read_file", R"({"path":"a"})", "a");
+    auto second = make_tool_activity("", "read_file", R"({"path":"a"})", "a");
+    CHECK(tool_disclosure_key(first, 0) != tool_disclosure_key(second, 1));
+
+    auto identified = make_tool_activity("call-1", "read_file", R"({"path":"a"})", "a");
+    CHECK(tool_disclosure_key(identified, 0) == tool_disclosure_key(identified, 7));
+}
+
+TEST_CASE("tool activity prepares its transcript diff preview",
+          "[tui][conversation][tool]") {
+    const auto tool = make_tool_activity(
+        "write-1",
+        "write_file",
+        R"({"path":"notes.md","content":"first\nsecond\n"})",
+        "notes.md");
+    REQUIRE_FALSE(tool.diff_preview.empty());
+    CHECK(tool.diff_preview.title == "notes.md");
+}
+
 TEST_CASE("render — active reasoning stays collapsed by default",
           "[tui][conversation][render][reasoning]") {
     std::vector<UiMessage> messages;
@@ -1134,4 +1446,23 @@ TEST_CASE("make_allow_key — other tools use name", "[tui][conversation][allow]
 TEST_CASE("make_allow_label — creates readable label", "[tui][conversation][allow]") {
     auto label = make_allow_label("run_terminal_command", R"({"command":"npm install"})");
     REQUIRE_THAT(label, ContainsSubstring("npm"));
+}
+
+
+TEST_CASE("write diff stats count file lines, not the trailing newline",
+          "[tui][conversation][render][tool][regression]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "write-stats",
+        "write_file",
+        R"({"path":"notes.md","content":"alpha\nbeta\n"})",
+        "notes.md");
+    apply_tool_result(tool, R"({"success":true})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    // A file whose content ends in a newline has two lines, not three.
+    const auto rendered = render_panel_text(messages);
+    REQUIRE_THAT(rendered, ContainsSubstring("+2 -0"));
 }

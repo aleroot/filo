@@ -78,6 +78,7 @@ std::size_t message_fingerprint(const UiMessage& msg) {
         add_text(tool.args);
         add_text(tool.description);
         add_text(tool.result.summary);
+        add_text(tool.result.raw_payload);
         add_optional_int(tool.result.exit_code);
         add_value(static_cast<std::size_t>(tool.result.truncated));
         add_value(static_cast<std::size_t>(tool.auto_approved));

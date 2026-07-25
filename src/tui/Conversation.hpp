@@ -32,6 +32,7 @@ struct ToolActivity {
 
     struct Result {
         std::string summary;                // Tool output/result
+        std::string raw_payload;
         std::optional<int> exit_code;       // Terminal command exit status (when available)
         bool truncated = false;             // True when output was truncated upstream
 
@@ -41,6 +42,7 @@ struct ToolActivity {
 
         void clear() {
             summary.clear();
+            raw_payload.clear();
             exit_code.reset();
             truncated = false;
         }
@@ -297,7 +299,31 @@ void append_ui_message(std::vector<UiMessage>& messages, UiMessage message);
 ToolActivity make_tool_activity(std::string id,
                                  std::string name,
                                  std::string args,
-                                 std::string description = {});
+                                 std::string description = {},
+                                 bool build_diff_preview = true);
+
+// ============================================================================
+// Tool Disclosure
+// ============================================================================
+//
+// The transcript renderer and the mouse handler must agree on whether a tool's
+// body is expanded. Both derive it from these pure functions rather than the
+// renderer publishing state, so rendering stays free of side effects and safe
+// to cache.
+
+/// True when a tool has anything to show below its header.
+[[nodiscard]] bool tool_has_disclosure_body(const ToolActivity& tool);
+
+/// Whether a tool's body starts expanded, absent an explicit user toggle.
+/// Outcomes that need attention (failures, diffs, live subagents) open by
+/// default; routine successes stay collapsed.
+[[nodiscard]] bool tool_disclosure_defaults_expanded(const ToolActivity& tool);
+
+/// Stable key identifying a tool's disclosure toggle. `index_in_message`
+/// disambiguates repeated calls that share a name and description but carry no
+/// id, which would otherwise collide within a single tool group.
+[[nodiscard]] std::string tool_disclosure_key(const ToolActivity& tool,
+                                              std::size_t index_in_message);
 
 // ============================================================================
 // Utility Functions

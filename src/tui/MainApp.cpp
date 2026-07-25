@@ -4607,11 +4607,15 @@ RunResult run(RunOptions opts) {
                             break;
                         case core::agent::SubagentEvent::Kind::ToolFinished:
                             if (auto* child_tool = upsert_child_tool()) {
+                                // The probe exists only to derive a status from
+                                // apply_tool_result and is then discarded, so
+                                // skip the diff build (and its file read).
                                 ToolActivity probe = make_tool_activity(
                                     child_tool->id,
                                     child_tool->name,
                                     child_tool->args,
-                                    child_tool->description);
+                                    child_tool->description,
+                                    /*build_diff_preview=*/false);
                                 apply_tool_result(probe, event.tool_result);
                                 child_tool->status = probe.status;
                             }

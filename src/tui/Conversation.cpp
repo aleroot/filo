@@ -423,6 +423,441 @@ LimitedTextResult clamp_tool_result_lines(std::string_view content, std::size_t 
     };
 }
 
+// ============================================================================
+// Tool Presentation
+// ============================================================================
+
+/// Acknowledgement `apply_tool_result` substitutes when a tool reports success
+/// without a message. Renderers key off it to avoid showing a bare "Done" next
+/// to a diff that already says everything.
+inline constexpr std::string_view kDoneSummary = "Done";
+
+/// Web-search snippets are prose; anything longer just pushes the next result
+/// off screen.
+inline constexpr std::size_t kWebSnippetPreviewChars = 240;
+
+/// Ceiling on the JSON a finished tool may retain for its structured renderer.
+/// Transcripts live for the whole session, so a runaway payload must not be
+/// held twice; past this size the tool falls back to plain-text rendering.
+inline constexpr std::size_t kMaxRetainedRawPayloadBytes = 512 * 1024;
+
+/// Semantic grouping that selects a tool's specialized result renderer.
+enum class ToolPresentationKind {
+    Read,
+    Write,
+    Edit,
+    Shell,
+    Grep,
+    Files,
+    Directory,
+    WebSearch,
+    WebFetch,
+    Todo,
+    Task,
+    Generic,
+};
+
+/// How a tool is surfaced in the transcript: which renderer handles its result,
+/// and the human-facing label shown instead of the raw tool name.
+struct ToolPresentation {
+    ToolPresentationKind kind = ToolPresentationKind::Generic;
+    std::string_view     label;
+};
+
+/// Single source of truth for tool presentation. Each tool appears exactly once,
+/// so its renderer and its label cannot drift apart.
+ToolPresentation tool_presentation(std::string_view name) {
+    using namespace core::tools::names;
+    using Kind = ToolPresentationKind;
+    if (name == kReadFile)                          return {Kind::Read,      "Read"};
+    if (name == kWriteFile)                         return {Kind::Write,     "Write"};
+    if (name == kApplyPatch)                        return {Kind::Edit,      "Patch"};
+    if (name == kSearchReplace || is_replace_tool(name)) return {Kind::Edit, "Edit"};
+    if (name == kDeleteFile)                        return {Kind::Edit,      "Delete"};
+    if (name == kMoveFile)                          return {Kind::Edit,      "Move"};
+    if (name == kCreateDirectory)                   return {Kind::Edit,      "Create directory"};
+    if (is_terminal_tool(name))                     return {Kind::Shell,     "Shell"};
+    if (name == kPython)                            return {Kind::Shell,     "Python"};
+    if (name == kGrepSearch)                        return {Kind::Grep,      "Search"};
+    if (name == kFileSearch)                        return {Kind::Files,     "Find files"};
+    if (name == kListDirectory)                     return {Kind::Directory, "List"};
+    if (name == kWebSearch)                         return {Kind::WebSearch, "Web search"};
+    if (name == kFetchUrl)                          return {Kind::WebFetch,  "Fetch"};
+    if (name == kWriteTodos)                        return {Kind::Todo,      "Plan"};
+    if (is_subagent_tool(name))                     return {Kind::Task,      "Agent"};
+    if (name == kMemory)                            return {Kind::Generic,   "Memory"};
+    if (name == kActivateSkill)                     return {Kind::Generic,   "Skill"};
+    if (name == kAskUserQuestion)                   return {Kind::Generic,   "Question"};
+    if (name == kGetCurrentTime)                    return {Kind::Generic,   "Time"};
+    return {Kind::Generic, name};
+}
+
+/// True for tools whose renderer reads JSON fields that `apply_tool_result`
+/// discards when it collapses a payload down to a display string. Those tools
+/// keep the original JSON in `Result::raw_payload`; see `apply_tool_result`.
+bool tool_result_needs_raw_payload(std::string_view name) {
+    switch (tool_presentation(name).kind) {
+        case ToolPresentationKind::Grep:
+        case ToolPresentationKind::Files:
+        case ToolPresentationKind::Directory:
+        case ToolPresentationKind::WebSearch:
+        case ToolPresentationKind::WebFetch:
+        case ToolPresentationKind::Todo:
+            return true;
+        case ToolPresentationKind::Read:
+        case ToolPresentationKind::Write:
+        case ToolPresentationKind::Edit:
+        case ToolPresentationKind::Shell:
+        case ToolPresentationKind::Task:
+        case ToolPresentationKind::Generic:
+            return false;
+    }
+    return false;
+}
+
+/// The JSON a structured renderer should parse: the retained original when the
+/// summary no longer contains it, otherwise the summary itself.
+std::string_view tool_result_payload(const ToolActivity& tool) {
+    return tool.result.raw_payload.empty()
+        ? std::string_view{tool.result.summary}
+        : std::string_view{tool.result.raw_payload};
+}
+
+std::string join_with(const std::vector<std::string>& parts, std::string_view separator) {
+    std::string joined;
+    for (const auto& part : parts) {
+        if (!joined.empty()) joined += separator;
+        joined += part;
+    }
+    return joined;
+}
+
+// ============================================================================
+// Tool Result Parsing
+// ============================================================================
+
+/// Parses `payload` as a JSON object and hands it to `fn`. Returns false when
+/// the payload is absent or not an object, which is the normal case for tools
+/// that report plain-text errors.
+template <typename Fn>
+bool with_json_object(std::string_view payload, Fn&& fn) {
+    if (payload.empty()) return false;
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    if (parser.parse(payload).get(document) != simdjson::SUCCESS) return false;
+    simdjson::dom::object object;
+    if (document.get(object) != simdjson::SUCCESS) return false;
+    fn(object);
+    return true;
+}
+
+struct SearchResultRow {
+    std::string  path;
+    std::int64_t line = 0;
+    std::string  text;
+};
+
+struct PathResultRow {
+    std::string_view marker;  // Points at a string literal.
+    std::string      path;
+};
+
+struct WebResultRow {
+    std::string title;
+    std::string url;
+    std::string snippet;
+};
+
+struct TodoRow {
+    std::string content;
+    std::string status;
+};
+
+struct FetchMetadata {
+    std::string  url;
+    std::string  content_type;
+    std::string  title;
+    std::int64_t status_code = 0;
+    bool         truncated = false;
+    bool         parsed = false;
+};
+
+bool parse_search_rows(std::string_view payload, std::vector<SearchResultRow>& out) {
+    bool found = false;
+    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        simdjson::dom::array matches;
+        if (object["matches"].get_array().get(matches) != simdjson::SUCCESS) return;
+        found = true;
+        out.reserve(matches.size());
+        for (const auto item : matches) {
+            simdjson::dom::object match;
+            if (item.get_object().get(match) != simdjson::SUCCESS) continue;
+            const auto path = core::utils::json::first_string_field(match, {"path"});
+            if (!path) continue;
+            const auto text = core::utils::json::first_string_field(match, {"text"});
+            std::int64_t line = 0;
+            (void)match["line"].get(line);
+            out.push_back({
+                .path = *path,
+                .line = line,
+                .text = text.value_or(std::string{}),
+            });
+        }
+    });
+    return parsed && found;
+}
+
+bool parse_path_rows(std::string_view payload, std::vector<PathResultRow>& out) {
+    bool found = false;
+    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        simdjson::dom::array files;
+        if (object["files"].get_array().get(files) == simdjson::SUCCESS) {
+            found = true;
+            out.reserve(files.size());
+            for (const auto item : files) {
+                std::string_view path;
+                if (item.get(path) == simdjson::SUCCESS) {
+                    out.push_back({.marker = "·", .path = std::string(path)});
+                }
+            }
+            return;
+        }
+
+        simdjson::dom::array entries;
+        if (object["entries"].get_array().get(entries) != simdjson::SUCCESS) return;
+        found = true;
+        out.reserve(entries.size());
+        for (const auto item : entries) {
+            simdjson::dom::object entry;
+            if (item.get_object().get(entry) != simdjson::SUCCESS) continue;
+            const auto name = core::utils::json::first_string_field(entry, {"name"});
+            if (!name) continue;
+            const auto type = core::utils::json::first_string_field(entry, {"type"});
+            out.push_back({
+                .marker = type && *type == "dir" ? "▸" : "·",
+                .path = *name,
+            });
+        }
+    });
+    return parsed && found;
+}
+
+bool parse_web_rows(std::string_view payload, std::vector<WebResultRow>& out) {
+    bool found = false;
+    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        simdjson::dom::array results;
+        if (object["results"].get_array().get(results) != simdjson::SUCCESS) return;
+        found = true;
+        out.reserve(results.size());
+        for (const auto item : results) {
+            simdjson::dom::object result;
+            if (item.get_object().get(result) != simdjson::SUCCESS) continue;
+            out.push_back({
+                .title = core::utils::json::first_string_field(result, {"title"})
+                             .value_or(std::string{"Untitled"}),
+                .url = core::utils::json::first_string_field(result, {"url"})
+                           .value_or(std::string{}),
+                .snippet = core::utils::json::first_string_field(result, {"snippet", "content"})
+                               .value_or(std::string{}),
+            });
+        }
+    });
+    return parsed && found;
+}
+
+bool parse_todo_rows(std::string_view payload, std::vector<TodoRow>& out) {
+    bool found = false;
+    const bool parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        simdjson::dom::array array;
+        if (object["todos"].get_array().get(array) != simdjson::SUCCESS) return;
+        found = true;
+        out.reserve(array.size());
+        for (const auto item : array) {
+            simdjson::dom::object todo;
+            if (item.get_object().get(todo) != simdjson::SUCCESS) continue;
+            const auto content = core::utils::json::first_string_field(todo, {"content"});
+            if (!content) continue;
+            const auto status = core::utils::json::first_string_field(todo, {"status"});
+            out.push_back({
+                .content = *content,
+                .status = status.value_or(std::string{"pending"}),
+            });
+        }
+    });
+    return parsed && found;
+}
+
+bool parse_fetch_metadata(std::string_view payload, FetchMetadata& out) {
+    out.parsed = with_json_object(payload, [&](simdjson::dom::object object) {
+        out.url = core::utils::json::first_string_field(object, {"url"})
+                      .value_or(std::string{});
+        out.content_type = core::utils::json::first_string_field(object, {"content_type"})
+                               .value_or(std::string{});
+        out.title = core::utils::json::first_string_field(object, {"title"})
+                        .value_or(std::string{});
+        (void)object["status_code"].get(out.status_code);
+        (void)object["truncated"].get(out.truncated);
+    });
+    return out.parsed;
+}
+
+/// First line requested by a `read_file` call, so the transcript's gutter
+/// matches the file's real line numbers. Defaults to 1.
+std::int64_t read_start_line(std::string_view tool_args) {
+    std::int64_t start_line = 1;
+    with_json_object(tool_args, [&](simdjson::dom::object object) {
+        for (const auto field : {"offset_line", "start_line", "offset"}) {
+            std::int64_t value = 0;
+            if (object[field].get(value) == simdjson::SUCCESS && value > 0) {
+                start_line = value;
+                return;
+            }
+        }
+    });
+    return start_line;
+}
+
+/// Everything a tool's header and body need, parsed exactly once per frame.
+/// The header previously parsed the payload to compute a count and the body
+/// parsed it again to build rows — two full simdjson passes per tool per frame.
+struct ToolResultView {
+    ToolPresentation             presentation;
+    std::vector<SearchResultRow> search_rows;
+    std::vector<PathResultRow>   path_rows;
+    std::vector<WebResultRow>    web_rows;
+    std::vector<TodoRow>         todo_rows;
+    FetchMetadata                fetch;
+    std::size_t                  read_line_count = 0;
+    std::int64_t                 read_start_line = 1;
+    std::size_t                  diff_additions = 0;
+    std::size_t                  diff_deletions = 0;
+    /// True when the payload parsed into the shape this tool's renderer expects.
+    bool                         payload_parsed = false;
+};
+
+ToolResultView build_tool_result_view(const ToolActivity& tool) {
+    ToolResultView view;
+    view.presentation = tool_presentation(tool.name);
+    const std::string_view payload = tool_result_payload(tool);
+
+    switch (view.presentation.kind) {
+        case ToolPresentationKind::Read:
+            view.read_line_count = visible_line_count(tool.result.summary);
+            view.read_start_line = read_start_line(tool.args);
+            break;
+        case ToolPresentationKind::Write:
+        case ToolPresentationKind::Edit:
+            for (const auto& line : tool.diff_preview.lines) {
+                view.diff_additions += line.kind == DiffLineKind::Add ? 1 : 0;
+                view.diff_deletions += line.kind == DiffLineKind::Delete ? 1 : 0;
+            }
+            break;
+        case ToolPresentationKind::Grep:
+            view.payload_parsed = parse_search_rows(payload, view.search_rows);
+            break;
+        case ToolPresentationKind::Files:
+        case ToolPresentationKind::Directory:
+            view.payload_parsed = parse_path_rows(payload, view.path_rows);
+            break;
+        case ToolPresentationKind::WebSearch:
+            view.payload_parsed = parse_web_rows(payload, view.web_rows);
+            break;
+        case ToolPresentationKind::WebFetch:
+            view.payload_parsed = parse_fetch_metadata(payload, view.fetch);
+            break;
+        case ToolPresentationKind::Todo:
+            // The result echoes the persisted plan; the arguments are the only
+            // source while the call is still pending.
+            view.payload_parsed = parse_todo_rows(payload, view.todo_rows)
+                || parse_todo_rows(tool.args, view.todo_rows);
+            break;
+        case ToolPresentationKind::Shell:
+        case ToolPresentationKind::Task:
+        case ToolPresentationKind::Generic:
+            break;
+    }
+    return view;
+}
+
+// ============================================================================
+// Tool Header Metric
+// ============================================================================
+
+std::string count_label(std::size_t count,
+                        std::string_view singular,
+                        std::string_view plural) {
+    return std::format("{} {}", count, count == 1 ? singular : plural);
+}
+
+/// Compact detail for the right edge of a tool header, e.g. "12 matches".
+/// Returns empty when there is nothing meaningful to report — every metric is
+/// only trustworthy for a successful call, so failures deliberately fall through
+/// to the status label in `tool_result_metric`.
+std::string tool_metric_detail(const ToolActivity& tool, const ToolResultView& view) {
+    const bool succeeded = tool.status == ToolActivity::Status::Succeeded;
+    const bool structured = succeeded && view.payload_parsed;
+
+    switch (view.presentation.kind) {
+        case ToolPresentationKind::Read:
+            return succeeded ? count_label(view.read_line_count, "line", "lines")
+                             : std::string{};
+        case ToolPresentationKind::Write:
+        case ToolPresentationKind::Edit:
+            if (succeeded && (view.diff_additions != 0 || view.diff_deletions != 0)) {
+                return std::format("+{} -{}", view.diff_additions, view.diff_deletions);
+            }
+            return {};
+        case ToolPresentationKind::Shell:
+            // A cancelled command still carries the exit status of the process we
+            // killed, so reporting it would claim a clean exit for an abort.
+            if ((succeeded || tool.status == ToolActivity::Status::Failed)
+                && tool.result.exit_code.has_value()) {
+                return std::format("exit {}", *tool.result.exit_code);
+            }
+            return {};
+        case ToolPresentationKind::Grep:
+            return structured ? count_label(view.search_rows.size(), "match", "matches")
+                              : std::string{};
+        case ToolPresentationKind::Files:
+            return structured ? count_label(view.path_rows.size(), "file", "files")
+                              : std::string{};
+        case ToolPresentationKind::Directory:
+            return structured ? count_label(view.path_rows.size(), "entry", "entries")
+                              : std::string{};
+        case ToolPresentationKind::WebSearch:
+            return structured ? count_label(view.web_rows.size(), "result", "results")
+                              : std::string{};
+        case ToolPresentationKind::WebFetch:
+            return view.fetch.parsed && view.fetch.status_code != 0
+                ? std::to_string(view.fetch.status_code)
+                : std::string{};
+        case ToolPresentationKind::Todo:
+            return succeeded && !view.todo_rows.empty()
+                ? count_label(view.todo_rows.size(), "item", "items")
+                : std::string{};
+        case ToolPresentationKind::Task:
+            return tool.subagents.empty()
+                ? std::string{}
+                : count_label(tool.subagents.size(), "agent", "agents");
+        case ToolPresentationKind::Generic:
+            return {};
+    }
+    return {};
+}
+
+/// Header metric with a guaranteed non-empty result for finished calls: a
+/// failed, denied or cancelled tool always shows its status even when no
+/// domain-specific metric could be computed.
+std::string tool_result_metric(const ToolActivity& tool, const ToolResultView& view) {
+    if (tool.status == ToolActivity::Status::Pending
+        || tool.status == ToolActivity::Status::Executing) {
+        return {};
+    }
+    std::string detail = tool_metric_detail(tool, view);
+    return detail.empty() ? std::string(tool_status_label(tool.status)) : std::move(detail);
+}
+
+
 Element render_lightbulb_prefix(bool show) {
     if (!show) {
         return ftxui::text("    ");
@@ -488,47 +923,287 @@ Element render_status_text(std::string_view text_content, Color text_color, std:
 // Tool Group Rendering (Gemini CLI Style)
 // ============================================================================
 
-Element render_tool_header(const ToolActivity& tool, 
+std::size_t specialized_preview_limit(const ConversationRenderOptions& options,
+                                      std::size_t compact_floor = 20) {
+    if (options.expand_tool_results) return 0;
+    return std::max(options.tool_result_preview_max_lines, compact_floor);
+}
+
+Element placeholder_text(std::string_view label) {
+    return ftxui::text(std::string(label)) | ftxui::color(Color::GrayDark) | dim;
+}
+
+/// Shared skeleton for every list-shaped tool renderer: clamp to the compact
+/// preview limit, emit rows, and footer the elided remainder. `emit_row` appends
+/// one *or more* elements per item, so renderers that interleave group headings
+/// (grep) or multi-line entries (web search) use the same path as flat lists.
+template <typename EmitRow>
+Element render_limited_rows(std::size_t total,
+                            const ConversationRenderOptions& options,
+                            std::string_view overflow_noun,
+                            EmitRow&& emit_row) {
+    const std::size_t limit = specialized_preview_limit(options);
+    const std::size_t shown = limit == 0 ? total : std::min(total, limit);
+
+    std::vector<Element> rows;
+    rows.reserve(shown + 1);
+    for (std::size_t i = 0; i < shown; ++i) {
+        emit_row(rows, i);
+    }
+    if (shown < total) {
+        rows.push_back(
+            ftxui::text(std::format("  … {} more {}", total - shown, overflow_noun))
+            | ftxui::color(Color::GrayDark)
+            | dim);
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
+Element render_numbered_tool_text(std::string_view content,
+                                  std::int64_t start_line,
+                                  const ConversationRenderOptions& options) {
+    // Views into `content`; the caller owns the buffer for the duration of the
+    // call, and only the lines actually shown are copied into elements.
+    auto lines = split_lines_view(content);
+    while (!lines.empty() && lines.back().empty()) lines.pop_back();
+    if (lines.empty()) {
+        return placeholder_text("No content");
+    }
+
+    const std::size_t limit = specialized_preview_limit(options);
+    const std::size_t shown = limit == 0 ? lines.size() : std::min(lines.size(), limit);
+    const std::int64_t last_line = start_line + static_cast<std::int64_t>(shown) - 1;
+    const std::size_t number_width = std::format("{}", last_line).size();
+
+    return render_limited_rows(
+        lines.size(), options, "lines",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::format(
+                        "{:>{}}", start_line + static_cast<std::int64_t>(i), number_width))
+                        | ftxui::color(Color::GrayDark),
+                    ftxui::text(" │ ") | ftxui::color(ColorYellowDark) | dim,
+                    paragraph(std::string(lines[i])) | ftxui::color(Color::GrayLight) | xflex,
+                }) | xflex);
+        });
+}
+
+Element render_search_results(const ToolResultView& view,
+                              const ConversationRenderOptions& options) {
+    if (view.search_rows.empty()) {
+        return placeholder_text("No matches");
+    }
+
+    std::string current_path;
+    return render_limited_rows(
+        view.search_rows.size(), options, "matches",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            const auto& match = view.search_rows[i];
+            if (match.path != current_path) {
+                current_path = match.path;
+                rows.push_back(
+                    ftxui::text(current_path)
+                    | ftxui::color(ColorYellowDark)
+                    | ftxui::bold);
+            }
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::format("{:>5}", match.line))
+                        | ftxui::color(Color::GrayDark),
+                    ftxui::text(" │ ") | ftxui::color(ColorYellowDark) | dim,
+                    paragraph(match.text) | ftxui::color(Color::GrayLight) | xflex,
+                }) | xflex);
+        });
+}
+
+Element render_path_results(const ToolResultView& view,
+                            const ConversationRenderOptions& options) {
+    if (view.path_rows.empty()) {
+        return placeholder_text("No results");
+    }
+    return render_limited_rows(
+        view.path_rows.size(), options, "entries",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::format("{} ", view.path_rows[i].marker))
+                        | ftxui::color(ColorYellowDark),
+                    ftxui::text(view.path_rows[i].path)
+                        | ftxui::color(Color::GrayLight)
+                        | xflex,
+                }) | xflex);
+        });
+}
+
+Element render_web_results(const ToolResultView& view,
+                           const ConversationRenderOptions& options) {
+    if (view.web_rows.empty()) {
+        return placeholder_text("No results");
+    }
+    return render_limited_rows(
+        view.web_rows.size(), options, "results",
+        [&](std::vector<Element>& rows, std::size_t i) {
+            const auto& result = view.web_rows[i];
+            rows.push_back(
+                hbox({
+                    ftxui::text(std::format("{}  ", i + 1)) | ftxui::color(ColorYellowDark),
+                    paragraph(result.title)
+                        | ftxui::color(Color::GrayLight)
+                        | ftxui::bold
+                        | xflex,
+                }) | xflex);
+            if (!result.url.empty()) {
+                rows.push_back(
+                    hbox({
+                        ftxui::text("   "),
+                        paragraph(result.url) | ftxui::color(Color::GrayDark) | dim | xflex,
+                    }) | xflex);
+            }
+            if (!result.snippet.empty()) {
+                rows.push_back(
+                    hbox({
+                        ftxui::text("   "),
+                        paragraph(truncate_preview(result.snippet, kWebSnippetPreviewChars))
+                            | ftxui::color(Color::GrayLight)
+                            | xflex,
+                    }) | xflex);
+            }
+        });
+}
+
+Element render_todo_results(const ToolResultView& view) {
+    if (view.todo_rows.empty()) {
+        return placeholder_text("Plan updated");
+    }
+
+    std::vector<Element> rows;
+    rows.reserve(view.todo_rows.size());
+    for (const auto& todo : view.todo_rows) {
+        const bool done = todo.status == "completed";
+        const bool active = todo.status == "in_progress";
+        const std::string_view marker = done ? "✓" : active ? "●" : "○";
+        const Color marker_color = done
+            ? static_cast<Color>(ColorToolDone)
+            : active ? static_cast<Color>(ColorYellowBright)
+                     : static_cast<Color>(ColorToolPending);
+        Element content = paragraph(todo.content)
+            | ftxui::color(done ? Color::GrayDark : Color::GrayLight)
+            | xflex;
+        if (done) content = std::move(content) | dim;
+        rows.push_back(
+            hbox({
+                ftxui::text(std::format("{} ", marker)) | ftxui::color(marker_color),
+                std::move(content),
+            }) | xflex);
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
+Element render_fetch_result(const ToolActivity& tool,
+                            const ToolResultView& view,
+                            const ConversationRenderOptions& options) {
+    if (!view.fetch.parsed) {
+        return render_text_lines_preserving_newlines(tool.result.summary, Color::GrayLight);
+    }
+
+    std::vector<std::string> metadata;
+    if (view.fetch.status_code != 0) {
+        metadata.push_back(std::to_string(view.fetch.status_code));
+    }
+    if (!view.fetch.content_type.empty()) metadata.push_back(view.fetch.content_type);
+    if (view.fetch.truncated) metadata.emplace_back("truncated");
+
+    std::vector<Element> rows;
+    if (!view.fetch.title.empty()) {
+        rows.push_back(
+            paragraph(view.fetch.title) | ftxui::color(Color::GrayLight) | ftxui::bold | xflex);
+    }
+    if (!metadata.empty()) {
+        rows.push_back(
+            ftxui::text(join_with(metadata, " · "))
+            | ftxui::color(ColorYellowDark)
+            | dim);
+    }
+    // The description already shows the URL for most fetches; repeating it is noise.
+    if (!view.fetch.url.empty() && view.fetch.url != tool.description) {
+        rows.push_back(paragraph(view.fetch.url) | ftxui::color(Color::GrayDark) | dim | xflex);
+    }
+
+    const auto display = options.expand_tool_results
+        ? LimitedTextResult{.text = tool.result.summary, .hidden_lines = 0}
+        : clamp_tool_result_lines(tool.result.summary, specialized_preview_limit(options));
+    if (!display.text.empty()) {
+        rows.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
+        rows.push_back(render_text_lines_preserving_newlines(display.text, Color::GrayLight));
+    }
+    if (display.hidden_lines > 0) {
+        rows.push_back(
+            ftxui::text(std::format("… {} more lines", display.hidden_lines))
+            | ftxui::color(Color::GrayDark)
+            | dim);
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
+Element render_tool_header(const ToolActivity& tool,
+                           const ToolResultView& view,
+                           const std::string& disclosure_key,
                            std::size_t tick,
                            const ConversationRenderOptions& options,
                            int /*terminal_width*/,
                            Color /*border_color*/,
-                           bool /*is_first*/) {
+                           bool /*is_first*/,
+                           bool expandable,
+                           bool expanded) {
     const Color status_color = tui::tool_status_color(tool.status);
     Element icon_el = tool.status == ToolActivity::Status::Executing && options.show_spinner
         ? status_spinner_text(tick, options)
         : ftxui::text(std::string(tui::tool_status_icon(tool.status)));
     Element status_el = hbox({ftxui::text(" "), std::move(icon_el), ftxui::text(" ")})
                       | ftxui::color(status_color) | ftxui::bold;
-    Element name_el = ftxui::text(tool.name) | ftxui::bold | ftxui::color(ColorYellowBright);
-    
+
+    // Chevron plus label form the click target. Reflecting the whole header row
+    // instead would swallow clicks across the full terminal width and break
+    // FTXUI's text selection on every tool line.
+    Element toggle_el = hbox({
+        expandable
+            ? ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(ColorYellowDark) | dim
+            : ftxui::text("  "),
+        ftxui::text(std::string(view.presentation.label))
+            | ftxui::bold
+            | ftxui::color(ColorYellowBright),
+    });
+    if (expandable && options.system_disclosure_hitboxes != nullptr) {
+        auto& box = (*options.system_disclosure_hitboxes)[disclosure_key];
+        toggle_el = std::move(toggle_el) | reflect(box);
+    }
+
     std::vector<Element> header_items;
     header_items.push_back(std::move(status_el));
-    header_items.push_back(ftxui::text(" "));
-    header_items.push_back(std::move(name_el));
+    header_items.push_back(std::move(toggle_el));
 
     if (tool.auto_approved) {
         header_items.push_back(ftxui::text("  "));
         header_items.push_back(
             ftxui::text("auto-approved") | ftxui::color(ColorYellowDark) | dim);
     }
-    
+
     if (!tool.description.empty()) {
         header_items.push_back(ftxui::text("  "));
         header_items.push_back(
             ftxui::text(tool.description) | ftxui::color(Color::GrayDark) | xflex);
     }
-    
-    if (tool.status != ToolActivity::Status::Pending && 
+
+    if (tool.status != ToolActivity::Status::Pending &&
         tool.status != ToolActivity::Status::Executing) {
         header_items.push_back(filler());
-        std::string status_label = std::string(tui::tool_status_label(tool.status));
-        if (core::tools::names::is_terminal_tool(tool.name) && tool.result.exit_code.has_value()) {
-            status_label += std::format(" · exit {}", *tool.result.exit_code);
-        }
-        header_items.push_back(ftxui::text(std::move(status_label)) | ftxui::color(status_color));
+        header_items.push_back(
+            ftxui::text(tool_result_metric(tool, view))
+            | ftxui::color(status_color)
+            | dim);
     }
-    
+
     return hbox(std::move(header_items)) | xflex;
 }
 
@@ -554,25 +1229,50 @@ Element render_tool_progress(const ToolActivity& tool) {
 }
 
 Element render_tool_result(const ToolActivity& tool,
+                           const ToolResultView& view,
                            const ConversationRenderOptions& options,
-                           int /*available_height*/,
                            int /*terminal_width*/) {
     if (tool.result.empty()) {
         return emptyElement();
     }
-    
+
     const bool is_error = tool.status == ToolActivity::Status::Failed ||
                           tool.status == ToolActivity::Status::Denied;
     const Color text_color = is_error ? static_cast<Color>(ColorToolFail) : Color{Color::GrayLight};
 
-    const bool is_terminal_output = core::tools::names::is_terminal_tool(tool.name);
+    // Specialized renderers assume a well-formed success payload. Anything else
+    // — failed, denied, cancelled mid-write — falls back to plain text so a
+    // partial or non-JSON body is shown verbatim instead of as "No results".
+    if (tool.status == ToolActivity::Status::Succeeded) {
+        switch (view.presentation.kind) {
+            case ToolPresentationKind::Read:
+                return render_numbered_tool_text(
+                    tool.result.summary, view.read_start_line, options);
+            case ToolPresentationKind::Grep:
+                return render_search_results(view, options);
+            case ToolPresentationKind::Files:
+            case ToolPresentationKind::Directory:
+                return render_path_results(view, options);
+            case ToolPresentationKind::WebSearch:
+                return render_web_results(view, options);
+            case ToolPresentationKind::WebFetch:
+                return render_fetch_result(tool, view, options);
+            case ToolPresentationKind::Todo:
+                return render_todo_results(view);
+            case ToolPresentationKind::Write:
+            case ToolPresentationKind::Edit:
+            case ToolPresentationKind::Shell:
+            case ToolPresentationKind::Task:
+            case ToolPresentationKind::Generic:
+                break;
+        }
+    }
+
+    const bool is_terminal_output = view.presentation.kind == ToolPresentationKind::Shell
+        && core::tools::names::is_terminal_tool(tool.name);
     std::vector<Element> rows;
     if (is_terminal_output) {
-        std::string label = "Terminal output";
-        if (tool.result.exit_code.has_value()) {
-            label += std::format(" (exit {})", *tool.result.exit_code);
-        }
-        rows.push_back(ftxui::text(std::move(label)) | ftxui::color(ColorYellowDark) | ftxui::bold);
+        rows.push_back(ftxui::text("Output") | ftxui::color(ColorYellowDark) | ftxui::bold);
     }
 
     const std::size_t preview_lines = options.tool_result_preview_max_lines == 0
@@ -658,7 +1358,7 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview) {
             dim | ftxui::color(Color::GrayDark));
     }
     
-    return vbox(std::move(rows)) | border;
+    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
 }
 
 std::string subagent_status_label(const ToolActivity::SubagentActivity& subagent) {
@@ -822,36 +1522,78 @@ AssistantActivityState compute_assistant_activity_state(const UiMessage& msg) {
 }
 
 Element render_tool_item(const ToolActivity& tool,
+                         std::size_t index_in_message,
                          std::size_t tick,
                          const ConversationRenderOptions& options,
                          int terminal_width,
                          Color border_color,
                          bool is_first,
                          bool /*is_last*/) {
+    // Parsed once and threaded through the header and the body: the header needs
+    // a count and the body needs the rows, and both used to parse independently.
+    const ToolResultView view = build_tool_result_view(tool);
+
+    const bool expandable = tool_has_disclosure_body(tool);
+    const auto disclosure_key = tool_disclosure_key(tool, index_in_message);
+    // The default is a pure function of the tool so that the renderer and the
+    // mouse handler agree without the renderer having to publish state.
+    bool expanded = tool_disclosure_defaults_expanded(tool);
+    if (options.system_disclosure_expanded != nullptr) {
+        if (const auto it = options.system_disclosure_expanded->find(disclosure_key);
+            it != options.system_disclosure_expanded->end()) {
+            expanded = it->second;
+        }
+    }
+    if (options.expand_tool_results) expanded = true;
+    expanded = expanded && expandable;
+
     std::vector<Element> tool_elements;
-    
     tool_elements.push_back(
-        render_tool_header(tool, tick, options, terminal_width,
-                          border_color, is_first));
-    
+        render_tool_header(tool, view, disclosure_key, tick, options, terminal_width,
+                           border_color, is_first, expandable, expanded));
+
+    if (!expanded) {
+        return vbox(std::move(tool_elements));
+    }
+
+    std::vector<Element> body;
+    const auto add_section = [&body](Element element) {
+        if (!body.empty()) {
+            body.push_back(separator() | ftxui::color(Color::GrayDark));
+        }
+        body.push_back(std::move(element));
+    };
+
     if (tool.status == ToolActivity::Status::Executing && tool.progress.has_value()) {
-        tool_elements.push_back(render_tool_progress(tool));
+        body.push_back(render_tool_progress(tool));
     }
 
     if (!tool.subagents.empty()) {
-        tool_elements.push_back(separator() | ftxui::color(Color::GrayDark));
-        tool_elements.push_back(render_subagent_group(tool, tick, options));
+        add_section(render_subagent_group(tool, tick, options));
     }
-    
-    if (!tool.result.empty()) {
-        tool_elements.push_back(separator() | ftxui::color(Color::GrayDark));
-        tool_elements.push_back(render_tool_result(tool, options, 10, terminal_width));
+
+    // File-modification tools report a bare acknowledgement; the diff already
+    // says everything the acknowledgement would, so skip the redundant line.
+    const bool diff_supersedes_summary =
+        !tool.diff_preview.empty()
+        && tool.status == ToolActivity::Status::Succeeded
+        && (tool.result.summary == kDoneSummary || tool.result.summary.empty());
+    if (!tool.result.empty() && !diff_supersedes_summary) {
+        add_section(render_tool_result(tool, view, options, terminal_width));
     }
-    
+
     if (!tool.diff_preview.empty()) {
-        tool_elements.push_back(render_tool_diff_preview(tool.diff_preview));
+        add_section(render_tool_diff_preview(tool.diff_preview));
     }
-    
+
+    if (!body.empty()) {
+        tool_elements.push_back(
+            hbox({
+                ftxui::text("   │ ") | ftxui::color(ColorYellowDark) | dim,
+                vbox(std::move(body)) | xflex,
+            }) | xflex);
+    }
+
     return vbox(std::move(tool_elements));
 }
 
@@ -872,18 +1614,18 @@ Element render_tool_group_container(const UiMessage& msg,
         const auto& tool = msg.tools[i];
         const bool is_first = (i == 0);
         const bool is_last = (i == msg.tools.size() - 1);
-        
+
         content_elements.push_back(
-            render_tool_item(tool, tick, options, content_width, 
-                           border_color, is_first, is_last));
-        
+            render_tool_item(tool, i, tick, options, content_width,
+                             border_color, is_first, is_last));
+
         if (!is_last) {
             content_elements.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
         }
     }
     
     Element content = vbox(std::move(content_elements));
-    return content | border | ftxui::color(border_color);
+    return content | UiBorder(border_color);
 }
 
 } // anonymous namespace
@@ -1034,18 +1776,30 @@ void append_ui_message(std::vector<UiMessage>& messages, UiMessage message) {
 ToolActivity make_tool_activity(std::string id,
                                  std::string name,
                                  std::string args,
-                                 std::string description) {
+                                 std::string description,
+                                 bool build_diff_preview) {
     ToolActivity tool;
     tool.id = std::move(id);
     tool.name = std::move(name);
     tool.args = std::move(args);
     tool.description = std::move(description);
+    if (build_diff_preview) {
+        tool.diff_preview = build_tool_diff_preview(
+            tool.name,
+            tool.args,
+            kToolDiffPreviewMaxLines);
+    }
     tool.status = ToolActivity::Status::Pending;
     return tool;
 }
 
-void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
-    tool.result.clear();
+namespace {
+
+/// Derives `tool.status` and `tool.result.summary` from a raw tool payload.
+/// Deliberately collapses structured results down to the single string the
+/// generic renderer shows; `apply_tool_result` preserves the original JSON for
+/// the tools that need more than that.
+void apply_tool_result_summary(ToolActivity& tool, std::string_view result_payload) {
     auto set_result_summary = [&](std::string summary) {
         tool.result.summary = std::move(summary);
         tool.result.truncated = has_output_truncation_marker(tool.result.summary);
@@ -1124,6 +1878,62 @@ void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
 
     tool.status = ToolActivity::Status::Succeeded;
     set_result_summary(std::string(result_payload));
+}
+
+} // namespace
+
+void apply_tool_result(ToolActivity& tool, std::string_view result_payload) {
+    tool.result.clear();
+    apply_tool_result_summary(tool, result_payload);
+
+    // Structured renderers (grep, file/dir listings, web, plan, fetch) need
+    // fields the summary drops. Retaining the payload only when the summary no
+    // longer contains it keeps exactly one copy in transcript memory, and frees
+    // those renderers from depending on which branch above happened to match.
+    // Oversized payloads are skipped: the renderer degrades to plain text rather
+    // than doubling the memory held by a long-lived transcript.
+    if (tool_result_needs_raw_payload(tool.name)
+        && tool.result.summary != result_payload
+        && result_payload.size() <= kMaxRetainedRawPayloadBytes) {
+        tool.result.raw_payload = std::string(result_payload);
+    }
+}
+
+// ============================================================================
+// Tool Disclosure
+// ============================================================================
+
+bool tool_has_disclosure_body(const ToolActivity& tool) {
+    return !tool.result.empty()
+        || !tool.diff_preview.empty()
+        || !tool.subagents.empty()
+        || tool.progress.has_value();
+}
+
+bool tool_disclosure_defaults_expanded(const ToolActivity& tool) {
+    switch (tool.status) {
+        case ToolActivity::Status::Failed:
+        case ToolActivity::Status::Denied:
+        case ToolActivity::Status::Cancelled:
+            // Anything that went wrong is worth reading without a click.
+            return true;
+        case ToolActivity::Status::Executing:
+            // Live progress is only useful while it is still moving.
+            return !tool.subagents.empty() || tool.progress.has_value();
+        case ToolActivity::Status::Pending:
+        case ToolActivity::Status::Succeeded:
+            break;
+    }
+    // A pending or successful edit still shows its diff: it is the change the
+    // user is being asked to trust, not incidental output.
+    return !tool.diff_preview.empty();
+}
+
+std::string tool_disclosure_key(const ToolActivity& tool, std::size_t index_in_message) {
+    if (!tool.id.empty()) {
+        return "tool:" + tool.id;
+    }
+    return std::format("tool:{}:{}:{}", index_in_message, tool.name, tool.description);
 }
 
 // ============================================================================

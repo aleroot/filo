@@ -263,11 +263,17 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
     // Clicking a system-message disclosure chevron toggles its details.
     if (event.mouse().button == ftxui::Mouse::Left
         && event.mouse().motion == ftxui::Mouse::Pressed) {
-        for (const auto& [message_id, box] : disclosure_hitboxes_) {
-            if (box.Contain(event.mouse().x, event.mouse().y)) {
-                disclosure_expanded_[message_id] = !disclosure_expanded_[message_id];
-                return true;
+        for (const auto& [disclosure_id, box] : disclosure_hitboxes_) {
+            if (!box.Contain(event.mouse().x, event.mouse().y)) {
+                continue;
             }
+            // Toggle relative to what is actually on screen: a card the user has never touched shows its default state, not `false`.
+            const auto explicit_state = disclosure_expanded_.find(disclosure_id);
+            const bool current = explicit_state != disclosure_expanded_.end()
+                ? explicit_state->second
+                : default_disclosure_expanded(disclosure_id);
+            disclosure_expanded_[disclosure_id] = !current;
+            return true;
         }
     }
 
@@ -275,6 +281,24 @@ bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
     // single shared handler. Returning false for plain clicks/drags leaves them
     // to FTXUI's text-selection machinery and never steals focus.
     return HandleWheel(event);
+}
+
+bool HistoryComponent::default_disclosure_expanded(const std::string& disclosure_id) const {
+    // Tool cards are the only disclosures with a non-collapsed default. The key
+    // is rebuilt from the snapshot rather than cached during render, so that
+    // rendering stays side-effect free and safe to serve from the frame cache.
+    const auto snapshot = get_messages_();
+    if (!snapshot) {
+        return false;
+    }
+    for (const auto& message : *snapshot) {
+        for (std::size_t i = 0; i < message.tools.size(); ++i) {
+            if (tool_disclosure_key(message.tools[i], i) == disclosure_id) {
+                return tool_disclosure_defaults_expanded(message.tools[i]);
+            }
+        }
+    }
+    return false;
 }
 
 std::size_t HistoryComponent::compute_render_cache_key(
@@ -287,10 +311,14 @@ std::size_t HistoryComponent::compute_render_cache_key(
     seed = combine_hash(seed, options.expand_tool_results ? 1 : 0);
     seed = combine_hash(seed, options.tool_result_preview_max_lines);
     // Per-message disclosure (▶/▼) toggle state — toggling a card must rebuild.
+    // Accumulated with wrapping addition so the digest depends only on the set of
+    // entries: `disclosure_expanded_` is unordered, and an order-sensitive fold
+    // would change the key on every rehash and needlessly rebuild the transcript.
+    std::size_t disclosure_digest = 0;
     for (const auto& [id, expanded] : disclosure_expanded_) {
-        seed = combine_hash(seed, std::hash<std::string>{}(id));
-        seed = combine_hash(seed, expanded ? 1 : 0);
+        disclosure_digest += combine_hash(std::hash<std::string>{}(id), expanded ? 1 : 0);
     }
+    seed = combine_hash(seed, disclosure_digest);
     return seed;
 }
 
