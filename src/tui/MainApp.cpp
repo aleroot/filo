@@ -2204,7 +2204,7 @@ RunResult run(RunOptions opts) {
                 manual_model_name.empty() ? "<provider default>" : manual_model_name);
             const std::string hint = provider_setup_hint(manual_provider_name);
             if (!hint.empty()) {
-                message += "\n        " + hint;
+                message += "\n   " + hint;
             }
             return message;
         } catch (const std::exception& e) {
@@ -2593,9 +2593,9 @@ RunResult run(RunOptions opts) {
         const core::config::ModelPersistenceResult& persistence) {
         using enum core::config::ModelPersistenceStatus;
         if (persistence.status == SessionOnly) {
-            message += std::format("\n        ℹ  {}", persistence.detail);
+            message += std::format("\n   ℹ  {}", persistence.detail);
         } else if (persistence.status == Failed) {
-            message += std::format("\n        ⚠  {}", persistence.detail);
+            message += std::format("\n   ⚠  {}", persistence.detail);
         }
         return message;
     };

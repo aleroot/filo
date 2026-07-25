@@ -13,6 +13,12 @@ using namespace ftxui;
 
 namespace tui {
 
+namespace {
+
+constexpr int kMaxQuickSelectOptions = 5;
+
+} // namespace
+
 void QuestionDialogEventResult::resolve() {
     if (promise) {
         promise->set_value(std::move(answers));
@@ -24,9 +30,15 @@ QuestionDialogController::QuestionDialogController() {
     auto option = InputOption();
     option.transform = [](InputState input_state) {
         if (input_state.is_placeholder) {
-            return input_state.element | color(Color::GrayDark);
+            return input_state.element
+                | color(input_state.focused
+                            ? static_cast<Color>(ColorQuestionCyan)
+                            : Color{Color::GrayLight});
         }
-        return input_state.element | color(ColorQuestionCyan);
+        return input_state.element
+            | color(input_state.focused
+                        ? static_cast<Color>(ColorQuestionCyan)
+                        : Color{Color::White});
     };
     option.multiline = false;
     option.cursor_position = &state_.other_input_cursor_position;
@@ -38,7 +50,7 @@ QuestionDialogController::QuestionDialogController() {
     };
     editor_component_ = PromptInput(
         &state_.other_input_text,
-        "Type your own instruction...",
+        std::string(kQuestionDialogOtherLabel),
         std::move(option));
 }
 
@@ -58,6 +70,7 @@ QuestionDialogPromise QuestionDialogController::open(
             item.options.push_back(QuestionDialogOption{
                 .label = std::move(option.label),
                 .description = std::move(option.description),
+                .accepts_free_text = option.accepts_free_text,
             });
         }
         questions.push_back(std::move(item));
@@ -68,6 +81,7 @@ QuestionDialogPromise QuestionDialogController::open(
     activate_question_dialog(state_, std::move(questions));
     promise_ = std::move(request.promise);
     submit_requested_ = false;
+    focus_other_editor_if_selected();
     return displaced;
 }
 
@@ -84,18 +98,30 @@ Element QuestionDialogController::render() {
     std::lock_guard lock(mutex_);
     return render_question_dialog_panel(
         state_,
-        state_.show_other_input ? editor_component_->Render() : Element{});
+        editor_component_->Render());
+}
+
+void QuestionDialogController::focus_other_editor_if_selected() {
+    if (question_dialog_selected_option_is_other(state_)) {
+        editor_component_->TakeFocus();
+    }
+}
+
+void QuestionDialogController::sync_selection_focus(
+    QuestionDialogEventResult& result) {
+    if (question_dialog_selected_option_is_other(state_)) {
+        editor_component_->TakeFocus();
+    } else {
+        result.restore_main_input_focus = true;
+    }
 }
 
 void QuestionDialogController::apply_answer_progress(
     QuestionDialogAnswerProgress progress,
     QuestionDialogEventResult& result) {
     switch (progress) {
-    case QuestionDialogAnswerProgress::EditingOther:
-        editor_component_->TakeFocus();
-        break;
     case QuestionDialogAnswerProgress::Advanced:
-        result.restore_main_input_focus = true;
+        sync_selection_focus(result);
         break;
     case QuestionDialogAnswerProgress::Completed:
         result.restore_main_input_focus = true;
@@ -128,75 +154,69 @@ QuestionDialogEventResult QuestionDialogController::handle_event(
     }
     result.handled = true;
 
-    auto& question = state_.questions[
-        static_cast<std::size_t>(state_.current_question_index)];
-    const int option_count = static_cast<int>(question.options.size());
+    if (is_interrupt) {
+        dismiss(true, result);
+        return result;
+    }
 
-    if (state_.show_other_input) {
-        if (event == Event::Escape) {
-            cancel_question_dialog_other_input(state_);
-            result.restore_main_input_focus = true;
-            return result;
+    // Navigation and dismissal stay owned by the dialog while the embedded
+    // "Other" editor is selected, so the highlight never gets trapped in it.
+    if (event == Event::ArrowUp) {
+        move_question_dialog_selection(state_, -1);
+        sync_selection_focus(result);
+        return result;
+    }
+    if (event == Event::ArrowDown) {
+        move_question_dialog_selection(state_, 1);
+        sync_selection_focus(result);
+        return result;
+    }
+    if (event == Event::Escape) {
+        if (!clear_question_dialog_other_input(state_)) {
+            dismiss(false, result);
         }
-        if (is_interrupt) {
-            dismiss(true, result);
-            return result;
-        }
+        return result;
+    }
 
+    // "Other" highlighted: every remaining key edits the free text, so digits
+    // and spaces are typed instead of being swallowed by option shortcuts.
+    if (question_dialog_selected_option_is_other(state_)) {
         submit_requested_ = false;
         (void)editor_component_->OnEvent(event);
         if (submit_requested_) {
-            apply_answer_progress(
-                accept_question_dialog_other_answer(state_),
-                result);
+            apply_answer_progress(accept_question_dialog_answer(state_), result);
         }
         return result;
     }
 
-    if (event == Event::ArrowUp && option_count > 0) {
-        state_.selected_option =
-            (state_.selected_option + option_count - 1) % option_count;
-        return result;
-    }
-    if (event == Event::ArrowDown && option_count > 0) {
-        state_.selected_option =
-            (state_.selected_option + 1) % option_count;
-        return result;
-    }
+    const auto& question = state_.questions[
+        static_cast<std::size_t>(state_.current_question_index)];
+    const int option_count = static_cast<int>(question.options.size());
+
     if (event == Event::Character(' ') && question.multi_select) {
-        const auto selected = std::ranges::find(
-            state_.multi_selected,
-            state_.selected_option);
-        if (selected == state_.multi_selected.end()) {
-            state_.multi_selected.push_back(state_.selected_option);
-        } else {
-            state_.multi_selected.erase(selected);
-        }
+        toggle_question_dialog_multi_selection(state_);
         return result;
     }
     if (event == Event::Return) {
-        apply_answer_progress(
-            accept_question_dialog_selected_answer(state_),
-            result);
-        return result;
-    }
-    if (event == Event::Escape || is_interrupt) {
-        dismiss(is_interrupt, result);
+        apply_answer_progress(accept_question_dialog_answer(state_), result);
         return result;
     }
 
     for (int option_number = 1;
-         option_number <= std::min(option_count, 5);
+         option_number <= std::min(option_count, kMaxQuickSelectOptions);
          ++option_number) {
         if (event != Event::Character(
                          static_cast<char>('0' + option_number))) {
             continue;
         }
-        state_.selected_option = option_number - 1;
-        if (!question.multi_select) {
-            apply_answer_progress(
-                accept_question_dialog_selected_answer(state_),
-                result);
+        if (!select_question_dialog_option(state_, option_number - 1)) {
+            break;
+        }
+        // Selecting "Other" opens its editor instead of answering right away.
+        if (question_dialog_selected_option_is_other(state_)) {
+            editor_component_->TakeFocus();
+        } else if (!question.multi_select) {
+            apply_answer_progress(accept_question_dialog_answer(state_), result);
         }
         break;
     }

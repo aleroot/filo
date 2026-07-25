@@ -15,6 +15,7 @@ namespace core::tools {
 struct QuestionOption {
     std::string label;
     std::string description;
+    bool accepts_free_text = false;
 };
 
 /**

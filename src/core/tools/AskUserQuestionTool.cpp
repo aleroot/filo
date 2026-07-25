@@ -123,16 +123,19 @@ std::string AskUserQuestionTool::execute(
                     opt.description = std::string(description);
                 }
                 
-                if (!opt.label.empty()) {
+                // "Other" is supplied by the tool as one dedicated free-text
+                // row. Ignore a duplicate choice from the caller so the UI
+                // never renders both a regular label and an input row.
+                if (!opt.label.empty() && opt.label != "Other") {
                     item.options.push_back(std::move(opt));
                 }
             }
         }
 
-        // Add synthetic "Other" option
+        // Add one synthetic free-text row. "Other" is a UI placeholder, not
+        // the label of a regular choice.
         QuestionOption other_opt;
-        other_opt.label = "Other";
-        other_opt.description = "";
+        other_opt.accepts_free_text = true;
         item.options.push_back(std::move(other_opt));
 
         if (!item.question.empty() && item.options.size() >= 2) {

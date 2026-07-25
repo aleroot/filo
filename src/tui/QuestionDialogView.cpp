@@ -1,6 +1,5 @@
 #include "QuestionDialogView.hpp"
 
-#include "PromptComponents.hpp"
 #include "TuiTheme.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -52,24 +51,51 @@ Element render_question_tabs(const QuestionDialogState& state) {
     return hbox(std::move(tabs));
 }
 
+/// Renders one option row. The synthetic free-text option is the input itself;
+/// "Other" is supplied only by the editor placeholder.
 Element render_question_option(
-    const QuestionDialogOption& option,
+    const QuestionDialogState& state,
+    const QuestionDialogItem& question,
     int index,
-    int selected_index,
-    bool multi_select,
-    const std::vector<int>& multi_selected,
-    bool show_other_input,
-    bool other_input_error,
     Element other_input_editor) {
+    const auto& option = question.options[static_cast<std::size_t>(index)];
     const int number = index + 1;
-    const bool is_selected = index == selected_index;
-    const bool is_other = option.label == kQuestionDialogOtherLabel;
+    const bool is_selected = index == state.selected_option;
+    const bool accepts_free_text =
+        question_dialog_option_accepts_free_text(option);
+
+    if (accepts_free_text) {
+        if (!other_input_editor) {
+            other_input_editor = text(std::string(kQuestionDialogOtherLabel));
+        }
+
+        const Color prefix_color = is_selected
+            ? static_cast<Color>(ColorQuestionCyan)
+            : Color::GrayLight;
+        auto input_row = hbox({
+            text(std::format(
+                "{} [{}] ",
+                is_selected ? "\xe2\x86\x92" : " ",
+                number))
+                | color(prefix_color),
+            std::move(other_input_editor) | xflex,
+        }) | xflex;
+
+        Elements lines;
+        lines.push_back(std::move(input_row));
+        if (state.other_input_error && is_selected) {
+            lines.push_back(
+                text("      Enter another answer before submitting.")
+                | color(Color::Red));
+        }
+        return vbox(std::move(lines));
+    }
 
     Elements lines;
     Element option_line;
-    if (multi_select) {
+    if (question.multi_select) {
         const bool checked =
-            std::ranges::find(multi_selected, index) != multi_selected.end();
+            std::ranges::find(state.multi_selected, index) != state.multi_selected.end();
         const std::string checkbox = checked ? "[\xe2\x9c\x93]" : "[ ]";
         const Color option_color = is_selected
             ? static_cast<Color>(ColorQuestionCyan)
@@ -85,25 +111,9 @@ Element render_question_option(
     }
     lines.push_back(std::move(option_line));
 
-    if (!option.description.empty() && !(is_other && show_other_input)) {
+    if (!option.description.empty()) {
         lines.push_back(
             text(std::format("      {}", option.description)) | dim);
-    }
-
-    if (is_other && is_selected && show_other_input) {
-        if (!other_input_editor) {
-            other_input_editor = text("");
-        }
-        lines.push_back(
-            render_prompt_box(
-                std::move(other_input_editor),
-                ColorQuestionCyan)
-            | xflex);
-        if (other_input_error) {
-            lines.push_back(
-                text("      Enter an instruction before submitting.")
-                | color(Color::Red));
-        }
     }
 
     return vbox(std::move(lines));
@@ -122,6 +132,8 @@ Element render_question_dialog_panel(
 
     const auto& current_question =
         state.questions[static_cast<std::size_t>(state.current_question_index)];
+    const bool editing_other =
+        question_dialog_selected_option_is_other(state);
     Elements children;
 
     auto tabs = render_question_tabs(state);
@@ -148,38 +160,28 @@ Element render_question_dialog_panel(
     }
 
     for (std::size_t i = 0; i < current_question.options.size(); ++i) {
-        const bool use_other_editor =
-            static_cast<int>(i) == state.selected_option
-            && current_question.options[i].label == kQuestionDialogOtherLabel;
+        const bool row_owns_editor =
+            question_dialog_option_accepts_free_text(
+                current_question.options[i]);
         children.push_back(render_question_option(
-            current_question.options[i],
+            state,
+            current_question,
             static_cast<int>(i),
-            state.selected_option,
-            current_question.multi_select,
-            state.multi_selected,
-            state.show_other_input,
-            state.other_input_error,
-            use_other_editor ? std::move(other_input_editor) : Element{}));
+            row_owns_editor ? std::move(other_input_editor) : Element{}));
     }
 
-    if (state.show_other_input) {
-        children.push_back(text(""));
-        children.push_back(
-            text("  Type your instruction  Enter: submit  "
-                 "Shift+Enter: new line  Esc: back")
-            | dim);
-    } else if (state.questions.size() > 1) {
-        children.push_back(text(""));
-        children.push_back(
-            text("  \xe2\x97\x84/\xe2\x96\xba switch  "
-                 "\xe2\x96\xb2/\xe2\x96\xbc select  "
-                 "Enter: submit  Esc: exit")
-            | dim);
-    }
+    children.push_back(text(""));
+    children.push_back(
+        text(editing_other
+                 ? "  Type your instruction  Enter: submit  "
+                   "Shift+Enter: new line  Esc: clear"
+                 : "  \xe2\x96\xb2/\xe2\x96\xbc select  "
+                   "Enter: confirm  Esc: exit")
+        | dim);
 
     auto content = vbox(std::move(children));
-    const std::string help = state.show_other_input
-        ? "Enter: submit  Shift+Enter: new line  Esc: back"
+    const std::string help = editing_other
+        ? "Up/Down: select  Enter: submit  Esc: clear draft"
         : std::format(
               "Up/Down: select  Enter: confirm  1-{}: quick select  Esc: exit",
               std::min<std::size_t>(current_question.options.size(), 5));

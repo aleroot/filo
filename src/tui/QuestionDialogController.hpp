@@ -56,6 +56,8 @@ public:
         bool is_interrupt);
 
 private:
+    void focus_other_editor_if_selected();
+    void sync_selection_focus(QuestionDialogEventResult& result);
     void apply_answer_progress(
         QuestionDialogAnswerProgress progress,
         QuestionDialogEventResult& result);
