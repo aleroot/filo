@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <fstream>
 #include <filesystem>
+#include "core/llm/KimiModelTraits.hpp"
 #include "core/llm/routing/PolicyLoader.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/tools/ToolNames.hpp"
@@ -218,11 +219,8 @@ void apply_api_key_fallback(std::string_view name, ProviderConfig& provider) {
 
 [[nodiscard]] bool is_kimi_code_preset(std::string_view name,
                                        const ProviderConfig& provider) {
-    const bool managed_name = name == "kimi-code"
-        || name.starts_with("kimi-code-")
-        || name == "kimi-for-coding"
-        || name.starts_with("kimi-for-coding-");
-    return managed_name && provider.base_url.find("/coding/") != std::string::npos;
+    return core::llm::is_kimi_code_provider_name(name)
+        && core::llm::is_kimi_code_endpoint_path(provider.base_url);
 }
 
 void inherit_kimi_oauth_for_code_presets(AppConfig& config) {

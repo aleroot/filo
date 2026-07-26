@@ -87,6 +87,80 @@ namespace {
     return {};
 }
 
+enum class TokenPlanLimitKind {
+    Unknown,
+    RequestRate,
+    PlanQuota,
+};
+
+struct DashScopeErrorDetails {
+    std::string code;
+    std::string message;
+    TokenPlanLimitKind token_plan_limit = TokenPlanLimitKind::Unknown;
+};
+
+[[nodiscard]] TokenPlanLimitKind classify_token_plan_limit(
+    std::string_view code,
+    std::string_view message) {
+    const std::string normalized_code =
+        core::utils::str::to_lower_ascii_copy(code);
+    const std::string normalized_message =
+        core::utils::str::to_lower_ascii_copy(message);
+
+    // Token Plan Personal Edition documents these allocation errors as an
+    // exhausted 5-hour or 7-day Credits window.
+    if (normalized_code == "throttling.allocationquota"
+        || normalized_code == "insufficient_quota"
+        || normalized_message.find("allocated quota exceeded")
+            != std::string::npos
+        || normalized_message.find("exceeded your current quota")
+            != std::string::npos) {
+        return TokenPlanLimitKind::PlanQuota;
+    }
+
+    // Do not classify the broad `Throttling.*` namespace as plan exhaustion:
+    // RateQuota and BurstRate are short-lived request throttles.
+    if (normalized_code == "throttling.ratequota"
+        || normalized_code == "limitrequests"
+        || normalized_code == "limit_requests"
+        || normalized_code == "throttling.burstrate"
+        || normalized_code == "limit_burst_rate"
+        || normalized_message.find("requests rate limit exceeded")
+            != std::string::npos
+        || normalized_message.find("request rate increased too quickly")
+            != std::string::npos) {
+        return TokenPlanLimitKind::RequestRate;
+    }
+    return TokenPlanLimitKind::Unknown;
+}
+
+[[nodiscard]] DashScopeErrorDetails parse_dashscope_error(
+    std::string_view body) {
+    DashScopeErrorDetails details;
+    if (body.empty()) return details;
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(body);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return details;
+
+    std::string_view value;
+    if (doc["code"].get(value) == simdjson::SUCCESS) {
+        details.code = value;
+    } else if (doc["error"]["code"].get(value) == simdjson::SUCCESS) {
+        details.code = value;
+    }
+    if (doc["message"].get(value) == simdjson::SUCCESS) {
+        details.message = value;
+    } else if (doc["error"]["message"].get(value) == simdjson::SUCCESS) {
+        details.message = value;
+    }
+
+    details.token_plan_limit =
+        classify_token_plan_limit(details.code, details.message);
+    return details;
+}
+
 [[nodiscard]] std::string format_dashscope_error(
     const HttpResponse& response,
     DashScopeDeployment deployment,
@@ -94,28 +168,16 @@ namespace {
     const int code = response.status_code;
     const bool token_plan = deployment == DashScopeDeployment::TokenPlan;
 
-    std::string dash_code;
-    std::string dash_message;
-    if (!response.body.empty()) {
-        thread_local simdjson::dom::parser parser;
-        simdjson::padded_string ps(response.body);
-        simdjson::dom::element doc;
-        if (parser.parse(ps).get(doc) == simdjson::SUCCESS) {
-            std::string_view value;
-            if (doc["code"].get(value) == simdjson::SUCCESS) dash_code = value;
-            if (doc["message"].get(value) == simdjson::SUCCESS) dash_message = value;
-            if (dash_message.empty()
-                && doc["error"]["message"].get(value) == simdjson::SUCCESS) {
-                dash_message = value;
-            }
-        }
-    }
+    const DashScopeErrorDetails error =
+        parse_dashscope_error(response.body);
 
     const auto detail = [&]() -> std::string {
-        if (!dash_code.empty() && !dash_message.empty()) {
-            return " (" + dash_code + ": " + dash_message + ")";
+        if (!error.code.empty() && !error.message.empty()) {
+            return " (" + error.code + ": " + error.message + ")";
         }
-        return dash_message.empty() ? std::string{} : " " + dash_message;
+        return error.message.empty()
+            ? std::string{}
+            : " " + error.message;
     };
 
     switch (code) {
@@ -146,16 +208,43 @@ namespace {
                        ? " Check the exact model ID and use /compatible-mode/v1.]"
                        : " Check the model ID in the Qwen Cloud model catalog.]");
         case 429: {
-            std::string message = token_plan
-                ? "[Qwen Token Plan Error 429: Rate limit or Credits quota exceeded."
-                : "[DashScope Error 429: Rate limit or quota exceeded.";
+            // Distinguish a hard plan-quota block (5h/7d window exhausted) from
+            // a transient per-minute request rate limit. The two call for very
+            // different user action, and the Token Plan surfaces both as 429.
+            const bool quota = error.token_plan_limit
+                == TokenPlanLimitKind::PlanQuota;
+            const bool request_rate = error.token_plan_limit
+                == TokenPlanLimitKind::RequestRate;
+            std::string message;
+            if (!token_plan) {
+                message = "[DashScope Error 429: Rate limit or quota exceeded.";
+            } else if (quota) {
+                message = "[Qwen Token Plan Error 429: Credits quota exceeded.";
+            } else if (request_rate) {
+                message = "[Qwen Token Plan Error 429: Request rate limit exceeded.";
+            } else {
+                message = "[Qwen Token Plan Error 429: Rate limit or quota exceeded.";
+            }
             message += detail();
             if (retry_after_seconds > 0) {
                 message += " Retry after " + std::to_string(retry_after_seconds) + "s.";
             }
-            message += token_plan
-                ? " Check Credits at https://home.qwencloud.com/token-plan]"
-                : " Check Qwen Cloud usage in the console.]";
+            if (token_plan) {
+                if (quota) {
+                    message +=
+                        " The 5-hour or 7-day window is exhausted — the service "
+                        "resumes when that window resets. Manage usage at "
+                        "https://home.qwencloud.com/token-plan]";
+                } else if (request_rate) {
+                    message += " Reduce request frequency and retry.]";
+                } else {
+                    message +=
+                        " Retry with backoff; if the error persists, check "
+                        "Credits at https://home.qwencloud.com/token-plan]";
+                }
+            } else {
+                message += " Check Qwen Cloud usage in the console.]";
+            }
             return message;
         }
         case 500:
@@ -428,7 +517,33 @@ std::unique_ptr<ApiProtocolBase> DashScopeTokenPlanProtocol::clone() const {
 
 void DashScopeTokenPlanProtocol::on_response(
     const HttpResponse& response) {
+    // Keep the inner protocol's behaviour (usage parsing, header-based limits).
     active().on_response(response);
+
+    // The Token Plan inference endpoints expose no rate-limit/usage headers, so
+    // on a successful response there is nothing additional to capture. The only
+    // provider-backed quota signal is a 429 body; translate it into a
+    // rate-limit snapshot so the status bar and quota notifications can react.
+    has_rate_limit_override_ = false;
+    rate_limit_override_ = {};
+
+    if (response.status_code != 429) return;
+
+    RateLimitInfo info = active().last_rate_limit();
+    info.is_rate_limited = true;
+    info.unified_status = "rate_limited";
+    if (const int32_t retry_after = parse_int_header(response.headers, "retry-after");
+        retry_after > 0) {
+        info.retry_after = retry_after;
+    }
+    // A plan-quota block is a hard rejection (not a transient throttle).
+    if (parse_dashscope_error(response.body).token_plan_limit
+        == TokenPlanLimitKind::PlanQuota) {
+        info.unified_overage_status = "rejected";
+    }
+
+    rate_limit_override_ = info;
+    has_rate_limit_override_ = true;
 }
 
 std::string DashScopeTokenPlanProtocol::format_error_message(
@@ -442,6 +557,7 @@ bool DashScopeTokenPlanProtocol::is_retryable(
 }
 
 RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
+    if (has_rate_limit_override_) return rate_limit_override_;
     return active().last_rate_limit();
 }
 
@@ -449,6 +565,8 @@ void DashScopeTokenPlanProtocol::reset_state() {
     chat_->reset_state();
     responses_->reset_state();
     active_wire_api_ = QwenTokenPlanWireApi::Responses;
+    has_rate_limit_override_ = false;
+    rate_limit_override_ = {};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

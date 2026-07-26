@@ -1,5 +1,6 @@
 #include "ProviderCatalogGrouping.hpp"
 
+#include "KimiModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -34,21 +35,16 @@ constexpr std::array<std::string_view, 4> kQwenTokenPlanTextModels{{
 }
 
 [[nodiscard]] bool is_kimi_code_source(std::string_view provider_name) {
-    const std::string lowered = normalized(provider_name);
-    return lowered == "kimi-code"
-        || lowered.starts_with("kimi-code-")
-        || lowered == "kimi-for-coding"
-        || lowered.starts_with("kimi-for-coding-");
+    return is_kimi_code_provider_name(provider_name);
 }
 
 [[nodiscard]] bool is_qwen_token_plan_source(std::string_view provider_name) {
     return normalized(provider_name).starts_with("qwen-token-plan");
 }
 
-template <std::size_t N>
 [[nodiscard]] ProviderCatalogModelFilter model_filter(
     ProviderCatalogModelRule rule,
-    const std::array<std::string_view, N>& model_ids) {
+    std::span<const std::string_view> model_ids) {
     ProviderCatalogModelFilter filter{.rule = rule};
     filter.model_ids.reserve(model_ids.size());
     for (const auto model_id : model_ids) {
@@ -66,12 +62,9 @@ template <std::size_t N>
 }
 
 [[nodiscard]] ProviderCatalogModelFilter kimi_regular_filter() {
-    constexpr std::array<std::string_view, 3> code_models{{
-        "k3",
-        "kimi-for-coding",
-        "kimi-for-coding-highspeed",
-    }};
-    return model_filter(ProviderCatalogModelRule::Exclude, code_models);
+    return model_filter(
+        ProviderCatalogModelRule::Exclude,
+        kimi_code_model_ids());
 }
 
 [[nodiscard]] ProviderCatalogModelFilter kimi_code_filter() {
@@ -95,6 +88,7 @@ template <std::size_t N>
                                                         std::string_view group_name) {
     ProviderCatalogSource source{
         .provider_name = std::string(provider_name),
+        .service_id = std::string(provider_name),
         .category_label = {},
         .registry_model_filter = {},
         .api_model_policy = ProviderCatalogApiModelPolicy::All,
@@ -106,9 +100,12 @@ template <std::size_t N>
     } else if (group_name == "zai") {
         source.registry_model_filter = zai_regular_filter();
     } else if (group_name == "kimi" && is_kimi_code_source(provider_name)) {
+        source.service_id = std::string(kimi_service_id(KimiService::Code));
         source.category_label = "Kimi Code subscription.";
         source.registry_model_filter = kimi_code_filter();
     } else if (group_name == "kimi") {
+        source.service_id =
+            std::string(kimi_service_id(KimiService::PublicApi));
         source.category_label = "Kimi API.";
         source.registry_model_filter = kimi_regular_filter();
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
@@ -183,6 +180,16 @@ ProviderCatalogGroup::find_source(std::string_view provider) const {
     const auto it = std::ranges::find_if(sources, [&](const ProviderCatalogSource& source) {
         return source.provider_name == provider;
     });
+    return it == sources.end() ? nullptr : &*it;
+}
+
+const ProviderCatalogSource*
+ProviderCatalogGroup::find_source_by_service_id(std::string_view service) const {
+    const auto it = std::ranges::find_if(
+        sources,
+        [&](const ProviderCatalogSource& source) {
+            return source.service_id == service;
+        });
     return it == sources.end() ? nullptr : &*it;
 }
 

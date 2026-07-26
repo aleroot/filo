@@ -557,6 +557,79 @@ TEST_CASE("KimiModelCatalogProvider parses Moonshot enriched models response", "
     CHECK_FALSE(legacy.supports(ModelCapability::VideoInput));
 }
 
+TEST_CASE("KimiModelCatalogProvider parses current Kimi Code reasoning metadata",
+          "[llm][model-catalog][kimi]") {
+    KimiModelCatalogProvider provider;
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "k3",
+          "display_name": "K3",
+          "context_length": 262144,
+          "supports_reasoning": true,
+          "supports_thinking_type": "only",
+          "think_efforts": {
+            "support": true,
+            "valid_efforts": ["low", "high", "max"],
+            "default_effort": "high"
+          },
+          "supports_image_in": true,
+          "supports_video_in": true
+        },
+        {
+          "id": "kimi-for-coding",
+          "display_name": "K2.7 Coding",
+          "context_length": 262144,
+          "supports_reasoning": true,
+          "supports_thinking_type": "only",
+          "think_efforts": null,
+          "supports_image_in": true,
+          "supports_video_in": true
+        },
+        {
+          "id": "K3-256K",
+          "supports_reasoning": true,
+          "supports_thinking_type": "only",
+          "think_efforts": {
+            "support": true,
+            "valid_efforts": ["low", "high", "max"]
+          },
+          "supports_image_in": true,
+          "supports_video_in": false
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 3);
+
+    const auto& k3 = result.models[0];
+    CHECK(k3.context_window == 262144);
+    CHECK(k3.max_output_tokens == 262144);
+    CHECK(k3.reasoning.complete);
+    CHECK(k3.reasoning.manual_thinking);
+    CHECK(k3.reasoning.effort.supports(ReasoningCapability::Effort));
+    CHECK(k3.reasoning.effort.supports(ReasoningCapability::Required));
+    CHECK(k3.reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK_FALSE(k3.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+
+    const auto& k27 = result.models[1];
+    CHECK(k27.reasoning.complete);
+    CHECK(k27.reasoning.effort.supports(ReasoningCapability::Effort));
+    CHECK(k27.reasoning.effort.supports(ReasoningCapability::Required));
+    CHECK_FALSE(k27.reasoning.effort.supports(
+        ReasoningCapability::MaxEffort));
+
+    const auto& k3_256k = result.models[2];
+    CHECK(k3_256k.canonical_id == "K3-256K");
+    CHECK(k3_256k.context_window == 262144);
+    CHECK(k3_256k.max_output_tokens == 262144);
+    CHECK(k3_256k.supports(ModelCapability::Vision));
+    CHECK_FALSE(k3_256k.supports(ModelCapability::VideoInput));
+}
+
 TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[llm][model-catalog]") {
     KimiModelCatalogProvider provider;
 

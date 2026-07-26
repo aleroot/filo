@@ -184,6 +184,7 @@ set(FILO_CORE_SOURCES
     src/core/config/SessionModelOverride.cpp
     src/core/llm/providers/RouterProvider.cpp
     src/core/llm/providers/QwenModelCatalogSelector.cpp
+    src/core/llm/KimiModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
     src/core/llm/ModelCatalogDiscovery.cpp

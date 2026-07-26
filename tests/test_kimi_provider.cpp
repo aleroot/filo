@@ -2,9 +2,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
+#include <utility>
 
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
@@ -111,11 +114,69 @@ TEST_CASE("KimiSerializer - k2.7 code model is serialized correctly", "[kimi][se
 }
 
 TEST_CASE("KimiSerializer - K3 public and subscription model IDs are preserved", "[kimi][serializer]") {
-    for (const std::string model : {"kimi-k3", "k3"}) {
-        const auto payload = KimiProtocol{}.serialize(make_simple_request(model));
-        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":")" + model + "\""));
-        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
-        REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+    for (const auto& [model, default_effort] :
+         std::array<std::pair<std::string_view, std::string_view>, 3>{{
+             {"kimi-k3", "max"},
+             {"k3", "high"},
+             {"k3-256k", "high"},
+         }}) {
+        const auto payload =
+            KimiProtocol{}.serialize(make_simple_request(std::string(model)));
+        REQUIRE_THAT(
+            payload,
+            Catch::Matchers::ContainsSubstring(
+                R"("model":")" + std::string(model) + "\""));
+        if (model == "kimi-k3") {
+            REQUIRE_THAT(
+                payload,
+                Catch::Matchers::ContainsSubstring(
+                    R"("reasoning_effort":")"
+                    + std::string(default_effort)
+                    + "\""));
+            REQUIRE_THAT(
+                payload,
+                !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+        } else {
+            REQUIRE_THAT(
+                payload,
+                !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+            REQUIRE_THAT(
+                payload,
+                Catch::Matchers::ContainsSubstring(
+                    R"("thinking":{"type":"enabled","effort":")"
+                    + std::string(default_effort)
+                    + "\"}"));
+        }
+    }
+}
+
+TEST_CASE("KimiProtocol - K3 maps supported reasoning effort levels",
+          "[kimi][serializer][effort]") {
+    for (const auto& [requested, expected] :
+         std::array<std::pair<std::string_view, std::string_view>, 7>{{
+             {"low", "low"},
+             {"medium", "high"},
+             {"high", "high"},
+             {"xhigh", "max"},
+             {"max", "max"},
+             {"auto", "high"},
+             {"off", "high"},
+         }}) {
+        CAPTURE(requested);
+        for (const auto model : {"k3", "k3-256k"}) {
+            auto req = make_simple_request(model);
+            req.effort = requested;
+            const auto payload = KimiProtocol{}.serialize(req);
+            REQUIRE_THAT(
+                payload,
+                !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+            REQUIRE_THAT(
+                payload,
+                Catch::Matchers::ContainsSubstring(
+                    R"("thinking":{"type":"enabled","effort":")"
+                    + std::string(expected)
+                    + "\"}"));
+        }
     }
 }
 
@@ -257,15 +318,18 @@ TEST_CASE("KimiProtocol - off effort disables switchable K2.6 thinking",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
 }
 
-TEST_CASE("KimiProtocol - K3 always uses max reasoning even when effort is off",
+TEST_CASE("KimiProtocol - K3 preserves the selected model when effort is off",
           "[kimi][serializer][effort]") {
     auto req = make_simple_request("k3");
     req.effort = "off";
 
     const auto payload = KimiProtocol{}.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","effort":"high"})"));
 }
 
 TEST_CASE("KimiProtocol - session id becomes stable prompt cache key",
@@ -1366,7 +1430,26 @@ TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][
     REQUIRE(metadata.has_value());
     CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
     CHECK(metadata->default_model == "k3");
+    CHECK(metadata->service_id == "kimi:code");
     CHECK(provider->max_context_size() == 1'048'576);
+}
+
+TEST_CASE("ProviderFactory - K3 256K uses subscription endpoint",
+          "[kimi][factory][k3]") {
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3-256k";
+    cfg.auth_type = "api_key";
+    cfg.api_key = "test-key";
+
+    const auto provider =
+        core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
+    CHECK(metadata->default_model == "k3-256k");
+    CHECK(metadata->service_id == "kimi:code");
+    CHECK(provider->max_context_size() == 262'144);
 }
 
 TEST_CASE("ProviderFactory - public Kimi K3 uses current Moonshot API endpoint", "[kimi][factory][k3]") {
@@ -1380,6 +1463,7 @@ TEST_CASE("ProviderFactory - public Kimi K3 uses current Moonshot API endpoint",
     REQUIRE(metadata.has_value());
     CHECK(metadata->base_url == "https://api.moonshot.ai/v1");
     CHECK(metadata->default_model == "kimi-k3");
+    CHECK(metadata->service_id == "kimi:public-api");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

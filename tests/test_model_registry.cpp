@@ -20,6 +20,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     // Kimi (via new registry)
     REQUIRE(get_max_context_size("kimi-k3") == 1048576);
     REQUIRE(get_max_context_size("k3") == 1048576);
+    REQUIRE(get_max_context_size("k3-256k") == 262144);
     REQUIRE(get_max_context_size("kimi-k2.7-code") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.6") == 256000);
     REQUIRE(get_max_context_size("kimi-k2.5") == 256000);
@@ -103,6 +104,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("kimi-k2.7-code"));
     REQUIRE(registry.has_model("kimi-k3"));
     REQUIRE(registry.has_model("k3"));
+    REQUIRE(registry.has_model("k3-256k"));
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
     REQUIRE(registry.has_model("kimi-for-coding"));

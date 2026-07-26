@@ -179,9 +179,9 @@ protected:
     /**
      * @brief Append Kimi thinking controls for reasoning-capable Kimi models.
      *
-     * Filo carries effort as a provider-neutral request hint. K3 uses its
-     * max-only top-level `reasoning_effort`; K2.x uses `thinking.type`, matching
-     * the current Kimi CLI wire contract.
+     * Filo carries effort as a provider-neutral request hint. Public kimi-k3
+     * uses top-level `reasoning_effort`; managed Kimi Code K3 uses
+     * `thinking.effort`; K2.x uses `thinking.type`.
      */
     void append_extra_fields(std::string& payload, const ChatRequest& req) const override;
 

@@ -904,14 +904,10 @@ RunResult run(RunOptions opts) {
     
     // Rate limit tracking for status bar and notifications
     struct RateLimitState {
-        int32_t requests_limit = 0;
-        int32_t requests_remaining = 0;
-        int32_t tokens_limit = 0;
-        int32_t tokens_remaining = 0;
-        std::vector<core::llm::protocols::UsageWindow> usage_windows;
+        core::llm::protocols::RateLimitInfo latest;
+        bool quota_notified_limited = false;
         bool quota_notified_low = false;
         bool quota_notified_critical = false;
-        std::chrono::steady_clock::time_point last_update;
     };
     RateLimitState rate_limit_state;
     struct StderrPanelState {
@@ -1646,11 +1642,13 @@ RunResult run(RunOptions opts) {
         };
 
         const float req_util = utilization_from_remaining(
-            rate_limit_state.requests_remaining, rate_limit_state.requests_limit);
+            rate_limit_state.latest.requests_remaining,
+            rate_limit_state.latest.requests_limit);
         const float tok_util = utilization_from_remaining(
-            rate_limit_state.tokens_remaining, rate_limit_state.tokens_limit);
+            rate_limit_state.latest.tokens_remaining,
+            rate_limit_state.latest.tokens_limit);
         float unified_util = 0.0f;
-        for (const auto& w : rate_limit_state.usage_windows) {
+        for (const auto& w : rate_limit_state.latest.usage_windows) {
             unified_util = std::max(unified_util, w.utilization);
         }
         const float api_util = std::max(req_util, tok_util);
@@ -1665,7 +1663,7 @@ RunResult run(RunOptions opts) {
         };
 
         auto append_trigger_details = [&](std::string& msg, float threshold) {
-            for (const auto& w : rate_limit_state.usage_windows) {
+            for (const auto& w : rate_limit_state.latest.usage_windows) {
                 if (w.utilization >= threshold) {
                     msg += std::format("    {}: {:.0f}% used\n",
                                        window_name(w.label), w.utilization * 100.0f);
@@ -1674,16 +1672,44 @@ RunResult run(RunOptions opts) {
             if (req_util >= threshold) {
                 msg += std::format("    Request window: {:.0f}% used ({}/{})\n",
                                    req_util * 100.0f,
-                                   rate_limit_state.requests_remaining,
-                                   rate_limit_state.requests_limit);
+                                   rate_limit_state.latest.requests_remaining,
+                                   rate_limit_state.latest.requests_limit);
             }
             if (tok_util >= threshold) {
                 msg += std::format("    Token window: {:.0f}% used ({}/{})\n",
                                    tok_util * 100.0f,
-                                   rate_limit_state.tokens_remaining,
-                                   rate_limit_state.tokens_limit);
+                                   rate_limit_state.latest.tokens_remaining,
+                                   rate_limit_state.latest.tokens_limit);
             }
         };
+
+        // Providers that expose no usage windows or numeric limits (notably
+        // the QwenCloud Token Plan) can still report a hard 429 rate-limit
+        // state. Surface it with its own one-time notification and skip the
+        // percentage tiers, which have no data to work with here.
+        const bool hard_limited =
+            (rate_limit_state.latest.is_rate_limited
+             || rate_limit_state.latest.unified_status == "rate_limited")
+            && rate_limit_state.latest.usage_windows.empty()
+            && rate_limit_state.latest.requests_limit <= 0
+            && rate_limit_state.latest.tokens_limit <= 0;
+
+        if (hard_limited) {
+            if (!rate_limit_state.quota_notified_limited) {
+                rate_limit_state.quota_notified_limited = true;
+                std::string msg = "\n\xe2\x9b\x94  Rate limited by the provider";
+                if (rate_limit_state.latest.retry_after > 0) {
+                    msg += std::format(" (retry in {}s)",
+                                       rate_limit_state.latest.retry_after);
+                }
+                msg += ". The request was blocked; it will resume when the "
+                       "limit resets.\n";
+                append_history(msg);
+            }
+            return;
+        }
+        // No longer hard-limited: re-arm the notification for the next time.
+        rate_limit_state.quota_notified_limited = false;
 
         // Check for critical quota (90%+ used)
         if (max_util >= 0.90f) {
@@ -2726,6 +2752,7 @@ RunResult run(RunOptions opts) {
     auto provider_model_rows = [&](std::string_view provider_name) {
         std::vector<tui::ModelPickerRow> rows;
         std::unordered_set<std::string> seen;
+        std::unordered_set<std::string> seen_services;
 
         const auto catalog_group =
             core::llm::provider_catalog_group_for(provider_name, sorted_provider_names);
@@ -2737,7 +2764,8 @@ RunResult run(RunOptions opts) {
                            std::string selector,
                            std::string source_provider,
                            std::string description,
-                           bool provider_default) {
+                           bool provider_default,
+                           std::string_view category_label) {
             if (id.empty()) {
                 id = "<provider default>";
             }
@@ -2749,12 +2777,11 @@ RunResult run(RunOptions opts) {
                 && (selector.empty()
                     ? manual_model_name.empty()
                     : models_equivalent(manual_model_name, selector));
-            if (const auto* source = catalog_group.find_source(source_provider);
-                source && !source->category_label.empty()) {
+            if (!category_label.empty()) {
                 if (!description.empty()) {
                     description += " ";
                 }
-                description += source->category_label;
+                description += category_label;
             }
             if (provider_default && !description.empty()) {
                 description += " Configured default.";
@@ -2779,13 +2806,34 @@ RunResult run(RunOptions opts) {
             }
             const auto& provider_cfg = provider_it->second;
             const std::string configured_default = provider_cfg.model;
+            std::shared_ptr<core::llm::LLMProvider> source_llm_provider;
+            const core::llm::ProviderCatalogSource* effective_source = &source;
+            try {
+                source_llm_provider =
+                    provider_manager.get_provider(source_provider);
+                if (const auto metadata = source_llm_provider->metadata()) {
+                    if (const auto* resolved =
+                            catalog_group.find_source_by_service_id(
+                                metadata->service_id)) {
+                        effective_source = resolved;
+                    }
+                }
+            } catch (const std::exception&) {
+            }
+            if (!seen_services.insert(effective_source->service_id).second) {
+                continue;
+            }
+            const std::string_view category_label =
+                effective_source->category_label;
 
             auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
             if (!core::llm::is_local_provider(
                     registered_providers, source_provider)) {
                 try {
                     snapshot = core::llm::request_model_catalog_snapshot(
-                        provider_manager.get_provider(source_provider),
+                        source_llm_provider
+                            ? source_llm_provider
+                            : provider_manager.get_provider(source_provider),
                         source_provider,
                         {.timeout_ms = 2500},
                         std::chrono::milliseconds{3000});
@@ -2800,14 +2848,16 @@ RunResult run(RunOptions opts) {
                 core::llm::ModelRegistry::instance().get_by_provider(
                     registry_key);
             std::erase_if(registry_models, [&](const auto& model) {
-                return !source.includes_registry_model(model.canonical_id);
+                return !effective_source->includes_registry_model(
+                    model.canonical_id);
             });
             std::ranges::sort(
                 registry_models, {}, &core::llm::ModelInfo::canonical_id);
 
             auto provider_models = snapshot.models;
             std::erase_if(provider_models, [&](const auto& model) {
-                return !source.includes_api_model(model.canonical_id);
+                return !effective_source->includes_api_model(
+                    model.canonical_id);
             });
             const auto resolved = core::llm::resolve_model_catalog(
                 provider_models, registry_models);
@@ -2825,7 +2875,8 @@ RunResult run(RunOptions opts) {
                     default_metadata.model
                         ? compact_model_description(*default_metadata.model)
                         : std::string{},
-                    true);
+                    true,
+                    category_label);
             }
             for (const auto& model : resolved.models) {
                 add_row(
@@ -2834,7 +2885,8 @@ RunResult run(RunOptions opts) {
                     source_provider,
                     compact_model_description(model),
                     models_equivalent(
-                        configured_default, model.canonical_id));
+                        configured_default, model.canonical_id),
+                    category_label);
             }
         }
 
@@ -2844,7 +2896,8 @@ RunResult run(RunOptions opts) {
                     "",
                     source_provider,
                     "Use the provider default configured by the backend.",
-                    true);
+                    true,
+                    catalog_group.sources.front().category_label);
         }
 
         return rows;
@@ -6622,11 +6675,7 @@ RunResult run(RunOptions opts) {
         // Update our local rate limit state for quota notifications
         {
             std::lock_guard lock(ui_mutex);
-            rate_limit_state.requests_limit     = rate_limit_info.requests_limit;
-            rate_limit_state.requests_remaining = rate_limit_info.requests_remaining;
-            rate_limit_state.tokens_limit       = rate_limit_info.tokens_limit;
-            rate_limit_state.tokens_remaining   = rate_limit_info.tokens_remaining;
-            rate_limit_state.usage_windows    = rate_limit_info.usage_windows;
+            rate_limit_state.latest = rate_limit_info;
         }
         // Check for quota notifications
         check_and_notify_quota();
@@ -6759,6 +6808,17 @@ RunResult run(RunOptions opts) {
                                                  rate_limit_info.tokens_remaining))
                                 | color(rate_color);
             }
+        } else if (rate_limit_info.is_rate_limited
+                   || rate_limit_info.unified_status == "rate_limited") {
+            // No usage windows or numeric limits are available, but the provider
+            // has blocked the request (e.g. a QwenCloud Token Plan 429). Surface
+            // the state honestly in red instead of leaving the slot blank.
+            std::string label = " Rate limited";
+            if (rate_limit_info.retry_after > 0) {
+                label += " " + std::to_string(rate_limit_info.retry_after) + "s";
+            }
+            label += " ";
+            rate_limit_el = text(label) | color(Color::Red);
         }
 
         Element guardrail_el = text("");

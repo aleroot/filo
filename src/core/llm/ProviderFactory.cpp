@@ -1,5 +1,6 @@
 #include "ProviderFactory.hpp"
 #include "HttpLLMProvider.hpp"
+#include "KimiModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
 #include "providers/QwenModelCatalogSelector.hpp"
@@ -78,19 +79,6 @@ std::string resolve_key(
     if (lowered == "chat_completions") return OpenAIWireApi::ChatCompletions;
 
     return OpenAIWireApi::ChatCompletions;
-}
-
-[[nodiscard]] bool model_prefers_kimi_code_endpoint(std::string_view model) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(model);
-    return lowered == "k3"
-        || lowered == "kimi-for-coding"
-        || lowered == "kimi-for-coding-highspeed";
-}
-
-[[nodiscard]] bool is_public_kimi_api_endpoint(
-    std::string_view base_url) noexcept {
-    return base_url == "https://api.moonshot.ai/v1"
-        || base_url == "https://api.moonshot.cn/v1";
 }
 
 [[nodiscard]] bool is_qwen_token_plan_endpoint(std::string_view base_url) noexcept {
@@ -182,15 +170,15 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     // Moonshot host and the legacy China host remain valid API-key endpoints.
     if (cred
         && canonical_type == "kimi"
-        && is_public_kimi_api_endpoint(base_url)) {
+        && kimi_service_for_endpoint(base_url) == KimiService::PublicApi) {
         base_url = "https://api.kimi.com/coding/v1";
         core::logging::debug("Using Kimi OAuth endpoint: {}", base_url);
     }
 
     // The official Kimi Code model is served by the Kimi Code endpoint.
     if (canonical_type == "kimi"
-        && is_public_kimi_api_endpoint(base_url)
-        && model_prefers_kimi_code_endpoint(config.model)) {
+        && kimi_service_for_endpoint(base_url) == KimiService::PublicApi
+        && is_kimi_code_model(config.model)) {
         base_url = "https://api.kimi.com/coding/v1";
         core::logging::debug("Using Kimi Code endpoint for model '{}': {}", config.model, base_url);
     }
@@ -382,6 +370,15 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         return nullptr;
     }
 
+    std::string service_id(name);
+    if (canonical_type == "kimi") {
+        if (const std::string_view resolved =
+                kimi_service_id(kimi_service_for_endpoint(base_url));
+            !resolved.empty()) {
+            service_id = resolved;
+        }
+    }
+
     return std::make_shared<HttpLLMProvider>(
         base_url,
         std::move(cred),
@@ -390,7 +387,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         api_type,
         std::string(name),
         std::move(client_identity_source),
-        std::move(model_catalog_selector));
+        std::move(model_catalog_selector),
+        std::move(service_id));
 }
 
 } // namespace core::llm

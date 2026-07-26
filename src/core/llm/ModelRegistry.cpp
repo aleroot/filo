@@ -598,6 +598,19 @@ std::vector<ModelInfo> build_kimi_catalog() {
             .constraints = kStandardConstraints,
         },
         {
+            .canonical_id = "k3-256k",
+            .aliases = {},
+            .display_name = "Kimi K3 256K (Kimi Code)",
+            .provider = "kimi",
+            .context_window = 262'144,
+            .max_output_tokens = 262'144,
+            .max_reasoning_tokens = 262'144,
+            .capabilities = CAP_FULL
+                | static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Reasoning,
+            .constraints = kStandardConstraints,
+        },
+        {
             .canonical_id = "kimi-k2.7-code",
             .aliases = {"k2.7-code"},
             .display_name = "Kimi K2.7 Code",

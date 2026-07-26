@@ -273,6 +273,17 @@ private:
     std::unique_ptr<ApiProtocolBase> chat_;
     std::unique_ptr<ApiProtocolBase> responses_;
     QwenTokenPlanWireApi active_wire_api_ = QwenTokenPlanWireApi::Responses;
+
+    // The Token Plan inference endpoints never return rate-limit/usage headers
+    // (verified for chat/completions, responses and the Anthropic-compatible
+    // shim). The only provider-backed quota signal available over the API-key
+    // path is the 429 body. Exact allocation errors
+    // (`Throttling.AllocationQuota` / `insufficient_quota`) identify an
+    // exhausted Personal Edition Credits window; request/burst throttles stay
+    // transient. We capture the resulting state here so the status bar and
+    // quota notifications can surface the blocked state honestly.
+    RateLimitInfo rate_limit_override_;
+    bool has_rate_limit_override_ = false;
 };
 
 } // namespace core::llm::protocols

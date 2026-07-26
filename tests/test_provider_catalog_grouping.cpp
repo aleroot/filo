@@ -2,6 +2,7 @@
 
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderDefinition.hpp"
+#include "core/llm/KimiModelTraits.hpp"
 
 #include <string>
 #include <vector>
@@ -100,13 +101,22 @@ TEST_CASE("Provider catalog grouping exposes only Kimi API and Kimi Code",
     const auto* public_api = groups[0].find_source("kimi");
     REQUIRE(public_api != nullptr);
     REQUIRE(public_api->category_label == "Kimi API.");
+    CHECK(public_api->service_id
+          == core::llm::kimi_service_id(
+              core::llm::KimiService::PublicApi));
     REQUIRE(public_api->includes_registry_model("kimi-k3"));
     REQUIRE_FALSE(public_api->includes_registry_model("k3"));
+    REQUIRE_FALSE(public_api->includes_registry_model("k3-256k"));
     REQUIRE_FALSE(public_api->includes_registry_model("kimi-for-coding"));
 
     const auto* code_api = groups[0].find_source("kimi-code");
     REQUIRE(code_api != nullptr);
     REQUIRE(code_api->category_label == "Kimi Code subscription.");
+    CHECK(code_api->service_id
+          == core::llm::kimi_service_id(
+              core::llm::KimiService::Code));
+    CHECK(groups[0].find_source_by_service_id(code_api->service_id)
+          == code_api);
     REQUIRE_FALSE(code_api->includes_registry_model("k3"));
     REQUIRE_FALSE(code_api->includes_registry_model("kimi-for-coding"));
     REQUIRE_FALSE(code_api->includes_registry_model("kimi-for-coding-highspeed"));
@@ -114,6 +124,31 @@ TEST_CASE("Provider catalog grouping exposes only Kimi API and Kimi Code",
 
     const auto alias_group = core::llm::provider_catalog_group_for("kimi-code", providers);
     REQUIRE(alias_group.provider_name == "kimi");
+}
+
+TEST_CASE("Kimi service routing is host-safe and independent of catalog DTOs",
+          "[llm][provider-catalog][kimi]") {
+    using core::llm::KimiService;
+    using core::llm::is_kimi_code_endpoint_path;
+    using core::llm::kimi_service_for_endpoint;
+
+    CHECK(kimi_service_for_endpoint("https://api.moonshot.cn/v1")
+          == KimiService::PublicApi);
+    CHECK(kimi_service_for_endpoint("https://api.moonshot.ai/v1")
+          == KimiService::PublicApi);
+    CHECK(kimi_service_for_endpoint(
+              "HTTPS://API.KIMI.COM:443/coding/v1/")
+          == KimiService::Code);
+    CHECK(kimi_service_for_endpoint(
+              "https://api.kimi.com.evil.example/coding/v1")
+          == KimiService::Unknown);
+    CHECK(kimi_service_for_endpoint(
+              "https://api.kimi.com/not-coding/v1")
+          == KimiService::Unknown);
+    CHECK(is_kimi_code_endpoint_path(
+        "http://127.0.0.1:1234/CODING/v1?test=true"));
+    CHECK_FALSE(is_kimi_code_endpoint_path(
+        "https://api.kimi.com/not-coding/v1"));
 }
 
 TEST_CASE("Provider catalog grouping chooses one Kimi source per endpoint without canonical presets",

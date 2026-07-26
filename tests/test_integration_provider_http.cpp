@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
@@ -147,6 +148,56 @@ TEST_CASE("KimiProtocol uploads local videos as files and serializes ms referenc
     REQUIRE_NOTHROW(protocol.prepare_media_uploads(cached_req, base_url, auth));
     CHECK(uploads.load() == 1);
     CHECK(cached_req.messages[0].content_parts[0].url == "ms://file_kimi_video_123");
+}
+
+TEST_CASE("Kimi protocol enriches a header-only 5h window with weekly usage",
+          "[integration][kimi][rate_limit][enrich]") {
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    std::string authorization;
+    server.Get("/coding/v1/usages",
+               [&](const httplib::Request& req, httplib::Response& res) {
+                   ++requests;
+                   authorization = req.get_header_value("Authorization");
+                   res.set_content(
+                       R"({"usage":{"limit":"100","used":"31","remaining":"69","resetTime":"2026-07-31T13:04:40Z"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"100","used":"76","remaining":"24","resetTime":"2026-07-26T07:04:40Z"}}]})",
+                       "application/json");
+               });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    KimiProtocol protocol;
+    protocol.on_response(HttpResponse{
+        200,
+        "{}",
+        cpr::Header{
+            {"x-ratelimit-unified-5h-utilization", "0.76"},
+            {"x-ratelimit-limit-tokens", "100"},
+            {"x-ratelimit-remaining-tokens", "24"},
+        }});
+    protocol.enrich_rate_limit(
+        std::format("http://127.0.0.1:{}/coding/v1", port),
+        cpr::Header{{"Authorization", "Bearer test-token"}},
+        HttpResponse{200, "{}", {}});
+
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(requests.load() == 1);
+    REQUIRE(authorization == "Bearer test-token");
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.usage_windows[0].utilization
+          == Catch::Approx(0.76f).epsilon(0.001f));
+    CHECK(info.usage_windows[1].label == "7d");
+    CHECK(info.usage_windows[1].utilization
+          == Catch::Approx(0.31f).epsilon(0.001f));
 }
 
 TEST_CASE("Z.ai protocol enriches usage windows from dashboard quota endpoint",

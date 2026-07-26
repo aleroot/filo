@@ -28,6 +28,10 @@ struct ProviderCapabilities {
 struct ProviderMetadata {
     core::config::ApiType api_type = core::config::ApiType::Unknown;
     std::string provider_name;
+    // Stable identity of the effective service selected by routing. This may
+    // differ from provider_name when a compatibility preset is transparently
+    // routed to another service within the same provider family.
+    std::string service_id;
     std::string base_url;
     std::string default_model;
     std::shared_ptr<core::auth::ICredentialSource> credential_source;

@@ -59,6 +59,157 @@ static void require_valid_json(std::string_view payload) {
     REQUIRE(parser.parse(json).get(document) == simdjson::SUCCESS);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Token Plan quota / rate-limit surfacing
+//
+// The QwenCloud Token Plan inference endpoints return no rate-limit or usage
+// headers, so the only provider-backed quota signal is a 429 body. These tests
+// pin the honest behaviour: a 200 leaves the rate-limit snapshot empty, while a
+// 429 is translated into a rate-limited snapshot (with a hard-rejection marker
+// when the body indicates plan-quota exhaustion) and distinct error wording.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("Token Plan - 200 response leaves rate-limit snapshot empty",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto resp = make_response(200, R"({"usage":{"prompt_tokens":5}})");
+    protocol.on_response(resp.view());
+
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(!info.is_rate_limited);
+    REQUIRE(info.unified_status.empty());
+    REQUIRE(info.usage_windows.empty());
+    REQUIRE(info.requests_limit == 0);
+    REQUIRE(info.tokens_limit == 0);
+}
+
+TEST_CASE("Token Plan - quota 429 surfaces rate-limited snapshot",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    cpr::Header headers{{"retry-after", "30"}};
+    const auto resp = make_response(
+        429,
+        R"({"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"})",
+        headers);
+    protocol.on_response(resp.view());
+
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(info.is_rate_limited);
+    REQUIRE(info.unified_status == "rate_limited");
+    REQUIRE(info.unified_overage_status == "rejected");  // hard plan-quota block
+    REQUIRE(info.retry_after == 30);
+    // No fabricated usage windows: real utilization is unknown.
+    REQUIRE(info.usage_windows.empty());
+}
+
+TEST_CASE("Token Plan - per-minute 429 surfaces rate-limited without overage",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto resp = make_response(
+        429,
+        R"({"error":{"message":"Requests rate limit exceeded"}})");
+    protocol.on_response(resp.view());
+
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(info.is_rate_limited);
+    REQUIRE(info.unified_status == "rate_limited");
+    // A transient throttle is not a hard plan-quota rejection.
+    REQUIRE(info.unified_overage_status.empty());
+}
+
+TEST_CASE("Token Plan - successful response clears prior 429 state",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto limited = make_response(
+        429,
+        R"({"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"})");
+    protocol.on_response(limited.view());
+    REQUIRE(protocol.last_rate_limit().is_rate_limited);
+
+    const auto success = make_response(200, R"({"usage":{"prompt_tokens":5}})");
+    protocol.on_response(success.view());
+
+    const auto info = protocol.last_rate_limit();
+    CHECK_FALSE(info.is_rate_limited);
+    CHECK(info.unified_status.empty());
+    CHECK(info.unified_overage_status.empty());
+}
+
+TEST_CASE("Token Plan - Throttling namespace does not imply plan exhaustion",
+          "[qwen][ratelimit]") {
+    for (const auto body : {
+             R"({"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"})",
+             R"({"code":"Throttling.BurstRate","message":"Request rate increased too quickly"})",
+         }) {
+        DashScopeTokenPlanProtocol protocol;
+        const auto resp = make_response(429, body);
+        protocol.on_response(resp.view());
+
+        const auto info = protocol.last_rate_limit();
+        REQUIRE(info.is_rate_limited);
+        REQUIRE(info.unified_status == "rate_limited");
+        REQUIRE(info.unified_overage_status.empty());
+        REQUIRE_THAT(
+            protocol.format_error_message(resp.view()),
+            Catch::Matchers::ContainsSubstring(
+                "Request rate limit exceeded"));
+    }
+}
+
+TEST_CASE("Token Plan - nested allocation error has consistent state and wording",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto resp = make_response(
+        429,
+        R"({"error":{"code":"insufficient_quota","message":"plan unavailable"}})");
+    protocol.on_response(resp.view());
+
+    REQUIRE(protocol.last_rate_limit().unified_overage_status == "rejected");
+    REQUIRE_THAT(
+        protocol.format_error_message(resp.view()),
+        Catch::Matchers::ContainsSubstring("Credits quota exceeded"));
+}
+
+TEST_CASE("Token Plan - unknown 429 does not invent a recovery cause",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto resp = make_response(
+        429,
+        R"({"code":"UnknownThrottle","message":"temporarily unavailable"})");
+    protocol.on_response(resp.view());
+
+    REQUIRE(protocol.last_rate_limit().unified_overage_status.empty());
+    const std::string message = protocol.format_error_message(resp.view());
+    REQUIRE_THAT(
+        message,
+        Catch::Matchers::ContainsSubstring("Rate limit or quota exceeded"));
+    REQUIRE_THAT(
+        message,
+        Catch::Matchers::ContainsSubstring("Retry with backoff"));
+}
+
+TEST_CASE("Token Plan - 429 error message distinguishes quota from rate limit",
+          "[qwen][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+
+    const auto quota_resp = make_response(
+        429,
+        R"({"code":"Throttling.AllocationQuota","message":"insufficient_quota"})");
+    protocol.on_response(quota_resp.view());
+    const std::string quota_msg = protocol.format_error_message(quota_resp.view());
+    REQUIRE_THAT(quota_msg, Catch::Matchers::ContainsSubstring("Credits quota exceeded"));
+    REQUIRE_THAT(quota_msg, Catch::Matchers::ContainsSubstring("5-hour or 7-day window"));
+    REQUIRE_THAT(quota_msg, Catch::Matchers::ContainsSubstring("home.qwencloud.com/token-plan"));
+
+    const auto rpm_resp = make_response(
+        429,
+        R"({"error":{"message":"Requests rate limit exceeded"}})");
+    protocol.on_response(rpm_resp.view());
+    const std::string rpm_msg = protocol.format_error_message(rpm_resp.view());
+    REQUIRE_THAT(rpm_msg, Catch::Matchers::ContainsSubstring("Request rate limit exceeded"));
+    REQUIRE_THAT(rpm_msg, Catch::Matchers::ContainsSubstring("Reduce request frequency"));
+}
+
 TEST_CASE("Qwen catalog selector chooses the highest live server generation",
           "[qwen][model-catalog]") {
     const auto selector = core::llm::providers::make_qwen_model_catalog_selector();

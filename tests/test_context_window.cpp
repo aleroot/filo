@@ -148,6 +148,7 @@ TEST_CASE("ContextWindowTracker resolves representative provider model windows",
     const std::vector<ModelCase> cases{
         {"kimi-k3", 1'048'576},
         {"k3", 1'048'576},
+        {"k3-256k", 262'144},
         {"kimi-for-coding", 256'000},
         {"kimi-k2.7-code", 256'000},
         {"claude-sonnet-4-6[1m]", 1'000'000},

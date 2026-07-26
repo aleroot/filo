@@ -27,6 +27,7 @@ struct ProviderCatalogModelFilter {
 
 struct ProviderCatalogSource {
     std::string provider_name;
+    std::string service_id;
     std::string category_label;
     ProviderCatalogModelFilter registry_model_filter;
     ProviderCatalogApiModelPolicy api_model_policy =
@@ -43,6 +44,8 @@ struct ProviderCatalogGroup {
     [[nodiscard]] bool contains_source_provider(std::string_view provider_name) const;
     [[nodiscard]] const ProviderCatalogSource*
     find_source(std::string_view provider_name) const;
+    [[nodiscard]] const ProviderCatalogSource*
+    find_source_by_service_id(std::string_view service_id) const;
 };
 
 [[nodiscard]] std::string provider_catalog_group_name(std::string_view provider_name);

@@ -1,5 +1,6 @@
 #include "KimiProtocol.hpp"
 #include "SseUtils.hpp"
+#include "../KimiModelTraits.hpp"
 #include "../../auth/KimiOAuthFlow.hpp"
 #include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
@@ -32,17 +33,15 @@ namespace {
     using core::utils::ascii::iequals;
     using core::utils::ascii::istarts_with;
 
-    if (iequals(model, "k3") || iequals(model, "kimi-k3")) {
+    if (is_kimi_k3_model(model)) {
         return ReasoningCapability::Effort
             | ReasoningCapability::MaxEffort
-            | ReasoningCapability::Required
-            | ReasoningCapability::FixedMax;
+            | ReasoningCapability::Required;
     }
 
     const bool required = iequals(model, "kimi-k2.7-code")
         || iequals(model, "kimi-k2.7-code-highspeed")
-        || iequals(model, "kimi-for-coding")
-        || iequals(model, "kimi-for-coding-highspeed");
+        || is_kimi_code_model(model);
     const bool supported = required
         || istarts_with(model, "kimi-k2")
         || core::utils::str::contains_case_insensitive(model, "thinking");
@@ -625,6 +624,18 @@ parse_kimi_usage_payload(std::string_view payload) {
             } else {
                 snapshot.tokens_remaining = *limit;
             }
+
+            // Kimi Code's current /usages schema exposes the weekly
+            // subscription quota in the root `usage` object. Rolling windows
+            // such as 5h live in limits[]. Both counters may be JSON strings.
+            if (const auto utilization =
+                    utilization_from_limit_detail(&usage_obj);
+                utilization.has_value()) {
+                snapshot.windows.push_back(UsageWindow{
+                    .label = "7d",
+                    .utilization = *utilization,
+                });
+            }
         }
     }
 
@@ -671,7 +682,7 @@ parse_kimi_usage_payload(std::string_view payload) {
 [[nodiscard]] bool should_query_kimi_usages_endpoint(std::string_view base_url) {
     // Match kimi-cli behavior: usage endpoint is available on Kimi Code
     // managed platform base URLs (*/coding/*), regardless of OAuth/API key.
-    return base_url.find("/coding/") != std::string_view::npos;
+    return is_kimi_code_endpoint_path(base_url);
 }
 
 [[nodiscard]] std::string trim_trailing_slash(std::string_view url) {
@@ -768,6 +779,16 @@ void merge_kimi_usage_snapshot(RateLimitInfo& info, const KimiUsageSnapshot& sna
             info.usage_windows.push_back(incoming);
         }
     }
+}
+
+[[nodiscard]] bool has_usage_window(
+    const RateLimitInfo& info,
+    std::string_view label) {
+    return std::ranges::any_of(
+        info.usage_windows,
+        [&](const UsageWindow& window) {
+            return window.label == label;
+        });
 }
 
 [[nodiscard]] bool read_usage_object(simdjson::dom::object usage_obj,
@@ -1007,11 +1028,25 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         return;
     }
 
-    // K3 is an always-reasoning model and does not accept the K2.x `thinking`
-    // switch. At launch, max is its only accepted effort on both the public
-    // `kimi-k3` model and the Kimi Code subscription model `k3`.
-    if (capabilities.supports(ReasoningCapability::FixedMax)) {
-        payload += R"(,"reasoning_effort":"max")";
+    // K3 is always-thinking. The public API's kimi-k3 model retains the
+    // top-level reasoning_effort dialect, while the managed Kimi Code service
+    // advertises k3/k3-256k efforts through thinking.effort.
+    if (is_kimi_k3_model(req.model)) {
+        std::string effort = normalize_kimi_effort(req.effort);
+        if (effort.empty() || effort == "off") {
+            effort = is_kimi_public_k3_model(req.model) ? "max" : "high";
+        } else if (effort == "medium") {
+            effort = "high";
+        }
+        if (is_kimi_public_k3_model(req.model)) {
+            payload += R"(,"reasoning_effort":")";
+            payload += effort;
+            payload += '"';
+        } else {
+            payload += R"(,"thinking":{"type":"enabled","effort":")";
+            payload += effort;
+            payload += R"("})";
+        }
         return;
     }
 
@@ -1171,7 +1206,8 @@ void KimiProtocol::enrich_rate_limit(std::string_view base_url,
     if (!should_query_kimi_usages_endpoint(base_url)) return;
 
     const bool needs_enrichment =
-        last_rate_limit_.usage_windows.empty()
+        !has_usage_window(last_rate_limit_, "5h")
+        || !has_usage_window(last_rate_limit_, "7d")
         || (last_rate_limit_.tokens_limit <= 0
             && last_rate_limit_.tokens_remaining <= 0);
     if (!needs_enrichment) return;

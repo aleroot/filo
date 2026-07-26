@@ -190,13 +190,15 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
                                  core::config::ApiType                          api_type,
                                  std::string                                    provider_name,
                                  std::shared_ptr<IProviderClientIdentitySource>  client_identity_source,
-                                 std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector)
+                                 std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector,
+                                 std::string                                    service_id)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
     , protocol_(std::move(protocol))
     , api_type_(api_type)
     , provider_name_(std::move(provider_name))
+    , service_id_(std::move(service_id))
     , client_identity_source_(std::move(client_identity_source))
     , model_catalog_selector_(std::move(model_catalog_selector))
 {}
@@ -354,6 +356,7 @@ std::optional<ProviderMetadata> HttpLLMProvider::metadata() const {
     return ProviderMetadata{
         .api_type = api_type_,
         .provider_name = provider_name_,
+        .service_id = service_id_.empty() ? provider_name_ : service_id_,
         .base_url = base_url_,
         .default_model = default_model_,
         .credential_source = cred_source_,
@@ -505,7 +508,8 @@ std::shared_ptr<LLMProvider> HttpLLMProvider::fork_for_parallel_request() const 
         api_type_,
         provider_name_,
         client_identity_source_,
-        model_catalog_selector_);
+        model_catalog_selector_,
+        service_id_);
 }
 
 void HttpLLMProvider::reset_conversation_state() {

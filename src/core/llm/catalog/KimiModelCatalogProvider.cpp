@@ -3,6 +3,7 @@
 #include "CompatibleModelMetadata.hpp"
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
+#include "../KimiModelTraits.hpp"
 
 #include <simdjson.h>
 
@@ -13,8 +14,9 @@ namespace core::llm {
 namespace {
 
 [[nodiscard]] int32_t infer_context_window(std::string_view model_id) {
-    if (model_id == "k3" || catalog::contains_ascii(model_id, "kimi-k3")) {
-        return 1'048'576;
+    if (const int32_t known = kimi_model_context_window(model_id);
+        known > 0) {
+        return known;
     }
     if (catalog::contains_ascii(model_id, "moonshot-v1-8k")) return 8'192;
     if (catalog::contains_ascii(model_id, "moonshot-v1-32k")) return 32'768;
@@ -31,10 +33,55 @@ namespace {
 }
 
 [[nodiscard]] int32_t infer_max_output_tokens(std::string_view model_id) {
-    return model_id == "k3"
-            || catalog::contains_ascii(model_id, "kimi-k3")
-        ? 1'048'576
-        : 8'192;
+    return kimi_model_max_output_tokens(model_id);
+}
+
+[[nodiscard]] ModelReasoningProfile kimi_reasoning_profile(
+    const catalog::JsonObjectView& model,
+    bool supports_reasoning) {
+    ModelReasoningProfile profile;
+    if (!supports_reasoning) {
+        profile.complete =
+            model.optional_boolean("supports_reasoning").has_value();
+        return profile;
+    }
+
+    profile.effort = ReasoningCapabilities{
+        ReasoningCapability::Effort};
+    profile.manual_thinking = true;
+
+    std::string thinking_type;
+    const bool has_thinking_type =
+        model.string("supports_thinking_type", thinking_type);
+    if (has_thinking_type && catalog::contains_ascii(
+            thinking_type, "only")) {
+        profile.effort =
+            profile.effort | ReasoningCapability::Required;
+    }
+
+    simdjson::dom::object effort_object;
+    const bool has_effort_object =
+        model.raw()["think_efforts"].get(effort_object)
+        == simdjson::SUCCESS;
+    if (has_effort_object) {
+        const catalog::JsonObjectView efforts(effort_object);
+        if (efforts.boolean("support")) {
+            const auto valid_efforts =
+                efforts.string_array("valid_efforts");
+            for (const auto& effort : valid_efforts) {
+                if (effort == "max") {
+                    profile.effort =
+                        profile.effort | ReasoningCapability::MaxEffort;
+                } else if (effort == "xhigh") {
+                    profile.effort =
+                        profile.effort | ReasoningCapability::XHighEffort;
+                }
+            }
+        }
+    }
+
+    profile.complete = has_thinking_type || has_effort_object;
+    return profile;
 }
 
 [[nodiscard]] ModelCapabilities kimi_capabilities(
@@ -47,8 +94,7 @@ namespace {
         static_cast<uint32_t>(ModelCapability::JsonMode);
 
     const bool inferred_reasoning =
-        model_id == "k3"
-        || catalog::contains_ascii(model_id, "kimi-k3")
+        is_kimi_k3_model(model_id)
         || catalog::contains_ascii(model_id, "thinking")
         || catalog::contains_ascii(model_id, "reason")
         || catalog::contains_ascii(model_id, "kimi-for-coding")
@@ -58,8 +104,7 @@ namespace {
     }
 
     const bool inferred_image =
-        model_id == "k3"
-        || catalog::contains_ascii(model_id, "kimi-k3")
+        is_kimi_k3_model(model_id)
         || catalog::contains_ascii(model_id, "vl")
         || catalog::contains_ascii(model_id, "vision")
         || catalog::contains_ascii(model_id, "kimi-k2")
@@ -71,8 +116,7 @@ namespace {
     }
 
     const bool inferred_video =
-        model_id == "k3"
-        || catalog::contains_ascii(model_id, "kimi-k3")
+        (is_kimi_k3_model(model_id) && !is_kimi_k3_256k_model(model_id))
         || catalog::contains_ascii(model_id, "kimi-k2")
         || catalog::contains_ascii(model_id, "kimi-for-coding")
         || catalog::contains_ascii(model_id, "kimi-code");
@@ -135,6 +179,10 @@ ModelCatalogResult KimiModelCatalogProvider::parse_models_response(
         info.max_output_tokens = model.first_integer(
             {"max_output_tokens", "max_tokens"},
             infer_max_output_tokens(info.canonical_id));
+        if (info.context_window > 0
+            && info.max_output_tokens > info.context_window) {
+            info.max_output_tokens = info.context_window;
+        }
         info.capabilities = kimi_capabilities(
             info.canonical_id,
             model.optional_boolean("supports_reasoning"),
@@ -143,6 +191,9 @@ ModelCatalogResult KimiModelCatalogProvider::parse_models_response(
             | catalog::compatible_advertised_capabilities(
                 info.canonical_id,
                 model);
+        info.reasoning = kimi_reasoning_profile(
+            model,
+            info.supports(ModelCapability::Reasoning));
         info.tier = catalog::infer_tier(
             info.canonical_id,
             info.supports(ModelCapability::Reasoning));

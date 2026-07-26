@@ -87,6 +87,7 @@ TEST_CASE("context_window_for_model returns correct sizes", "[BudgetTracker]") {
     SECTION("Kimi / Moonshot models") {
         CHECK(context_window_for_model("kimi-k3")               == 1'048'576);
         CHECK(context_window_for_model("k3")                    == 1'048'576);
+        CHECK(context_window_for_model("k3-256k")               ==   262'144);
         CHECK(context_window_for_model("moonshot-v1-8k")         ==   8'192);
         CHECK(context_window_for_model("moonshot-v1-32k")        ==  32'768);
         CHECK(context_window_for_model("moonshot-v1-128k")       == 128'000);

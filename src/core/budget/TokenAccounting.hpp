@@ -34,6 +34,7 @@ namespace core::budget {
     if (model.find("moonshot-v1-8k")   != std::string_view::npos) return     8'192;
     if (model.find("moonshot-v1-32k")  != std::string_view::npos) return    32'768;
     if (model.find("moonshot-v1-128k") != std::string_view::npos) return   128'000;
+    if (model == "k3-256k") return 262'144;
     if (model == "k3" || model.find("kimi-k3") != std::string_view::npos) return 1'048'576;
     if (model.find("kimi-k2-0711-preview") != std::string_view::npos) return 128'000;
     if (model.find("kimi-k2.6")        != std::string_view::npos) return   256'000;

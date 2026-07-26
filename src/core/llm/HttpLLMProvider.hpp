@@ -85,7 +85,8 @@ public:
                     core::config::ApiType                          api_type = core::config::ApiType::Unknown,
                     std::string                                    provider_name = {},
                     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {},
-                    std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector = {});
+                    std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector = {},
+                    std::string                                    service_id = {});
     ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
@@ -179,6 +180,7 @@ private:
     std::unique_ptr<protocols::ApiProtocolBase>    protocol_;
     core::config::ApiType                          api_type_;
     std::string                                    provider_name_;
+    std::string                                    service_id_;
     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
     std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector_;
     WebSocketTransportState                        websocket_;
