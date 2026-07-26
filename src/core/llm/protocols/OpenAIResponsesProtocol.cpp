@@ -964,6 +964,12 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
     }
 
     if (event_type == "response.output_text.done") {
+        // This event is a completed text snapshot, not another delta. Some
+        // compatible providers (including Qwen) send it after the full delta
+        // sequence, so forwarding it would duplicate the assistant response.
+        if (saw_text_delta_) {
+            return result;
+        }
         std::string_view text;
         if (doc["text"].get(text) == simdjson::SUCCESS && !text.empty()) {
             saw_text_delta_ = true;
@@ -989,6 +995,15 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
         if (item["type"].get(item_type) != simdjson::SUCCESS) return result;
 
         if (item_type == "function_call") {
+            // output_item.added is a provisional item snapshot, not an
+            // arguments delta. Qwen commonly reports arguments="{}" there and
+            // supplies the completed JSON in output_item.done. Emitting both
+            // makes the agent's delta accumulator concatenate two standalone
+            // JSON documents (for example, {}{"path":"..."}).
+            if (event_type != "response.output_item.done") {
+                return result;
+            }
+
             ToolCall call;
             call.type = "function";
 

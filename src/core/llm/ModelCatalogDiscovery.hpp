@@ -118,6 +118,21 @@ private:
     std::unordered_map<std::string, ProviderModelCatalogSnapshot> providers_;
 };
 
+/**
+ * Requests a provider catalog refresh and returns the best snapshot available
+ * for an interactive consumer.
+ *
+ * Stale models are returned immediately while refreshing. When no models have
+ * been obtained yet, the call waits for the in-flight discovery up to
+ * @p wait_timeout so first-open pickers do not render an artificial empty
+ * catalog.
+ */
+[[nodiscard]] ProviderModelCatalogSnapshot request_model_catalog_snapshot(
+    const std::shared_ptr<LLMProvider>& provider,
+    std::string_view provider_name,
+    const ModelCatalogDiscoveryOptions& options = {},
+    std::chrono::milliseconds wait_timeout = std::chrono::milliseconds{3000});
+
 [[nodiscard]] ModelCatalogDiscoveryResult discover_and_register_models(
     std::string_view provider_name,
     config::ApiType api_type,

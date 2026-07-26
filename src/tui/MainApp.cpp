@@ -2781,13 +2781,14 @@ RunResult run(RunOptions opts) {
             const std::string configured_default = provider_cfg.model;
 
             auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
-            if (!core::llm::is_local_provider(registered_providers, source_provider)
-                && snapshot.refresh_due()) {
+            if (!core::llm::is_local_provider(
+                    registered_providers, source_provider)) {
                 try {
-                    core::llm::request_model_catalog_discovery(
+                    snapshot = core::llm::request_model_catalog_snapshot(
                         provider_manager.get_provider(source_provider),
-                        {.timeout_ms = 1000});
-                    snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+                        source_provider,
+                        {.timeout_ms = 2500},
+                        std::chrono::milliseconds{3000});
                 } catch (const std::exception&) {
                 }
             }
@@ -2804,13 +2805,17 @@ RunResult run(RunOptions opts) {
             std::ranges::sort(
                 registry_models, {}, &core::llm::ModelInfo::canonical_id);
 
+            auto provider_models = snapshot.models;
+            std::erase_if(provider_models, [&](const auto& model) {
+                return !source.includes_api_model(model.canonical_id);
+            });
             const auto resolved = core::llm::resolve_model_catalog(
-                snapshot.models, registry_models);
+                provider_models, registry_models);
             if (!configured_default.empty()) {
                 const auto default_metadata =
                     core::llm::resolve_model_metadata(
                         configured_default,
-                        snapshot.models,
+                        provider_models,
                         core::llm::ModelRegistry::instance().lookup(
                             configured_default));
                 add_row(
@@ -2880,8 +2885,12 @@ RunResult run(RunOptions opts) {
                     return !source.includes_registry_model(
                         model.canonical_id);
                 });
+                auto provider_models = snapshot.models;
+                std::erase_if(provider_models, [&](const auto& model) {
+                    return !source.includes_api_model(model.canonical_id);
+                });
                 const auto resolved = core::llm::resolve_model_catalog(
-                    snapshot.models, registry_models);
+                    provider_models, registry_models);
                 for (const auto& model : resolved.models) {
                     known_model_ids.insert(model.canonical_id);
                 }

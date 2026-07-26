@@ -6,6 +6,7 @@
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ModelRegistry.hpp"
+#include "core/llm/QwenModelTraits.hpp"
 #include "core/llm/providers/QwenModelCatalogSelector.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
@@ -221,6 +222,15 @@ TEST_CASE("DashScopeProtocol - effort can disable hybrid thinking",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
+TEST_CASE("DashScopeProtocol - omits Qwen thinking fields for third-party models",
+          "[qwen][serializer][thinking][token-plan]") {
+    auto req = make_simple_request("glm-5.2");
+    req.effort = "high";
+    const auto payload = DashScopeProtocol(8192, "high").serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+}
+
 TEST_CASE("DashScope Responses - Token Plan payload enables native features",
           "[qwen][responses][token-plan]") {
     auto req = make_simple_request("qwen3.8-max-preview");
@@ -240,6 +250,51 @@ TEST_CASE("DashScope Responses - Token Plan payload enables native features",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("store")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("prompt_cache_key"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("include":[])"));
+}
+
+TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
+          "[qwen][responses][token-plan][glm]") {
+    auto req = make_simple_request("glm-5.2");
+    req.effort = "high";
+    Tool local_tool;
+    local_tool.function.name = "read_file";
+    local_tool.function.description = "Read a file";
+    local_tool.function.input_schema =
+        R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})";
+    req.tools.push_back(std::move(local_tool));
+
+    const auto payload = DashScopeResponsesProtocol({
+        .default_effort = "high",
+        .enable_hosted_tools = true,
+    }).serialize(req);
+
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("model":"glm-5.2")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("name":"read_file")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("reasoning":)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"({"type":"web_search"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"({"type":"code_interpreter"})"));
+}
+
+TEST_CASE("Qwen Token Plan hosted tools are selected by model generation",
+          "[qwen][responses][token-plan][traits]") {
+    CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "qwen3.8-max-preview"));
+    CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "qwen3.7-plus"));
+    CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "qwen3.6-flash"));
+    CHECK_FALSE(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "qwen3.5-plus"));
+    CHECK_FALSE(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "glm-5.2"));
+    CHECK_FALSE(core::llm::qwen_model_supports_token_plan_hosted_tools(
+        "deepseek-v4-pro"));
 }
 
 TEST_CASE("DashScope Responses - sends only incremental messages with previous response",
@@ -484,6 +539,83 @@ TEST_CASE("DashScope Responses - parses detailed Token Plan usage",
     REQUIRE(result.cached_prompt_tokens == 1480);
     REQUIRE(result.cache_creation_prompt_tokens == 20);
     REQUIRE(result.reasoning_tokens == 245);
+}
+
+TEST_CASE("DashScope Responses - does not concatenate provisional and completed tool arguments",
+          "[qwen][responses][sse][tools]") {
+    DashScopeResponsesProtocol protocol;
+
+    const auto added = protocol.parse_event(
+        "event: response.output_item.added\n"
+        R"(data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"list_directory","arguments":"{}","status":"in_progress"}})");
+    REQUIRE(added.chunks.empty());
+
+    const auto done = protocol.parse_event(
+        "event: response.output_item.done\n"
+        R"(data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"list_directory","arguments":"{\"path\":\"Lampo/Prompter\"}","status":"completed"}})");
+    REQUIRE(done.chunks.size() == 1);
+    REQUIRE(done.chunks.front().tools.size() == 1);
+    CHECK(done.chunks.front().tools.front().function.arguments
+          == R"({"path":"Lampo/Prompter"})");
+}
+
+TEST_CASE("Token Plan routes Qwen models through Responses",
+          "[qwen][token-plan][routing]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto req = make_simple_request("qwen3.8-max-preview");
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("input":[)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE(protocol.build_url("https://example.test/v1", req.model)
+            == "https://example.test/v1/responses");
+}
+
+TEST_CASE("Token Plan routes third-party models through Chat Completions",
+          "[qwen][token-plan][routing]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto req = make_simple_request("glm-5.2");
+    const auto payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("input":[)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE(protocol.build_url("https://example.test/v1", req.model)
+            == "https://example.test/v1/chat/completions");
+}
+
+TEST_CASE("Token Plan Chat route parses fragmented GLM tool arguments",
+          "[qwen][token-plan][routing][tools]") {
+    DashScopeTokenPlanProtocol protocol;
+    auto request = make_simple_request("glm-5.2");
+    protocol.prepare_request(request);
+
+    const auto named = protocol.parse_event(
+        R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"ping","arguments":"{"}}]}}]})");
+    REQUIRE(named.chunks.size() == 1);
+    REQUIRE(named.chunks.front().tools.size() == 1);
+    REQUIRE(named.chunks.front().tools.front().function.name == "ping");
+    REQUIRE(named.chunks.front().tools.front().function.arguments == "{");
+
+    const auto args = protocol.parse_event(
+        R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"value\":\"ok\"}"}}]}}]})");
+    REQUIRE(args.chunks.size() == 1);
+    REQUIRE(args.chunks.front().tools.front().function.arguments
+            == R"("value":"ok"})");
+}
+
+TEST_CASE("Token Plan wire routing is future-friendly and isolates third parties",
+          "[qwen][token-plan][routing][traits]") {
+    CHECK(qwen_token_plan_wire_api("qwen3.8-max-preview")
+          == QwenTokenPlanWireApi::Responses);
+    CHECK(qwen_token_plan_wire_api("qwen4-coder")
+          == QwenTokenPlanWireApi::Responses);
+    CHECK(qwen_token_plan_wire_api("glm-5.2")
+          == QwenTokenPlanWireApi::ChatCompletions);
+    CHECK(qwen_token_plan_wire_api("deepseek-v4-pro")
+          == QwenTokenPlanWireApi::ChatCompletions);
+    CHECK(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen4-coder")
+          .supports_effort());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

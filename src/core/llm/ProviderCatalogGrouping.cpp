@@ -17,6 +17,13 @@ constexpr std::array<std::string_view, 4> kZaiCodingModels{{
     "glm-4.5-air",
 }};
 
+constexpr std::array<std::string_view, 4> kQwenTokenPlanTextModels{{
+    "qwen3.8-max-preview",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-flash",
+}};
+
 [[nodiscard]] std::string normalized(std::string_view value) {
     return core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(value));
@@ -75,10 +82,13 @@ template <std::size_t N>
 }
 
 [[nodiscard]] ProviderCatalogModelFilter qwen_token_plan_filter() {
-    // Token Plan availability is account- and subscription-specific. An empty
-    // include filter intentionally disables static-registry fallback; the live
-    // /models response is the source of truth for this endpoint.
-    return ProviderCatalogModelFilter{.rule = ProviderCatalogModelRule::Include};
+    // The authenticated /models response remains authoritative. These exact
+    // text-model IDs provide a conservative fallback when the catalog request
+    // is still in flight or temporarily unavailable; unrelated DashScope
+    // models must never leak into the subscription picker.
+    return model_filter(
+        ProviderCatalogModelRule::Include,
+        kQwenTokenPlanTextModels);
 }
 
 [[nodiscard]] ProviderCatalogSource source_for_provider(std::string_view provider_name,
@@ -87,6 +97,7 @@ template <std::size_t N>
         .provider_name = std::string(provider_name),
         .category_label = {},
         .registry_model_filter = {},
+        .api_model_policy = ProviderCatalogApiModelPolicy::All,
     };
 
     if (group_name == "zai" && is_zai_coding_source(provider_name)) {
@@ -103,6 +114,7 @@ template <std::size_t N>
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     }
 
     return source;
@@ -131,6 +143,31 @@ bool ProviderCatalogModelFilter::matches(std::string_view model_id) const {
 
 bool ProviderCatalogSource::includes_registry_model(std::string_view model_id) const {
     return registry_model_filter.matches(model_id);
+}
+
+bool ProviderCatalogSource::includes_api_model(std::string_view model_id) const {
+    if (api_model_policy == ProviderCatalogApiModelPolicy::All) {
+        return true;
+    }
+
+    // Some provider catalogs mix chat models with image, audio, embedding, and
+    // ranking endpoints but expose no modality metadata. Keep future text and
+    // multimodal-chat IDs, rejecting only explicit non-generation markers.
+    static constexpr std::array<std::string_view, 9> kNonTextMarkers{{
+        "embedding",
+        "rerank",
+        "image",
+        "video",
+        "audio",
+        "speech",
+        "tts",
+        "asr",
+        "moderation",
+    }};
+    const std::string id = normalized(model_id);
+    return std::ranges::none_of(kNonTextMarkers, [&](std::string_view marker) {
+        return id.find(marker) != std::string::npos;
+    });
 }
 
 bool ProviderCatalogGroup::contains_source_provider(std::string_view provider) const {

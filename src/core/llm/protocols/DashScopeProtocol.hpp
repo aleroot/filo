@@ -41,6 +41,7 @@
 
 #include "OpenAIProtocol.hpp"
 #include "OpenAIResponsesProtocol.hpp"
+#include "../QwenModelTraits.hpp"
 
 namespace core::llm::protocols {
 
@@ -162,8 +163,9 @@ protected:
      * @brief Inject Qwen3 thinking-mode fields when `thinking_budget_ > 0`.
      *
      * Appends `,"enable_thinking":true,"thinking_budget":<N>` when the budget
-     * is positive.  Safe to include even for non-thinking models — the server
-     * ignores unknown fields on those.
+     * is positive and the selected model advertises Qwen reasoning controls.
+     * Non-Qwen models sharing the DashScope endpoint receive no Qwen-only
+     * fields.
      */
     void append_extra_fields(std::string& payload, const ChatRequest& req) const override;
 
@@ -177,9 +179,8 @@ private:
 /**
  * Qwen Cloud implementation of the OpenAI Responses API.
  *
- * Token Plan uses this by default because it exposes Qwen's native reasoning
- * effort scale, server-side conversation cache, and hosted Harness tools while
- * retaining Filo's local function tools.
+ * Used for Qwen models on Token Plan. Qwen-only reasoning and hosted Harness
+ * features are selected per model.
  */
 class DashScopeResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
@@ -210,6 +211,68 @@ public:
 
 private:
     Options options_;
+};
+
+/**
+ * Model-aware protocol router for Alibaba Cloud Token Plan.
+ *
+ * Token Plan exposes one model catalog but not one universal generation API:
+ * Qwen text models support Responses, while third-party models such as GLM and
+ * DeepSeek are served through Chat Completions. This protocol owns both wire
+ * strategies and selects one per request, keeping transport and UI code
+ * independent of vendor-specific routing rules.
+ */
+class DashScopeTokenPlanProtocol final : public ApiProtocolBase {
+public:
+    struct Options {
+        int thinking_budget = 0;
+        std::string default_effort = "high";
+        bool enable_hosted_tools = true;
+    };
+
+    DashScopeTokenPlanProtocol();
+    explicit DashScopeTokenPlanProtocol(Options options);
+
+    [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
+    [[nodiscard]] cpr::Header build_headers(
+        const core::auth::AuthInfo& auth) const override;
+    [[nodiscard]] std::string build_url(
+        std::string_view base_url,
+        std::string_view model) const override;
+    [[nodiscard]] std::string_view event_delimiter() const noexcept override;
+    [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return "dashscope_token_plan";
+    }
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override;
+
+    void prepare_request(ChatRequest& request) override;
+    void on_response(const HttpResponse& response) override;
+    [[nodiscard]] std::string format_error_message(
+        const HttpResponse& response) const override;
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override;
+    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override;
+    void reset_state() override;
+
+private:
+    DashScopeTokenPlanProtocol(
+        Options options,
+        std::unique_ptr<ApiProtocolBase> chat,
+        std::unique_ptr<ApiProtocolBase> responses);
+
+    void select_for_model(std::string_view model) noexcept;
+    [[nodiscard]] ApiProtocolBase& active() noexcept;
+    [[nodiscard]] const ApiProtocolBase& active() const noexcept;
+    [[nodiscard]] const ApiProtocolBase& protocol_for(
+        std::string_view model) const noexcept;
+
+    Options options_;
+    std::unique_ptr<ApiProtocolBase> chat_;
+    std::unique_ptr<ApiProtocolBase> responses_;
+    QwenTokenPlanWireApi active_wire_api_ = QwenTokenPlanWireApi::Responses;
 };
 
 } // namespace core::llm::protocols

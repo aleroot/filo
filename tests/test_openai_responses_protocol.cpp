@@ -617,9 +617,15 @@ TEST_CASE("OpenAIResponsesProtocol - joins multiline data payloads",
     REQUIRE(result.chunks[0].content == "Multi");
 }
 
-TEST_CASE("OpenAIResponsesProtocol - parse function_call item event",
+TEST_CASE("OpenAIResponsesProtocol - ignores provisional function call and parses completed item",
           "[openai][responses][sse][tools]") {
     OpenAIResponsesProtocol protocol;
+
+    const auto added = protocol.parse_event(
+        "event: response.output_item.added\n"
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{}\",\"status\":\"in_progress\"}}");
+    REQUIRE_FALSE(added.done);
+    REQUIRE(added.chunks.empty());
 
     auto result = protocol.parse_event(
         "event: response.output_item.done\n"
@@ -630,6 +636,8 @@ TEST_CASE("OpenAIResponsesProtocol - parse function_call item event",
     REQUIRE(result.chunks[0].tools.size() == 1);
     REQUIRE(result.chunks[0].tools[0].id == "call_abc");
     REQUIRE(result.chunks[0].tools[0].function.name == "read_file");
+    REQUIRE(result.chunks[0].tools[0].function.arguments
+            == R"({"path":"README.md"})");
 }
 
 TEST_CASE("OpenAIResponsesProtocol preserves and replays encrypted reasoning items",
@@ -717,6 +725,21 @@ TEST_CASE("OpenAIResponsesProtocol - parse output_text.done event",
     REQUIRE_FALSE(result.done);
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].content == " world");
+}
+
+TEST_CASE("OpenAIResponsesProtocol - ignores full text snapshot after deltas",
+          "[openai][responses][sse]") {
+    OpenAIResponsesProtocol protocol;
+
+    const auto delta = protocol.parse_event(
+        "event: response.output_text.delta\n"
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"QWEN TOOL OK\"}");
+    REQUIRE(delta.chunks.size() == 1);
+
+    const auto done = protocol.parse_event(
+        "event: response.output_text.done\n"
+        "data: {\"type\":\"response.output_text.done\",\"text\":\"QWEN TOOL OK\"}");
+    REQUIRE(done.chunks.empty());
 }
 
 TEST_CASE("OpenAIResponsesProtocol - parse failed event as terminal error chunk",

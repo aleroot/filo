@@ -232,6 +232,29 @@ ProviderModelCatalogSnapshot ModelCatalogAvailability::wait_for_snapshot(
     return {};
 }
 
+ProviderModelCatalogSnapshot request_model_catalog_snapshot(
+    const std::shared_ptr<LLMProvider>& provider,
+    std::string_view provider_name,
+    const ModelCatalogDiscoveryOptions& options,
+    std::chrono::milliseconds wait_timeout) {
+    auto& availability = ModelCatalogAvailability::instance();
+    auto snapshot = availability.snapshot(provider_name);
+
+    if (snapshot.refresh_due()) {
+        request_model_catalog_discovery(provider, options);
+        snapshot = availability.snapshot(provider_name);
+    }
+
+    if (snapshot.models.empty()
+        && snapshot.refresh_in_progress
+        && wait_timeout > std::chrono::milliseconds::zero()) {
+        snapshot = availability.wait_for_snapshot(
+            provider_name,
+            wait_timeout);
+    }
+    return snapshot;
+}
+
 std::optional<bool> ModelCatalogAvailability::contains_model(
     std::string_view provider_name,
     std::string_view model_id) const {

@@ -4,6 +4,7 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/config/SessionModelOverride.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ProviderManager.hpp"
@@ -500,11 +501,20 @@ void register_default_tools(core::tools::ToolManager& tool_manager) {
     return !text.empty() && (text.back() == '\n' || text.back() == '\r');
 }
 
-[[nodiscard]] RuntimeContext build_runtime_context(std::string& error) {
+[[nodiscard]] RuntimeContext build_runtime_context(
+    const RunOptions& options,
+    std::string& error) {
     error.clear();
 
     auto& config_manager = core::config::ConfigManager::get_instance();
-    const auto& config = config_manager.get_config();
+    auto config = config_manager.get_config();
+    if (options.startup_model.has_value()) {
+        if (auto applied = core::config::apply_session_model_override(
+                config, *options.startup_model); !applied) {
+            error = applied.error();
+            return {};
+        }
+    }
 
     auto& provider_manager = core::llm::ProviderManager::get_instance();
 
@@ -996,7 +1006,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
 
 int run(const RunOptions& options) {
     std::string runtime_error;
-    RuntimeContext runtime = build_runtime_context(runtime_error);
+    RuntimeContext runtime = build_runtime_context(options, runtime_error);
     if (!runtime_error.empty()) {
         std::cerr << "Prompter mode failed: " << runtime_error << "\n";
         return 1;

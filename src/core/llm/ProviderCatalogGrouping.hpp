@@ -13,6 +13,11 @@ enum class ProviderCatalogModelRule {
     Exclude,
 };
 
+enum class ProviderCatalogApiModelPolicy {
+    All,
+    TextGeneration,
+};
+
 struct ProviderCatalogModelFilter {
     ProviderCatalogModelRule rule = ProviderCatalogModelRule::All;
     std::vector<std::string> model_ids;
@@ -24,8 +29,11 @@ struct ProviderCatalogSource {
     std::string provider_name;
     std::string category_label;
     ProviderCatalogModelFilter registry_model_filter;
+    ProviderCatalogApiModelPolicy api_model_policy =
+        ProviderCatalogApiModelPolicy::All;
 
     [[nodiscard]] bool includes_registry_model(std::string_view model_id) const;
+    [[nodiscard]] bool includes_api_model(std::string_view model_id) const;
 };
 
 struct ProviderCatalogGroup {

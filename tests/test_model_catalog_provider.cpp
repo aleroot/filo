@@ -38,6 +38,43 @@ public:
                          std::function<void(const StreamChunk&)>) override {}
 };
 
+class DeferredCatalogProbe final : public LLMProvider,
+                                   public ModelCatalogDiscoverable {
+public:
+    explicit DeferredCatalogProbe(std::string provider_name)
+        : provider_name_(std::move(provider_name)) {}
+
+    void stream_response(const ChatRequest&,
+                         std::function<void(const StreamChunk&)>) override {}
+
+    void discover_models(
+        const ModelCatalogDiscoveryOptions&) const override {
+        auto& availability = ModelCatalogAvailability::instance();
+        if (!availability.try_mark_refreshing(provider_name_)) {
+            return;
+        }
+
+        worker_ = std::jthread([provider_name = provider_name_] {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+            ModelInfo model;
+            model.canonical_id = "deferred-live-model";
+            model.provider = provider_name;
+
+            ModelCatalogDiscoveryResult success;
+            success.attempted = true;
+            success.fetched = 1;
+            ModelCatalogAvailability::instance().record_result(
+                provider_name,
+                success,
+                {std::move(model)});
+        });
+    }
+
+private:
+    std::string provider_name_;
+    mutable std::jthread worker_;
+};
+
 } // namespace
 
 TEST_CASE("Model discovery dispatches through an optional provider capability",
@@ -50,6 +87,24 @@ TEST_CASE("Model discovery dispatches through an optional provider capability",
 
     auto unsupported = std::make_shared<ProviderWithoutCatalog>();
     CHECK_NOTHROW(request_model_catalog_discovery(unsupported));
+}
+
+TEST_CASE("Interactive catalog snapshot waits for first asynchronous result",
+          "[llm][model-catalog][discovery]") {
+    constexpr std::string_view provider_name =
+        "deferred-picker-catalog-provider";
+    auto provider = std::make_shared<DeferredCatalogProbe>(
+        std::string(provider_name));
+
+    const auto snapshot = request_model_catalog_snapshot(
+        provider,
+        provider_name,
+        {.timeout_ms = 1000},
+        std::chrono::milliseconds{500});
+
+    REQUIRE(snapshot.state == ModelCatalogDiscoveryState::Succeeded);
+    REQUIRE(snapshot.models.size() == 1);
+    CHECK(snapshot.models.front().canonical_id == "deferred-live-model");
 }
 
 TEST_CASE("GeminiModelCatalogProvider parses live model catalog shape", "[llm][model-catalog]") {

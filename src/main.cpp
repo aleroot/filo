@@ -464,6 +464,9 @@ int main(int argc, char** argv) {
         opts.continue_last = continue_last;
         opts.yolo = trust_resolution.trust_all_tools;
         opts.trusted_tools = trust_resolution.trusted_tool_names;
+        if (model_opt->count() > 0) {
+            opts.startup_model = startup_model;
+        }
         if (resume_opt->count() > 0) {
             opts.resume_session = resume_session;
         }

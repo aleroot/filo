@@ -23,6 +23,7 @@ struct RunOptions {
     bool continue_last = false;
     bool yolo = false;
     std::vector<std::string> trusted_tools;
+    std::optional<std::string> startup_model;
 
     // When present and empty, resume the most recent session.
     std::optional<std::string> resume_session;

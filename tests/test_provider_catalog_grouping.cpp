@@ -135,7 +135,7 @@ TEST_CASE("Provider catalog grouping chooses one Kimi source per endpoint withou
     CHECK(group.contains_source_provider("kimi-for-coding"));
 }
 
-TEST_CASE("Provider catalog grouping keeps Qwen Token Plan availability live-only",
+TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fallback",
           "[llm][provider-catalog][qwen][token-plan]") {
     const std::vector<std::string> providers{"qwen", "qwen-token-plan"};
     const auto group = core::llm::provider_catalog_group_for("qwen-token-plan", providers);
@@ -148,13 +148,19 @@ TEST_CASE("Provider catalog grouping keeps Qwen Token Plan availability live-onl
     REQUIRE(token_plan != nullptr);
     REQUIRE(token_plan->category_label == "Token Plan endpoint.");
     for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
-                             "qwen3.7-plus", "qwen3.6-flash",
-                             "qwen4.0-max"}) {
-        CHECK_FALSE(token_plan->includes_registry_model(model));
+                             "qwen3.7-plus", "qwen3.6-flash"}) {
+        CHECK(token_plan->includes_registry_model(model));
         CHECK(public_api->includes_registry_model(model));
     }
+    CHECK_FALSE(token_plan->includes_registry_model("qwen4.0-max"));
     CHECK_FALSE(token_plan->includes_registry_model("qwen3-coder-plus"));
     CHECK(public_api->includes_registry_model("qwen3-coder-plus"));
+    CHECK(token_plan->includes_api_model("qwen4.0-max"));
+    CHECK(token_plan->includes_api_model("glm-5.2"));
+    CHECK(token_plan->includes_api_model("deepseek-v5"));
+    CHECK_FALSE(token_plan->includes_api_model("wan2.7-image"));
+    CHECK_FALSE(token_plan->includes_api_model("qwen-audio-2"));
+    CHECK(public_api->includes_api_model("qwen-image-2.0"));
 }
 
 TEST_CASE("Provider catalog family matching respects provider-name boundaries",

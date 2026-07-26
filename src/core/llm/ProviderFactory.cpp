@@ -328,16 +328,25 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 wire_api,
                 builtin ? builtin->default_wire_api : "chat_completions")
             == OpenAIWireApi::Responses) {
-            protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
-                protocols::DashScopeResponsesProtocol::Options{
+            if (qwen_token_plan) {
+                protocol = std::make_unique<protocols::DashScopeTokenPlanProtocol>(
+                    protocols::DashScopeTokenPlanProtocol::Options{
+                        .thinking_budget = config.thinking_budget,
+                        .default_effort = config.reasoning_effort.empty()
+                            ? "high"
+                            : config.reasoning_effort,
+                        .enable_hosted_tools = true,
+                    });
+            } else {
+                protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
+                    protocols::DashScopeResponsesProtocol::Options{
                     .default_effort = config.reasoning_effort.empty()
                         ? "high"
                         : config.reasoning_effort,
-                    .enable_hosted_tools = qwen_token_plan,
-                    .deployment = qwen_token_plan
-                        ? protocols::DashScopeDeployment::TokenPlan
-                        : protocols::DashScopeDeployment::Standard,
-                });
+                        .enable_hosted_tools = false,
+                        .deployment = protocols::DashScopeDeployment::Standard,
+                    });
+            }
         } else {
             protocol = std::make_unique<protocols::DashScopeProtocol>(
                 config.thinking_budget,

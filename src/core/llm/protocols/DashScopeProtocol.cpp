@@ -14,7 +14,9 @@ namespace {
 [[nodiscard]] ReasoningCapabilities qwen_reasoning_capabilities(
     std::string_view model) noexcept {
     using core::utils::ascii::istarts_with;
-    const bool supported = istarts_with(model, "qwen3")
+    const auto generation = qwen_model_generation(model);
+    const bool supported = (!generation.empty()
+                            && generation >= std::vector<int>{3})
         || istarts_with(model, "qwen-plus")
         || istarts_with(model, "qwen-flash")
         || istarts_with(model, "qwen-turbo")
@@ -120,8 +122,7 @@ namespace {
         case 400:
             return std::string(token_plan ? "[Qwen Token Plan Error 400: Bad request."
                                           : "[DashScope Error 400: Bad request.") + detail()
-                + " Check all parameters are valid for this model. "
-                  "Note: 'enable_thinking' requires a Qwen3 model.]";
+                + " Check model-specific parameters, reasoning controls, and tool types.]";
         case 401:
             if (token_plan) {
                 return "[Qwen Token Plan Error 401: Authentication failed." + detail()
@@ -222,6 +223,10 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
 
 void DashScopeProtocol::append_extra_fields(std::string&       payload,
                                              const ChatRequest& req) const {
+    if (!qwen_reasoning_capabilities(req.model).supports_effort()) {
+        return;
+    }
+
     const std::string effort = normalize_qwen_effort(
         req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort));
 
@@ -280,6 +285,12 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
             ? std::string_view(options_.default_effort)
             : std::string_view(req.effort));
     const std::string effective_effort = effort.empty() ? "xhigh" : effort;
+    const auto model_reasoning =
+        qwen_reasoning_capabilities(req.model);
+    const std::optional<std::string_view> reasoning_effort =
+        model_reasoning.supports_effort()
+        ? std::optional<std::string_view>{effective_effort}
+        : std::nullopt;
     static constexpr std::array<std::string_view, 5> kHostedTools{
         "web_search",
         "code_interpreter",
@@ -287,7 +298,10 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
         "web_search_image",
         "image_search",
     };
-    const std::span<const std::string_view> hosted_tools = options_.enable_hosted_tools
+    const bool enable_hosted_tools =
+        options_.enable_hosted_tools
+        && qwen_model_supports_token_plan_hosted_tools(req.model);
+    const std::span<const std::string_view> hosted_tools = enable_hosted_tools
         ? std::span<const std::string_view>{kHostedTools}
         : std::span<const std::string_view>{};
     return serialize_with_options(
@@ -296,7 +310,7 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
             .include_store = false,
             .include_prompt_cache_key = false,
             .include_response_include = false,
-            .reasoning_effort_override = effective_effort,
+            .reasoning_effort_override = reasoning_effort,
             .hosted_tool_types = hosted_tools,
         });
 }
@@ -320,6 +334,121 @@ bool DashScopeResponsesProtocol::is_retryable(
     return response.status_code == 429 || response.status_code == 500
         || response.status_code == 502 || response.status_code == 503
         || response.status_code == 504;
+}
+
+DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol()
+    : DashScopeTokenPlanProtocol(Options{}) {}
+
+DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(Options options)
+    : DashScopeTokenPlanProtocol(
+          options,
+          std::make_unique<DashScopeProtocol>(
+              options.thinking_budget,
+              options.default_effort,
+              DashScopeDeployment::TokenPlan),
+          std::make_unique<DashScopeResponsesProtocol>(
+              DashScopeResponsesProtocol::Options{
+                  .default_effort = options.default_effort,
+                  .enable_hosted_tools = options.enable_hosted_tools,
+                  .deployment = DashScopeDeployment::TokenPlan,
+              })) {}
+
+DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(
+    Options options,
+    std::unique_ptr<ApiProtocolBase> chat,
+    std::unique_ptr<ApiProtocolBase> responses)
+    : options_(std::move(options))
+    , chat_(std::move(chat))
+    , responses_(std::move(responses)) {}
+
+void DashScopeTokenPlanProtocol::select_for_model(
+    std::string_view model) noexcept {
+    active_wire_api_ = qwen_token_plan_wire_api(model);
+}
+
+ApiProtocolBase& DashScopeTokenPlanProtocol::active() noexcept {
+    return active_wire_api_ == QwenTokenPlanWireApi::Responses
+        ? *responses_
+        : *chat_;
+}
+
+const ApiProtocolBase& DashScopeTokenPlanProtocol::active() const noexcept {
+    return active_wire_api_ == QwenTokenPlanWireApi::Responses
+        ? *responses_
+        : *chat_;
+}
+
+const ApiProtocolBase& DashScopeTokenPlanProtocol::protocol_for(
+    std::string_view model) const noexcept {
+    return qwen_token_plan_wire_api(model) == QwenTokenPlanWireApi::Responses
+        ? *responses_
+        : *chat_;
+}
+
+void DashScopeTokenPlanProtocol::prepare_request(ChatRequest& request) {
+    select_for_model(request.model);
+    active().prepare_request(request);
+}
+
+std::string DashScopeTokenPlanProtocol::serialize(
+    const ChatRequest& req) const {
+    return protocol_for(req.model).serialize(req);
+}
+
+cpr::Header DashScopeTokenPlanProtocol::build_headers(
+    const core::auth::AuthInfo& auth) const {
+    return active().build_headers(auth);
+}
+
+std::string DashScopeTokenPlanProtocol::build_url(
+    std::string_view base_url,
+    std::string_view model) const {
+    return protocol_for(model).build_url(base_url, model);
+}
+
+std::string_view DashScopeTokenPlanProtocol::event_delimiter() const noexcept {
+    return active().event_delimiter();
+}
+
+ParseResult DashScopeTokenPlanProtocol::parse_event(
+    std::string_view raw_event) {
+    return active().parse_event(raw_event);
+}
+
+ReasoningCapabilities DashScopeTokenPlanProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    return qwen_reasoning_capabilities(model);
+}
+
+std::unique_ptr<ApiProtocolBase> DashScopeTokenPlanProtocol::clone() const {
+    return std::unique_ptr<ApiProtocolBase>{
+        new DashScopeTokenPlanProtocol(
+            options_, chat_->clone(), responses_->clone())};
+}
+
+void DashScopeTokenPlanProtocol::on_response(
+    const HttpResponse& response) {
+    active().on_response(response);
+}
+
+std::string DashScopeTokenPlanProtocol::format_error_message(
+    const HttpResponse& response) const {
+    return active().format_error_message(response);
+}
+
+bool DashScopeTokenPlanProtocol::is_retryable(
+    const HttpResponse& response) const noexcept {
+    return active().is_retryable(response);
+}
+
+RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
+    return active().last_rate_limit();
+}
+
+void DashScopeTokenPlanProtocol::reset_state() {
+    chat_->reset_state();
+    responses_->reset_state();
+    active_wire_api_ = QwenTokenPlanWireApi::Responses;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

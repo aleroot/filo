@@ -39,6 +39,18 @@ bool is_qwen_text_model(std::string_view model_id) {
         && lowered.find("rerank") == std::string::npos;
 }
 
+QwenTokenPlanWireApi qwen_token_plan_wire_api(
+    std::string_view model_id) {
+    // Alibaba's Token Plan advertises Qwen and third-party models through one
+    // catalog, but its Responses endpoint accepts Qwen models only. Keep the
+    // policy model-driven so newly released Qwen text models automatically use
+    // Responses while GLM, DeepSeek, and future third-party models use the
+    // broadly compatible Chat Completions endpoint.
+    return is_qwen_text_model(model_id)
+        ? QwenTokenPlanWireApi::Responses
+        : QwenTokenPlanWireApi::ChatCompletions;
+}
+
 bool qwen_model_supports_preserve_thinking(std::string_view model_id) {
     const std::vector<int> generation = qwen_model_generation(model_id);
     if (generation >= std::vector<int>{3, 7}) return true;
@@ -47,6 +59,19 @@ bool qwen_model_supports_preserve_thinking(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(model_id);
     return lowered.find("-max") != std::string::npos
         || lowered.find("-plus") != std::string::npos;
+}
+
+bool qwen_model_supports_token_plan_hosted_tools(
+    std::string_view model_id) {
+    const std::vector<int> generation = qwen_model_generation(model_id);
+    if (generation >= std::vector<int>{3, 7}) return true;
+    if (generation != std::vector<int>{3, 6}) return false;
+
+    const std::string lowered =
+        core::utils::str::to_lower_ascii_copy(model_id);
+    return lowered.find("-max") != std::string::npos
+        || lowered.find("-plus") != std::string::npos
+        || lowered.find("-flash") != std::string::npos;
 }
 
 } // namespace core::llm
