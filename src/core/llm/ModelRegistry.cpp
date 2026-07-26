@@ -1,4 +1,5 @@
 #include "ModelRegistry.hpp"
+#include "ModelMetadata.hpp"
 
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -127,6 +128,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // Anthropic Claude Models
     // -----------------------------------------------------------------------
     { "claude-fable-5",     1000000 },
+    { "claude-opus-5",      1000000 },
     { "claude-sonnet-5",    1000000 },
     { "claude-haiku-4-5",   200000 },
     { "claude-opus-4-8",    200000 },
@@ -255,6 +257,30 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             .constraints = kClaudeConstraints,
             .max_tool_calls = 32
         },
+        // Claude Opus 5
+        {
+            .canonical_id = "claude-opus-5",
+            .aliases = {"opus", "claude-opus", "opus-5"},
+            .display_name = "Claude Opus 5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PdfInput) |
+                static_cast<uint32_t>(ModelCapability::Citations) |
+                static_cast<uint32_t>(ModelCapability::CodeExecution) |
+                static_cast<uint32_t>(ModelCapability::Batch) |
+                static_cast<uint32_t>(ModelCapability::ContextManagement),
+            .tier = ModelTier::Powerful,
+            .pricing = {5.0, 25.0, 0.50, 6.25},
+            .knowledge_cutoff = "2026-05",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
         // Claude Sonnet 5
         {
             .canonical_id = "claude-sonnet-5",
@@ -297,7 +323,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
         // Claude Opus 4.8
         {
             .canonical_id = "claude-opus-4-8",
-            .aliases = {"opus", "claude-opus", "opus-4.8", "opus-4-8"},
+            .aliases = {"opus-4.8", "opus-4-8"},
             .display_name = "Claude Opus 4.8",
             .provider = "anthropic",
             .context_window = 200000,
@@ -1269,6 +1295,10 @@ void ModelRegistry::load_defaults() {
     // Load all built-in catalogs
     auto register_all = [this](std::vector<ModelInfo> models) {
         for (auto& info : models) {
+            // Built-in cards intentionally enumerate Filo's full capability
+            // vocabulary. Live partial catalogs may enrich these cards without
+            // turning an omitted field into a false negative.
+            info.capabilities_complete = true;
             register_model(std::move(info));
         }
     };
@@ -1334,54 +1364,8 @@ bool ModelRegistry::merge_model(ModelInfo info) {
     }
 
     const std::string canonical = existing->second.canonical_id;
-    ModelInfo merged = existing->second;
-    if (!info.display_name.empty()
-        && (merged.display_name.empty() || info.display_name != info.canonical_id)) {
-        merged.display_name = std::move(info.display_name);
-    }
-    if (!info.provider.empty() && merged.provider.empty()) {
-        merged.provider = std::move(info.provider);
-    }
-    if (info.context_window > 0) merged.context_window = info.context_window;
-    if (info.max_output_tokens > 0) merged.max_output_tokens = info.max_output_tokens;
-    if (info.max_reasoning_tokens > 0) merged.max_reasoning_tokens = info.max_reasoning_tokens;
-    if (info.capabilities != 0) merged.capabilities |= info.capabilities;
-    if (info.tier != ModelTier::Balanced || merged.tier == ModelTier::Balanced) {
-        merged.tier = info.tier;
-    }
-    if (info.pricing.input_per_mtok > 0.0) merged.pricing.input_per_mtok = info.pricing.input_per_mtok;
-    if (info.pricing.output_per_mtok > 0.0) merged.pricing.output_per_mtok = info.pricing.output_per_mtok;
-    if (info.pricing.cached_input_per_mtok >= 0.0) {
-        merged.pricing.cached_input_per_mtok = info.pricing.cached_input_per_mtok;
-    }
-    if (info.pricing.prompt_caching_write_per_mtok >= 0.0) {
-        merged.pricing.prompt_caching_write_per_mtok = info.pricing.prompt_caching_write_per_mtok;
-    }
-    if (!info.knowledge_cutoff.empty()) merged.knowledge_cutoff = std::move(info.knowledge_cutoff);
-    if (!info.deprecation_date.empty()) merged.deprecation_date = std::move(info.deprecation_date);
-    if (!info.expected_completion_date.empty()) {
-        merged.expected_completion_date = std::move(info.expected_completion_date);
-    }
-    if (info.constraints.temperature) merged.constraints.temperature = info.constraints.temperature;
-    if (info.constraints.top_p) merged.constraints.top_p = info.constraints.top_p;
-    if (info.constraints.frequency_penalty) {
-        merged.constraints.frequency_penalty = info.constraints.frequency_penalty;
-    }
-    if (info.constraints.presence_penalty) {
-        merged.constraints.presence_penalty = info.constraints.presence_penalty;
-    }
-    if (info.constraints.max_tokens_min != 1) {
-        merged.constraints.max_tokens_min = info.constraints.max_tokens_min;
-    }
-    if (info.constraints.max_tokens_max > 0) {
-        merged.constraints.max_tokens_max = info.constraints.max_tokens_max;
-    }
-    if (info.max_tool_calls != 32) merged.max_tool_calls = info.max_tool_calls;
-    for (auto& alias : info.aliases) {
-        if (std::ranges::find(merged.aliases, alias) == merged.aliases.end()) {
-            merged.aliases.push_back(std::move(alias));
-        }
-    }
+    ModelInfo merged =
+        merge_model_metadata(existing->second, std::move(info));
 
     for (const auto& alias : existing->second.aliases) {
         if (const auto alias_it = next->aliases.find(alias);
@@ -1601,6 +1585,17 @@ static bool get_json_double(simdjson::dom::object object,
     return true;
 }
 
+static bool get_json_bool(simdjson::dom::object object,
+                          const char* key,
+                          bool& out) {
+    bool value = false;
+    if (object[key].get(value) != simdjson::SUCCESS) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 static void parse_constraints_range(simdjson::dom::object constraints_obj,
                                     const char* key,
                                     std::optional<ParameterConstraints::Range>& out) {
@@ -1699,6 +1694,28 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
                 }
             }
         }
+        get_json_bool(
+            model_obj,
+            "capabilities_complete",
+            info.capabilities_complete);
+
+        simdjson::dom::object reasoning;
+        if (model_obj["reasoning"].get(reasoning) == simdjson::SUCCESS) {
+            int32_t effort_bits = 0;
+            if (get_json_int(reasoning, "effort_bits", effort_bits)) {
+                info.reasoning.effort = ReasoningCapabilities::from_bits(
+                    static_cast<ReasoningCapabilities::Storage>(effort_bits));
+            }
+            get_json_bool(
+                reasoning,
+                "adaptive_thinking",
+                info.reasoning.adaptive_thinking);
+            get_json_bool(
+                reasoning,
+                "manual_thinking",
+                info.reasoning.manual_thinking);
+            get_json_bool(reasoning, "complete", info.reasoning.complete);
+        }
 
         simdjson::dom::object pricing_obj;
         if (model_obj["pricing"].get(pricing_obj) == simdjson::SUCCESS) {
@@ -1792,6 +1809,25 @@ std::string ModelRegistry::export_to_json() const {
                     }
                 }
                 writer.comma();
+                writer.kv_bool(
+                    "capabilities_complete",
+                    info.capabilities_complete).comma();
+
+                writer.key("reasoning");
+                {
+                    auto reasoning = writer.object();
+                    writer.kv_num(
+                        "effort_bits",
+                        info.reasoning.effort.bits()).comma();
+                    writer.kv_bool(
+                        "adaptive_thinking",
+                        info.reasoning.adaptive_thinking).comma();
+                    writer.kv_bool(
+                        "manual_thinking",
+                        info.reasoning.manual_thinking).comma();
+                    writer.kv_bool("complete", info.reasoning.complete);
+                }
+                writer.comma();
 
                 writer.key("pricing");
                 {
@@ -1856,7 +1892,7 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
         return "claude-sonnet-5";
     }
     if (lowered == "opus") {
-        return "claude-opus-4-8";
+        return "claude-opus-5";
     }
     return normalized;
 }

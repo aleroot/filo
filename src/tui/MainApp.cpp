@@ -31,6 +31,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/event.hpp>
 #include "core/llm/ModelCatalogDiscovery.hpp"
+#include "core/llm/ModelMetadata.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderManager.hpp"
@@ -2690,43 +2691,6 @@ RunResult run(RunOptions opts) {
         return with_persisted_model_preferences(std::move(message));
     };
 
-    auto registry_provider_key = [&](std::string_view provider_name,
-                                     const core::config::ProviderConfig& provider_cfg) {
-        const std::string lowered = core::utils::str::to_lower_ascii_copy(provider_name);
-        if (provider_cfg.api_type == core::config::ApiType::Anthropic
-            || lowered.starts_with("claude")
-            || lowered.find("anthropic") != std::string::npos) {
-            return std::string("anthropic");
-        }
-        if (provider_cfg.api_type == core::config::ApiType::Kimi
-            || lowered.starts_with("kimi")) {
-            return std::string("kimi");
-        }
-        if (provider_cfg.api_type == core::config::ApiType::Gemini
-            || lowered.starts_with("gemini")) {
-            return std::string("gemini");
-        }
-        if (provider_cfg.api_type == core::config::ApiType::DashScope
-            || lowered.starts_with("qwen")) {
-            return std::string("qwen");
-        }
-        if (lowered.starts_with("grok")) {
-            return std::string("grok");
-        }
-        if (lowered.starts_with("zai")) {
-            return std::string("zai");
-        }
-        if (lowered.starts_with("openai")) {
-            return std::string("openai");
-        }
-        if (provider_cfg.api_type == core::config::ApiType::LlamaCppLocal
-            || lowered.starts_with("local")
-            || lowered.starts_with("ollama")) {
-            return std::string("local");
-        }
-        return std::string(provider_name);
-    };
-
     auto models_equivalent = [&](std::string_view lhs, std::string_view rhs) {
         if (lhs == rhs) {
             return true;
@@ -2816,29 +2780,6 @@ RunResult run(RunOptions opts) {
             const auto& provider_cfg = provider_it->second;
             const std::string configured_default = provider_cfg.model;
 
-            if (configured_default.empty()) {
-                continue;
-            }
-            std::string description;
-            if (const auto info = core::llm::ModelRegistry::instance().lookup(configured_default)) {
-                description = compact_model_description(*info);
-            }
-            add_row(configured_default,
-                    configured_default,
-                    source_provider,
-                    std::move(description),
-                    true);
-        }
-
-        for (const auto& source : catalog_group.sources) {
-            const auto& source_provider = source.provider_name;
-            const auto provider_it = config.providers.find(source_provider);
-            if (provider_it == config.providers.end()) {
-                continue;
-            }
-            const auto& provider_cfg = provider_it->second;
-            const std::string configured_default = provider_cfg.model;
-
             auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
             if (!core::llm::is_local_provider(registered_providers, source_provider)
                 && snapshot.refresh_due()) {
@@ -2851,41 +2792,44 @@ RunResult run(RunOptions opts) {
                 }
             }
 
-            for (const auto& model : snapshot.models) {
-                add_row(model.canonical_id,
-                        model.canonical_id,
-                        source_provider,
-                        compact_model_description(model),
-                        models_equivalent(configured_default, model.canonical_id));
+            const std::string registry_key =
+                core::llm::model_registry_provider_key(
+                    source_provider, provider_cfg.api_type);
+            auto registry_models =
+                core::llm::ModelRegistry::instance().get_by_provider(
+                    registry_key);
+            std::erase_if(registry_models, [&](const auto& model) {
+                return !source.includes_registry_model(model.canonical_id);
+            });
+            std::ranges::sort(
+                registry_models, {}, &core::llm::ModelInfo::canonical_id);
+
+            const auto resolved = core::llm::resolve_model_catalog(
+                snapshot.models, registry_models);
+            if (!configured_default.empty()) {
+                const auto default_metadata =
+                    core::llm::resolve_model_metadata(
+                        configured_default,
+                        snapshot.models,
+                        core::llm::ModelRegistry::instance().lookup(
+                            configured_default));
+                add_row(
+                    configured_default,
+                    configured_default,
+                    source_provider,
+                    default_metadata.model
+                        ? compact_model_description(*default_metadata.model)
+                        : std::string{},
+                    true);
             }
-        }
-
-        if (rows.size() <= catalog_group.sources.size()) {
-            const auto add_registry_models = [&](const core::llm::ProviderCatalogSource& source) {
-                const auto& source_provider = source.provider_name;
-                const auto provider_it = config.providers.find(source_provider);
-                if (provider_it == config.providers.end()) {
-                    return;
-                }
-                const auto& provider_cfg = provider_it->second;
-                const std::string configured_default = provider_cfg.model;
-                const std::string registry_key = registry_provider_key(source_provider, provider_cfg);
-                auto registry_models = core::llm::ModelRegistry::instance().get_by_provider(registry_key);
-                std::ranges::sort(registry_models, {}, &core::llm::ModelInfo::canonical_id);
-                for (const auto& model : registry_models) {
-                    if (!source.includes_registry_model(model.canonical_id)) {
-                        continue;
-                    }
-                    add_row(model.canonical_id,
-                            model.canonical_id,
-                            source_provider,
-                            compact_model_description(model),
-                            models_equivalent(configured_default, model.canonical_id));
-                }
-            };
-
-            for (const auto& source : catalog_group.sources) {
-                add_registry_models(source);
+            for (const auto& model : resolved.models) {
+                add_row(
+                    model.canonical_id,
+                    model.canonical_id,
+                    source_provider,
+                    compact_model_description(model),
+                    models_equivalent(
+                        configured_default, model.canonical_id));
             }
         }
 
@@ -2926,28 +2870,20 @@ RunResult run(RunOptions opts) {
 
                 const auto snapshot =
                     core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
-                for (const auto& model : snapshot.models) {
+                const std::string registry_key =
+                    core::llm::model_registry_provider_key(
+                        source_provider, provider_it->second.api_type);
+                auto registry_models =
+                    core::llm::ModelRegistry::instance().get_by_provider(
+                        registry_key);
+                std::erase_if(registry_models, [&](const auto& model) {
+                    return !source.includes_registry_model(
+                        model.canonical_id);
+                });
+                const auto resolved = core::llm::resolve_model_catalog(
+                    snapshot.models, registry_models);
+                for (const auto& model : resolved.models) {
                     known_model_ids.insert(model.canonical_id);
-                }
-            }
-
-            if (known_model_ids.empty()) {
-                for (const auto& source : catalog_group.sources) {
-                    const auto& source_provider = source.provider_name;
-                    const auto provider_it = config.providers.find(source_provider);
-                    if (provider_it == config.providers.end()) {
-                        continue;
-                    }
-                    const std::string registry_key =
-                        registry_provider_key(source_provider, provider_it->second);
-                    auto registry_models =
-                        core::llm::ModelRegistry::instance().get_by_provider(registry_key);
-                    for (const auto& model : registry_models) {
-                        if (!source.includes_registry_model(model.canonical_id)) {
-                            continue;
-                        }
-                        known_model_ids.insert(model.canonical_id);
-                    }
                 }
             }
 
@@ -3161,7 +3097,7 @@ RunResult run(RunOptions opts) {
         // Allow explicit provider + model overrides in a single command:
         //   /model claude sonnet
         //   /model claude opus
-        //   /model claude claude-opus-4-8
+        //   /model claude claude-opus-5
         if (const auto split = trimmed.find_first_of(" \t");
             split != std::string_view::npos) {
             const std::string_view provider_name = trim_ascii(trimmed.substr(0, split));

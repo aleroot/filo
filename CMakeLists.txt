@@ -188,6 +188,17 @@ set(FILO_CORE_SOURCES
     src/core/llm/HttpLLMProvider.cpp
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
+    src/core/llm/ModelMetadata.cpp
+    src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
+    src/core/llm/catalog/CompatibleModelMetadata.cpp
+    src/core/llm/catalog/GeminiModelCatalogProvider.cpp
+    src/core/llm/catalog/KimiModelCatalogProvider.cpp
+    src/core/llm/catalog/MistralModelCatalogProvider.cpp
+    src/core/llm/catalog/ModelCatalogJson.cpp
+    src/core/llm/catalog/ModelCatalogTraits.cpp
+    src/core/llm/catalog/OllamaModelCatalogProvider.cpp
+    src/core/llm/catalog/OpenAICompatibleModelCatalogProvider.cpp
+    src/core/llm/catalog/XaiModelCatalogProvider.cpp
     src/core/llm/ModelRegistry.cpp
     src/core/llm/ProviderCatalogGrouping.cpp
     src/core/llm/ProviderClientIdentity.cpp

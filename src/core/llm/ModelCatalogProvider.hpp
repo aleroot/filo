@@ -18,6 +18,13 @@ struct ModelCatalogResult {
     [[nodiscard]] bool ok() const noexcept { return error.empty(); }
 };
 
+/**
+ * Provider-specific adapter for the remote model-catalog contract.
+ *
+ * Transport orchestration depends only on this interface. Each implementation
+ * owns one provider schema and maps it into the provider-neutral ModelInfo
+ * domain record; registry precedence and HTTP execution live elsewhere.
+ */
 class ModelCatalogProvider {
 public:
     virtual ~ModelCatalogProvider() = default;
@@ -54,9 +61,50 @@ private:
     bool include_session_only_models_ = false;
 };
 
+class XaiModelCatalogProvider final : public ModelCatalogProvider {
+public:
+    explicit XaiModelCatalogProvider(
+        std::string provider_name = "grok",
+        bool use_session_catalog = false);
+
+    [[nodiscard]] std::string_view provider_name() const noexcept override;
+    [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
+
+private:
+    std::string provider_name_;
+    bool use_session_catalog_ = false;
+};
+
+class MistralModelCatalogProvider final : public ModelCatalogProvider {
+public:
+    explicit MistralModelCatalogProvider(
+        std::string provider_name = "mistral");
+
+    [[nodiscard]] std::string_view provider_name() const noexcept override;
+    [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
+
+private:
+    std::string provider_name_;
+};
+
 class KimiModelCatalogProvider final : public ModelCatalogProvider {
 public:
     explicit KimiModelCatalogProvider(std::string provider_name = "kimi");
+
+    [[nodiscard]] std::string_view provider_name() const noexcept override;
+    [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
+
+private:
+    std::string provider_name_;
+};
+
+class OllamaModelCatalogProvider final : public ModelCatalogProvider {
+public:
+    explicit OllamaModelCatalogProvider(
+        std::string provider_name = "ollama");
 
     [[nodiscard]] std::string_view provider_name() const noexcept override;
     [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;

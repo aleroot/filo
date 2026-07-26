@@ -95,7 +95,7 @@ TEST_CASE("Anthropic protocol reports per-family effort levels",
           "[llm][effort][anthropic]") {
     AnthropicProtocol protocol;
     for (const auto model : {"claude-fable-5", "claude-mythos-1", "claude-sonnet-5",
-                             "claude-opus-4-8", "claude-opus-4-7",
+                             "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
                              "claude-sonnet-4-6"}) {
         CAPTURE(model);
         CHECK(supports(protocol, model, ReasoningCapability::Effort));

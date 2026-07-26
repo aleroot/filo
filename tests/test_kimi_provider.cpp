@@ -1369,7 +1369,7 @@ TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][
     CHECK(provider->max_context_size() == 1'048'576);
 }
 
-TEST_CASE("ProviderFactory - public Kimi K3 keeps Moonshot API endpoint", "[kimi][factory][k3]") {
+TEST_CASE("ProviderFactory - public Kimi K3 uses current Moonshot API endpoint", "[kimi][factory][k3]") {
     core::config::ProviderConfig cfg;
     cfg.model = "kimi-k3";
     cfg.api_key = "test-key";
@@ -1378,7 +1378,7 @@ TEST_CASE("ProviderFactory - public Kimi K3 keeps Moonshot API endpoint", "[kimi
     REQUIRE(provider != nullptr);
     const auto metadata = provider->metadata();
     REQUIRE(metadata.has_value());
-    CHECK(metadata->base_url == "https://api.moonshot.cn/v1");
+    CHECK(metadata->base_url == "https://api.moonshot.ai/v1");
     CHECK(metadata->default_model == "kimi-k3");
 }
 

@@ -115,8 +115,8 @@ public:
     [[nodiscard]] int max_context_size() const noexcept override;
 
     /**
-     * @brief Get full model information from the registry.
-     * @return ModelInfo if found in registry, nullopt otherwise.
+     * @brief Get API-first model information with registry fallback.
+     * @return Resolved ModelInfo, or nullopt when neither tier knows the model.
      */
     [[nodiscard]] std::optional<ModelInfo> get_model_info() const;
 
@@ -152,6 +152,9 @@ public:
 
 private:
     [[nodiscard]] std::string resolve_default_model() const;
+    void ensure_model_metadata(std::string_view model) const;
+    [[nodiscard]] std::optional<ModelInfo> resolved_model_info(
+        std::string_view model) const;
 
     struct WebSocketTransportState {
         WebSocketTransportState();

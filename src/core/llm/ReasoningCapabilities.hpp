@@ -15,9 +15,16 @@ enum class ReasoningCapability : std::uint16_t {
 
 class ReasoningCapabilities {
 public:
+    using Storage = std::uint16_t;
+
     constexpr ReasoningCapabilities() noexcept = default;
     constexpr explicit ReasoningCapabilities(ReasoningCapability capability) noexcept
         : features_(static_cast<Storage>(capability)) {}
+
+    [[nodiscard]] static constexpr ReasoningCapabilities from_bits(
+        Storage features) noexcept {
+        return ReasoningCapabilities(features);
+    }
 
     [[nodiscard]] constexpr bool supports(ReasoningCapability capability) const noexcept {
         return (features_ & static_cast<Storage>(capability)) != 0;
@@ -27,9 +34,10 @@ public:
         return supports(ReasoningCapability::Effort);
     }
 
-private:
-    using Storage = std::uint16_t;
+    [[nodiscard]] constexpr Storage bits() const noexcept { return features_; }
+    [[nodiscard]] constexpr bool empty() const noexcept { return features_ == 0; }
 
+private:
     constexpr explicit ReasoningCapabilities(Storage features) noexcept
         : features_(features) {}
 

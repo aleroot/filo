@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ReasoningCapabilities.hpp"
+
 #include <array>
 #include <memory>
 #include <mutex>
@@ -36,6 +38,11 @@ enum class ModelCapability : uint32_t {
     Logprobs            = 1 << 11,  ///< Can return log probabilities
     Embeddings          = 1 << 12,  ///< Has embedding variant
     VideoInput          = 1 << 13,  ///< Video understanding (multimodal)
+    PdfInput            = 1 << 14,  ///< Native PDF document input
+    Citations           = 1 << 15,  ///< Provider-native citation generation
+    CodeExecution       = 1 << 16,  ///< Provider-hosted code execution
+    Batch               = 1 << 17,  ///< Provider batch inference API
+    ContextManagement   = 1 << 18,  ///< Provider-native context management
 };
 
 using ModelCapabilities = uint32_t;
@@ -60,7 +67,7 @@ struct ModelCapabilityName {
     std::string_view name;
 };
 
-inline constexpr std::array<ModelCapabilityName, 14> kModelCapabilityNames{{
+inline constexpr std::array<ModelCapabilityName, 19> kModelCapabilityNames{{
     {ModelCapability::TextInput, "text_input"},
     {ModelCapability::TextOutput, "text_output"},
     {ModelCapability::Vision, "vision"},
@@ -75,6 +82,11 @@ inline constexpr std::array<ModelCapabilityName, 14> kModelCapabilityNames{{
     {ModelCapability::Logprobs, "logprobs"},
     {ModelCapability::Embeddings, "embeddings"},
     {ModelCapability::VideoInput, "video_input"},
+    {ModelCapability::PdfInput, "pdf_input"},
+    {ModelCapability::Citations, "citations"},
+    {ModelCapability::CodeExecution, "code_execution"},
+    {ModelCapability::Batch, "batch"},
+    {ModelCapability::ContextManagement, "context_management"},
 }};
 
 inline constexpr std::array<ModelCapabilityName, 4> kModelCapabilityAliases{{
@@ -188,6 +200,19 @@ struct ParameterConstraints {
     int32_t max_tokens_max = 0;  ///< 0 = use max_output_tokens from model
 };
 
+/**
+ * Provider-advertised reasoning controls for a model.
+ *
+ * Keeping this separate from the broad Reasoning capability lets protocols
+ * choose a supported wire mode without identifying model generations by name.
+ */
+struct ModelReasoningProfile {
+    ReasoningCapabilities effort;
+    bool adaptive_thinking = false;
+    bool manual_thinking = false;
+    bool complete = false;
+};
+
 // ============================================================================
 // Model Information Record (the "Model Card")
 // ============================================================================
@@ -218,6 +243,8 @@ struct ModelInfo {
     // Capabilities & Classification
     // ------------------------------------------------------------------------
     ModelCapabilities capabilities = 0;          ///< Bitmap of ModelCapability flags
+    bool capabilities_complete = false;          ///< True when the provider supplied an exhaustive capability set
+    ModelReasoningProfile reasoning;              ///< Advertised effort levels and thinking wire modes
     ModelTier tier = ModelTier::Balanced;        ///< Quality tier for routing
     
     // ------------------------------------------------------------------------

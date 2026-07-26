@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/llm/ProviderCatalogGrouping.hpp"
+#include "core/llm/ProviderDefinition.hpp"
 
 #include <string>
 #include <vector>
@@ -176,4 +177,27 @@ TEST_CASE("Provider catalog family matching respects provider-name boundaries",
     REQUIRE(core::llm::provider_catalog_group_name("kimiko") == "kimiko");
     REQUIRE(core::llm::provider_catalog_group_name("zai-coding") == "zai");
     REQUIRE(core::llm::provider_catalog_group_name("zaire") == "zaire");
+}
+
+TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
+          "[llm][provider-catalog][provider-definition]") {
+    using core::llm::find_builtin_provider_definition;
+
+    const auto* zai_coding =
+        find_builtin_provider_definition("zai-coding-opus");
+    REQUIRE(zai_coding != nullptr);
+    CHECK(zai_coding->prefix == "zai-coding");
+    CHECK(zai_coding->registry_provider == "zai");
+    CHECK(zai_coding->catalog_group == "zai");
+
+    const auto* token_plan =
+        find_builtin_provider_definition("qwen-token-plan-team");
+    REQUIRE(token_plan != nullptr);
+    CHECK(token_plan->prefix == "qwen-token-plan");
+    CHECK(token_plan->registry_provider == "qwen");
+    CHECK(token_plan->default_wire_api == "responses");
+
+    CHECK(find_builtin_provider_definition("grokker") == nullptr);
+    CHECK(find_builtin_provider_definition("kimiko") == nullptr);
+    CHECK(find_builtin_provider_definition("zaire") == nullptr);
 }

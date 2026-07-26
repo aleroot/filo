@@ -1,14 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/llm/LLMProvider.hpp"
+#include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ModelCatalogProvider.hpp"
+#include "core/llm/ModelMetadata.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/auth/ApiKeyCredentialSource.hpp"
 
 using namespace core::llm;
 
@@ -55,12 +58,18 @@ TEST_CASE("GeminiModelCatalogProvider parses live model catalog shape", "[llm][m
     const auto result = provider.parse_models_response(R"JSON({
       "models": [
         {
-          "name": "models/gemini-3.2-flash",
+          "name": "models/gemini-3.2-flash-001",
           "baseModelId": "gemini-3.2-flash",
           "displayName": "Gemini 3.2 Flash",
           "inputTokenLimit": 1048576,
           "outputTokenLimit": 65536,
-          "supportedGenerationMethods": ["generateContent", "countTokens"],
+          "maxTemperature": 1.5,
+          "supportedGenerationMethods": [
+            "generateContent",
+            "countTokens",
+            "createCachedContent",
+            "batchGenerateContent"
+          ],
           "thinking": true
         },
         {
@@ -80,14 +89,21 @@ TEST_CASE("GeminiModelCatalogProvider parses live model catalog shape", "[llm][m
     const auto& flash = result.models[0];
     CHECK(flash.canonical_id == "gemini-3.2-flash");
     CHECK(flash.display_name == "Gemini 3.2 Flash");
+    REQUIRE(flash.aliases.size() == 1);
+    CHECK(flash.aliases.front() == "gemini-3.2-flash-001");
     CHECK(flash.provider == "gemini");
     CHECK(flash.context_window == 1048576);
     CHECK(flash.max_output_tokens == 65536);
     CHECK(flash.tier == ModelTier::Reasoning);
-    CHECK(flash.supports(ModelCapability::FunctionCalling));
-    CHECK(flash.supports(ModelCapability::JsonMode));
+    CHECK_FALSE(flash.supports(ModelCapability::FunctionCalling));
+    CHECK_FALSE(flash.supports(ModelCapability::JsonMode));
     CHECK(flash.supports(ModelCapability::TokenCounting));
     CHECK(flash.supports(ModelCapability::PromptCaching));
+    CHECK(flash.supports(ModelCapability::Batch));
+    CHECK_FALSE(flash.supports(ModelCapability::Vision));
+    CHECK_FALSE(flash.capabilities_complete);
+    REQUIRE(flash.constraints.temperature.has_value());
+    CHECK(flash.constraints.temperature->max == 1.5);
 
     const auto& embedding = result.models[1];
     CHECK(embedding.canonical_id == "text-embedding-005");
@@ -168,6 +184,54 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses data array and preserves 
     CHECK(embedding.supports(ModelCapability::Embeddings));
 }
 
+TEST_CASE("OpenAI-compatible catalogs consume optional limits and advertised capabilities",
+          "[llm][model-catalog][openai]") {
+    OpenAICompatibleModelCatalogProvider provider("compatible");
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "provider-agent-1",
+          "display_name": "Provider Agent 1",
+          "context_length": 262144,
+          "max_tokens": 32768,
+          "reasoning_max_tokens": 12000,
+          "input_modalities": ["text", "image"],
+          "output_modalities": ["text"],
+          "supports_streaming": true,
+          "supports_system_prompts": true,
+          "supports_function_calling": true,
+          "supports_parallel_tool_calls": true,
+          "supports_structured_outputs": true,
+          "capabilities": {
+            "reasoning": {"supported": true},
+            "prompt_caching": true,
+            "pdf_input": {"supported": true}
+          }
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    const auto& model = result.models.front();
+    CHECK(model.context_window == 262144);
+    CHECK(model.max_output_tokens == 32768);
+    CHECK(model.max_reasoning_tokens == 12000);
+    CHECK(model.tier == ModelTier::Reasoning);
+    CHECK(model.supports(ModelCapability::TextInput));
+    CHECK(model.supports(ModelCapability::TextOutput));
+    CHECK(model.supports(ModelCapability::Streaming));
+    CHECK(model.supports(ModelCapability::SystemPrompts));
+    CHECK(model.supports(ModelCapability::FunctionCalling));
+    CHECK(model.supports(ModelCapability::ParallelToolCalls));
+    CHECK(model.supports(ModelCapability::JsonMode));
+    CHECK(model.supports(ModelCapability::Vision));
+    CHECK(model.supports(ModelCapability::Reasoning));
+    CHECK(model.supports(ModelCapability::PromptCaching));
+    CHECK(model.supports(ModelCapability::PdfInput));
+}
+
 TEST_CASE("OpenAICompatibleModelCatalogProvider parses Codex remote model catalog", "[llm][model-catalog][openai]") {
     OpenAICompatibleModelCatalogProvider provider("openai");
 
@@ -216,6 +280,179 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses Codex remote model catalo
     CHECK(codex.supports(ModelCapability::JsonMode));
     CHECK(codex.supports(ModelCapability::Reasoning));
     CHECK(codex.supports(ModelCapability::Vision));
+}
+
+TEST_CASE("xAI catalog loads callable language models, limits, aliases, and pricing",
+          "[llm][model-catalog][xai]") {
+    XaiModelCatalogProvider provider("grok");
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "object": "list",
+      "data": [
+        {
+          "id": "grok-4.3-latest",
+          "aliases": ["grok-latest"],
+          "context_length": 131072,
+          "prompt_text_token_price": 12500,
+          "cached_prompt_text_token_price": 2000,
+          "prompt_image_token_price": 12500,
+          "completion_text_token_price": 25000
+        },
+        {
+          "id": "grok-420-reasoning",
+          "aliases": [],
+          "context_length": 256000,
+          "prompt_text_token_price": 20000,
+          "cached_prompt_text_token_price": 2000,
+          "prompt_image_token_price": 0,
+          "completion_text_token_price": 80000
+        },
+        {
+          "id": "grok-imagine-image",
+          "context_length": 1024,
+          "image_price": 200000000
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+
+    const auto& multimodal = result.models[0];
+    CHECK(multimodal.canonical_id == "grok-4.3-latest");
+    CHECK(multimodal.context_window == 131072);
+    REQUIRE(multimodal.aliases.size() == 1);
+    CHECK(multimodal.aliases.front() == "grok-latest");
+    CHECK(multimodal.supports(ModelCapability::Vision));
+    CHECK(multimodal.supports(ModelCapability::FunctionCalling));
+    CHECK(multimodal.pricing.input_per_mtok == 1.25);
+    CHECK(multimodal.pricing.output_per_mtok == 2.5);
+    CHECK(multimodal.pricing.cached_input_per_mtok == 0.2);
+
+    const auto& reasoning = result.models[1];
+    CHECK(reasoning.context_window == 256000);
+    CHECK(reasoning.supports(ModelCapability::Reasoning));
+    CHECK_FALSE(reasoning.supports(ModelCapability::Vision));
+}
+
+TEST_CASE("xAI session catalog retains the Codex-style proxy schema",
+          "[llm][model-catalog][xai]") {
+    XaiModelCatalogProvider provider("grok", true);
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "models": [{
+        "slug": "grok-account-model",
+        "display_name": "Grok Account Model",
+        "supported_in_api": false,
+        "context_window": 200000
+      }]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    CHECK(result.models.front().canonical_id == "grok-account-model");
+    CHECK(result.models.front().context_window == 200000);
+}
+
+TEST_CASE("Mistral catalog loads its capability matrix and context limit",
+          "[llm][model-catalog][mistral]") {
+    MistralModelCatalogProvider provider;
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "object": "list",
+      "data": [
+        {
+          "id": "mistral-future-vision",
+          "aliases": ["mistral-future-latest"],
+          "max_context_length": 262144,
+          "archived": false,
+          "capabilities": {
+            "completion_chat": true,
+            "completion_fim": false,
+            "function_calling": true,
+            "fine_tuning": false,
+            "vision": true,
+            "classification": false
+          }
+        },
+        {
+          "id": "archived-model",
+          "archived": true,
+          "capabilities": {"completion_chat": true}
+        },
+        {
+          "id": "classifier-only",
+          "archived": false,
+          "capabilities": {
+            "completion_chat": false,
+            "classification": true
+          }
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    const auto& model = result.models.front();
+    CHECK(model.canonical_id == "mistral-future-vision");
+    CHECK(model.context_window == 262144);
+    CHECK_FALSE(model.capabilities_complete);
+    CHECK(model.supports(ModelCapability::TextInput));
+    CHECK(model.supports(ModelCapability::Streaming));
+    CHECK(model.supports(ModelCapability::JsonMode));
+    CHECK(model.supports(ModelCapability::FunctionCalling));
+    CHECK(model.supports(ModelCapability::ParallelToolCalls));
+    CHECK(model.supports(ModelCapability::Vision));
+    REQUIRE(model.aliases.size() == 1);
+    CHECK(model.aliases.front() == "mistral-future-latest");
+}
+
+TEST_CASE("Mistral catalog accepts the documented bare-array response",
+          "[llm][model-catalog][mistral]") {
+    MistralModelCatalogProvider provider;
+    const auto result = provider.parse_models_response(R"JSON([
+      {
+        "id": "mistral-bare-array",
+        "max_context_length": 32768,
+        "capabilities": {"completion_chat": true}
+      }
+    ])JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    CHECK(result.models.front().context_window == 32768);
+}
+
+TEST_CASE("Ollama catalog loads locally installed model identities",
+          "[llm][model-catalog][ollama]") {
+    OllamaModelCatalogProvider provider;
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "models": [
+        {
+          "name": "qwen3:30b",
+          "modified_at": "2026-07-26T10:00:00Z",
+          "size": 18000000000,
+          "digest": "sha256",
+          "details": {
+            "format": "gguf",
+            "family": "qwen3",
+            "parameter_size": "30B",
+            "quantization_level": "Q4_K_M"
+          }
+        },
+        {"model": "nomic-embed-text:latest"}
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+    CHECK(result.models[0].canonical_id == "qwen3:30b");
+    CHECK(result.models[0].provider == "ollama");
+    CHECK(result.models[0].supports(ModelCapability::TextInput));
+    CHECK(result.models[0].supports(ModelCapability::JsonMode));
+    CHECK_FALSE(result.models[0].capabilities_complete);
+    CHECK(result.models[1].supports(ModelCapability::Embeddings));
 }
 
 TEST_CASE("KimiModelCatalogProvider parses Moonshot enriched models response", "[llm][model-catalog]") {
@@ -292,18 +529,66 @@ TEST_CASE("KimiModelCatalogProvider infers context when Moonshot omits it", "[ll
     CHECK(result.models[3].supports(ModelCapability::Vision));
 }
 
-TEST_CASE("AnthropicModelCatalogProvider parses v1 models response", "[llm][model-catalog]") {
+TEST_CASE("Kimi catalog treats explicit capability flags as authoritative",
+          "[llm][model-catalog][kimi]") {
+    KimiModelCatalogProvider provider;
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [{
+        "id": "kimi-k2-no-media",
+        "supports_reasoning": false,
+        "supports_image_in": false,
+        "supports_video_in": false
+      }]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    const auto& model = result.models.front();
+    CHECK_FALSE(model.supports(ModelCapability::Reasoning));
+    CHECK_FALSE(model.supports(ModelCapability::Vision));
+    CHECK_FALSE(model.supports(ModelCapability::VideoInput));
+}
+
+TEST_CASE("AnthropicModelCatalogProvider parses limits and capabilities",
+          "[llm][model-catalog][anthropic]") {
     AnthropicModelCatalogProvider provider;
 
     const auto result = provider.parse_models_response(R"JSON({
       "data": [
         {
-          "id": "claude-sonnet-4-6-20260514",
-          "display_name": "Claude Sonnet 4.6"
+          "id": "claude-opus-5",
+          "display_name": "Claude Opus 5",
+          "max_input_tokens": 1000000,
+          "max_tokens": 128000,
+          "capabilities": {
+            "batch": {"supported": true},
+            "citations": {"supported": true},
+            "code_execution": {"supported": true},
+            "context_management": {"supported": true},
+            "effort": {
+              "supported": true,
+              "low": {"supported": true},
+              "medium": {"supported": true},
+              "high": {"supported": true},
+              "max": {"supported": true},
+              "xhigh": {"supported": true}
+            },
+            "image_input": {"supported": true},
+            "pdf_input": {"supported": true},
+            "structured_outputs": {"supported": true},
+            "thinking": {
+              "supported": true,
+              "types": {
+                "adaptive": {"supported": true},
+                "enabled": {"supported": false}
+              }
+            }
+          }
         },
         {
-          "id": "claude-fable-5-20260601",
-          "display_name": "Claude Fable 5"
+          "id": "claude-legacy-sparse",
+          "display_name": "Claude Legacy Sparse"
         }
       ],
       "has_more": false
@@ -312,16 +597,108 @@ TEST_CASE("AnthropicModelCatalogProvider parses v1 models response", "[llm][mode
     REQUIRE(result.ok());
     REQUIRE(result.models.size() == 2);
 
-    const auto& sonnet = result.models[0];
-    CHECK(sonnet.canonical_id == "claude-sonnet-4-6-20260514");
-    CHECK(sonnet.display_name == "Claude Sonnet 4.6");
-    CHECK(sonnet.provider == "anthropic");
-    CHECK(sonnet.context_window == 0);
-    CHECK(sonnet.max_output_tokens == 0);
-    CHECK(sonnet.capabilities == 0);
+    const auto& opus = result.models[0];
+    CHECK(opus.canonical_id == "claude-opus-5");
+    CHECK(opus.display_name == "Claude Opus 5");
+    CHECK(opus.provider == "anthropic");
+    CHECK(opus.context_window == 1000000);
+    CHECK(opus.max_output_tokens == 128000);
+    CHECK(opus.capabilities_complete);
+    CHECK(opus.tier == ModelTier::Reasoning);
+    CHECK(opus.supports(ModelCapability::TextInput));
+    CHECK(opus.supports(ModelCapability::TextOutput));
+    CHECK(opus.supports(ModelCapability::Streaming));
+    CHECK(opus.supports(ModelCapability::SystemPrompts));
+    CHECK(opus.supports(ModelCapability::FunctionCalling));
+    CHECK(opus.supports(ModelCapability::ParallelToolCalls));
+    CHECK(opus.supports(ModelCapability::PromptCaching));
+    CHECK(opus.supports(ModelCapability::TokenCounting));
+    CHECK(opus.supports(ModelCapability::Vision));
+    CHECK(opus.supports(ModelCapability::PdfInput));
+    CHECK(opus.supports(ModelCapability::JsonMode));
+    CHECK(opus.supports(ModelCapability::Reasoning));
+    CHECK(opus.supports(ModelCapability::Citations));
+    CHECK(opus.supports(ModelCapability::CodeExecution));
+    CHECK(opus.supports(ModelCapability::Batch));
+    CHECK(opus.supports(ModelCapability::ContextManagement));
+    CHECK(opus.reasoning.complete);
+    CHECK(opus.reasoning.effort.supports_effort());
+    CHECK(opus.reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(opus.reasoning.effort.supports(ReasoningCapability::XHighEffort));
+    CHECK(opus.reasoning.adaptive_thinking);
+    CHECK_FALSE(opus.reasoning.manual_thinking);
+    REQUIRE(opus.constraints.temperature.has_value());
+    CHECK(opus.constraints.temperature->max == 1.0);
 
-    const auto& fable = result.models[1];
-    CHECK(fable.tier == ModelTier::Balanced);
+    const auto& sparse = result.models[1];
+    CHECK(sparse.context_window == 0);
+    CHECK(sparse.max_output_tokens == 0);
+    CHECK(sparse.capabilities == 0);
+    CHECK_FALSE(sparse.capabilities_complete);
+    CHECK_FALSE(sparse.reasoning.complete);
+    CHECK_FALSE(sparse.supports(ModelCapability::Vision));
+    CHECK_FALSE(sparse.supports(ModelCapability::Reasoning));
+}
+
+TEST_CASE("A newly released Claude model is data-driven end to end",
+          "[llm][model-catalog][anthropic][future-model]") {
+    AnthropicModelCatalogProvider provider;
+    auto result = provider.parse_models_response(R"JSON({
+      "data": [{
+        "id": "claude-future-dynamic-2030",
+        "display_name": "Claude Future Dynamic",
+        "max_input_tokens": 2000000,
+        "max_tokens": 192000,
+        "capabilities": {
+          "effort": {
+            "supported": true,
+            "low": {"supported": true},
+            "medium": {"supported": true},
+            "high": {"supported": true},
+            "max": {"supported": false},
+            "xhigh": {"supported": true}
+          },
+          "thinking": {
+            "supported": true,
+            "types": {
+              "adaptive": {"supported": true},
+              "enabled": {"supported": false}
+            }
+          },
+          "image_input": {"supported": true},
+          "pdf_input": {"supported": true}
+        }
+      }],
+      "has_more": false
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    auto& registry = ModelRegistry::instance();
+    CHECK(registry.merge_model(std::move(result.models.front())));
+
+    const auto discovered = registry.lookup("claude-future-dynamic-2030");
+    REQUIRE(discovered);
+    CHECK(discovered->context_window == 2'000'000);
+    CHECK(discovered->max_output_tokens == 192'000);
+    CHECK(discovered->reasoning.complete);
+    CHECK(discovered->reasoning.adaptive_thinking);
+    CHECK_FALSE(discovered->reasoning.manual_thinking);
+
+    ChatRequest request;
+    request.model = "claude-future-dynamic-2030";
+    request.effort = "xhigh";
+    request.messages.push_back({.role = "user", .content = "Hello"});
+    const std::string payload =
+        protocols::AnthropicSerializer::serialize(request);
+
+    CHECK(payload.find(R"("max_tokens":192000)") != std::string::npos);
+    CHECK(payload.find(R"("output_config":{"effort":"xhigh"})")
+          != std::string::npos);
+    CHECK(payload.find(R"("thinking":{"type":"adaptive"})")
+          != std::string::npos);
+    CHECK(payload.find(R"("thinking":{"type":"enabled")")
+          == std::string::npos);
 }
 
 TEST_CASE("AnthropicModelCatalogProvider captures next cursor", "[llm][model-catalog]") {
@@ -349,6 +726,12 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     CHECK(grok->provider_name() == "grok");
     CHECK(grok->model_list_path() == "/models");
 
+    auto mistral = make_model_catalog_provider(
+        core::config::ApiType::OpenAI,
+        "mistral");
+    REQUIRE(mistral != nullptr);
+    CHECK(dynamic_cast<MistralModelCatalogProvider*>(mistral.get()) != nullptr);
+
     auto kimi = make_model_catalog_provider(core::config::ApiType::Kimi, "kimi");
     REQUIRE(kimi != nullptr);
     CHECK(kimi->provider_name() == "kimi");
@@ -365,7 +748,13 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     CHECK(claude->model_list_path("cursor") == "/v1/models?limit=1000&after_id=cursor");
 
     auto ollama = make_model_catalog_provider(core::config::ApiType::Ollama, "ollama");
-    CHECK(ollama == nullptr);
+    REQUIRE(ollama != nullptr);
+    CHECK(ollama->model_list_path() == "/api/tags");
+
+    auto zai = make_model_catalog_provider(
+        core::config::ApiType::OpenAI,
+        "zai");
+    CHECK(zai == nullptr);
 }
 
 TEST_CASE("Remote model discovery skips quietly without credentials",
@@ -503,6 +892,290 @@ TEST_CASE("ModelRegistry merge preserves catalog metadata when discovery is spar
     CHECK(merged->supports(ModelCapability::FunctionCalling));
 }
 
+TEST_CASE("Sparse capability catalogs never create false validation failures",
+          "[llm][model-catalog][capabilities]") {
+    constexpr std::string_view model_id =
+        "partial-capability-validation-model";
+
+    ModelInfo partial;
+    partial.canonical_id = std::string(model_id);
+    partial.provider = "partial-capability-provider";
+    partial.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::TextOutput);
+    partial.capabilities_complete = false;
+    ModelRegistry::instance().register_model(partial);
+
+    HttpLLMProvider provider(
+        "https://example.invalid/v1",
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        std::string(model_id),
+        std::make_unique<core::llm::protocols::OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        partial.provider);
+
+    ChatRequest request;
+    request.model = std::string(model_id);
+    request.messages.push_back({.role = "user", .content = "Hello"});
+    Tool tool;
+    tool.function.name = "test_tool";
+    tool.function.input_schema = R"JSON({"type":"object"})JSON";
+    request.tools.push_back(std::move(tool));
+
+    CHECK(provider.validate_request(request).empty());
+
+    partial.capabilities_complete = true;
+    ModelRegistry::instance().register_model(std::move(partial));
+    const auto errors = provider.validate_request(request);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors.front() == "model does not support function calling");
+}
+
+TEST_CASE("HTTP request validation uses provider metadata before registry cards",
+          "[llm][model-catalog][metadata][fallback]") {
+    constexpr std::string_view provider_name =
+        "api-first-validation-provider";
+    constexpr std::string_view model_id =
+        "api-first-validation-model";
+
+    ModelInfo registry_card;
+    registry_card.canonical_id = std::string(model_id);
+    registry_card.provider = "test";
+    registry_card.max_output_tokens = 8'192;
+    registry_card.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::TextOutput) |
+        static_cast<uint32_t>(ModelCapability::FunctionCalling);
+    registry_card.capabilities_complete = true;
+    ModelRegistry::instance().register_model(registry_card);
+
+    ModelInfo provider_card;
+    provider_card.canonical_id = std::string(model_id);
+    provider_card.max_output_tokens = 128'000;
+    provider_card.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::TextOutput);
+    provider_card.capabilities_complete = true;
+
+    ModelCatalogDiscoveryResult success;
+    success.attempted = true;
+    success.fetched = 1;
+    ModelCatalogAvailability::instance().record_result(
+        provider_name, success, {provider_card});
+
+    HttpLLMProvider provider(
+        "https://example.invalid/v1",
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        std::string(model_id),
+        std::make_unique<core::llm::protocols::OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        std::string(provider_name));
+
+    ChatRequest request;
+    request.model = std::string(model_id);
+    request.max_tokens = 64'000;
+    request.messages.push_back({.role = "user", .content = "Hello"});
+    Tool tool;
+    tool.function.name = "test_tool";
+    tool.function.input_schema = R"JSON({"type":"object"})JSON";
+    request.tools.push_back(std::move(tool));
+
+    const auto errors = provider.validate_request(request);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors.front() == "model does not support function calling");
+    REQUIRE(provider.get_model_info().has_value());
+    CHECK(provider.get_model_info()->max_output_tokens == 128'000);
+}
+
+TEST_CASE("HTTP request validation falls back after permanent catalog skip",
+          "[llm][model-catalog][metadata][fallback]") {
+    constexpr std::string_view provider_name =
+        "registry-fallback-validation-provider";
+    constexpr std::string_view model_id =
+        "registry-fallback-validation-model";
+
+    ModelInfo registry_card;
+    registry_card.canonical_id = std::string(model_id);
+    registry_card.provider = "test";
+    registry_card.max_output_tokens = 8'192;
+    ModelRegistry::instance().register_model(registry_card);
+
+    ModelCatalogDiscoveryResult unsupported;
+    unsupported.permanent_skip = true;
+    ModelCatalogAvailability::instance().record_result(
+        provider_name, unsupported, {});
+
+    HttpLLMProvider provider(
+        "https://example.invalid/v1",
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        std::string(model_id),
+        std::make_unique<core::llm::protocols::OpenAIProtocol>(),
+        core::config::ApiType::OpenAI,
+        std::string(provider_name));
+
+    ChatRequest request;
+    request.model = std::string(model_id);
+    request.max_tokens = 64'000;
+    request.messages.push_back({.role = "user", .content = "Hello"});
+
+    const auto errors = provider.validate_request(request);
+    REQUIRE(errors.size() == 1);
+    CHECK(errors.front().find("exceeds model limit of 8192")
+          != std::string::npos);
+}
+
+TEST_CASE("ModelRegistry replaces stale capabilities from a complete provider catalog",
+          "[llm][model-catalog][registry]") {
+    auto& registry = ModelRegistry::instance();
+
+    ModelInfo stale;
+    stale.canonical_id = "complete-capability-refresh-model";
+    stale.provider = "test";
+    stale.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::TextOutput) |
+        static_cast<uint32_t>(ModelCapability::Vision);
+    registry.register_model(stale);
+
+    ModelInfo discovered;
+    discovered.canonical_id = stale.canonical_id;
+    discovered.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::TextOutput);
+    discovered.capabilities_complete = true;
+    CHECK_FALSE(registry.merge_model(std::move(discovered)));
+
+    const auto merged = registry.get_info(stale.canonical_id);
+    REQUIRE(merged.has_value());
+    CHECK(merged->capabilities_complete);
+    CHECK(merged->supports(ModelCapability::TextInput));
+    CHECK(merged->supports(ModelCapability::TextOutput));
+    CHECK_FALSE(merged->supports(ModelCapability::Vision));
+}
+
+TEST_CASE("Complete reasoning metadata replaces stale wire-mode inference",
+          "[llm][model-catalog][metadata-merge]") {
+    ModelInfo baseline;
+    baseline.canonical_id = "metadata-merge-reasoning";
+    baseline.reasoning.effort =
+        ReasoningCapability::Effort
+        | ReasoningCapability::MaxEffort;
+    baseline.reasoning.manual_thinking = true;
+
+    ModelInfo discovered;
+    discovered.canonical_id = baseline.canonical_id;
+    discovered.reasoning.effort =
+        ReasoningCapability::Effort
+        | ReasoningCapability::XHighEffort;
+    discovered.reasoning.adaptive_thinking = true;
+    discovered.reasoning.complete = true;
+
+    const ModelInfo merged =
+        merge_model_metadata(std::move(baseline), std::move(discovered));
+    CHECK(merged.reasoning.complete);
+    CHECK(merged.reasoning.effort.supports_effort());
+    CHECK(merged.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+    CHECK_FALSE(merged.reasoning.effort.supports(
+        ReasoningCapability::MaxEffort));
+    CHECK(merged.reasoning.adaptive_thinking);
+    CHECK_FALSE(merged.reasoning.manual_thinking);
+}
+
+TEST_CASE("Model catalog resolution is provider API first with registry fallback",
+          "[llm][model-catalog][metadata][fallback]") {
+    std::vector<ModelInfo> provider_models(1);
+    provider_models[0].canonical_id = "provider-live-model";
+    provider_models[0].provider = "provider-api";
+
+    std::vector<ModelInfo> registry_models(1);
+    registry_models[0].canonical_id = "registry-fallback-model";
+    registry_models[0].provider = "internal-registry";
+
+    const auto primary =
+        resolve_model_catalog(provider_models, registry_models);
+    REQUIRE_FALSE(primary.empty());
+    CHECK(primary.origin == ModelMetadataOrigin::ProviderApi);
+    CHECK_FALSE(primary.uses_registry_fallback());
+    REQUIRE(primary.models.size() == 1);
+    CHECK(primary.models.front().canonical_id == "provider-live-model");
+
+    const auto fallback = resolve_model_catalog({}, registry_models);
+    REQUIRE_FALSE(fallback.empty());
+    CHECK(fallback.origin == ModelMetadataOrigin::InternalRegistry);
+    CHECK(fallback.uses_registry_fallback());
+    REQUIRE(fallback.models.size() == 1);
+    CHECK(fallback.models.front().canonical_id
+          == "registry-fallback-model");
+
+    const auto unavailable = resolve_model_catalog({}, {});
+    CHECK(unavailable.empty());
+    CHECK(unavailable.origin == ModelMetadataOrigin::None);
+}
+
+TEST_CASE("Single-model resolution merges API truth over registry fallback",
+          "[llm][model-catalog][metadata][fallback]") {
+    auto registry = std::make_shared<ModelInfo>();
+    registry->canonical_id = "api-first-model";
+    registry->context_window = 128'000;
+    registry->max_output_tokens = 8'192;
+    registry->capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::Vision);
+    registry->capabilities_complete = true;
+
+    ModelInfo provider;
+    provider.canonical_id = registry->canonical_id;
+    provider.context_window = 1'000'000;
+    provider.max_output_tokens = 128'000;
+    provider.capabilities =
+        static_cast<uint32_t>(ModelCapability::TextInput) |
+        static_cast<uint32_t>(ModelCapability::Reasoning);
+    provider.capabilities_complete = true;
+    const std::vector provider_models{provider};
+
+    const auto primary = resolve_model_metadata(
+        "api-first-model", provider_models, registry);
+    REQUIRE(primary);
+    CHECK(primary.origin == ModelMetadataOrigin::ProviderApi);
+    REQUIRE(primary.model.has_value());
+    CHECK(primary.model->context_window == 1'000'000);
+    CHECK(primary.model->max_output_tokens == 128'000);
+    CHECK(primary.model->supports(ModelCapability::Reasoning));
+    CHECK_FALSE(primary.model->supports(ModelCapability::Vision));
+
+    const auto fallback =
+        resolve_model_metadata("api-first-model", {}, registry);
+    REQUIRE(fallback);
+    CHECK(fallback.origin == ModelMetadataOrigin::InternalRegistry);
+    REQUIRE(fallback.model.has_value());
+    CHECK(fallback.model->max_output_tokens == 8'192);
+
+    const auto missing =
+        resolve_model_metadata("unknown-model", provider_models, nullptr);
+    CHECK_FALSE(missing);
+    CHECK(missing.origin == ModelMetadataOrigin::None);
+}
+
+TEST_CASE("Registry fallback family mapping is centralized",
+          "[llm][model-catalog][metadata][fallback]") {
+    CHECK(model_registry_provider_key(
+              "claude-work", core::config::ApiType::Anthropic)
+          == "anthropic");
+    CHECK(model_registry_provider_key(
+              "qwen-token-plan", core::config::ApiType::DashScope)
+          == "qwen");
+    CHECK(model_registry_provider_key(
+              "mistral-team", core::config::ApiType::OpenAI)
+          == "mistral");
+    CHECK(model_registry_provider_key(
+              "ollama-remote", core::config::ApiType::Ollama)
+          == "local");
+    CHECK(model_registry_provider_key(
+              "custom-gateway", core::config::ApiType::OpenAI)
+          == "custom-gateway");
+}
+
 TEST_CASE("ModelRegistry merge resolves discovered IDs through existing aliases",
           "[llm][model-catalog][registry]") {
     auto& registry = ModelRegistry::instance();
@@ -591,6 +1264,35 @@ TEST_CASE("ModelCatalogAvailability stores provider-scoped live models",
     CHECK(snapshot.models[0].provider == "runtime-provider");
 }
 
+TEST_CASE("An unknown requested model can bypass a fresh catalog TTL",
+          "[llm][model-catalog][discovery]") {
+    constexpr std::string_view provider = "forced-refresh-provider";
+    auto& availability = ModelCatalogAvailability::instance();
+
+    REQUIRE(availability.try_mark_refreshing(provider));
+    ModelCatalogDiscoveryResult success;
+    success.attempted = true;
+    availability.record_result(provider, success, {});
+
+    CHECK_FALSE(availability.try_mark_refreshing(provider));
+    CHECK(availability.try_mark_refreshing(provider, true));
+    availability.record_result(provider, success, {});
+}
+
+TEST_CASE("Forced discovery still respects transient failure backoff",
+          "[llm][model-catalog][discovery]") {
+    constexpr std::string_view provider = "forced-refresh-backoff-provider";
+    auto& availability = ModelCatalogAvailability::instance();
+
+    REQUIRE(availability.try_mark_refreshing(provider));
+    ModelCatalogDiscoveryResult failure;
+    failure.attempted = true;
+    failure.error = "temporary";
+    availability.record_result(provider, failure, {});
+
+    CHECK_FALSE(availability.try_mark_refreshing(provider, true));
+}
+
 TEST_CASE("ModelCatalogAvailability keeps stale models and schedules transient retries",
           "[llm][model-catalog][discovery]") {
     auto& availability = ModelCatalogAvailability::instance();
@@ -654,6 +1356,32 @@ TEST_CASE("Model discovery skips Gemini Code Assist catalog probes",
     CHECK(result.ok());
 }
 
+TEST_CASE("Model discovery explicitly skips providers without callable catalogs",
+          "[llm][model-catalog][discovery]") {
+    core::llm::protocols::OpenAIProtocol protocol;
+
+    const auto zai = discover_and_register_models(
+        "zai",
+        core::config::ApiType::OpenAI,
+        "https://api.z.ai/api/paas/v4",
+        nullptr,
+        protocol);
+    CHECK(zai.permanent_skip);
+    CHECK_FALSE(zai.attempted);
+
+    // Azure's data-plane model list contains base models, while requests
+    // require user-chosen deployment names. Listing it would populate the
+    // picker with identifiers that are not necessarily callable.
+    const auto azure = discover_and_register_models(
+        "azure-work",
+        core::config::ApiType::OpenAI,
+        "https://example.openai.azure.com",
+        nullptr,
+        protocol);
+    CHECK(azure.permanent_skip);
+    CHECK_FALSE(azure.attempted);
+}
+
 TEST_CASE("ModelRegistry JSON export escapes strings", "[llm][model-catalog][registry]") {
     auto& registry = ModelRegistry::instance();
 
@@ -661,12 +1389,27 @@ TEST_CASE("ModelRegistry JSON export escapes strings", "[llm][model-catalog][reg
     info.canonical_id = "json-escape-model";
     info.display_name = "Quote \" and newline\n model";
     info.provider = "custom\\provider";
+    info.capabilities =
+        static_cast<uint32_t>(ModelCapability::Reasoning);
+    info.capabilities_complete = true;
+    info.reasoning.effort =
+        ReasoningCapability::Effort
+        | ReasoningCapability::XHighEffort;
+    info.reasoning.adaptive_thinking = true;
+    info.reasoning.complete = true;
     registry.register_model(std::move(info));
 
     const auto exported = registry.export_to_json();
     CHECK(exported.find("Quote \\\" and newline\\n model") != std::string::npos);
     CHECK(exported.find("custom\\\\provider") != std::string::npos);
     CHECK(registry.load_from_json(exported) > 0);
+    const auto round_tripped = registry.lookup("json-escape-model");
+    REQUIRE(round_tripped);
+    CHECK(round_tripped->capabilities_complete);
+    CHECK(round_tripped->reasoning.complete);
+    CHECK(round_tripped->reasoning.adaptive_thinking);
+    CHECK(round_tripped->reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
 }
 
 TEST_CASE("ModelRegistry load_from_json rejects malformed catalog JSON", "[llm][model-catalog][registry]") {

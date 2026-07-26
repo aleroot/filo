@@ -1,5 +1,6 @@
 #include "ProviderFactory.hpp"
 #include "HttpLLMProvider.hpp"
+#include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
 #include "providers/QwenModelCatalogSelector.hpp"
 #ifdef FILO_ENABLE_LLAMACPP
@@ -32,44 +33,23 @@ using core::config::ProviderConfig;
 
 namespace {
 
-enum class AuthStyle { Bearer, QueryParam, XApiKey, None };
 enum class OpenAIWireApi { ChatCompletions, Responses };
 
-struct BuiltinDef {
-    const char* prefix;
-    ApiType     api_type;
-    const char* base_url;
-    const char* env_var;    ///< Environment variable for the API key; "" = none
-    AuthStyle   auth_style;
-    const char* default_wire_api; ///< OpenAI wire API default for OpenAI-family providers
-};
-
-// First matching prefix wins — order matters.
-static constexpr BuiltinDef kBuiltins[] = {
-    { "grok",    ApiType::OpenAI,     "https://api.x.ai/v1",                                            "XAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
-    { "openai",  ApiType::OpenAI,     "https://api.openai.com/v1",                                      "OPENAI_API_KEY",      AuthStyle::Bearer,     "responses" },
-    { "claude",  ApiType::Anthropic,  "https://api.anthropic.com",                                      "ANTHROPIC_API_KEY",   AuthStyle::XApiKey,    "" },
-    { "gemini",  ApiType::Gemini,     "https://generativelanguage.googleapis.com",                       "GEMINI_API_KEY",      AuthStyle::QueryParam, "" },
-    { "mistral", ApiType::OpenAI,     "https://api.mistral.ai/v1",                                      "MISTRAL_API_KEY",     AuthStyle::Bearer,     "chat_completions" },
-    { "kimi",    ApiType::Kimi,       "https://api.moonshot.cn/v1",                                     "KIMI_API_KEY",        AuthStyle::Bearer,     "" },
-    { "ollama",  ApiType::Ollama,     "http://localhost:11434",                                          "",                    AuthStyle::None,       "" },
-    { "zai-coding", ApiType::OpenAI,  "https://api.z.ai/api/coding/paas/v4",                            "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
-    { "zai",     ApiType::OpenAI,     "https://api.z.ai/api/paas/v4",                                   "ZAI_API_KEY",         AuthStyle::Bearer,     "chat_completions" },
-    { "qwen-token-plan", ApiType::DashScope, "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "QWEN_TOKEN_PLAN_API_KEY", AuthStyle::Bearer, "responses" },
-    { "qwen",    ApiType::DashScope,  "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",          "DASHSCOPE_API_KEY",   AuthStyle::Bearer,     "chat_completions" },
-};
-
-const BuiltinDef* find_builtin(std::string_view name) noexcept {
-    for (const auto& def : kBuiltins) {
-        if (name.starts_with(def.prefix)) return &def;
-    }
-    return nullptr;
-}
-
-std::string resolve_key(std::string_view config_key, const char* env_var) {
+std::string resolve_key(
+    std::string_view config_key,
+    std::string_view env_var) {
     if (!config_key.empty()) return std::string(config_key);
-    if (env_var && *env_var) {
-        if (const char* e = std::getenv(env_var)) return e;
+    if (!env_var.empty()) {
+        if (const char* e = std::getenv(std::string(env_var).c_str());
+            e && *e) {
+            return e;
+        }
+        if (env_var == "KIMI_API_KEY") {
+            if (const char* e = std::getenv("MOONSHOT_API_KEY");
+                e && *e) {
+                return e;
+            }
+        }
     }
     return {};
 }
@@ -107,6 +87,12 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
         || lowered == "kimi-for-coding-highspeed";
 }
 
+[[nodiscard]] bool is_public_kimi_api_endpoint(
+    std::string_view base_url) noexcept {
+    return base_url == "https://api.moonshot.ai/v1"
+        || base_url == "https://api.moonshot.cn/v1";
+}
+
 [[nodiscard]] bool is_qwen_token_plan_endpoint(std::string_view base_url) noexcept {
     const auto host = core::utils::uri::extract_http_host(base_url);
     return host.has_value()
@@ -119,13 +105,14 @@ std::string resolve_key(std::string_view config_key, const char* env_var) {
 std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     std::string_view name, const ProviderConfig& config)
 {
-    const BuiltinDef* builtin = find_builtin(name);
+    const BuiltinProviderDefinition* builtin =
+        find_builtin_provider_definition(name);
 
     // Resolve api_type and base_url: explicit config overrides built-in defaults.
     ApiType     api_type  = config.api_type;
     std::string base_url  = config.base_url;
-    AuthStyle   auth_style = AuthStyle::Bearer;
-    const char* env_var   = "";
+    ProviderAuthStyle auth_style = ProviderAuthStyle::Bearer;
+    std::string_view env_var;
     std::string_view canonical_type = name;   // for OAuth strategy matching
     std::string wire_api  = config.wire_api;
 
@@ -159,9 +146,13 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             return nullptr;
         }
         // Infer auth_style from api_type.
-        if      (api_type == ApiType::Anthropic) auth_style = AuthStyle::XApiKey;
-        else if (api_type == ApiType::Gemini)    auth_style = AuthStyle::QueryParam;
-        else if (api_type == ApiType::Ollama)    auth_style = AuthStyle::None;
+        if (api_type == ApiType::Anthropic) {
+            auth_style = ProviderAuthStyle::XApiKey;
+        } else if (api_type == ApiType::Gemini) {
+            auth_style = ProviderAuthStyle::QueryParam;
+        } else if (api_type == ApiType::Ollama) {
+            auth_style = ProviderAuthStyle::None;
+        }
     }
 
     // LlamaCppLocal is not HTTP-based — delegate directly.
@@ -187,17 +178,18 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     const std::string normalized_auth_type =
         core::utils::str::to_lower_ascii_copy(config.auth_type);
 
-    // For Kimi OAuth, use the correct OAuth endpoint instead of the API key endpoint.
-    // The official kimi-cli uses https://api.kimi.com/coding/v1 for OAuth,
-    // while https://api.moonshot.cn/v1 is for API key authentication.
-    if (cred && canonical_type == "kimi" && base_url == "https://api.moonshot.cn/v1") {
+    // Kimi OAuth uses the managed coding endpoint. Both the current global
+    // Moonshot host and the legacy China host remain valid API-key endpoints.
+    if (cred
+        && canonical_type == "kimi"
+        && is_public_kimi_api_endpoint(base_url)) {
         base_url = "https://api.kimi.com/coding/v1";
         core::logging::debug("Using Kimi OAuth endpoint: {}", base_url);
     }
 
     // The official Kimi Code model is served by the Kimi Code endpoint.
     if (canonical_type == "kimi"
-        && base_url == "https://api.moonshot.cn/v1"
+        && is_public_kimi_api_endpoint(base_url)
         && model_prefers_kimi_code_endpoint(config.model)) {
         base_url = "https://api.kimi.com/coding/v1";
         core::logging::debug("Using Kimi Code endpoint for model '{}': {}", config.model, base_url);
@@ -230,7 +222,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
 
     const bool qwen_token_plan = canonical_type == "qwen-token-plan"
         || is_qwen_token_plan_endpoint(base_url);
-    if (qwen_token_plan && (!env_var || !*env_var)) {
+    if (qwen_token_plan && env_var.empty()) {
         env_var = "QWEN_TOKEN_PLAN_API_KEY";
     }
     if (qwen_token_plan && config.model.empty()) {
@@ -240,7 +232,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     if (!cred) {
         const std::string key = resolve_key(config.api_key, env_var);
         switch (auth_style) {
-        case AuthStyle::Bearer:
+        case ProviderAuthStyle::Bearer:
             if (api_type == ApiType::OpenAI
                 && openai_endpoint::is_azure_openai_base_url(base_url)) {
                 cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "api-key");
@@ -250,13 +242,13 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     canonical_type == "zai-coding" || qwen_token_plan);
             }
             break;
-        case AuthStyle::QueryParam:
+        case ProviderAuthStyle::QueryParam:
             cred = core::auth::ApiKeyCredentialSource::as_query_param(key);
             break;
-        case AuthStyle::XApiKey:
+        case ProviderAuthStyle::XApiKey:
             cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "x-api-key");
             break;
-        case AuthStyle::None:
+        case ProviderAuthStyle::None:
             cred = core::auth::ApiKeyCredentialSource::none();
             break;
         }

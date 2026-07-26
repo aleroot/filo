@@ -71,11 +71,16 @@ constexpr auto kCatalogRetryMaxDelay = std::chrono::minutes{30};
                                         std::string_view base_url,
                                         std::string_view protocol_name) {
     return api_type == config::ApiType::Unknown
-        || api_type == config::ApiType::Ollama
         || api_type == config::ApiType::LlamaCppLocal
         || protocol_name == "gemini_code_assist"
         || (api_type == config::ApiType::OpenAI
             && openai_endpoint::is_azure_openai_base_url(base_url));
+}
+
+[[nodiscard]] bool catalog_endpoint_is_unsupported(long status_code) noexcept {
+    return status_code == 404
+        || status_code == 405
+        || status_code == 501;
 }
 
 [[nodiscard]] int parse_retry_after_seconds(const cpr::Header& headers) {
@@ -124,13 +129,20 @@ ModelCatalogAvailability& ModelCatalogAvailability::instance() {
     return availability;
 }
 
-bool ModelCatalogAvailability::try_mark_refreshing(std::string_view provider_name) {
+bool ModelCatalogAvailability::try_mark_refreshing(
+    std::string_view provider_name,
+    bool force_refresh) {
     if (provider_name.empty()) return false;
 
     std::unique_lock lock(mutex_);
     auto& snapshot = providers_[std::string(provider_name)];
     const auto now = std::chrono::steady_clock::now();
-    if (!snapshot.refresh_due(now)) {
+    const bool bypass_success_ttl =
+        force_refresh
+        && snapshot.state == ModelCatalogDiscoveryState::Succeeded;
+    if (snapshot.refresh_in_progress
+        || snapshot.state == ModelCatalogDiscoveryState::PermanentSkip
+        || (!bypass_success_ttl && !snapshot.refresh_due(now))) {
         return false;
     }
 
@@ -270,7 +282,8 @@ ModelCatalogDiscoveryResult discover_and_register_models(
         discovery.permanent_skip = true;
         return discovery;
     }
-    if (is_remote_without_auth(base_url, auth)) {
+    if (api_type != config::ApiType::Ollama
+        && is_remote_without_auth(base_url, auth)) {
         discovery.error = "missing credentials for remote model discovery";
         return discovery;
     }
@@ -298,6 +311,8 @@ ModelCatalogDiscoveryResult discover_and_register_models(
         }
         if (response.status_code < 200 || response.status_code >= 300) {
             discovery.retry_after_seconds = parse_retry_after_seconds(response.header);
+            discovery.permanent_skip =
+                catalog_endpoint_is_unsupported(response.status_code);
             discovery.error = std::format(
                 "model discovery for provider '{}' failed with HTTP {}",
                 provider_name,
@@ -385,7 +400,9 @@ void ModelCatalogDiscoveryService::request_refresh(
         return;
     }
 
-    if (!ModelCatalogAvailability::instance().try_mark_refreshing(provider_name)) {
+    if (!ModelCatalogAvailability::instance().try_mark_refreshing(
+            provider_name,
+            options.force_refresh)) {
         return;
     }
 

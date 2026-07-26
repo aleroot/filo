@@ -26,6 +26,7 @@ class LLMProvider;
 struct ModelCatalogDiscoveryOptions {
     int max_pages = 8;
     int timeout_ms = 2500;
+    bool force_refresh = false;
 };
 
 /**
@@ -95,7 +96,9 @@ class ModelCatalogAvailability {
 public:
     static ModelCatalogAvailability& instance();
 
-    [[nodiscard]] bool try_mark_refreshing(std::string_view provider_name);
+    [[nodiscard]] bool try_mark_refreshing(
+        std::string_view provider_name,
+        bool force_refresh = false);
     void record_result(std::string_view provider_name,
                        const ModelCatalogDiscoveryResult& result,
                        std::vector<ModelInfo> models);

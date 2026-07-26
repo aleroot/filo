@@ -1,5 +1,6 @@
 #include "ProviderCatalogGrouping.hpp"
 
+#include "ProviderDefinition.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <algorithm>
@@ -8,20 +9,6 @@
 
 namespace core::llm {
 namespace {
-
-struct ProviderCatalogFamily {
-    std::string_view group_name;
-};
-
-// Built-in provider presets are separate routing targets, but the model picker
-// presents them as one provider family. Keep this list centralized so adding a
-// preset never creates another top-level /model entry by accident.
-constexpr std::array kProviderCatalogFamilies{
-    ProviderCatalogFamily{"grok"},
-    ProviderCatalogFamily{"kimi"},
-    ProviderCatalogFamily{"qwen"},
-    ProviderCatalogFamily{"zai"},
-};
 
 constexpr std::array<std::string_view, 4> kZaiCodingModels{{
     "glm-5.2",
@@ -33,25 +20,6 @@ constexpr std::array<std::string_view, 4> kZaiCodingModels{{
 [[nodiscard]] std::string normalized(std::string_view value) {
     return core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(value));
-}
-
-[[nodiscard]] bool is_family_member(std::string_view provider_name,
-                                    std::string_view group_name) {
-    const std::string lowered = normalized(provider_name);
-    return lowered == group_name
-        || (lowered.starts_with(group_name)
-            && lowered.size() > group_name.size()
-            && lowered[group_name.size()] == '-');
-}
-
-[[nodiscard]] const ProviderCatalogFamily*
-find_family(std::string_view provider_name) {
-    const auto it = std::ranges::find_if(
-        kProviderCatalogFamilies,
-        [&](const ProviderCatalogFamily& family) {
-            return is_family_member(provider_name, family.group_name);
-        });
-    return it == kProviderCatalogFamilies.end() ? nullptr : &*it;
 }
 
 [[nodiscard]] bool is_zai_coding_source(std::string_view provider_name) {
@@ -182,8 +150,11 @@ ProviderCatalogGroup::find_source(std::string_view provider) const {
 }
 
 std::string provider_catalog_group_name(std::string_view provider_name) {
-    if (const auto* family = find_family(provider_name)) {
-        return std::string(family->group_name);
+    const std::string lowered = normalized(provider_name);
+    if (const auto* definition =
+            find_builtin_provider_definition(lowered);
+        definition && !definition->catalog_group.empty()) {
+        return std::string(definition->catalog_group);
     }
     return std::string(provider_name);
 }

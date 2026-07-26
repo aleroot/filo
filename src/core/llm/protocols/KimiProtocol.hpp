@@ -6,7 +6,7 @@
  *
  * KimiProtocol inherits the full OpenAI Chat Completions wire format and
  * overrides header generation to inject the X-Msh-* headers required by
- * the Kimi API (api.moonshot.cn).
+ * the Kimi API (api.moonshot.ai; legacy regional hosts are also supported).
  *
  * ## Why This Is Necessary
  *
@@ -36,7 +36,7 @@
  * ### Authentication
  * The Kimi API supports two authentication methods:
  *   1. OAuth (obtained via KimiOAuthFlow) - requires X-Msh-* headers
- *   2. API Key (from platform.moonshot.cn) - standard Bearer token
+ *   2. API Key (from platform.kimi.ai) - standard Bearer token
  *
  * When using OAuth, the X-Msh-* headers are REQUIRED in addition to the
  * Authorization header.
@@ -49,7 +49,7 @@
  * auto cred_source = auth_manager.create_credential_source("kimi", provider_config);
  *
  * auto provider = std::make_shared<HttpLLMProvider>(
- *     "https://api.moonshot.cn/v1",
+ *     "https://api.moonshot.ai/v1",
  *     std::move(cred_source),
  *     "kimi-k2-5",
  *     std::make_unique<KimiProtocol>()

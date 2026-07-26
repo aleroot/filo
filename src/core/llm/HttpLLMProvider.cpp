@@ -1,4 +1,5 @@
 #include "HttpLLMProvider.hpp"
+#include "ModelMetadata.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "protocols/GeminiProtocol.hpp"
@@ -227,13 +228,20 @@ void HttpLLMProvider::WebSocketTransportState::reset() {
 }
 
 int HttpLLMProvider::max_context_size() const noexcept {
-    return core::llm::get_max_context_size(
-        normalize_metadata_model(default_model_, protocol_.get()));
+    const std::string model =
+        normalize_metadata_model(default_model_, protocol_.get());
+    if (const auto info = resolved_model_info(model);
+        info && info->context_window > 0) {
+        return info->context_window;
+    }
+    return core::llm::get_max_context_size(model);
 }
 
 std::optional<ModelInfo> HttpLLMProvider::get_model_info() const {
-    return ModelRegistry::instance().get_info(
-        normalize_metadata_model(default_model_, protocol_.get()));
+    const std::string model =
+        normalize_metadata_model(default_model_, protocol_.get());
+    ensure_model_metadata(model);
+    return resolved_model_info(model);
 }
 
 void HttpLLMProvider::discover_models(
@@ -265,14 +273,76 @@ std::string HttpLLMProvider::resolve_default_model() const {
             provider_name_, std::chrono::milliseconds{3000});
     }
 
-    const ModelCatalogSelection selection = model_catalog_selector_->select(snapshot.models);
+    const std::string registry_provider = model_registry_provider_key(
+        provider_name_, api_type_);
+    const std::vector<ModelInfo> registry_models =
+        ModelRegistry::instance().get_by_provider(registry_provider);
+    const ResolvedModelCatalog catalog = resolve_model_catalog(
+        snapshot.models, registry_models);
+    const ModelCatalogSelection selection =
+        model_catalog_selector_->select(catalog.models);
     if (!selection.ok()) {
         throw std::runtime_error(
             selection.error.empty()
-                ? "Live model catalog did not provide a usable default model."
+                ? "Neither the provider catalog nor the internal registry "
+                  "provided a usable default model."
                 : selection.error);
     }
     return selection.model;
+}
+
+void HttpLLMProvider::ensure_model_metadata(std::string_view model) const {
+    if (model.empty()
+        || provider_name_.empty()
+        || api_type_ == config::ApiType::Unknown
+        || !protocol_) {
+        return;
+    }
+
+    auto snapshot =
+        ModelCatalogAvailability::instance().snapshot(provider_name_);
+    const bool provider_knows_model = static_cast<bool>(
+        resolve_model_metadata(model, snapshot.models, nullptr));
+    const bool registry_knows_model =
+        ModelRegistry::instance().has_model(model);
+    const bool targeted_refresh =
+        snapshot.state == ModelCatalogDiscoveryState::Succeeded
+        && !provider_knows_model
+        && !registry_knows_model;
+
+    // A retained provider catalog remains the primary tier while a refresh is
+    // due or has failed transiently. Only block when no API data has ever been
+    // obtained; this keeps requests reliable without adding recurring latency.
+    if (snapshot.state != ModelCatalogDiscoveryState::PermanentSkip
+        && (targeted_refresh || snapshot.refresh_due())) {
+        discover_models({
+            .timeout_ms = 2500,
+            .force_refresh =
+                targeted_refresh
+                || snapshot.state == ModelCatalogDiscoveryState::Succeeded,
+        });
+        snapshot =
+            ModelCatalogAvailability::instance().snapshot(provider_name_);
+    }
+    if (snapshot.state != ModelCatalogDiscoveryState::PermanentSkip
+        && (targeted_refresh
+            || (snapshot.models.empty()
+                && (snapshot.refresh_in_progress || !snapshot.checked)))) {
+        snapshot = ModelCatalogAvailability::instance().wait_for_snapshot(
+            provider_name_,
+            std::chrono::milliseconds{3000});
+    }
+}
+
+std::optional<ModelInfo> HttpLLMProvider::resolved_model_info(
+    std::string_view model) const {
+    const auto snapshot =
+        ModelCatalogAvailability::instance().snapshot(provider_name_);
+    const ResolvedModelMetadata resolved = resolve_model_metadata(
+        model,
+        snapshot.models,
+        ModelRegistry::instance().lookup(model));
+    return resolved.model;
 }
 
 std::string HttpLLMProvider::get_last_model() const {
@@ -297,7 +367,7 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     const std::string model = normalize_metadata_model(
         request.model.empty() ? std::string_view(default_model_) : std::string_view(request.model),
         protocol_.get());
-    const auto info = ModelRegistry::instance().lookup(model);
+    const auto info = resolved_model_info(model);
     
     if (!info) {
         // Unknown model - can't validate, but not necessarily an error
@@ -305,12 +375,17 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
         return errors;
     }
 
-    const bool has_declared_capabilities = info->capabilities != 0;
+    // Absence is evidence of non-support only for an exhaustive capability
+    // catalog. Sparse provider APIs (OpenAI, xAI, Ollama, and compatible
+    // gateways) commonly advertise a useful subset and omit the rest.
+    const bool can_reliably_deny_capabilities =
+        info->capabilities_complete;
     
     // Validate max_tokens
     if (request.max_tokens.has_value()) {
-        if (!ModelRegistry::instance().validate_max_tokens(model, *request.max_tokens)) {
-            int effective_max = info->effective_max_tokens();
+        const int effective_max = info->effective_max_tokens();
+        if ((effective_max > 0 && *request.max_tokens > effective_max)
+            || *request.max_tokens < info->constraints.max_tokens_min) {
             errors.push_back(std::format(
                 "max_tokens {} exceeds model limit of {}", 
                 *request.max_tokens, effective_max));
@@ -331,26 +406,26 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
     }
     
     // Validate tool support
-    if (has_declared_capabilities
+    if (can_reliably_deny_capabilities
         && !request.tools.empty()
         && !info->supports(ModelCapability::FunctionCalling)) {
         errors.push_back("model does not support function calling");
     }
     
     // Validate JSON mode support
-    if (has_declared_capabilities
+    if (can_reliably_deny_capabilities
         && request.response_format.is_structured()
         && !info->supports(ModelCapability::JsonMode)) {
         errors.push_back("model does not support structured outputs (JSON mode)");
     }
 
-    if (has_declared_capabilities
+    if (can_reliably_deny_capabilities
         && request_has_image_input(request)
         && !info->supports(ModelCapability::Vision)) {
         errors.push_back("model does not support image input");
     }
 
-    if (has_declared_capabilities
+    if (can_reliably_deny_capabilities
         && request_has_video_input(request)
         && !info->supports(ModelCapability::VideoInput)) {
         errors.push_back("model does not support video input");
@@ -389,16 +464,16 @@ std::vector<std::string> HttpLLMProvider::validate_request(const ChatRequest& re
 }
 
 bool HttpLLMProvider::supports(ModelCapability cap) const {
-    return ModelRegistry::instance().supports(
-        normalize_metadata_model(default_model_, protocol_.get()),
-        cap);
+    const auto info = resolved_model_info(
+        normalize_metadata_model(default_model_, protocol_.get()));
+    return info && info->supports(cap);
 }
 
 double HttpLLMProvider::estimate_cost(int input_tokens, int output_tokens) const {
-    return ModelRegistry::instance().estimate_cost(
-        normalize_metadata_model(default_model_, protocol_.get()),
-        input_tokens,
-        output_tokens);
+    const auto info = resolved_model_info(
+        normalize_metadata_model(default_model_, protocol_.get()));
+    if (!info) return -1.0;
+    return info->estimate_cost(input_tokens, output_tokens);
 }
 
 bool HttpLLMProvider::should_estimate_cost() const {
@@ -471,7 +546,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 ? std::string_view(effective_default_model)
                 : std::string_view(effective_request.model),
             protocol_.get());
-        const auto metadata_info = ModelRegistry::instance().get_info(metadata_model);
+        ensure_model_metadata(metadata_model);
+        const auto metadata_info = resolved_model_info(metadata_model);
         if (metadata_info.has_value()
             && metadata_info->capabilities != 0) {
             degrade_historical_media_inputs(

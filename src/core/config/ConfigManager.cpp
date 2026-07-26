@@ -186,20 +186,31 @@ namespace {
 void apply_api_key_fallback(std::string_view name, ProviderConfig& provider) {
     if (!provider.api_key.empty()) return;
 
-    struct Entry { const char* prefix; const char* env_var; };
+    struct Entry {
+        const char* prefix;
+        const char* env_var;
+        const char* alternative_env_var = nullptr;
+    };
     static constexpr Entry kEnvVars[] = {
         { "grok",    "XAI_API_KEY" },
         { "openai",  "OPENAI_API_KEY" },
         { "claude",  "ANTHROPIC_API_KEY" },
         { "gemini",  "GEMINI_API_KEY" },
         { "mistral", "MISTRAL_API_KEY" },
-        { "kimi",    "KIMI_API_KEY" },
+        { "kimi",    "KIMI_API_KEY", "MOONSHOT_API_KEY" },
         { "zai",     "ZAI_API_KEY" },
     };
     for (const auto& entry : kEnvVars) {
         if (name.starts_with(entry.prefix)) {
-            if (const char* e = std::getenv(entry.env_var))
+            if (const char* e = std::getenv(entry.env_var); e && *e) {
                 provider.api_key = e;
+            } else if (entry.alternative_env_var) {
+                if (const char* alternative =
+                        std::getenv(entry.alternative_env_var);
+                    alternative && *alternative) {
+                    provider.api_key = alternative;
+                }
+            }
             return;
         }
     }

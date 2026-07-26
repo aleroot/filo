@@ -46,6 +46,7 @@ namespace core::budget {
     if (model.find("kimi-k1.5")        != std::string_view::npos) return   256'000;
     if (model.find("kimi-")            != std::string_view::npos) return   128'000;
     if (model.find("claude-fable-5")   != std::string_view::npos) return 1'000'000;
+    if (model.find("claude-opus-5")    != std::string_view::npos) return 1'000'000;
     if (model.find("claude-sonnet-5")  != std::string_view::npos) return 1'000'000;
     if (model.find("fable")            != std::string_view::npos) return 1'000'000;
     if (model == "sonnet") return 1'000'000;
@@ -101,6 +102,7 @@ struct ModelRates {
     if (model.find("grok-2")      != std::string_view::npos) return { 2.00, 10.00 };
     if (model.find("grok-4")      != std::string_view::npos) return { 3.00, 15.00 };
     if (model.find("claude-fable-5")   != std::string_view::npos) return {10.00, 50.00 };
+    if (model.find("claude-opus-5")    != std::string_view::npos) return { 5.00, 25.00 };
     if (model.find("claude-sonnet-5")  != std::string_view::npos) return { 2.00, 10.00 };
     if (model.find("fable")            != std::string_view::npos) return {10.00, 50.00 };
     if (model == "sonnet") return { 2.00, 10.00 };

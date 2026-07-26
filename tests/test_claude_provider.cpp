@@ -120,6 +120,14 @@ TEST_CASE("ClaudeSerializer - max_tokens uses registered model output limit by d
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
 }
 
+TEST_CASE("ClaudeSerializer - Opus 5 does not fall back to the unknown-model budget",
+          "[claude][serializer][regression]") {
+    const auto payload =
+        AnthropicSerializer::serialize(make_simple_request("claude-opus-5"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("max_tokens":8096)"));
+}
+
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {
     auto req = make_simple_request();
     req.max_tokens = 2048;
@@ -650,7 +658,7 @@ TEST_CASE("ClaudeSerializer - multiple messages no trailing comma", "[claude][se
 }
 
 TEST_CASE("ClaudeSerializer - known model names preserved verbatim", "[claude][serializer]") {
-    for (const auto* model : {"claude-opus-4-8", "claude-sonnet-4-6",
+    for (const auto* model : {"claude-opus-5", "claude-opus-4-8", "claude-sonnet-4-6",
                                "claude-sonnet-5", "claude-fable-5",
                                "claude-haiku-4-5"}) {
         auto payload = AnthropicSerializer::serialize(make_simple_request(model));
@@ -749,7 +757,7 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Opus alias to current Opu
     ChatRequest req = make_simple_request("opus");
     protocol.prepare_request(req);
 
-    REQUIRE(req.model == "claude-opus-4-8");
+    REQUIRE(req.model == "claude-opus-5");
 }
 
 TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5", "[claude][headers]") {

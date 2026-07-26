@@ -30,7 +30,7 @@ namespace {
 
     constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-5";
     constexpr std::string_view CLAUDE_DEFAULT_FABLE  = "claude-fable-5";
-    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-4-8";
+    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-5";
     constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
     struct HeaderWindowDef {
@@ -181,24 +181,43 @@ namespace {
         ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
     constexpr ReasoningCapabilities kEffortMaxXHigh =
         kEffortMax | ReasoningCapability::XHighEffort;
-    constexpr std::array<AnthropicReasoningPolicy, 6> kAnthropicReasoningPolicies{{
+    constexpr std::array<AnthropicReasoningPolicy, 7> kAnthropicReasoningPolicies{{
         {"fable", kEffortMaxXHigh, true, false},
         {"mythos", kEffortMaxXHigh, true, false},
         {"sonnet-5", kEffortMaxXHigh, true, false},
+        {"opus-5", kEffortMaxXHigh, true, true},
         {"opus-4-8", kEffortMaxXHigh, true, true},
         {"opus-4-7", kEffortMaxXHigh, true, true},
         {"sonnet-4-6", kEffortMax, false, false},
     }};
 
-    [[nodiscard]] const AnthropicReasoningPolicy* anthropic_reasoning_policy(
-        std::string_view model) noexcept {
+    [[nodiscard]] std::optional<AnthropicReasoningPolicy>
+    anthropic_reasoning_policy(std::string_view model) {
+        if (const auto info = ModelRegistry::instance().lookup(model);
+            info && info->reasoning.complete) {
+            return AnthropicReasoningPolicy{
+                .model_token = {},
+                .capabilities = info->reasoning.effort,
+                .rejects_manual_thinking =
+                    !info->reasoning.manual_thinking,
+                .needs_adaptive_thinking =
+                    info->reasoning.adaptive_thinking,
+            };
+        }
+
+        // Offline and legacy catalogs may not contain the richer reasoning
+        // profile. Keep a conservative compatibility table for those records;
+        // live provider metadata always takes precedence above.
         const auto it = std::ranges::find_if(
             kAnthropicReasoningPolicies,
             [&](const AnthropicReasoningPolicy& policy) {
                 return core::utils::str::contains_case_insensitive(
                     model, policy.model_token);
             });
-        return it == kAnthropicReasoningPolicies.end() ? nullptr : &*it;
+        if (it == kAnthropicReasoningPolicies.end()) {
+            return std::nullopt;
+        }
+        return *it;
     }
 
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
@@ -691,7 +710,7 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
 
     // Effort can reduce output/token spend for tool-heavy sessions.
     // Anthropic docs (Apr 2026): generally available, no beta header needed.
-    const AnthropicReasoningPolicy* reasoning_policy =
+    const std::optional<AnthropicReasoningPolicy> reasoning_policy =
         anthropic_reasoning_policy(req.model);
     const ReasoningCapabilities reasoning_capabilities = reasoning_policy
         ? reasoning_policy->capabilities
@@ -726,12 +745,15 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
 
     const bool use_adaptive_thinking =
         thinking_wanted
-        && reasoning_policy != nullptr
-        && reasoning_policy->rejects_manual_thinking
-        && reasoning_policy->needs_adaptive_thinking;
+        && reasoning_policy.has_value()
+        && reasoning_policy->needs_adaptive_thinking
+        && (reasoning_policy->rejects_manual_thinking || !thinking.enabled);
     const bool use_manual_thinking =
         thinking_wanted
-        && (reasoning_policy == nullptr || !reasoning_policy->rejects_manual_thinking);
+        && (!reasoning_policy.has_value()
+            || (!reasoning_policy->rejects_manual_thinking
+                && (!reasoning_policy->needs_adaptive_thinking
+                    || thinking.enabled)));
 
     // Anthropic requires temperature=1 when extended thinking is enabled.
     // Emit the constraint unconditionally so the API never receives a conflicting value.
@@ -1092,8 +1114,12 @@ std::string AnthropicProtocol::serialize(const ChatRequest& req) const {
 
 ReasoningCapabilities AnthropicProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
-    const auto* policy = anthropic_reasoning_policy(model);
-    return policy ? policy->capabilities : ReasoningCapabilities{};
+    try {
+        const auto policy = anthropic_reasoning_policy(model);
+        return policy ? policy->capabilities : ReasoningCapabilities{};
+    } catch (...) {
+        return {};
+    }
 }
 
 cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) const {
@@ -1128,10 +1154,11 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
 
     append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
-    const auto* reasoning_policy = anthropic_reasoning_policy(last_requested_model_);
+    const auto reasoning_policy =
+        anthropic_reasoning_policy(last_requested_model_);
     if (thinking_.enabled
         && (last_requested_model_.empty()
-            || reasoning_policy == nullptr
+            || !reasoning_policy.has_value()
             || !reasoning_policy->rejects_manual_thinking)) {
         append_beta_unique(ANTHROPIC_BETA_THINKING);
     }

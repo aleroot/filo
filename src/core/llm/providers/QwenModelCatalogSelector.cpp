@@ -26,8 +26,9 @@ public:
 
         if (!selected) {
             return {
-                .error = "Qwen Token Plan returned no Qwen text models from /models; "
-                         "refresh /model or select an explicit model.",
+                .error = "Neither Qwen Token Plan /models nor the internal "
+                         "registry provided a Qwen text model; refresh /model "
+                         "or select an explicit model.",
             };
         }
         return {.model = selected->canonical_id};
