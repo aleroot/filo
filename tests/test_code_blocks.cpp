@@ -6,9 +6,12 @@
 #include "tui/CodeBlockRunServices.hpp"
 #include "tui/Conversation.hpp"
 
+#include <array>
 #include <filesystem>
 #include <format>
+#include <string_view>
 #if !defined(_WIN32)
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -176,8 +179,25 @@ TEST_CASE("Code runner closes unrelated inherited descriptors before exec",
           "[code_blocks][runner]") {
     int inherited_pipe[2]{};
     REQUIRE(::pipe(inherited_pipe) == 0);
+
+    // Probe by content, not by descriptor availability.
+    //
+    // Asking the child whether the number is merely *usable* (`: >&N`) is a
+    // false-positive generator: the shell relocates its own script descriptor
+    // to a low-but-reserved slot (fd 10 for bash on macOS), so whenever this
+    // pipe happened to land on that number the redirect succeeded even though
+    // the runner had correctly closed it. Which number the pipe gets depends on
+    // how many descriptors the rest of the suite has open, which is why that
+    // formulation failed only under certain test orderings.
+    //
+    // Writing a sentinel is unambiguous: only a genuinely leaked descriptor can
+    // still deliver bytes back to this process.
+    // The redirect is wrapped in a subshell whose stderr is redirected as a
+    // whole: a failing `>&N` is reported by the shell *before* an inline
+    // `2>/dev/null` on the same command takes effect, which would otherwise
+    // push "Bad file descriptor" into the captured output.
     const auto source = std::format(
-        "if ( : >&{} ) 2>/dev/null; then printf leaked; else printf closed; fi\n",
+        "( printf FILO_LEAKED_DESCRIPTOR >&{} ) 2>/dev/null; printf done\n",
         inherited_pipe[1]);
     auto plan = plan_execution(FencedCodeBlock{
         .ordinal = 1,
@@ -192,10 +212,36 @@ TEST_CASE("Code runner closes unrelated inherited descriptors before exec",
         std::filesystem::current_path(),
         std::filesystem::temp_directory_path() / "filo-code-runner-tests",
         core::landrun::LandrunPolicy{});
+
+    // This process still holds the write end, so a blocking read would hang in
+    // the passing case. Drain without blocking instead.
+    std::array<char, 64> received{};
+    ssize_t received_count = -1;
+    if (const int flags = ::fcntl(inherited_pipe[0], F_GETFL); flags != -1) {
+        if (::fcntl(inherited_pipe[0], F_SETFL, flags | O_NONBLOCK) == 0) {
+            received_count =
+                ::read(inherited_pipe[0], received.data(), received.size() - 1);
+        }
+    }
     ::close(inherited_pipe[0]);
     ::close(inherited_pipe[1]);
 
     REQUIRE(result.has_value());
-    CHECK(result->output == "closed");
+    // The script ran to completion. Deliberately not an equality check: whether
+    // the shell's own `>&N` bookkeeping emits anything on stdout/stderr varies
+    // with the descriptor number it happens to be handed, and that noise says
+    // nothing about the property under test.
+    CHECK(result->output.find("done") != std::string::npos);
+
+    // The actual assertion, and the only one that cannot false-positive: bytes
+    // can only arrive here if the child still held *this* pipe. It identifies
+    // the descriptor by identity rather than by number, so the shell reusing
+    // the same number for its own purposes cannot be mistaken for a leak.
+    INFO("bytes leaked back through the inherited descriptor: "
+         << (received_count > 0
+                 ? std::string_view(received.data(),
+                                    static_cast<std::size_t>(received_count))
+                 : std::string_view{"<none>"}));
+    CHECK(received_count <= 0);
 }
 #endif

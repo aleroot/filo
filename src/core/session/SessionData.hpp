@@ -42,6 +42,19 @@ struct SessionGoal {
     std::string completed_at;
 };
 
+// ---------------------------------------------------------------------------
+// SessionGoalGraph — durable snapshot of the graph-based goal engine
+// (core::goal::GoalEngine). The payload is produced/consumed by the engine
+// itself; the session layer treats it as an opaque, versioned blob so the
+// graph schema can evolve without touching the session schema.
+// ---------------------------------------------------------------------------
+struct SessionGoalGraph {
+    int plan_version = 0;
+    std::string run_state;  ///< core::goal::RunState name at snapshot time
+    std::string snapshot;   ///< GoalEngine::snapshot_json() payload
+    std::string updated_at; ///< ISO 8601
+};
+
 enum class TodoStatus {
     Pending,
     InProgress,
@@ -96,6 +109,7 @@ struct SessionData {
     std::string context_summary;
     std::string handoff_summary;
     std::optional<SessionGoal> goal;
+    std::optional<SessionGoalGraph> goal_graph;
 
     /// Conversation messages — system message is excluded (regenerated on load).
     std::vector<core::llm::Message> messages;

@@ -12,6 +12,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 
 #include <cerrno>
@@ -36,6 +37,25 @@ namespace core::mcp {
 // ===========================================================================
 
 namespace {
+
+// Close both ends of a pipe pair and mark them invalid. Safe to call twice.
+void close_pipe_pair(int (&fds)[2]) noexcept {
+    for (int& fd : fds) {
+        if (fd != -1) {
+            ::close(fd);
+            fd = -1;
+        }
+    }
+}
+
+// Mark a descriptor close-on-exec so spawned children never inherit it.
+void set_cloexec(int fd) noexcept {
+    if (fd == -1) return;
+    const int flags = ::fcntl(fd, F_GETFD);
+    if (flags != -1) {
+        (void)::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+}
 
 // Build a JSON-RPC 2.0 request string (with id).
 [[nodiscard]] std::string make_jsonrpc_request(int id,
@@ -596,8 +616,23 @@ StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config,
     int pipe_to_child[2]   = {-1, -1};
     int pipe_from_child[2] = {-1, -1};
 
-    if (pipe(pipe_to_child) != 0 || pipe(pipe_from_child) != 0) {
+    // Shutdown wake pipe. Created before the child pipes so a failure here can
+    // never strand an already-spawned server process.
+    if (pipe(wake_pipe_) != 0) {
         throw std::runtime_error(std::string("MCP: pipe() failed: ") + strerror(errno));
+    }
+    // Never leak the wake pipe into the spawned server.
+    set_cloexec(wake_pipe_[0]);
+    set_cloexec(wake_pipe_[1]);
+
+    if (pipe(pipe_to_child) != 0 || pipe(pipe_from_child) != 0) {
+        const int err = errno;
+        // Close every descriptor opened so far: if the first pipe() succeeded
+        // and the second failed, the first pair would otherwise leak.
+        close_pipe_pair(pipe_to_child);
+        close_pipe_pair(pipe_from_child);
+        close_pipe_pair(wake_pipe_);
+        throw std::runtime_error(std::string("MCP: pipe() failed: ") + strerror(err));
     }
 
     // Build argv for posix_spawn
@@ -643,6 +678,7 @@ StdioMcpSession::StdioMcpSession(const core::config::McpServerConfig& config,
     if (rc != 0) {
         close(pipe_to_child[1]);
         close(pipe_from_child[0]);
+        close_pipe_pair(wake_pipe_);
         throw std::runtime_error(std::string("MCP: posix_spawnp('") + config.command + "') failed: " + strerror(rc));
     }
 
@@ -687,14 +723,28 @@ void StdioMcpSession::shutdown() noexcept {
         kill(pid, SIGTERM);
     }
 
-    // Close read end — causes reader_loop to exit
-    if (read_fd_ != -1) { close(read_fd_); read_fd_ = -1; }
+    // Wake the reader out of poll(). The read fd deliberately stays open until
+    // the thread has been joined: closing it here would both race with the
+    // reader's own use of it and risk the descriptor number being recycled by
+    // another thread's open()/socket() before the reader noticed, making it
+    // read from an unrelated file.
+    if (wake_pipe_[1] != -1) {
+        const char token = 'x';
+        ssize_t written = 0;
+        do {
+            written = ::write(wake_pipe_[1], &token, 1);
+        } while (written < 0 && errno == EINTR);
+    }
 
     // The reader thread may still touch object state while unwinding; always join
     // to avoid detached access after this session is destroyed.
     if (reader_thread_.joinable()) {
         reader_thread_.join();
     }
+
+    // Safe now: the only thread that observes these descriptors has exited.
+    if (read_fd_ != -1) { close(read_fd_); read_fd_ = -1; }
+    close_pipe_pair(wake_pipe_);
 
     // Reap the child process. If TERM did not stop it yet, force kill.
     if (pid != -1) {
@@ -808,6 +858,23 @@ void StdioMcpSession::reader_loop() {
     std::array<char, 4096> chunk{};
 
     while (running_.load(std::memory_order_acquire)) {
+        // Wait for either payload data or a shutdown signal. poll() rather than
+        // a bare blocking read() is what makes shutdown deterministic: POSIX
+        // does not guarantee that closing a descriptor wakes another thread
+        // already blocked on it.
+        struct pollfd fds[2] = {
+            {.fd = read_fd_,      .events = POLLIN, .revents = 0},
+            {.fd = wake_pipe_[0], .events = POLLIN, .revents = 0},
+        };
+        if (::poll(fds, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (fds[1].revents != 0) break;  // shutdown requested
+        if ((fds[0].revents & (POLLERR | POLLNVAL)) != 0) break;
+        // POLLHUP still needs a read() to drain whatever the child left behind.
+        if ((fds[0].revents & (POLLIN | POLLHUP)) == 0) continue;
+
         ssize_t n = ::read(read_fd_, chunk.data(), chunk.size());
         if (n < 0) {
             if (errno == EINTR) continue;

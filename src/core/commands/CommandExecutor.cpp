@@ -28,6 +28,7 @@
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/utils/Base64.hpp"
+#include "GoalExecutor.hpp"
 #include "ReviewExecutor.hpp"
 
 namespace core::commands {
@@ -1344,7 +1345,7 @@ public:
             "  /fork               Branch the current conversation into a new session\n"
             "  /rewind             Restore and branch from an earlier prompt\n"
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
-            "  /goal [action]      Set or manage the session goal\n"
+            "  /goal [action]      Set or manage the session goal (plan/run/graph)\n"
             "  /todo [action]      Manage session-backed todo items\n"
             "  /memory [action]    Manage opt-in durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
@@ -2623,8 +2624,19 @@ public:
 
         const std::string args = trailing_arguments(ctx.text);
         const auto tokens = split_ascii_whitespace(args);
+
+        auto goal_engine = [&]() -> GoalExecutor::Handle {
+            if (!ctx.goal_engine_fn) {
+                return {};
+            }
+            return std::static_pointer_cast<core::goal::GoalEngine>(ctx.goal_engine_fn());
+        };
         auto show_goal = [&]() {
             ctx.append_history_fn(format_goal(ctx.current_goal_fn()));
+            const std::string graph_status = GoalExecutor::render_status(goal_engine());
+            if (!graph_status.empty()) {
+                ctx.append_history_fn(graph_status);
+            }
         };
 
         if (tokens.empty()) {
@@ -2642,6 +2654,66 @@ public:
         std::string objective_to_submit;
         if (action == "show" || action == "status" || action == "list") {
             show_goal();
+            return;
+        }
+
+        // -------------------------------------------------------------------
+        // Graph subcommands. These run the DAG engine rather than the flat
+        // session goal, and block, so they are dispatched onto a worker.
+        // -------------------------------------------------------------------
+        if (action == "graph" || action == "dag") {
+            ctx.append_history_fn("\n" + GoalExecutor::render(goal_engine()));
+            return;
+        }
+
+        const bool is_plan = action == "plan" || action == "decompose";
+        const bool is_run = action == "run" || action == "start" || action == "go";
+        const bool is_replan = action == "replan";
+        const bool is_pause = action == "pause" || action == "stop";
+
+        if (is_pause) {
+            auto engine = goal_engine();
+            if (!engine) {
+                ctx.append_history_fn("\n\xe2\x9c\x97  Goal graph is unavailable in this context.\n");
+                return;
+            }
+            engine->request_pause();
+            ctx.append_history_fn(
+                "\n\xe2\x9c\x93  Goal graph paused. Resume with `/goal run`.\n");
+            if (ctx.save_goal_graph_fn) {
+                ctx.save_goal_graph_fn();
+            }
+            return;
+        }
+
+        if (is_plan || is_run || is_replan) {
+            auto engine = goal_engine();
+            if (!engine) {
+                ctx.append_history_fn("\n\xe2\x9c\x97  Goal graph is unavailable in this context.\n");
+                return;
+            }
+            if (is_plan && trim(remainder).empty()) {
+                ctx.append_history_fn("\n\xe2\x84\xb9  Usage: /goal plan <objective>\n");
+                return;
+            }
+
+            auto work = [ctx, engine, is_plan, is_run, remainder]() {
+                if (is_plan) {
+                    GoalExecutor::plan(ctx, engine, remainder);
+                } else if (is_run) {
+                    GoalExecutor::run(ctx, engine);
+                } else {
+                    GoalExecutor::replan(ctx, engine, remainder);
+                }
+                if (ctx.save_goal_graph_fn) {
+                    ctx.save_goal_graph_fn();
+                }
+            };
+            if (ctx.dispatch_async_fn) {
+                ctx.dispatch_async_fn(std::move(work));
+            } else {
+                work();
+            }
             return;
         }
 
@@ -2679,6 +2751,7 @@ public:
             if (trim(objective).empty()) {
                 ctx.append_history_fn(
                     "\nℹ  Usage: /goal <objective>\n"
+                    "   Graph actions: plan <objective>, run, pause, replan [reason], graph.\n"
                     "   Other actions: show, set <objective>, done [note], blocked [note], resume [note], clear.\n");
                 return;
             }

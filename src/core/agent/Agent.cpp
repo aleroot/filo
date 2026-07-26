@@ -363,6 +363,13 @@ void Agent::set_session_goal(std::optional<core::session::SessionGoal> goal) {
     refresh_context_window_snapshot_unlocked();
 }
 
+void Agent::set_goal_graph_context_fn(std::function<std::string()> fn) {
+    std::lock_guard lock(history_mutex_);
+    goal_graph_context_fn_ = std::move(fn);
+    ensure_system_prompt();
+    refresh_context_window_snapshot_unlocked();
+}
+
 void Agent::restore_todos(std::vector<core::session::SessionTodoItem> todos) {
     todo_manager_.restore(std::move(todos));
 }
@@ -503,6 +510,11 @@ int Agent::sanitize_max_steps_per_turn(int value) noexcept {
 
 std::string Agent::build_dynamic_prompt_suffix() const {
     std::string suffix = core::session::GoalManager::prompt_context(session_goal_);
+    // The graph engine renders its own (empty when no goal is active) block,
+    // so a plain session goal and a running DAG compose without duplication.
+    if (goal_graph_context_fn_) {
+        suffix += goal_graph_context_fn_();
+    }
     suffix += todo_manager_.prompt_context();
     if (!context_summary_.empty()) {
         suffix += "\n\nSummary of earlier conversation context:\n" + context_summary_;

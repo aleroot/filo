@@ -18,6 +18,8 @@
 #include "RewindPicker.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/commands/GoalExecutor.hpp"
+#include "core/goal/GoalEngine.hpp"
 #include "core/session/GoalManager.hpp"
 #include "core/session/SessionHandoff.hpp"
 #include "core/session/SessionStats.hpp"
@@ -1345,6 +1347,10 @@ RunResult run(RunOptions opts) {
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
     std::string session_file_path;  // computed after first save
     core::session::GoalManager goal_manager{&core::session::SessionStore::now_iso8601};
+    // Graph-based goal engine (/goal plan|run|graph|replan). Constructed lazily
+    // on first use so it can capture the fully-built command context.
+    std::shared_ptr<core::goal::GoalEngine> goal_engine;
+    std::string pending_goal_graph_snapshot;
     struct SessionSaveState {
         std::mutex write_mutex;
         std::atomic<std::uint64_t> latest_requested{0};
@@ -1400,6 +1406,10 @@ RunResult run(RunOptions opts) {
         session_name       = data.name;
         session_created_at = data.created_at;
         goal_manager.restore(data.goal);
+        // Deferred: the engine is built on first /goal use, so stash the blob
+        // and rehydrate it then.
+        pending_goal_graph_snapshot =
+            data.goal_graph.has_value() ? data.goal_graph->snapshot : std::string{};
         agent->restore_todos(data.todos);
 
         // Restore agent state.
@@ -1917,6 +1927,9 @@ RunResult run(RunOptions opts) {
             session_name       = data.name;
             session_created_at = data.created_at;
             goal_manager.restore(data.goal);
+            pending_goal_graph_snapshot =
+                data.goal_graph.has_value() ? data.goal_graph->snapshot : std::string{};
+            goal_engine.reset(); // rebuilt against the resumed session
             agent->restore_todos(data.todos);
 
             // Restore agent state.
@@ -4028,6 +4041,7 @@ RunResult run(RunOptions opts) {
         std::string model_name;
         core::session::ActiveSessionLease::Ptr session_lease;
         std::optional<core::session::SessionGoal> snap_goal;
+        std::optional<core::session::SessionGoalGraph> snap_goal_graph;
         auto snap_todos = agent->get_todos();
         {
             std::lock_guard lock(ui_mutex);
@@ -4038,6 +4052,19 @@ RunResult run(RunOptions opts) {
             model_name = active_model_name;
             session_lease = session_leases.retain();
             snap_goal = goal_manager.current();
+            // Durable execution: persist the whole DAG so a goal can resume
+            // mid-graph after a restart.
+            if (goal_engine) {
+                const auto graph_status = goal_engine->status();
+                if (graph_status.has_graph) {
+                    snap_goal_graph = core::session::SessionGoalGraph{
+                        .plan_version = graph_status.plan_version,
+                        .run_state = std::string(core::goal::to_string(graph_status.run_state)),
+                        .snapshot = goal_engine->snapshot_json(),
+                        .updated_at = core::session::SessionStore::now_iso8601(),
+                    };
+                }
+            }
         }
 
         const std::uint64_t generation =
@@ -4049,6 +4076,7 @@ RunResult run(RunOptions opts) {
                      snap_messages = std::move(snap_messages),
                      snap_mode, snap_context,
                      snap_goal = std::move(snap_goal),
+                     snap_goal_graph = std::move(snap_goal_graph),
                      snap_todos = std::move(snap_todos),
                      session_lease = std::move(session_lease),
                      session_save_state,
@@ -4068,6 +4096,7 @@ RunResult run(RunOptions opts) {
             data.context_summary   = snap_context;
             data.messages          = snap_messages;
             data.goal              = snap_goal;
+            data.goal_graph        = snap_goal_graph;
             data.todos             = snap_todos;
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
@@ -4299,8 +4328,53 @@ RunResult run(RunOptions opts) {
             goal_manager.clear();
         }
         agent->set_session_goal(std::nullopt);
+        if (goal_engine) {
+            goal_engine->clear();
+        }
         save_session_snapshot();
         return {.ok = true, .message = "Goal cleared."};
+    };
+
+    // Lazily builds (and rehydrates) the session's goal-graph engine. The
+    // engine only needs the agent and a transcript sink, so it is constructed
+    // from a minimal context rather than the full command context.
+    auto goal_engine_accessor = [&]() -> std::shared_ptr<void> {
+        std::shared_ptr<core::goal::GoalEngine> engine;
+        bool created = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (!goal_engine) {
+                core::commands::CommandContext engine_ctx;
+                engine_ctx.agent = agent;
+                engine_ctx.append_history_fn = append_history;
+                goal_engine = core::commands::GoalExecutor::make_engine(engine_ctx);
+
+                if (!pending_goal_graph_snapshot.empty()) {
+                    if (const auto restored =
+                            goal_engine->restore_snapshot(pending_goal_graph_snapshot);
+                        !restored.has_value()) {
+                        core::logging::warn("Failed to restore goal graph: {}", restored.error());
+                    }
+                    pending_goal_graph_snapshot.clear();
+                }
+                created = true;
+            }
+            engine = goal_engine;
+        }
+
+        // Publish the graph into the agent's system prompt so a work turn sees
+        // the objective and frontier, not just its own directive. Done outside
+        // ui_mutex: this takes the agent's history lock, and the agent takes
+        // ui_mutex from its streaming callbacks. The capture is weak because
+        // the engine's hooks already hold a strong reference to the agent.
+        if (created) {
+            agent->set_goal_graph_context_fn(
+                [weak = std::weak_ptr<core::goal::GoalEngine>(engine)] {
+                    const auto live = weak.lock();
+                    return live ? live->prompt_context() : std::string{};
+                });
+        }
+        return engine;
     };
 
     auto memory_state = [memory_store]() {
@@ -5074,6 +5148,8 @@ RunResult run(RunOptions opts) {
             .set_goal_fn = set_goal,
             .set_goal_status_fn = set_goal_status,
             .clear_goal_fn = clear_goal,
+            .goal_engine_fn = goal_engine_accessor,
+            .save_goal_graph_fn = save_session_snapshot,
             .memory_state_fn = memory_state,
             .set_memory_settings_fn = set_memory_settings,
             .memory_thread_policy_fn = memory_thread_policy,

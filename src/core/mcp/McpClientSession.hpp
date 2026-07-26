@@ -163,6 +163,11 @@ private:
 
     int write_fd_ = -1;
     int read_fd_  = -1;
+    // Self-pipe used to wake reader_loop() out of poll() during shutdown.
+    // Closing read_fd_ from another thread is neither guaranteed to wake a
+    // blocked reader nor safe against fd-number reuse, so shutdown() signals
+    // here first and closes read_fd_ only once the reader thread has joined.
+    int wake_pipe_[2] = {-1, -1};
     pid_t child_pid_ = -1;
     std::string server_name_;
     McpSamplingCallback sampling_callback_;

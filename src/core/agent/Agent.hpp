@@ -106,6 +106,12 @@ public:
         const std::vector<std::filesystem::path>& paths);
     [[nodiscard]] core::workspace::SessionWorkspace workspace_snapshot() const;
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
+    /// Supplies the live goal-graph context for the dynamic prompt suffix.
+    /// Injected as a callable rather than a GoalEngine handle so the agent
+    /// keeps no dependency on core::goal, and so ownership stays acyclic:
+    /// the engine's hooks already hold a strong reference to this agent, so
+    /// the callable must hold only a weak one.
+    void set_goal_graph_context_fn(std::function<std::string()> fn);
     void restore_todos(std::vector<core::session::SessionTodoItem> todos);
     [[nodiscard]] std::vector<core::session::SessionTodoItem> get_todos() const;
     [[nodiscard]] std::expected<core::session::SessionTodoItem, std::string>
@@ -233,6 +239,14 @@ public:
         refresh_context_window_snapshot_unlocked();
     }
 
+    /// Active provider, for out-of-band one-shot completions that must NOT
+    /// touch conversation history (goal planning, verification judging,
+    /// reflection). Callers own the returned handle for the call's duration.
+    [[nodiscard]] std::shared_ptr<core::llm::LLMProvider> get_provider() const {
+        std::lock_guard lock(history_mutex_);
+        return provider_;
+    }
+
     void set_active_provider_name(std::string provider_name) {
         std::lock_guard lock(history_mutex_);
         active_provider_name_ = std::move(provider_name);
@@ -323,6 +337,7 @@ private:
     std::string effort_level_;
     std::string context_summary_;
     std::optional<core::session::SessionGoal> session_goal_;
+    std::function<std::string()> goal_graph_context_fn_;
     std::optional<core::context::ProjectFactsSnapshot> project_facts_snapshot_;
     core::context::PromptPlan stable_prompt_plan_;
     std::string stable_prompt_prefix_;

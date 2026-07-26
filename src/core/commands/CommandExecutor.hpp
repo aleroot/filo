@@ -101,6 +101,12 @@ struct CommandContext {
     std::function<CommandOperationResult(std::string_view)> set_goal_fn = {};
     std::function<CommandOperationResult(std::string_view, std::string_view)> set_goal_status_fn = {};
     std::function<CommandOperationResult()> clear_goal_fn = {};
+    /// Session-scoped goal-graph engine (core::goal::GoalEngine), type-erased
+    /// so the command layer keeps no compile-time dependency on the engine.
+    /// Returns nullptr when the graph feature is unavailable.
+    std::function<std::shared_ptr<void>()> goal_engine_fn = {};
+    /// Persists the current goal-graph snapshot into the session file.
+    std::function<void()> save_goal_graph_fn = {};
     std::function<core::memory::MemoryState()> memory_state_fn = {};
     std::function<CommandOperationResult(core::memory::MemorySettings)> set_memory_settings_fn = {};
     std::function<core::memory::MemoryThreadPolicy()> memory_thread_policy_fn = {};

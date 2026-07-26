@@ -318,6 +318,7 @@ set(FILO_CORE_SOURCES
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp
+    src/core/commands/GoalExecutor.cpp
     src/core/commands/ReviewExecutor.cpp
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
@@ -325,6 +326,12 @@ set(FILO_CORE_SOURCES
     src/core/session/SessionStore.cpp
     src/core/session/ActiveSessionLease.cpp
     src/core/session/GoalManager.cpp
+    src/core/goal/GoalGraph.cpp
+    src/core/goal/GoalVerifier.cpp
+    src/core/goal/GoalReflector.cpp
+    src/core/goal/GoalPlanner.cpp
+    src/core/goal/GoalScheduler.cpp
+    src/core/goal/GoalEngine.cpp
     src/core/session/TodoManager.cpp
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
@@ -486,6 +493,7 @@ unset(_filo_saved_folder)
 
 set(FILO_UNIT_TEST_SOURCES
     tests/test_reasoning_capabilities.cpp
+    tests/test_goal_graph.cpp
     tests/test_tools.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp

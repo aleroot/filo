@@ -250,6 +250,19 @@ void append_goal_json(std::string& out, const core::session::SessionGoal& goal) 
     out += "\"}";
 }
 
+void append_goal_graph_json(std::string& out,
+                            const core::session::SessionGoalGraph& graph) {
+    out += "{\"plan_version\":";
+    out += std::to_string(graph.plan_version);
+    out += ",\"run_state\":\"";
+    core::utils::append_escaped(out, graph.run_state);
+    out += "\",\"snapshot\":\"";
+    core::utils::append_escaped(out, graph.snapshot);
+    out += "\",\"updated_at\":\"";
+    core::utils::append_escaped(out, graph.updated_at);
+    out += "\"}";
+}
+
 } // namespace
 
 std::string SessionStore::to_json(const SessionData& data) {
@@ -282,6 +295,10 @@ std::string SessionStore::to_json(const SessionData& data) {
     if (data.goal.has_value()) {
         out += ",\"goal\":";
         append_goal_json(out, *data.goal);
+    }
+    if (data.goal_graph.has_value()) {
+        out += ",\"goal_graph\":";
+        append_goal_graph_json(out, *data.goal_graph);
     }
     out += ",\"messages\":[";
 
@@ -375,6 +392,28 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
             }
             if (!goal.objective.empty()) {
                 data.goal = std::move(goal);
+            }
+        }
+
+        simdjson::dom::object goal_graph_obj;
+        if (doc["goal_graph"].get(goal_graph_obj) == simdjson::SUCCESS) {
+            SessionGoalGraph goal_graph;
+            std::string_view sv;
+            int64_t plan_version = 0;
+            if (goal_graph_obj["plan_version"].get(plan_version) == simdjson::SUCCESS) {
+                goal_graph.plan_version = static_cast<int>(plan_version);
+            }
+            if (goal_graph_obj["run_state"].get(sv) == simdjson::SUCCESS) {
+                goal_graph.run_state = std::string(sv);
+            }
+            if (goal_graph_obj["snapshot"].get(sv) == simdjson::SUCCESS) {
+                goal_graph.snapshot = std::string(sv);
+            }
+            if (goal_graph_obj["updated_at"].get(sv) == simdjson::SUCCESS) {
+                goal_graph.updated_at = std::string(sv);
+            }
+            if (!goal_graph.snapshot.empty()) {
+                data.goal_graph = std::move(goal_graph);
             }
         }
 
