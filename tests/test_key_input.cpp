@@ -21,6 +21,21 @@ TEST_CASE("KeyInput detects all supported Ctrl events", "[tui][key_input]") {
     REQUIRE(tui::is_ctrl_g_event(ftxui::Event::Special({7})));
     REQUIRE(tui::is_ctrl_v_event(ftxui::Event::Special({22})));
     REQUIRE(tui::is_ctrl_p_event(ftxui::Event::Special({16})));
+    REQUIRE(tui::is_ctrl_r_event(ftxui::Event::Special({18})));
+}
+
+TEST_CASE("KeyInput keeps the prompt-editor and run-code bindings distinct",
+          "[tui][key_input]") {
+    // Ctrl+G opens the prompt editor (Claude Code parity), Ctrl+X is the
+    // Gemini CLI-compatible alias, and Ctrl+R runs fenced code.
+    const auto ctrl_r = ftxui::Event::Special({18});
+    REQUIRE(tui::is_ctrl_r_event(ctrl_r));
+    REQUIRE_FALSE(tui::is_ctrl_g_event(ctrl_r));
+    REQUIRE_FALSE(tui::is_ctrl_x_event(ctrl_r));
+
+    const auto ctrl_g = ftxui::Event::Special({7});
+    REQUIRE_FALSE(tui::is_ctrl_r_event(ctrl_g));
+    REQUIRE(tui::is_ctrl_r_event(ftxui::Event::Special("\x1B[114;5u")));
 }
 
 TEST_CASE("KeyInput detects kitty keyboard protocol events", "[tui][key_input]") {

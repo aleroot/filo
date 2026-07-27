@@ -15,5 +15,6 @@ bool is_ctrl_v_event(const ftxui::Event& event);
 bool is_ctrl_l_event(const ftxui::Event& event);
 bool is_ctrl_c_event(const ftxui::Event& event);
 bool is_ctrl_p_event(const ftxui::Event& event);
+bool is_ctrl_r_event(const ftxui::Event& event);
 
 } // namespace tui

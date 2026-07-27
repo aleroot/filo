@@ -243,6 +243,52 @@ Config files are layered in this order:
 Use `config.json` for providers/router/subagents.
 Use `settings.json` for managed UI/workflow preferences.
 
+### Prompt editor
+
+Press `Ctrl+G` to edit the current draft in an external editor, exactly like
+Claude Code. `Ctrl+X` is accepted as a Gemini CLI-compatible alias. (`Ctrl+R`
+opens the code runner for fenced code in the latest response.)
+
+The default backend follows the standard `VISUAL` / `EDITOR` convention, so
+`vim`, `nano`, `hx` and friends work out of the box:
+
+```json
+{
+  "prompt_editor": "system"
+}
+```
+
+Any other value is used as an explicit editor command, which is handy when you
+want Filo to use a different editor from the rest of your shell:
+
+```json
+{
+  "prompt_editor": "nano"
+}
+```
+
+GUI editors are automatically launched in blocking mode (`code --wait`,
+`subl -w`), and the vi family runs with `-i NONE` so a user init file cannot
+repurpose the scratch buffer.
+
+On macOS only, the Lampo App Store app is offered as an additional backend:
+
+```json
+{
+  "prompt_editor": "lampo"
+}
+```
+
+Pick a backend interactively under `/settings`; the list only shows backends
+compiled into your platform's build. Lampo is opt-in and does not change the
+behaviour of any other editor. The Lampo backend is one client of Lampo's
+versioned Prompter CLI protocol — Lampo does not depend on Filo-specific file
+types or routes.
+
+Backends live behind the `tui::editor::PromptEditor` interface and register
+themselves in `PromptEditorCatalog`, so integrating another IDE means adding one
+translation unit — no TUI, settings or config changes required.
+
 ### Concurrent instances
 
 Filo supports multiple interactive processes with independent active models.

@@ -11,6 +11,7 @@
 #include "SessionReplay.hpp"
 #include "SelectionClipboardCopier.hpp"
 #include "Text.hpp"
+#include "editor/ExternalEditorController.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
 #include "QuestionDialogController.hpp"
@@ -554,78 +555,6 @@ void insert_token_with_spacing(std::string& text, int& cursor, std::string_view 
     insert_text_at_cursor(text, cursor, chunk);
 }
 
-bool is_gui_editor_command(std::string_view lowered_command) {
-    static constexpr std::array<std::string_view, 5> kGuiEditors{
-        "code", "cursor", "subl", "zed", "atom"
-    };
-    for (const auto editor : kGuiEditors) {
-        if (lowered_command.find(editor) != std::string_view::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool has_wait_flag(std::string_view lowered_command) {
-    return lowered_command.find("--wait") != std::string_view::npos
-        || lowered_command.find(" -w") != std::string_view::npos
-        || lowered_command.starts_with("-w");
-}
-
-bool is_vi_family_command(std::string_view lowered_command) {
-    static constexpr std::array<std::string_view, 3> kViCommands{
-        "vi", "vim", "nvim"
-    };
-    for (const auto cmd : kViCommands) {
-        if (lowered_command.find(cmd) != std::string_view::npos) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::string build_external_editor_command(const std::string& file_path) {
-    const char* visual = std::getenv("VISUAL");
-    const char* editor = std::getenv("EDITOR");
-
-    std::string command;
-    if (visual != nullptr && *visual != '\0') {
-        command = visual;
-    } else if (editor != nullptr && *editor != '\0') {
-        command = editor;
-    } else {
-        command = "vi";
-    }
-
-    const std::string lowered = to_lower_ascii(command);
-    if (is_gui_editor_command(lowered) && !has_wait_flag(lowered)) {
-        command += lowered.find("subl") != std::string::npos ? " -w" : " --wait";
-    }
-    if (is_vi_family_command(lowered) && lowered.find("-i") == std::string::npos) {
-        command += " -i NONE";
-    }
-
-    command += " " + shell_single_quote(file_path);
-    return command;
-}
-
-int normalize_exit_code(int status) {
-    if (status == -1) {
-        return -1;
-    }
-#if defined(_WIN32)
-    return status;
-#else
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
-    if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
-    }
-    return status;
-#endif
-}
-
 } // namespace
 
 RunResult run(RunOptions opts) {
@@ -952,6 +881,13 @@ RunResult run(RunOptions opts) {
             screen.PostEvent(Event::Custom);
         }
     };
+    // Owns the whole prompt-editor lifecycle: scratch buffer, backend
+    // selection, worker thread and cancellation.
+    editor::ExternalEditorController external_editor({
+        .wake_ui = [&wake_ui]() { wake_ui(); },
+        .with_terminal =
+            [&screen](const std::function<void()>& body) { screen.WithRestoredIO(body)(); },
+    });
     core::logging::Logger::get_instance().use_callback_sink(
         [&ui_mutex, &stderr_panel_state, &wake_ui](core::logging::Level level,
                                                   std::string line) {
@@ -1269,6 +1205,21 @@ RunResult run(RunOptions opts) {
             .label = "Routing · Default Policy",
             .description = "Pick the router policy new Router/Auto sessions should start from.",
             .choices = std::move(router_policy_choices),
+        });
+        // Driven by the editor catalog, so a new backend shows up here (and only
+        // on the platforms that ship it) without touching the settings pane.
+        std::vector<SettingsChoice> prompt_editor_choices;
+        for (const auto& descriptor : editor::builtin_prompt_editors().descriptors()) {
+            prompt_editor_choices.push_back(SettingsChoice{
+                .value = std::string(descriptor.id),
+                .label = std::string(descriptor.label),
+            });
+        }
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::PromptEditor,
+            .label = "General · Prompt Editor",
+            .description = "Editor opened by Ctrl+G for the current prompt draft.",
+            .choices = std::move(prompt_editor_choices),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiBanner,
@@ -3483,6 +3434,8 @@ RunResult run(RunOptions opts) {
                 return settings.default_approval_mode;
             case core::config::ManagedSettingKey::DefaultRouterPolicy:
                 return settings.default_router_policy;
+            case core::config::ManagedSettingKey::PromptEditor:
+                return settings.prompt_editor;
             case core::config::ManagedSettingKey::UiBanner:
                 return settings.ui_banner;
             case core::config::ManagedSettingKey::UiFooter:
@@ -3516,6 +3469,10 @@ RunResult run(RunOptions opts) {
                     : effective.default_approval_mode;
             case core::config::ManagedSettingKey::DefaultRouterPolicy:
                 return effective.router.default_policy;
+            case core::config::ManagedSettingKey::PromptEditor:
+                return effective.prompt_editor.empty()
+                    ? std::string("system")
+                    : effective.prompt_editor;
             case core::config::ManagedSettingKey::UiBanner:
                 return effective.ui_banner;
             case core::config::ManagedSettingKey::UiFooter:
@@ -3561,6 +3518,7 @@ RunResult run(RunOptions opts) {
         -> std::optional<std::string> {
         config.default_mode = after.default_mode;
         config.default_approval_mode = after.default_approval_mode;
+        config.prompt_editor = after.prompt_editor;
         config.router.default_policy = after.router.default_policy;
         config.ui_banner = after.ui_banner;
         config.ui_footer = after.ui_footer;
@@ -5175,6 +5133,21 @@ RunResult run(RunOptions opts) {
         submit_or_queue_agent_turn(std::move(text), {});
     };
 
+    // Ctrl+G / Ctrl+X — hand the draft to the configured prompt editor.
+    auto apply_editor_outcome = [&](const editor::EditorOutcome& outcome) {
+        if (outcome.text.has_value()) {
+            input_text = normalize_newlines(*outcome.text);
+            input_cursor_position = static_cast<int>(input_text.size());
+        }
+        if (outcome.notice.has_value()) {
+            append_history(std::format(
+                "\n{}  {}\n",
+                outcome.notice->success ? "✓" : "✗",
+                outcome.notice->message));
+        }
+        wake_ui();
+    };
+
     auto open_external_editor = [&]() -> bool {
         {
             std::lock_guard lock(ui_mutex);
@@ -5195,65 +5168,13 @@ RunResult run(RunOptions opts) {
             }
         }
 
-        std::array<char, 32> temp_dir_template{};
-        constexpr std::string_view kTemplate = "/tmp/filo-edit-XXXXXX";
-        std::ranges::copy(kTemplate, temp_dir_template.begin());
-
-        char* temp_dir = ::mkdtemp(temp_dir_template.data());
-        if (temp_dir == nullptr) {
-            append_history("\n\xe2\x9c\x97  Could not create a temporary buffer file for external editor.\n");
-            return true;
+        // Terminal backends answer inline; detached ones report through
+        // take_outcome() once the user is done in the other application.
+        if (const auto outcome = external_editor.open(config.prompt_editor, input_text)) {
+            apply_editor_outcome(*outcome);
+        } else {
+            wake_ui();  // Draw the overlay while the detached session runs.
         }
-
-        const std::filesystem::path temp_dir_path(temp_dir);
-        const std::filesystem::path buffer_path = temp_dir_path / "buffer.txt";
-
-        auto cleanup_temp_files = [&]() {
-            std::error_code ec;
-            std::filesystem::remove(buffer_path, ec);
-            std::filesystem::remove(temp_dir_path, ec);
-        };
-
-        {
-            std::ofstream out(buffer_path, std::ios::binary | std::ios::trunc);
-            if (!out) {
-                cleanup_temp_files();
-                append_history("\n\xe2\x9c\x97  Could not write temporary editor buffer.\n");
-                return true;
-            }
-            out << input_text;
-        }
-
-        const std::string command = build_external_editor_command(buffer_path.string());
-        int command_status = -1;
-        screen.WithRestoredIO([&]() {
-            command_status = std::system(command.c_str());
-        })();
-
-        const int exit_code = normalize_exit_code(command_status);
-        if (exit_code != 0) {
-            cleanup_temp_files();
-            append_history(std::format(
-                "\n\xe2\x9c\x97  External editor exited with status {}.\n",
-                exit_code));
-            return true;
-        }
-
-        std::ifstream in(buffer_path, std::ios::binary);
-        if (!in) {
-            cleanup_temp_files();
-            append_history("\n\xe2\x9c\x97  Could not reload edited text from temporary buffer.\n");
-            return true;
-        }
-
-        std::string edited_text(
-            (std::istreambuf_iterator<char>(in)),
-            std::istreambuf_iterator<char>());
-        input_text = normalize_newlines(std::move(edited_text));
-        input_cursor_position = static_cast<int>(input_text.size());
-
-        cleanup_temp_files();
-        wake_ui();
         return true;
     };
 
@@ -5348,6 +5269,19 @@ RunResult run(RunOptions opts) {
     auto component = CatchEvent(input_stack, [&](Event event) {
         reset_double_escape_on_non_escape(double_escape_state, event);
 
+        // A detached editor session owns the prompt: apply its result as soon
+        // as it lands, and swallow every key except the cancel gesture.
+        if (auto outcome = external_editor.take_outcome()) {
+            apply_editor_outcome(*outcome);
+            return true;
+        }
+        if (external_editor.busy()) {
+            if (event == Event::Escape || is_ctrl_c_event(event)) {
+                external_editor.cancel();
+            }
+            return true;
+        }
+
         if (event == Event::Escape
             || event == Event::Character('c')
             || event == Event::Character('C')
@@ -5362,7 +5296,7 @@ RunResult run(RunOptions opts) {
 
         const auto code_block_outcome = code_block_runner.handle(
             event,
-            is_ctrl_c_event(event) || is_ctrl_g_event(event));
+            is_ctrl_c_event(event) || is_ctrl_r_event(event));
         if (code_block_outcome.handled) {
             if (code_block_outcome.attachment.has_value()) {
                 insert_token_with_spacing(
@@ -6252,7 +6186,7 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        if (is_ctrl_g_event(event)) {
+        if (is_ctrl_r_event(event)) {  // Ctrl+R — run code from the latest response
             const auto result = open_code_blocks(std::nullopt);
             if (!result.ok) {
                 append_history(std::format("\n✗  {}\n", result.message));
@@ -6351,7 +6285,8 @@ RunResult run(RunOptions opts) {
             clear_screen();
             return true;
         }
-        if (is_ctrl_x_event(event)) {  // Ctrl+X — open external editor
+        // Ctrl+G matches Claude Code, Ctrl+X matches Gemini CLI.
+        if (is_ctrl_g_event(event) || is_ctrl_x_event(event)) {
             return open_external_editor();
         }
         if (is_ctrl_v_event(event)) {  // Ctrl+V — paste clipboard content / image
@@ -6525,6 +6460,7 @@ RunResult run(RunOptions opts) {
         bool                            stderr_panel_active = false;
         std::vector<std::string>        stderr_panel_lines;
         std::size_t                     queued_steering_count = 0;
+        std::string                     external_editor_status;
         {
             std::lock_guard lock(ui_mutex);
             if (conversation_search_state.active) {
@@ -6587,7 +6523,8 @@ RunResult run(RunOptions opts) {
             stderr_panel_lines = stderr_panel_state.lines;
             queued_steering_count = queued_steering_turns.size();
         }
-        
+        external_editor_status = external_editor.status_label();
+
         const bool question_dialog_active = question_dialog.active();
         
         auto history_el = history_component->Render() | flex;
@@ -6605,7 +6542,14 @@ RunResult run(RunOptions opts) {
 
         // ── Permission overlay ───────────────────────────────────────────
         Element bottom_el;
-        if (settings_panel_active) {
+        if (!external_editor_status.empty()) {
+            bottom_el = render_default_prompt_panel(
+                hbox({
+                    text(external_editor_status) | color(Color::GrayLight) | xflex,
+                    text("Esc to cancel") | color(Color::GrayDark),
+                }),
+                {});
+        } else if (settings_panel_active) {
             std::vector<SettingsPanelRow> settings_rows;
             settings_rows.reserve(settings_definitions.size());
             const auto& scope_overlay = config_manager.get_settings_overlay(settings_panel_scope);

@@ -66,6 +66,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.default_approval_mode;
         case core::config::ManagedSettingKey::DefaultRouterPolicy:
             return settings.default_router_policy;
+        case core::config::ManagedSettingKey::PromptEditor:
+            return settings.prompt_editor;
         case core::config::ManagedSettingKey::UiBanner:
             return settings.ui_banner;
         case core::config::ManagedSettingKey::UiFooter:
@@ -97,6 +99,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return config.default_approval_mode;
         case core::config::ManagedSettingKey::DefaultRouterPolicy:
             return config.router.default_policy;
+        case core::config::ManagedSettingKey::PromptEditor:
+            return config.prompt_editor;
         case core::config::ManagedSettingKey::UiBanner:
             return config.ui_banner;
         case core::config::ManagedSettingKey::UiFooter:
@@ -669,6 +673,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.default_provider == "grok");
     REQUIRE(config.default_model_selection == "manual");
     REQUIRE(config.default_approval_mode == "prompt");
+    REQUIRE(config.prompt_editor == "system");
     REQUIRE(config.ui_banner == "show");
     REQUIRE(config.ui_footer == "show");
     REQUIRE(config.ui_model_info == "show");
@@ -1247,6 +1252,11 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
             core::config::ManagedSettingKey::DefaultRouterPolicy,
             "default_router_policy",
             "deep",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::PromptEditor,
+            "prompt_editor",
+            "lampo",
         },
         ManagedSettingCase{
             core::config::ManagedSettingKey::UiBanner,

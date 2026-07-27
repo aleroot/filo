@@ -58,7 +58,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 12> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 13> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -66,6 +66,7 @@ static constexpr std::array<ManagedSettingDescriptor, 12> kManagedSettingDescrip
     { ManagedSettingKey::DefaultRouterPolicy,
       "default_router_policy",
       &ManagedSettings::default_router_policy },
+    { ManagedSettingKey::PromptEditor, "prompt_editor", &ManagedSettings::prompt_editor },
     { ManagedSettingKey::UiBanner, "ui_banner", &ManagedSettings::ui_banner },
     { ManagedSettingKey::UiFooter, "ui_footer", &ManagedSettings::ui_footer },
     { ManagedSettingKey::UiModelInfo, "ui_model_info", &ManagedSettings::ui_model_info },
@@ -112,6 +113,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::DefaultRouterPolicy:
             config.router.default_policy = value;
+            break;
+        case ManagedSettingKey::PromptEditor:
+            config.prompt_editor = value;
             break;
         case ManagedSettingKey::UiBanner:
             config.ui_banner = value;
@@ -517,6 +521,7 @@ AppConfig make_default_config() {
     config.default_model_selection = "manual";
     config.default_mode = "BUILD";
     config.default_approval_mode = "prompt";
+    config.prompt_editor = "system";
     config.ui_banner = "show";
     config.ui_footer = "show";
     config.ui_model_info = "show";
@@ -610,6 +615,7 @@ std::string default_config_json() {
     "default_model_selection": "manual",
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
+    "prompt_editor": "system",
     "auto_compact_threshold": 25000,
     "tool_output_token_limit": 3072,
     "context_compression": "off",
@@ -1067,6 +1073,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     if (!doc["default_approval_mode"].get(value)) {
         parsed.default_approval_mode = std::string(value);
     }
+    if (!doc["prompt_editor"].get(value)) {
+        parsed.prompt_editor = std::string(value);
+    }
     if (!doc["ui_banner"].get(value)) {
         parsed.ui_banner = std::string(value);
     }
@@ -1286,6 +1295,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (!overlay.default_approval_mode.empty()) {
         base.default_approval_mode = overlay.default_approval_mode;
+    }
+    if (!overlay.prompt_editor.empty()) {
+        base.prompt_editor = overlay.prompt_editor;
     }
     if (!overlay.ui_banner.empty()) {
         base.ui_banner = overlay.ui_banner;

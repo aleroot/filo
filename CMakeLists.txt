@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.28...4.3)
 project(filo VERSION 0.1.0 LANGUAGES CXX)
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 include(GNUInstallDirs)
 
 set(FILO_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -163,6 +167,10 @@ set(FILO_CORE_SOURCES
     src/tui/CodeBlockRunner.cpp
     src/tui/CodeBlockRunServices.cpp
     src/tui/DiffPreview.cpp
+    src/tui/editor/ExternalEditorController.cpp
+    src/tui/editor/PromptBuffer.cpp
+    src/tui/editor/PromptEditorCatalog.cpp
+    src/tui/editor/SystemPromptEditor.cpp
     src/tui/HistoryComponent.cpp
     src/tui/TranscriptViewport.cpp
     src/tui/MarkdownRenderer.cpp
@@ -344,6 +352,16 @@ set(FILO_CORE_SOURCES
     src/core/cli/TrustFlagResolver.cpp
 )
 
+# Lampo is a native macOS App Store app: its backend only exists in Apple builds.
+# Every other platform simply never registers it in the prompt-editor catalog.
+if(APPLE)
+    list(APPEND FILO_CORE_SOURCES src/tui/editor/LampoPromptEditor.mm)
+    set_source_files_properties(
+        src/tui/editor/LampoPromptEditor.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+    )
+endif()
+
 file(GLOB_RECURSE FILO_HEADER_FILES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
@@ -431,11 +449,13 @@ target_link_libraries(filo_core
 )
 
 if(APPLE)
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
     find_library(CFNETWORK_FRAMEWORK CFNetwork REQUIRED)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
     target_link_libraries(filo_core
         PUBLIC
+            ${APPKIT_FRAMEWORK}
             ${CFNETWORK_FRAMEWORK}
             ${COREFOUNDATION_FRAMEWORK}
             ${IOKIT_FRAMEWORK}
@@ -562,6 +582,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_question_dialog.cpp
     tests/test_history_component.cpp
     tests/test_key_input.cpp
+    tests/test_prompt_editor.cpp
     tests/test_session_replay.cpp
     tests/test_text.cpp
     tests/test_permission_system.cpp
@@ -732,6 +753,7 @@ source_group(
         tests/test_question_dialog.cpp
         tests/test_history_component.cpp
         tests/test_key_input.cpp
+        tests/test_prompt_editor.cpp
         tests/test_session_replay.cpp
         tests/test_text.cpp
         tests/test_agent_freeze.cpp

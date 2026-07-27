@@ -20,6 +20,7 @@ enum class ManagedSettingKey {
     DefaultMode,
     DefaultApprovalMode,
     DefaultRouterPolicy,
+    PromptEditor,
     UiBanner,
     UiFooter,
     UiModelInfo,
@@ -35,6 +36,7 @@ struct ManagedSettings {
     std::optional<std::string> default_mode;
     std::optional<std::string> default_approval_mode;
     std::optional<std::string> default_router_policy;
+    std::optional<std::string> prompt_editor;
     std::optional<std::string> ui_banner;
     std::optional<std::string> ui_footer;
     std::optional<std::string> ui_model_info;
@@ -205,6 +207,7 @@ struct AppConfig {
     std::string default_model_selection;
     std::string default_mode;
     std::string default_approval_mode;
+    std::string prompt_editor;
     std::string ui_banner;
     std::string ui_footer;
     std::string ui_model_info;

@@ -1400,7 +1400,7 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
     rows.push_back(hbox({
         text(" RUN CODE ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
         filler(),
-        text("Ctrl+G · Esc: close/back") | color(Color::GrayDark),
+        text("Ctrl+R · Esc: close/back") | color(Color::GrayDark),
     }));
     rows.push_back(separator());
 
