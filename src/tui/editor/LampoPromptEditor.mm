@@ -2,6 +2,7 @@
 
 #import <AppKit/AppKit.h>
 
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <expected>
@@ -11,6 +12,8 @@
 #include <string>
 #include <system_error>
 #include <thread>
+
+#include <signal.h>
 
 // Lampo's Prompter CLI protocol, v1.
 //
@@ -222,7 +225,7 @@ public:
                 return;
             }
             completed_ = true;
-            application_ = application;
+            process_identifier_ = application.processIdentifier;
             if (error != nil) {
                 error_ = to_std(error.localizedDescription);
             } else if (application == nil) {
@@ -253,14 +256,20 @@ public:
     }
 
     [[nodiscard]] bool is_running() const {
-        return application_ != nil && !application_.terminated;
+        if (process_identifier_ <= 0) {
+            return false;
+        }
+        if (::kill(process_identifier_, 0) == 0) {
+            return true;
+        }
+        return errno == EPERM;
     }
 
 private:
     std::mutex mutex_;
     std::condition_variable completion_;
     bool completed_ = false;
-    NSRunningApplication* application_ = nil;
+    pid_t process_identifier_ = -1;
     std::string error_;
 };
 
@@ -365,8 +374,8 @@ private:
                     }
                 }
 
-                // Lampo quitting after it took the session is a cancellation.
-                if (acknowledged && !application.is_running()) {
+                // Quitting the exact Lampo instance at any point cancels the edit.
+                if (!application.is_running()) {
                     return EditResult::cancelled();
                 }
                 if (!acknowledged && std::chrono::steady_clock::now() >= deadline) {
