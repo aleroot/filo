@@ -41,7 +41,6 @@ private:
 };
 
 [[nodiscard]] std::string format_bytes(uint64_t bytes);
-[[nodiscard]] std::string format_network_traffic(NetworkTraffic traffic);
 [[nodiscard]] uint64_t estimated_http_header_bytes(auto&& headers) {
     uint64_t total = 0;
     for (const auto& [name, value] : headers) {

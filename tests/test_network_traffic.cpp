@@ -24,12 +24,3 @@ TEST_CASE("Network traffic byte formatter uses compact binary units", "[network]
     CHECK(core::net::format_bytes(12ULL * 1024ULL * 1024ULL + 410ULL * 1024ULL) == "12.4 MB");
     CHECK(core::net::format_bytes(999) == "999 B");
 }
-
-TEST_CASE("Network traffic formatter matches report row value shape", "[network][traffic]") {
-    const auto formatted = core::net::format_network_traffic({
-        .bytes_sent = 842ULL * 1024ULL,
-        .bytes_received = 12ULL * 1024ULL * 1024ULL + 410ULL * 1024ULL,
-    });
-
-    CHECK(formatted == "\xe2\x86\x91" "842 KB  \xe2\x86\x93" "12.4 MB  total 13.2 MB");
-}

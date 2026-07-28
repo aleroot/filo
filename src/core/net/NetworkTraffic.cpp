@@ -78,12 +78,4 @@ std::string format_bytes(uint64_t bytes) {
     return std::format("{:.1f} {}", value, kUnits[unit]);
 }
 
-std::string format_network_traffic(NetworkTraffic traffic) {
-    return std::format(
-        "\xe2\x86\x91{}  \xe2\x86\x93{}  total {}",
-        format_bytes(traffic.bytes_sent),
-        format_bytes(traffic.bytes_received),
-        format_bytes(traffic.total_bytes()));
-}
-
 } // namespace core::net

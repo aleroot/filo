@@ -995,15 +995,35 @@ TEST_CASE("SessionReport keeps rows aligned and prints --resume command", "[sess
 
     CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Resume with"));
     CHECK_THAT(out, Catch::Matchers::ContainsSubstring("filo --resume 0e275b32"));
-    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Network traffic"));
-    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("total 13.2 MB"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Network"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Tokens"));
+    CHECK_THAT(out, Catch::Matchers::ContainsSubstring("\xce\xa3" "13.2 MB"));
 
     std::istringstream in{out};
     std::string line;
+    std::string tokens_line;
+    std::string network_line;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         const auto width = ftxui::string_width(line);
         // 64 inner cells + 2 border cells.
         CHECK(width == 66);
+        if (line.find("Tokens") != std::string::npos) tokens_line = line;
+        if (line.find("Network") != std::string::npos) network_line = line;
     }
+
+    // The ↑ / ↓ / total sub-columns must start at identical display columns
+    // on both the Tokens and the Network rows.
+    REQUIRE_FALSE(tokens_line.empty());
+    REQUIRE_FALSE(network_line.empty());
+
+    auto column_of = [](const std::string& line, std::string_view needle) {
+        const auto pos = line.find(needle);
+        REQUIRE(pos != std::string::npos);
+        return ftxui::string_width(line.substr(0, pos));
+    };
+
+    CHECK(column_of(tokens_line, "\xe2\x86\x91") == column_of(network_line, "\xe2\x86\x91"));
+    CHECK(column_of(tokens_line, "\xe2\x86\x93") == column_of(network_line, "\xe2\x86\x93"));
+    CHECK(column_of(tokens_line, "\xce\xa3") == column_of(network_line, "\xce\xa3"));
 }

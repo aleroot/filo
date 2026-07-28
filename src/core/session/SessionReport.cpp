@@ -176,6 +176,22 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
             << C(kGray) << kV << C(kReset) << '\n';
     };
 
+    // ── traffic row: ↑sent / ↓received / total laid out in fixed columns so
+    //    the "Tokens" and "Network" rows line up under each other ───────────
+    constexpr int kUpWidth   = 12;
+    constexpr int kDownWidth = 12;
+    auto traffic_row = [&](std::string_view label,
+                           std::string up, std::string down, std::string sum) {
+        // ↑ (\xe2\x86\x91) = data going UP to the LLM (input/sent)
+        // ↓ (\xe2\x86\x93) = data coming DOWN from the LLM (output/received)
+        // Σ (\xce\xa3)     = total (sum of ↑ and ↓)
+        std::string value =
+            pad_right("\xe2\x86\x91" + std::move(up),   kUpWidth) +
+            pad_right("\xe2\x86\x93" + std::move(down), kDownWidth) +
+            "\xce\xa3" + std::move(sum);
+        row(label, std::move(value), kReset);
+    };
+
     // ── header ──────────────────────────────────────────────────────────────
     std::cout << '\n';
     {
@@ -251,14 +267,10 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
 
     // ── Totals ───────────────────────────────────────────────────────────────
     hr(kML, kMR);
-    // ↑ (\xe2\x86\x91) = prompt tokens going UP to the LLM (input/sent)
-    // ↓ (\xe2\x86\x93) = completion tokens coming DOWN from the LLM (output/received)
-    row("Total tokens",
-        std::format("\xe2\x86\x91{}  \xe2\x86\x93{}  total {}",
-            fmt_tokens(total.prompt_tokens),
-            fmt_tokens(total.completion_tokens),
-            fmt_tokens(total.total_tokens)),
-        kReset);
+    traffic_row("Tokens",
+        fmt_tokens(total.prompt_tokens),
+        fmt_tokens(total.completion_tokens),
+        fmt_tokens(total.total_tokens));
     if (total.cached_prompt_tokens > 0) {
         row("Cached input", fmt_tokens(total.cached_prompt_tokens), kGreen);
     }
@@ -269,7 +281,10 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
         row("Reasoning", fmt_tokens(total.reasoning_tokens), kCyan);
     }
     if (!snap.network_traffic.empty()) {
-        row("Network traffic", core::net::format_network_traffic(snap.network_traffic), kReset);
+        traffic_row("Network",
+            core::net::format_bytes(snap.network_traffic.bytes_sent),
+            core::net::format_bytes(snap.network_traffic.bytes_received),
+            core::net::format_bytes(snap.network_traffic.total_bytes()));
     }
     if (cost > 0.0) {
         row("Total cost", fmt_cost(cost), kYellow);
