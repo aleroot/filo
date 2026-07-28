@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <optional>
@@ -156,6 +157,57 @@ std::string fit_column_right(std::string_view text, int width) {
         return fit_column(text, width);
     }
     return std::string(static_cast<std::size_t>(width - text_width), ' ') + std::string{text};
+}
+
+// Shorten an absolute path for display: collapse the user's home directory to
+// "~". Keeps the working-dir column readable without leaking the full path.
+std::string abbreviate_path(std::string_view path) {
+    if (path.empty()) {
+        return {};
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+        const std::string_view home_sv{home};
+        if (path.starts_with(home_sv)) {
+            return "~" + std::string{path.substr(home_sv.size())};
+        }
+    }
+    return std::string{path};
+}
+
+// Like fit_column, but truncates from the LEFT for paths: the distinguishing
+// part of a project path is its tail (the folder name), so "…/Projects/filo"
+// is far more useful than "~/Documents/Develop…".
+std::string fit_path_column(std::string_view path, int width) {
+    if (width <= 0) {
+        return {};
+    }
+    const int text_width = string_width(path);
+    if (text_width <= width) {
+        return fit_column(path, width);
+    }
+    // Walk glyphs right-to-left, keeping as many trailing glyphs as fit, then
+    // prepend an ellipsis.
+    const auto glyphs = Utf8ToGlyphs(path);
+    std::string tail;
+    int used = 1; // reserve one cell for the leading ellipsis
+    for (auto it = glyphs.rbegin(); it != glyphs.rend(); ++it) {
+        if (it->empty()) {
+            continue;
+        }
+        const int gw = string_width(*it);
+        if (used + gw > width) {
+            break;
+        }
+        tail.insert(tail.begin(), it->begin(), it->end());
+        used += gw;
+    }
+    tail.insert(tail.begin(), '\xe2'); // leading '…'
+    tail.insert(tail.begin() + 1, '\x80');
+    tail.insert(tail.begin() + 2, '\xa6');
+    if (used < width) {
+        tail += std::string(static_cast<std::size_t>(width - used), ' ');
+    }
+    return tail;
 }
 
 struct PermissionField {
@@ -1168,7 +1220,8 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
     constexpr int kIdWidth     = 8;
     constexpr int kNameWidth   = 20;
     constexpr int kTimeWidth   = 16;
-    constexpr int kModelWidth  = 28;
+    constexpr int kDirWidth    = 20; // abbreviated project working directory
+    constexpr int kModelWidth  = 24;
     constexpr int kTurnsWidth  = 5;
     constexpr int kModeWidth   = 8; // BUILD / PLAN / RESEARCH
     constexpr std::string_view kGap = "  ";
@@ -1248,6 +1301,11 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
         }
         cells.push_back(text(fit_column(ts, kTimeWidth)) | color(muted_color));
         cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(fit_path_column(
+                s.working_dir.empty() ? std::string{"\xe2\x80\x94"} : abbreviate_path(s.working_dir),
+                kDirWidth))
+                        | color(s.working_dir.empty() ? muted_color : primary_color));
+        cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_column(model_cell, kModelWidth))
                         | color(is_selected ? Color::Black : Color::GrayLight));
         cells.push_back(text(std::string{kGap}));
@@ -1286,6 +1344,8 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
         header_cells.push_back(text(std::string{kGap}));
     }
     header_cells.push_back(header_cell("LAST ACTIVE", kTimeWidth));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(header_cell("DIR", kDirWidth));
     header_cells.push_back(text(std::string{kGap}));
     header_cells.push_back(header_cell("PROVIDER/MODEL", kModelWidth));
     header_cells.push_back(text(std::string{kGap}));

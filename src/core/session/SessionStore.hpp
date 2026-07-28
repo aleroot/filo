@@ -15,6 +15,7 @@ struct SessionInfo {
     std::string           name;
     std::string           created_at;
     std::string           last_active_at;
+    std::string           working_dir; ///< project directory at session start
     std::string           provider;
     std::string           model;
     std::string           mode;

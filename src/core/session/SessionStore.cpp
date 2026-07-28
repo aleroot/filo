@@ -663,6 +663,7 @@ std::vector<SessionInfo> SessionStore::list() const {
         info.name           = d.name;
         info.created_at     = d.created_at;
         info.last_active_at = d.last_active_at;
+        info.working_dir    = d.working_dir;
         info.provider       = d.provider;
         info.model          = d.model;
         info.mode           = d.mode;
