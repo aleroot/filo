@@ -342,8 +342,8 @@ Element render_permission_diff_preview(const ToolDiffPreview& preview) {
     const std::size_t number_width = diff_line_number_width(preview);
 
     std::vector<Element> rows;
-    rows.reserve(preview.lines.size() + 1);
-    for (const auto& line : preview.lines) {
+    rows.reserve(preview.lines().size() + 1);
+    for (const auto& line : preview.lines()) {
         rows.push_back(render_permission_diff_line(line, number_width));
     }
 

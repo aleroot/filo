@@ -316,17 +316,20 @@ TEST_CASE("render_permission_prompt_panel — keeps file header visible with lon
           "[tui][picker][permission]") {
     ToolDiffPreview preview;
     preview.title = "src/tui/very/long/path/to/a_file_with_a_banner_that_should_stay_visible.cpp";
-    preview.lines.push_back({.kind = DiffLineKind::Header, .content = "--- a/src/tui/file.cpp"});
-    preview.lines.push_back({.kind = DiffLineKind::Header, .content = "+++ b/src/tui/file.cpp"});
-    preview.lines.push_back({.kind = DiffLineKind::Hunk, .content = "@@ -1,3 +1,40 @@"});
+    std::vector<DiffLinePreview> lines;
+    lines.push_back({.kind = DiffLineKind::Header, .content = "--- a/src/tui/file.cpp"});
+    lines.push_back({.kind = DiffLineKind::Header, .content = "+++ b/src/tui/file.cpp"});
+    lines.push_back({.kind = DiffLineKind::Hunk, .content = "@@ -1,3 +1,40 @@"});
     for (int i = 0; i < 40; ++i) {
-        preview.lines.push_back({
+        lines.push_back({
             .kind = DiffLineKind::Context,
             .old_line = i + 1,
             .new_line = i + 1,
             .content = "context line " + std::to_string(i),
         });
     }
+    preview.total_line_count = lines.size();
+    preview.set_lines(std::move(lines));
 
     auto panel = render_permission_prompt_panel(
         "apply_patch",

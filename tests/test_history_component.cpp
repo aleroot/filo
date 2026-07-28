@@ -527,6 +527,58 @@ TEST_CASE("HistoryComponent toggles a tool result by mouse click",
     REQUIRE_THAT(expanded, Catch::Matchers::ContainsSubstring("hidden source line"));
 }
 
+TEST_CASE("HistoryComponent reveals a long diff only after the user expands it",
+          "[tui][history_component][diff][regression]") {
+    // The diff used to be truncated when the ToolActivity was built, so the
+    // card could never grow past the preview budget no matter how it was
+    // toggled. Measured height is the honest witness: expanding must add rows.
+    std::atomic<size_t> tick{0};
+
+    std::string content;
+    for (int i = 0; i < 40; ++i) {
+        content += "payload line " + std::to_string(i) + "\\n";
+    }
+
+    std::vector<tui::UiMessage> messages;
+    auto msg = tui::make_assistant_message("", "", false);
+    auto tool = tui::make_tool_activity(
+        "write-long-click",
+        "write_file",
+        R"({"path":"generated.txt","content":")" + content + R"("})",
+        "generated.txt");
+    tui::apply_tool_result(tool, R"({"result":"Done"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    const auto collapsed = render_history_text(history);
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("▶ Write"));
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("42 diff lines"));
+    REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("payload line 39"));
+
+    const auto chevron = rendered_cell_of(collapsed, "▶ Write");
+    REQUIRE(chevron.row >= 0);
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = chevron.column;
+    mouse.y = chevron.row;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+
+    // The viewport follows the bottom of the transcript, so the tail of the
+    // now-visible diff is the proof that expanding reached past the old budget.
+    // (The header itself has scrolled off the top by now — the diff is taller
+    // than the viewport, which is precisely the point.)
+    const auto expanded = render_history_text(history);
+    CHECK_THAT(expanded, Catch::Matchers::ContainsSubstring("payload line 39"));
+}
+
 // ============================================================================
 // Render-cache regression tests
 // ============================================================================

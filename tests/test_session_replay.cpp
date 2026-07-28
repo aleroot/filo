@@ -133,3 +133,62 @@ TEST_CASE("Session replay does not render synthetic user context as prompts",
     CHECK(messages[2].type == tui::MessageType::Assistant);
     CHECK(messages[3].type == tui::MessageType::Assistant);
 }
+
+TEST_CASE("Session replay restores the diff of a past edit",
+          "[tui][session_replay][diff][regression]") {
+    // Regression: replay deliberately skipped diff construction, so resuming a
+    // session silently dropped every edit's diff — the one thing a file
+    // modification card exists to show. The diff comes from the recorded call
+    // arguments, not from disk, so it is reconstructible and stays true to what
+    // was applied at the time.
+    core::session::SessionData data;
+    data.session_id = "sess_edit";
+
+    core::llm::Message assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back(core::llm::ToolCall{
+        .id = "call_edit",
+        .function = {
+            .name = "replace",
+            .arguments = R"({"file_path":"notes.md","old_string":"alpha\nbeta",)"
+                         R"("new_string":"alpha\ngamma\ndelta"})",
+        },
+    });
+    data.messages.push_back(assistant);
+
+    core::llm::Message tool_result;
+    tool_result.role = "tool";
+    tool_result.tool_call_id = "call_edit";
+    tool_result.content = R"({"result":"Done"})";
+    data.messages.push_back(tool_result);
+
+    const auto messages = tui::build_resumed_ui_messages(data);
+    REQUIRE(messages.size() == 2);
+    REQUIRE(messages[1].tools.size() == 1);
+
+    const auto& diff = messages[1].tools[0].diff_preview;
+    REQUIRE_FALSE(diff.empty());
+    CHECK(diff.title == "notes.md");
+    CHECK(diff.deleted_count == 2);
+    CHECK(diff.added_count == 3);
+    // Short enough to open on its own, exactly as it did in the live session.
+    CHECK(tui::tool_disclosure_defaults_expanded(messages[1].tools[0]));
+}
+
+TEST_CASE("Session replay leaves non-file tools without a diff",
+          "[tui][session_replay][diff]") {
+    core::session::SessionData data;
+    data.session_id = "sess_plain";
+
+    core::llm::Message assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back(core::llm::ToolCall{
+        .id = "call_read",
+        .function = {.name = "read_file", .arguments = R"({"path":"notes.md"})"},
+    });
+    data.messages.push_back(assistant);
+
+    const auto messages = tui::build_resumed_ui_messages(data);
+    REQUIRE(messages[1].tools.size() == 1);
+    CHECK(messages[1].tools[0].diff_preview.empty());
+}

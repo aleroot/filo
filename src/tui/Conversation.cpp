@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 
 using namespace ftxui;
 
@@ -747,10 +748,10 @@ ToolResultView build_tool_result_view(const ToolActivity& tool) {
             break;
         case ToolPresentationKind::Write:
         case ToolPresentationKind::Edit:
-            for (const auto& line : tool.diff_preview.lines) {
-                view.diff_additions += line.kind == DiffLineKind::Add ? 1 : 0;
-                view.diff_deletions += line.kind == DiffLineKind::Delete ? 1 : 0;
-            }
+            // Read the totals off the model, never off what is drawn: a card
+            // showing 10 of 26 diff lines must still report the whole change.
+            view.diff_additions = tool.diff_preview.added_count;
+            view.diff_deletions = tool.diff_preview.deleted_count;
             break;
         case ToolPresentationKind::Grep:
             view.payload_parsed = parse_search_rows(payload, view.search_rows);
@@ -1195,11 +1196,23 @@ Element render_tool_header(const ToolActivity& tool,
             ftxui::text(tool.description) | ftxui::color(Color::GrayDark) | xflex);
     }
 
+    // Right-edge label. A collapsed card is the only thing standing between the
+    // reader and the change, so a diff that chose to stay closed must say how
+    // big it is — otherwise "collapsed by default" reads as "silently hidden".
+    std::vector<std::string> trailing;
     if (tool.status != ToolActivity::Status::Pending &&
         tool.status != ToolActivity::Status::Executing) {
+        trailing.push_back(tool_result_metric(tool, view));
+    }
+    if (!expanded && tool.diff_preview.total_line_count > kToolDiffAutoExpandMaxLines) {
+        trailing.push_back(std::format("{} diff lines", tool.diff_preview.total_line_count));
+    }
+    std::erase_if(trailing, [](const std::string& part) { return part.empty(); });
+
+    if (!trailing.empty()) {
         header_items.push_back(filler());
         header_items.push_back(
-            ftxui::text(tool_result_metric(tool, view))
+            ftxui::text(join_with(trailing, " · "))
             | ftxui::color(status_color)
             | dim);
     }
@@ -1309,18 +1322,26 @@ Element render_tool_result(const ToolActivity& tool,
     return content;
 }
 
-Element render_tool_diff_preview(const ToolDiffPreview& preview) {
+/// Draws a diff at the budget the current disclosure state allows.
+/// `max_lines == 0` means "draw everything the model kept".
+Element render_tool_diff_preview(const ToolDiffPreview& preview, std::size_t max_lines) {
     if (preview.empty()) {
         return emptyElement();
     }
-    
+
+    const auto& all_lines = preview.lines();
+    const std::size_t shown = max_lines == 0
+        ? all_lines.size()
+        : std::min(all_lines.size(), max_lines);
+    const std::size_t hidden = preview.total_line_count - shown;
+
     std::vector<Element> rows;
     if (!preview.title.empty()) {
         rows.push_back(ftxui::text(std::format("Diff: {}", preview.title)) | 
                       ftxui::color(ColorYellowDark) | ftxui::bold);
     }
-    
-    for (const auto& line : preview.lines) {
+
+    for (const auto& line : std::span{all_lines}.first(shown)) {
         Color line_color = Color::GrayLight;
         std::string prefix = "  ";
         
@@ -1352,10 +1373,15 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview) {
             }));
     }
     
-    if (preview.hidden_line_count > 0) {
-        rows.push_back(
-            ftxui::text(std::format("... {} more lines", preview.hidden_line_count)) | 
-            dim | ftxui::color(Color::GrayDark));
+    if (hidden > 0) {
+        // Be explicit about which kind of "more" this is: a display budget the
+        // card chose, or a change so large the model never kept the rest. The
+        // second case must not imply that another click would reveal it.
+        const std::string note = shown < all_lines.size()
+            ? std::format("... {} more lines — showing the first {} of {}",
+                          hidden, shown, preview.total_line_count)
+            : std::format("... {} more lines — diff too large to display in full", hidden);
+        rows.push_back(ftxui::text(note) | dim | ftxui::color(Color::GrayDark));
     }
     
     return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
@@ -1583,7 +1609,12 @@ Element render_tool_item(const ToolActivity& tool,
     }
 
     if (!tool.diff_preview.empty()) {
-        add_section(render_tool_diff_preview(tool.diff_preview));
+        // Expanding is an explicit request to read the change, so the diff is
+        // drawn in full; the budget only bounds how tall one card can get.
+        // Ctrl+O ("show me everything") lifts even that.
+        add_section(render_tool_diff_preview(
+            tool.diff_preview,
+            options.expand_tool_results ? 0 : options.tool_diff_expanded_max_lines));
     }
 
     if (!body.empty()) {
@@ -1784,10 +1815,7 @@ ToolActivity make_tool_activity(std::string id,
     tool.args = std::move(args);
     tool.description = std::move(description);
     if (build_diff_preview) {
-        tool.diff_preview = build_tool_diff_preview(
-            tool.name,
-            tool.args,
-            kToolDiffPreviewMaxLines);
+        tool.diff_preview = build_tool_diff_preview(tool.name, tool.args);
     }
     tool.status = ToolActivity::Status::Pending;
     return tool;
@@ -1925,8 +1953,11 @@ bool tool_disclosure_defaults_expanded(const ToolActivity& tool) {
             break;
     }
     // A pending or successful edit still shows its diff: it is the change the
-    // user is being asked to trust, not incidental output.
-    return !tool.diff_preview.empty();
+    // user is being asked to trust, not incidental output. Long diffs are the
+    // exception — auto-opening a 300-line rewrite buries every neighbouring
+    // card, so those start collapsed and advertise their size in the header.
+    return !tool.diff_preview.empty()
+        && tool.diff_preview.total_line_count <= kToolDiffAutoExpandMaxLines;
 }
 
 std::string tool_disclosure_key(const ToolActivity& tool, std::size_t index_in_message) {

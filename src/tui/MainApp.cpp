@@ -3901,9 +3901,10 @@ RunResult run(RunOptions opts) {
             // Keep full arguments so the permission panel can parse/render
             // a structured, user-friendly preview instead of truncated JSON.
             perm_state.args_preview = std::string(args);
-            perm_state.diff_preview = build_tool_diff_preview(
-                tool_name,
-                args,
+            // The overlay is a fixed-height panel, so it clamps explicitly
+            // rather than relying on the model to arrive pre-truncated.
+            perm_state.diff_preview = clamp_diff_preview(
+                build_tool_diff_preview(tool_name, args),
                 kPermissionDiffPreviewMaxLines);
             perm_state.selected     = 0;
             perm_state.remember_rule =

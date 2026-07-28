@@ -247,6 +247,10 @@ struct ConversationRenderOptions {
     std::unordered_map<std::string, bool>* system_disclosure_expanded = nullptr;
     std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
+    // Diff lines drawn in an expanded tool card (0 = every line the model kept).
+    // Collapsed cards draw no diff at all, so this is purely a ceiling on how
+    // tall one deliberately opened card may become.
+    std::size_t tool_diff_expanded_max_lines = kToolDiffExpandedMaxLines;
     // Max reasoning lines shown while streaming (0 = unlimited). The collapsed
     // finished box always shows the full text on expand.
     std::size_t reasoning_stream_preview_max_lines = kReasoningStreamPreviewMaxLines;

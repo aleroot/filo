@@ -87,13 +87,16 @@ std::size_t message_fingerprint(const UiMessage& msg) {
         add_optional_int(tool.progress_total);
         add_text(tool.progress_message);
 
+        // The diff is a pure function of (name, args), both hashed above, so
+        // its shape is enough here. Hashing every line would re-hash whole
+        // patches on each sync for no additional discrimination.
         add_text(tool.diff_preview.title);
-        add_value(tool.diff_preview.lines.size());
-        for (const auto& line : tool.diff_preview.lines) {
-            add_value(static_cast<std::size_t>(line.kind));
-            add_text(line.content);
-        }
+        add_value(tool.diff_preview.lines().size());
+        add_value(tool.diff_preview.total_line_count);
+        add_value(tool.diff_preview.added_count);
+        add_value(tool.diff_preview.deleted_count);
         add_value(tool.diff_preview.hidden_line_count);
+        add_value(static_cast<std::size_t>(tool.diff_preview.truncated_at_source));
 
         add_value(tool.subagents.size());
         for (const auto& subagent : tool.subagents) {

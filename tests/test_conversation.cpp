@@ -1047,6 +1047,216 @@ TEST_CASE("tool activity prepares its transcript diff preview",
     CHECK(tool.diff_preview.title == "notes.md");
 }
 
+namespace {
+
+/// Renders the transcript content without the scroll viewport, so that a card
+/// taller than the terminal can be asserted on in full.
+std::string render_content_text(const std::vector<UiMessage>& messages,
+                                ConversationRenderOptions options = {}) {
+    auto content = render_history_content(messages, 0, std::move(options));
+    // `extend_beyond_screen` — a deliberately expanded diff is taller than the
+    // host terminal, and clamping here would hide exactly what is under test.
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+                                        ftxui::Dimension::Fit(content, true));
+    ftxui::Render(screen, content);
+    return strip_ansi(screen.ToString());
+}
+
+/// A write_file call whose content is `line_count` numbered lines.
+ToolActivity make_write_tool(std::string id, std::size_t line_count) {
+    std::string content;
+    for (std::size_t i = 0; i < line_count; ++i) {
+        content += std::format("line {}\\n", i);
+    }
+    return make_tool_activity(
+        std::move(id),
+        "write_file",
+        std::format(R"({{"path":"big.txt","content":"{}"}})", content),
+        "big.txt");
+}
+
+} // namespace
+
+TEST_CASE("diff preview keeps every line so expanding can reveal them",
+          "[tui][conversation][tool][diff][regression]") {
+    // Regression: the preview used to be clamped in make_tool_activity, which
+    // deleted the remaining lines before any disclosure state existed. No click
+    // could bring them back and "… N more lines" was a dead end.
+    const auto tool = make_write_tool("write-long", 60);
+
+    // +2 for the "+++ b/…" header and the "@@ file content @@" hunk line.
+    CHECK(tool.diff_preview.total_line_count == 62);
+    CHECK(tool.diff_preview.lines().size() == 62);
+    CHECK(tool.diff_preview.hidden_line_count == 0);
+    CHECK_FALSE(tool.diff_preview.truncated_at_source);
+}
+
+TEST_CASE("diff stats describe the whole change, not the visible fragment",
+          "[tui][conversation][render][tool][diff][regression]") {
+    // Regression: the header counted Add/Delete lines of the *clamped* preview,
+    // so a long edit reported nonsense such as "+0 -7" for a 26-line change.
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "replace-1",
+        "replace",
+        R"({"file_path":"a.txt","old_string":"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn",)"
+        R"("new_string":"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16"})",
+        "a.txt");
+    CHECK(tool.diff_preview.deleted_count == 14);
+    CHECK(tool.diff_preview.added_count == 16);
+
+    apply_tool_result(tool, R"({"result":"Done"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    CHECK_THAT(render_panel_text(messages), ContainsSubstring("+16 -14"));
+}
+
+TEST_CASE("long diffs start collapsed and advertise their size",
+          "[tui][conversation][render][tool][diff]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_write_tool("write-long", 60);
+    apply_tool_result(tool, R"({"result":"Done"})");
+    const auto key = tool_disclosure_key(tool, 0);
+    REQUIRE_FALSE(tool_disclosure_defaults_expanded(tool));
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    // Collapsed: no diff body, but the header states what is behind the chevron.
+    const auto collapsed = render_content_text(messages);
+    CHECK_THAT(collapsed, ContainsSubstring("▶"));
+    CHECK_THAT(collapsed, ContainsSubstring("62 diff lines"));
+    CHECK(collapsed.find("line 59") == std::string::npos);
+
+    // Expanded by a click: the whole diff, including its very last line.
+    std::unordered_map<std::string, bool> disclosure_state;
+    disclosure_state[key] = true;
+    ConversationRenderOptions clicked_open;
+    clicked_open.system_disclosure_expanded = &disclosure_state;
+
+    const auto expanded = render_content_text(messages, clicked_open);
+    CHECK_THAT(expanded, ContainsSubstring("▼"));
+    CHECK_THAT(expanded, ContainsSubstring("line 0"));
+    CHECK_THAT(expanded, ContainsSubstring("line 59"));
+    CHECK(expanded.find("more lines") == std::string::npos);
+}
+
+TEST_CASE("short diffs still open on their own",
+          "[tui][conversation][render][tool][diff]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_write_tool("write-short", 4);
+    apply_tool_result(tool, R"({"result":"Done"})");
+    REQUIRE(tool_disclosure_defaults_expanded(tool));
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto rendered = render_content_text(messages);
+    CHECK_THAT(rendered, ContainsSubstring("line 3"));
+    CHECK(rendered.find("diff lines") == std::string::npos);
+}
+
+TEST_CASE("a diff beyond the model ceiling is cut once and says so",
+          "[tui][conversation][render][tool][diff]") {
+    // The only truncation the user cannot undo. It must be reported as such,
+    // never as something another click would reveal.
+    const std::size_t over_ceiling = kToolDiffModelMaxLines + 50;
+    auto tool = make_write_tool("write-ceiling", over_ceiling);
+    apply_tool_result(tool, R"({"result":"Done"})");
+
+    // +2 for the file header and hunk marker.
+    CHECK(tool.diff_preview.total_line_count == over_ceiling + 2);
+    CHECK(tool.diff_preview.added_count == over_ceiling);
+    CHECK(tool.diff_preview.lines().size() == kToolDiffModelMaxLines);
+    CHECK(tool.diff_preview.truncated_at_source);
+    // Too long to open unprompted.
+    CHECK_FALSE(tool_disclosure_defaults_expanded(tool));
+
+    const auto key = tool_disclosure_key(tool, 0);
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    std::unordered_map<std::string, bool> disclosure_state;
+    disclosure_state[key] = true;
+    ConversationRenderOptions options;
+    options.system_disclosure_expanded = &disclosure_state;
+    // Ctrl+O lifts the render budget, so the ceiling is the only limit left.
+    options.expand_tool_results = true;
+
+    CHECK_THAT(render_content_text(messages, options),
+               ContainsSubstring("diff too large to display in full"));
+}
+
+TEST_CASE("clamp_diff_preview reports hidden lines against the true total",
+          "[tui][conversation][tool][diff]") {
+    const auto full = make_write_tool("clamp-src", 30).diff_preview;
+    REQUIRE(full.total_line_count == 32);
+
+    const auto clamped = clamp_diff_preview(full, 10);
+    CHECK(clamped.lines().size() == 10);
+    CHECK(clamped.hidden_line_count == 22);
+    // Stats survive clamping — they describe the change, not the view.
+    CHECK(clamped.added_count == full.added_count);
+    CHECK(clamped.total_line_count == full.total_line_count);
+
+    // A no-op clamp must not invent hidden lines...
+    const auto unclamped = clamp_diff_preview(full, 0);
+    CHECK(unclamped.lines().size() == full.lines().size());
+    CHECK(unclamped.hidden_line_count == 0);
+
+    // ...and clamping twice narrows rather than compounds.
+    const auto twice = clamp_diff_preview(clamped, 4);
+    CHECK(twice.lines().size() == 4);
+    CHECK(twice.hidden_line_count == 28);
+}
+
+TEST_CASE("a tool without a diff is unaffected by the diff budget",
+          "[tui][conversation][render][tool][diff]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity("read-nodiff", "read_file", R"({"path":"a"})", "a");
+    apply_tool_result(tool, R"({"content":"only line\n"})");
+    CHECK(tool.diff_preview.empty());
+    CHECK(tool.diff_preview.total_line_count == 0);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto rendered = render_content_text(
+        messages, ConversationRenderOptions{.expand_tool_results = true});
+    CHECK_THAT(rendered, ContainsSubstring("only line"));
+    CHECK(rendered.find("diff lines") == std::string::npos);
+    CHECK(rendered.find("more lines") == std::string::npos);
+}
+
+TEST_CASE("an expanded diff past the render budget says how much it shows",
+          "[tui][conversation][render][tool][diff]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_write_tool("write-huge", 40);
+    apply_tool_result(tool, R"({"result":"Done"})");
+    const auto key = tool_disclosure_key(tool, 0);
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    std::unordered_map<std::string, bool> disclosure_state;
+    disclosure_state[key] = true;
+    ConversationRenderOptions options;
+    options.system_disclosure_expanded = &disclosure_state;
+    options.tool_diff_expanded_max_lines = 10;
+
+    const auto rendered = render_content_text(messages, options);
+    CHECK_THAT(rendered, ContainsSubstring("showing the first 10 of 42"));
+    CHECK(rendered.find("line 39") == std::string::npos);
+
+    // Ctrl+O means "everything you have", budget included.
+    options.expand_tool_results = true;
+    CHECK_THAT(render_content_text(messages, options), ContainsSubstring("line 39"));
+}
+
 TEST_CASE("render — active reasoning stays collapsed by default",
           "[tui][conversation][render][reasoning]") {
     std::vector<UiMessage> messages;

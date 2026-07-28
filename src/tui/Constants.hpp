@@ -31,8 +31,21 @@ inline constexpr std::size_t kPermissionArgsPreviewMaxLen = 300;
 /// to the tool-call activity in the conversation history.
 inline constexpr std::size_t kToolPreviewMaxLen = 88;
 
-/// Maximum number of diff lines rendered in the conversation tool activity.
-inline constexpr std::size_t kToolDiffPreviewMaxLines = 10;
+/// Longest diff a tool card still opens on its own. A change that fits here is
+/// worth showing without a click; anything longer would bury the transcript, so
+/// the card starts collapsed and advertises its size in the header instead.
+inline constexpr std::size_t kToolDiffAutoExpandMaxLines = 12;
+
+/// Diff lines drawn once the user expands a tool card. Deliberately generous —
+/// expanding is an explicit request to read the change — while still bounding
+/// the height a single card can add to the transcript.
+inline constexpr std::size_t kToolDiffExpandedMaxLines = 400;
+
+/// Hard ceiling on the diff lines the UI model keeps for one tool call. Beyond
+/// this the remainder is dropped at build time and the card says so: no amount
+/// of expanding can reveal it. Generated files are the only realistic way to
+/// reach this limit.
+inline constexpr std::size_t kToolDiffModelMaxLines = 2000;
 
 /// Maximum number of tool-result lines shown inline in conversation cards.
 /// Additional lines are collapsed to keep long transcripts scrollable.

@@ -1,5 +1,6 @@
 #include "DiffPreview.hpp"
 
+#include "Constants.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -7,8 +8,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace tui {
 namespace {
@@ -251,18 +254,36 @@ std::vector<DiffLinePreview> parse_patch_lines(std::string_view patch) {
     return lines;
 }
 
-void clamp_preview_lines(ToolDiffPreview& preview, std::size_t max_lines) {
-    if (max_lines == 0 || preview.lines.size() <= max_lines) {
-        preview.hidden_line_count = 0;
-        return;
+/// A built diff before it becomes a `ToolDiffPreview`.
+struct DiffBuildResult {
+    std::string                  title;
+    std::vector<DiffLinePreview> lines;
+};
+
+/// Turns a built diff into the immutable model object: records the true totals,
+/// then applies the model-level ceiling. Counts are taken *before* the ceiling
+/// so a pathological change still reports its real size in the header even
+/// though the transcript refuses to carry every line of it.
+ToolDiffPreview finish_preview(DiffBuildResult built) {
+    ToolDiffPreview preview;
+    preview.title = std::move(built.title);
+    preview.total_line_count = built.lines.size();
+    for (const auto& line : built.lines) {
+        preview.added_count += line.kind == DiffLineKind::Add ? 1 : 0;
+        preview.deleted_count += line.kind == DiffLineKind::Delete ? 1 : 0;
     }
 
-    preview.hidden_line_count = preview.lines.size() - max_lines;
-    preview.lines.resize(max_lines);
+    if (kToolDiffModelMaxLines != 0 && built.lines.size() > kToolDiffModelMaxLines) {
+        built.lines.resize(kToolDiffModelMaxLines);
+        preview.truncated_at_source = true;
+    }
+
+    preview.set_lines(std::move(built.lines));
+    return preview;
 }
 
-ToolDiffPreview build_replace_preview(const simdjson::dom::object& object) {
-    ToolDiffPreview preview;
+DiffBuildResult build_replace_preview(const simdjson::dom::object& object) {
+    DiffBuildResult preview;
 
     const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"});
     const auto old_string = core::utils::json::first_string_field(object, {"old_string"});
@@ -305,8 +326,8 @@ ToolDiffPreview build_replace_preview(const simdjson::dom::object& object) {
     return preview;
 }
 
-ToolDiffPreview build_write_file_preview(const simdjson::dom::object& object) {
-    ToolDiffPreview preview;
+DiffBuildResult build_write_file_preview(const simdjson::dom::object& object) {
+    DiffBuildResult preview;
 
     const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"});
     const auto content = core::utils::json::first_string_field(object, {"content"});
@@ -337,55 +358,81 @@ ToolDiffPreview build_write_file_preview(const simdjson::dom::object& object) {
 
 } // namespace
 
+const std::vector<DiffLinePreview>& ToolDiffPreview::lines() const noexcept {
+    static const std::vector<DiffLinePreview> kEmpty;
+    return lines_ ? *lines_ : kEmpty;
+}
+
+void ToolDiffPreview::set_lines(std::vector<DiffLinePreview> value) {
+    lines_ = std::make_shared<const std::vector<DiffLinePreview>>(std::move(value));
+}
+
 ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
-                                        std::string_view tool_args_json,
-                                        std::size_t max_lines) {
-    ToolDiffPreview preview;
+                                        std::string_view tool_args_json) {
     if (tool_args_json.empty()) {
-        return preview;
+        return {};
     }
 
     simdjson::dom::parser parser;
     simdjson::dom::element document;
     if (parser.parse(tool_args_json).get(document) != simdjson::SUCCESS) {
-        return preview;
+        return {};
     }
 
     simdjson::dom::object object;
     if (document.get(object) != simdjson::SUCCESS) {
-        return preview;
+        return {};
     }
 
     if (tool_name == core::tools::names::kApplyPatch) {
         const auto patch = core::utils::json::first_string_field(object, {"patch"});
         if (!patch || patch->empty()) {
-            return preview;
+            return {};
         }
-
-        preview.title = first_non_empty_path_from_patch(*patch);
-        preview.lines = parse_patch_lines(*patch);
-        clamp_preview_lines(preview, max_lines);
-        return preview;
+        return finish_preview({
+            .title = first_non_empty_path_from_patch(*patch),
+            .lines = parse_patch_lines(*patch),
+        });
     }
 
     if (core::tools::names::is_replace_tool(tool_name)) {
-        preview = build_replace_preview(object);
-        clamp_preview_lines(preview, max_lines);
-        return preview;
+        return finish_preview(build_replace_preview(object));
     }
 
     if (tool_name == core::tools::names::kWriteFile) {
-        preview = build_write_file_preview(object);
-        clamp_preview_lines(preview, max_lines);
+        return finish_preview(build_write_file_preview(object));
+    }
+
+    return {};
+}
+
+ToolDiffPreview clamp_diff_preview(const ToolDiffPreview& preview, std::size_t max_lines) {
+    const auto& lines = preview.lines();
+    const std::size_t shown = max_lines == 0
+        ? lines.size()
+        : std::min(lines.size(), max_lines);
+
+    // Measured against the true total, not against what survived the model
+    // ceiling: a diff that was already cut at build time still owes the reader
+    // an honest count, even when this clamp itself drops nothing.
+    const std::size_t hidden = preview.total_line_count - shown;
+    if (hidden == preview.hidden_line_count && shown == lines.size()) {
         return preview;
     }
 
-    return preview;
+    ToolDiffPreview clamped = preview;
+    clamped.hidden_line_count = hidden;
+    if (shown < lines.size()) {
+        clamped.set_lines(
+            std::vector<DiffLinePreview>(lines.begin(),
+                                         lines.begin() + static_cast<std::ptrdiff_t>(shown)));
+    }
+    return clamped;
 }
 
 std::size_t diff_line_number_width(const ToolDiffPreview& preview) {
     int max_line = 0;
-    for (const auto& line : preview.lines) {
+    for (const auto& line : preview.lines()) {
         if (line.old_line) {
             max_line = std::max(max_line, *line.old_line);
         }
