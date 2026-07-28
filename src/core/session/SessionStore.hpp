@@ -78,6 +78,27 @@ public:
     /// Current UTC time formatted as ISO 8601.
     [[nodiscard]] static std::string now_iso8601();
 
+    /// Normalize a working-directory string into a canonical absolute path so
+    /// that two logically-identical directories compare equal regardless of
+    /// relative form, trailing separators, or symlinks. Falls back to a lexical
+    /// normalization when the filesystem resolution fails (e.g. a deleted dir).
+    /// An empty @p dir yields an empty path.
+    [[nodiscard]] static std::filesystem::path canonicalize_working_dir(std::string_view dir);
+
+    /// True when @p a and @p b resolve to the same project directory. Returns
+    /// true when either side is empty (the working dir is unknown, e.g. for a
+    /// legacy session written before working_dir was tracked) so callers never
+    /// raise a spurious mismatch warning.
+    [[nodiscard]] static bool working_dirs_match(std::string_view a, std::string_view b);
+
+    /// Returns a human-readable warning when a resumed session's working
+    /// directory differs from the process's current directory, or std::nullopt
+    /// when they agree (or are unknown). Centralizes the message so every
+    /// resume entry point (TUI startup, /resume, session picker, prompter)
+    /// stays in sync — one place to change the wording.
+    [[nodiscard]] static std::optional<std::string>
+    working_dir_mismatch_notice(std::string_view session_dir, std::string_view current_dir);
+
     /// XDG-aware default session storage directory.
     [[nodiscard]] static std::filesystem::path default_sessions_dir();
 

@@ -10,6 +10,7 @@
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/string.hpp>
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -108,6 +109,53 @@ std::string extract_patch_target(std::string_view patch) {
     }
 
     return "patch";
+}
+
+// --- Column layout helpers -------------------------------------------------
+// Terminal columns only line up when every cell occupies the same number of
+// display cells. std::format's width specifier counts bytes, which breaks on
+// UTF-8 and on strings that need truncating, so pad/trim by display width.
+
+std::string fit_column(std::string_view text, int width) {
+    if (width <= 0) {
+        return {};
+    }
+
+    const int text_width = string_width(text);
+    if (text_width == width) {
+        return std::string{text};
+    }
+    if (text_width < width) {
+        return std::string{text} + std::string(static_cast<std::size_t>(width - text_width), ' ');
+    }
+
+    std::string out;
+    int used = 0;
+    for (const auto& glyph : Utf8ToGlyphs(text)) {
+        if (glyph.empty()) {
+            continue;
+        }
+        const int glyph_width = string_width(glyph);
+        if (used + glyph_width > width - 1) {
+            break;
+        }
+        out += glyph;
+        used += glyph_width;
+    }
+    out += "\xe2\x80\xa6"; // ellipsis
+    used += 1;
+    if (used < width) {
+        out += std::string(static_cast<std::size_t>(width - used), ' ');
+    }
+    return out;
+}
+
+std::string fit_column_right(std::string_view text, int width) {
+    const int text_width = string_width(text);
+    if (text_width >= width) {
+        return fit_column(text, width);
+    }
+    return std::string(static_cast<std::size_t>(width - text_width), ' ') + std::string{text};
 }
 
 struct PermissionField {
@@ -1113,72 +1161,153 @@ Element render_local_model_picker_panel(std::string_view current_dir,
 }
 
 Element render_session_picker_panel(const std::vector<core::session::SessionInfo>& sessions,
-                                           int selected_index) {
+                                    int selected_index) {
+    // Fixed display-width columns keep every row lined up regardless of how
+    // long individual ids, names, provider or model strings are.
+    constexpr int kMarkerWidth = 3;
+    constexpr int kIdWidth     = 8;
+    constexpr int kNameWidth   = 20;
+    constexpr int kTimeWidth   = 16;
+    constexpr int kModelWidth  = 28;
+    constexpr int kTurnsWidth  = 5;
+    constexpr int kModeWidth   = 8; // BUILD / PLAN / RESEARCH
+    constexpr std::string_view kGap = "  ";
+
+    const auto header_cell = [](std::string_view label, int width, bool right = false) {
+        return text(right ? fit_column_right(label, width) : fit_column(label, width))
+               | color(Color::GrayDark);
+    };
+
     if (sessions.empty()) {
         return vbox({
             hbox({
                 text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
                 filler(),
+                text("Esc: close") | color(Color::GrayDark),
             }),
             separator(),
-            text("  No saved sessions found.") | dim,
+            text("  No saved sessions yet.") | color(Color::White),
+            text("  Sessions are stored automatically once a conversation starts.") | dim,
             filler(),
         }) | UiBorder(ColorYellowBright)
            | size(HEIGHT, EQUAL, 10);
     }
 
+    const int total = static_cast<int>(sessions.size());
+    const int selected = std::clamp(selected_index, 0, total - 1);
+
     const int max_visible = 8;
-    const int start_idx = std::max(0, std::min(selected_index - max_visible / 2, 
-                                              static_cast<int>(sessions.size()) - max_visible));
-    const int end_idx = std::min(start_idx + max_visible, static_cast<int>(sessions.size()));
+    const int start_idx = std::max(0, std::min(selected - max_visible / 2,
+                                               total - max_visible));
+    const int end_idx = std::min(start_idx + max_visible, total);
+
+    const bool show_names = std::any_of(
+        sessions.begin(), sessions.end(),
+        [](const core::session::SessionInfo& s) { return !s.name.empty(); });
 
     Elements visible_rows;
+    visible_rows.reserve(static_cast<std::size_t>(end_idx - start_idx) + 2);
+
     for (int i = start_idx; i < end_idx; ++i) {
         const auto& s = sessions[static_cast<std::size_t>(i)];
-        bool is_selected = (i == selected_index);
+        const bool is_selected = (i == selected);
 
         std::string ts = s.last_active_at.empty() ? s.created_at : s.last_active_at;
-        if (ts.size() >= 16 && ts[10] == 'T') ts[10] = ' ';
-        ts = ts.substr(0, 16);
-
-        auto row = hbox({
-            text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
-            text(std::format(" {} ", s.session_id)) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
-            text(s.name.empty() ? std::string{} : std::format(" {} ", s.name))
-                | ftxui::bold | color(is_selected ? Color::White : Color::GrayLight),
-            text(std::format(" {}  ", ts)) | color(is_selected ? Color::White : Color::GrayDark),
-            text(std::format("{}/{:18} ", s.provider, s.model)) | color(is_selected ? Color::White : Color::GrayLight),
-            text(std::format(" {:3d} turns ", s.turn_count)) | color(is_selected ? Color::White : Color::GrayDark),
-            text(std::format(" [{}] ", s.mode)) | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::GrayDark}),
-            filler(),
-        });
-
-        if (is_selected) {
-            row = row | bgcolor(Color::GrayDark);
+        if (ts.size() > 10 && ts[10] == 'T') {
+            ts[10] = ' ';
         }
-        visible_rows.push_back(row);
+        if (ts.size() > static_cast<std::size_t>(kTimeWidth)) {
+            ts.resize(static_cast<std::size_t>(kTimeWidth));
+        }
+
+        std::string model_cell = s.provider.empty()
+            ? s.model
+            : std::format("{}/{}", s.provider, s.model);
+
+        std::string mode = s.mode;
+        std::transform(mode.begin(), mode.end(), mode.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+
+        const Color id_color      = is_selected ? Color{Color::Black} : static_cast<Color>(ColorYellowBright);
+        const Color primary_color = is_selected ? Color::Black : Color::White;
+        const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;
+        const Color mode_color = is_selected
+            ? Color{Color::Black}
+            : (mode == "BUILD" ? static_cast<Color>(ColorYellowDark)
+                               : static_cast<Color>(ColorQuestionCyan));
+
+        Elements cells;
+        cells.push_back(text(is_selected ? " \xe2\x96\xb6 " : "   ")
+                        | color(is_selected ? Color{Color::Black} : Color{Color::GrayDark}));
+        cells.push_back(text(fit_column(s.session_id, kIdWidth)) | ftxui::bold | color(id_color));
+        cells.push_back(text(std::string{kGap}));
+        if (show_names) {
+            cells.push_back(text(fit_column(s.name.empty() ? "\xe2\x80\x94" : s.name, kNameWidth))
+                            | color(s.name.empty() ? muted_color : primary_color));
+            cells.push_back(text(std::string{kGap}));
+        }
+        cells.push_back(text(fit_column(ts, kTimeWidth)) | color(muted_color));
+        cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(fit_column(model_cell, kModelWidth))
+                        | color(is_selected ? Color::Black : Color::GrayLight));
+        cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(fit_column_right(std::to_string(s.turn_count), kTurnsWidth))
+                        | color(muted_color));
+        cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(fit_column(mode, kModeWidth)) | color(mode_color));
+        cells.push_back(filler());
+
+        auto row = hbox(std::move(cells));
+        if (is_selected) {
+            row = row | bgcolor(ColorYellowDark);
+        }
+        visible_rows.push_back(std::move(row));
     }
 
     if (start_idx > 0) {
-        visible_rows.insert(visible_rows.begin(), 
-            hbox({text(" \xe2\x86\x91 ") | color(ColorYellowDark), text("more above") | dim}));
+        visible_rows.insert(visible_rows.begin(), hbox({
+            text(" \xe2\x86\x91 ") | color(ColorYellowDark),
+            text(std::format("{} more above", start_idx)) | color(Color::GrayDark) | dim,
+        }));
     }
-    if (end_idx < static_cast<int>(sessions.size())) {
-        visible_rows.push_back(
-            hbox({text(" \xe2\x86\x93 ") | color(ColorYellowDark), text("more below") | dim}));
+    if (end_idx < total) {
+        visible_rows.push_back(hbox({
+            text(" \xe2\x86\x93 ") | color(ColorYellowDark),
+            text(std::format("{} more below", total - end_idx)) | color(Color::GrayDark) | dim,
+        }));
     }
+
+    Elements header_cells;
+    header_cells.push_back(text(std::string(static_cast<std::size_t>(kMarkerWidth), ' ')));
+    header_cells.push_back(header_cell("ID", kIdWidth));
+    header_cells.push_back(text(std::string{kGap}));
+    if (show_names) {
+        header_cells.push_back(header_cell("NAME", kNameWidth));
+        header_cells.push_back(text(std::string{kGap}));
+    }
+    header_cells.push_back(header_cell("LAST ACTIVE", kTimeWidth));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(header_cell("PROVIDER/MODEL", kModelWidth));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(header_cell("TURNS", kTurnsWidth, /*right=*/true));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(header_cell("MODE", kModeWidth));
+    header_cells.push_back(filler());
 
     return vbox({
         hbox({
             text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(std::format("  {} of {}", selected + 1, total)) | color(Color::GrayLight),
             filler(),
-            text("\xe2\x86\x91\xe2\x86\x93  Enter: resume  Backspace/Del: delete  Esc: close") | color(Color::GrayDark)
+            text("\xe2\x86\x91\xe2\x86\x93 navigate  \xc2\xb7  Enter resume  \xc2\xb7  Del delete  \xc2\xb7  Esc close")
+                | color(Color::GrayDark),
         }),
         separator(),
+        hbox(std::move(header_cells)) | dim,
         vbox(std::move(visible_rows)),
         filler(),
     }) | UiBorder(ColorYellowBright)
-      | size(HEIGHT, GREATER_THAN, 12);
+      | size(HEIGHT, GREATER_THAN, 13);
 }
 
 Element render_review_picker_panel(ReviewPickerMode mode,

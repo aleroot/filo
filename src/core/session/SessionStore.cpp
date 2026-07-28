@@ -63,6 +63,49 @@ std::filesystem::path SessionStore::default_sessions_dir() {
     return std::filesystem::temp_directory_path() / "filo" / "sessions";
 }
 
+std::filesystem::path SessionStore::canonicalize_working_dir(std::string_view dir) {
+    if (dir.empty()) {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::path resolved{dir};
+    if (!resolved.is_absolute()) {
+        resolved = std::filesystem::absolute(resolved, ec);
+    }
+    resolved = std::filesystem::weakly_canonical(resolved, ec);
+    if (ec) {
+        // The path may no longer exist (e.g. a deleted project). Fall back to a
+        // purely lexical normalization so such sessions are still comparable.
+        resolved = std::filesystem::path{dir}.lexically_normal();
+    }
+    return resolved;
+}
+
+bool SessionStore::working_dirs_match(std::string_view a, std::string_view b) {
+    // An unknown directory on either side can't be compared — treat it as a
+    // match so legacy sessions (pre-dating working_dir) never trigger a warning.
+    if (a.empty() || b.empty()) {
+        return true;
+    }
+    return canonicalize_working_dir(a) == canonicalize_working_dir(b);
+}
+
+std::optional<std::string>
+SessionStore::working_dir_mismatch_notice(std::string_view session_dir,
+                                          std::string_view current_dir) {
+    if (working_dirs_match(session_dir, current_dir)) {
+        return std::nullopt;
+    }
+    return std::format(
+        "Resuming a session from a different project directory:\n"
+        "  session dir : {}\n"
+        "  current dir : {}\n"
+        "Tools will operate in the current directory. To resume within the "
+        "original project, run filo from there; for an auto-scoped resume use "
+        "`filo -c`.",
+        session_dir, current_dir);
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -682,32 +725,15 @@ std::optional<SessionData> SessionStore::load_most_recent_for_project(
     std::string_view working_dir) const {
     if (working_dir.empty()) return std::nullopt;
 
-    // Normalize the requested path so that symlinks, trailing separators, and
-    // relative paths don't cause spurious mismatches against stored sessions.
-    std::error_code ec;
-    std::filesystem::path target = std::filesystem::path(working_dir);
-    if (!target.is_absolute()) {
-        target = std::filesystem::absolute(target, ec);
-    }
-    target = std::filesystem::weakly_canonical(target, ec);
-    if (ec) {
-        target = std::filesystem::path(working_dir).lexically_normal();
-    }
+    // Normalize the requested path once so that symlinks, trailing separators,
+    // and relative paths don't cause spurious mismatches against stored sessions.
+    const std::filesystem::path target = canonicalize_working_dir(working_dir);
 
     for (const auto& info : list()) {   // sorted most-recent first
         auto data_opt = load_by_id(info.session_id);
         if (!data_opt.has_value()) continue;
 
-        std::filesystem::path stored = std::filesystem::path(data_opt->working_dir);
-        if (!stored.is_absolute()) {
-            stored = std::filesystem::absolute(stored, ec);
-        }
-        stored = std::filesystem::weakly_canonical(stored, ec);
-        if (ec) {
-            stored = std::filesystem::path(data_opt->working_dir).lexically_normal();
-        }
-
-        if (stored == target) {
+        if (canonicalize_working_dir(data_opt->working_dir) == target) {
             return data_opt;
         }
     }

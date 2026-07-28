@@ -704,6 +704,19 @@ RunDiagnostics run_for_test(const RunOptions& options,
             err << "Prompter mode: " << resume_error << "\n";
             return diagnostics;
         }
+
+        // Warn (non-fatal) when --resume pulls in a session from another
+        // project directory. --continue can't mismatch (it is already scoped
+        // to the current dir), but checking unconditionally keeps this DRY
+        // with the TUI: working_dir_mismatch_notice returns nullopt on a match.
+        if (resumed_session.has_value()) {
+            if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
+                    resumed_session->working_dir,
+                    std::filesystem::current_path().string());
+                notice.has_value()) {
+                err << *notice << "\n";
+            }
+        }
     }
 
     if (resumed_session.has_value()) {

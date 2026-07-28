@@ -1408,6 +1408,16 @@ RunResult run(RunOptions opts) {
         ui_messages = build_resumed_ui_messages(
             data,
             SessionReplayOptions{.include_continue_hint = true});
+
+        // Warn when a resumed session originated in a different project than
+        // the current directory: the agent's history references the old paths
+        // but tools will act on the current directory. This is almost never
+        // intended, so surface it prominently instead of resuming silently.
+        if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
+                data.working_dir, std::filesystem::current_path().string());
+            notice.has_value()) {
+            append_ui_message(ui_messages, make_warning_message(std::move(*notice)));
+        }
     } else if (!missing_session_label.empty()) {
         // --resume pointed at something that doesn't exist — warn the user.
         append_ui_message(ui_messages, make_warning_message(
@@ -1950,6 +1960,14 @@ RunResult run(RunOptions opts) {
             session_file_path = session_store->compute_path(data).string();
 
             ui_messages = build_resumed_ui_messages(data);
+
+            // Same cross-project guard as the startup --resume path: warn when
+            // the resumed session belongs to a different directory.
+            if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
+                    data.working_dir, std::filesystem::current_path().string());
+                notice.has_value()) {
+                append_ui_message(ui_messages, make_warning_message(std::move(*notice)));
+            }
             
             // Re-sync TUI status labels to the resumed session's provider/model
             manual_provider_name = data.provider;

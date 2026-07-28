@@ -696,6 +696,83 @@ TEST_CASE("SessionStore::load_most_recent_for_project scopes to working_dir",
 }
 
 // ---------------------------------------------------------------------------
+// Working-directory comparison helpers (DRY foundation for cross-project
+// resume warnings across TUI + prompter).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SessionStore::canonicalize_working_dir normalizes paths",
+          "[session][store][working_dir]") {
+    using core::session::SessionStore;
+    const auto cwd = std::filesystem::current_path();
+
+    // Empty in, empty out.
+    CHECK(SessionStore::canonicalize_working_dir("").empty());
+
+    // Relative "." resolves to the current working directory.
+    CHECK(SessionStore::canonicalize_working_dir(".") == cwd);
+
+    // Trailing separators and redundant dots collapse to the same path.
+    CHECK(SessionStore::canonicalize_working_dir((cwd / ".").string()) == cwd);
+
+    // A nonexistent absolute path still normalizes lexically (no throw).
+    const auto ghost = SessionStore::canonicalize_working_dir("/no/such/filo/dir");
+    CHECK(ghost.is_absolute());
+}
+
+TEST_CASE("SessionStore::working_dirs_match semantics",
+          "[session][store][working_dir]") {
+    using core::session::SessionStore;
+    const auto cwd = std::filesystem::current_path().string();
+
+    SECTION("identical directories match") {
+        CHECK(SessionStore::working_dirs_match(cwd, cwd));
+    }
+
+    SECTION("equivalent spellings match") {
+        CHECK(SessionStore::working_dirs_match(cwd + "/", cwd));
+        CHECK(SessionStore::working_dirs_match(".", cwd));
+        CHECK(SessionStore::working_dirs_match((cwd + "/./"), "."));
+    }
+
+    SECTION("different directories do not match") {
+        CHECK_FALSE(SessionStore::working_dirs_match("/aaa/bbb", "/ccc/ddd"));
+        CHECK_FALSE(SessionStore::working_dirs_match(cwd, "/completely/different/path"));
+    }
+
+    SECTION("empty sides are treated as unknown, never a mismatch") {
+        CHECK(SessionStore::working_dirs_match("", cwd));   // legacy session
+        CHECK(SessionStore::working_dirs_match(cwd, ""));
+        CHECK(SessionStore::working_dirs_match("", ""));
+    }
+}
+
+TEST_CASE("SessionStore::working_dir_mismatch_notice",
+          "[session][store][working_dir]") {
+    using core::session::SessionStore;
+    using Catch::Matchers::ContainsSubstring;
+
+    const auto cwd = std::filesystem::current_path().string();
+
+    SECTION("returns nullopt on a match") {
+        CHECK_FALSE(SessionStore::working_dir_mismatch_notice(cwd, cwd).has_value());
+    }
+
+    SECTION("returns nullopt when either side is unknown") {
+        CHECK_FALSE(SessionStore::working_dir_mismatch_notice("", cwd).has_value());
+        CHECK_FALSE(SessionStore::working_dir_mismatch_notice(cwd, "").has_value());
+    }
+
+    SECTION("returns a descriptive notice on mismatch") {
+        const auto notice =
+            SessionStore::working_dir_mismatch_notice("/home/me/projectA", cwd);
+        REQUIRE(notice.has_value());
+        CHECK_THAT(*notice, ContainsSubstring("different project directory"));
+        CHECK_THAT(*notice, ContainsSubstring("/home/me/projectA"));
+        CHECK_THAT(*notice, ContainsSubstring(cwd));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SessionStore::remove
 // ---------------------------------------------------------------------------
 
