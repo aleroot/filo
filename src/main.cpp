@@ -516,6 +516,7 @@ int main(int argc, char** argv) {
             .runtime_root = landrun_settings.runtime_root(),
             .host_tmpdir = landrun_settings.host_tmpdir(),
         };
+        run_opts.remote_mcp_server_enabled = mcp_tcp_mode;
         if (model_opt->count() > 0) {
             run_opts.startup_model = startup_model;
         }

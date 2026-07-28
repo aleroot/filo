@@ -17,6 +17,7 @@
 #include "QuestionDialogController.hpp"
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
+#include "RemoteActivityPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/commands/GoalExecutor.hpp"
@@ -74,6 +75,7 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/mcp/McpConnectionManager.hpp"
+#include "core/mcp/RemoteActivity.hpp"
 #include "core/context/ContextMentions.hpp"
 #include "core/context/SteeringLoader.hpp"
 #include "core/commands/CommandExecutor.hpp"
@@ -846,6 +848,12 @@ RunResult run(RunOptions opts) {
         std::vector<std::string> lines;
     };
     StderrPanelState stderr_panel_state;
+    struct RemoteActivityPanelState {
+        bool active = false;
+        std::size_t selected = 0;
+    };
+    RemoteActivityPanelState remote_activity_panel_state;
+    Box remote_activity_pill_box{0, -1, 0, -1};
     SelectionClipboardCopier selection_clipboard_copier;
     auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
@@ -881,6 +889,8 @@ RunResult run(RunOptions opts) {
             screen.PostEvent(Event::Custom);
         }
     };
+    auto& remote_activity_hub =
+        core::mcp::RemoteActivityHub::get_instance();
     // Owns the whole prompt-editor lifecycle: scratch buffer, backend
     // selection, worker thread and cancellation.
     editor::ExternalEditorController external_editor({
@@ -914,6 +924,15 @@ RunResult run(RunOptions opts) {
     std::atomic<std::size_t> animation_tick = 0;
     std::mutex animation_mutex;
     std::condition_variable animation_cv;
+    if (opts.remote_mcp_server_enabled) {
+        // Invoked from daemon threads. Capturing run()-local state by reference
+        // is safe only because detaching the callback below is a barrier that
+        // waits for in-flight invocations; the daemon itself outlives run().
+        remote_activity_hub.set_notify_callback([&wake_ui, &animation_cv]() {
+            wake_ui();
+            animation_cv.notify_one();
+        });
+    }
     std::function<void()> reset_history_view = [] {};
     core::commands::CommandExecutor cmd_executor;
     // Load layered prompt skills (global → project-local) before describe_commands()
@@ -943,7 +962,15 @@ RunResult run(RunOptions opts) {
             }
             wake_ui();
         });
-    const auto command_index = cmd_executor.describe_commands();
+    auto command_index = cmd_executor.describe_commands();
+    if (opts.remote_mcp_server_enabled) {
+        command_index.push_back(core::commands::CommandDescriptor{
+            .name = "/remote",
+            .description = "Open inbound MCP client and tool activity.",
+            .accepts_arguments = false,
+        });
+        std::ranges::sort(command_index, {}, &core::commands::CommandDescriptor::name);
+    }
 
     // ── Picker state (shared structure for mention and command pickers) ───────
     // See tui/PickerState.hpp for the struct definition.
@@ -1522,10 +1549,28 @@ RunResult run(RunOptions opts) {
     auto animation_cadence = [&]() -> std::optional<AnimationCadence> {
         const bool assistant_active =
             assistant_turn_active.load(std::memory_order_relaxed);
+        bool remote_activity_active = false;
+        bool remote_completion_fresh = false;
+        if (opts.remote_mcp_server_enabled) {
+            const auto remote_snapshot = remote_activity_hub.snapshot(false);
+            remote_activity_active = std::ranges::any_of(
+                remote_snapshot.activities,
+                [](const core::mcp::RemoteToolActivity& activity) {
+                    return activity.status == core::mcp::RemoteToolStatus::running;
+                });
+            if (!remote_snapshot.activities.empty()) {
+                const auto& latest = remote_snapshot.activities.front();
+                remote_completion_fresh =
+                    latest.finished_at != std::chrono::steady_clock::time_point{}
+                    && std::chrono::steady_clock::now() - latest.finished_at
+                        <= std::chrono::seconds{2};
+            }
+        }
         std::lock_guard lock(ui_mutex);
         const bool review_active = review_activity_state.active;
         bool conversation_animation_active =
-            direct_shell_animation_count.load(std::memory_order_relaxed) > 0;
+            direct_shell_animation_count.load(std::memory_order_relaxed) > 0
+            || remote_activity_active;
         if (!assistant_active && !review_active && !conversation_animation_active) {
             // Defensive fallback for restored or externally-updated activity
             // cards that are not owned by the normal assistant/shell counters.
@@ -1537,6 +1582,12 @@ RunResult run(RunOptions opts) {
             assistant_active,
             review_active,
             conversation_animation_active);
+        if (!cadence.has_value() && remote_completion_fresh) {
+            return AnimationCadence{
+                .period = std::chrono::seconds(1),
+                .advance_frame = false,
+            };
+        }
         if (!cadence.has_value() && ui_show_banner) {
             return AnimationCadence{
                 .period = std::chrono::seconds(1),
@@ -4991,12 +5042,28 @@ RunResult run(RunOptions opts) {
                 || rewind_picker_state.active
                 || code_block_runner.active()
                 || conversation_search_state.active
-                || settings_panel_state.active) return;
+                || settings_panel_state.active
+                || remote_activity_panel_state.active) return;
         }
         if (input_text.empty()) return;
         std::string text = input_text;
         input_text.clear();
         prompt_history.save(text);
+
+        // /remote takes no arguments; tolerate trailing whitespace/arguments
+        // so it behaves like every other picker-advertised command.
+        const std::string_view trimmed_command = trim_ascii(text);
+        if (opts.remote_mcp_server_enabled
+            && (trimmed_command == "/remote"
+                || trimmed_command.starts_with("/remote "))) {
+            {
+                std::lock_guard lock(ui_mutex);
+                remote_activity_panel_state.active = true;
+                remote_activity_panel_state.selected = 0;
+            }
+            wake_ui();
+            return;
+        }
 
         core::commands::CommandContext ctx{
             .text             = text,
@@ -5280,6 +5347,60 @@ RunResult run(RunOptions opts) {
             if (event == Event::Escape || is_ctrl_c_event(event)) {
                 external_editor.cancel();
             }
+            return true;
+        }
+
+        if (opts.remote_mcp_server_enabled
+            && event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && remote_activity_pill_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                remote_activity_panel_state.active = true;
+                remote_activity_panel_state.selected = 0;
+            }
+            wake_ui();
+            return true;
+        }
+
+        bool remote_panel_was_active = false;
+        bool remote_panel_closed = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (remote_activity_panel_state.active) {
+                remote_panel_was_active = true;
+                // Metadata-only: the row count is all this needs, and payloads
+                // can run to tens of kilobytes per entry.
+                const auto activity_count =
+                    remote_activity_hub.snapshot(false).activities.size();
+                if (event == Event::Escape) {
+                    remote_activity_panel_state.active = false;
+                    remote_panel_closed = true;
+                } else if (event == Event::ArrowUp && activity_count > 0) {
+                    remote_activity_panel_state.selected =
+                        remote_activity_panel_state.selected == 0
+                            ? activity_count - 1
+                            : remote_activity_panel_state.selected - 1;
+                } else if (event == Event::ArrowDown && activity_count > 0) {
+                    remote_activity_panel_state.selected =
+                        (remote_activity_panel_state.selected + 1) % activity_count;
+                } else if (event == Event::Character('c')
+                           || event == Event::Character('C')) {
+                    remote_activity_hub.clear_completed();
+                    remote_activity_panel_state.selected = 0;
+                }
+            }
+        }
+        if (remote_panel_closed) {
+            // Acknowledged on close rather than on open: the badge exists to
+            // pull the user into the panel, so clearing it on entry would hide
+            // failures that arrive while the panel is on screen. Called outside
+            // ui_mutex because it notifies, which re-enters the UI wake path.
+            remote_activity_hub.acknowledge_errors();
+        }
+        if (remote_panel_was_active) {
+            wake_ui();
             return true;
         }
 
@@ -6460,6 +6581,8 @@ RunResult run(RunOptions opts) {
         std::vector<tui::ConversationSearchHit> conversation_search_hits;
         bool                            stderr_panel_active = false;
         std::vector<std::string>        stderr_panel_lines;
+        bool                            remote_activity_panel_active = false;
+        std::size_t                     remote_activity_panel_selected = 0;
         std::size_t                     queued_steering_count = 0;
         std::string                     external_editor_status;
         {
@@ -6522,7 +6645,20 @@ RunResult run(RunOptions opts) {
             stderr_panel_active = stderr_panel_state.active
                 && !stderr_panel_state.lines.empty();
             stderr_panel_lines = stderr_panel_state.lines;
+            remote_activity_panel_active = remote_activity_panel_state.active;
+            remote_activity_panel_selected = remote_activity_panel_state.selected;
             queued_steering_count = queued_steering_turns.size();
+        }
+        auto remote_activity_snapshot = opts.remote_mcp_server_enabled
+            ? remote_activity_hub.snapshot(remote_activity_panel_active)
+            : core::mcp::RemoteActivitySnapshot{};
+        if (opts.remote_mcp_server_enabled
+            && remote_activity_snapshot.server_state
+                == core::mcp::RemoteServerState::disabled) {
+            // The daemon thread may not have published its first lifecycle
+            // event yet, but the composition root has already enabled it.
+            remote_activity_snapshot.server_state =
+                core::mcp::RemoteServerState::starting;
         }
         external_editor_status = external_editor.status_label();
 
@@ -6550,6 +6686,10 @@ RunResult run(RunOptions opts) {
                     text("Esc to cancel") | color(Color::GrayDark),
                 }),
                 {});
+        } else if (remote_activity_panel_active) {
+            bottom_el = render_remote_activity_panel(
+                remote_activity_snapshot,
+                remote_activity_panel_selected);
         } else if (settings_panel_active) {
             std::vector<SettingsPanelRow> settings_rows;
             settings_rows.reserve(settings_definitions.size());
@@ -6918,6 +7058,37 @@ RunResult run(RunOptions opts) {
             turn_activity_state,
             ui_show_spinner.load(std::memory_order_relaxed),
             tick));
+        if (opts.remote_mcp_server_enabled) {
+            const auto remote_status = format_remote_footer_status(
+                remote_activity_snapshot);
+            Color foreground = Color::GrayLight;
+            Color background = Color::GrayDark;
+            switch (remote_status.tone) {
+                case RemoteFooterTone::ready:
+                    foreground = Color::Black;
+                    background = Color::Green;
+                    break;
+                case RemoteFooterTone::running:
+                    foreground = Color::Black;
+                    background = ColorYellowBright;
+                    break;
+                case RemoteFooterTone::success:
+                    foreground = Color::Black;
+                    background = Color::Green;
+                    break;
+                case RemoteFooterTone::error:
+                    foreground = Color::Black;
+                    background = ColorToolFail;
+                    break;
+                case RemoteFooterTone::neutral:
+                    break;
+            }
+            left_items.push_back(
+                text(" " + remote_status.label + " ")
+                | color(foreground)
+                | bgcolor(background)
+                | reflect(remote_activity_pill_box));
+        }
         left_items.push_back(guardrail_el);
         left_items.push_back(queued_steering_el);
         left_items.push_back(review_activity_el);
@@ -6925,6 +7096,7 @@ RunResult run(RunOptions opts) {
             ui_show_footer
             || response_in_progress
             || review_activity_active
+            || opts.remote_mcp_server_enabled
             || queued_steering_count > 0;
         auto left_el = show_status_footer
             ? hbox(std::move(left_items)) | xflex
@@ -6993,6 +7165,11 @@ RunResult run(RunOptions opts) {
 
     screen.Loop(renderer);
 
+    if (opts.remote_mcp_server_enabled) {
+        // Barrier: blocks until no daemon thread is inside the callback, so the
+        // captured locals below can be destroyed safely as run() unwinds.
+        remote_activity_hub.set_notify_callback({});
+    }
     animation_thread.request_stop();
     animation_cv.notify_one();
     animation_thread.join();

@@ -75,6 +75,7 @@ private:
         TaskState state;
         std::chrono::system_clock::time_point created_at_tp{};
         std::string session_scope;
+        std::uint64_t remote_activity_id = 0;
         std::mutex mutex;
         std::condition_variable cv;
         bool finished = false;

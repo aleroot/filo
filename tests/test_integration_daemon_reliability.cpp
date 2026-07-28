@@ -6,6 +6,7 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
 #include "core/llm/ProviderManager.hpp"
+#include "core/mcp/RemoteActivity.hpp"
 #include "exec/ApiGateway.hpp"
 #include "exec/ApiGatewayModelList.hpp"
 #include "exec/Daemon.hpp"
@@ -484,6 +485,9 @@ private:
 
 TEST_CASE("Daemon replays duplicate completed requests instead of re-running tools",
           "[daemon][reliability]") {
+    // The activity hub is process-wide: start from a clean slate so this test
+    // is independent of any other daemon test in the same binary.
+    core::mcp::RemoteActivityHub::get_instance().reset_for_testing();
     const int port = next_test_port();
     DaemonRunner daemon(port);
     if (!wait_for_ping(port)) {
@@ -492,6 +496,14 @@ TEST_CASE("Daemon replays duplicate completed requests instead of re-running too
 
     const auto session = initialize_mcp_session(port);
     REQUIRE(session.has_value());
+    {
+        const auto activity =
+            core::mcp::RemoteActivityHub::get_instance().snapshot();
+        REQUIRE(activity.clients.size() == 1);
+        CHECK(activity.clients.front().name == "daemon-test");
+        CHECK(activity.clients.front().version == "1.0");
+        CHECK(activity.clients.front().ready);
+    }
 
     const auto out_file = temp_file_path("filo_daemon_replay_completed");
     std::filesystem::remove(out_file);
@@ -509,6 +521,13 @@ TEST_CASE("Daemon replays duplicate completed requests instead of re-running too
     auto second = post_mcp_request(port, payload, session_headers(*session));
     REQUIRE(second);
     REQUIRE(second->status == 200);
+
+    const auto activity =
+        core::mcp::RemoteActivityHub::get_instance().snapshot();
+    REQUIRE(activity.activities.size() == 1);
+    CHECK(activity.activities.front().tool_name == "run_terminal_command");
+    CHECK(activity.activities.front().status
+          == core::mcp::RemoteToolStatus::succeeded);
 
     REQUIRE(std::filesystem::exists(out_file));
     REQUIRE(count_lines(out_file) == 1);

@@ -27,6 +27,10 @@ struct RunOptions {
     /// Explicit process sandbox mode; supplied by the application composition root.
     core::landrun::LandrunMode landrun_mode{core::landrun::LandrunMode::off};
     core::landrun::LandrunPolicyEnvironment landrun_environment;
+    /// True only when the inbound Streamable-HTTP MCP server was requested.
+    /// Drives the isolated remote-activity affordance; outbound MCP clients do
+    /// not make it visible.
+    bool remote_mcp_server_enabled = false;
 };
 
 struct RunResult {

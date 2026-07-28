@@ -16,4 +16,11 @@ struct ToolCallResultClassification {
     std::string_view payload,
     std::string_view related_task_id = {});
 
+/// Overload that reuses a precomputed classification so callers that already
+/// inspected the payload do not parse it twice.
+[[nodiscard]] std::string build_call_tool_result_from_payload(
+    std::string_view payload,
+    ToolCallResultClassification classification,
+    std::string_view related_task_id = {});
+
 } // namespace core::mcp

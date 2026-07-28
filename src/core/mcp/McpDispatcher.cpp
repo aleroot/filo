@@ -1,5 +1,6 @@
 #include "McpDispatcher.hpp"
 #include "McpTaskManager.hpp"
+#include "RemoteActivity.hpp"
 #include "ToolCallResult.hpp"
 #include "../context/SessionContext.hpp"
 #include "../tools/BuiltinToolRegistry.hpp"
@@ -1167,6 +1168,44 @@ struct ParsedPromptGetRequest {
     return parsed;
 }
 
+/// Reports the lifecycle of one inbound HTTP tool call to the remote-activity
+/// hub. Guarantees exactly one terminal report — even when tool execution
+/// throws — so the activity feed can never leak a phantom "running" entry.
+/// A no-op for non-HTTP transports.
+class RemoteToolCallReporter {
+public:
+    RemoteToolCallReporter(const core::context::SessionContext& context,
+                           std::string_view tool_name,
+                           std::string_view arguments_json) {
+        if (context.transport != core::context::SessionTransport::mcp_http) return;
+        activity_id_ = RemoteActivityHub::get_instance().tool_started(
+            context.session_id,
+            tool_name,
+            arguments_json);
+    }
+
+    RemoteToolCallReporter(const RemoteToolCallReporter&) = delete;
+    RemoteToolCallReporter& operator=(const RemoteToolCallReporter&) = delete;
+
+    ~RemoteToolCallReporter() {
+        if (activity_id_ == 0 || reported_) return;
+        RemoteActivityHub::get_instance().tool_finished(
+            activity_id_,
+            R"({"error":"Tool execution terminated unexpectedly."})",
+            true);
+    }
+
+    void finish(std::string_view result, bool failed) {
+        if (activity_id_ == 0 || reported_) return;
+        reported_ = true;
+        RemoteActivityHub::get_instance().tool_finished(activity_id_, result, failed);
+    }
+
+private:
+    std::uint64_t activity_id_ = 0;
+    bool reported_ = false;
+};
+
 [[nodiscard]] RpcExpected<std::string> build_tool_call_result(
     const ParsedToolCallRequest& request,
     const core::context::SessionContext& context)
@@ -1182,11 +1221,16 @@ struct ParsedPromptGetRequest {
         return std::unexpected(RpcError{-32602, *validation_error});
     }
 
-    std::string tool_result = sm.execute_tool(
+    RemoteToolCallReporter remote_reporter(
+        context, request.name, request.arguments_json);
+    const std::string tool_result = sm.execute_tool(
         request.name,
         request.arguments_json,
         context);
-    return build_call_tool_result_from_payload(tool_result);
+    const ToolCallResultClassification classification =
+        classify_tool_call_payload(tool_result);
+    remote_reporter.finish(tool_result, classification.is_error);
+    return build_call_tool_result_from_payload(tool_result, classification);
 }
 
 [[nodiscard]] bool is_long_running_delegate_task_call(const ParsedToolCallRequest& request) {

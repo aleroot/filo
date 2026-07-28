@@ -1,0 +1,292 @@
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <format>
+#include <thread>
+#include <vector>
+
+#include "core/mcp/RemoteActivity.hpp"
+#include "tui/RemoteActivityPanel.hpp"
+
+using core::mcp::RemoteActivityHub;
+using core::mcp::RemoteServerState;
+using core::mcp::RemoteToolStatus;
+
+TEST_CASE("remote MCP client names are safe and have a stable fallback",
+          "[mcp][remote-activity]") {
+    CHECK(core::mcp::sanitize_remote_client_name("") == "Client");
+    CHECK(core::mcp::sanitize_remote_client_name("  Lampo\n\t1.0  ") == "Lampo 1.0");
+    CHECK(core::mcp::sanitize_remote_client_name("\x01\x02") == "Client");
+}
+
+TEST_CASE("remote activity hub tracks client identity and tool lifecycle",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("session-a", "Lampo", "1.4.0");
+    hub.client_ready("session-a");
+
+    const auto activity_id = hub.tool_started(
+        "session-a",
+        "read_file",
+        R"({"path":"/tmp/example"})");
+
+    auto snapshot = hub.snapshot();
+    REQUIRE(snapshot.server_state == RemoteServerState::listening);
+    REQUIRE(snapshot.clients.size() == 1);
+    CHECK(snapshot.clients.front().name == "Lampo");
+    CHECK(snapshot.clients.front().version == "1.4.0");
+    CHECK(snapshot.clients.front().ready);
+    REQUIRE(snapshot.activities.size() == 1);
+    CHECK(snapshot.activities.front().status == RemoteToolStatus::running);
+
+    hub.tool_finished(activity_id, R"({"content":"ok"})", false);
+    snapshot = hub.snapshot();
+    CHECK(snapshot.activities.front().status == RemoteToolStatus::succeeded);
+    CHECK(snapshot.unacknowledged_errors == 0);
+
+    const auto failed_id = hub.tool_started("session-a", "write_file", "{}");
+    hub.tool_finished(failed_id, R"({"error":"denied"})", true);
+    snapshot = hub.snapshot();
+    CHECK(snapshot.activities.front().status == RemoteToolStatus::failed);
+    CHECK(snapshot.unacknowledged_errors == 1);
+
+    hub.acknowledge_errors();
+    CHECK(hub.snapshot().unacknowledged_errors == 0);
+    hub.clear_completed();
+    CHECK(hub.snapshot().activities.empty());
+}
+
+TEST_CASE("remote footer uses protocol client name and generic fallback",
+          "[tui][mcp][remote-activity]") {
+    CHECK(tui::format_remote_footer_status({}).label.empty());
+
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("known", "Lampo", "2.0");
+    hub.client_ready("known");
+
+    auto status = tui::format_remote_footer_status(hub.snapshot());
+    CHECK(status.label.find("Lampo") != std::string::npos);
+    CHECK(status.label.find("ready") != std::string::npos);
+
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("unknown", "", "");
+    hub.client_ready("unknown");
+
+    status = tui::format_remote_footer_status(hub.snapshot());
+    CHECK(status.label.find("Client") != std::string::npos);
+    CHECK(status.label.find("Lampo") == std::string::npos);
+}
+
+TEST_CASE("remote activity history stays bounded even when nothing finishes",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    // More running entries than the retention cap: a stuck producer must not
+    // grow the history without limit.
+    constexpr std::size_t kFlood = 150;
+    for (std::size_t i = 0; i < kFlood; ++i) {
+        const std::uint64_t id = hub.tool_started("session-a", "read_file", "{}");
+        CHECK(id != 0);
+    }
+    const auto snapshot = hub.snapshot(false);
+    CHECK(snapshot.activities.size() == 100);
+    CHECK(std::ranges::all_of(snapshot.activities,
+                              [](const core::mcp::RemoteToolActivity& activity) {
+                                  return activity.status
+                                      == RemoteToolStatus::running;
+                              }));
+    // Late completions for evicted ids are dropped silently.
+    hub.tool_finished(1, "{}", false);
+    CHECK(hub.snapshot(false).activities.size() == 100);
+}
+
+TEST_CASE("remote activity payloads carry a single truncation marker",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    const std::string oversized(40 * 1024, 'x');
+    const auto activity_id = hub.tool_started("session-a", "read_file", "{}");
+    hub.tool_finished(activity_id, oversized, false);
+
+    const auto snapshot = hub.snapshot();
+    REQUIRE(snapshot.activities.size() == 1);
+    const std::string& result = snapshot.activities.front().result;
+    CHECK(result.size() < oversized.size());
+    CHECK(result.ends_with("[truncated]"));
+    CHECK(result.find("…") == std::string::npos);
+}
+
+TEST_CASE("evicting a failed activity does not strand the error badge",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    const auto failed_id = hub.tool_started("session-a", "write_file", "{}");
+    hub.tool_finished(failed_id, R"({"error":"denied"})", true);
+    REQUIRE(hub.snapshot(false).unacknowledged_errors == 1);
+
+    // Push the failure out of the retention window; the badge must follow the
+    // history rather than keep counting an entry the user can no longer reach.
+    for (std::size_t i = 0; i < 120; ++i) {
+        const auto id = hub.tool_started("session-a", "read_file", "{}");
+        hub.tool_finished(id, "{}", false);
+    }
+
+    const auto snapshot = hub.snapshot(false);
+    CHECK(std::ranges::none_of(
+        snapshot.activities,
+        [](const core::mcp::RemoteToolActivity& activity) {
+            return activity.status == RemoteToolStatus::failed;
+        }));
+    CHECK(snapshot.unacknowledged_errors == 0);
+}
+
+TEST_CASE("acknowledging errors only clears failures already recorded",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    const auto first = hub.tool_started("session-a", "write_file", "{}");
+    hub.tool_finished(first, R"({"error":"denied"})", true);
+    hub.acknowledge_errors();
+    REQUIRE(hub.snapshot(false).unacknowledged_errors == 0);
+
+    // A failure arriving after the acknowledgement must light the badge again.
+    const auto second = hub.tool_started("session-a", "write_file", "{}");
+    hub.tool_finished(second, R"({"error":"denied"})", true);
+    CHECK(hub.snapshot(false).unacknowledged_errors == 1);
+}
+
+TEST_CASE("client retention is bounded and prefers evicting closed sessions",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    // MCP sessions only end on an explicit DELETE that clients may never send,
+    // so a long-lived daemon must not accumulate records without limit.
+    constexpr std::size_t kSessions = 500;
+    for (std::size_t i = 0; i < kSessions; ++i) {
+        const auto session = std::format("session-{}", i);
+        hub.client_initialized(session, "Lampo", "1.0");
+        hub.client_closed(session);
+    }
+    CHECK(hub.client_count() <= 64);
+
+    // An open session must survive a flood of closed ones.
+    hub.client_initialized("keeper", "Keeper", "1.0");
+    hub.client_ready("keeper");
+    for (std::size_t i = 0; i < kSessions; ++i) {
+        const auto session = std::format("closed-{}", i);
+        hub.client_initialized(session, "Lampo", "1.0");
+        hub.client_closed(session);
+    }
+    CHECK(hub.client_count() <= 64);
+
+    const auto snapshot = hub.snapshot(false);
+    const auto keeper = std::ranges::find(
+        snapshot.clients, "keeper", &core::mcp::RemoteClientActivity::session_id);
+    REQUIRE(keeper != snapshot.clients.end());
+    CHECK(keeper->ready);
+    CHECK_FALSE(keeper->closed);
+}
+
+TEST_CASE("detaching the notify callback waits for in-flight notifications",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    std::atomic_bool inside_callback{false};
+    std::atomic_bool callback_finished{false};
+    std::atomic_bool release{false};
+    std::atomic_int callbacks{0};
+
+    hub.set_notify_callback([&] {
+        callbacks.fetch_add(1, std::memory_order_relaxed);
+        inside_callback.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        // Re-entering the hub from the callback must not deadlock against a
+        // concurrent detach.
+        (void)hub.snapshot(false);
+        callback_finished.store(true, std::memory_order_release);
+    });
+
+    std::thread producer([&] { hub.client_seen("session-a"); });
+    while (!inside_callback.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::atomic_bool detach_returned{false};
+    std::thread detacher([&] {
+        hub.set_notify_callback({});
+        detach_returned.store(true, std::memory_order_release);
+    });
+
+    // The detach must block while the callback is still running: this is what
+    // makes it safe for the TUI to destroy the state the callback captured.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_FALSE(detach_returned.load(std::memory_order_acquire));
+
+    release.store(true, std::memory_order_release);
+    detacher.join();
+    producer.join();
+
+    CHECK(detach_returned.load(std::memory_order_acquire));
+    CHECK(callback_finished.load(std::memory_order_acquire));
+
+    // Once detached, no further notification may be delivered.
+    const int observed = callbacks.load(std::memory_order_relaxed);
+    (void)hub.tool_started("session-a", "read_file", "{}");
+    CHECK(callbacks.load(std::memory_order_relaxed) == observed);
+
+    hub.reset_for_testing();
+}
+
+TEST_CASE("repeated liveness touches do not wake the UI once per request",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("session-a", "Lampo", "1.0");
+
+    std::atomic_int wakes{0};
+    hub.set_notify_callback([&] { wakes.fetch_add(1, std::memory_order_relaxed); });
+
+    for (std::size_t i = 0; i < 1000; ++i) {
+        hub.client_seen("session-a");
+    }
+    // The session is already open and was just seen, so these are coalesced.
+    CHECK(wakes.load(std::memory_order_relaxed) == 0);
+
+    // A genuine state change still refreshes immediately.
+    hub.client_closed("session-a");
+    hub.client_seen("session-a");
+    CHECK(wakes.load(std::memory_order_relaxed) >= 2);
+
+    hub.reset_for_testing();
+}

@@ -1,5 +1,6 @@
 #include "McpTaskManager.hpp"
 
+#include "RemoteActivity.hpp"
 #include "ToolCallResult.hpp"
 #include "../session/SessionStore.hpp"
 #include "../task/TaskService.hpp"
@@ -145,6 +146,13 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
     entry->state.poll_interval_ms = kPollIntervalMs;
     entry->created_at_tp = std::chrono::system_clock::now();
     entry->session_scope = context.session_id;
+    if (context.transport == core::context::SessionTransport::mcp_http) {
+        entry->remote_activity_id =
+            RemoteActivityHub::get_instance().tool_started(
+                context.session_id,
+                tool_name,
+                arguments_json);
+    }
 
     auto record = std::make_shared<TaskRecord>();
     record->entry = entry;
@@ -173,6 +181,11 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
                 }
             }
             if (stop_token.stop_requested()) {
+                if (entry->remote_activity_id != 0) {
+                    RemoteActivityHub::get_instance().tool_cancelled(
+                        entry->remote_activity_id,
+                        "Task cancelled before it started.");
+                }
                 entry->cv.notify_all();
                 return;
             }
@@ -183,6 +196,7 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
                 const auto final_result = build_call_tool_result_from_payload(
                     payload_json,
                     entry->state.task_id);
+                bool committed = false;
 
                 {
                     std::lock_guard lock(entry->mutex);
@@ -200,32 +214,62 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
                             entry->payload.result_json = final_result;
                         }
                         entry->finished = true;
+                        committed = true;
                     }
                     entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
                 }
+                if (committed && entry->remote_activity_id != 0) {
+                    RemoteActivityHub::get_instance().tool_finished(
+                        entry->remote_activity_id,
+                        payload_json,
+                        classification.is_error);
+                }
             } catch (const std::exception& e) {
-                std::lock_guard lock(entry->mutex);
-                if (!entry->finished) {
-                    entry->payload.has_error = true;
-                    entry->payload.error_code = -32603;
-                    entry->payload.error_message = std::format("Task execution failed: {}", e.what());
-                    entry->state.status = "failed";
-                    entry->state.status_message = "The delegated task crashed during execution.";
-                    entry->finished = true;
+                const std::string error =
+                    std::format("Task execution failed: {}", e.what());
+                bool committed = false;
+                {
+                    std::lock_guard lock(entry->mutex);
+                    if (!entry->finished) {
+                        entry->payload.has_error = true;
+                        entry->payload.error_code = -32603;
+                        entry->payload.error_message = error;
+                        entry->state.status = "failed";
+                        entry->state.status_message = "The delegated task crashed during execution.";
+                        entry->finished = true;
+                        committed = true;
+                    }
+                    entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
                 }
-                entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
+                if (committed && entry->remote_activity_id != 0) {
+                    RemoteActivityHub::get_instance().tool_finished(
+                        entry->remote_activity_id,
+                        error,
+                        true);
+                }
             } catch (...) {
-                std::lock_guard lock(entry->mutex);
-                if (!entry->finished) {
-                    entry->payload.has_error = true;
-                    entry->payload.error_code = -32603;
-                    entry->payload.error_message =
-                        "Task execution failed with an unknown error.";
-                    entry->state.status = "failed";
-                    entry->state.status_message = "The delegated task crashed during execution.";
-                    entry->finished = true;
+                constexpr std::string_view error =
+                    "Task execution failed with an unknown error.";
+                bool committed = false;
+                {
+                    std::lock_guard lock(entry->mutex);
+                    if (!entry->finished) {
+                        entry->payload.has_error = true;
+                        entry->payload.error_code = -32603;
+                        entry->payload.error_message = error;
+                        entry->state.status = "failed";
+                        entry->state.status_message = "The delegated task crashed during execution.";
+                        entry->finished = true;
+                        committed = true;
+                    }
+                    entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
                 }
-                entry->state.last_updated_at = core::session::SessionStore::now_iso8601();
+                if (committed && entry->remote_activity_id != 0) {
+                    RemoteActivityHub::get_instance().tool_finished(
+                        entry->remote_activity_id,
+                        R"({"error":"Task execution failed with an unknown error."})",
+                        true);
+                }
             }
             entry->cv.notify_all();
         });
@@ -309,6 +353,11 @@ std::expected<McpTaskManager::TaskState, McpTaskManager::CancelError> McpTaskMan
     }
     if (record->request_cancel) {
         record->request_cancel();
+    }
+    if (record->entry->remote_activity_id != 0) {
+        RemoteActivityHub::get_instance().tool_cancelled(
+            record->entry->remote_activity_id,
+            "Task cancelled by request.");
     }
     record->stop_source.request_stop();
     record->entry->cv.notify_all();

@@ -9,6 +9,7 @@
 #include "../core/llm/ProviderFactory.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
+#include "../core/mcp/RemoteActivity.hpp"
 #include "../core/tools/ToolManager.hpp"
 #include "../core/context/SessionContext.hpp"
 #include "../core/utils/JsonUtils.hpp"
@@ -135,6 +136,11 @@ struct ParsedJsonRpcMessage {
     std::string method;
 };
 
+struct ParsedMcpClientInfo {
+    std::string name{"Client"};
+    std::string version;
+};
+
 struct PendingServerResponse {
     PendingServerResponse()
         : future(promise.get_future().share()) {}
@@ -252,6 +258,36 @@ parse_jsonrpc_message(std::string_view json_body) {
     }
 
     return std::nullopt;
+}
+
+[[nodiscard]] ParsedMcpClientInfo
+extract_mcp_client_info(std::string_view json_body) {
+    ParsedMcpClientInfo info;
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(json_body);
+    simdjson::ondemand::document doc;
+    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return info;
+
+    simdjson::ondemand::object root;
+    if (doc.get_object().get(root) != simdjson::SUCCESS) return info;
+
+    simdjson::ondemand::object params;
+    if (root["params"].get_object().get(params) != simdjson::SUCCESS) return info;
+
+    simdjson::ondemand::object client_info;
+    if (params["clientInfo"].get_object().get(client_info) != simdjson::SUCCESS) {
+        return info;
+    }
+
+    std::string_view name;
+    if (client_info["name"].get_string().get(name) == simdjson::SUCCESS) {
+        info.name = std::string(name);
+    }
+    std::string_view version;
+    if (client_info["version"].get_string().get(version) == simdjson::SUCCESS) {
+        info.version = std::string(version);
+    }
+    return info;
 }
 
 [[nodiscard]] std::optional<std::string>
@@ -691,6 +727,7 @@ void handle_mcp_delete(const std::string& host,
         return;
     }
 
+    core::mcp::RemoteActivityHub::get_instance().client_closed(session_id);
     replay_cache().clear_session(session_id);
     core::tools::ToolManager::get_instance().clear_session_state(session_id);
     res.status = 204;
@@ -748,6 +785,7 @@ void handle_mcp_post(const std::string& host,
             if (init_result.status == 200 && !init_result.body.empty()) {
                 if (auto version = extract_initialize_protocol_version(init_result.body)) {
                     auto [new_session_id, new_session] = create_http_session(std::move(*version));
+                    const auto client_info = extract_mcp_client_info(req.body);
                     const auto roots_capability =
                         core::mcp::extract_roots_capability_from_initialize(req.body);
                     {
@@ -757,6 +795,10 @@ void handle_mcp_post(const std::string& host,
                             roots_capability.list_changed;
                         new_session->roots_dirty = roots_capability.supported;
                     }
+                    core::mcp::RemoteActivityHub::get_instance().client_initialized(
+                        new_session_id,
+                        client_info.name,
+                        client_info.version);
                     res.set_header("MCP-Session-Id", new_session_id);
                 }
             }
@@ -781,6 +823,7 @@ void handle_mcp_post(const std::string& host,
                 "application/json");
             return;
         }
+        core::mcp::RemoteActivityHub::get_instance().client_seen(session_id);
 
         if (parsed->kind == ParsedJsonRpcMessage::Kind::request
             && parsed->method == "initialize") {
@@ -840,6 +883,7 @@ void handle_mcp_post(const std::string& host,
                 if (parsed->kind == ParsedJsonRpcMessage::Kind::notification
                     && parsed->method == "notifications/initialized") {
                     session->client_ready = true;
+                    core::mcp::RemoteActivityHub::get_instance().client_ready(session_id);
                 } else if (!(parsed->kind == ParsedJsonRpcMessage::Kind::request
                              && parsed->method == "ping")) {
                     res.status = 400;
@@ -1157,6 +1201,9 @@ void run_server(int port,
                 const std::string& host,
                 bool enable_api_gateway,
                 bool enable_mcp_http) {
+    if (enable_mcp_http) {
+        core::mcp::RemoteActivityHub::get_instance().server_starting();
+    }
     auto svr = std::make_shared<httplib::Server>();
     {
         std::lock_guard<std::mutex> lock(g_server_mutex);
@@ -1221,12 +1268,20 @@ void run_server(int port,
 
     if (!svr->bind_to_port(host, port)) {
         core::logging::error("Filo daemon failed to bind to {}:{}.", host, port);
+        if (enable_mcp_http) {
+            core::mcp::RemoteActivityHub::get_instance().server_failed(
+                std::format("Could not listen on {}:{}.", host, port));
+        }
         std::lock_guard<std::mutex> lock(g_server_mutex);
         if (g_svr == svr) g_svr.reset();
         return;
     }
 
     core::logging::info("Filo daemon listening on {}:{}.", host, port);
+    if (enable_mcp_http) {
+        core::mcp::RemoteActivityHub::get_instance().server_listening(
+            std::format("{}:{}", host, port));
+    }
     core::logging::info("Health check : http://{}:{}/ping", host, port);
     if (enable_mcp_http) {
         if (!is_loopback_host(host) && configured_mcp_bearer_token().empty()) {
@@ -1244,8 +1299,15 @@ void run_server(int port,
     const bool listen_ok = svr->listen_after_bind();
     if (!listen_ok) {
         core::logging::error("Filo daemon stopped with a listen error on {}:{}.", host, port);
+        if (enable_mcp_http) {
+            core::mcp::RemoteActivityHub::get_instance().server_failed(
+                std::format("The listener stopped with an error on {}:{}.", host, port));
+        }
     } else {
         core::logging::info("Filo daemon stopped.");
+        if (enable_mcp_http) {
+            core::mcp::RemoteActivityHub::get_instance().server_stopped();
+        }
     }
 
     {

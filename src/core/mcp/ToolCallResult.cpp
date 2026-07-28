@@ -51,7 +51,16 @@ ToolCallResultClassification classify_tool_call_payload(std::string_view payload
 
 std::string build_call_tool_result_from_payload(std::string_view payload,
                                                 std::string_view related_task_id) {
-    const ToolCallResultClassification classification = classify_tool_call_payload(payload);
+    return build_call_tool_result_from_payload(
+        payload,
+        classify_tool_call_payload(payload),
+        related_task_id);
+}
+
+std::string build_call_tool_result_from_payload(
+    std::string_view payload,
+    ToolCallResultClassification classification,
+    std::string_view related_task_id) {
     const bool is_error = classification.is_error;
 
     core::utils::JsonWriter writer(payload.size() + related_task_id.size() + 192);

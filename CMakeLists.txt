@@ -159,6 +159,7 @@ set(FILO_CORE_SOURCES
     src/core/mcp/McpDynamicFeatureTools.cpp
     src/core/mcp/McpTaskManager.cpp
     src/core/mcp/McpRoots.cpp
+    src/core/mcp/RemoteActivity.cpp
     src/core/mcp/McpSamplingBridge.cpp
     src/core/mcp/ToolCallResult.cpp
     src/tui/ActivityTimer.cpp
@@ -185,6 +186,7 @@ set(FILO_CORE_SOURCES
     src/tui/QuestionDialogView.cpp
     src/tui/RewindActions.cpp
     src/tui/RewindPicker.cpp
+    src/tui/RemoteActivityPanel.cpp
     src/tui/SelectionClipboardCopier.cpp
     src/core/budget/TokenLedger.cpp
     src/core/config/ConfigManager.cpp
@@ -553,6 +555,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_ollama_provider.cpp
     tests/test_llamacpp_provider.cpp
     tests/test_mcp_server.cpp
+    tests/test_remote_activity.cpp
     tests/test_mcp_tasks.cpp
     tests/test_oauth.cpp
     tests/test_logger.cpp
