@@ -579,6 +579,49 @@ TEST_CASE("HistoryComponent reveals a long diff only after the user expands it",
     CHECK_THAT(expanded, Catch::Matchers::ContainsSubstring("payload line 39"));
 }
 
+TEST_CASE("HistoryComponent toggles nested raw edit JSON independently",
+          "[tui][history_component][diff][regression]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> messages;
+    auto msg = tui::make_assistant_message("", "", false);
+    auto tool = tui::make_tool_activity(
+        "replace-raw-click",
+        "replace",
+        R"({"file_path":"a.txt","old_string":"before","new_string":"after"})",
+        "a.txt");
+    tui::apply_tool_result(
+        tool,
+        R"({"truncated":true,"tool":"replace","digest_fnv1a64":"hidden-json"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    const auto collapsed = render_history_text(history);
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("after"));
+    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("▶ Raw result"));
+    REQUIRE_THAT(
+        collapsed,
+        !Catch::Matchers::ContainsSubstring("digest_fnv1a64"));
+    const auto chevron = rendered_cell_of(collapsed, "▶ Raw result");
+    REQUIRE(chevron.row >= 0);
+
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = chevron.column;
+    mouse.y = chevron.row;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+
+    const auto expanded = render_history_text(history);
+    CHECK_THAT(expanded, Catch::Matchers::ContainsSubstring("▼ Raw result"));
+    CHECK_THAT(expanded, Catch::Matchers::ContainsSubstring("digest_fnv1a64"));
+}
+
 // ============================================================================
 // Render-cache regression tests
 // ============================================================================

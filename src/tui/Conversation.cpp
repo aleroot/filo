@@ -1322,6 +1322,61 @@ Element render_tool_result(const ToolActivity& tool,
     return content;
 }
 
+/// A successful edit can return transport/storage metadata rather than a
+/// human-facing acknowledgement (for example, the truncation envelope used for
+/// oversized tool results). The diff remains the useful result; keep this
+/// machine-oriented JSON available without letting it dominate an auto-opened
+/// edit card.
+bool edit_result_is_raw_json(const ToolActivity& tool,
+                             const ToolResultView& view) {
+    if (tool.status != ToolActivity::Status::Succeeded
+        || tool.diff_preview.empty()
+        || tool.result.summary.empty()
+        || tool.result.summary == kDoneSummary
+        || (view.presentation.kind != ToolPresentationKind::Write
+            && view.presentation.kind != ToolPresentationKind::Edit)) {
+        return false;
+    }
+
+    return with_json_object(tool.result.summary, [](simdjson::dom::object) {});
+}
+
+Element render_raw_tool_result_disclosure(
+    const ToolActivity& tool,
+    const ToolResultView& view,
+    std::string_view disclosure_key,
+    const ConversationRenderOptions& options,
+    int terminal_width) {
+    bool expanded = options.expand_tool_results;
+    if (!expanded && options.system_disclosure_expanded != nullptr) {
+        if (const auto it =
+                options.system_disclosure_expanded->find(std::string(disclosure_key));
+            it != options.system_disclosure_expanded->end()) {
+            expanded = it->second;
+        }
+    }
+
+    Element toggle = hbox({
+        ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(Color::GrayDark) | dim,
+        ftxui::text("Raw result") | ftxui::color(Color::GrayLight),
+        filler(),
+        ftxui::text("JSON") | ftxui::color(Color::GrayDark) | dim,
+    }) | xflex;
+    if (options.system_disclosure_hitboxes != nullptr) {
+        auto& box =
+            (*options.system_disclosure_hitboxes)[std::string(disclosure_key)];
+        toggle = std::move(toggle) | reflect(box);
+    }
+
+    std::vector<Element> rows;
+    rows.push_back(std::move(toggle));
+    if (expanded) {
+        rows.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
+        rows.push_back(render_tool_result(tool, view, options, terminal_width));
+    }
+    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
+}
+
 /// Draws a diff at the budget the current disclosure state allows.
 /// `max_lines == 0` means "draw everything the model kept".
 Element render_tool_diff_preview(const ToolDiffPreview& preview, std::size_t max_lines) {
@@ -1598,16 +1653,38 @@ Element render_tool_item(const ToolActivity& tool,
         add_section(render_subagent_group(tool, tick, options));
     }
 
+    const bool raw_edit_result = edit_result_is_raw_json(tool, view);
+
     // File-modification tools report a bare acknowledgement; the diff already
     // says everything the acknowledgement would, so skip the redundant line.
     const bool diff_supersedes_summary =
         !tool.diff_preview.empty()
         && tool.status == ToolActivity::Status::Succeeded
         && (tool.result.summary == kDoneSummary || tool.result.summary.empty());
-    if (!tool.result.empty() && !diff_supersedes_summary) {
+
+    // A failed/cancelled edit describes a proposed change, not one that landed.
+    // Lead with the failure so the diff cannot be mistaken for applied work.
+    const bool result_precedes_diff =
+        !tool.result.empty()
+        && !diff_supersedes_summary
+        && !raw_edit_result
+        && tool.status != ToolActivity::Status::Succeeded;
+    if (result_precedes_diff) {
         add_section(render_tool_result(tool, view, options, terminal_width));
     }
 
+    if (raw_edit_result) {
+        add_section(render_raw_tool_result_disclosure(
+            tool,
+            view,
+            tool_raw_result_disclosure_key(tool, index_in_message),
+            options,
+            terminal_width));
+    }
+
+    // The change is the primary result of an edit. Draw it before any ancillary
+    // human-facing response text. Raw machine metadata has its own compact,
+    // collapsed row immediately above the diff.
     if (!tool.diff_preview.empty()) {
         // Expanding is an explicit request to read the change, so the diff is
         // drawn in full; the budget only bounds how tall one card can get.
@@ -1615,6 +1692,13 @@ Element render_tool_item(const ToolActivity& tool,
         add_section(render_tool_diff_preview(
             tool.diff_preview,
             options.expand_tool_results ? 0 : options.tool_diff_expanded_max_lines));
+    }
+
+    if (!tool.result.empty()
+        && !diff_supersedes_summary
+        && !raw_edit_result
+        && !result_precedes_diff) {
+        add_section(render_tool_result(tool, view, options, terminal_width));
     }
 
     if (!body.empty()) {
@@ -1965,6 +2049,11 @@ std::string tool_disclosure_key(const ToolActivity& tool, std::size_t index_in_m
         return "tool:" + tool.id;
     }
     return std::format("tool:{}:{}:{}", index_in_message, tool.name, tool.description);
+}
+
+std::string tool_raw_result_disclosure_key(const ToolActivity& tool,
+                                           std::size_t index_in_message) {
+    return tool_disclosure_key(tool, index_in_message) + ":raw-result";
 }
 
 // ============================================================================

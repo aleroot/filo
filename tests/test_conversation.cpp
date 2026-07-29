@@ -1158,6 +1158,40 @@ TEST_CASE("short diffs still open on their own",
     CHECK(rendered.find("diff lines") == std::string::npos);
 }
 
+TEST_CASE("edit metadata JSON is nested behind a collapsed disclosure",
+          "[tui][conversation][render][tool][diff][regression]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "replace-json",
+        "replace",
+        R"({"file_path":"a.txt","old_string":"before","new_string":"after"})",
+        "a.txt");
+    apply_tool_result(
+        tool,
+        R"({"truncated":true,"tool":"replace","digest_fnv1a64":"machine-only"})");
+    REQUIRE(tool_disclosure_defaults_expanded(tool));
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto collapsed = render_content_text(messages);
+    CHECK_THAT(collapsed, ContainsSubstring("Diff: a.txt"));
+    CHECK_THAT(collapsed, ContainsSubstring("after"));
+    CHECK_THAT(collapsed, ContainsSubstring("▶ Raw result"));
+    CHECK(collapsed.find("digest_fnv1a64") == std::string::npos);
+
+    std::unordered_map<std::string, bool> disclosure_state;
+    disclosure_state[tool_raw_result_disclosure_key(
+        messages.front().tools.front(), 0)] = true;
+    ConversationRenderOptions opened;
+    opened.system_disclosure_expanded = &disclosure_state;
+
+    const auto expanded = render_content_text(messages, opened);
+    CHECK_THAT(expanded, ContainsSubstring("▼ Raw result"));
+    CHECK_THAT(expanded, ContainsSubstring("digest_fnv1a64"));
+    CHECK(expanded.find("Raw result") < expanded.find("Diff: a.txt"));
+}
+
 TEST_CASE("a diff beyond the model ceiling is cut once and says so",
           "[tui][conversation][render][tool][diff]") {
     // The only truncation the user cannot undo. It must be reported as such,

@@ -329,6 +329,13 @@ ToolActivity make_tool_activity(std::string id,
 [[nodiscard]] std::string tool_disclosure_key(const ToolActivity& tool,
                                               std::size_t index_in_message);
 
+/// Stable key for the nested raw-result disclosure inside a tool card.
+/// Machine-oriented JSON stays independently collapsible even when the outer
+/// card opens automatically to show a short diff.
+[[nodiscard]] std::string tool_raw_result_disclosure_key(
+    const ToolActivity& tool,
+    std::size_t index_in_message);
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
