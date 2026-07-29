@@ -1,4 +1,5 @@
 #include "XaiOAuthFlow.hpp"
+#include "OAuthErrors.hpp"
 
 #include "AuthBrowserLauncher.hpp"
 #include "OAuthPkce.hpp"
@@ -381,7 +382,10 @@ OAuthToken XaiOAuthFlow::refresh(std::string_view refresh_token) {
         }
         const OAuthErrorResponse error = parse_oauth_error(response.text);
         last_error = error.message();
-        if (error.code == "invalid_grant" || error.code == "invalid_client") break;
+        if (error.code == "invalid_grant") {
+            throw OAuthRefreshRejected::by_provider("Grok");
+        }
+        if (error.code == "invalid_client") break;
         if (attempt < 2) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200 << attempt));
         }

@@ -7,6 +7,7 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
 #include "core/auth/KimiOAuthFlow.hpp"
+#include "core/auth/OAuthErrors.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
@@ -30,6 +31,17 @@ using namespace core::llm;
 using namespace core::llm::protocols;
 
 namespace {
+
+class ReauthenticationCredentialSource final
+    : public core::auth::ICredentialSource {
+public:
+    core::auth::AuthInfo get_auth() override {
+        throw core::auth::ReauthenticationRequired(
+            "claude",
+            "Claude rejected the saved refresh token. Sign in again to continue.");
+    }
+
+};
 
 class ScopedServerStop {
 public:
@@ -77,6 +89,32 @@ int bind_to_first_available_port(httplib::Server& server, int begin, int end) {
 }
 
 } // namespace
+
+TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recovery",
+          "[integration][authentication][reauthentication]") {
+    auto provider = std::make_shared<HttpLLMProvider>(
+        "https://example.invalid",
+        std::make_shared<ReauthenticationCredentialSource>(),
+        "claude-sonnet-4-6",
+        std::make_unique<AnthropicProtocol>());
+
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        make_claude_request(),
+        [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    REQUIRE(chunks.size() == 1);
+    const auto& failure = chunks.front();
+    CHECK(failure.is_error);
+    CHECK(failure.is_final);
+    REQUIRE(failure.authentication_recovery.has_value());
+    CHECK(failure.authentication_recovery->provider_id == "claude");
+    CHECK(failure.authentication_recovery->retry_safe);
+    CHECK_THAT(failure.content,
+               Catch::Matchers::ContainsSubstring("Authentication required"));
+    CHECK_THAT(failure.content,
+               !Catch::Matchers::ContainsSubstring("invalid_grant"));
+}
 
 TEST_CASE("KimiProtocol uploads local videos as files and serializes ms references",
           "[integration][kimi][video][upload]") {
@@ -520,6 +558,39 @@ TEST_CASE("ClaudeOAuthFlow::refresh retries without scope after invalid_scope",
     REQUIRE(request_bodies.size() == 2);
     REQUIRE(request_bodies[0].find("\"scope\"") != std::string::npos);
     REQUIRE(request_bodies[1].find("\"scope\"") == std::string::npos);
+}
+
+TEST_CASE("ClaudeOAuthFlow classifies an expired refresh token as reauthentication",
+          "[integration][ClaudeOAuthFlow][reauthentication]") {
+    httplib::Server server;
+    server.Post("/oauth/token", [&](const httplib::Request&, httplib::Response& res) {
+        res.status = 400;
+        res.set_content(
+            R"({"error": "invalid_grant", "error_description": "Refresh token expired"})",
+            "application/json");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Loopback port binding unavailable in this test environment");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+    core::auth::ClaudeOAuthFlow flow(
+        "test-client-id",
+        base + "/oauth/authorize",
+        base + "/oauth/token",
+        {"user:inference"},
+        42100,
+        42101,
+        nullptr);
+
+    REQUIRE_THROWS_AS(
+        flow.refresh("expired-refresh-token"),
+        core::auth::OAuthRefreshRejected);
 }
 
 TEST_CASE("ClaudeOAuthFlow::refresh parses top-level account/org identifiers",

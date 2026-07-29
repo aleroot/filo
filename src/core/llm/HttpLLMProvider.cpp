@@ -5,6 +5,7 @@
 #include "protocols/GeminiProtocol.hpp"
 #include "transport/CurlWebSocketTransport.hpp"
 #include "transport/HttpHeaderUtils.hpp"
+#include "../auth/OAuthErrors.hpp"
 #include "../logging/Logger.hpp"
 #include "../net/NetworkTraffic.hpp"
 #include "../utils/UriUtils.hpp"
@@ -179,6 +180,19 @@ namespace {
 
     [[nodiscard]] bool looks_like_loopback_base_url(std::string_view base_url) {
         return core::utils::uri::is_loopback_http_url(base_url);
+    }
+
+    [[nodiscard]] StreamChunk make_reauthentication_chunk(
+        const core::auth::ReauthenticationRequired& error,
+        bool retry_safe) {
+        const std::string provider_id(error.provider_id());
+        return StreamChunk::make_authentication_error(
+            "\n[Authentication required.]\n",
+            AuthenticationRecoveryRequest{
+                .provider_id = provider_id,
+                .reason = error.what(),
+                .retry_safe = retry_safe,
+            });
     }
 
 }
@@ -579,6 +593,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             std::lock_guard lock(state_mutex_);
             last_model_ = prepared.model;
         }
+    } catch (const core::auth::ReauthenticationRequired& error) {
+        core::logging::warn(
+            "[HTTP] OAuth session for '{}' requires sign-in: {}",
+            error.provider_id(),
+            error.what());
+        callback(make_reauthentication_chunk(error, /*retry_safe=*/true));
+        return;
     } catch (const std::exception& e) {
         core::logging::error("[HTTP] Failed to start request: {}", e.what());
         callback(StreamChunk::make_error(std::string("\n[Failed to start request: ") + e.what() + "]"));
@@ -987,8 +1008,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     && !attempted_auth_recovery
                     && self->cred_source_) {
                     attempted_auth_recovery = true;
-                    if (self->cred_source_->refresh_on_auth_failure()) {
-                        try {
+                    try {
+                        if (self->cred_source_->refresh_on_auth_failure()) {
                             auto refreshed_auth = self->cred_source_->get_auth();
                             headers = protocol->build_headers(refreshed_auth);
                             headers["Accept"] = "text/event-stream";
@@ -997,12 +1018,24 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                 callback(StreamChunk::make_final());
                                 break;
                             }
-                            callback(StreamChunk::make_error(
-                                "\n[Authentication expired. Retrying with refreshed credentials...]"));
+                            core::logging::info(
+                                "OAuth credentials refreshed after an authentication failure; "
+                                "retrying the request");
                             continue;
-                        } catch (const std::exception& e) {
-                            core::logging::warn("Credential refresh retry failed: {}", e.what());
                         }
+                    } catch (const core::auth::ReauthenticationRequired& error) {
+                        core::logging::warn(
+                            "OAuth session for '{}' requires sign-in: {}",
+                            error.provider_id(),
+                            error.what());
+                        callback(make_reauthentication_chunk(
+                            error,
+                            /*retry_safe=*/!stream_started));
+                        break;
+                    } catch (const std::exception& error) {
+                        core::logging::warn(
+                            "Credential refresh retry failed: {}",
+                            error.what());
                     }
                 }
 

@@ -10,6 +10,7 @@
 #include "core/auth/GoogleOAuthFlow.hpp"
 
 #include "core/auth/OpenAIOAuthFlow.hpp"
+#include "core/auth/OAuthErrors.hpp"
 #include "core/auth/OAuthTokenManager.hpp"
 #include "core/auth/OAuthCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
@@ -131,6 +132,13 @@ struct StubFlow : IOAuthFlow {
     }
 };
 
+struct RejectedRefreshFlow : StubFlow {
+    OAuthToken refresh(std::string_view) override {
+        ++refresh_calls;
+        throw OAuthRefreshRejected("Refresh token expired");
+    }
+};
+
 // ── OAuthToken ────────────────────────────────────────────────────────────────
 
 TEST_CASE("OAuthToken::is_valid() — future expiry", "[OAuthToken]") {
@@ -159,6 +167,16 @@ TEST_CASE("OAuthToken::has_refresh_token()", "[OAuthToken]") {
     REQUIRE_FALSE(t.has_refresh_token());
     t.refresh_token = "rt";
     REQUIRE(t.has_refresh_token());
+}
+
+TEST_CASE("OAuth refresh rejection classifier recognizes terminal grants",
+          "[OAuthToken][reauthentication]") {
+    CHECK(oauth_error_is_invalid_grant(
+        R"({"error": "invalid_grant", "error_description": "Refresh token expired"})"));
+    CHECK(oauth_error_is_invalid_grant(
+        R"({"error":"expired_token","error_description":"token has been revoked"})"));
+    CHECK_FALSE(oauth_error_is_invalid_grant(
+        R"({"error":"temporarily_unavailable"})"));
 }
 
 // ── ApiKeyCredentialSource ────────────────────────────────────────────────────
@@ -685,6 +703,36 @@ TEST_CASE("OAuthTokenManager — force_refresh() throws without refresh token", 
     REQUIRE(flow->refresh_calls == 0);
 }
 
+TEST_CASE("OAuthTokenManager — rejected refresh requests provider reauthentication",
+          "[OAuthTokenManager][reauthentication]") {
+    auto flow = std::make_shared<RejectedRefreshFlow>();
+    auto store = std::make_shared<StubStore>();
+    store->stored = make_token(-3600, "expired-refresh", "expired-access");
+
+    OAuthTokenManager manager("claude", flow, store, false);
+
+    try {
+        (void)manager.get_valid_token();
+        FAIL("Expected a reauthentication request");
+    } catch (const ReauthenticationRequired& error) {
+        CHECK(error.provider_id() == "claude");
+        CHECK_THAT(error.what(),
+                   Catch::Matchers::ContainsSubstring("Refresh token expired"));
+    }
+    CHECK(flow->refresh_calls == 1);
+    CHECK(store->save_calls == 0);
+}
+
+TEST_CASE("OAuthTokenManager — noninteractive runtime never launches login",
+          "[OAuthTokenManager][reauthentication]") {
+    auto flow = std::make_shared<StubFlow>();
+    auto store = std::make_shared<StubStore>();
+    OAuthTokenManager manager("openai-pkce", flow, store, false);
+
+    REQUIRE_THROWS_AS(manager.get_valid_token(), ReauthenticationRequired);
+    CHECK(flow->login_calls == 0);
+}
+
 // ── OAuthCredentialSource ─────────────────────────────────────────────────────
 
 TEST_CASE("OAuthCredentialSource — returns Bearer header from manager's token", "[OAuthCredentialSource]") {
@@ -786,7 +834,8 @@ TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns true when
     REQUIRE(flow->refresh_calls == 1);
 }
 
-TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns false without refresh token", "[OAuthCredentialSource]") {
+TEST_CASE("OAuthCredentialSource — missing refresh token requests reauthentication",
+          "[OAuthCredentialSource][reauthentication]") {
     auto flow  = std::make_shared<StubFlow>();
     auto store = std::make_shared<StubStore>();
     store->stored = make_token(-3600, "", "expired-at");
@@ -794,7 +843,7 @@ TEST_CASE("OAuthCredentialSource — refresh_on_auth_failure() returns false wit
     auto manager = std::make_shared<OAuthTokenManager>("claude", flow, store);
     OAuthCredentialSource src(manager);
 
-    REQUIRE_FALSE(src.refresh_on_auth_failure());
+    REQUIRE_THROWS_AS(src.refresh_on_auth_failure(), ReauthenticationRequired);
     REQUIRE(flow->refresh_calls == 0);
 }
 
@@ -1218,6 +1267,30 @@ TEST_CASE("AuthenticationManager logout succeeds when no session is cached", "[A
     REQUIRE(manager.logout("claude", /*revoke_remote=*/false) == "Claude");
 }
 
+TEST_CASE("AuthenticationManager resolves recovery metadata through strategies",
+          "[AuthenticationManager][reauthentication]") {
+    TempDir tmp;
+    const auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    const auto claude = manager.describe_provider("claude");
+    REQUIRE(claude.has_value());
+    CHECK(claude->credential_id == "claude");
+    CHECK(claude->login_provider == "claude");
+    CHECK(claude->display_name == "Claude");
+
+    const auto openai = manager.describe_provider("openai-pkce");
+    REQUIRE(openai.has_value());
+    CHECK(openai->credential_id == "openai-pkce");
+    CHECK(openai->login_provider == "openai");
+    CHECK(openai->display_name == "OpenAI (ChatGPT login)");
+
+    // API-key setup strategies are deliberately not interactive OAuth
+    // recovery targets.
+    CHECK_FALSE(manager.describe_provider("qwen").has_value());
+    CHECK_FALSE(manager.describe_provider("zai").has_value());
+    CHECK_FALSE(manager.describe_provider("unknown").has_value());
+}
+
 TEST_CASE("OAuthTokenManager observes logout performed by another manager",
           "[OAuthTokenManager][logout]") {
     TempDir tmp;
@@ -1232,9 +1305,12 @@ TEST_CASE("OAuthTokenManager observes logout performed by another manager",
     REQUIRE(manager->get_valid_token().is_valid());
 
     FileTokenStore(tmp.path).clear("grok");
-    REQUIRE_THROWS_WITH(
-        manager->get_valid_token(),
-        Catch::Matchers::ContainsSubstring("filo --auth grok"));
+    try {
+        (void)manager->get_valid_token();
+        FAIL("Expected a reauthentication request after logout");
+    } catch (const ReauthenticationRequired& error) {
+        CHECK(error.provider_id() == "grok");
+    }
 }
 
 TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[AuthenticationManager][logout]") {

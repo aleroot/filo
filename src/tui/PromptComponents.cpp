@@ -1107,6 +1107,57 @@ Element render_provider_selection_panel(const std::vector<std::string>& provider
       | size(HEIGHT, GREATER_THAN, std::max(8, static_cast<int>(providers.size()) + 6));
 }
 
+Element render_authentication_recovery_panel(
+    std::string_view provider_name,
+    std::string_view reason,
+    bool retry_safe,
+    int selected_index) {
+    const std::array<std::pair<std::string, std::string>, 2> options{{
+        {
+            retry_safe ? "Sign in and retry" : "Sign in again",
+            retry_safe
+                ? "Reconnect the account, then safely replay the request."
+                : "Reconnect the account. The interrupted request will not be replayed.",
+        },
+        {
+            "Not now",
+            "Keep using Filo; reconnect later with /auth.",
+        },
+    }};
+
+    std::vector<Element> rows;
+    rows.reserve(options.size());
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        rows.push_back(make_selection_row(
+            std::format("[{}] {}", i + 1, options[i].first),
+            options[i].second,
+            selected_index == static_cast<int>(i),
+            ColorYellowDark));
+    }
+
+    const std::string title = provider_name.empty()
+        ? std::string("RECONNECT ACCOUNT")
+        : "RECONNECT " + std::string(provider_name);
+    const std::string explanation = reason.empty()
+        ? std::string("The saved session can no longer be refreshed.")
+        : std::string(reason);
+
+    return vbox({
+        hbox({
+            text(" " + title + " ") | ftxui::bold | color(Color::Black)
+                | bgcolor(ColorYellowBright),
+            filler(),
+            text("Up/Down: select  Enter: confirm  Esc: not now")
+                | color(Color::GrayDark),
+        }),
+        separator(),
+        text("Sign-in required") | ftxui::bold | color(Color::White),
+        paragraph(explanation) | color(Color::GrayLight),
+        filler(),
+        vbox(std::move(rows)),
+    }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 13);
+}
+
 Element render_settings_panel(std::string_view scope_label,
                               std::string_view scope_path,
                               const std::vector<SettingsPanelRow>& rows,

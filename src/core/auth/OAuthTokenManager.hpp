@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace core::auth {
 
@@ -33,8 +34,11 @@ public:
     void force_refresh();
     void login();
     void logout();
+    [[nodiscard]] std::string_view provider_id() const noexcept { return provider_id_; }
 
 private:
+    [[nodiscard]] OAuthToken refresh(const OAuthToken& current);
+
     std::string                  provider_id_;
     std::shared_ptr<IOAuthFlow>  flow_;
     std::shared_ptr<ITokenStore> store_;

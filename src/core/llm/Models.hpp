@@ -394,6 +394,14 @@ struct ContinuationItem {
     return parser.parse(padded).get(object) == simdjson::SUCCESS;
 }
 
+struct AuthenticationRecoveryRequest {
+    std::string provider_id;
+    std::string reason;
+    // True only when the provider rejected the request before producing model
+    // output or tool calls, making a post-login replay safe.
+    bool retry_safe = false;
+};
+
 struct StreamChunk {
     std::string content;           // Text content from the model
     std::string reasoning_content; // Provider-specific thinking/reasoning content
@@ -403,6 +411,7 @@ struct StreamChunk {
     bool is_error = false;         // True if this chunk represents an API/HTTP error
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
     std::vector<ContinuationItem> continuation_items; // Opaque signed/encrypted reasoning state
+    std::optional<AuthenticationRecoveryRequest> authentication_recovery;
 
     // Factory methods for common cases
     [[nodiscard]] static StreamChunk make_final(
@@ -427,6 +436,13 @@ struct StreamChunk {
             .is_final = true,
             .is_error = true,
         };
+    }
+    [[nodiscard]] static StreamChunk make_authentication_error(
+        std::string message,
+        AuthenticationRecoveryRequest recovery) {
+        StreamChunk chunk = make_error(std::move(message));
+        chunk.authentication_recovery = std::move(recovery);
+        return chunk;
     }
     [[nodiscard]] static StreamChunk make_content(std::string text) {
         return StreamChunk{

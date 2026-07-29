@@ -1,4 +1,5 @@
 #include "OpenAIOAuthFlow.hpp"
+#include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "OAuthPkce.hpp"
 #include "core/utils/Base64.hpp"
@@ -314,9 +315,13 @@ OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
         }
     );
 
-    if (r.status_code != 200)
+    if (r.status_code != 200) {
+        if (oauth_error_is_invalid_grant(r.text)) {
+            throw OAuthRefreshRejected::by_provider("OpenAI");
+        }
         throw std::runtime_error("Token refresh failed ("
                                  + std::to_string(r.status_code) + "): " + r.text);
+    }
 
     OAuthToken token = parse_token_response(r.text, req_time);
 

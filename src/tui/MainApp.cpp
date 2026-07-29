@@ -44,6 +44,7 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/config/ModelDefaultsPersistence.hpp"
 #include "core/config/SessionModelOverride.hpp"
+#include "core/auth/AuthenticationManager.hpp"
 #include "core/llm/routing/RouterEngine.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/BuiltinToolRegistry.hpp"
@@ -566,6 +567,9 @@ RunResult run(RunOptions opts) {
     auto config              = config_manager.get_config();
     auto& provider_manager   = core::llm::ProviderManager::get_instance();
     const auto settings_working_dir = std::filesystem::current_path();
+    const auto authentication_manager =
+        core::auth::AuthenticationManager::create_with_defaults(
+            config_manager.get_config_dir());
 
     core::config::ModelDefaultsPersistence model_defaults{config_manager};
     if (opts.startup_model.has_value()) {
@@ -833,6 +837,19 @@ RunResult run(RunOptions opts) {
         core::agent::Agent::TurnCallbacks callbacks;
     };
     std::deque<PendingAgentTurn> queued_steering_turns;
+    struct PendingAuthenticationRecovery {
+        core::llm::AuthenticationRecoveryRequest request;
+        core::auth::AuthenticationProviderDescriptor provider;
+        std::string retry_text;
+        core::agent::Agent::TurnCallbacks retry_callbacks;
+    };
+    struct AuthenticationRecoveryState {
+        std::optional<PendingAuthenticationRecovery> active;
+        std::deque<PendingAuthenticationRecovery> queued;
+        std::unordered_set<std::string> providers;
+        int selected = 0;
+    };
+    AuthenticationRecoveryState authentication_recovery_state;
     ActivityTimerRegistry turn_activity_timers;
     
     // Rate limit tracking for status bar and notifications
@@ -4837,6 +4854,7 @@ RunResult run(RunOptions opts) {
         wake_ui();
 
         auto effective_callbacks = make_turn_callbacks(assistant_message_id);
+        auto retry_callbacks = turn_callbacks;
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
         effective_callbacks.allowed_tools = std::move(turn_callbacks.allowed_tools);
@@ -4845,6 +4863,46 @@ RunResult run(RunOptions opts) {
             effective_callbacks.min_context_utilization_for_rotation =
                 turn_callbacks.min_context_utilization_for_rotation;
         }
+        effective_callbacks.on_authentication_required =
+            [retry_text = text,
+             retry_callbacks = std::move(retry_callbacks),
+             &authentication_recovery_state,
+             &authentication_manager,
+             &ui_mutex,
+             &wake_ui](
+                const core::llm::AuthenticationRecoveryRequest& request) {
+                if (request.provider_id.empty()) {
+                    return;
+                }
+                const auto provider =
+                    authentication_manager.describe_provider(request.provider_id);
+                if (!provider.has_value()) {
+                    return;
+                }
+                {
+                    std::lock_guard lock(ui_mutex);
+                    if (!authentication_recovery_state.providers
+                             .insert(provider->credential_id)
+                             .second) {
+                        return;
+                    }
+
+                    PendingAuthenticationRecovery pending{
+                        .request = request,
+                        .provider = *provider,
+                        .retry_text = retry_text,
+                        .retry_callbacks = retry_callbacks,
+                    };
+                    if (!authentication_recovery_state.active.has_value()) {
+                        authentication_recovery_state.active = std::move(pending);
+                        authentication_recovery_state.selected = 0;
+                    } else {
+                        authentication_recovery_state.queued.push_back(
+                            std::move(pending));
+                    }
+                }
+                wake_ui();
+            };
 
         std::thread([text = std::string(text),
                      base_dir = std::filesystem::current_path(),
@@ -5479,6 +5537,117 @@ RunResult run(RunOptions opts) {
                     break;
                 }
             }
+            wake_ui();
+            return true;
+        }
+
+        // ── OAuth reauthentication dialog ───────────────────────────────
+        // Provider callbacks arrive on worker threads. The prompt state is
+        // populated there, but browser/device login must run here on the TUI
+        // event thread so WithRestoredIO can safely hand terminal ownership
+        // back to the interactive authentication flow.
+        std::optional<PendingAuthenticationRecovery> authentication_recovery;
+        bool authentication_recovery_was_active = false;
+        bool authentication_recovery_accepted = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (authentication_recovery_state.active.has_value()) {
+                authentication_recovery_was_active = true;
+                if (event == Event::ArrowUp || event == Event::ArrowDown) {
+                    authentication_recovery_state.selected =
+                        authentication_recovery_state.selected == 0 ? 1 : 0;
+                } else if (event == Event::Character('1')
+                           || event == Event::Character('y')
+                           || event == Event::Character('Y')) {
+                    authentication_recovery_accepted = true;
+                    authentication_recovery =
+                        std::move(authentication_recovery_state.active);
+                    authentication_recovery_state.active.reset();
+                } else if (event == Event::Return) {
+                    authentication_recovery_accepted =
+                        authentication_recovery_state.selected == 0;
+                    authentication_recovery =
+                        std::move(authentication_recovery_state.active);
+                    authentication_recovery_state.active.reset();
+                } else if (event == Event::Character('2')
+                           || event == Event::Character('n')
+                           || event == Event::Character('N')
+                           || event == Event::Escape
+                           || is_ctrl_c_event(event)) {
+                    authentication_recovery =
+                        std::move(authentication_recovery_state.active);
+                    authentication_recovery_state.active.reset();
+                }
+            }
+        }
+        if (authentication_recovery_was_active) {
+            if (!authentication_recovery.has_value()) {
+                wake_ui();
+                return true;
+            }
+
+            const auto& provider = authentication_recovery->provider;
+            bool login_succeeded = false;
+            std::string login_error;
+
+            if (authentication_recovery_accepted) {
+                auto authenticate = [&]() {
+                    try {
+                        authentication_manager.login(provider.login_provider);
+                        login_succeeded = true;
+                    } catch (const std::exception& error) {
+                        login_error = error.what();
+                    } catch (...) {
+                        login_error = "Unknown authentication error.";
+                    }
+                };
+                screen.WithRestoredIO(authenticate)();
+            }
+
+            if (!authentication_recovery_accepted) {
+                append_history(std::format(
+                    "\nℹ  {} remains signed out. Reconnect any time with `/auth {}`.\n",
+                    provider.display_name,
+                    provider.login_provider));
+            } else if (!login_succeeded) {
+                append_history(std::format(
+                    "\n✗  Could not reconnect {}: {}\n"
+                    "ℹ  Try again with `/auth {}`.\n",
+                    provider.display_name,
+                    login_error.empty() ? std::string("Unknown error.") : login_error,
+                    provider.login_provider));
+            } else if (authentication_recovery->request.retry_safe
+                       && !authentication_recovery->retry_text.empty()) {
+                append_history(std::format(
+                    "\n✓  {} reconnected. Retrying your request…\n",
+                    provider.display_name));
+                // Remove the failed user/error pair from model history before
+                // replaying. The transcript keeps the visible diagnostic, but
+                // the provider receives one clean copy of the user request.
+                agent->undo_last();
+                submit_agent_turn(
+                    std::move(authentication_recovery->retry_text),
+                    std::move(authentication_recovery->retry_callbacks));
+            } else {
+                append_history(std::format(
+                    "\n✓  {} reconnected. The interrupted request was not replayed "
+                    "because output may already have started; use `/retry` when ready.\n",
+                    provider.display_name));
+            }
+
+            {
+                std::lock_guard lock(ui_mutex);
+                authentication_recovery_state.providers.erase(
+                    provider.credential_id);
+                if (!authentication_recovery_state.active.has_value()
+                    && !authentication_recovery_state.queued.empty()) {
+                    authentication_recovery_state.active =
+                        std::move(authentication_recovery_state.queued.front());
+                    authentication_recovery_state.queued.pop_front();
+                    authentication_recovery_state.selected = 0;
+                }
+            }
+            input_component->TakeFocus();
             wake_ui();
             return true;
         }
@@ -6555,9 +6724,13 @@ RunResult run(RunOptions opts) {
         bool                   review_picker_active = false;
         bool                   review_activity_active = false;
         bool                   settings_panel_active = false;
+        bool                   authentication_recovery_active = false;
         std::string            perm_tool, perm_args, perm_allow_label;
         std::string            review_activity_hint;
         std::string            settings_panel_status;
+        std::string            authentication_recovery_provider;
+        std::string            authentication_recovery_reason;
+        bool                   authentication_recovery_retry_safe = false;
         ToolDiffPreview        perm_diff;
         int                    perm_selected = 0;
         int                    model_picker_selected = 0;
@@ -6567,6 +6740,7 @@ RunResult run(RunOptions opts) {
         int                    provider_picker_selected = 0;
         int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
+        int                    authentication_recovery_selected = 0;
         std::vector<std::string> provider_picker_providers;
         std::vector<tui::ModelProviderPickerRow> model_provider_picker_providers;
         std::vector<tui::ModelPickerRow> provider_model_picker_models;
@@ -6645,6 +6819,18 @@ RunResult run(RunOptions opts) {
             settings_panel_selected = settings_panel_state.selected;
             settings_panel_scope = settings_panel_state.scope;
             settings_panel_status = settings_panel_state.status_message;
+            authentication_recovery_active =
+                authentication_recovery_state.active.has_value();
+            if (authentication_recovery_state.active.has_value()) {
+                authentication_recovery_provider =
+                    authentication_recovery_state.active->provider.display_name;
+                authentication_recovery_reason =
+                    authentication_recovery_state.active->request.reason;
+                authentication_recovery_retry_safe =
+                    authentication_recovery_state.active->request.retry_safe;
+                authentication_recovery_selected =
+                    authentication_recovery_state.selected;
+            }
             local_model_picker_active   = local_model_picker_state.active;
             local_model_picker_selected = local_model_picker_state.selected;
             local_model_picker_dir      = local_model_picker_state.current_dir.string();
@@ -6708,6 +6894,12 @@ RunResult run(RunOptions opts) {
             bottom_el = render_remote_activity_panel(
                 remote_activity_snapshot,
                 remote_activity_panel_selected);
+        } else if (authentication_recovery_active) {
+            bottom_el = render_authentication_recovery_panel(
+                authentication_recovery_provider,
+                authentication_recovery_reason,
+                authentication_recovery_retry_safe,
+                authentication_recovery_selected);
         } else if (settings_panel_active) {
             std::vector<SettingsPanelRow> settings_rows;
             settings_rows.reserve(settings_definitions.size());

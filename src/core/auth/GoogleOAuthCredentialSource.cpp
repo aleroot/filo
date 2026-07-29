@@ -1,5 +1,6 @@
 #include "GoogleOAuthCredentialSource.hpp"
 #include "GoogleCodeAssist.hpp"
+#include "OAuthErrors.hpp"
 #include <cstdlib>
 
 namespace core::auth {
@@ -71,6 +72,8 @@ bool GoogleOAuthCredentialSource::refresh_on_auth_failure() {
     try {
         manager_->force_refresh();
         return true;
+    } catch (const ReauthenticationRequired&) {
+        throw;
     } catch (...) {
         return false;
     }

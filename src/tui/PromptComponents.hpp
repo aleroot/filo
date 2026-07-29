@@ -148,6 +148,12 @@ ftxui::Element render_option_selection_panel(std::string_view title,
 ftxui::Element render_provider_selection_panel(const std::vector<std::string>& providers,
                                                int selected_index);
 
+ftxui::Element render_authentication_recovery_panel(
+    std::string_view provider_name,
+    std::string_view reason,
+    bool retry_safe,
+    int selected_index);
+
 ftxui::Element render_settings_panel(std::string_view scope_label,
                                      std::string_view scope_path,
                                      const std::vector<SettingsPanelRow>& rows,

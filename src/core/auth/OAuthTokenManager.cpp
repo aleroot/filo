@@ -1,4 +1,5 @@
 #include "OAuthTokenManager.hpp"
+#include "OAuthErrors.hpp"
 #include <stdexcept>
 
 namespace core::auth {
@@ -45,8 +46,7 @@ OAuthToken OAuthTokenManager::get_valid_token() {
         }
         // 2. Expired but refresh token available
         if (stored->has_refresh_token()) {
-            OAuthToken refreshed = flow_->refresh(stored->refresh_token);
-            inherit_refresh_context(refreshed, *stored);
+            OAuthToken refreshed = refresh(*stored);
             store_->save(provider_id_, refreshed);
             return refreshed;
         }
@@ -54,9 +54,9 @@ OAuthToken OAuthTokenManager::get_valid_token() {
 
     // 3. Full login (opens browser)
     if (!allow_interactive_login_) {
-        throw std::runtime_error(
-            "No usable OAuth session for provider '" + provider_id_
-            + "'. Run `filo --auth " + provider_id_ + "` first.");
+        throw ReauthenticationRequired(
+            provider_id_,
+            "The saved OAuth session can no longer be used.");
     }
     OAuthToken token = flow_->login();
     store_->save(provider_id_, token);
@@ -75,14 +75,24 @@ void OAuthTokenManager::force_refresh() {
 
     auto stored = store_->load(provider_id_);
     if (stored && stored->has_refresh_token()) {
-        OAuthToken refreshed = flow_->refresh(stored->refresh_token);
-        inherit_refresh_context(refreshed, *stored);
+        OAuthToken refreshed = refresh(*stored);
         store_->save(provider_id_, refreshed);
         return;
     }
 
-    throw std::runtime_error(
-        "No refresh token available for provider '" + provider_id_ + "'.");
+    throw ReauthenticationRequired(
+        provider_id_,
+        "No refresh token is available for the saved OAuth session.");
+}
+
+OAuthToken OAuthTokenManager::refresh(const OAuthToken& current) {
+    try {
+        OAuthToken refreshed = flow_->refresh(current.refresh_token);
+        inherit_refresh_context(refreshed, current);
+        return refreshed;
+    } catch (const OAuthRefreshRejected& error) {
+        throw ReauthenticationRequired(provider_id_, error.what());
+    }
 }
 
 void OAuthTokenManager::login() {

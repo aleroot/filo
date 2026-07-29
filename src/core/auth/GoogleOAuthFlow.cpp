@@ -1,4 +1,5 @@
 #include "GoogleOAuthFlow.hpp"
+#include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "GoogleCodeAssist.hpp"
 #include "OAuthPkce.hpp"
@@ -576,9 +577,13 @@ OAuthToken GoogleOAuthFlow::refresh(std::string_view refresh_token) {
         }
     );
 
-    if (r.status_code != 200)
+    if (r.status_code != 200) {
+        if (oauth_error_is_invalid_grant(r.text)) {
+            throw OAuthRefreshRejected::by_provider("Google");
+        }
         throw std::runtime_error("Token refresh failed (" +
                                  std::to_string(r.status_code) + "): " + r.text);
+    }
 
     OAuthToken token = parse_token_response(r.text, request_time);
 

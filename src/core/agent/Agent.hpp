@@ -62,6 +62,10 @@ public:
         // routing status here keeps it out of the assistant response body and
         // avoids re-marking a finalized assistant message as pending.
         std::function<void(const std::string&)> on_status_log = {};
+        // Raised only when an OAuth refresh credential was definitively
+        // rejected and interactive sign-in can recover the provider.
+        std::function<void(const core::llm::AuthenticationRecoveryRequest&)>
+            on_authentication_required = {};
         std::shared_ptr<core::llm::LLMProvider> provider_override = {};
         std::string provider_name_override{};
         std::string model_override{};

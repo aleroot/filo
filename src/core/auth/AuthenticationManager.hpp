@@ -3,6 +3,7 @@
 #include "ICredentialSource.hpp"
 #include "core/config/ConfigManager.hpp"
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,18 @@ struct LoginResult {
     std::string provider;
     std::string login_provider;
     std::vector<std::string> hints;
+};
+
+/**
+ * Stable authentication identity exposed to presentation layers.
+ *
+ * The strategy registry owns these values. Callers must not infer labels,
+ * login aliases, or token-store keys from one another.
+ */
+struct AuthenticationProviderDescriptor {
+    std::string credential_id;
+    std::string login_provider;
+    std::string display_name;
 };
 
 class IAuthStrategy {
@@ -72,6 +85,13 @@ public:
     void register_strategy(std::shared_ptr<IAuthStrategy> strategy);
 
     LoginResult login(std::string_view provider) const;
+
+    /**
+     * Resolve a login alias or token-store key through the registered
+     * strategies. This is the single source of provider presentation metadata.
+     */
+    [[nodiscard]] std::optional<AuthenticationProviderDescriptor>
+    describe_provider(std::string_view provider) const;
 
     /**
      * Sign out of a login provider: best-effort server-side token revocation

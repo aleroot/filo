@@ -1,4 +1,5 @@
 #include "KimiOAuthFlow.hpp"
+#include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "core/utils/Base64.hpp"
 #include <cpr/cpr.h>
@@ -458,10 +459,13 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
     }
     
     if (r.status_code == 401 || r.status_code == 403) {
-        throw std::runtime_error("Token refresh unauthorized. Please login again.");
+        throw OAuthRefreshRejected::by_provider("Kimi");
     }
     
     if (r.status_code != 200) {
+        if (oauth_error_is_invalid_grant(r.text)) {
+            throw OAuthRefreshRejected::by_provider("Kimi");
+        }
         throw std::runtime_error("Token refresh failed (" + 
                                  std::to_string(r.status_code) + "): " + r.text);
     }

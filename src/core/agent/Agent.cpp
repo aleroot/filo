@@ -1095,6 +1095,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         if (chunk.is_error) {
             self->turn_failed_.store(true, std::memory_order_release);
         }
+        if (chunk.authentication_recovery.has_value()
+            && turn_callbacks.on_authentication_required) {
+            turn_callbacks.on_authentication_required(
+                *chunk.authentication_recovery);
+        }
 
         // Record token usage in the ledger and session stats.
         {

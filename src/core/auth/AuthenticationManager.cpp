@@ -288,7 +288,8 @@ public:
         auto flow = std::make_shared<GoogleOAuthFlow>();
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
-            "google", std::move(flow), std::move(store));
+            "google", std::move(flow), std::move(store),
+            /*allow_interactive_login=*/false);
         return std::make_shared<GoogleOAuthCredentialSource>(std::move(manager));
     }
 
@@ -329,7 +330,8 @@ public:
         auto flow = std::make_shared<ClaudeOAuthFlow>(nullptr);
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
-            "claude", std::move(flow), std::move(store));
+            "claude", std::move(flow), std::move(store),
+            /*allow_interactive_login=*/false);
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
@@ -372,7 +374,8 @@ public:
         auto flow    = std::make_shared<OpenAIOAuthFlow>();
         auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
-            "openai-pkce", std::move(flow), std::move(store));
+            "openai-pkce", std::move(flow), std::move(store),
+            /*allow_interactive_login=*/false);
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
@@ -412,7 +415,8 @@ public:
         auto flow    = std::make_shared<KimiOAuthFlow>();
         auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
-            "kimi", std::move(flow), std::move(store));
+            "kimi", std::move(flow), std::move(store),
+            /*allow_interactive_login=*/false);
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
@@ -576,6 +580,32 @@ LoginResult AuthenticationManager::login(std::string_view provider) const {
     throw std::runtime_error(
         "Unknown provider '" + std::string(provider)
         + "'. Available: " + join(available));
+}
+
+std::optional<AuthenticationProviderDescriptor>
+AuthenticationManager::describe_provider(std::string_view provider) const {
+    const std::string login_identifier = normalize_login_provider(provider);
+    const std::string credential_identifier = normalize(provider);
+    for (const auto& strategy : strategies_) {
+        const std::string login_provider =
+            normalize(strategy->login_provider());
+        const std::string credential_id =
+            normalize(strategy->token_store_key());
+        if (login_identifier != login_provider
+            && credential_identifier != credential_id) {
+            continue;
+        }
+        if (strategy->login_provider().empty()
+            || strategy->token_store_key().empty()) {
+            continue;
+        }
+        return AuthenticationProviderDescriptor{
+            .credential_id = credential_id,
+            .login_provider = std::string(strategy->login_provider()),
+            .display_name = std::string(strategy->display_name()),
+        };
+    }
+    return std::nullopt;
 }
 
 std::string AuthenticationManager::logout(std::string_view provider,

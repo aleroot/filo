@@ -1,5 +1,6 @@
 #include "ClaudeOAuthFlow.hpp"
 #include "AuthBrowserLauncher.hpp"
+#include "OAuthErrors.hpp"
 #include "OAuthPkce.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/Base64.hpp"
@@ -629,6 +630,9 @@ OAuthToken ClaudeOAuthFlow::refresh(std::string_view refresh_token) {
     }
 
     if (r.status_code != 200) {
+        if (oauth_error_is_invalid_grant(r.text)) {
+            throw OAuthRefreshRejected::by_provider("Claude");
+        }
         std::string message = "Claude token refresh failed ("
                              + std::to_string(r.status_code) + "): " + r.text;
         if (r.status_code == 429) {

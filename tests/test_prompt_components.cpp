@@ -123,6 +123,40 @@ TEST_CASE("runtime status summary has one compact canonical format",
           == "provider: openai  —  model: <provider default>  —  MCP servers: 0");
 }
 
+TEST_CASE("authentication recovery panel explains safe retry",
+          "[tui][authentication]") {
+    auto panel = render_authentication_recovery_panel(
+        "Claude",
+        "Your saved session expired.",
+        true,
+        0);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(90),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring("RECONNECT Claude"));
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring("saved session expired"));
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring("Sign in and retry"));
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring("Not now"));
+}
+
+TEST_CASE("authentication recovery panel does not promise an unsafe retry",
+          "[tui][authentication]") {
+    auto panel = render_authentication_recovery_panel(
+        "Claude",
+        "Sign-in is required.",
+        false,
+        0);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(90),
+                                        ftxui::Dimension::Fit(panel));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring("Sign in again"));
+    CHECK_THAT(output, !Catch::Matchers::ContainsSubstring("Sign in and retry"));
+}
+
 TEST_CASE("workspace status uses a lock only for an enabled sandbox",
           "[tui][status-bar][sandbox]") {
     CHECK(format_workspace_status_label("~/project", false) == " ~/project ");
