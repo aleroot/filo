@@ -4039,13 +4039,16 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
-    auto update_assistant_message = [&](std::string_view assistant_message_id, auto&& updater) {
-        update_ui_message(assistant_message_id, [&](UiMessage& message) {
-            if (message.type != MessageType::Assistant) {
-                return;
+    auto update_live_assistant_message =
+        [&](const std::shared_ptr<LiveAssistantTimeline>& timeline, auto&& updater) {
+        {
+            std::lock_guard lock(ui_mutex);
+            if (auto* message = timeline->current(ui_messages)) {
+                updater(*message);
             }
-            updater(message);
-        });
+        }
+        animation_cv.notify_one();
+        wake_ui();
     };
 
     auto save_session_snapshot = [&, session_save_state]() {
@@ -4062,7 +4065,9 @@ RunResult run(RunOptions opts) {
                 for (const auto& m : ui_messages) {
                     if (m.type == MessageType::Assistant && m.finalized
                         && !m.reasoning_elapsed.empty() && !m.reasoning_text.empty()) {
-                        elapsed_by_reasoning.emplace(m.reasoning_text, m.reasoning_elapsed);
+                        elapsed_by_reasoning.emplace(
+                            m.reasoning_text,
+                            m.reasoning_elapsed);
                     }
                 }
             }
@@ -4544,26 +4549,42 @@ RunResult run(RunOptions opts) {
         return core::config::ConfigManager::get_instance().get_config().mcp_servers;
     };
 
-    auto make_turn_callbacks = [&](std::string assistant_message_id) {
+    auto make_turn_callbacks =
+        [&](std::shared_ptr<LiveAssistantTimeline> timeline) {
         core::agent::Agent::TurnCallbacks callbacks;
-        callbacks.on_step_begin = [assistant_message_id,
-                                   &update_assistant_message,
-                                   &assistant_turn_active]() {
+        callbacks.on_step_begin = [timeline,
+                                   &ui_mutex,
+                                   &ui_messages,
+                                   &assistant_turn_active,
+                                   &turn_activity_timers,
+                                   &animation_cv,
+                                   &wake_ui]() {
             assistant_turn_active.store(true, std::memory_order_relaxed);
-            update_assistant_message(assistant_message_id, [&](UiMessage& message) {
-                // Guard against stray step events after finalization; a
-                // completed message must never revert to pending.
-                if (message.finalized) {
-                    return;
+            {
+                std::lock_guard lock(ui_mutex);
+                const std::string previous_id(timeline->current_message_id());
+                std::string previous_elapsed;
+                if (timeline->step_started()) {
+                    previous_elapsed = format_elapsed_compact(
+                        turn_activity_timers.elapsed(previous_id)
+                            .value_or(std::chrono::seconds{0}));
                 }
-                message.pending = true;
-                message.thinking = true;
-            });
+                UiMessage* message =
+                    timeline->begin_step(ui_messages, std::move(previous_elapsed));
+                if (message == nullptr) {
+                    turn_activity_timers.stop(previous_id);
+                } else if (message->id != previous_id) {
+                    turn_activity_timers.stop(previous_id);
+                    turn_activity_timers.start(message->id);
+                }
+            }
+            animation_cv.notify_one();
+            wake_ui();
         };
         callbacks.on_reasoning =
-            [assistant_message_id, &update_assistant_message](
+            [timeline, &update_live_assistant_message](
                 const std::string& delta) {
-                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                update_live_assistant_message(timeline, [&](UiMessage& message) {
                     // Reasoning that arrives after finalization is dropped; a
                     // completed card must not reopen its live thinking box.
                     if (message.finalized) {
@@ -4577,9 +4598,9 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_tool_start =
-            [assistant_message_id, &update_assistant_message](
+            [timeline, &update_live_assistant_message](
                 const core::llm::ToolCall& tool_call) {
-                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                update_live_assistant_message(timeline, [&](UiMessage& message) {
                     if (message.finalized) {
                         return;
                     }
@@ -4597,10 +4618,10 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_tool_finish =
-            [assistant_message_id, &update_assistant_message](
+            [timeline, &update_live_assistant_message](
                 const core::llm::ToolCall& tool_call,
                 const core::llm::Message& result) {
-                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                update_live_assistant_message(timeline, [&](UiMessage& message) {
                     auto* tool = find_tool_activity(message, tool_call.id);
 
                     if (tool == nullptr) {
@@ -4631,17 +4652,13 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_subagent_event =
-            [assistant_message_id, &update_assistant_message](
+            [timeline, &update_live_assistant_message](
                 const core::agent::SubagentEvent& event) {
                 if (event.parent_tool_call_id.empty() || event.task_id.empty()) {
                     return;
                 }
 
-                update_assistant_message(assistant_message_id, [&](UiMessage& message) {
-                    if (message.finalized) {
-                        return;
-                    }
-
+                update_live_assistant_message(timeline, [&](UiMessage& message) {
                     auto* parent_tool = find_tool_activity(message, event.parent_tool_call_id);
                     if (parent_tool == nullptr) {
                         message.tools.push_back(make_tool_activity(
@@ -4757,9 +4774,11 @@ RunResult run(RunOptions opts) {
                             break;
                     }
 
-                    message.pending = true;
-                    message.thinking = false;
-                    message.show_activity_status = true;
+                    if (!message.finalized) {
+                        message.pending = true;
+                        message.thinking = false;
+                        message.show_activity_status = true;
+                    }
                 });
             };
         // Route out-of-band lifecycle status (auto-compaction progress) to the
@@ -4848,12 +4867,14 @@ RunResult run(RunOptions opts) {
             append_ui_message(ui_messages, make_assistant_message("", "", true));
             assistant_message_id = ui_messages.back().id;
         }
+        auto live_timeline =
+            std::make_shared<LiveAssistantTimeline>(assistant_message_id);
         reset_history_view();
         turn_activity_timers.start(assistant_message_id);
         animation_cv.notify_one();
         wake_ui();
 
-        auto effective_callbacks = make_turn_callbacks(assistant_message_id);
+        auto effective_callbacks = make_turn_callbacks(live_timeline);
         auto retry_callbacks = turn_callbacks;
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
@@ -4908,12 +4929,16 @@ RunResult run(RunOptions opts) {
                      base_dir = std::filesystem::current_path(),
                      agent,
                      effective_callbacks = std::move(effective_callbacks),
-                     &update_assistant_message,
+                     live_timeline,
+                     &update_live_assistant_message,
                      &submit_agent_turn,
                      &take_queued_steering_turn_or_mark_idle,
                      &assistant_turn_active,
                      &turn_activity_timers,
-                     assistant_message_id = std::move(assistant_message_id),
+                     &ui_mutex,
+                     &ui_messages,
+                     &animation_cv,
+                     &wake_ui,
                      &save_session_snapshot]() mutable {
             const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
             // An absolute @ mention is an explicit user selection. Finder
@@ -4929,10 +4954,10 @@ RunResult run(RunOptions opts) {
             }
 
             agent->send_message(user_message,
-                [assistant_message_id,
-                 &update_assistant_message,
+                [live_timeline,
+                 &update_live_assistant_message,
                  &assistant_turn_active](const std::string& chunk) {
-                    update_assistant_message(assistant_message_id, [&](UiMessage& message) {
+                    update_live_assistant_message(live_timeline, [&](UiMessage& message) {
                         // Never revert a finalized assistant message back to
                         // pending. Late/out-of-band callbacks (e.g. compaction
                         // status racing the done callback) must not resurrect
@@ -4957,43 +4982,35 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                [assistant_message_id, agent,
-                 &update_assistant_message,
+                [live_timeline, agent,
                  &submit_agent_turn,
                  &take_queued_steering_turn_or_mark_idle,
                  &turn_activity_timers,
+                 &ui_mutex,
+                 &ui_messages,
+                 &animation_cv,
+                 &wake_ui,
                  &save_session_snapshot]() {
-                    // Capture the elapsed duration before stopping the timer so
-                    // a real reasoning disclosure can show its duration.
-                    const auto reasoning_elapsed_secs =
-                        turn_activity_timers.elapsed(assistant_message_id);
-                    turn_activity_timers.stop(assistant_message_id);
                     const bool was_stopped = agent->is_stop_requested();
                     // A turn only counts as successfully completed when it was
                     // neither cancelled (ESC/Ctrl+C) nor ended with an error.
                     const bool turn_succeeded = !was_stopped && !agent->last_turn_failed();
-                    update_assistant_message(assistant_message_id, [&](UiMessage& message) {
-                        message.pending = false;
-                        message.finalized = true;
-                        message.thinking = false;
-                        message.stopped = was_stopped;
-                        // Finalize a real reasoning disclosure. Generic work has
-                        // no hidden content and therefore leaves no faux thought
-                        // trace in the transcript.
-                        message.reasoning_active = false;
-                        if (!message.reasoning_text.empty()
-                            && message.reasoning_elapsed.empty()) {
-                            // Always stamp a duration so the header reads
-                            // "Thought for Ns" rather than a bare "Thought".
-                            // If the timer was somehow missing,
-                            // fall back to 0s instead of leaving it blank.
-                            message.reasoning_elapsed = format_elapsed_compact(
-                                reasoning_elapsed_secs.value_or(std::chrono::seconds{0}));
-                        }
-                        if (!message.text.empty() || !message.tools.empty()) {
-                            message.show_activity_status = true;
-                        }
-                    });
+                    {
+                        std::lock_guard lock(ui_mutex);
+                        const std::string current_id(
+                            live_timeline->current_message_id());
+                        const std::string reasoning_elapsed =
+                            format_elapsed_compact(
+                                turn_activity_timers.elapsed(current_id)
+                                    .value_or(std::chrono::seconds{0}));
+                        turn_activity_timers.stop(current_id);
+                        live_timeline->finish(
+                            ui_messages,
+                            reasoning_elapsed,
+                            was_stopped);
+                    }
+                    animation_cv.notify_one();
+                    wake_ui();
                     save_session_snapshot();
                     if (auto next_turn = take_queued_steering_turn_or_mark_idle(turn_succeeded);
                         next_turn.has_value()) {

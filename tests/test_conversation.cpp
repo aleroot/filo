@@ -763,6 +763,27 @@ TEST_CASE("tool presentation uses semantic labels and compact result metrics",
     REQUIRE_THAT(expanded, ContainsSubstring("11"));
 }
 
+TEST_CASE("assistant narration renders before the tools from the same step",
+          "[tui][conversation][render][tool][ordering]") {
+    std::vector<UiMessage> messages;
+    auto message = make_assistant_message("I will inspect the configuration.", "", false);
+    auto tool = make_tool_activity(
+        "read-config",
+        "read_file",
+        R"({"path":"config.toml"})",
+        "config.toml");
+    tool.status = ToolActivity::Status::Succeeded;
+    message.tools.push_back(std::move(tool));
+    messages.push_back(std::move(message));
+
+    const std::string rendered = render_panel_text(messages);
+    const auto narration = rendered.find("I will inspect the configuration.");
+    const auto tool_card = rendered.find("Read");
+    REQUIRE(narration != std::string::npos);
+    REQUIRE(tool_card != std::string::npos);
+    CHECK(narration < tool_card);
+}
+
 TEST_CASE("tool presentation groups grep results by file",
           "[tui][conversation][render][tool]") {
     std::vector<UiMessage> messages;
@@ -1590,6 +1611,25 @@ TEST_CASE("render_history_panel — mixed conversation", "[tui][conversation][re
 // ============================================================================
 // ConversationState Tests (History Separation)
 // ============================================================================
+
+TEST_CASE("LiveAssistantTimeline does not resurrect a removed or finished turn",
+          "[tui][conversation][live_timeline][lifecycle]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_assistant_message("", "", true));
+    LiveAssistantTimeline removed(messages.back().id);
+    messages.clear();
+    CHECK(removed.begin_step(messages) == nullptr);
+    CHECK(messages.empty());
+
+    messages.push_back(make_assistant_message("", "", true));
+    LiveAssistantTimeline finished(messages.back().id);
+    REQUIRE(finished.begin_step(messages) != nullptr);
+    finished.finish(messages, "0s", true);
+    CHECK(finished.begin_step(messages) == nullptr);
+    REQUIRE(messages.size() == 1);
+    CHECK(messages[0].stopped);
+    CHECK(messages[0].finalized);
+}
 
 TEST_CASE("ConversationState — empty on creation", "[tui][conversation][state]") {
     ConversationState state;

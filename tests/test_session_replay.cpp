@@ -91,6 +91,118 @@ TEST_CASE("Session replay handles failed tool calls and multiple assistant messa
     REQUIRE(messages[2].text == "I failed to run that.");
 }
 
+TEST_CASE("live multi-step tool turn has the same assistant boundaries as replay",
+          "[tui][session_replay][live_timeline][regression]") {
+    std::vector<tui::UiMessage> live;
+    live.push_back(tui::make_user_message("Inspect, then report."));
+    live.push_back(tui::make_assistant_message("", "", true));
+    tui::LiveAssistantTimeline timeline(live.back().id);
+
+    auto* first = timeline.begin_step(live);
+    REQUIRE(first != nullptr);
+    first->text = "I will inspect the file.";
+    first->assistant_source_text = first->text;
+    first->reasoning_text = "Locate the relevant code.";
+    first->reasoning_active = true;
+    first->activity_recorded = true;
+    first->tools.push_back(tui::make_tool_activity(
+        "call_read",
+        "read_file",
+        R"({"path":"config.toml"})",
+        "config.toml"));
+    tui::apply_tool_result(first->tools.back(), R"({"output":"loaded"})");
+
+    auto* second = timeline.begin_step(live, "1s");
+    REQUIRE(second != nullptr);
+    second->text = "I will run the checks.";
+    second->assistant_source_text = second->text;
+    second->tools.push_back(tui::make_tool_activity(
+        "call_test",
+        "run_terminal_command",
+        R"({"command":"ctest"})",
+        "cmd: ctest"));
+    tui::apply_tool_result(
+        second->tools.back(),
+        R"({"output":"All tests passed","exit_code":0})");
+
+    auto* third = timeline.begin_step(live, "1s");
+    REQUIRE(third != nullptr);
+    third->text = "The configuration is valid.";
+    third->assistant_source_text = third->text;
+    timeline.finish(live, "1s", false);
+
+    core::session::SessionData data;
+    data.session_id = "sess_parity";
+    data.messages.push_back({
+        .role = "user",
+        .content = "Inspect, then report.",
+    });
+    core::llm::Message persisted_first{
+        .role = "assistant",
+        .content = "I will inspect the file.",
+        .reasoning_content = "Locate the relevant code.",
+        .reasoning_elapsed = "1s",
+    };
+    persisted_first.tool_calls.push_back(core::llm::ToolCall{
+        .id = "call_read",
+        .function = {
+            .name = "read_file",
+            .arguments = R"({"path":"config.toml"})",
+        },
+    });
+    data.messages.push_back(std::move(persisted_first));
+    data.messages.push_back({
+        .role = "tool",
+        .content = R"({"output":"loaded"})",
+        .tool_call_id = "call_read",
+    });
+    core::llm::Message persisted_second{
+        .role = "assistant",
+        .content = "I will run the checks.",
+    };
+    persisted_second.tool_calls.push_back(core::llm::ToolCall{
+        .id = "call_test",
+        .function = {
+            .name = "run_terminal_command",
+            .arguments = R"({"command":"ctest"})",
+        },
+    });
+    data.messages.push_back(std::move(persisted_second));
+    data.messages.push_back({
+        .role = "tool",
+        .content = R"({"output":"All tests passed","exit_code":0})",
+        .tool_call_id = "call_test",
+    });
+    data.messages.push_back({
+        .role = "assistant",
+        .content = "The configuration is valid.",
+    });
+
+    const auto replayed = tui::build_resumed_ui_messages(data);
+    REQUIRE(live.size() == 4);
+    REQUIRE(replayed.size() == 5); // Resume banner + the same four transcript messages.
+
+    for (std::size_t live_index = 0; live_index < live.size(); ++live_index) {
+        const auto& live_message = live[live_index];
+        const auto& replayed_message = replayed[live_index + 1];
+        CHECK(live_message.type == replayed_message.type);
+        CHECK(live_message.text == replayed_message.text);
+        CHECK(live_message.pending == replayed_message.pending);
+        CHECK(live_message.finalized == replayed_message.finalized);
+        CHECK(live_message.reasoning_text == replayed_message.reasoning_text);
+        CHECK(live_message.reasoning_elapsed == replayed_message.reasoning_elapsed);
+        CHECK(live_message.activity_recorded == replayed_message.activity_recorded);
+        REQUIRE(live_message.tools.size() == replayed_message.tools.size());
+        if (!live_message.tools.empty()) {
+            CHECK(live_message.tools[0].id == replayed_message.tools[0].id);
+            CHECK(live_message.tools[0].name == replayed_message.tools[0].name);
+            CHECK(live_message.tools[0].status == replayed_message.tools[0].status);
+            CHECK(live_message.tools[0].result.summary
+                  == replayed_message.tools[0].result.summary);
+        }
+    }
+}
+
 TEST_CASE("Session replay restores reasoning duration for the disclosure",
           "[tui][session_replay][reasoning]") {
     core::session::SessionData data;

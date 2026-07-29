@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace tui {
@@ -220,6 +221,57 @@ struct ConversationState {
         }
         return false;
     }
+};
+
+// ============================================================================
+// Live Assistant Step Timeline
+// ============================================================================
+
+/// Owns the UI-message boundary between model steps inside one user turn.
+///
+/// Agent tool loops may issue several provider requests before the user turn is
+/// complete. Persistence stores each provider response as a distinct assistant
+/// message; the live transcript must do the same or all tool calls and all text
+/// collapse into one card and can no longer be rendered chronologically.
+///
+/// The caller is responsible for synchronization. MainApp accesses an instance
+/// only while holding its UI mutex.
+class LiveAssistantTimeline {
+public:
+    explicit LiveAssistantTimeline(std::string initial_message_id)
+        : current_message_id_(std::move(initial_message_id)) {}
+
+    [[nodiscard]] const std::string& current_message_id() const noexcept {
+        return current_message_id_;
+    }
+
+    [[nodiscard]] bool step_started() const noexcept {
+        return step_started_;
+    }
+
+    /// Starts a provider step. The first call reuses the pending placeholder;
+    /// later calls finalize the previous step and append a new pending message.
+    /// Returns nullptr when the turn was already finished or its message was
+    /// removed (for example by /clear while cancellation was winding down).
+    UiMessage* begin_step(std::vector<UiMessage>& messages,
+                          std::string previous_reasoning_elapsed = {});
+
+    /// Returns the currently active assistant step, or nullptr after finish or
+    /// when the transcript no longer contains it.
+    UiMessage* current(std::vector<UiMessage>& messages);
+
+    /// Finalizes the last provider step and closes the timeline.
+    void finish(std::vector<UiMessage>& messages,
+                std::string reasoning_elapsed,
+                bool stopped);
+
+private:
+    static void finalize_step(UiMessage& message,
+                              std::string reasoning_elapsed,
+                              bool stopped);
+
+    std::string current_message_id_;
+    bool step_started_ = false;
 };
 
 // ============================================================================

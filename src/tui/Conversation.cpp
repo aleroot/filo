@@ -278,6 +278,70 @@ bool truncate_ui_before_user_turn(
     return true;
 }
 
+UiMessage* LiveAssistantTimeline::current(std::vector<UiMessage>& messages) {
+    if (current_message_id_.empty()) {
+        return nullptr;
+    }
+    const auto it = std::ranges::find_if(messages, [&](const UiMessage& message) {
+        return message.type == MessageType::Assistant
+            && message.id == current_message_id_;
+    });
+    return it == messages.end() ? nullptr : &*it;
+}
+
+void LiveAssistantTimeline::finalize_step(
+    UiMessage& message,
+    std::string reasoning_elapsed,
+    bool stopped) {
+    message.pending = false;
+    message.finalized = true;
+    message.thinking = false;
+    message.stopped = stopped;
+    message.reasoning_active = false;
+    if (!message.reasoning_text.empty() && message.reasoning_elapsed.empty()) {
+        message.reasoning_elapsed = std::move(reasoning_elapsed);
+        if (message.reasoning_elapsed.empty()) {
+            message.reasoning_elapsed = "0s";
+        }
+    }
+    if (!message.text.empty() || !message.tools.empty()) {
+        message.show_activity_status = true;
+    }
+}
+
+UiMessage* LiveAssistantTimeline::begin_step(
+    std::vector<UiMessage>& messages,
+    std::string previous_reasoning_elapsed) {
+    UiMessage* active = current(messages);
+    if (active == nullptr || active->finalized) {
+        current_message_id_.clear();
+        return nullptr;
+    }
+
+    if (!step_started_) {
+        step_started_ = true;
+        active->pending = true;
+        active->thinking = true;
+        return active;
+    }
+
+    finalize_step(*active, std::move(previous_reasoning_elapsed), false);
+    append_ui_message(messages, make_assistant_message("", "", true));
+    current_message_id_ = messages.back().id;
+    return &messages.back();
+}
+
+void LiveAssistantTimeline::finish(
+    std::vector<UiMessage>& messages,
+    std::string reasoning_elapsed,
+    bool stopped) {
+    UiMessage* active = current(messages);
+    current_message_id_.clear();
+    if (active != nullptr) {
+        finalize_step(*active, std::move(reasoning_elapsed), stopped);
+    }
+}
+
 namespace {
 
 std::string truncate_preview(std::string_view text, std::size_t max_len = kToolPreviewMaxLen) {
@@ -2300,32 +2364,34 @@ Element render_assistant_message(const UiMessage& msg,
             }));
     }
 
-    // Render tools first (completed work)
-    if (!msg.tools.empty()) {
-        UiMessage tool_group = msg;
-        tool_group.type = MessageType::ToolGroup;
-        elements.push_back(render_tool_group(tool_group, tick, options));
-    }
-
-    // Render real provider reasoning above the answer. Generic model activity
-    // stays in the neutral working indicator below.
+    // Render real provider reasoning before the visible response. Generic model
+    // activity stays in the neutral working indicator below.
     const bool has_reasoning = has_activity_disclosure(msg, options);
     // A live reasoning disclosure owns the activity label, avoiding duplication.
     const bool disclosure_owns_live_indicator =
         has_reasoning && msg.pending && !msg.finalized;
     if (has_reasoning) {
-        if (!msg.tools.empty()) {
-            elements.push_back(ftxui::text(""));
-        }
         elements.push_back(render_reasoning_disclosure(msg, tick, options));
     }
 
-    // Render text response (middle)
+    // Provider text introduces the work that follows, so keep it before this
+    // step's tool cards. This ordering also makes live and resumed transcripts
+    // identical at provider-step boundaries.
     if (!msg.text.empty()) {
-        if (!msg.tools.empty() || has_reasoning) {
+        if (has_reasoning) {
             elements.push_back(ftxui::text(""));
         }
         elements.push_back(render_markdown(msg.text, Color::White));
+    }
+
+    // Tool calls belong to this provider step and follow its narration.
+    if (!msg.tools.empty()) {
+        if (has_reasoning || !msg.text.empty()) {
+            elements.push_back(ftxui::text(""));
+        }
+        UiMessage tool_group = msg;
+        tool_group.type = MessageType::ToolGroup;
+        elements.push_back(render_tool_group(tool_group, tick, options));
     }
 
     // Render thinking indicator at the BOTTOM (current activity)
