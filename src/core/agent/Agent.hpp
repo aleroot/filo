@@ -102,6 +102,11 @@ public:
     /// Check if the current/last turn ended with an error (provider, transport, or configuration failure). Reset when a new turn starts.
     [[nodiscard]] bool last_turn_failed() const;
 
+    /// True from user-message admission until the turn's single completion
+    /// callback wins. Session/history replacement must not run while this is
+    /// true.
+    [[nodiscard]] bool turn_in_progress() const noexcept;
+
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
 
@@ -274,6 +279,15 @@ private:
         std::optional<core::context::PromptPlan> prompt_plan;
         ToolCallDeduplicator deduplicator;
         bool final_response_after_repeat_stop_requested = false;
+        // Destructive history replacement invalidates callbacks from every
+        // older turn. Ordinary appends and in-turn compaction keep this stable.
+        std::uint64_t conversation_generation = 0;
+        // Freeze provider selection for a complete agentic turn. A live model
+        // switch applies to the next user turn, not halfway through a
+        // tool-use/result exchange.
+        std::shared_ptr<core::llm::LLMProvider> provider;
+        std::string provider_name;
+        std::string model;
     };
 
     void step(std::function<void(const std::string&)> text_callback,
@@ -281,6 +295,37 @@ private:
               std::function<void()> done_callback,
               TurnCallbacks turn_callbacks,
               std::shared_ptr<TurnState> turn_state);
+
+    // True while the turn identified by `turn_state` still owns the current
+    // conversation. Destructive history replacement bumps conversation_generation_
+    // and makes every older turn stale.
+    [[nodiscard]] bool is_turn_current(
+        const std::shared_ptr<TurnState>& turn_state) const;
+
+    // Freeze provider selection (and the conversation generation) into the turn
+    // state so a live model switch applies to the next user turn, not halfway
+    // through a tool-use/result exchange. Caller must hold history_mutex_.
+    void capture_turn_provider_snapshot_unlocked(
+        TurnState& turn_state, const TurnCallbacks& turn_callbacks);
+
+    // Run `mutator` against the live history under history_mutex_, but only if
+    // the turn's conversation generation is still current. Returns false (doing
+    // nothing) when the conversation was replaced after the turn began — callers
+    // must abort the turn in that case. Refreshes the context snapshot when
+    // current. Used to make every in-turn history append generation-safe with a
+    // single, uniform control-flow pattern.
+    template <typename Mutator>
+    bool apply_to_history_if_turn_current(
+        const std::shared_ptr<TurnState>& turn_state,
+        Mutator&& mutator) {
+        std::lock_guard lock(history_mutex_);
+        if (turn_state->conversation_generation != conversation_generation_) {
+            return false;
+        }
+        std::forward<Mutator>(mutator)(history_);
+        refresh_context_window_snapshot_unlocked();
+        return true;
+    }
 
     // status_log_callback receives out-of-band lifecycle status (compaction
     // progress). It must be distinct from the streaming assistant chunk
@@ -335,6 +380,7 @@ private:
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
     std::uint64_t history_revision_ = 0;
+    std::uint64_t conversation_generation_ = 0;
     bool compaction_in_progress_ = false;
     std::string current_mode_ = "BUILD";
     PermissionProfile permission_profile_ = PermissionProfile::Interactive;

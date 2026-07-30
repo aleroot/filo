@@ -277,6 +277,75 @@ void append_compaction_section(
             model));
 }
 
+struct InvalidToolHistory {
+    std::size_t index = 0;
+    std::string reason;
+};
+
+[[nodiscard]] std::optional<InvalidToolHistory> invalid_tool_history(
+    const std::vector<core::llm::Message>& messages) {
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        const auto& assistant = messages[i];
+        if (assistant.role != "assistant" || assistant.tool_calls.empty()) {
+            continue;
+        }
+
+        std::vector<bool> matched(assistant.tool_calls.size(), false);
+        std::size_t result_count = 0;
+        std::size_t cursor = i + 1;
+        while (cursor < messages.size() && messages[cursor].role == "tool") {
+            const auto& result = messages[cursor];
+            const auto call = std::ranges::find_if(
+                assistant.tool_calls,
+                [&](const core::llm::ToolCall& tool_call) {
+                    return tool_call.id == result.tool_call_id;
+                });
+            if (call == assistant.tool_calls.end()) {
+                return InvalidToolHistory{
+                    .index = i,
+                    .reason = std::format(
+                        "tool result '{}' does not belong to the preceding assistant message at history index {}",
+                        result.tool_call_id,
+                        i),
+                };
+            }
+            const auto match_index = static_cast<std::size_t>(
+                std::distance(assistant.tool_calls.begin(), call));
+            if (matched[match_index]) {
+                return InvalidToolHistory{
+                    .index = i,
+                    .reason = std::format(
+                        "tool call '{}' has more than one result after history index {}",
+                        result.tool_call_id,
+                        i),
+                };
+            }
+            matched[match_index] = true;
+            ++result_count;
+            ++cursor;
+        }
+
+        if (result_count != assistant.tool_calls.size()) {
+            std::string missing;
+            for (std::size_t call_index = 0;
+                 call_index < assistant.tool_calls.size();
+                 ++call_index) {
+                if (matched[call_index]) continue;
+                if (!missing.empty()) missing += ", ";
+                missing += assistant.tool_calls[call_index].id;
+            }
+            return InvalidToolHistory{
+                .index = i,
+                .reason = std::format(
+                    "assistant tool calls at history index {} are not immediately followed by all results; missing: {}",
+                    i,
+                    missing),
+            };
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -334,6 +403,29 @@ void Agent::clear_stop_request() {
 
 bool Agent::last_turn_failed() const {
     return turn_failed_.load(std::memory_order_acquire);
+}
+
+bool Agent::turn_in_progress() const noexcept {
+    return turn_in_progress_.load(std::memory_order_acquire);
+}
+
+bool Agent::is_turn_current(const std::shared_ptr<TurnState>& turn_state) const {
+    std::lock_guard lock(history_mutex_);
+    return turn_state->conversation_generation == conversation_generation_;
+}
+
+void Agent::capture_turn_provider_snapshot_unlocked(
+    TurnState& turn_state, const TurnCallbacks& turn_callbacks) {
+    turn_state.conversation_generation = conversation_generation_;
+    turn_state.provider = turn_callbacks.provider_override
+        ? turn_callbacks.provider_override
+        : provider_;
+    turn_state.provider_name = turn_callbacks.provider_name_override.empty()
+        ? active_provider_name_
+        : turn_callbacks.provider_name_override;
+    turn_state.model = turn_callbacks.model_override.empty()
+        ? active_model_
+        : turn_callbacks.model_override;
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +723,7 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
 
 void Agent::clear_history() {
     std::lock_guard lock(history_mutex_);
+    ++conversation_generation_;
     history_.clear();
     context_summary_.clear();
     project_facts_snapshot_.reset();
@@ -789,9 +882,21 @@ void Agent::launch_compaction_transaction(
 
 void Agent::undo_last() {
     std::lock_guard lock(history_mutex_);
-    if (!history_.empty() && history_.back().role == "assistant") history_.pop_back();
-    while (!history_.empty() && history_.back().role == "tool") history_.pop_back();
-    if (history_.size() > 1 && history_.back().role == "user")  history_.pop_back();
+    if (turn_in_progress_.load(std::memory_order_acquire)) {
+        return;
+    }
+    const auto last_user = std::find_if(
+        history_.rbegin(),
+        history_.rend(),
+        [](const core::llm::Message& message) {
+            return message.role == "user" && !message.synthetic;
+        });
+    if (last_user == history_.rend()) {
+        return;
+    }
+    const auto erase_from = std::prev(last_user.base());
+    history_.erase(erase_from, history_.end());
+    ++conversation_generation_;
     refresh_context_window_snapshot_unlocked();
 }
 
@@ -960,6 +1065,7 @@ void Agent::send_message(core::llm::Message user_message,
         ensure_system_prompt();
         append_project_facts_update_unlocked(std::move(project_facts));
         mode_snapshot = current_mode_;
+        capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
         history_.push_back(std::move(user_message));
         refresh_context_window_snapshot_unlocked();
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
@@ -991,6 +1097,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         turn_state = std::make_shared<TurnState>();
         std::lock_guard lock(history_mutex_);
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
+        capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
+    }
+
+    if (!is_turn_current(turn_state)) {
+        done_callback();
+        return;
     }
 
     if (turn_state->transport_turn_id.empty()) {
@@ -1023,41 +1135,55 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::string mode_snapshot;
     std::string provider_name_snapshot;
     std::string dynamic_prompt_suffix;
+    bool stale_turn = false;
     {
         std::lock_guard lock(history_mutex_);
-        request.messages = history_;
-        request.model = turn_callbacks.model_override.empty()
-            ? active_model_
-            : turn_callbacks.model_override;
-        request.effort = effort_level_;
-        if (!turn_callbacks.effort_override.empty()) {
-            request.effort = turn_callbacks.effort_override;
+        if (turn_state->conversation_generation != conversation_generation_) {
+            stale_turn = true;
+        } else {
+            request.messages = history_;
+            request.model = turn_state->model;
+            request.effort = effort_level_;
+            if (!turn_callbacks.effort_override.empty()) {
+                request.effort = turn_callbacks.effort_override;
+            }
+            if (turn_callbacks.max_tokens_override.has_value()) {
+                request.max_tokens = turn_callbacks.max_tokens_override;
+            }
+            if (turn_callbacks.response_format_override.has_value()) {
+                request.response_format = *turn_callbacks.response_format_override;
+            }
+            request.session_id = step_session_context.session_id;
+            request.transport_turn_id = turn_state->transport_turn_id;
+            provider = turn_state->provider;
+            mode_snapshot = current_mode_;
+            dynamic_prompt_suffix = build_dynamic_prompt_suffix();
+            if (!turn_state->prompt_plan.has_value()) {
+                auto plan = stable_prompt_plan_;
+                plan.append(core::context::ContextLayer{
+                    .kind = core::context::ContextLayerKind::ConversationState,
+                    .stability = core::context::PromptStability::Dynamic,
+                    .name = "conversation_state",
+                    .content = std::move(dynamic_prompt_suffix),
+                });
+                turn_state->prompt_plan = std::move(plan);
+            }
+            request.prompt_plan = *turn_state->prompt_plan;
+            provider_name_snapshot = turn_state->provider_name;
         }
-        if (turn_callbacks.max_tokens_override.has_value()) {
-            request.max_tokens = turn_callbacks.max_tokens_override;
-        }
-        if (turn_callbacks.response_format_override.has_value()) {
-            request.response_format = *turn_callbacks.response_format_override;
-        }
-        request.session_id = step_session_context.session_id;
-        request.transport_turn_id = turn_state->transport_turn_id;
-        provider = turn_callbacks.provider_override ? turn_callbacks.provider_override : provider_;
-        mode_snapshot = current_mode_;
-        dynamic_prompt_suffix = build_dynamic_prompt_suffix();
-        if (!turn_state->prompt_plan.has_value()) {
-            auto plan = stable_prompt_plan_;
-            plan.append(core::context::ContextLayer{
-                .kind = core::context::ContextLayerKind::ConversationState,
-                .stability = core::context::PromptStability::Dynamic,
-                .name = "conversation_state",
-                .content = std::move(dynamic_prompt_suffix),
-            });
-            turn_state->prompt_plan = std::move(plan);
-        }
-        request.prompt_plan = *turn_state->prompt_plan;
-        provider_name_snapshot = turn_callbacks.provider_name_override.empty()
-            ? active_provider_name_
-            : turn_callbacks.provider_name_override;
+    }
+    if (stale_turn) {
+        done_callback();
+        return;
+    }
+    if (const auto invalid = invalid_tool_history(request.messages);
+        invalid.has_value()) {
+        text_callback(std::format(
+            "\n[Internal history error: Filo blocked a malformed tool transcript before it reached the provider: {}]\n",
+            invalid->reason));
+        turn_failed_.store(true, std::memory_order_release);
+        done_callback();
+        return;
     }
     if (!provider) {
         text_callback("\n[Error: no active provider configured]\n");
@@ -1125,10 +1251,17 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
          continuation_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
-         already_stopped, turn_state, step_session_context, provider_name_snapshot](
+         already_stopped, turn_state,
+         step_session_context, provider_name_snapshot](
              const core::llm::StreamChunk& chunk) {
 
         if (already_stopped->load(std::memory_order_acquire)) {
+            return;
+        }
+        if (!self->is_turn_current(turn_state)) {
+            if (!already_stopped->exchange(true, std::memory_order_acq_rel)) {
+                done_callback();
+            }
             return;
         }
 
@@ -1143,11 +1276,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 stopped_msg.content = *assistant_response;
                 stopped_msg.reasoning_content = *reasoning_accum;
                 stopped_msg.continuation_items = *continuation_accum;
-                {
-                    std::lock_guard lock(self->history_mutex_);
-                    self->history_.push_back(std::move(stopped_msg));
-                    self->refresh_context_window_snapshot_unlocked();
-                }
+                self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message>& history) {
+                        history.push_back(std::move(stopped_msg));
+                    });
             }
             text_callback("\n\n[Generation stopped by user]\n");
             done_callback();
@@ -1200,6 +1333,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         if (!chunk.is_final) return;
+        // A transport must have exactly one terminal event. Some cancellation
+        // and retry paths can race a final marker with an error marker; only
+        // the first one may persist history or launch tools.
+        if (already_stopped->exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
 
         // ── Final chunk ──────────────────────────────────────────────────
         // Record API call outcome (is_error is true for HTTP 4XX/5XX or connection errors)
@@ -1219,8 +1358,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::string model = provider->get_last_model();
             const bool should_estimate_cost = provider->should_estimate_cost();
             if (model.empty()) {
-                std::lock_guard lock(self->history_mutex_);
-                model = self->active_model_;
+                model = turn_state->model;
             }
             const std::string ledger_actor = turn_callbacks.ledger_actor.empty()
                 ? std::string("agent")
@@ -1308,18 +1446,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 text_callback(status);
             }
 
-            {
-                std::lock_guard lock(self->history_mutex_);
-                if (!asst_msg.content.empty() || !asst_msg.reasoning_content.empty()
-                    || !asst_msg.continuation_items.empty()) {
-                    self->history_.push_back(asst_msg);
-                }
-                self->history_.push_back(core::llm::Message{
-                    .role = "user",
-                    .content = std::string(kMaxOutputRecoveryPrompt),
-                    .synthetic = true,
-                });
-                self->refresh_context_window_snapshot_unlocked();
+            if (!self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message>& history) {
+                        if (!asst_msg.content.empty()
+                            || !asst_msg.reasoning_content.empty()
+                            || !asst_msg.continuation_items.empty()) {
+                            history.push_back(asst_msg);
+                        }
+                        history.push_back(core::llm::Message{
+                            .role = "user",
+                            .content = std::string(kMaxOutputRecoveryPrompt),
+                            .synthetic = true,
+                        });
+                    })) {
+                done_callback();
+                return;
             }
 
             self->step(text_callback, tool_callback, done_callback, turn_callbacks, turn_state);
@@ -1349,10 +1491,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             !self->is_stop_requested()
             || !asst_msg.content.empty()
             || !asst_msg.tool_calls.empty();
-        if (should_persist_assistant) {
-            std::lock_guard lock(self->history_mutex_);
-            self->history_.push_back(asst_msg);
-            self->refresh_context_window_snapshot_unlocked();
+        if (should_persist_assistant
+            && !self->apply_to_history_if_turn_current(
+                turn_state,
+                [&](std::vector<core::llm::Message>& history) {
+                    history.push_back(asst_msg);
+                })) {
+            done_callback();
+            return;
         }
 
         // Check if we were stopped - if so, don't proceed to tool execution
@@ -1381,7 +1527,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // ── Execute tool calls ───────────────────────────────────────────
         std::thread([self, tool_calls_accum, tool_cost_attribution, text_callback,
                      tool_callback, done_callback, turn_callbacks, turn_state,
-                     step_session_context, provider_name_snapshot]() {
+                     step_session_context,
+                     provider_name_snapshot]() {
             try {
 
             // 1. Permission checks (sequential — only one prompt at a time)
@@ -1405,7 +1552,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
-                if (self->is_stop_requested()) {
+                if (self->is_stop_requested() || !self->is_turn_current(turn_state)) {
                     done_callback();
                     return;
                 }
@@ -1491,7 +1638,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 tc.function.arguments = std::move(*normalized);
             }
 
-            if (self->is_stop_requested()) {
+            if (self->is_stop_requested() || !self->is_turn_current(turn_state)) {
                 done_callback();
                 return;
             }
@@ -1503,18 +1650,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::string parent_mode_for_task;
             {
                 std::lock_guard lock(self->history_mutex_);
-                provider_for_task = turn_callbacks.provider_override
-                    ? turn_callbacks.provider_override
-                    : self->provider_;
-                active_provider_name_for_task = turn_callbacks.provider_name_override.empty()
-                    ? self->active_provider_name_
-                    : turn_callbacks.provider_name_override;
+                provider_for_task = turn_state->provider;
+                active_provider_name_for_task = turn_state->provider_name;
                 if (active_provider_name_for_task.empty()) {
                     active_provider_name_for_task = provider_name_snapshot;
                 }
-                active_model_for_task = turn_callbacks.model_override.empty()
-                    ? self->active_model_
-                    : turn_callbacks.model_override;
+                active_model_for_task = turn_state->model;
                 parent_mode_for_task = self->current_mode_;
             }
 
@@ -1726,6 +1867,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             turn_state->deduplicator.end_step();
 
             const bool stop_requested_after_tools = self->is_stop_requested();
+            if (!self->is_turn_current(turn_state)) {
+                done_callback();
+                return;
+            }
 
             // 3. Collect results and assess failures
             int failure_count = 0;
@@ -1771,10 +1916,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     .billable = false,
                     .cost_micro_usd = 0,
                 });
-                {
-                    std::lock_guard lock(self->history_mutex_);
-                    self->history_.push_back(msg);
-                    self->refresh_context_window_snapshot_unlocked();
+                if (!self->apply_to_history_if_turn_current(
+                        turn_state,
+                        [&](std::vector<core::llm::Message>& history) {
+                            history.push_back(msg);
+                        })) {
+                    done_callback();
+                    return;
                 }
                 if (turn_callbacks.on_tool_finish) {
                     turn_callbacks.on_tool_finish(tool_call, msg);
@@ -1887,11 +2035,24 @@ std::vector<core::llm::Message> Agent::get_history() const {
     for (const auto& msg : history_) {
         if (msg.role != "system") result.push_back(msg);
     }
+    // Session snapshots must always be replayable. While tools are running,
+    // the live history temporarily ends at an assistant tool-use message; save
+    // only the last complete prefix. The same rule prevents legacy corruption
+    // from being persisted again.
+    if (const auto invalid = invalid_tool_history(result);
+        invalid.has_value()) {
+        result.resize(invalid->index);
+    }
     return result;
 }
 
 void Agent::append_history_message(core::llm::Message message) {
     std::lock_guard lock(history_mutex_);
+    if (turn_in_progress_.load(std::memory_order_acquire)) {
+        core::logging::warn(
+            "Ignored out-of-band history append while an agent turn was active.");
+        return;
+    }
     ensure_system_prompt();
     if (message.role.empty()) {
         message.role = "user";
@@ -1905,6 +2066,7 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
                           const std::string& context_summary,
                           const std::string& mode) {
     std::lock_guard lock(history_mutex_);
+    ++conversation_generation_;
     std::string clean_mode = mode;
     std::erase_if(clean_mode, [](unsigned char c){ return !std::isalpha(c); });
     if (clean_mode.empty()) clean_mode = "BUILD";
@@ -1932,6 +2094,14 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
 
     // Remove any stale system message — ensure_system_prompt() inserts a fresh one.
     std::erase_if(messages, [](const core::llm::Message& m){ return m.role == "system"; });
+    if (const auto invalid = invalid_tool_history(messages);
+        invalid.has_value()) {
+        core::logging::warn(
+            "Truncated malformed saved tool transcript at history index {}: {}",
+            invalid->index,
+            invalid->reason);
+        messages.resize(invalid->index);
+    }
     history_ = std::move(messages);
     refresh_stable_prompt_state_unlocked();
 }

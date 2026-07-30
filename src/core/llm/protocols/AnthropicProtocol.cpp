@@ -801,19 +801,36 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
     // Messages — system messages are skipped (handled above as top-level field).
     payload += R"(,"messages":[)";
     bool first_msg = true;
-    for (const auto& msg : req.messages) {
+    for (std::size_t message_index = 0;
+         message_index < req.messages.size();
+         ++message_index) {
+        const auto& msg = req.messages[message_index];
         if (msg.role == "system") continue;
 
         if (!first_msg) payload += ',';
         first_msg = false;
 
         if (msg.role == "tool") {
-            // OpenAI tool role → Claude user message with tool_result content block.
-            payload += R"({"role":"user","content":[{"type":"tool_result","tool_use_id":")";
-            payload += core::utils::escape_json_string(msg.tool_call_id);
-            payload += R"(","content":")";
-            payload += core::utils::escape_json_string(msg.content);
-            payload += "\"}]}";
+            // Every result for a parallel assistant tool-use step belongs in
+            // the immediately following Claude user message. Filo stores one
+            // provider-neutral `tool` message per result, so coalesce the
+            // consecutive run into one Anthropic content array.
+            payload += R"({"role":"user","content":[)";
+            bool first_result = true;
+            while (message_index < req.messages.size()
+                   && req.messages[message_index].role == "tool") {
+                const auto& result = req.messages[message_index];
+                if (!first_result) payload += ',';
+                first_result = false;
+                payload += R"({"type":"tool_result","tool_use_id":")";
+                payload += core::utils::escape_json_string(result.tool_call_id);
+                payload += R"(","content":")";
+                payload += core::utils::escape_json_string(result.content);
+                payload += "\"}";
+                ++message_index;
+            }
+            --message_index;
+            payload += "]}";
 
         } else if (msg.role == "assistant"
                    && (!msg.tool_calls.empty() || !msg.continuation_items.empty())) {

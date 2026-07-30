@@ -260,6 +260,146 @@ private:
     std::promise<void> release_;
 };
 
+class DeferredFinalProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(mutex_);
+            entered_ = true;
+        }
+        cv_.notify_all();
+        {
+            std::unique_lock lock(mutex_);
+            cv_.wait(lock, [&] { return released_; });
+        }
+        callback(core::llm::StreamChunk::make_content("late response"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    void wait_until_entered() {
+        std::unique_lock lock(mutex_);
+        REQUIRE(cv_.wait_for(
+            lock,
+            std::chrono::seconds(3),
+            [&] { return entered_; }));
+    }
+
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool entered_ = false;
+    bool released_ = false;
+};
+
+class BlockingHistoryTool final : public core::tools::Tool {
+public:
+    explicit BlockingHistoryTool(std::string name)
+        : name_(std::move(name)) {}
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .title = "Blocking history tool",
+            .description = "Waits until released by the transcript race test.",
+            .parameters = {},
+            .annotations = {
+                .read_only_hint = true,
+                .idempotent_hint = true,
+            },
+        };
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
+        {
+            std::lock_guard lock(mutex_);
+            entered_ = true;
+        }
+        cv_.notify_all();
+        {
+            std::unique_lock lock(mutex_);
+            cv_.wait(lock, [&] { return released_; });
+        }
+        return R"({"ok":true})";
+    }
+
+    void wait_until_entered() {
+        std::unique_lock lock(mutex_);
+        REQUIRE(cv_.wait_for(
+            lock,
+            std::chrono::seconds(3),
+            [&] { return entered_; }));
+    }
+
+    void release() {
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::string name_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool entered_ = false;
+    bool released_ = false;
+};
+
+class ToolThenTextCapturingProvider final : public core::llm::LLMProvider {
+public:
+    explicit ToolThenTextCapturingProvider(std::string tool_name)
+        : tool_name_(std::move(tool_name)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest& request,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        {
+            std::lock_guard lock(mutex_);
+            requests_.push_back(request);
+        }
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = "history-race-tool-call";
+            tool_call.type = "function";
+            tool_call.function.name = tool_name_;
+            tool_call.function.arguments = "{}";
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {std::move(tool_call)};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+        callback(core::llm::StreamChunk::make_content("finished"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::string tool_name_;
+    std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+    std::atomic<int> calls_{0};
+};
+
 class RotatingToolLoopProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -473,6 +613,183 @@ TEST_CASE("Agent appends history-only user messages without model turn", "[agent
     REQUIRE_THAT(history[0].content,
                  Catch::Matchers::ContainsSubstring("This produced the following result"));
     CHECK(provider->requests_snapshot().empty());
+}
+
+TEST_CASE("Clearing history invalidates a late provider callback",
+          "[agent][history][generation][regression]") {
+    auto provider = std::make_shared<DeferredFinalProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    std::jthread sender([&] {
+        agent->send_message(
+            "old session request",
+            [](const std::string&) {},
+            [](const std::string&, const std::string&) {},
+            [&] {
+                {
+                    std::lock_guard lock(done_mutex);
+                    done = true;
+                }
+                done_cv.notify_one();
+            });
+    });
+
+    provider->wait_until_entered();
+    REQUIRE(agent->turn_in_progress());
+    agent->clear_history();
+    provider->release();
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(
+            lock,
+            std::chrono::seconds(3),
+            [&] { return done; }));
+    }
+    sender.join();
+    CHECK_FALSE(agent->turn_in_progress());
+    CHECK(agent->get_history().empty());
+}
+
+TEST_CASE("Clearing history discards late tool results and prevents stale recursion",
+          "[agent][history][tool][generation][regression]") {
+    const std::string tool_name = "blocking_history_generation_tool";
+    auto tool = std::make_shared<BlockingHistoryTool>(tool_name);
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(tool);
+    auto provider = std::make_shared<ToolThenTextCapturingProvider>(tool_name);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message(
+        "run the blocking tool",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&] {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        });
+
+    tool->wait_until_entered();
+    const auto in_flight_snapshot = agent->get_history();
+    CHECK(std::ranges::none_of(
+        in_flight_snapshot,
+        [](const core::llm::Message& message) {
+            return !message.tool_calls.empty();
+        }));
+
+    agent->clear_history();
+    tool->release();
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(
+            lock,
+            std::chrono::seconds(3),
+            [&] { return done; }));
+    }
+
+    CHECK(provider->call_count() == 1);
+    CHECK(agent->get_history().empty());
+}
+
+TEST_CASE("Provider changes apply after the complete tool turn",
+          "[agent][provider][tool][regression]") {
+    const std::string tool_name = "blocking_provider_freeze_tool";
+    auto tool = std::make_shared<BlockingHistoryTool>(tool_name);
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(tool);
+    auto original_provider =
+        std::make_shared<ToolThenTextCapturingProvider>(tool_name);
+    auto replacement_provider = std::make_shared<CapturingProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        original_provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message(
+        "keep this turn on one provider",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&] {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        });
+
+    tool->wait_until_entered();
+    agent->set_provider(replacement_provider);
+    agent->set_active_provider_name("replacement");
+    agent->set_active_model("replacement-model");
+    tool->release();
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(
+            lock,
+            std::chrono::seconds(3),
+            [&] { return done; }));
+    }
+
+    CHECK(original_provider->call_count() == 2);
+    CHECK(replacement_provider->requests_snapshot().empty());
+}
+
+TEST_CASE("Loading a malformed tool transcript keeps only its complete prefix",
+          "[agent][history][load][regression]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    core::llm::Message tool_use{
+        .role = "assistant",
+        .content = "starting",
+    };
+    tool_use.tool_calls.push_back(core::llm::ToolCall{
+        .id = "missing-result",
+        .type = "function",
+        .function = {
+            .name = "grep_search",
+            .arguments = "{}",
+        },
+    });
+    agent->load_history(
+        {
+            core::llm::Message{.role = "user", .content = "keep me"},
+            std::move(tool_use),
+            core::llm::Message{.role = "assistant", .content = "interleaved"},
+        },
+        {},
+        "BUILD");
+
+    const auto restored = agent->get_history();
+    REQUIRE(restored.size() == 1);
+    CHECK(restored.front().role == "user");
+    CHECK(restored.front().content == "keep me");
+
+    send_and_wait(agent, "continue safely");
+    REQUIRE(provider->requests_snapshot().size() == 1);
 }
 
 TEST_CASE("Agent runs independent explore subagents concurrently with a bounded fan-out",

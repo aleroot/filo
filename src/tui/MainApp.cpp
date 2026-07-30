@@ -1472,6 +1472,18 @@ RunResult run(RunOptions opts) {
     };
 
     auto clear_screen = [&]() {
+        if (agent->turn_in_progress()
+            || (direct_shell_state
+                && direct_shell_state->has_active_for(session_id))) {
+            {
+                std::lock_guard lock(ui_mutex);
+                append_ui_message(ui_messages, make_warning_message(
+                    "Stop all active work before clearing the session. "
+                    "Filo kept the current history intact."));
+            }
+            wake_ui();
+            return;
+        }
         turn_activity_timers.clear();
         assistant_turn_active.store(false, std::memory_order_relaxed);
         assistant_turn_completion_status.store(TurnCompletionStatus::None,
@@ -1944,6 +1956,12 @@ RunResult run(RunOptions opts) {
 
     auto resume_session = [&](const core::session::SessionData& data)
         -> std::optional<std::string> {
+        if (agent->turn_in_progress()
+            || (direct_shell_state
+                && direct_shell_state->has_active_for(session_id))) {
+            return std::string(
+                "Stop all active work before resuming another session.");
+        }
         auto next_lease = session_leases.reserve(data);
         if (!next_lease) return next_lease.error();
         turn_activity_timers.clear();
@@ -2059,6 +2077,12 @@ RunResult run(RunOptions opts) {
     auto branch_session = [&](const std::vector<core::llm::Message>& branch_messages,
                               std::string branch_context)
         -> std::expected<SessionBranchIds, std::string> {
+        if (agent->turn_in_progress()
+            || (direct_shell_state
+                && direct_shell_state->has_active_for(session_id))) {
+            return std::unexpected(
+                "Stop all active work before replacing or branching its history.");
+        }
 
         const auto original_messages = agent->get_history();
         const std::string snap_mode = agent->get_mode();
@@ -5037,6 +5061,11 @@ RunResult run(RunOptions opts) {
 
     auto submit_direct_shell_command = [&](std::string command) {
         if (command.empty()) {
+            return;
+        }
+        if (agent->turn_in_progress()) {
+            append_history(
+                "\nℹ  Stop the active agent turn before starting a direct shell command.\n");
             return;
         }
 

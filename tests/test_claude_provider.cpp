@@ -548,6 +548,48 @@ TEST_CASE("ClaudeSerializer - tool role maps to user role in output", "[claude][
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"tool")"));
 }
 
+TEST_CASE("ClaudeSerializer - parallel tool results share the immediately following user message",
+          "[claude][serializer][tool_result][regression]") {
+    ChatRequest req;
+    req.model = "claude-sonnet-4-6";
+    req.messages.push_back(Message{.role = "user", .content = "Run both."});
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .tool_calls = {
+            ToolCall{
+                .id = "tc_a",
+                .type = "function",
+                .function = {.name = "tool_a", .arguments = "{}"},
+            },
+            ToolCall{
+                .id = "tc_b",
+                .type = "function",
+                .function = {.name = "tool_b", .arguments = "{}"},
+            },
+        },
+    });
+    req.messages.push_back(Message{
+        .role = "tool",
+        .content = "A",
+        .tool_call_id = "tc_a",
+    });
+    req.messages.push_back(Message{
+        .role = "tool",
+        .content = "B",
+        .tool_call_id = "tc_b",
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("content":[{"type":"tool_result","tool_use_id":"tc_a","content":"A"},{"type":"tool_result","tool_use_id":"tc_b","content":"B"}])"));
+    REQUIRE_THAT(
+        payload,
+        !Catch::Matchers::ContainsSubstring(
+            R"("tool_use_id":"tc_a","content":"A"}]},{"role":"user")"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ClaudeSerializer — assistant messages with tool_calls (tool_use format)
 // ─────────────────────────────────────────────────────────────────────────────
