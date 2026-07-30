@@ -167,6 +167,10 @@ ftxui::Element render_local_model_picker_panel(std::string_view current_dir,
 ftxui::Element render_session_picker_panel(const std::vector<core::session::SessionInfo>& sessions,
                                            int selected_index);
 
+ftxui::Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
+                                           int selected_index,
+                                           std::string_view status_message);
+
 ftxui::Element render_review_picker_panel(ReviewPickerMode mode,
                                           int selected_index,
                                           std::string_view input_text,

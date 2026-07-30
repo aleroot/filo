@@ -44,6 +44,12 @@ public:
     // Clear in-memory and on-disk history as one cross-process transaction.
     [[nodiscard]] bool clear_and_save(std::string* error = nullptr);
 
+    // Reload, remove the entry at @p index (0-based, oldest first), and save
+    // as one cross-process transaction. Returns false if @p index is out of
+    // range or the save fails; sets @p error when provided.
+    [[nodiscard]] bool remove_at_and_save(std::size_t index,
+                                          std::string* error = nullptr);
+
     // Add a new entry. Empty strings are ignored. Consecutive duplicates are collapsed.
     void add(std::string_view text);
 

@@ -875,6 +875,31 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Default router policy: smart-code"));
     }
 
+    SECTION("/prompts opens picker when callback handles it") {
+        auto prompts_picker_opened = std::make_shared<bool>(false);
+        ctx.open_prompts_picker_fn = [prompts_picker_opened]() {
+            *prompts_picker_opened = true;
+            return true;
+        };
+        *mock_history = "";
+
+        ctx.text = "/prompts";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE(*prompts_picker_opened == true);
+        REQUIRE(mock_history->empty());
+    }
+
+    SECTION("/prompts falls back to warning when no picker is available") {
+        *mock_history = "";
+        ctx.open_prompts_picker_fn = {};
+
+        ctx.text = "/prompts";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_FALSE(mock_history->empty());
+    }
+
     SECTION("/yolo toggles approval mode") {
         *mock_history = "";
         *yolo_enabled = false;
@@ -1669,6 +1694,12 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         });
         REQUIRE(init_it != commands.end());
         REQUIRE(init_it->accepts_arguments);
+
+        const auto prompts_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
+            return cmd.name == "/prompts";
+        });
+        REQUIRE(prompts_it != commands.end());
+        REQUIRE_FALSE(prompts_it->accepts_arguments);
     }
 }
 

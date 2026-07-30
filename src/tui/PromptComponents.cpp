@@ -1421,6 +1421,162 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
       | size(HEIGHT, GREATER_THAN, 13);
 }
 
+// Build a single-line preview of a (potentially multi-line) prompt: collapse
+// internal newlines and surrounding whitespace so the list column stays tidy.
+static std::string single_line_preview(std::string_view text, int width) {
+    std::string collapsed;
+    collapsed.reserve(text.size());
+    bool was_space = false;
+    for (const char ch : text) {
+        if (ch == '\n' || ch == '\r' || ch == '\t') {
+            if (!was_space && !collapsed.empty()) {
+                collapsed.push_back(' ');
+                was_space = true;
+            }
+        } else if (ch == ' ') {
+            if (!was_space && !collapsed.empty()) {
+                collapsed.push_back(' ');
+                was_space = true;
+            }
+        } else {
+            collapsed.push_back(ch);
+            was_space = false;
+        }
+    }
+    return fit_column(collapsed, width);
+}
+
+Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
+                                    int selected_index,
+                                    std::string_view status_message) {
+    constexpr int kMarkerWidth = 3;
+    constexpr int kIndexWidth  = 4;
+    constexpr int kPreviewWidth = 78;
+    constexpr int kMaxPreviewLines = 6;
+    constexpr int kMaxListRows = 7;
+    constexpr std::string_view kGap = "  ";
+
+    if (prompts.empty()) {
+        return vbox({
+            hbox({
+                text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+                filler(),
+                text("Esc: close") | color(Color::GrayDark),
+            }),
+            separator(),
+            text("  No prompt history yet.") | color(Color::White),
+            text("  Prompts are saved automatically once you send a message.") | dim,
+            filler(),
+        }) | UiBorder(ColorYellowBright)
+           | size(HEIGHT, EQUAL, 10);
+    }
+
+    const int total = static_cast<int>(prompts.size());
+    const int selected = std::clamp(selected_index, 0, total - 1);
+
+    // ── Visible window (centered on selection) ────────────────────────────
+    const int start_idx = std::max(0, std::min(selected - kMaxListRows / 2,
+                                               total - kMaxListRows));
+    const int end_idx = std::min(start_idx + kMaxListRows, total);
+
+    Elements list_rows;
+    list_rows.reserve(static_cast<std::size_t>(end_idx - start_idx) + 2);
+
+    for (int i = start_idx; i < end_idx; ++i) {
+        const bool is_selected = (i == selected);
+        const Color primary_color = is_selected ? Color::Black : Color::White;
+        const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;
+        const Color index_color   = is_selected
+            ? Color{Color::Black}
+            : static_cast<Color>(ColorYellowDark);
+
+        Elements cells;
+        cells.push_back(text(is_selected ? " \xe2\x96\xb6 " : "   ")
+                        | color(is_selected ? Color{Color::Black} : Color{Color::GrayDark}));
+        cells.push_back(text(fit_column_right(std::to_string(i + 1), kIndexWidth))
+                        | ftxui::bold | color(index_color));
+        cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(single_line_preview(prompts[static_cast<std::size_t>(i)],
+                                                 kPreviewWidth))
+                        | color(primary_color));
+        cells.push_back(filler());
+
+        auto row = hbox(std::move(cells));
+        if (is_selected) {
+            row = row | bgcolor(ColorYellowDark);
+        }
+        list_rows.push_back(std::move(row));
+    }
+
+    if (start_idx > 0) {
+        list_rows.insert(list_rows.begin(), hbox({
+            text(" \xe2\x86\x91 ") | color(ColorYellowDark),
+            text(std::format("{} more above", start_idx)) | color(Color::GrayDark) | dim,
+        }));
+    }
+    if (end_idx < total) {
+        list_rows.push_back(hbox({
+            text(" \xe2\x86\x93 ") | color(ColorYellowDark),
+            text(std::format("{} more below", total - end_idx)) | color(Color::GrayDark) | dim,
+        }));
+    }
+
+    // ── Preview area: full text of the selected prompt ────────────────────
+    const auto& selected_prompt = prompts[static_cast<std::size_t>(selected)];
+    const auto preview_lines = split_lines_view(selected_prompt);
+
+    Elements preview_body;
+    int shown = 0;
+    for (const auto line : preview_lines) {
+        if (shown >= kMaxPreviewLines) {
+            preview_body.push_back(
+                text(std::format("  \xe2\x80\xa6 {} more line(s)",
+                                 preview_lines.size() - kMaxPreviewLines))
+                | color(Color::GrayDark) | dim);
+            break;
+        }
+        preview_body.push_back(text(std::string{"  "} + std::string{line})
+                               | color(Color::GrayLight));
+        ++shown;
+    }
+    if (preview_body.empty()) {
+        preview_body.push_back(text("  (empty)") | color(Color::GrayDark));
+    }
+
+    // ── Assemble ──────────────────────────────────────────────────────────
+    Elements header_cells;
+    header_cells.push_back(text(std::string(static_cast<std::size_t>(kMarkerWidth), ' ')));
+    header_cells.push_back(text(fit_column_right("#", kIndexWidth)) | color(Color::GrayDark));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(text(fit_column("PROMPT", kPreviewWidth)) | color(Color::GrayDark));
+    header_cells.push_back(filler());
+
+    Elements children;
+    children.push_back(hbox({
+        text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        text(std::format("  {} of {}", selected + 1, total)) | color(Color::GrayLight),
+        filler(),
+        text("\xe2\x86\x91\xe2\x86\x93 navigate  \xc2\xb7  Enter use  \xc2\xb7  Ctrl+\xe2\x86\xb5 copy  \xc2\xb7  Del delete  \xc2\xb7  Esc close")
+            | color(Color::GrayDark),
+    }));
+    children.push_back(separator());
+    children.push_back(hbox(std::move(header_cells)) | dim);
+    children.push_back(vbox(std::move(list_rows)));
+    children.push_back(separator());
+    children.push_back(text(" PREVIEW") | color(Color::GrayDark) | ftxui::bold);
+    children.push_back(vbox(std::move(preview_body)));
+    if (!status_message.empty()) {
+        children.push_back(separator());
+        children.push_back(text(std::string{"  "} + std::string{status_message})
+                           | color(ColorQuestionCyan));
+    }
+    children.push_back(filler());
+
+    return vbox(std::move(children))
+         | UiBorder(ColorYellowBright)
+         | size(HEIGHT, GREATER_THAN, 20);
+}
+
 Element render_review_picker_panel(ReviewPickerMode mode,
                                    int selected_index,
                                    std::string_view input_text,

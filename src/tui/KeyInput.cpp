@@ -3,7 +3,9 @@
 #include <cctype>
 #include <charconv>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
 
 namespace tui {
 namespace {
@@ -64,26 +66,36 @@ bool is_ctrl_letter_kitty_sequence(std::string_view input, char letter) {
     return is_letter_codepoint(codepoint, letter) && is_ctrl_modifier(modifier);
 }
 
-bool is_ctrl_letter_modify_other_keys_sequence(std::string_view input, char letter) {
+// Parse a modifyOtherKeys CSI sequence: ESC [ 27 ; <modifier> ; <key> ~
+// Returns (key_code, modifier) on success.
+std::optional<std::pair<int, int>>
+parse_modify_other_keys(std::string_view input) {
     if (!input.starts_with("\x1B[27;") || !input.ends_with("~")) {
-        return false;
+        return std::nullopt;
     }
 
     const std::string_view body = input.substr(5, input.size() - 6);
     const std::size_t semicolon = body.find(';');
     if (semicolon == std::string_view::npos) {
-        return false;
+        return std::nullopt;
     }
-
-    const std::string_view modifier_token = body.substr(0, semicolon);
-    const std::string_view key_token = body.substr(semicolon + 1);
 
     int modifier = 0;
     int key_code = 0;
-    if (!parse_decimal(modifier_token, modifier) || !parse_decimal(key_token, key_code)) {
-        return false;
+    if (!parse_decimal(body.substr(0, semicolon), modifier)
+        || !parse_decimal(body.substr(semicolon + 1), key_code)) {
+        return std::nullopt;
     }
 
+    return std::make_pair(key_code, modifier);
+}
+
+bool is_ctrl_letter_modify_other_keys_sequence(std::string_view input, char letter) {
+    const auto parsed = parse_modify_other_keys(input);
+    if (!parsed) {
+        return false;
+    }
+    const auto [key_code, modifier] = *parsed;
     return is_letter_codepoint(key_code, letter) && is_ctrl_modifier(modifier);
 }
 
@@ -156,6 +168,16 @@ bool is_ctrl_p_event(const ftxui::Event& event) {
 
 bool is_ctrl_r_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 'r');
+}
+
+bool is_ctrl_enter_event(const ftxui::Event& event) {
+    // modifyOtherKeys CSI: ESC[27;<modifier>;<key>~  where key 13 = Enter.
+    const auto parsed = parse_modify_other_keys(event.input());
+    if (!parsed) {
+        return false;
+    }
+    const auto [key_code, modifier] = *parsed;
+    return key_code == 13 && is_ctrl_modifier(modifier);
 }
 
 } // namespace tui

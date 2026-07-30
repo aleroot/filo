@@ -1141,6 +1141,20 @@ public:
     }
 };
 
+class PromptsCommand : public Command {
+public:
+    std::string get_name() const override { return "/prompts"; }
+    std::string get_description() const override { return "Browse and reuse previous prompts"; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (ctx.open_prompts_picker_fn && ctx.open_prompts_picker_fn()) {
+            return;
+        }
+        ctx.append_history_fn("\n\xe2\x9a\xa0  Prompt history is only available in the interactive TUI.\n");
+    }
+};
+
 class ResumeCommand : public Command {
 public:
     std::string get_name() const override { return "/resume"; }
@@ -1322,6 +1336,7 @@ public:
             "  /clear, /cls        Clear the screen and conversation history\n"
             "  /quit, /exit, /q    Exit the application\n"
             "  /sessions           List and manage conversation sessions\n"
+            "  /prompts            Browse and reuse previous prompts\n"
             "  /resume [id|name]   Restore a saved session by ID, index, or name\n"
             "  /continue           Resume last session when empty, else push the current one on\n"
             "  /rename [name]      Name the current session for /resume <name>\n"
@@ -3373,6 +3388,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ClearCommand>());
     register_command(std::make_unique<HelpCommand>());
     register_command(std::make_unique<SessionsCommand>());
+    register_command(std::make_unique<PromptsCommand>());
     register_command(std::make_unique<ResumeCommand>());
     register_command(std::make_unique<ContinueCommand>());
     register_command(std::make_unique<RenameCommand>());

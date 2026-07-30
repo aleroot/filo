@@ -151,6 +151,53 @@ TEST_CASE("PromptHistoryStore entries_newest_first returns reversed order", "[hi
     CHECK(newest_first[2] == "oldest");
 }
 
+TEST_CASE("PromptHistoryStore remove_at_and_save removes by index", "[history]") {
+    auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_remove.json";
+    std::filesystem::remove(temp_path);
+
+    {
+        PromptHistoryStore store(temp_path);
+        REQUIRE(store.load());
+        store.add("alpha");
+        store.add("beta");
+        store.add("gamma");
+        REQUIRE(store.save());
+    }
+
+    {
+        PromptHistoryStore store(temp_path);
+        REQUIRE(store.load());
+        REQUIRE(store.size() == 3);
+
+        // Remove index 1 ("beta") — oldest-first ordering.
+        REQUIRE(store.remove_at_and_save(1));
+
+        REQUIRE(store.load());
+        REQUIRE(store.size() == 2);
+        const auto& entries = store.entries();
+        CHECK(entries[0] == "alpha");
+        CHECK(entries[1] == "gamma");
+    }
+
+    std::filesystem::remove(temp_path);
+}
+
+TEST_CASE("PromptHistoryStore remove_at_and_save rejects out-of-range index", "[history]") {
+    auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_remove_oor.json";
+    std::filesystem::remove(temp_path);
+
+    PromptHistoryStore store(temp_path);
+    REQUIRE(store.load());
+    store.add("only");
+
+    std::string error;
+    REQUIRE_FALSE(store.remove_at_and_save(99, &error));
+    REQUIRE_FALSE(error.empty());
+    REQUIRE(store.size() == 1);
+
+    std::filesystem::remove(temp_path);
+}
+
 TEST_CASE("PersistentPromptHistory navigation", "[history]") {
     auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_nav.json";
     std::filesystem::remove(temp_path);

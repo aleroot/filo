@@ -67,6 +67,7 @@ struct CommandContext {
     std::function<bool(std::string_view)> open_command_option_picker_fn = {};
     std::function<bool()> open_settings_picker_fn = {};
     std::function<bool()> open_sessions_picker_fn = {};
+    std::function<bool()> open_prompts_picker_fn = {};
     std::function<void(std::string_view)> resume_session_fn = {};
     // Renames the current session (empty = clear). Returns outcome message.
     std::function<CommandOperationResult(std::string_view)> rename_session_fn = {};

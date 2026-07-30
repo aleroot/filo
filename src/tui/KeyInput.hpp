@@ -17,4 +17,9 @@ bool is_ctrl_c_event(const ftxui::Event& event);
 bool is_ctrl_p_event(const ftxui::Event& event);
 bool is_ctrl_r_event(const ftxui::Event& event);
 
+/// True when @p event is a Ctrl+Enter keypress (modifyOtherKeys CSI sequence
+/// ESC[27;5;13~). Used by list pickers that distinguish Enter (activate) from
+/// Ctrl+Enter (copy-to-clipboard).
+bool is_ctrl_enter_event(const ftxui::Event& event);
+
 } // namespace tui

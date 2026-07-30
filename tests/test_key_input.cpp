@@ -51,3 +51,16 @@ TEST_CASE("KeyInput detects modifyOtherKeys events", "[tui][key_input]") {
     REQUIRE(tui::is_ctrl_y_event(ftxui::Event::Special("\x1B[27;5;121~")));
     REQUIRE_FALSE(tui::is_ctrl_y_event(ftxui::Event::Special("\x1B[27;3;121~")));
 }
+
+TEST_CASE("KeyInput detects Ctrl+Enter events", "[tui][key_input]") {
+    // modifyOtherKeys CSI: ESC[27;5;13~  (modifier 5 = Ctrl, key 13 = Enter)
+    REQUIRE(tui::is_ctrl_enter_event(ftxui::Event::Special("\x1B[27;5;13~")));
+    // Shift+Enter (modifier 2) must not match.
+    REQUIRE_FALSE(tui::is_ctrl_enter_event(ftxui::Event::Special("\x1B[27;2;13~")));
+    // Plain Enter must not match.
+    REQUIRE_FALSE(tui::is_ctrl_enter_event(ftxui::Event::Return));
+    // Ctrl+Y (same modifier, different key) must not match.
+    REQUIRE_FALSE(tui::is_ctrl_enter_event(ftxui::Event::Special("\x1B[27;5;121~")));
+    // Garbage must not match.
+    REQUIRE_FALSE(tui::is_ctrl_enter_event(ftxui::Event::Special("xyz")));
+}

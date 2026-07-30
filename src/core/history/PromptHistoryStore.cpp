@@ -128,6 +128,26 @@ bool PromptHistoryStore::clear_and_save(std::string* error) {
     return save_unlocked(error);
 }
 
+bool PromptHistoryStore::remove_at_and_save(std::size_t index, std::string* error) {
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(history_file_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
+    if (!load_unlocked(error)) return false;
+    if (index >= entries_.size()) {
+        if (error) {
+            *error = std::format("history index {} out of range (have {})",
+                                 index, entries_.size());
+        }
+        return false;
+    }
+    entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
+    return save_unlocked(error);
+}
+
 void PromptHistoryStore::add(std::string_view text) {
     // Ignore empty strings.
     if (text.empty()) {

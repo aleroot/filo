@@ -1124,6 +1124,14 @@ RunResult run(RunOptions opts) {
     };
     SessionPickerState session_picker_state;
 
+    struct PromptsPickerState {
+        bool active = false;
+        int selected = 0;
+        std::vector<std::string> prompts;  // newest-first
+        std::string status_message;        // ephemeral feedback (e.g. copy confirmation)
+    };
+    PromptsPickerState prompts_picker_state;
+
     RewindPickerState rewind_picker_state;
     const auto code_run_script_directory = select_code_run_script_directory(
         opts.landrun_mode,
@@ -2037,6 +2045,23 @@ RunResult run(RunOptions opts) {
             session_picker_state.active = true;
             session_picker_state.selected = 0;
         }
+        wake_ui();
+        return true;
+    };
+
+    auto open_prompts_picker = [&]() -> bool {
+        {
+            std::lock_guard lock(ui_mutex);
+            static_cast<void>(history_store->load());
+            prompts_picker_state.prompts = history_store->entries_newest_first();
+            if (prompts_picker_state.prompts.empty()) {
+                return false;
+            }
+            prompts_picker_state.active = true;
+            prompts_picker_state.selected = 0;
+            prompts_picker_state.status_message.clear();
+        }
+        prompt_history.reload();
         wake_ui();
         return true;
     };
@@ -5165,7 +5190,8 @@ RunResult run(RunOptions opts) {
                 || code_block_runner.active()
                 || conversation_search_state.active
                 || settings_panel_state.active
-                || remote_activity_panel_state.active) return;
+                || remote_activity_panel_state.active
+                || prompts_picker_state.active) return;
         }
         if (input_text.empty()) return;
         std::string text = input_text;
@@ -5207,6 +5233,7 @@ RunResult run(RunOptions opts) {
             .open_command_option_picker_fn = open_command_option_picker,
             .open_settings_picker_fn = open_settings_picker,
             .open_sessions_picker_fn = open_sessions_picker,
+            .open_prompts_picker_fn = open_prompts_picker,
             .resume_session_fn = [&](std::string_view id_or_idx) {
                 auto data_opt = id_or_idx.empty()
                     ? session_store->load_most_recent()
@@ -6156,6 +6183,113 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
+        bool prompts_picker_was_active = false;
+        std::optional<int> prompts_choice;
+        std::optional<int> prompts_delete_idx;
+        bool prompts_copy_requested = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (prompts_picker_state.active) {
+                prompts_picker_was_active = true;
+                const int count = static_cast<int>(prompts_picker_state.prompts.size());
+                if (event == Event::ArrowUp) {
+                    if (count > 0) {
+                        prompts_picker_state.selected = (prompts_picker_state.selected + count - 1) % count;
+                        prompts_picker_state.status_message.clear();
+                    }
+                } else if (event == Event::ArrowDown) {
+                    if (count > 0) {
+                        prompts_picker_state.selected = (prompts_picker_state.selected + 1) % count;
+                        prompts_picker_state.status_message.clear();
+                    }
+                } else if (event == Event::Return) {
+                    if (count > 0) {
+                        prompts_choice = prompts_picker_state.selected;
+                        prompts_picker_state.active = false;
+                    }
+                } else if (tui::is_ctrl_enter_event(event)) {
+                    if (count > 0) {
+                        prompts_copy_requested = true;
+                    }
+                } else if (event == Event::Backspace || event == Event::Delete) {
+                    if (count > 0) {
+                        prompts_delete_idx = prompts_picker_state.selected;
+                    }
+                } else if (event == Event::Escape) {
+                    prompts_picker_state.active = false;
+                }
+            }
+        }
+        if (prompts_picker_was_active) {
+            if (prompts_copy_requested) {
+                std::string prompt_text;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    prompt_text = prompts_picker_state.prompts[
+                        static_cast<size_t>(prompts_picker_state.selected)];
+                }
+                if (const auto err = core::commands::copy_text_to_clipboard(prompt_text);
+                    !err.has_value()) {
+                    std::lock_guard lock(ui_mutex);
+                    prompts_picker_state.status_message =
+                        "\xe2\x9c\x93 Copied to clipboard";
+                } else {
+                    std::lock_guard lock(ui_mutex);
+                    prompts_picker_state.status_message =
+                        std::format("\xe2\x9c\x97 Copy failed: {}", *err);
+                }
+                return true;
+            }
+            if (prompts_delete_idx.has_value()) {
+                std::string error;
+                const int picker_idx = *prompts_delete_idx;
+                // Reload the store to compute the correct store-side index.
+                // The store uses its own cross-process lock, not ui_mutex, so
+                // this is safe outside the render lock.  All append_history
+                // calls must also happen outside the lock to avoid a deadlock
+                // (append_history itself acquires ui_mutex).
+                static_cast<void>(history_store->load());
+                const std::size_t store_size = history_store->size();
+                // Picker is newest-first (index 0 = newest); store is
+                // oldest-first (index 0 = oldest).
+                const std::size_t store_idx =
+                    store_size > static_cast<std::size_t>(picker_idx)
+                        ? store_size - 1 - static_cast<std::size_t>(picker_idx)
+                        : 0;
+                if (history_store->remove_at_and_save(store_idx, &error)) {
+                    std::lock_guard lock(ui_mutex);
+                    prompts_picker_state.prompts = history_store->entries_newest_first();
+                    if (prompts_picker_state.prompts.empty()) {
+                        prompts_picker_state.active = false;
+                    } else {
+                        prompts_picker_state.selected = std::min(
+                            prompts_picker_state.selected,
+                            static_cast<int>(prompts_picker_state.prompts.size()) - 1);
+                    }
+                    prompts_picker_state.status_message.clear();
+                } else {
+                    append_history(std::format(
+                        "\n\xe2\x9c\x97  Failed to delete prompt: {}\n", error));
+                }
+                prompt_history.reload();
+                wake_ui();
+                return true;
+            }
+            if (prompts_choice.has_value()) {
+                std::string prompt_text;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    prompt_text = prompts_picker_state.prompts[
+                        static_cast<size_t>(*prompts_choice)];
+                    input_text = std::move(prompt_text);
+                    input_cursor_position = static_cast<int>(input_text.size());
+                    prompts_picker_state.status_message.clear();
+                }
+                wake_ui();
+            }
+            return true;
+        }
+
         bool model_picker_was_active = false;
         std::optional<int> model_choice;
         bool open_local_picker_from_model = false;
@@ -6809,6 +6943,10 @@ RunResult run(RunOptions opts) {
         bool                            session_picker_active = false;
         int                             session_picker_selected = 0;
         std::vector<core::session::SessionInfo> session_picker_sessions;
+        bool                            prompts_picker_active = false;
+        int                             prompts_picker_selected = 0;
+        std::vector<std::string>        prompts_picker_prompts;
+        std::string                     prompts_picker_status;
         bool                            rewind_picker_active = false;
         int                             rewind_picker_selected = 0;
         std::vector<RewindPickerOption> rewind_picker_options;
@@ -6884,6 +7022,10 @@ RunResult run(RunOptions opts) {
             session_picker_active = session_picker_state.active;
             session_picker_selected = session_picker_state.selected;
             session_picker_sessions = session_picker_state.sessions;
+            prompts_picker_active = prompts_picker_state.active;
+            prompts_picker_selected = prompts_picker_state.selected;
+            prompts_picker_prompts = prompts_picker_state.prompts;
+            prompts_picker_status = prompts_picker_state.status_message;
             rewind_picker_active = rewind_picker_state.active;
             rewind_picker_selected = rewind_picker_state.selected;
             rewind_picker_options = rewind_picker_state.options;
@@ -6984,6 +7126,11 @@ RunResult run(RunOptions opts) {
                 conversation_search_selected);
         } else if (session_picker_active) {
             bottom_el = render_session_picker_panel(session_picker_sessions, session_picker_selected);
+        } else if (prompts_picker_active) {
+            bottom_el = render_prompts_picker_panel(
+                prompts_picker_prompts,
+                prompts_picker_selected,
+                prompts_picker_status);
         } else if (provider_model_picker_active) {
             bottom_el = render_provider_model_picker_panel(
                 provider_model_picker_provider,
