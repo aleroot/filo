@@ -2241,10 +2241,6 @@ namespace {
     // The disclosure is live while the turn is still running; its header
     // animates and shows the present-tense label.
     const bool is_live = msg.pending && !msg.finalized;
-
-    // Reasoning boxes are collapsed by default so the transcript stays compact.
-    // The header animates "Thinking…" live and shows "Thought for Ns" when
-    // finished; the user expands it via click or Ctrl+O.
     bool expanded = options.expand_system_details;
     if (options.system_disclosure_expanded != nullptr) {
         if (const auto it = options.system_disclosure_expanded->find(key);
@@ -2291,12 +2287,7 @@ namespace {
         }
     } else {
         const std::string past(activity_past_label(msg.reasoning_kind));
-        std::string summary = msg.reasoning_elapsed.empty()
-            ? past
-            : std::format("{} for {}", past, msg.reasoning_elapsed);
-        if (expandable && !expanded) {
-            summary += "  (click or Ctrl+O to expand)";
-        }
+        std::string summary = msg.reasoning_elapsed.empty() ? past : std::format("{} for {}", past, msg.reasoning_elapsed);
         header.push_back(ftxui::text(std::move(summary)) | ftxui::color(ColorYellowDark) | dim);
     }
 
@@ -2533,9 +2524,6 @@ Element render_system_message(const UiMessage& msg,
         std::string summary = std::string(expanded ? "▼ " : "▶ ") + msg.text;
         if (msg.repeat_count > 1) {
             summary += std::format("  (x{})", msg.repeat_count);
-        }
-        if (!expanded) {
-            summary += "  (click or Ctrl+O for details)";
         }
 
         Element summary_el = ftxui::text(std::move(summary)) | ftxui::color(ColorYellowDark);

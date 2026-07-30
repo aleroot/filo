@@ -438,7 +438,6 @@ TEST_CASE("HistoryComponent toggles system disclosure by mouse click",
         [&options]() { return options; });
 
     const auto collapsed = render_history_text(history);
-    REQUIRE_THAT(collapsed, Catch::Matchers::ContainsSubstring("click or Ctrl+O for details"));
     REQUIRE_THAT(collapsed, !Catch::Matchers::ContainsSubstring("Previous segment: seg-a"));
 
     ftxui::Mouse mouse;

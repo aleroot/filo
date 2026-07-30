@@ -661,7 +661,6 @@ TEST_CASE("render_history_panel — system disclosure is compact by default",
     const auto output = strip_ansi(screen.ToString());
 
     REQUIRE_THAT(output, ContainsSubstring("Internal session rotated"));
-    REQUIRE_THAT(output, ContainsSubstring("click or Ctrl+O for details"));
     REQUIRE_THAT(output, !ContainsSubstring("Previous segment: seg-a"));
 }
 
@@ -704,7 +703,6 @@ TEST_CASE("render_history_panel — repeated system disclosure shows counter and
     ftxui::Render(compact_screen, compact_panel);
     const auto compact_output = strip_ansi(compact_screen.ToString());
     REQUIRE_THAT(compact_output, ContainsSubstring("(x3)"));
-    REQUIRE_THAT(compact_output, ContainsSubstring("click or Ctrl+O for details"));
 
     auto expanded_panel = render_history_panel(
         messages,
@@ -1343,7 +1341,6 @@ TEST_CASE("render — finished reasoning collapses to a Thought summary",
     // Collapsed by default: summary + hint shown, body hidden, answer visible.
     REQUIRE_THAT(output, ContainsSubstring("▶"));
     REQUIRE_THAT(output, ContainsSubstring("Thought for 7s"));
-    REQUIRE_THAT(output, ContainsSubstring("click or Ctrl+O to expand"));
     REQUIRE_THAT(output, ContainsSubstring("Here is the answer."));
     REQUIRE_THAT(output, !ContainsSubstring("Private chain of thought"));
 }

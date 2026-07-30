@@ -1907,6 +1907,46 @@ TEST_CASE("GrepSearchTool regex dot-star matches substring", "[tools][grep]") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("GrepSearchTool preserves capturing-group boolean matches", "[tools][grep]") {
+    const std::string dir = "test_grep_capturing_groups";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "request_123 succeeded\nrequest_x failed\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("(request|response)_[0-9]+", dir));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("request_123 succeeded"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("request_x failed"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool preserves ECMAScript numeric backreferences", "[tools][grep]") {
+    const std::string dir = "test_grep_backreference";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "echo echo\necho other\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("^([a-z]+) \\\\1$", dir));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("echo echo"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("echo other"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool preserves anchors around capturing groups", "[tools][grep]") {
+    const std::string dir = "test_grep_capture_anchors";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "item_42\nprefix item_42\nitem_42 suffix\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("^item_([0-9]+)$", dir));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"line\":1"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("\"line\":2"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("\"line\":3"));
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("GrepSearchTool regex is case-sensitive by default", "[tools][grep]") {
     const std::string dir = "test_grep_casesensitive";
     std::filesystem::create_directories(dir);

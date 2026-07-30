@@ -135,6 +135,35 @@ struct SearchScope {
     return pattern.find_first_of(kMeta) == std::string_view::npos;
 }
 
+// `nosubs` lets standard-library regex engines omit capture bookkeeping when
+// callers only need a boolean result. It cannot be used when the expression
+// contains a numeric backreference because those depend on captured text.
+//
+// ECMAScript backreferences are decimal escapes outside bracket expressions.
+// Keep this deliberately conservative: any \1..\9 disables the optimization,
+// even if the complete decimal escape would ultimately be rejected.
+[[nodiscard]] bool regex_uses_backreference(std::string_view pattern) noexcept {
+    bool in_bracket_expression = false;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        const char current = pattern[i];
+        if (current == '\\') {
+            if (i + 1 < pattern.size()) {
+                const char escaped = pattern[++i];
+                if (!in_bracket_expression && escaped >= '1' && escaped <= '9') {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (current == '[' && !in_bracket_expression) {
+            in_bracket_expression = true;
+        } else if (current == ']' && in_bracket_expression) {
+            in_bracket_expression = false;
+        }
+    }
+    return false;
+}
+
 // Searches one file for matches of either a literal string or a compiled regex.
 // Results are appended to 'out'. Returns early once total_found >= max_results.
 //
@@ -307,7 +336,11 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     std::regex re;
     if (!literal_mode) {
         try {
-            re = std::regex(literal_str, std::regex::ECMAScript | std::regex::optimize);
+            auto flags = std::regex::ECMAScript | std::regex::optimize;
+            if (!regex_uses_backreference(pattern)) {
+                flags |= std::regex::nosubs;
+            }
+            re = std::regex(literal_str, flags);
         } catch (const std::regex_error& e) {
             return std::string(R"({"error":"Invalid regex: )") + e.what() + "\"}";
         }
