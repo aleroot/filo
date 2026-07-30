@@ -145,7 +145,7 @@ TEST_CASE("KimiSerializer - K3 public and subscription model IDs are preserved",
                 Catch::Matchers::ContainsSubstring(
                     R"("thinking":{"type":"enabled","effort":")"
                     + std::string(default_effort)
-                    + "\"}"));
+                    + R"(","keep":"all"})"));
         }
     }
 }
@@ -175,7 +175,7 @@ TEST_CASE("KimiProtocol - K3 maps supported reasoning effort levels",
                 Catch::Matchers::ContainsSubstring(
                     R"("thinking":{"type":"enabled","effort":")"
                     + std::string(expected)
-                    + "\"}"));
+                    + R"(","keep":"all"})"));
         }
     }
 }
@@ -220,7 +220,10 @@ TEST_CASE("KimiProtocol - effort enables Kimi thinking for kimi-for-coding",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - effort enables Kimi thinking for K2 models",
@@ -232,7 +235,10 @@ TEST_CASE("KimiProtocol - effort enables Kimi thinking for K2 models",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - K2 max effort enables thinking without legacy effort",
@@ -244,7 +250,10 @@ TEST_CASE("KimiProtocol - K2 max effort enables thinking without legacy effort",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - Kimi Code K2.7 enables thinking on auto effort",
@@ -256,7 +265,10 @@ TEST_CASE("KimiProtocol - Kimi Code K2.7 enables thinking on auto effort",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - K2.7 Code enables thinking on auto effort",
@@ -268,7 +280,10 @@ TEST_CASE("KimiProtocol - K2.7 Code enables thinking on auto effort",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - K2.7 Code remains thinking when effort is off",
@@ -280,7 +295,10 @@ TEST_CASE("KimiProtocol - K2.7 Code remains thinking when effort is off",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - effort is omitted on legacy Moonshot models",
@@ -304,7 +322,10 @@ TEST_CASE("KimiProtocol - off effort cannot disable Kimi Code K2.7",
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled"})"));
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("thinking":{"type":"enabled","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - off effort disables switchable K2.6 thinking",
@@ -316,6 +337,7 @@ TEST_CASE("KimiProtocol - off effort disables switchable K2.6 thinking",
 
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("keep":"all")"));
 }
 
 TEST_CASE("KimiProtocol - K3 preserves the selected model when effort is off",
@@ -329,7 +351,7 @@ TEST_CASE("KimiProtocol - K3 preserves the selected model when effort is off",
     REQUIRE_THAT(
         payload,
         Catch::Matchers::ContainsSubstring(
-            R"("thinking":{"type":"enabled","effort":"high"})"));
+            R"("thinking":{"type":"enabled","effort":"high","keep":"all"})"));
 }
 
 TEST_CASE("KimiProtocol - session id becomes stable prompt cache key",

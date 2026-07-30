@@ -252,6 +252,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/Agent.cpp
     src/core/agent/DelegatedAgentRunner.cpp
     src/core/agent/HistoryCompactor.cpp
+    src/core/agent/HistoryCompactionPlanner.cpp
     src/core/agent/SemanticHistoryEditor.cpp
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
@@ -529,6 +530,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_workspace.cpp
     tests/test_commands.cpp
     tests/test_history.cpp
+    tests/test_history_compaction_planner.cpp
     tests/test_config_manager.cpp
     tests/test_model_defaults_persistence.cpp
     tests/test_session_model_override.cpp

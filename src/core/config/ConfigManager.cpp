@@ -141,6 +141,7 @@ void apply_managed_setting_value(ManagedSettingKey key,
         case ManagedSettingKey::AutoCompactThreshold:
             try {
                 config.auto_compact_threshold = std::stoi(value);
+                config.auto_compact_threshold_explicit = true;
             } catch (...) {}
             break;
         case ManagedSettingKey::ContextCompression:
@@ -616,7 +617,6 @@ std::string default_config_json() {
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
     "prompt_editor": "system",
-    "auto_compact_threshold": 25000,
     "tool_output_token_limit": 3072,
     "context_compression": "off",
     "providers": {

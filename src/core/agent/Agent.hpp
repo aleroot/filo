@@ -14,6 +14,7 @@
 #include "../tools/ReadToolResultTool.hpp"
 #include "../tools/TodoTool.hpp"
 #include "HistoryCompactor.hpp"
+#include "HistoryCompactionPlanner.hpp"
 #include "SubagentOrchestrator.hpp"
 #include "SubagentEvents.hpp"
 #include "PermissionGate.hpp"
@@ -298,6 +299,19 @@ private:
     void refresh_stable_prompt_prefix_unlocked();
     void mark_stable_prompt_prefix_dirty() noexcept { stable_prompt_prefix_dirty_ = true; }
     void refresh_context_window_snapshot_unlocked() noexcept;
+    void apply_compaction_unlocked(
+        std::string summary,
+        HistoryCompactionPlan plan,
+        std::string active_skill_context);
+    void launch_compaction_transaction(
+        HistoryCompactionPlan plan,
+        std::uint64_t base_revision,
+        std::string active_skill_context,
+        std::shared_ptr<core::llm::LLMProvider> provider,
+        std::string model,
+        HistoryCompactionReason reason,
+        std::function<void(const std::string&)> status_log_callback,
+        std::function<void()> done_callback = {});
 
     // Returns true if the tool call was approved (or doesn't need permission).
     [[nodiscard]] bool check_permission(const std::string& tool_name,
@@ -320,6 +334,8 @@ private:
     core::tools::ReadToolResultTool read_tool_result_tool_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
+    std::uint64_t history_revision_ = 0;
+    bool compaction_in_progress_ = false;
     std::string current_mode_ = "BUILD";
     PermissionProfile permission_profile_ = PermissionProfile::Interactive;
 

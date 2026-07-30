@@ -54,6 +54,23 @@ namespace {
     return features;
 }
 
+void append_kimi_thinking(std::string& payload,
+                          std::string_view type,
+                          std::string_view effort = {}) {
+    payload += R"(,"thinking":{"type":")";
+    payload += core::utils::escape_json_string(type);
+    payload += '"';
+    if (!effort.empty()) {
+        payload += R"(,"effort":")";
+        payload += core::utils::escape_json_string(effort);
+        payload += '"';
+    }
+    if (type == "enabled") {
+        payload += R"(,"keep":"all")";
+    }
+    payload += '}';
+}
+
 [[nodiscard]] std::optional<std::string_view>
 find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
     if (const auto it = headers.find(std::string(key)); it != headers.end()) {
@@ -1043,9 +1060,7 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
             payload += effort;
             payload += '"';
         } else {
-            payload += R"(,"thinking":{"type":"enabled","effort":")";
-            payload += effort;
-            payload += R"("})";
+            append_kimi_thinking(payload, "enabled", effort);
         }
         return;
     }
@@ -1060,14 +1075,14 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
     }
 
     if (effort == "off") {
-        payload += R"(,"thinking":{"type":"disabled"})";
+        append_kimi_thinking(payload, "disabled");
         return;
     }
 
     // Match current kimi-cli: K2 thinking is controlled exclusively through
     // `thinking.type`. Sending legacy reasoning_effort as well can make
     // current Kimi-compatible endpoints reject the request.
-    payload += R"(,"thinking":{"type":"enabled"})";
+    append_kimi_thinking(payload, "enabled");
 }
 
 ReasoningCapabilities KimiProtocol::reasoning_capabilities(

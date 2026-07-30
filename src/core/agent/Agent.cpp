@@ -28,6 +28,7 @@
 #include <cmath>
 #include <future>
 #include <format>
+#include <iterator>
 #include <ranges>
 #include <utility>
 
@@ -255,6 +256,27 @@ struct HookFieldPayload {
     return collected;
 }
 
+void append_compaction_section(
+    std::string& summary,
+    std::string_view title,
+    std::string_view content) {
+    const auto trimmed = core::utils::str::trim_ascii_view(content);
+    if (trimmed.empty()) return;
+    if (!summary.empty()) summary += "\n\n";
+    summary += title;
+    summary += ":\n";
+    summary += trimmed;
+}
+
+[[nodiscard]] HistoryCompactionPolicy compaction_policy(
+    const std::shared_ptr<core::llm::LLMProvider>& provider,
+    std::string_view model) noexcept {
+    return HistoryCompactionPlanner::policy_for_context_window(
+        core::context::ContextWindowTracker::resolve_max_context_tokens(
+            provider,
+            model));
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -340,6 +362,7 @@ void Agent::set_session_id(std::string session_id) {
     if (session_context_.session_id != session_id) {
         session_context_.session_id = std::move(session_id);
         mark_stable_prompt_prefix_dirty();
+        ++history_revision_;
     }
 }
 
@@ -599,6 +622,7 @@ void Agent::refresh_context_window_snapshot_unlocked() noexcept {
         provider_,
         active_model_,
         stable_prompt_prefix_tokens_);
+    ++history_revision_;
 }
 
 // ---------------------------------------------------------------------------
@@ -622,22 +646,48 @@ void Agent::clear_history() {
 
 void Agent::compact_history(std::string summary) {
     std::lock_guard lock(history_mutex_);
+    auto plan = HistoryCompactionPlanner::plan(
+        history_,
+        context_summary_,
+        compaction_policy(provider_, active_model_));
     const auto active_skill_context = collect_active_skill_context(history_);
+    apply_compaction_unlocked(
+        std::move(summary),
+        std::move(plan),
+        active_skill_context);
+}
+
+void Agent::apply_compaction_unlocked(
+    std::string summary,
+    HistoryCompactionPlan plan,
+    std::string active_skill_context) {
     context_summary_ = core::utils::str::trim_ascii_copy(summary);
-    if (!active_skill_context.empty()) {
-        if (!context_summary_.empty()) context_summary_ += "\n\n";
-        context_summary_ += "Active Agent Skill instructions preserved from earlier context:\n";
-        context_summary_ += active_skill_context;
-    }
+    append_compaction_section(
+        context_summary_,
+        "Recent untrusted execution record preserved by Filo",
+        plan.execution_checkpoint);
+    append_compaction_section(
+        context_summary_,
+        "Active Agent Skill instructions preserved from earlier context",
+        active_skill_context);
+
     history_.clear();
     project_facts_snapshot_.reset();
-    consecutive_failure_rounds_ = 0;
-    orchestrator_.clear_sessions();
+    // Efficiency samples describe the old prompt shape and must start a fresh
+    // baseline. Execution-owned state (loop breaker, todos, goals, resumable
+    // subagents, and tool-result storage) deliberately survives compaction.
     reset_efficiency_tracking_unlocked();
     if (provider_) {
+        // Every provider must discard transport continuation handles after a
+        // history rewrite. This does not affect authentication or session-owned
+        // execution state.
         provider_->reset_conversation_state();
     }
     ensure_system_prompt();
+    history_.insert(
+        history_.end(),
+        std::make_move_iterator(plan.retained_history.begin()),
+        std::make_move_iterator(plan.retained_history.end()));
     refresh_context_window_snapshot_unlocked();
 }
 
@@ -646,31 +696,93 @@ void Agent::compact_history_async(
     std::function<void()> done_callback,
     HistoryCompactionReason reason) {
 
-    std::vector<core::llm::Message> history_copy;
+    HistoryCompactionPlan plan;
     std::shared_ptr<core::llm::LLMProvider> provider;
+    std::string active_skill_context;
     std::string model;
+    std::uint64_t base_revision = 0;
+    bool already_compacting = false;
     {
         std::lock_guard lock(history_mutex_);
-        history_copy = history_;
-        provider = provider_;
-        model = active_model_;
+        already_compacting = compaction_in_progress_;
+        if (!already_compacting) {
+            plan = HistoryCompactionPlanner::plan(
+                history_,
+                context_summary_,
+                compaction_policy(provider_, active_model_));
+            provider = provider_;
+            model = active_model_;
+            active_skill_context = collect_active_skill_context(history_);
+            base_revision = history_revision_;
+            compaction_in_progress_ = true;
+        }
     }
 
+    if (already_compacting) {
+        if (text_callback) {
+            text_callback("\n\xe2\x84\xb9  A history compaction is already in progress.\n");
+        }
+        return;
+    }
+
+    launch_compaction_transaction(
+        std::move(plan),
+        base_revision,
+        std::move(active_skill_context),
+        std::move(provider),
+        std::move(model),
+        reason,
+        std::move(text_callback),
+        std::move(done_callback));
+}
+
+void Agent::launch_compaction_transaction(
+    HistoryCompactionPlan plan,
+    std::uint64_t base_revision,
+    std::string active_skill_context,
+    std::shared_ptr<core::llm::LLMProvider> provider,
+    std::string model,
+    HistoryCompactionReason reason,
+    std::function<void(const std::string&)> status_log_callback,
+    std::function<void()> done_callback) {
     auto self = shared_from_this();
+    auto summary_history = plan.summary_history;
     history_compactor_.compact_async(
         HistoryCompactionRequest{
-            .history = std::move(history_copy),
+            .history = std::move(summary_history),
             .provider = std::move(provider),
             .model = std::move(model),
             .reason = reason,
         },
         HistoryCompactionCallbacks{
-            .on_status = std::move(text_callback),
-            .on_summary = [self, done_callback = std::move(done_callback)](std::string summary) {
-                self->compact_history(std::move(summary));
-                if (done_callback) {
+            .on_status = std::move(status_log_callback),
+            .on_summary =
+                [self,
+                 base_revision,
+                 plan = std::move(plan),
+                 active_skill_context = std::move(active_skill_context),
+                 done_callback = std::move(done_callback)](std::string summary) mutable {
+                bool applied = false;
+                {
+                    std::lock_guard lock(self->history_mutex_);
+                    if (self->history_revision_ == base_revision) {
+                        self->apply_compaction_unlocked(
+                            std::move(summary),
+                            std::move(plan),
+                            std::move(active_skill_context));
+                        applied = true;
+                    }
+                }
+                if (applied && done_callback) {
                     done_callback();
                 }
+                return applied
+                    ? HistoryCompactionApplyStatus::Applied
+                    : HistoryCompactionApplyStatus::Stale;
+            },
+            .on_finished = [self]() {
+                std::lock_guard lock(self->history_mutex_);
+                self->compaction_in_progress_ = false;
             },
         });
 }
@@ -1895,20 +2007,22 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
     // The caller must ensure we're at a natural conversation boundary.
     
     int threshold = 0;
-    std::vector<core::llm::Message> history_copy;
+    HistoryCompactionPlan plan;
     std::shared_ptr<core::llm::LLMProvider> provider;
+    std::string active_skill_context;
     std::string model;
+    std::uint64_t base_revision = 0;
     core::context::CompactionDecision compaction;
     {
         std::lock_guard lock(history_mutex_);
+        if (compaction_in_progress_) return;
         threshold = auto_compact_threshold_;
         const bool use_model_aware_default_threshold =
             auto_compact_uses_model_window_default_;
-        history_copy = history_;
         provider = provider_;
         model = active_model_;
         compaction = core::context::ContextWindowTracker::compaction_decision(
-            history_copy,
+            history_,
             provider,
             model,
             core::context::CompactionTriggerPolicy{
@@ -1916,6 +2030,15 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
                 .use_model_aware_default_threshold =
                     use_model_aware_default_threshold,
             });
+        if (threshold > 0 && compaction.should_compact) {
+            plan = HistoryCompactionPlanner::plan(
+                history_,
+                context_summary_,
+                compaction_policy(provider_, active_model_));
+            active_skill_context = collect_active_skill_context(history_);
+            base_revision = history_revision_;
+            compaction_in_progress_ = true;
+        }
     }
 
     // Auto-compact disabled
@@ -1923,20 +2046,14 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
 
     if (!compaction.should_compact) return;
 
-    auto self = shared_from_this();
-    history_compactor_.compact_async(
-        HistoryCompactionRequest{
-            .history = std::move(history_copy),
-            .provider = std::move(provider),
-            .model = std::move(model),
-            .reason = HistoryCompactionReason::Auto,
-        },
-        HistoryCompactionCallbacks{
-            .on_status = std::move(status_log_callback),
-            .on_summary = [self](std::string summary) {
-                self->compact_history(std::move(summary));
-            },
-        });
+    launch_compaction_transaction(
+        std::move(plan),
+        base_revision,
+        std::move(active_skill_context),
+        std::move(provider),
+        std::move(model),
+        HistoryCompactionReason::Auto,
+        std::move(status_log_callback));
 }
 
 } // namespace core::agent

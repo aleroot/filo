@@ -1176,15 +1176,16 @@ TEST_CASE("Agent can rotate transparently between tool-loop steps", "[agent][loo
     const auto requests = provider->requests_snapshot();
     REQUIRE(requests.size() == 11);
 
-    bool third_request_has_user = false;
+    bool retained_user_request = false;
     for (const auto& message : requests.back().messages) {
-        if (message.role == "user") {
-            third_request_has_user = true;
+        if (message.role == "user"
+            && message.content.find(std::string(100, 'x')) != std::string::npos) {
+            retained_user_request = true;
             break;
         }
     }
 
-    CHECK_FALSE(third_request_has_user);
+    CHECK(retained_user_request);
 }
 
 TEST_CASE("Agent can gate efficiency rotation by minimum context utilization",

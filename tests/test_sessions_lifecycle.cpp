@@ -55,6 +55,12 @@ struct TempDir {
     }
 };
 
+bool is_compaction_request(const core::llm::ChatRequest& request) {
+    return !request.messages.empty()
+        && request.messages.back().content.find("continuation checkpoint")
+            != std::string::npos;
+}
+
 } // namespace
 
 TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][session]") {
@@ -74,7 +80,7 @@ TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][ses
     bool summary_triggered = false;
 
     provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
-        if (!req.messages.empty() && req.messages.back().content.find("Summarise the conversation") != std::string::npos) {
+        if (is_compaction_request(req)) {
             summary_triggered = true;
             summary_called.set_value();
             callback(core::llm::StreamChunk::make_content("This is a summary of the conversation."));
@@ -105,12 +111,11 @@ TEST_CASE("Agent auto-compaction triggers when threshold exceeded", "[agent][ses
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
     CHECK(agent->get_context_summary() == "This is a summary of the conversation.");
-    // History should be cleared (only system prompt remains)
+    // Genuine user intent is retained in provider-neutral text form.
     const auto history = agent->get_history();
-    // System prompt + maybe new context summary injection? 
-    // Agent::compact_history clears history and calls ensure_system_prompt.
-    // ensure_system_prompt adds the system message.
-    REQUIRE(history.empty()); // get_history excludes system prompt
+    REQUIRE(history.size() == 1);
+    CHECK(history.front().role == "user");
+    CHECK(history.front().content == "Hello");
 }
 
 TEST_CASE("Agent auto-compaction default threshold follows known model context", "[agent][session]") {
@@ -126,9 +131,7 @@ TEST_CASE("Agent auto-compaction default threshold follows known model context",
 
     std::atomic<int> summary_requests{0};
     provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
-        if (!req.messages.empty()
-            && req.messages.back().content.find("Summarise the conversation")
-                != std::string::npos) {
+        if (is_compaction_request(req)) {
             summary_requests.fetch_add(1, std::memory_order_relaxed);
             callback(core::llm::StreamChunk::make_content("unexpected summary"));
             callback(core::llm::StreamChunk::make_final());
@@ -198,9 +201,7 @@ TEST_CASE("Agent auto-compaction reports provider return without final chunk", "
     agent->set_auto_compact_threshold(50);
 
     provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
-        if (!req.messages.empty()
-            && req.messages.back().content.find("Summarise the conversation")
-                != std::string::npos) {
+        if (is_compaction_request(req)) {
             return;
         }
 
@@ -241,9 +242,7 @@ TEST_CASE("Agent auto-compaction reports provider exceptions", "[agent][session]
     agent->set_auto_compact_threshold(50);
 
     provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
-        if (!req.messages.empty()
-            && req.messages.back().content.find("Summarise the conversation")
-                != std::string::npos) {
+        if (is_compaction_request(req)) {
             throw std::runtime_error("summary transport failed");
         }
 
@@ -290,9 +289,7 @@ TEST_CASE("Agent auto-compaction status uses the status log sink, not text",
     agent->set_auto_compact_threshold(50);
 
     provider->on_stream = [&](const core::llm::ChatRequest& req, auto callback) {
-        if (!req.messages.empty()
-            && req.messages.back().content.find("Summarise the conversation")
-                != std::string::npos) {
+        if (is_compaction_request(req)) {
             callback(core::llm::StreamChunk::make_content("Condensed summary."));
             callback(core::llm::StreamChunk::make_final());
             return;
@@ -343,6 +340,103 @@ TEST_CASE("Agent auto-compaction status uses the status log sink, not text",
     CHECK(streamed_text.find("This response is long enough") != std::string::npos);
     CHECK(streamed_text.find("Auto-compacting history") == std::string::npos);
     CHECK(streamed_text.find("History compacted") == std::string::npos);
+}
+
+TEST_CASE("Agent rejects stale asynchronous compaction without losing newer history",
+          "[agent][session][compaction][transaction]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->append_history_message({
+        .role = "user",
+        .content = "Original request",
+    });
+    agent->append_history_message({
+        .role = "assistant",
+        .content = "Original response",
+    });
+
+    std::promise<void> summary_started;
+    std::promise<void> release_summary;
+    auto release_future = release_summary.get_future().share();
+    provider->on_stream = [&](const core::llm::ChatRequest& request, auto callback) {
+        REQUIRE(is_compaction_request(request));
+        summary_started.set_value();
+        release_future.wait();
+        callback(core::llm::StreamChunk::make_content("Stale summary"));
+        callback(core::llm::StreamChunk::make_final());
+    };
+
+    std::promise<void> stale_reported;
+    std::atomic<bool> stale_set{false};
+    agent->compact_history_async([&](const std::string& status) {
+        if (status.find("conversation changed") != std::string::npos
+            && !stale_set.exchange(true)) {
+            stale_reported.set_value();
+        }
+    });
+
+    REQUIRE(summary_started.get_future().wait_for(std::chrono::seconds(5))
+            == std::future_status::ready);
+    agent->append_history_message({
+        .role = "user",
+        .content = "New request that must survive",
+    });
+    release_summary.set_value();
+
+    REQUIRE(stale_reported.get_future().wait_for(std::chrono::seconds(5))
+            == std::future_status::ready);
+    CHECK(agent->get_context_summary().empty());
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 3);
+    CHECK(history.back().content == "New request that must survive");
+}
+
+TEST_CASE("Agent compaction preserves todos and deterministic tool execution state",
+          "[agent][session][compaction][state]") {
+    auto provider = std::make_shared<MockProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    REQUIRE(agent->add_todo("Preserve transactional compaction").has_value());
+    agent->append_history_message({
+        .role = "user",
+        .content = "Implement the compaction transaction",
+    });
+    agent->append_history_message({
+        .role = "assistant",
+        .tool_calls = {{
+            .id = "call-state",
+            .function = {
+                .name = "read_file",
+                .arguments = R"({"path":"src/core/agent/Agent.cpp"})",
+            },
+        }},
+    });
+    agent->append_history_message({
+        .role = "tool",
+        .content =
+            R"({"preview":"Agent state","offload":{"reference":"session/call-state.result"}})",
+        .name = "read_file",
+        .tool_call_id = "call-state",
+    });
+
+    agent->compact_history("Implementation remains in progress.");
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 1);
+    CHECK(history.front().content == "Implement the compaction transaction");
+    CHECK(agent->get_todos().size() == 1);
+    const auto summary = agent->get_context_summary();
+    CHECK_THAT(summary, Catch::Matchers::ContainsSubstring("call-state"));
+    CHECK_THAT(summary, Catch::Matchers::ContainsSubstring("session/call-state.result"));
 }
 
 TEST_CASE("SessionStore list/delete operations", "[session][store]") {

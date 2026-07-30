@@ -14,6 +14,11 @@ enum class HistoryCompactionReason {
     Manual,
 };
 
+enum class HistoryCompactionApplyStatus {
+    Applied,
+    Stale,
+};
+
 struct HistoryCompactionRequest {
     std::vector<core::llm::Message> history;
     std::shared_ptr<core::llm::LLMProvider> provider;
@@ -23,7 +28,8 @@ struct HistoryCompactionRequest {
 
 struct HistoryCompactionCallbacks {
     std::function<void(const std::string&)> on_status;
-    std::function<void(std::string)> on_summary;
+    std::function<HistoryCompactionApplyStatus(std::string)> on_summary;
+    std::function<void()> on_finished;
 };
 
 class HistoryCompactor {

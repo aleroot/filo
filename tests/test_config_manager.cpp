@@ -680,6 +680,8 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.ui_context_usage == "show");
     REQUIRE(config.ui_timestamps == "show");
     REQUIRE(config.ui_spinner == "show");
+    REQUIRE(config.auto_compact_threshold == 25000);
+    REQUIRE_FALSE(config.auto_compact_threshold_explicit);
     REQUIRE(config.tool_output_token_limit == 3072);
     REQUIRE(config.providers.contains("grok"));
     REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
@@ -721,7 +723,10 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.subagents.at("explore").use_allow_list.value());
     REQUIRE(config.router.enabled);
     REQUIRE(config.router.policies.contains("smart-code"));
-    REQUIRE(fs::exists(xdg_home / "filo" / "config.json"));
+    const fs::path generated_config = xdg_home / "filo" / "config.json";
+    REQUIRE(fs::exists(generated_config));
+    REQUIRE(read_text(generated_config).find("\"auto_compact_threshold\"")
+            == std::string::npos);
 
     fs::remove_all(sandbox);
 }
@@ -1326,6 +1331,9 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
                     item.key)
                 == std::optional<std::string>{item.value});
         REQUIRE(effective_managed_value(manager.get_config(), item.key) == item.value);
+        if (item.key == core::config::ManagedSettingKey::AutoCompactThreshold) {
+            REQUIRE(manager.get_config().auto_compact_threshold_explicit);
+        }
 
         const std::string persisted_settings = read_text(user_settings);
         REQUIRE(persisted_settings.find(std::format("\"{}\"", item.json_key))
