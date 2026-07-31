@@ -15,10 +15,9 @@ ToolDefinition ListDirectoryTool::get_definition() const {
         .name  = std::string(names::kListDirectory),
         .title = "List Directory",
         .description =
-            "Lists the immediate contents of a directory. "
-            "Returns a JSON array of objects with 'type' ('file' or 'dir') and 'name' fields.",
+            "List a directory's immediate file and subdirectory names.",
         .parameters = {
-            {"path", "string", "Absolute or relative path to the directory to list.", true}
+            {"path", "string", "Directory path.", true}
         },
         .output_schema =
             R"({"type":"object","properties":{"entries":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string","enum":["file","dir"]},"name":{"type":"string"}},"required":["type","name"],"additionalProperties":false},"description":"Immediate entries in the directory."}},"required":["entries"],"additionalProperties":false})",

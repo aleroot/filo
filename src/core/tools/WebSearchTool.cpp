@@ -81,9 +81,7 @@ ToolDefinition WebSearchTool::get_definition() const {
         .name = std::string(names::kWebSearch),
         .title = "Web Search",
         .description =
-            "Search the web through the active provider's native search backend. "
-            "Use this when current or external information is needed and cite URLs "
-            "from the returned results.",
+            "Search the web through the active provider and return citable results.",
         .parameters = {
             {
                 .name = "query",
@@ -94,26 +92,26 @@ ToolDefinition WebSearchTool::get_definition() const {
             {
                 .name = "limit",
                 .type = "integer",
-                .description = "Maximum number of search results to return, from 1 to 20.",
+                .description = "Result limit from 1 to 20.",
                 .required = false,
             },
             {
                 .name = "include_page_content",
                 .type = "boolean",
-                .description = "Ask the backend to include crawled page content when supported.",
+                .description = "Include page text when supported.",
                 .required = false,
             },
             {
                 .name = "allowed_domains",
                 .type = "array",
-                .description = "Optional provider-supported allow-list of domains.",
+                .description = "Optional domain allow-list.",
                 .required = false,
                 .items_schema = R"({"type":"string"})",
             },
             {
                 .name = "blocked_domains",
                 .type = "array",
-                .description = "Optional provider-supported block-list of domains.",
+                .description = "Optional domain block-list.",
                 .required = false,
                 .items_schema = R"({"type":"string"})",
             },

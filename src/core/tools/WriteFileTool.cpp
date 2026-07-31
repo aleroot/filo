@@ -27,13 +27,11 @@ ToolDefinition WriteFileTool::get_definition() const {
         .name  = std::string(names::kWriteFile),
         .title = "Write File",
         .description =
-            "Writes complete content to a file, overwriting any existing content. "
-            "Parent directories are created automatically if they do not exist. "
-            "Returns the previous file content in 'previous_content' so the caller can "
-            "display a diff; 'created' is true when the file did not exist before.",
+            "Write complete file content, creating parents. Overwrites existing content and "
+            "returns bounded previous_content for diff display.",
         .parameters = {
-            {"file_path", "string", "Absolute or relative path to the file to write.", true},
-            {"content",   "string", "The complete new content to write to the file.",  true}
+            {"file_path", "string", "File path.", true},
+            {"content",   "string", "Complete new content.", true}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the write completed successfully."},"file_path":{"type":"string","description":"The path that was written."},"created":{"type":"boolean","description":"True if the file did not exist before this write."},"bytes_written":{"type":"integer","description":"Number of bytes written to disk."},"previous_content":{"type":"string","description":"The prior file content, capped for diff display."}},"required":["success","file_path","created","bytes_written","previous_content"],"additionalProperties":false})",

@@ -98,11 +98,9 @@ ToolDefinition MemoryTool::get_definition() const {
         .name = std::string(names::kMemory),
         .title = "Memory",
         .description =
-            "Stores, lists, archives, and cleans durable Filo memories. Use only for stable "
-            "user preferences, reusable workflows, or durable project facts after the user has "
-            "enabled memory.",
+            "Manage durable Filo memories for stable preferences, workflows, and project facts.",
         .input_schema =
-            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Concise memory content for action=remember."},"id":{"type":"string","description":"Memory id for action=forget."},"scope":{"type":"string","description":"global, project, or session. Defaults to global."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Content for remember."},"id":{"type":"string","description":"Memory id for forget."},"scope":{"type":"string","description":"global, project, or session; defaults to global."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint = false,
             .destructive_hint = true,

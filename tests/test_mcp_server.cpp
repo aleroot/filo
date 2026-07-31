@@ -4,11 +4,13 @@
 #include "core/mcp/McpDispatcher.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/utils/JsonWriter.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <format>
 #include <memory>
 #include <optional>
 #include <string>
@@ -380,6 +382,57 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
         }) {
         REQUIRE_THAT(resp, ContainsSubstring(name));
     }
+}
+
+TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][schema]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":2})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    simdjson::dom::array tools;
+    REQUIRE(doc["result"]["tools"].get(tools) == simdjson::SUCCESS);
+
+    core::utils::JsonWriter catalog(resp.size());
+    {
+        auto catalog_array = catalog.array();
+        bool first = true;
+        for (auto tool : tools) {
+            std::string_view name;
+            std::string_view description;
+            simdjson::dom::element input_schema;
+            REQUIRE(tool["name"].get(name) == simdjson::SUCCESS);
+            REQUIRE(tool["description"].get(description) == simdjson::SUCCESS);
+            REQUIRE(tool["inputSchema"].get(input_schema) == simdjson::SUCCESS);
+
+            if (name == "activate_skill") continue;
+
+            core::utils::JsonWriter projected_tool(1024);
+            {
+                auto root = projected_tool.object();
+                projected_tool.kv_str("type", "function").comma().key("function");
+                {
+                    auto _function = projected_tool.object();
+                    projected_tool.kv_str("name", name).comma()
+                        .kv_str("description",
+                                std::format("MCP server 'filo' tool '{}'. {}",
+                                            name,
+                                            description)).comma()
+                        .kv_raw("parameters", simdjson::to_string(input_schema));
+                }
+            }
+            auto projected = std::move(projected_tool).take();
+            REQUIRE(projected.size() <= 1200);
+
+            if (!first) catalog.comma();
+            first = false;
+            catalog.raw(projected);
+        }
+    }
+
+    REQUIRE(std::move(catalog).take().size() <= 9 * 1024);
 }
 
 TEST_CASE("MCP tools/list each tool has inputSchema with type object", "[mcp]") {

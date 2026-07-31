@@ -16,14 +16,11 @@ ToolDefinition ReplaceTool::get_definition() const {
         .name  = std::string(names::kReplace),
         .title = "Replace in File",
         .description =
-            "Replaces the first occurrence of an exact literal string within a file. "
-            "Fails if the string is not found or appears more than once (use more context). "
-            "Returns the 1-based line number of the replacement for UI display. "
-            "On success, includes a bounded unified diff in 'diff' when the file is text-like.",
+            "Replace one unique exact-text occurrence in a file and return a bounded diff.",
         .parameters = {
-            {"file_path",  "string", "Absolute or relative path to the file to modify.",       true},
-            {"old_string", "string", "The exact literal text to find and replace.",             true},
-            {"new_string", "string", "The exact literal text to insert in place of old_string.", true}
+            {"file_path",  "string", "File path.", true},
+            {"old_string", "string", "Unique verbatim text to replace.", true},
+            {"new_string", "string", "Replacement text.", true}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the replacement completed successfully."},"file_path":{"type":"string","description":"The modified file path."},"replaced_at_line":{"type":"integer","description":"1-based line number where the replacement began."},"diff":{"type":"string","description":"Bounded unified diff of the file before and after the replacement, omitted for very large or binary-like content."}},"required":["success","file_path","replaced_at_line"],"additionalProperties":false})",

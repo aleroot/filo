@@ -52,15 +52,12 @@ ToolDefinition WebFetchTool::get_definition() const {
         .name = std::string(names::kFetchUrl),
         .title = "Fetch URL",
         .description =
-            "Fetch a known http or https URL and return bounded extracted text for analysis. "
-            "A successful response may be marked truncated when the source or returned text "
-            "exceeds Filo's safety budgets; use the returned content instead of retrying the "
-            "same URL to change its size. Use web_search first when the URL is not already known.",
+            "Fetch a known HTTP(S) URL as bounded extracted text. Use web_search to find URLs.",
         .parameters = {
             {
                 .name = "url",
                 .type = "string",
-                .description = "HTTP or HTTPS URL to fetch. Credentials in URLs are rejected.",
+                .description = "HTTP(S) URL without embedded credentials.",
                 .required = true,
             },
         },

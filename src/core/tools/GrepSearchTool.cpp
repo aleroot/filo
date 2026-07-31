@@ -245,16 +245,12 @@ ToolDefinition GrepSearchTool::get_definition() const {
         .name  = std::string(names::kGrepSearch),
         .title = "Grep Search",
         .description =
-            "Searches for a regular expression pattern within file contents, recursively. "
-            "Pure C++ — no external tools required, works on all platforms. "
-            "Skips .git, node_modules, build, and similar directories. "
-            "Returns up to 100 matching lines, each with 'path', 'line' (1-based), and 'text'.",
+            "Find up to 100 matching lines recursively, skipping generated and VCS directories.",
         .parameters = {
-            {"pattern",         "string", "ECMAScript regex pattern to search for.", true},
-            {"path",            "string", "Root directory or file to search. Defaults to '.'.", false},
+            {"pattern",         "string", "Literal text or ECMAScript regular expression.", true},
+            {"path",            "string", "File or search root; defaults to the workspace.", false},
             {"include_pattern", "string",
-             "Glob pattern to restrict searched files (e.g. '*.cpp', '**/example/**/*.kt', 'modules/core'). "
-             "Patterns with path separators match against relative paths; plain directory patterns include files beneath that directory.",
+             "Optional file glob such as '*.cpp' or '**/tests/*.swift'.",
              false}
         },
         .output_schema =

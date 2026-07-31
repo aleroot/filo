@@ -13,13 +13,10 @@ ToolDefinition MoveFileTool::get_definition() const {
         .name  = std::string(names::kMoveFile),
         .title = "Move File",
         .description =
-            "Moves or renames a file or directory. "
-            "Destination parent directories are created automatically. "
-            "Falls back to copy + delete if source and destination are on different filesystems. "
-            "Returns 'from' and 'to' paths on success.",
+            "Move or rename a file or directory, creating destination parents as needed.",
         .parameters = {
-            {"source",      "string", "Current absolute or relative path of the file or directory.", true},
-            {"destination", "string", "Target path — the new name or location.",                     true}
+            {"source",      "string", "Existing path.", true},
+            {"destination", "string", "New path.",      true}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the move completed successfully."},"from":{"type":"string","description":"The original source path."},"to":{"type":"string","description":"The final destination path."}},"required":["success","from","to"],"additionalProperties":false})",

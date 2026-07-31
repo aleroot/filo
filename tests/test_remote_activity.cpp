@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <format>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -205,7 +206,8 @@ TEST_CASE("client retention is bounded and prefers evicting closed sessions",
 
     const auto snapshot = hub.snapshot(false);
     const auto keeper = std::ranges::find(
-        snapshot.clients, "keeper", &core::mcp::RemoteClientActivity::session_id);
+        snapshot.clients, std::string{"keeper"},
+        &core::mcp::RemoteClientActivity::session_id);
     REQUIRE(keeper != snapshot.clients.end());
     CHECK(keeper->ready);
     CHECK_FALSE(keeper->closed);

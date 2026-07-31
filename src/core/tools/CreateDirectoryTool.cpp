@@ -13,11 +13,9 @@ ToolDefinition CreateDirectoryTool::get_definition() const {
         .name  = std::string(names::kCreateDirectory),
         .title = "Create Directory",
         .description =
-            "Creates a directory (and any missing parent directories) at the given path. "
-            "Succeeds silently if the directory already exists. "
-            "Returns the created path in 'path' on success.",
+            "Create a directory and missing parents. Existing directories succeed unchanged.",
         .parameters = {
-            {"dir_path", "string", "Absolute or relative path of the directory to create.", true}
+            {"dir_path", "string", "Directory path.", true}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the directory exists after the call."},"path":{"type":"string","description":"The created directory path."}},"required":["success","path"],"additionalProperties":false})",

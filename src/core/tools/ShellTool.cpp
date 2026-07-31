@@ -341,29 +341,14 @@ ToolDefinition ShellTool::get_definition() const {
         .name  = std::string(names::kRunTerminalCommand),
         .title = "Run Terminal Command",
         .description =
-            "Executes a shell command in a persistent bash session on the user's local machine. "
-            "State persists between calls: 'cd' changes the working directory for all subsequent "
-            "commands, 'export' sets environment variables, and 'source' activates environments "
-            "(virtualenv, nvm, etc.). "
-            "stdout and stderr are merged into a single 'output' field. "
-            "Provide 'working_dir' to run this specific command in a given directory without "
-            "affecting the session's current directory (runs in a subshell); "
-            "omit it to run in the session's current directory. "
-            "Use 'timeout_seconds' for long-running commands such as compilation, test suites, "
-            "or package installation; the default is 600 seconds (10 minutes). "
-            "On timeout the command is killed and the session is reset automatically.",
+            "Run a local command in persistent bash. stdout and stderr are merged; check exit_code. "
+            "working_dir uses a per-call subshell. Timeout defaults to 600 seconds.",
         .parameters = {
-            {"command",          "string",
-             "The bash command to execute.", true},
+            {"command",          "string", "Bash command.", true},
             {"working_dir",      "string",
-             "Absolute or relative path to run this command in. Relative paths resolve "
-             "against the effective workspace root for this MCP session. Runs in a "
-             "subshell so the session's working directory is unaffected. "
-             "Optional; defaults to the session's current directory.", false},
+             "Per-call directory; defaults to the persistent session directory.", false},
             {"timeout_seconds",  "integer",
-             "Maximum seconds to wait for the command to finish. "
-             "Defaults to 600 (10 minutes). Increase for very long builds. "
-             "On expiry the process group is killed and the session restarted.", false},
+             "Timeout in seconds, capped at 3600.", false},
         },
         .output_schema =
             R"({"type":"object","properties":{"output":{"type":"string","description":"Combined stdout and stderr from the command."},"exit_code":{"type":"integer","description":"The command's process exit status."}},"required":["output","exit_code"],"additionalProperties":false})",

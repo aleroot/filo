@@ -56,13 +56,10 @@ ToolDefinition FileSearchTool::get_definition() const {
         .name  = std::string(names::kFileSearch),
         .title = "File Search",
         .description =
-            "Searches for files that match a glob pattern, recursively. "
-            "Pure C++ — no external tools required, works on all platforms. "
-            "Supports * and ? wildcards. Skips .git, node_modules, build, and similar directories. "
-            "Returns up to 100 matching file paths.",
+            "Find up to 100 files recursively by glob, skipping generated and VCS directories.",
         .parameters = {
-            {"pattern", "string", "Glob pattern to match (e.g. '*.cpp', '**/example/**/*.kt', 'src/core').", true},
-            {"path",    "string", "Root directory to search. Defaults to '.'.", false}
+            {"pattern", "string", "Glob such as '*.cpp' or '**/tests/*.swift'.", true},
+            {"path",    "string", "Search root; defaults to the workspace.", false}
         },
         .output_schema =
             R"({"type":"object","properties":{"files":{"type":"array","items":{"type":"string"},"description":"Matching file paths."}},"required":["files"],"additionalProperties":false})",

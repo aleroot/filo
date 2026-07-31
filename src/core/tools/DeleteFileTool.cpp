@@ -13,12 +13,9 @@ ToolDefinition DeleteFileTool::get_definition() const {
         .name  = std::string(names::kDeleteFile),
         .title = "Delete File",
         .description =
-            "Permanently deletes a file or empty directory from the filesystem. "
-            "This action cannot be undone. "
-            "Returns the deleted path in 'deleted' on success.",
+            "Permanently delete a file or empty directory.",
         .parameters = {
-            {"file_path", "string",
-             "Absolute or relative path to the file or empty directory to delete.", true}
+            {"file_path", "string", "File or empty-directory path.", true}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the deletion completed successfully."},"deleted":{"type":"string","description":"The path that was removed."}},"required":["success","deleted"],"additionalProperties":false})",

@@ -177,34 +177,26 @@ static ApplyResult apply_blocks(
 // JSON Schema for each element of the "edits" array.
 // Emitted verbatim as the "items" value in the serialized tool schema.
 static constexpr std::string_view kEditsItemsSchema =
-    R"({"type":"object","properties":{"old_string":{"type":"string","description":"Exact literal text to find in the file, copied verbatim with all indentation and line endings."},"new_string":{"type":"string","description":"Replacement text to insert in place of old_string."}},"required":["old_string","new_string"],"additionalProperties":false})";
+    R"({"type":"object","properties":{"old_string":{"type":"string","description":"Unique verbatim text to replace."},"new_string":{"type":"string","description":"Replacement text."}},"required":["old_string","new_string"],"additionalProperties":false})";
 
 ToolDefinition SearchReplaceTool::get_definition() const {
     return {
         .name  = std::string(names::kSearchReplace),
         .title = "Search & Replace",
         .description =
-            "Applies one or more search-and-replace edits to a file in a single call. "
-            "Each edit replaces the first occurrence of old_string with new_string. "
-            "old_string must be copied verbatim from the file, preserving all indentation, "
-            "punctuation, and line endings — do NOT paraphrase or reformat. "
-            "Include 3-5 lines of surrounding context to ensure uniqueness. "
-            "Edits are applied sequentially, so later edits see the result of earlier ones. "
-            "Fails if any old_string is not found in the file. "
-            "On success, includes a bounded unified diff in 'diff' when the file is text-like.",
+            "Apply ordered exact-text edits to one file. Copy old_string verbatim with enough "
+            "context to be unique; later edits see earlier edits. Returns a bounded diff.",
         .parameters = {
             {
                 .name = "file_path",
                 .type = "string",
-                .description = "Absolute or relative path to the file to modify.",
+                .description = "File path.",
                 .required = true,
             },
             {
                 .name = "edits",
                 .type = "array",
-                .description =
-                    "Array of edit objects, each with 'old_string' (verbatim text to find) "
-                    "and 'new_string' (replacement text). Applied sequentially in order.",
+                .description = "Ordered {old_string,new_string} edits.",
                 .required = true,
                 .items_schema = std::string{kEditsItemsSchema},
             },

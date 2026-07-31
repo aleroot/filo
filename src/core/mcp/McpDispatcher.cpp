@@ -74,14 +74,12 @@ constexpr const char* kTasksExtensionIdentifier = "io.modelcontextprotocol/tasks
 /// Lampo's local model reads these to understand the server's capabilities and
 /// preferred usage patterns without trial-and-error.
 constexpr std::string_view kServerInstructions =
-    "filo-mcp exposes filesystem and shell tools running on the user's local machine "
-    "outside Lampo's sandbox. "
-    "Always use absolute paths for unambiguous file access. "
-    "Prefer search_replace or apply_patch for surgical code edits over write_file, "
-    "which overwrites the entire file. "
-    "Check exit_code in run_terminal_command results: 0 = success, non-zero = failure. "
-    "The 'previous_content' field in write_file responses enables diff display without "
-    "an extra read_file round-trip.";
+    "filo-mcp provides local coding tools outside Lampo's sandbox. "
+    "Paths may be absolute or relative to the active workspace. "
+    "Prefer file_search or grep_search before read_file, and use line slices for large files. "
+    "Prefer search_replace for exact edits or apply_patch for diffs; write_file replaces a whole file. "
+    "Shell state persists between calls; check run_terminal_command.exit_code. "
+    "write_file.previous_content supports diff display without another read.";
 
 namespace {
 

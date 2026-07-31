@@ -131,17 +131,11 @@ ToolDefinition ApplyPatchTool::get_definition() const {
         .name  = std::string(names::kApplyPatch),
         .title = "Apply Patch",
         .description =
-            "Applies a unified diff patch to the filesystem. "
-            "Requires the 'patch' utility (available by default on macOS and most Linux systems). "
-            "Provide 'working_dir' so the patch is applied relative to your project root; "
-            "relative paths resolve against the effective workspace root for this MCP session, "
-            "and the active workspace root is used when omitted. "
-            "On success returns the list of patched files in 'output'.",
+            "Apply a unified diff with patch -p1. working_dir defaults to the active workspace.",
         .parameters = {
-            {"patch",       "string", "The unified diff patch content to apply (unified diff format).", true},
+            {"patch",       "string", "Unified diff text.", true},
             {"working_dir", "string",
-             "Absolute or relative path to the directory where 'patch -p1' should run "
-             "(typically the project root). Defaults to the active workspace root.", false}
+             "Directory in which to apply the patch; defaults to the workspace.", false}
         },
         .output_schema =
             R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the patch applied successfully."},"output":{"type":"string","description":"Combined stdout and stderr from the patch command."}},"required":["success","output"],"additionalProperties":false})",
