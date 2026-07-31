@@ -18,6 +18,7 @@
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/TempFileAccessRegistry.hpp"
+#include "core/tools/ToolArgumentUtils.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
@@ -462,6 +463,92 @@ TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp write content"));
 
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("File mutation tools allow temp paths outside an enforced workspace",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 46,
+        },
+        core::context::SessionTransport::cli,
+        "temp-mutation-allowed");
+    const auto temp_path = std::filesystem::temp_directory_path()
+        / ("filo_temp_mutation_allowed_" + std::to_string(getpid()) + ".txt");
+
+    for (const auto tool_name : {
+             names::kWriteFile,
+             names::kReplace,
+             names::kReplaceInFile,
+             names::kSearchReplace,
+             names::kApplyPatch,
+             names::kDeleteFile,
+             names::kMoveFile,
+             names::kCreateDirectory,
+         }) {
+        const auto access_error = detail::check_workspace_access(
+            temp_path,
+            temp_path.string(),
+            context,
+            nullptr,
+            tool_name);
+        REQUIRE_FALSE(access_error.has_value());
+    }
+
+    const auto read_error = detail::check_workspace_access(
+        temp_path,
+        temp_path.string(),
+        context,
+        nullptr,
+        names::kReadFile);
+    REQUIRE(read_error.has_value());
+    REQUIRE_THAT(*read_error, Catch::Matchers::ContainsSubstring("Access denied"));
+}
+
+TEST_CASE("Edit tools modify temp files outside an enforced workspace",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 47,
+        },
+        core::context::SessionTransport::cli,
+        "temp-edit-allowed");
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_temp_edit_allowed_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+    { std::ofstream(temp_file) << "before\nsecond\n"; }
+
+#undef execute
+    ReplaceTool replace_tool;
+    const auto replace_res = replace_tool.execute(
+        std::format(
+            R"({{"file_path":"{}","old_string":"before","new_string":"after"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+
+    SearchReplaceTool search_replace_tool;
+    const auto search_replace_res = search_replace_tool.execute(
+        std::format(
+            R"({{"file_path":"{}","edits":[{{"old_string":"second","new_string":"final"}}]}})",
+            temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(search_replace_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+
+    std::ifstream ifs(temp_file);
+    const std::string content((std::istreambuf_iterator<char>(ifs)), {});
+    REQUIRE(content == "after\nfinal\n");
     std::filesystem::remove(temp_file, ec);
 }
 
@@ -1055,8 +1142,8 @@ TEST_CASE("CreateDirectoryTool is idempotent when directory exists", "[tools]") 
 TEST_CASE("CreateDirectoryTool denies out-of-scope path when workspace is enforced", "[tools][workspace]") {
     const auto workspace_root = std::filesystem::current_path()
         / ("test_artifact_workspace_create_" + std::to_string(getpid()));
-    const auto outside_path = std::filesystem::temp_directory_path()
-        / ("filo_outside_create_" + std::to_string(getpid()));
+    const auto outside_path = std::filesystem::current_path()
+        / ("test_artifact_outside_create_" + std::to_string(getpid()));
     std::filesystem::remove_all(workspace_root);
     std::filesystem::remove_all(outside_path);
     std::filesystem::create_directories(workspace_root);
@@ -1093,8 +1180,8 @@ TEST_CASE("DeleteFileTool returns error for nonexistent path", "[tools]") {
 TEST_CASE("DeleteFileTool denies out-of-scope path when workspace is enforced", "[tools][workspace]") {
     const auto workspace_root = std::filesystem::current_path()
         / ("test_artifact_workspace_delete_" + std::to_string(getpid()));
-    const auto outside_file = std::filesystem::temp_directory_path()
-        / ("filo_outside_delete_" + std::to_string(getpid()) + ".txt");
+    const auto outside_file = std::filesystem::current_path()
+        / ("test_artifact_outside_delete_" + std::to_string(getpid()) + ".txt");
     std::filesystem::remove_all(workspace_root);
     std::filesystem::remove(outside_file);
     std::filesystem::create_directories(workspace_root);
@@ -1133,8 +1220,8 @@ TEST_CASE("MoveFileTool denies destination outside workspace when enforced", "[t
     const auto workspace_root = std::filesystem::current_path()
         / ("test_artifact_workspace_move_" + std::to_string(getpid()));
     const auto src = workspace_root / "source.txt";
-    const auto outside_dst = std::filesystem::temp_directory_path()
-        / ("filo_outside_move_" + std::to_string(getpid()) + ".txt");
+    const auto outside_dst = std::filesystem::current_path()
+        / ("test_artifact_outside_move_" + std::to_string(getpid()) + ".txt");
     std::filesystem::remove_all(workspace_root);
     std::filesystem::remove(outside_dst);
     std::filesystem::create_directories(workspace_root);
@@ -1324,8 +1411,8 @@ TEST_CASE("ApplyPatchTool applies a unified diff patch", "[tools]") {
 TEST_CASE("ApplyPatchTool denies out-of-scope patch targets when workspace is enforced", "[tools][workspace]") {
     const auto workspace_root = std::filesystem::current_path()
         / ("test_artifact_workspace_patch_" + std::to_string(getpid()));
-    const auto outside_file = std::filesystem::temp_directory_path()
-        / ("filo_outside_patch_" + std::to_string(getpid()) + ".txt");
+    const auto outside_file = std::filesystem::current_path()
+        / ("test_artifact_outside_patch_" + std::to_string(getpid()) + ".txt");
     std::filesystem::remove_all(workspace_root);
     std::filesystem::remove(outside_file);
     std::filesystem::create_directories(workspace_root);

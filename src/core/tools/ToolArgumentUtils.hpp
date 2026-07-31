@@ -42,13 +42,17 @@ inline std::optional<std::string> check_workspace_access(
         tool_name == names::kReadFile
         && temp_file_access_registry != nullptr
         && temp_file_access_registry->can_read(context.session_id, resolved);
-    const bool has_temp_write_allowance =
-        tool_name == names::kWriteFile
+    // Temporary files are intentionally outside a project's workspace roots,
+    // but are a supported destination for every native mutation tool. Keep
+    // reads scoped to explicit session grants above; allowing unrestricted
+    // reads here would expose unrelated processes' temporary files.
+    const bool has_temp_mutation_allowance =
+        names::is_file_modification_tool(tool_name)
         && TempFileAccessRegistry::is_temp_path(resolved);
 
     if (!context.is_path_allowed(resolved)
         && !has_temp_read_grant
-        && !has_temp_write_allowance) {
+        && !has_temp_mutation_allowance) {
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
