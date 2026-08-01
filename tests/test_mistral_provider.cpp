@@ -151,6 +151,7 @@ TEST_CASE("Mistral SSE - Vibe thinking and text blocks are preserved",
 
     REQUIRE(result.chunks.size() == 1);
     CHECK(result.chunks[0].reasoning_content == "reason");
+    CHECK(result.chunks[0].reasoning_protocol == "mistral");
     CHECK(result.chunks[0].content == "answer");
 }
 
@@ -164,6 +165,7 @@ TEST_CASE("Mistral SSE - direct reasoning content is preserved",
 
     REQUIRE(result.chunks.size() == 1);
     CHECK(result.chunks[0].reasoning_content == "reason");
+    CHECK(result.chunks[0].reasoning_protocol == "mistral");
     CHECK(result.chunks[0].content == "answer");
 }
 

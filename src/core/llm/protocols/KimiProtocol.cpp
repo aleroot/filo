@@ -54,6 +54,64 @@ namespace {
     return features;
 }
 
+[[nodiscard]] std::string normalize_kimi_effort(std::string_view raw_effort);
+
+enum class KimiThinkingDialect {
+    None,
+    PublicK3Effort,
+    ThinkingObject,
+};
+
+struct KimiThinkingRequestPolicy {
+    bool supported = false;
+    bool enabled = false;
+    bool preserve_history = false;
+    std::string effort;
+    KimiThinkingDialect dialect = KimiThinkingDialect::None;
+};
+
+[[nodiscard]] KimiThinkingRequestPolicy resolve_kimi_thinking_policy(
+    const ChatRequest& req) {
+    const ReasoningCapabilities capabilities =
+        kimi_reasoning_capabilities(req.model);
+    if (!capabilities.supports_effort()) return {};
+
+    KimiThinkingRequestPolicy policy;
+    policy.supported = true;
+
+    if (is_kimi_k3_model(req.model)) {
+        policy.enabled = true;
+        policy.preserve_history = true;
+        policy.effort = normalize_kimi_effort(req.effort);
+        if (policy.effort.empty() || policy.effort == "off") {
+            policy.effort = is_kimi_public_k3_model(req.model) ? "max" : "high";
+        } else if (policy.effort == "medium") {
+            policy.effort = "high";
+        }
+        policy.dialect = is_kimi_public_k3_model(req.model)
+            ? KimiThinkingDialect::PublicK3Effort
+            : KimiThinkingDialect::ThinkingObject;
+        return policy;
+    }
+
+    policy.effort = normalize_kimi_effort(req.effort);
+    if (capabilities.supports(ReasoningCapability::Required)
+        && (policy.effort.empty() || policy.effort == "off")) {
+        policy.effort = "high";
+    }
+    if (policy.effort.empty()) {
+        return policy;
+    }
+
+    policy.dialect = KimiThinkingDialect::ThinkingObject;
+    policy.enabled = policy.effort != "off";
+    // append_kimi_thinking emits keep:"all" whenever thinking is enabled.
+    // Keep message serialization derived from the same decision so the top-
+    // level mode and assistant transcript can never drift apart.
+    policy.preserve_history = policy.enabled;
+    return policy;
+}
+
 void append_kimi_thinking(std::string& payload,
                           std::string_view type,
                           std::string_view effort = {}) {
@@ -938,7 +996,12 @@ struct KimiParseResult {
 
 std::string KimiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
-    options.include_reasoning_content = true;
+    const KimiThinkingRequestPolicy thinking =
+        resolve_kimi_thinking_policy(req);
+    options.reasoning_content_policy = thinking.preserve_history
+        ? Serializer::ReasoningContentPolicy::EveryAssistant
+        : Serializer::ReasoningContentPolicy::NonEmptyOwned;
+    options.reasoning_protocol = std::string(name());
     options.max_tokens_field = "max_completion_tokens";
     options.transform_tool_schema = normalize_kimi_tool_schema;
     options.serialize_tool_override = serialize_kimi_builtin_tool;
@@ -1040,49 +1103,30 @@ void KimiProtocol::append_extra_fields(std::string& payload, const ChatRequest& 
         payload += '"';
     }
 
-    const ReasoningCapabilities capabilities = reasoning_capabilities(req.model);
-    if (!capabilities.supports_effort()) {
+    const KimiThinkingRequestPolicy thinking =
+        resolve_kimi_thinking_policy(req);
+    if (!thinking.supported || thinking.dialect == KimiThinkingDialect::None) {
         return;
     }
 
-    // K3 is always-thinking. The public API's kimi-k3 model retains the
-    // top-level reasoning_effort dialect, while the managed Kimi Code service
-    // advertises k3/k3-256k efforts through thinking.effort.
-    if (is_kimi_k3_model(req.model)) {
-        std::string effort = normalize_kimi_effort(req.effort);
-        if (effort.empty() || effort == "off") {
-            effort = is_kimi_public_k3_model(req.model) ? "max" : "high";
-        } else if (effort == "medium") {
-            effort = "high";
-        }
-        if (is_kimi_public_k3_model(req.model)) {
-            payload += R"(,"reasoning_effort":")";
-            payload += effort;
-            payload += '"';
-        } else {
-            append_kimi_thinking(payload, "enabled", effort);
-        }
+    if (thinking.dialect == KimiThinkingDialect::PublicK3Effort) {
+        payload += R"(,"reasoning_effort":")";
+        payload += thinking.effort;
+        payload += '"';
         return;
     }
 
-    std::string effort = normalize_kimi_effort(req.effort);
-    if (capabilities.supports(ReasoningCapability::Required)
-        && (effort.empty() || effort == "off")) {
-        effort = "high";
-    }
-    if (effort.empty()) {
-        return;
-    }
-
-    if (effort == "off") {
+    if (!thinking.enabled) {
         append_kimi_thinking(payload, "disabled");
         return;
     }
 
-    // Match current kimi-cli: K2 thinking is controlled exclusively through
-    // `thinking.type`. Sending legacy reasoning_effort as well can make
-    // current Kimi-compatible endpoints reject the request.
-    append_kimi_thinking(payload, "enabled");
+    // Managed K3 accepts effort inside thinking; K2 thinking is controlled by
+    // type alone and can reject the legacy effort field.
+    append_kimi_thinking(
+        payload,
+        "enabled",
+        is_kimi_k3_model(req.model) ? thinking.effort : std::string_view{});
 }
 
 ReasoningCapabilities KimiProtocol::reasoning_capabilities(
@@ -1265,6 +1309,9 @@ ParseResult KimiProtocol::parse_event(std::string_view raw_event) {
         StreamChunk chunk;
         chunk.content = std::move(kimi_result.content);
         chunk.reasoning_content = std::move(kimi_result.reasoning_content);
+        if (!chunk.reasoning_content.empty()) {
+            chunk.reasoning_protocol = std::string(name());
+        }
         chunk.tools   = std::move(kimi_result.tools);
         result.chunks.push_back(std::move(chunk));
     }

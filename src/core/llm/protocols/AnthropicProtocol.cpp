@@ -1237,7 +1237,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     if (!r.stop_reason.empty()) last_stop_reason_ = r.stop_reason;
 
     if (!r.text.empty())           result.chunks.push_back(StreamChunk::make_content(r.text));
-    if (!r.reasoning_delta.empty()) result.chunks.push_back(StreamChunk::make_reasoning(std::move(r.reasoning_delta)));
+    if (!r.reasoning_delta.empty()) {
+        auto chunk = StreamChunk::make_reasoning(std::move(r.reasoning_delta));
+        chunk.reasoning_protocol = std::string(name());
+        result.chunks.push_back(std::move(chunk));
+    }
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
     if (!r.continuation_items.empty()) {
         StreamChunk chunk;

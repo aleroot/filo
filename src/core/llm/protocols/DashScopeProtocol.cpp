@@ -296,7 +296,9 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
     // Qwen requires this field on the assistant message when a thinking tool
     // call is followed by tool results.
-    options.include_reasoning_content = true;
+    options.reasoning_content_policy =
+        Serializer::ReasoningContentPolicy::NonEmptyOwned;
+    options.reasoning_protocol = std::string(name());
 
     std::string payload = Serializer::serialize(req, options);
     if (payload.ends_with('}')) {
@@ -602,6 +604,7 @@ ParseResult DashScopeProtocol::parse_event(std::string_view raw_event) {
 
         StreamChunk thinking;
         thinking.reasoning_content = std::string(rc);
+        thinking.reasoning_protocol = std::string(name());
         result.chunks.push_back(std::move(thinking));
     }
 

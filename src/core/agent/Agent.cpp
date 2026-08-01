@@ -1242,13 +1242,15 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     auto tool_calls_accum     = std::make_shared<std::vector<core::llm::ToolCall>>();
     auto tool_cost_attribution =
         std::make_shared<std::vector<std::pair<int32_t, int64_t>>>();
-    auto reasoning_accum      = std::make_shared<std::string>();  // For Kimi thinking mode
+    auto reasoning_accum      = std::make_shared<std::string>();
+    auto reasoning_protocol_accum = std::make_shared<std::string>();
     auto continuation_accum   =
         std::make_shared<std::vector<core::llm::ContinuationItem>>();
     auto already_stopped      = std::make_shared<std::atomic<bool>>(false);
 
     auto on_stream_chunk =
         [self, provider, assistant_response, tool_calls_accum, reasoning_accum,
+         reasoning_protocol_accum,
          continuation_accum,
          tool_cost_attribution, text_callback, tool_callback, done_callback, turn_callbacks,
          already_stopped, turn_state,
@@ -1275,6 +1277,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 stopped_msg.role = "assistant";
                 stopped_msg.content = *assistant_response;
                 stopped_msg.reasoning_content = *reasoning_accum;
+                stopped_msg.reasoning_protocol = *reasoning_protocol_accum;
                 stopped_msg.continuation_items = *continuation_accum;
                 self->apply_to_history_if_turn_current(
                     turn_state,
@@ -1299,11 +1302,20 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             text_callback(chunk.content);
         }
         
-        // Accumulate reasoning content (Kimi K2.5 thinking mode)
-        // This is required to be sent back with tool_calls messages
+        // Accumulate provider reasoning separately from visible answer text.
+        // Protocol provenance controls whether it may be replayed upstream.
         if (!chunk.reasoning_content.empty()) {
             core::logging::debug("[Agent] Accumulating reasoning_content: '{}'", chunk.reasoning_content.substr(0, 50));
             *reasoning_accum += chunk.reasoning_content;
+            if (reasoning_protocol_accum->empty()) {
+                *reasoning_protocol_accum = chunk.reasoning_protocol;
+            } else if (!chunk.reasoning_protocol.empty()
+                       && *reasoning_protocol_accum != chunk.reasoning_protocol) {
+                // A single assistant response must come from one wire protocol.
+                // If a custom transport violates that invariant, retain the
+                // reasoning for display but disable upstream replay.
+                *reasoning_protocol_accum = "mixed";
+            }
             if (turn_callbacks.on_reasoning) {
                 turn_callbacks.on_reasoning(chunk.reasoning_content);
             }
@@ -1425,7 +1437,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         asst_msg.tool_calls         = self->is_stop_requested()
             ? std::vector<core::llm::ToolCall>{}
             : *tool_calls_accum;
-        asst_msg.reasoning_content  = *reasoning_accum;  // Required for Kimi thinking mode
+        asst_msg.reasoning_content  = *reasoning_accum;
+        asst_msg.reasoning_protocol = *reasoning_protocol_accum;
         asst_msg.continuation_items = *continuation_accum;
 
         if (!chunk.is_error

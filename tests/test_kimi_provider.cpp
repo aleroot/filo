@@ -596,6 +596,79 @@ TEST_CASE("KimiSerializer - assistant tool_calls message with reasoning_content 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_content":"I should read the file first.")"));
 }
 
+TEST_CASE("KimiProtocol - preserved thinking emits empty reasoning on every assistant message",
+          "[kimi][serializer][thinking][preserved]") {
+    for (const std::string model : {"kimi-k3", "k3", "k3-256k"}) {
+        CAPTURE(model);
+        ChatRequest req;
+        req.model = model;
+        req.messages.push_back(Message{.role = "user", .content = "Start."});
+        req.messages.push_back(Message{.role = "assistant", .content = "Done."});
+        req.messages.push_back(Message{.role = "user", .content = "Continue."});
+
+        const auto payload = KimiProtocol{}.serialize(req);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("role":"assistant","content":"Done.","reasoning_content":"")"));
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("role":"user","content":"Start."})"));
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("role":"user","content":"Continue."})"));
+    }
+}
+
+TEST_CASE("KimiProtocol - K2 backfills empty reasoning only when preservation is enabled",
+          "[kimi][serializer][thinking][preserved]") {
+    ChatRequest req;
+    req.model = "kimi-k2.6";
+    req.messages.push_back(Message{.role = "assistant", .content = "Done."});
+
+    req.effort = "high";
+    const auto preserved = KimiProtocol{}.serialize(req);
+    REQUIRE_THAT(preserved, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"")"));
+    REQUIRE_THAT(preserved, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"enabled","keep":"all"})"));
+
+    req.effort = "off";
+    const auto disabled = KimiProtocol{}.serialize(req);
+    REQUIRE_THAT(disabled, !Catch::Matchers::ContainsSubstring("reasoning_content"));
+    REQUIRE_THAT(disabled, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"disabled"})"));
+}
+
+TEST_CASE("KimiProtocol - foreign reasoning is not replayed as Kimi reasoning",
+          "[kimi][serializer][thinking][provenance]") {
+    ChatRequest req;
+    req.model = "kimi-k3";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .content = "Prior answer.",
+        .reasoning_content = "reasoning from another provider",
+        .reasoning_protocol = "dashscope",
+    });
+
+    const auto payload = KimiProtocol{}.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        "reasoning from another provider"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"")"));
+}
+
+TEST_CASE("KimiProtocol - Kimi-owned reasoning remains unchanged",
+          "[kimi][serializer][thinking][provenance]") {
+    ChatRequest req;
+    req.model = "kimi-k3";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .reasoning_content = "Kimi reasoning",
+        .reasoning_protocol = "kimi",
+    });
+
+    const auto payload = KimiProtocol{}.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"Kimi reasoning")"));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // KimiSerializer — tool definitions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -960,6 +1033,7 @@ TEST_CASE("KimiProtocol parse_event - extracts both content and reasoning_conten
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].content == "Hello");
     REQUIRE(result.chunks[0].reasoning_content == "Thinking...");
+    REQUIRE(result.chunks[0].reasoning_protocol == "kimi");
 }
 
 TEST_CASE("KimiProtocol parse_event - accepts data prefix without a space", "[kimi][parser]") {

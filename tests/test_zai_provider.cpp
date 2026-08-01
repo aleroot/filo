@@ -128,6 +128,22 @@ TEST_CASE("Z.ai protocol echoes assistant reasoning_content for preserved thinki
         R"("reasoning_content":"Need weather first.")"));
 }
 
+TEST_CASE("Z.ai protocol does not replay foreign reasoning state",
+          "[zai][protocol][thinking][provenance]") {
+    ChatRequest request;
+    request.model = "glm-4.7";
+    request.messages.push_back(Message{
+        .role = "assistant",
+        .content = "Prior answer.",
+        .reasoning_content = "Kimi reasoning",
+        .reasoning_protocol = "kimi",
+    });
+
+    const auto payload = ZaiProtocol{}.serialize(request);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("Kimi reasoning"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_content"));
+}
+
 TEST_CASE("Z.ai protocol parses streamed reasoning_content",
           "[zai][protocol][thinking]") {
     ZaiProtocol protocol;
@@ -137,6 +153,7 @@ TEST_CASE("Z.ai protocol parses streamed reasoning_content",
 
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].reasoning_content == "think");
+    REQUIRE(result.chunks[0].reasoning_protocol == "zai");
     REQUIRE(result.chunks[0].content == "answer");
 }
 

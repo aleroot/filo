@@ -1051,9 +1051,11 @@ TEST_CASE("AnthropicProtocol - thinking streams as reasoning chunks while replay
     // and never leaks into the visible answer body.
     REQUIRE(r1.chunks.size() == 1);
     REQUIRE(r1.chunks[0].reasoning_content == "Step one. ");
+    REQUIRE(r1.chunks[0].reasoning_protocol == "anthropic");
     REQUIRE(r1.chunks[0].content.empty());
     REQUIRE(r2.chunks.size() == 1);
     REQUIRE(r2.chunks[0].reasoning_content == "Step two.");
+    REQUIRE(r2.chunks[0].reasoning_protocol == "anthropic");
 
     // Signature + block-stop still yield the signed continuation item for replay.
     [[maybe_unused]] auto sig = protocol.parse_event(

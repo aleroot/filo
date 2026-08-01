@@ -723,6 +723,9 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
         chunk.content           = std::move(content);
         chunk.tools             = std::move(tools);
         chunk.reasoning_content = std::move(reasoning);
+        if (!chunk.reasoning_content.empty()) {
+            chunk.reasoning_protocol = std::string(name());
+        }
         result.chunks.push_back(std::move(chunk));
     }
 
@@ -736,7 +739,9 @@ void OpenAIProtocol::on_response(const HttpResponse& response) {
 
 std::string ZaiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
-    options.include_reasoning_content = true;
+    options.reasoning_content_policy =
+        Serializer::ReasoningContentPolicy::NonEmptyOwned;
+    options.reasoning_protocol = std::string(name());
 
     std::string payload = Serializer::serialize(req, options);
     if (payload.ends_with('}')) {
@@ -771,6 +776,9 @@ ParseResult ZaiProtocol::parse_event(std::string_view raw_event) {
         StreamChunk chunk;
         chunk.content = std::move(zai_result.content);
         chunk.reasoning_content = std::move(zai_result.reasoning_content);
+        if (!chunk.reasoning_content.empty()) {
+            chunk.reasoning_protocol = std::string(name());
+        }
         chunk.tools = std::move(zai_result.tools);
         result.chunks.push_back(std::move(chunk));
     }

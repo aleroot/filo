@@ -530,6 +530,7 @@ TEST_CASE("OpenAIProtocol parse_event - reasoning streams on the reasoning chann
         R"(data: {"choices":[{"delta":{"reasoning_content":"step by step"},"index":0}]})");
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].reasoning_content == "step by step");
+    REQUIRE(result.chunks[0].reasoning_protocol == "openai");
     REQUIRE(result.chunks[0].content.empty());
 }
 

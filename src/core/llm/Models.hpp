@@ -412,6 +412,10 @@ struct StreamChunk {
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
     std::vector<ContinuationItem> continuation_items; // Opaque signed/encrypted reasoning state
     std::optional<AuthenticationRecoveryRequest> authentication_recovery;
+    // Wire-protocol family that produced reasoning_content (for example
+    // "kimi" or "dashscope"). This prevents reasoning text from one provider
+    // being replayed through another provider after a live model switch.
+    std::string reasoning_protocol;
 
     // Factory methods for common cases
     [[nodiscard]] static StreamChunk make_final(
@@ -488,6 +492,10 @@ struct Message {
     std::string input_text = {};            // Original editable prompt before mention/media expansion
     bool synthetic = false;                // Internal context record, not a visible user prompt
     std::vector<ContinuationItem> continuation_items = {}; // Opaque provider continuation state
+    // Empty for legacy/session-authored messages. New streamed reasoning is
+    // tagged with the producing wire protocol so serializers can replay only
+    // state they own while the UI remains provider-neutral.
+    std::string reasoning_protocol = {};
 };
 
 struct Tool {
@@ -636,10 +644,20 @@ inline void degrade_historical_video_inputs(ChatRequest& req) {
 }
 
 struct Serializer {
+    enum class ReasoningContentPolicy {
+        Omit,
+        NonEmptyOwned,
+        EveryAssistant,
+    };
+
     struct Options {
-        // Vendor extension: some providers require assistant.reasoning_content
-        // to be echoed back on follow-up tool turns. Disabled by default.
-        bool include_reasoning_content = false;
+        // Vendor extension: providers disagree on whether historical assistant
+        // reasoning is forbidden, replayed only when present, or structurally
+        // required even when empty. Disabled by default. `reasoning_protocol`
+        // identifies the wire family that owns non-empty replay state.
+        ReasoningContentPolicy reasoning_content_policy =
+            ReasoningContentPolicy::Omit;
+        std::string reasoning_protocol;
         // OpenAI-compatible providers do not all agree on completion-budget
         // spelling.
         std::string max_tokens_field = "max_tokens";
@@ -815,10 +833,31 @@ struct Serializer {
                 payload += "]";
             }
 
-            // Vendor extension: only emitted when explicitly enabled.
-            if (options.include_reasoning_content
-                && !req.messages[i].reasoning_content.empty()) {
-                payload += ",\"reasoning_content\":\"" + core::utils::escape_json_string(req.messages[i].reasoning_content) + "\"";
+            // Vendor extension: only replay reasoning owned by this wire
+            // protocol. Legacy messages have no provenance and retain the old
+            // behavior for backward-compatible session resumes. When a
+            // provider requires a structurally present field (Kimi preserved
+            // thinking), foreign reasoning is replaced with an empty value.
+            const bool reasoning_owned =
+                req.messages[i].reasoning_protocol.empty()
+                || (!options.reasoning_protocol.empty()
+                    && req.messages[i].reasoning_protocol
+                        == options.reasoning_protocol);
+            const bool emit_non_empty_reasoning =
+                options.reasoning_content_policy
+                    == ReasoningContentPolicy::NonEmptyOwned
+                && reasoning_owned
+                && !req.messages[i].reasoning_content.empty();
+            const bool emit_required_assistant_reasoning =
+                options.reasoning_content_policy
+                    == ReasoningContentPolicy::EveryAssistant
+                && req.messages[i].role == "assistant";
+            if (emit_non_empty_reasoning || emit_required_assistant_reasoning) {
+                const std::string_view reasoning = reasoning_owned
+                    ? std::string_view{req.messages[i].reasoning_content}
+                    : std::string_view{};
+                payload += ",\"reasoning_content\":\""
+                    + core::utils::escape_json_string(reasoning) + "\"";
             }
 
             payload += "}";

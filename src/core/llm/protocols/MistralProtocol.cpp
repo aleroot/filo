@@ -127,6 +127,9 @@ ParseResult MistralProtocol::parse_event(std::string_view raw_event) {
     if (result.chunks.empty()) result.chunks.emplace_back();
     result.chunks.front().content += content;
     result.chunks.front().reasoning_content += reasoning;
+    if (!result.chunks.front().reasoning_content.empty()) {
+        result.chunks.front().reasoning_protocol = std::string(name());
+    }
     return result;
 }
 

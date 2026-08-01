@@ -364,6 +364,21 @@ TEST_CASE("DashScopeProtocol - preserves assistant reasoning across tool turns",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
 }
 
+TEST_CASE("DashScopeProtocol - does not replay foreign reasoning state",
+          "[qwen][serializer][thinking][provenance]") {
+    auto req = make_simple_request("qwen3.7-plus");
+    req.messages.insert(req.messages.begin() + 1, Message{
+        .role = "assistant",
+        .content = "Prior answer.",
+        .reasoning_content = "Kimi reasoning",
+        .reasoning_protocol = "kimi",
+    });
+
+    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("Kimi reasoning"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_content"));
+}
+
 TEST_CASE("DashScopeProtocol - effort can disable hybrid thinking",
           "[qwen][serializer][thinking][effort]") {
     auto req = make_simple_request("qwen3.7-plus");
@@ -608,6 +623,7 @@ TEST_CASE("DashScopeProtocol - parse_event extracts reasoning_content chunk",
     for (const auto& c : result.chunks) {
         if (!c.reasoning_content.empty()) {
             REQUIRE(c.reasoning_content == "Let me think...");
+            REQUIRE(c.reasoning_protocol == "dashscope");
             found_reasoning = true;
         }
     }

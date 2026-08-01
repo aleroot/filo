@@ -216,6 +216,7 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
             .kind = "reasoning",
             .payload = R"({"type":"reasoning","encrypted_content":"secret"})",
         }},
+        .reasoning_protocol = "zai",
     });
 
     REQUIRE(store.save(data));
@@ -223,6 +224,7 @@ TEST_CASE("SessionStore round-trips reasoning and opaque continuation state",
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages.size() == 3);
     CHECK(loaded->messages[2].reasoning_content == "interleaved GLM reasoning");
+    CHECK(loaded->messages[2].reasoning_protocol == "zai");
     CHECK(loaded->messages[2].reasoning_elapsed == "7s");
     REQUIRE(loaded->messages[2].continuation_items.size() == 1);
     CHECK(loaded->messages[2].continuation_items[0].payload
