@@ -1848,9 +1848,11 @@ TEST_CASE("GrepSearchTool returns error for invalid regex", "[tools]") {
 // Helper: build the JSON args string for grep_search.
 static std::string grep_args(const std::string& pattern,
                               const std::string& dir,
-                              const std::string& include = "") {
+                              const std::string& include = "",
+                              bool ignore_case = false) {
     std::string s = "{\"pattern\":\"" + pattern + "\",\"path\":\"" + dir + "\"";
     if (!include.empty()) s += ",\"include_pattern\":\"" + include + "\"";
+    if (ignore_case) s += ",\"ignore_case\":true";
     s += "}";
     return s;
 }
@@ -2047,12 +2049,55 @@ TEST_CASE("GrepSearchTool regex is case-sensitive by default", "[tools][grep]") 
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("GrepSearchTool ignore_case supports literal patterns", "[tools][grep]") {
+    const std::string dir = "test_grep_ignore_case_literal";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "Hello World\nHELLO AGAIN\nunrelated\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("hello", dir, "", true));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("Hello World"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("HELLO AGAIN"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("unrelated"));
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool ignore_case supports ECMAScript patterns", "[tools][grep]") {
+    const std::string dir = "test_grep_ignore_case_regex";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "ContextWindow\nCONTEXTLENGTH\ncontextOther\n"; }
+
+    GrepSearchTool tool;
+    auto res = tool.execute(grep_args("^context(window|length)$", dir, "", true));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("ContextWindow"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("CONTEXTLENGTH"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("contextOther"));
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("GrepSearchTool ECMAScript does not support inline (?i) flag", "[tools][grep]") {
     // std::regex with ECMAScript dialect does not recognise (?i) — it returns
     // an error rather than silently matching wrong results.
     GrepSearchTool tool;
     auto res = tool.execute(R"({"pattern":"(?i)hello","path":"."})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("ECMAScript"));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("ignore_case"));
+}
+
+TEST_CASE("GrepSearchTool advertises ECMAScript-only regex and ignore_case", "[tools][grep]") {
+    GrepSearchTool tool;
+    const auto definition = tool.get_definition();
+
+    REQUIRE_THAT(definition.description, Catch::Matchers::ContainsSubstring("ECMAScript only"));
+    const auto ignore_case = std::ranges::find_if(
+        definition.parameters,
+        [](const ToolParameter& parameter) { return parameter.name == "ignore_case"; });
+    REQUIRE(ignore_case != definition.parameters.end());
+    REQUIRE(ignore_case->type == "boolean");
+    REQUIRE_FALSE(ignore_case->required);
 }
 
 // ── Literal vs regex path ───────────────────────────────────────────────────

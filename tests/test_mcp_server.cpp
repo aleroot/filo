@@ -506,6 +506,45 @@ TEST_CASE("MCP tools/list search_replace includes array items schema", "[mcp]") 
     REQUIRE(found);
 }
 
+TEST_CASE("MCP tools/list grep_search advertises ECMAScript-only regex and ignore_case",
+          "[mcp][schema]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":511})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    simdjson::dom::array tools;
+    REQUIRE(doc["result"]["tools"].get(tools) == simdjson::SUCCESS);
+
+    bool found = false;
+    for (auto tool : tools) {
+        std::string_view name;
+        if (tool["name"].get(name) != simdjson::SUCCESS || name != "grep_search") {
+            continue;
+        }
+
+        found = true;
+
+        std::string_view description;
+        std::string_view pattern_description;
+        std::string_view ignore_case_type;
+        REQUIRE(tool["description"].get(description) == simdjson::SUCCESS);
+        REQUIRE(tool["inputSchema"]["properties"]["pattern"]["description"]
+                    .get(pattern_description) == simdjson::SUCCESS);
+        REQUIRE(tool["inputSchema"]["properties"]["ignore_case"]["type"]
+                    .get(ignore_case_type) == simdjson::SUCCESS);
+
+        REQUIRE_THAT(std::string(description), ContainsSubstring("C++ ECMAScript only"));
+        REQUIRE_THAT(std::string(pattern_description), ContainsSubstring("(?i)"));
+        REQUIRE(ignore_case_type == "boolean");
+        break;
+    }
+
+    REQUIRE(found);
+}
+
 TEST_CASE("MCP tools/list includes outputSchema for structured tool results", "[mcp]") {
     auto resp = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":52})");
@@ -1283,6 +1322,48 @@ TEST_CASE("MCP tools/call grep_search with single-quote in pattern is safe", "[m
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+}
+
+TEST_CASE("MCP tools/call grep_search supports ignore_case", "[mcp]") {
+    WorkspaceResetToDefault workspace_reset;
+    const auto scoped_root = make_temp_dir("grep_search_ignore_case");
+    write_test_file(
+        scoped_root / "search.txt",
+        "Compact context\nSUMMARIZATION pass\nunrelated\n");
+
+    const auto session_context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = scoped_root,
+            .additional = {},
+            .enforce = true,
+            .version = 181,
+        },
+        core::context::SessionTransport::mcp_stdio,
+        "mcp-grep-ignore-case");
+
+#undef dispatch
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_search","arguments":{"pattern":"compact|summariz","path":".","ignore_case":true}},"id":801})",
+        session_context);
+#define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_THAT(resp, ContainsSubstring("Compact context"));
+    REQUIRE_THAT(resp, ContainsSubstring("SUMMARIZATION pass"));
+    REQUIRE_THAT(resp, !ContainsSubstring("unrelated"));
+
+    std::filesystem::remove_all(scoped_root);
+}
+
+TEST_CASE("MCP tools/call grep_search explains unsupported inline ignore-case flag", "[mcp]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"grep_search","arguments":{"pattern":"(?i)hello","path":"."}},"id":802})");
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":true)"));
+    REQUIRE_THAT(resp, ContainsSubstring("C++ ECMAScript"));
+    REQUIRE_THAT(resp, ContainsSubstring("ignore_case"));
 }
 
 TEST_CASE("MCP tools/call grep_search resolves relative paths against scoped roots",

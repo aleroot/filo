@@ -245,12 +245,18 @@ ToolDefinition GrepSearchTool::get_definition() const {
         .name  = std::string(names::kGrepSearch),
         .title = "Grep Search",
         .description =
-            "Find up to 100 matching lines recursively, skipping generated and VCS directories.",
+            "Find up to 100 matching lines recursively, skipping generated and VCS directories. "
+            "Regex syntax is C++ ECMAScript only; inline flags such as (?i) are unsupported.",
         .parameters = {
-            {"pattern",         "string", "Literal text or ECMAScript regular expression.", true},
+            {"pattern",         "string",
+             "Literal text or C++ ECMAScript-only regular expression. Use ignore_case instead of inline flags such as (?i).",
+             true},
             {"path",            "string", "File or search root; defaults to the workspace.", false},
             {"include_pattern", "string",
              "Optional file glob such as '*.cpp' or '**/tests/*.swift'.",
+             false},
+            {"ignore_case",     "boolean",
+             "Case-insensitive matching; defaults to false.",
              false}
         },
         .output_schema =
@@ -272,13 +278,16 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
             detail::validate_object_arguments(
                 doc,
                 names::kGrepSearch,
-                {"pattern", "path", "include_pattern"})) {
+                {"pattern", "path", "include_pattern", "ignore_case"})) {
         return *validation_error;
     }
 
     std::string_view pattern;
     if (doc["pattern"].get(pattern) != simdjson::SUCCESS)
         return R"({"error":"Missing 'pattern' argument."})";
+
+    bool ignore_case = false;
+    static_cast<void>(doc["ignore_case"].get(ignore_case));
 
     std::string dir_path = ".";
     std::string_view dir_v;
@@ -326,19 +335,27 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     }
 
     // ── Regex or literal? ───────────────────────────────────────────────────
-    const bool literal_mode = is_literal_pattern(pattern);
+    // Preserve the fast literal path for the default case-sensitive mode.
+    // Case-insensitive searches use std::regex::icase so literal and regex
+    // patterns share the same matching semantics.
+    const bool literal_mode = is_literal_pattern(pattern) && !ignore_case;
     const std::string literal_str(pattern);
 
     std::regex re;
     if (!literal_mode) {
         try {
             auto flags = std::regex::ECMAScript | std::regex::optimize;
+            if (ignore_case) {
+                flags |= std::regex::icase;
+            }
             if (!regex_uses_backreference(pattern)) {
                 flags |= std::regex::nosubs;
             }
             re = std::regex(literal_str, flags);
         } catch (const std::regex_error& e) {
-            return std::string(R"({"error":"Invalid regex: )") + e.what() + "\"}";
+            return std::format(
+                R"({{"error":"Invalid C++ ECMAScript regex: {} Inline flags such as (?i) are unsupported; set ignore_case to true for case-insensitive matching."}})",
+                core::utils::escape_json_string(e.what()));
         }
     }
 
