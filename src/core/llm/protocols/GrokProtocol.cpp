@@ -5,6 +5,7 @@
 #include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
+#include <array>
 #include <cctype>
 #include <string_view>
 
@@ -57,6 +58,20 @@ bool grok_supports_reasoning_effort(std::string_view model) noexcept {
     return model.starts_with("grok-3-mini");
 }
 
+bool grok_responses_supports_effort(std::string_view model) noexcept {
+    using core::utils::ascii::istarts_with;
+    // The Responses-API `reasoning:{effort:...}` object is supported by the
+    // Grok 4.5 and 4.3 families and by the Grok Build coding model (which is
+    // built on Grok 4.5). Grok 4 / 4.1 and the non-reasoning variants are
+    // always-on or always-off and reject the control.
+    if (istarts_with(model, "grok-4.5") || istarts_with(model, "grok-4-5")) return true;
+    if (istarts_with(model, "grok-4.3") || istarts_with(model, "grok-4-3")) return true;
+    if (istarts_with(model, "grok-build")) return true;
+    // grok-composer-* are compatibility aliases of grok-4.5.
+    if (istarts_with(model, "grok-composer")) return true;
+    return false;
+}
+
 void GrokProtocol::append_extra_fields(std::string&       payload,
                                         const ChatRequest& req) const {
     if (effort_ == GrokReasoningEffort::None) return;
@@ -82,6 +97,33 @@ void GrokResponsesProtocol::prepare_headers(cpr::Header& headers,
                                             const ChatRequest& request,
                                             std::string_view base_url) {
     prepare_grok_session_headers(headers, request, base_url);
+}
+
+std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
+    SerializationOptions options;
+    if (enable_hosted_tools_) {
+        // xAI hosted server-side tools. The Grok Build session proxy resolves
+        // these internally, giving the model access to real-time web search
+        // and X (Twitter) data that filo's own client-side tools cannot reach.
+        // `code_execution` is intentionally omitted to avoid shadowing filo's
+        // local exec tool.
+        static constexpr std::array<std::string_view, 2> kHostedTools{
+            "web_search", "x_search",
+        };
+        options.hosted_tool_types = kHostedTools;
+    }
+    // Apply a provider-configured effort default only when the session left
+    // effort unset AND the model actually exposes the Responses effort knob.
+    // A non-empty request.effort (session override) always wins via the base
+    // serializer, which normalizes it because supports_effort() is true.
+    if (request.effort.empty()
+        && !default_effort_.empty()
+        && default_effort_ != "none"
+        && default_effort_ != "auto"
+        && grok_responses_supports_effort(request.model)) {
+        options.reasoning_effort_override = default_effort_;
+    }
+    return serialize_with_options(request, options);
 }
 
 std::string GrokProtocol::format_error_message(const HttpResponse& response) const {

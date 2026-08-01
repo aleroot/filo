@@ -880,3 +880,67 @@ TEST_CASE("parse_openai_sse_chunk - handles unicode in content", "[grok][parser]
     auto [content, tools, reasoning] = parse_openai_sse_chunk(json);
     REQUIRE(content == "Hello 世界 🌍");
 }
+
+// ── Gap #1/#3/#4: GrokResponsesProtocol (Responses API) behaviour ────────────
+
+TEST_CASE("grok_responses_supports_effort flags 4.5/4.3/build only",
+          "[grok][reasoning]") {
+    CHECK(grok_responses_supports_effort("grok-4.5"));
+    CHECK(grok_responses_supports_effort("grok-4-5"));
+    CHECK(grok_responses_supports_effort("grok-4.3"));
+    CHECK(grok_responses_supports_effort("grok-build"));
+    CHECK(grok_responses_supports_effort("GROK-4.5-latest")); // case-insensitive
+    CHECK_FALSE(grok_responses_supports_effort("grok-4"));
+    CHECK_FALSE(grok_responses_supports_effort("grok-4.1"));
+    CHECK_FALSE(grok_responses_supports_effort("grok-3-mini"));
+    CHECK_FALSE(grok_responses_supports_effort("grok-code-fast-1"));
+}
+
+TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
+          "[grok][reasoning][responses]") {
+    GrokResponsesProtocol proto;
+    CHECK(proto.reasoning_capabilities("grok-4.5").supports_effort());
+    CHECK(proto.reasoning_capabilities("grok-build").supports_effort());
+    CHECK_FALSE(proto.reasoning_capabilities("grok-4").supports_effort());
+    CHECK_FALSE(proto.reasoning_capabilities("grok-3-mini").supports_effort());
+}
+
+TEST_CASE("GrokResponsesProtocol serializes hosted tools and encrypted reasoning",
+          "[grok][serializer][responses]") {
+    GrokResponsesProtocol proto;
+    const auto payload = proto.serialize(make_simple_request("grok-4.5"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"web_search")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"x_search")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("reasoning.encrypted_content"));
+}
+
+TEST_CASE("GrokResponsesProtocol omits hosted tools when disabled",
+          "[grok][serializer][responses]") {
+    GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/false};
+    const auto payload = proto.serialize(make_simple_request("grok-4.5"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"web_search")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"x_search")"));
+}
+
+TEST_CASE("GrokResponsesProtocol serializes session reasoning effort",
+          "[grok][serializer][responses]") {
+    GrokResponsesProtocol proto;
+    auto req = make_simple_request("grok-4.5");
+    req.effort = "low";
+    const auto payload = proto.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"low"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol applies default effort when session leaves it unset",
+          "[grok][serializer][responses]") {
+    GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "medium"};
+    const auto payload = proto.serialize(make_simple_request("grok-4.5"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"medium"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported models",
+          "[grok][serializer][responses]") {
+    GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};
+    const auto payload = proto.serialize(make_simple_request("grok-4"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort")"));
+}

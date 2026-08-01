@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -25,6 +26,14 @@ namespace {
 [[nodiscard]] std::int64_t now_unix_seconds() {
     return std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+/// Heuristic for SSH / remote / container sessions where a localhost browser
+/// callback is unreachable. Conservative: only triggers on clear SSH markers.
+[[nodiscard]] bool appears_headless() noexcept {
+    if (std::getenv("SSH_CONNECTION") != nullptr) return true;
+    if (std::getenv("SSH_CLIENT") != nullptr) return true;
+    return false;
 }
 
 [[nodiscard]] std::string join_scopes(const std::vector<std::string>& scopes) {
@@ -129,16 +138,26 @@ XaiOAuthFlow::XaiOAuthFlow()
     : XaiOAuthFlow(std::string(kIssuer),
                    std::string(kClientId),
                    default_scopes(),
-                   std::string(kReferrer)) {}
+                   std::string(kReferrer),
+                   /*prefer_device_flow=*/false) {}
+
+XaiOAuthFlow::XaiOAuthFlow(bool prefer_device_flow)
+    : XaiOAuthFlow(std::string(kIssuer),
+                   std::string(kClientId),
+                   default_scopes(),
+                   std::string(kReferrer),
+                   prefer_device_flow) {}
 
 XaiOAuthFlow::XaiOAuthFlow(std::string issuer,
                            std::string client_id,
                            std::vector<std::string> scopes,
-                           std::string referrer)
+                           std::string referrer,
+                           bool prefer_device_flow)
     : issuer_(std::move(issuer))
     , client_id_(std::move(client_id))
     , scopes_(std::move(scopes))
-    , referrer_(std::move(referrer)) {}
+    , referrer_(std::move(referrer))
+    , prefer_device_flow_(prefer_device_flow) {}
 
 std::vector<std::string> XaiOAuthFlow::default_scopes() {
     return {
@@ -168,6 +187,9 @@ XaiOAuthFlow::parse_discovery_response(std::string_view json) {
     }
     if (doc["revocation_endpoint"].get_string().get(value) == simdjson::SUCCESS) {
         discovery.revocation_endpoint = std::string(value);
+    }
+    if (doc["device_authorization_endpoint"].get_string().get(value) == simdjson::SUCCESS) {
+        discovery.device_authorization_endpoint = std::string(value);
     }
     if (discovery.authorization_endpoint.empty() || discovery.token_endpoint.empty()) {
         throw std::runtime_error("xAI OIDC discovery response is missing endpoints");
@@ -356,8 +378,117 @@ OAuthToken XaiOAuthFlow::browser_login(const DiscoveryDocument& discovery) {
     return exchange_code(discovery, received_code, redirect_uri, verifier, nonce);
 }
 
+XaiOAuthFlow::DeviceAuthorization XaiOAuthFlow::parse_device_authorization_response(std::string_view json) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(json);
+    simdjson::dom::element doc = parser.parse(padded);
+    DeviceAuthorization auth;
+    std::string_view sv;
+    std::int64_t iv = 0;
+    if (doc["device_code"].get_string().get(sv) == simdjson::SUCCESS)
+        auth.device_code = std::string(sv);
+    if (doc["user_code"].get_string().get(sv) == simdjson::SUCCESS)
+        auth.user_code = std::string(sv);
+    if (doc["verification_uri"].get_string().get(sv) == simdjson::SUCCESS)
+        auth.verification_uri = std::string(sv);
+    if (doc["verification_uri_complete"].get_string().get(sv) == simdjson::SUCCESS)
+        auth.verification_uri_complete = std::string(sv);
+    if (doc["expires_in"].get_int64().get(iv) == simdjson::SUCCESS)
+        auth.expires_in = static_cast<int>(iv);
+    if (doc["interval"].get_int64().get(iv) == simdjson::SUCCESS)
+        auth.interval = static_cast<int>(iv);
+    if (auth.device_code.empty()) {
+        throw std::runtime_error(
+            "xAI device-authorization response is missing device_code");
+    }
+    return auth;
+}
+
+XaiOAuthFlow::DeviceAuthorization XaiOAuthFlow::request_device_authorization(const DiscoveryDocument& discovery) const {
+    if (discovery.device_authorization_endpoint.empty()) {
+        throw std::runtime_error(
+            "xAI issuer does not advertise a device-authorization endpoint");
+    }
+    const cpr::Response response = cpr::Post(
+        cpr::Url{discovery.device_authorization_endpoint},
+        xai_oauth_headers(),
+        cpr::Payload{
+            {"client_id", client_id_},
+            {"scope", join_scopes(scopes_)},
+        },
+        cpr::Timeout{15000});
+    if (response.status_code < 200 || response.status_code >= 300) {
+        throw std::runtime_error(
+            "xAI device authorization failed ("
+            + std::to_string(response.status_code) + "): "
+            + parse_oauth_error(response.text).message());
+    }
+    return parse_device_authorization_response(response.text);
+}
+
+OAuthToken XaiOAuthFlow::device_login(const DiscoveryDocument& discovery) {
+    const DeviceAuthorization auth = request_device_authorization(discovery);
+
+    const std::string verify_url = !auth.verification_uri_complete.empty()
+        ? auth.verification_uri_complete
+        : auth.verification_uri;
+    std::fprintf(stdout,
+        "\nSigning in with Grok (device flow)...\n\n"
+        "Open this URL and approve the request:\n  %s\n\n"
+        "When prompted, enter the code:  %s\n\n",
+        verify_url.c_str(),
+        auth.user_code.c_str());
+    std::fflush(stdout);
+
+    const int interval = std::max(auth.interval, 1);
+    const int max_attempts = auth.expires_in > 0
+        ? std::max(auth.expires_in / interval, 1)
+        : 60;
+    std::string last_error;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::seconds(interval));
+        const auto request_time = now_unix_seconds();
+        const cpr::Response response = cpr::Post(
+            cpr::Url{discovery.token_endpoint},
+            xai_oauth_headers(),
+            cpr::Payload{
+                {"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
+                {"device_code", auth.device_code},
+                {"client_id", client_id_},
+            },
+            cpr::Timeout{15000});
+        if (response.status_code >= 200 && response.status_code < 300) {
+            return parse_token_response(
+                response.text, request_time, issuer_, client_id_);
+        }
+        const OAuthErrorResponse error = parse_oauth_error(response.text);
+        last_error = error.message();
+        if (error.code == "expired_token") {
+            throw std::runtime_error(
+                "xAI device login code expired. Please try again.");
+        }
+        if (error.code == "access_denied") {
+            throw std::runtime_error("xAI device login was denied.");
+        }
+        if (error.code == "slow_down") {
+            std::this_thread::sleep_for(std::chrono::seconds(interval));
+            continue;
+        }
+        // authorization_pending → keep polling
+    }
+    throw std::runtime_error("xAI device login timed out: " + last_error);
+}
+
 OAuthToken XaiOAuthFlow::login() {
-    return browser_login(discover());
+    const auto discovery = discover();
+    const bool use_device = (prefer_device_flow_ || appears_headless())
+        && !discovery.device_authorization_endpoint.empty();
+    if (use_device) {
+        core::logging::info(
+            "Grok: using device-code login (headless/SSH session or explicit override).");
+        return device_login(discovery);
+    }
+    return browser_login(discovery);
 }
 
 OAuthToken XaiOAuthFlow::refresh(std::string_view refresh_token) {

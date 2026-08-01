@@ -65,12 +65,25 @@ namespace core::llm::protocols {
 enum class GrokReasoningEffort { None, Low, Medium, High };
 
 /**
- * @brief Return true if @p model accepts the `reasoning_effort` field.
+ * @brief Return true if @p model accepts the Chat Completions `reasoning_effort`
+ *        field.
  *
- * Currently only the `grok-3-mini` model family supports this parameter.
- * Sending it to Grok 4 or `grok-code-fast-1` causes the API to return HTTP 400.
+ * Currently only the `grok-3-mini` model family supports this top-level
+ * parameter. Sending it to Grok 4 or `grok-code-fast-1` causes the API to
+ * return HTTP 400.
  */
 [[nodiscard]] bool grok_supports_reasoning_effort(std::string_view model) noexcept;
+
+/**
+ * @brief Return true if @p model accepts the Responses API
+ *        `reasoning:{effort:...}` control.
+ *
+ * Unlike the Chat Completions `reasoning_effort` top-level field (which Grok 4
+ * rejects), the nested Responses-API object is supported by the Grok 4.5 and
+ * Grok 4.3 model families, and by the Grok Build coding model (built on Grok
+ * 4.5). Other Grok reasoning models are always-on and do not expose a knob.
+ */
+[[nodiscard]] bool grok_responses_supports_effort(std::string_view model) noexcept;
 
 /**
  * @brief xAI Grok protocol — OpenAI format + xAI-specific enhancements.
@@ -179,25 +192,70 @@ private:
         const cpr::Header& headers) noexcept;
 };
 
-/** xAI Responses API variant used by Grok OAuth session models. */
+/**
+ * @brief xAI Responses API variant used by Grok OAuth session models.
+ *
+ * Extends the base OpenAI Responses protocol with:
+ *  - Grok Build session proxy headers (`x-grok-*`)
+ *  - Reasoning-effort control (`reasoning:{effort:...}`) for Grok 4.5 / 4.3 /
+ *    Grok Build, so callers can select low/medium/high (the model otherwise
+ *    defaults to high; "fast mode" is low effort)
+ *  - Encrypted reasoning replay (`include:["reasoning.encrypted_content"]`) so
+ *    prior reasoning can be carried across turns
+ *  - Optional xAI hosted server-side tools (real-time `web_search` and
+ *    `x_search`), which the proxy resolves internally
+ */
 class GrokResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
-    explicit GrokResponsesProtocol(std::string service_tier = {})
-        : OpenAIResponsesProtocol(false, std::move(service_tier)) {}
+    /**
+     * @param service_tier       Optional Responses API service tier override.
+     * @param enable_hosted_tools When true (default), advertises the xAI hosted
+     *                           `web_search` and `x_search` tools so the model
+     *                           can use server-side live/X search.
+     * @param default_effort     Provider-configured reasoning effort ("low" /
+     *                           "medium" / "high") applied when the session
+     *                           leaves effort unset. Ignored for models that do
+     *                           not expose the Responses effort knob.
+     */
+    explicit GrokResponsesProtocol(std::string service_tier = {},
+                                   bool enable_hosted_tools = true,
+                                   std::string default_effort = {})
+        : OpenAIResponsesProtocol(/*include_reasoning_encrypted=*/true,
+                                  std::move(service_tier))
+        , enable_hosted_tools_(enable_hosted_tools)
+        , default_effort_(std::move(default_effort)) {}
 
     [[nodiscard]] std::string_view name() const noexcept override {
         return "grok_responses";
     }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
-        auto cloned = std::make_unique<GrokResponsesProtocol>(default_service_tier_);
+        auto cloned = std::make_unique<GrokResponsesProtocol>(
+            default_service_tier_, enable_hosted_tools_, default_effort_);
         share_continuity_state_with(*cloned);
         return cloned;
     }
 
+    /// Reports Effort support for Grok models that expose it on the
+    /// Responses API (4.5, 4.3, grok-build), enabling low/medium/high control.
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override {
+        if (grok_responses_supports_effort(model)) {
+            return ReasoningCapabilities{ReasoningCapability::Effort};
+        }
+        return {};
+    }
+
+    /// Injects the xAI hosted server-side tools when enabled.
+    [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
+
     void prepare_headers(cpr::Header& headers,
                          const ChatRequest& request,
                          std::string_view base_url) override;
+
+private:
+    bool enable_hosted_tools_;
+    std::string default_effort_;
 };
 
 } // namespace core::llm::protocols

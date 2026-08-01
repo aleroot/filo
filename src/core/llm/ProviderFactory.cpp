@@ -257,14 +257,16 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             "chat_completions");
 
         if (wire == OpenAIWireApi::Responses) {
-            if (canonical_type.starts_with("grok") && !config.reasoning_effort.empty()) {
-                core::logging::debug(
-                    "Provider '{}': reasoning_effort is ignored for wire_api='responses'.",
-                    name);
-            }
             if (canonical_type.starts_with("grok")) {
+                // reasoning_effort now flows through the Responses
+                // `reasoning:{effort:...}` control (honoured by Grok 4.5 /
+                // 4.3 / grok-build). It is applied as a provider default when
+                // the session leaves effort unset; xAI hosted server-side
+                // tools (web_search, x_search) are enabled by default.
                 protocol = std::make_unique<protocols::GrokResponsesProtocol>(
-                    config.service_tier);
+                    config.service_tier,
+                    /*enable_hosted_tools=*/true,
+                    config.reasoning_effort);
             } else if (base_url == "https://chatgpt.com/backend-api/codex") {
                 client_identity_source = make_codex_client_identity_source(config_dir);
                 protocol = std::make_unique<protocols::CodexResponsesProtocol>(

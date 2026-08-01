@@ -214,3 +214,56 @@ TEST_CASE("Grok OAuth provider resolves to the CLI chat proxy", "[xai][grok][fac
     CHECK(metadata->base_url == "https://cli-chat-proxy.grok.com/v1");
     CHECK_FALSE(provider->should_estimate_cost());
 }
+
+// ── Gap #2: RFC 8628 device-code login ───────────────────────────────────────
+
+TEST_CASE("xAI OAuth discovery advertises device-authorization endpoint",
+          "[xai][oauth]") {
+    const auto discovery = core::auth::XaiOAuthFlow::parse_discovery_response(R"JSON({
+      "authorization_endpoint":"https://auth.x.ai/oauth2/auth",
+      "token_endpoint":"https://auth.x.ai/oauth2/token",
+      "device_authorization_endpoint":"https://auth.x.ai/oauth2/device_authorization"
+    })JSON");
+    CHECK(discovery.authorization_endpoint == "https://auth.x.ai/oauth2/auth");
+    CHECK(discovery.token_endpoint == "https://auth.x.ai/oauth2/token");
+    CHECK(discovery.device_authorization_endpoint ==
+          "https://auth.x.ai/oauth2/device_authorization");
+}
+
+TEST_CASE("xAI OAuth device endpoint is optional in discovery",
+          "[xai][oauth]") {
+    const auto discovery = core::auth::XaiOAuthFlow::parse_discovery_response(R"JSON({
+      "authorization_endpoint":"https://auth.x.ai/oauth2/auth",
+      "token_endpoint":"https://auth.x.ai/oauth2/token"
+    })JSON");
+    CHECK(discovery.device_authorization_endpoint.empty());
+}
+
+TEST_CASE("xAI OAuth parses device-authorization response",
+          "[xai][oauth][device]") {
+    const auto auth = core::auth::XaiOAuthFlow::parse_device_authorization_response(R"JSON({
+      "device_code":"dev-code-123",
+      "user_code":"ABCD-WXYZ",
+      "verification_uri":"https://auth.x.ai/device",
+      "verification_uri_complete":"https://auth.x.ai/device?user_code=ABCD-WXYZ",
+      "expires_in":900,
+      "interval":5
+    })JSON");
+    CHECK(auth.device_code == "dev-code-123");
+    CHECK(auth.user_code == "ABCD-WXYZ");
+    CHECK(auth.verification_uri == "https://auth.x.ai/device");
+    CHECK(auth.verification_uri_complete == "https://auth.x.ai/device?user_code=ABCD-WXYZ");
+    CHECK(auth.expires_in == 900);
+    CHECK(auth.interval == 5);
+}
+
+TEST_CASE("xAI OAuth device-authorization response defaults interval and requires device_code",
+          "[xai][oauth][device]") {
+    const auto auth = core::auth::XaiOAuthFlow::parse_device_authorization_response(
+        R"JSON({"device_code":"x","user_code":"Y"})JSON");
+    CHECK(auth.interval == 5);
+    CHECK(auth.expires_in == 0);
+
+    REQUIRE_THROWS(core::auth::XaiOAuthFlow::parse_device_authorization_response(
+        R"JSON({"user_code":"ABCD"})JSON"));
+}
