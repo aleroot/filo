@@ -52,15 +52,16 @@ TEST_CASE("KeyInput detects modifyOtherKeys events", "[tui][key_input]") {
     REQUIRE_FALSE(tui::is_ctrl_y_event(ftxui::Event::Special("\x1B[27;3;121~")));
 }
 
-TEST_CASE("KeyInput detects Alt+P model picker events", "[tui][key_input]") {
-    REQUIRE(tui::is_alt_p_event(ftxui::Event::Special("\x1B" "p")));
-    REQUIRE(tui::is_alt_p_event(ftxui::Event::Special("\x1B[112;3u")));
-    REQUIRE(tui::is_alt_p_event(ftxui::Event::Special("\x1B[27;3;112~")));
+TEST_CASE("KeyInput detects Ctrl+T prompts-picker events", "[tui][key_input]") {
+    REQUIRE(tui::is_ctrl_t_event(ftxui::Event::Special({20})));
+    // Kitty keyboard protocol: codepoint 116 ('t'), modifier 5 (Ctrl).
+    REQUIRE(tui::is_ctrl_t_event(ftxui::Event::Special("\x1B[116;5u")));
+    // modifyOtherKeys: ESC[27;5;116~
+    REQUIRE(tui::is_ctrl_t_event(ftxui::Event::Special("\x1B[27;5;116~")));
 
-    REQUIRE_FALSE(tui::is_alt_p_event(ftxui::Event::Special({16}))); // Ctrl+P
-    REQUIRE_FALSE(tui::is_alt_p_event(ftxui::Event::Character('p')));
-    REQUIRE_FALSE(tui::is_alt_p_event(ftxui::Event::Special("\x1B" "P")));
-    REQUIRE_FALSE(tui::is_alt_p_event(ftxui::Event::Special("\x1B[112;6u")));
+    REQUIRE_FALSE(tui::is_ctrl_t_event(ftxui::Event::Character('t')));
+    REQUIRE_FALSE(tui::is_ctrl_t_event(ftxui::Event::Special({18})));  // Ctrl+R
+    REQUIRE_FALSE(tui::is_ctrl_t_event(ftxui::Event::Special({16})));  // Ctrl+P
 }
 
 TEST_CASE("KeyInput detects Ctrl+Enter events", "[tui][key_input]") {

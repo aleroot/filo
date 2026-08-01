@@ -6768,13 +6768,13 @@ RunResult run(RunOptions opts) {
             return true;
         }
         if (is_ctrl_p_event(event)) {
+            return open_model_picker();
+        }
+        if (is_ctrl_t_event(event)) {
             if (!open_prompts_picker()) {
                 append_history("\n\xe2\x9a\xa0  No saved prompts are available yet.\n");
             }
             return true;
-        }
-        if (is_alt_p_event(event)) {
-            return open_model_picker();
         }
         if (is_ctrl_l_event(event)) {  // Ctrl+L — clear screen (same as /clear)
             clear_screen();
