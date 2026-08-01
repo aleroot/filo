@@ -300,7 +300,9 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/tools [action]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/usage"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring(
-            "Ctrl+P   Open the model picker"));
+            "Ctrl+P   Browse and reuse previous prompts"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring(
+            "Alt+P    Open the model picker"));
 
         // Test alias
         *mock_history = "";

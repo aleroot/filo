@@ -31,6 +31,15 @@ bool is_ctrl_modifier(int encoded_modifier) {
     return (modifier_bits & 4) != 0;
 }
 
+bool is_alt_modifier(int encoded_modifier) {
+    if (encoded_modifier <= 0) {
+        return false;
+    }
+    // Terminal keyboard protocols encode Alt/Meta as bit 1, then add one.
+    // Match plain Alt exactly so Alt+Shift+P and Ctrl+Alt+P remain distinct.
+    return encoded_modifier - 1 == 2;
+}
+
 bool is_letter_codepoint(int codepoint, char letter) {
     const unsigned char lower = static_cast<unsigned char>(
         std::tolower(static_cast<unsigned char>(letter)));
@@ -66,6 +75,35 @@ bool is_ctrl_letter_kitty_sequence(std::string_view input, char letter) {
     return is_letter_codepoint(codepoint, letter) && is_ctrl_modifier(modifier);
 }
 
+bool is_alt_letter_kitty_sequence(std::string_view input, char letter) {
+    if (!input.starts_with("\x1B[") || !input.ends_with("u")) {
+        return false;
+    }
+
+    const std::string_view body = input.substr(2, input.size() - 3);
+    const std::size_t semicolon = body.find(';');
+    if (semicolon == std::string_view::npos) {
+        return false;
+    }
+
+    const std::string_view code_token = body.substr(0, semicolon);
+    std::string_view modifier_token = body.substr(semicolon + 1);
+    if (const std::size_t colon = modifier_token.find(':');
+        colon != std::string_view::npos) {
+        modifier_token = modifier_token.substr(0, colon);
+    }
+
+    int codepoint = 0;
+    int modifier = 0;
+    if (!parse_decimal(code_token, codepoint) || !parse_decimal(modifier_token, modifier)) {
+        return false;
+    }
+
+    return codepoint == static_cast<int>(
+               std::tolower(static_cast<unsigned char>(letter)))
+        && is_alt_modifier(modifier);
+}
+
 // Parse a modifyOtherKeys CSI sequence: ESC [ 27 ; <modifier> ; <key> ~
 // Returns (key_code, modifier) on success.
 std::optional<std::pair<int, int>>
@@ -97,6 +135,17 @@ bool is_ctrl_letter_modify_other_keys_sequence(std::string_view input, char lett
     }
     const auto [key_code, modifier] = *parsed;
     return is_letter_codepoint(key_code, letter) && is_ctrl_modifier(modifier);
+}
+
+bool is_alt_letter_modify_other_keys_sequence(std::string_view input, char letter) {
+    const auto parsed = parse_modify_other_keys(input);
+    if (!parsed) {
+        return false;
+    }
+    const auto [key_code, modifier] = *parsed;
+    return key_code == static_cast<int>(
+               std::tolower(static_cast<unsigned char>(letter)))
+        && is_alt_modifier(modifier);
 }
 
 std::optional<unsigned char> ctrl_letter_control_byte(char letter) {
@@ -168,6 +217,18 @@ bool is_ctrl_p_event(const ftxui::Event& event) {
 
 bool is_ctrl_r_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 'r');
+}
+
+bool is_alt_p_event(const ftxui::Event& event) {
+    const std::string& input = event.input();
+
+    // Traditional terminals encode Alt/Meta+P as Escape followed by "p".
+    if (input == "\x1B" "p") {
+        return true;
+    }
+
+    return is_alt_letter_kitty_sequence(input, 'p')
+        || is_alt_letter_modify_other_keys_sequence(input, 'p');
 }
 
 bool is_ctrl_enter_event(const ftxui::Event& event) {
