@@ -18,6 +18,7 @@
 #include "core/landrun/LandrunRuntime.hpp"
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunStatus.hpp"
+#include "core/workspace/FileAccessScope.hpp"
 #include "core/version/Version.hpp"
 #include "tui/MainApp.hpp"
 #include "exec/Server.hpp"
@@ -250,6 +251,30 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+
+    // Composition root for the scratch scope: build it once, here, and let it
+    // travel with the workspace snapshot into every session.
+    //
+    // The scope must mirror what this process's execution tools
+    // (`run_terminal_command`, `python`) can actually reach, because those tools
+    // bypass the workspace check entirely. Refusing the native path tools a
+    // directory the shell can already read denies nothing and merely pushes the
+    // model onto the unauditable path.
+    //
+    // Unsandboxed that is the host temp directories. Under landrun it is
+    // whatever the compiled sandbox policy grants, taken from the same helper
+    // the policy compiler uses so the kernel's view and the tools' view are
+    // derived from one computation rather than two guesses.
+    const auto scratch_scope = landrun_settings.enabled()
+        ? core::landrun::landrun_temp_scope(
+              core::landrun::current_landrun_environment(),
+              landrun_settings.mode())
+        : core::workspace::FileAccessScope::host_temp_directories();
+    core::logging::info(
+        "scratch scope: {} readable root(s), {} writable",
+        scratch_scope.readable_roots().size(),
+        scratch_scope.writable_roots().size());
+
     const auto trust_resolution = core::cli::resolve_trust_flags(yolo_mode, trusted_tools);
 
     std::string normalized_mcp_transport = core::utils::str::to_lower_ascii_copy(mcp_transport);
@@ -301,7 +326,8 @@ int main(int argc, char** argv) {
     core::workspace::Workspace::get_instance().initialize(
         std::filesystem::current_path(),
         additional_work_dirs,
-        true);
+        true,
+        scratch_scope);
 
     if (core::landrun::LandrunSettings::instance().enabled()) {
         const char* home_value = std::getenv("HOME");

@@ -2,7 +2,6 @@
 
 #include "../context/SessionContext.hpp"
 #include "../workspace/PathVisibility.hpp"
-#include "TempFileAccessRegistry.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
 #include "../utils/JsonUtils.hpp"
@@ -25,40 +24,43 @@ inline std::filesystem::path resolve_workspace_path(
     return context.resolve_path(path);
 }
 
+/**
+ * Single authorization gate for every path-taking tool.
+ *
+ * The order is uniform across tools: workspace scope, then path visibility
+ * (agent-ignore and sensitive-path rules), then configured tool policy.
+ *
+ * There is deliberately no per-tool escape hatch. Scope is a property of the
+ * session (see core::workspace::FileAccessScope, carried in WorkspaceSnapshot),
+ * not of which tool happens to be asking, so it is not possible to wire one
+ * tool with a weaker or stronger view of the filesystem than its peers -- which
+ * is precisely the failure mode of a defaulted, opt-in capability parameter.
+ */
 inline std::optional<std::string> check_workspace_access(
     const std::filesystem::path& path,
     const std::string& path_str,
     const core::context::SessionContext& context,
     std::filesystem::path* resolved_out = nullptr,
-    std::string_view tool_name = {},
-    TempFileAccessRegistry* temp_file_access_registry = nullptr)
+    std::string_view tool_name = {})
 {
     const auto resolved = context.resolve_path(path);
     if (resolved_out) {
         *resolved_out = resolved;
     }
 
-    const bool has_temp_read_grant =
-        tool_name == names::kReadFile
-        && temp_file_access_registry != nullptr
-        && temp_file_access_registry->can_read(context.session_id, resolved);
-    // Temporary files are intentionally outside a project's workspace roots,
-    // but are a supported destination for every native mutation tool. Keep
-    // reads scoped to explicit session grants above; allowing unrestricted
-    // reads here would expose unrelated processes' temporary files.
-    const bool has_temp_mutation_allowance =
-        names::is_file_modification_tool(tool_name)
-        && TempFileAccessRegistry::is_temp_path(resolved);
-
-    if (!context.is_path_allowed(resolved)
-        && !has_temp_read_grant
-        && !has_temp_mutation_allowance) {
+    // Mutating tools must clear the writable scope; everything else needs only
+    // read. The two differ for scratch directories under a read-only sandbox,
+    // where the shell may read /tmp but not write it.
+    const bool mutates = names::is_file_modification_tool(tool_name);
+    const bool permitted = mutates
+        ? context.allows_write(resolved)
+        : context.allows_read(resolved);
+    if (!permitted) {
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
     }
-    if (names::is_path_visibility_constrained_tool(tool_name)
-        && !has_temp_read_grant) {
+    if (names::is_path_visibility_constrained_tool(tool_name)) {
         const auto* visibility = context.path_visibility.get();
         if (visibility != nullptr) {
             if (const auto hidden_reason =

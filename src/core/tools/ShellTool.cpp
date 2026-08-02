@@ -1,5 +1,4 @@
 #include "ShellTool.hpp"
-#include "TempFileAccessRegistry.hpp"
 #include "ToolArgumentUtils.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
@@ -16,7 +15,6 @@
 #include <filesystem>
 #include <format>
 #include <memory>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -46,11 +44,6 @@ constexpr std::size_t kMaxSessionShells = 64;
 
 std::mutex g_active_commands_mutex;
 std::unordered_map<std::string, ShellTool::ActiveCommand> g_active_commands;
-
-struct TempCandidateSnapshot {
-    std::filesystem::path path;
-    bool existed{false};
-};
 
 void mark_session_shell_used(const std::shared_ptr<SessionShellState>& state) {
     std::lock_guard<std::mutex> lock(g_session_shells_mutex);
@@ -91,154 +84,6 @@ get_or_create_session_shell(
     return state;
 }
 
-[[nodiscard]] bool is_shell_token_separator(char c) {
-    return std::isspace(static_cast<unsigned char>(c))
-        || c == '<'
-        || c == '>'
-        || c == '|'
-        || c == ';'
-        || c == '&'
-        || c == '('
-        || c == ')'
-        || c == '{'
-        || c == '}';
-}
-
-void append_temp_candidate_from_token(
-    const std::string& token,
-    std::set<std::string>& seen,
-    std::vector<std::filesystem::path>& candidates)
-{
-    if (token.empty()) return;
-
-    auto try_append = [&](std::string value) {
-        if (value.empty() || value.front() != '/') return;
-        std::filesystem::path path(value);
-        const auto normalized = path.lexically_normal();
-        if (!TempFileAccessRegistry::is_lexically_temp_path(normalized)
-            && !TempFileAccessRegistry::is_temp_path(normalized)) {
-            return;
-        }
-        if (seen.insert(normalized.string()).second) {
-            candidates.push_back(normalized);
-        }
-    };
-
-    try_append(token);
-
-    for (const auto& prefix : TempFileAccessRegistry::temp_path_prefixes()) {
-        std::size_t offset = 0;
-        while ((offset = token.find(prefix, offset)) != std::string::npos) {
-            std::size_t end = offset;
-            while (end < token.size() && !is_shell_token_separator(token[end])) {
-                ++end;
-            }
-            try_append(token.substr(offset, end - offset));
-            offset = end;
-        }
-    }
-}
-
-[[nodiscard]] std::vector<std::filesystem::path> extract_temp_candidates(std::string_view command) {
-    std::vector<std::filesystem::path> candidates;
-    std::set<std::string> seen;
-    std::string token;
-    char quote = '\0';
-    bool escaped = false;
-
-    auto flush = [&] {
-        append_temp_candidate_from_token(token, seen, candidates);
-        token.clear();
-    };
-
-    for (char c : command) {
-        if (escaped) {
-            token += c;
-            escaped = false;
-            continue;
-        }
-
-        if (c == '\\' && quote != '\'') {
-            escaped = true;
-            continue;
-        }
-
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            } else {
-                token += c;
-            }
-            continue;
-        }
-
-        if (c == '\'' || c == '"') {
-            quote = c;
-            continue;
-        }
-
-        if (is_shell_token_separator(c)) {
-            flush();
-            continue;
-        }
-
-        token += c;
-    }
-
-    flush();
-    return candidates;
-}
-
-[[nodiscard]] TempCandidateSnapshot snapshot_temp_candidate(const std::filesystem::path& path) {
-    TempCandidateSnapshot snapshot{.path = path};
-
-    std::error_code symlink_ec;
-    const auto symlink_status = std::filesystem::symlink_status(path, symlink_ec);
-    if (symlink_ec || symlink_status.type() == std::filesystem::file_type::not_found) {
-        return snapshot;
-    }
-
-    snapshot.existed = true;
-    return snapshot;
-}
-
-[[nodiscard]] bool temp_candidate_was_created(
-    const TempCandidateSnapshot& before)
-{
-    if (before.existed) {
-        return false;
-    }
-
-    std::error_code symlink_ec;
-    const auto symlink_status = std::filesystem::symlink_status(before.path, symlink_ec);
-    if (symlink_ec || symlink_status.type() == std::filesystem::file_type::symlink) {
-        return false;
-    }
-
-    std::error_code status_ec;
-    const auto status = std::filesystem::status(before.path, status_ec);
-    if (status_ec || status.type() != std::filesystem::file_type::regular) {
-        return false;
-    }
-
-    if (!TempFileAccessRegistry::is_temp_path(before.path)) {
-        return false;
-    }
-    return true;
-}
-
-void grant_created_temp_candidates(
-    TempFileAccessRegistry* temp_file_access_registry,
-    std::string_view session_id,
-    const std::vector<TempCandidateSnapshot>& before)
-{
-    if (temp_file_access_registry == nullptr) return;
-    for (const auto& candidate : before) {
-        if (!temp_candidate_was_created(candidate)) continue;
-        temp_file_access_registry->grant_read(session_id, candidate.path);
-    }
-}
-
 class ActiveCommandRegistration {
 public:
     explicit ActiveCommandRegistration(ShellTool::ActiveCommand command)
@@ -265,22 +110,10 @@ private:
 } // namespace
 
 ShellTool::ShellTool()
-    : ShellTool(shell::make_shell_executor(), std::make_shared<TempFileAccessRegistry>()) {}
-
-ShellTool::ShellTool(std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
-    : ShellTool(shell::make_shell_executor(), std::move(temp_file_access_registry)) {}
+    : ShellTool(shell::make_shell_executor()) {}
 
 ShellTool::ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
-    : ShellTool(std::move(executor), std::make_shared<TempFileAccessRegistry>()) {}
-
-ShellTool::ShellTool(
-    std::unique_ptr<shell::IShellExecutor> executor,
-    std::shared_ptr<TempFileAccessRegistry> temp_file_access_registry)
-    : executor_(std::move(executor))
-    , temp_file_access_registry_(
-          temp_file_access_registry
-              ? std::move(temp_file_access_registry)
-              : std::make_shared<TempFileAccessRegistry>()) {
+    : executor_(std::move(executor)) {
     if (!executor_) {
         executor_ = shell::make_shell_executor();
     }
@@ -304,9 +137,6 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
 
 void ShellTool::clear_session_state(std::string_view session_id) {
     clear_mcp_session(session_id);
-    if (temp_file_access_registry_) {
-        temp_file_access_registry_->clear_session(session_id);
-    }
 }
 
 bool ShellTool::interrupt_mcp_session(std::string_view session_id) {
@@ -438,13 +268,6 @@ std::string ShellTool::execute_impl(
             core::utils::escape_json_string(*policy_error));
     }
 
-    const auto temp_candidates = extract_temp_candidates(command_view);
-    std::vector<TempCandidateSnapshot> temp_snapshots;
-    temp_snapshots.reserve(temp_candidates.size());
-    for (const auto& candidate : temp_candidates) {
-        temp_snapshots.push_back(snapshot_temp_candidate(candidate));
-    }
-
     // Delegate to the platform executor.
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
@@ -476,13 +299,6 @@ std::string ShellTool::execute_impl(
             result = state->executor->run(command_view, working_dir, timeout);
         }
         mark_session_shell_used(state);
-    }
-
-    if (result.exit_code == 0) {
-        grant_created_temp_candidates(
-            temp_file_access_registry_.get(),
-            context.session_id,
-            temp_snapshots);
     }
 
     const std::string escaped = core::utils::escape_json_string_utf8_safe(result.output);

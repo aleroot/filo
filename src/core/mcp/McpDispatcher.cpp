@@ -816,6 +816,16 @@ struct ParsedPromptGetRequest {
             for (const auto& add : workspace.additional()) {
                 dynamic_instructions += "- Additional: " + add.string() + "\n";
             }
+            const auto& scratch = workspace.scratch();
+            if (!scratch.empty()) {
+                dynamic_instructions +=
+                    "\nSCRATCH DIRECTORIES (in scope for every filesystem tool):\n";
+                for (const auto& scratch_root : scratch.readable_roots()) {
+                    const bool writable = scratch.allows_write(scratch_root);
+                    dynamic_instructions += "- " + scratch_root.string()
+                        + (writable ? " (read/write)\n" : " (read-only)\n");
+                }
+            }
             dynamic_instructions += "\nUse filesystem tools for strict path-bounded operations. "
                                     "run_terminal_command remains open-world and can access paths "
                                     "outside these folders if the invoked command does so.";
@@ -997,7 +1007,7 @@ struct ParsedPromptGetRequest {
     const std::filesystem::path& path,
     const core::context::SessionContext& context)
 {
-    if (!context.is_path_allowed(path)) {
+    if (!context.allows_read(path)) {
         return std::unexpected(
             RpcError{-32001, "Access denied: path is outside the allowed workspace"});
     }

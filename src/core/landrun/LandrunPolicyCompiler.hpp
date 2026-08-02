@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LandrunPolicy.hpp"
+#include "../workspace/FileAccessScope.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
 #include <filesystem>
@@ -14,6 +15,22 @@ struct LandrunPolicyEnvironment {
     std::filesystem::path runtime_root;
     std::filesystem::path host_tmpdir;
 };
+
+/**
+ * Temp directories the sandbox grants the process tree, split by access.
+ *
+ * Single source of truth, deliberately: `LandrunPolicyCompiler::build()` uses
+ * it to populate the kernel policy, and the composition root uses it to build
+ * the session's FileAccessScope. Because both read the same function, the
+ * shell's view and the native tools' view cannot drift apart -- a divergence
+ * here previously let the shell create /tmp/output while `read_file` denied it.
+ */
+[[nodiscard]] core::workspace::FileAccessScope landrun_temp_scope(
+    const LandrunPolicyEnvironment& environment,
+    LandrunMode mode);
+
+/** The active process-wide landrun environment, read from LandrunSettings. */
+[[nodiscard]] LandrunPolicyEnvironment current_landrun_environment();
 
 class LandrunPolicyCompiler {
 public:

@@ -291,7 +291,7 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
     auto snapshot = parent_context.effective_workspace();
     if (!requested_cwd.empty()) {
         const auto resolved = parent_context.resolve_path(std::filesystem::path(requested_cwd));
-        if (!parent_context.is_path_allowed(resolved)) {
+        if (!parent_context.allows_read(resolved)) {
             error_out = std::format(
                 "cwd '{}' is outside the allowed workspace.",
                 std::string(requested_cwd));

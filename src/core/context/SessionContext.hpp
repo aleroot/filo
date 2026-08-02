@@ -44,7 +44,8 @@ struct SessionContext {
     [[nodiscard]] const core::workspace::WorkspaceSnapshot& effective_workspace() const noexcept;
     [[nodiscard]] std::filesystem::path resolve_path(
         const std::filesystem::path& target_path) const;
-    [[nodiscard]] bool is_path_allowed(const std::filesystem::path& target_path) const;
+    [[nodiscard]] bool allows_read(const std::filesystem::path& target_path) const;
+    [[nodiscard]] bool allows_write(const std::filesystem::path& target_path) const;
 
     // Extends the workspace and invalidates visibility derived from its roots.
     std::size_t extend_workspace(

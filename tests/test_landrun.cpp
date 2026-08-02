@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -481,4 +482,121 @@ TEST_CASE("platform landrun driver reports an explicit backend", "[landrun]") {
     const auto probe = driver->probe();
     REQUIRE_FALSE(probe.backend.empty());
     REQUIRE_FALSE(probe.detail.empty());
+}
+
+TEST_CASE("scratch scope matches the sandbox temp grants in every mode",
+          "[landrun][scratch]") {
+    // The invariant that makes the native tools and the confined shell agree:
+    // whatever temp directory the compiled policy hands the process tree must
+    // also be in the scope the native path tools consult. A previous revision
+    // configured scratch from LandrunSettings::effective_tmpdir(), a strict
+    // subset, so the shell could create /tmp/output while read_file denied it.
+    namespace landrun = core::landrun;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-invariant-{}", std::rand());
+    const auto primary = base / "project";
+    const auto runtime = base / "runtime";
+    const auto host_tmpdir = base / "hosttmp";
+    std::filesystem::create_directories(primary, ec);
+    std::filesystem::create_directories(runtime, ec);
+    std::filesystem::create_directories(host_tmpdir, ec);
+
+    const core::workspace::SessionWorkspace workspace{
+        core::workspace::WorkspaceSnapshot{
+            .primary = primary,
+            .additional = {},
+            .enforce = true,
+        }};
+
+    const landrun::LandrunPolicyEnvironment environment{
+        .excluded_paths = {},
+        .runtime_root = runtime,
+        .host_tmpdir = host_tmpdir,
+    };
+
+    for (const auto mode : {landrun::LandrunMode::read_only,
+                            landrun::LandrunMode::workspace_write}) {
+        INFO("mode: " << landrun::landrun_mode_name(mode));
+
+        const auto policy = landrun::LandrunPolicyCompiler(environment).build(workspace, mode);
+        const auto scope = landrun::landrun_temp_scope(environment, mode);
+
+        // Every temp root the sandbox grants must be reachable by native tools.
+        for (const auto& root : scope.readable_roots()) {
+            INFO("readable root: " << root.string());
+            REQUIRE(std::ranges::find(policy.readable_roots,
+                                      landrun::normalize_landrun_path(root))
+                    != policy.readable_roots.end());
+            REQUIRE(scope.allows_read(
+                landrun::normalize_landrun_path(root / "probe.txt")));
+        }
+        for (const auto& root : scope.writable_roots()) {
+            INFO("writable root: " << root.string());
+            REQUIRE(std::ranges::find(policy.writable_roots,
+                                      landrun::normalize_landrun_path(root))
+                    != policy.writable_roots.end());
+            REQUIRE(scope.allows_write(
+                landrun::normalize_landrun_path(root / "probe.txt")));
+        }
+
+        // The shared temp directories the shell can reach are in scope. This is
+        // the exact assertion the old effective_tmpdir() wiring failed.
+        REQUIRE(scope.allows_read(landrun::normalize_landrun_path(host_tmpdir / "produced.txt")));
+        REQUIRE(scope.allows_read(landrun::normalize_landrun_path(runtime / "tmp" / "produced.txt")));
+        if (std::filesystem::is_directory("/tmp", ec)) {
+            REQUIRE(scope.allows_read(landrun::normalize_landrun_path("/tmp/produced.txt")));
+        }
+
+        // Project roots are never part of scratch; they are admitted by the
+        // workspace roots instead.
+        REQUIRE_FALSE(scope.allows_read(primary / "src.cpp"));
+    }
+
+    // Writability tracks the mode: read-only shares temp read access but keeps
+    // writes confined to the sandbox's private root.
+    const auto read_only = landrun::landrun_temp_scope(
+        environment, landrun::LandrunMode::read_only);
+    const auto host_probe = landrun::normalize_landrun_path(host_tmpdir / "x.txt");
+    const auto runtime_probe = landrun::normalize_landrun_path(runtime / "tmp" / "x.txt");
+    REQUIRE(read_only.allows_read(host_probe));
+    REQUIRE_FALSE(read_only.allows_write(host_probe));
+    REQUIRE(read_only.allows_write(runtime_probe));
+
+    const auto workspace_write = landrun::landrun_temp_scope(
+        environment, landrun::LandrunMode::workspace_write);
+    REQUIRE(workspace_write.allows_write(landrun::normalize_landrun_path(host_tmpdir / "x.txt")));
+
+    // Disabled sandbox contributes no scratch; the composition root supplies
+    // the unsandboxed posture instead.
+    REQUIRE(landrun::landrun_temp_scope(environment, landrun::LandrunMode::off).empty());
+
+    std::filesystem::remove_all(base, ec);
+}
+
+TEST_CASE("excluded paths are withheld from the scratch scope",
+          "[landrun][scratch]") {
+    namespace landrun = core::landrun;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-excluded-{}", std::rand());
+    const auto runtime = base / "runtime";
+    const auto host_tmpdir = base / "hosttmp";
+    std::filesystem::create_directories(runtime, ec);
+    std::filesystem::create_directories(host_tmpdir, ec);
+
+    const auto scope = landrun::landrun_temp_scope(
+        landrun::LandrunPolicyEnvironment{
+            .excluded_paths = {host_tmpdir},
+            .runtime_root = runtime,
+            .host_tmpdir = host_tmpdir,
+        },
+        landrun::LandrunMode::workspace_write);
+
+    REQUIRE_FALSE(scope.allows_read(landrun::normalize_landrun_path(host_tmpdir / "secret.txt")));
+    REQUIRE(scope.allows_write(landrun::normalize_landrun_path(runtime / "tmp" / "ok.txt")));
+
+    std::filesystem::remove_all(base, ec);
 }

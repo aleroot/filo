@@ -274,6 +274,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/AgentIgnore.cpp
     src/core/workspace/PathVisibility.cpp
     src/core/workspace/Workspace.cpp
+    src/core/workspace/FileAccessScope.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
     src/core/context/PromptPlan.cpp
@@ -325,7 +326,6 @@ set(FILO_CORE_SOURCES
     src/core/tools/WebFetchTool.cpp
     src/core/tools/WebSearchTool.cpp
     src/core/tools/SkillRegistry.cpp
-    src/core/tools/TempFileAccessRegistry.cpp
     src/core/utils/JsonUtils.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp

@@ -267,7 +267,7 @@ std::vector<std::filesystem::directory_entry> collect_visible_directory_entries(
     for (const auto& entry : collect_visible_directory_entries(
              directory,
              context.path_visibility.get())) {
-        if (!context.is_path_allowed(entry.path())) {
+        if (!context.allows_read(entry.path())) {
             continue;
         }
         entries.push_back(entry);
@@ -385,7 +385,7 @@ void visit_visible_regular_files(
         context.path_visibility.get(),
         std::move(should_prune_directory),
         [&](const std::filesystem::path& file) {
-            if (!context.is_path_allowed(file)) {
+            if (!context.allows_read(file)) {
                 return true;
             }
             return visitor(file);

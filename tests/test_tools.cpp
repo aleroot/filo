@@ -17,7 +17,6 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
-#include "core/tools/TempFileAccessRegistry.hpp"
 #include "core/tools/ToolArgumentUtils.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -26,6 +25,8 @@
 #include "core/tools/WebSearchTool.hpp"
 #include "core/tools/shell/ShellSession.hpp"
 #include "core/context/SessionContext.hpp"
+#include "core/workspace/FileAccessScope.hpp"
+#include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 #ifdef FILO_ENABLE_PYTHON
@@ -47,9 +48,7 @@
 #if !defined(_WIN32)
 #include <ctime>
 #endif
-#ifdef FILO_ENABLE_PYTHON
 #include <vector>
-#endif
 
 using namespace core::tools;
 
@@ -388,6 +387,112 @@ TEST_CASE("ReadFileTool reads files that contain spaces in their path", "[tools]
     std::filesystem::remove(path);
 }
 
+// ---------------------------------------------------------------------------
+// Scratch scope
+//
+// These cases pin the property the previous per-tool grant registry could not
+// express: scratch reachability is a property of the *session*, identical for
+// every path tool, and independent of which tool happened to create the file.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("The host temp posture covers every conventional temp directory",
+          "[tools][workspace][temp]") {
+    const auto scope = core::workspace::FileAccessScope::host_temp_directories();
+    const auto normalize = [](const std::filesystem::path& path) {
+        return core::workspace::SessionWorkspace::normalize_path(path);
+    };
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / "filo_scratch_probe.txt";
+    REQUIRE(scope.allows_read(normalize(temp_file)));
+    REQUIRE(scope.allows_write(normalize(temp_file)));
+    REQUIRE(scope.allows_read(normalize("/tmp/filo_scratch_probe.txt")));
+    REQUIRE(scope.allows_write(normalize("/tmp/filo_scratch_probe.txt")));
+
+    // Relative and non-temp paths are never scratch.
+    REQUIRE_FALSE(scope.allows_read("relative-temp-file.txt"));
+    REQUIRE_FALSE(scope.allows_read(normalize("/etc/passwd")));
+}
+
+TEST_CASE("Every path tool reaches scratch paths uniformly",
+          "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 46,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-uniform");
+    const auto temp_path = std::filesystem::temp_directory_path()
+        / ("filo_scratch_uniform_" + std::to_string(getpid()) + ".txt");
+
+    // Reads, listings, and searches must not be second-class relative to
+    // mutations. An asymmetry here is what forced the model onto `cat`.
+    for (const auto tool_name : {
+             names::kReadFile,
+             names::kListDirectory,
+             names::kGrepSearch,
+             names::kFileSearch,
+             names::kWriteFile,
+             names::kReplace,
+             names::kReplaceInFile,
+             names::kSearchReplace,
+             names::kApplyPatch,
+             names::kDeleteFile,
+             names::kMoveFile,
+             names::kCreateDirectory,
+             names::kRunTerminalCommand,
+         }) {
+        INFO("tool: " << tool_name);
+        const auto access_error = detail::check_workspace_access(
+            temp_path,
+            temp_path.string(),
+            context,
+            nullptr,
+            tool_name);
+        REQUIRE_FALSE(access_error.has_value());
+    }
+}
+
+TEST_CASE("ReadFileTool reads a scratch file regardless of which tool created it",
+          "[tools][workspace][temp]") {
+    // Regression: the embedded Python interpreter and any out-of-band producer
+    // write scratch files without notifying the tool layer. Reachability must
+    // not depend on Filo having observed the creation.
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 42,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-foreign-producer");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_scratch_foreign_" + std::to_string(getpid()) + ".diff");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+    { std::ofstream(temp_file) << "produced out of band\n"; }
+
+#undef execute
+    ReadFileTool read_tool;
+    const auto read_res = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("produced out of band"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
 TEST_CASE("ReadFileTool can read temp files created by the same shell session",
           "[tools][workspace][temp]") {
     const auto workspace_root = std::filesystem::current_path();
@@ -398,36 +503,36 @@ TEST_CASE("ReadFileTool can read temp files created by the same shell session",
             .additional = {},
             .enforce = true,
             .version = 42,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
         },
         core::context::SessionTransport::cli,
-        "temp-grant-created");
+        "scratch-shell-created");
 
     const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_created_" + std::to_string(getpid()) + ".txt");
+        / ("filo_scratch_shell_" + std::to_string(getpid()) + ".txt");
     std::error_code ec;
     std::filesystem::remove(temp_file, ec);
 
 #undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    ShellTool shell_tool(temp_file_access_registry);
+    ShellTool shell_tool;
     const auto shell_res = shell_tool.execute(
         std::format(
-            R"({{"command":"printf 'temp grant content\n' > '{}'"}})",
+            R"({{"command":"printf 'temp shell content\n' > '{}'"}})",
             temp_file.string()),
         context);
     REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
 
-    ReadFileTool read_tool(temp_file_access_registry);
+    ReadFileTool read_tool;
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
-    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp grant content"));
+    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("temp shell content"));
 
     std::filesystem::remove(temp_file, ec);
 }
 
-TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
+TEST_CASE("WriteFileTool round-trips temp files outside an enforced workspace",
           "[tools][workspace][temp]") {
     const auto workspace_root = std::filesystem::current_path();
     const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
@@ -437,18 +542,18 @@ TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
             .additional = {},
             .enforce = true,
             .version = 45,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
         },
         core::context::SessionTransport::cli,
-        "temp-write-allowed");
+        "scratch-write-roundtrip");
 
     const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_write_allowed_" + std::to_string(getpid()) + ".txt");
+        / ("filo_scratch_write_" + std::to_string(getpid()) + ".txt");
     std::error_code ec;
     std::filesystem::remove(temp_file, ec);
 
 #undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    WriteFileTool write_tool(temp_file_access_registry);
+    WriteFileTool write_tool;
     const auto write_res = write_tool.execute(
         std::format(
             R"({{"file_path":"{}","content":"temp write content"}})",
@@ -456,7 +561,7 @@ TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
         context);
     REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
 
-    ReadFileTool read_tool(temp_file_access_registry);
+    ReadFileTool read_tool;
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
@@ -466,48 +571,193 @@ TEST_CASE("WriteFileTool can write temp files outside an enforced workspace",
     std::filesystem::remove(temp_file, ec);
 }
 
-TEST_CASE("File mutation tools allow temp paths outside an enforced workspace",
+TEST_CASE("ListDirectoryTool can enumerate a scratch directory",
           "[tools][workspace][temp]") {
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 48,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-list");
+
+    const auto scratch_dir = std::filesystem::temp_directory_path()
+        / ("filo_scratch_list_" + std::to_string(getpid()));
+    std::error_code ec;
+    std::filesystem::remove_all(scratch_dir, ec);
+    std::filesystem::create_directories(scratch_dir);
+    { std::ofstream(scratch_dir / "listed_entry.txt") << "x"; }
+
+#undef execute
+    ListDirectoryTool list_tool;
+    const auto list_res = list_tool.execute(
+        std::format(R"({{"path":"{}"}})", scratch_dir.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(list_res, Catch::Matchers::ContainsSubstring("listed_entry.txt"));
+
+    std::filesystem::remove_all(scratch_dir, ec);
+}
+
+TEST_CASE("Session cleanup does not revoke scratch access",
+          "[tools][workspace][temp]") {
+    // Scratch scope is process posture, not per-session state, so tearing down
+    // a session must not change what the next call can reach.
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 47,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-cleanup");
+
+    const auto temp_file = std::filesystem::temp_directory_path()
+        / ("filo_scratch_cleanup_" + std::to_string(getpid()) + ".txt");
+    std::error_code ec;
+    std::filesystem::remove(temp_file, ec);
+
+#undef execute
+    ShellTool shell_tool;
+    ReadFileTool read_tool;
+
+    const auto shell_res = shell_tool.execute(
+        std::format(
+            R"({{"command":"printf 'cleanup scratch\n' > '{}'"}})",
+            temp_file.string()),
+        context);
+    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
+
+    shell_tool.clear_session_state(context.session_id);
+    const auto read_after_cleanup = read_tool.execute(
+        std::format(R"({{"path":"{}"}})", temp_file.string()),
+        context);
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+    REQUIRE_THAT(read_after_cleanup, Catch::Matchers::ContainsSubstring("cleanup scratch"));
+
+    std::filesystem::remove(temp_file, ec);
+}
+
+TEST_CASE("Scratch symlinks cannot escape into non-scratch targets",
+          "[tools][workspace][temp]") {
+    // resolve_path() canonicalizes before the scope test, so a symlink planted
+    // in a world-writable scratch directory is judged by its target, not by
+    // where the link happens to sit.
+    const auto workspace_root = std::filesystem::current_path();
+    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 44,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-symlink-escape");
+
+    const auto outside_target = std::filesystem::path("/etc/hosts");
+    if (!std::filesystem::exists(outside_target)) {
+        SKIP("No stable out-of-scope target available in this environment.");
+    }
+    const auto temp_link = std::filesystem::temp_directory_path()
+        / ("filo_scratch_escape_" + std::to_string(getpid()) + ".link");
+
+    std::error_code ec;
+    std::filesystem::remove(temp_link, ec);
+    std::filesystem::create_symlink(outside_target, temp_link, ec);
+    if (ec) {
+        SKIP("Filesystem does not permit symlink creation in this environment.");
+    }
+
+    const auto access_error = detail::check_workspace_access(
+        temp_link,
+        temp_link.string(),
+        context,
+        nullptr,
+        names::kReadFile);
+    REQUIRE(access_error.has_value());
+    REQUIRE_THAT(*access_error, Catch::Matchers::ContainsSubstring("Access denied"));
+
+    std::filesystem::remove(temp_link, ec);
+}
+
+TEST_CASE("An empty scratch scope denies temp paths to every tool",
+          "[tools][workspace][temp]") {
+    // Models the sandboxed posture, where the host temp directories are
+    // unreachable for child processes and must be unreachable for native tools
+    // too. A default-constructed scope fails closed.
     const auto workspace_root = std::filesystem::current_path();
     const auto context = test_support::make_session_context(
         core::workspace::WorkspaceSnapshot{
             .primary = workspace_root,
             .additional = {},
             .enforce = true,
-            .version = 46,
+            .version = 49,
         },
         core::context::SessionTransport::cli,
-        "temp-mutation-allowed");
+        "scratch-disabled");
     const auto temp_path = std::filesystem::temp_directory_path()
-        / ("filo_temp_mutation_allowed_" + std::to_string(getpid()) + ".txt");
+        / ("filo_scratch_disabled_" + std::to_string(getpid()) + ".txt");
 
     for (const auto tool_name : {
+             names::kReadFile,
+             names::kListDirectory,
              names::kWriteFile,
-             names::kReplace,
-             names::kReplaceInFile,
-             names::kSearchReplace,
-             names::kApplyPatch,
              names::kDeleteFile,
-             names::kMoveFile,
-             names::kCreateDirectory,
+             names::kApplyPatch,
          }) {
+        INFO("tool: " << tool_name);
         const auto access_error = detail::check_workspace_access(
             temp_path,
             temp_path.string(),
             context,
             nullptr,
             tool_name);
-        REQUIRE_FALSE(access_error.has_value());
+        REQUIRE(access_error.has_value());
+        REQUIRE_THAT(*access_error, Catch::Matchers::ContainsSubstring("Access denied"));
     }
+}
 
-    const auto read_error = detail::check_workspace_access(
-        temp_path,
-        temp_path.string(),
-        context,
-        nullptr,
-        names::kReadFile);
-    REQUIRE(read_error.has_value());
-    REQUIRE_THAT(*read_error, Catch::Matchers::ContainsSubstring("Access denied"));
+TEST_CASE("A relocated scratch root is the only reachable scratch directory",
+          "[tools][workspace][temp]") {
+    const auto sandbox_tmp = std::filesystem::temp_directory_path()
+        / ("filo_scratch_relocated_" + std::to_string(getpid()));
+    std::error_code ec;
+    std::filesystem::create_directories(sandbox_tmp);
+
+    const auto workspace_root = std::filesystem::current_path();
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = workspace_root,
+            .additional = {},
+            .enforce = true,
+            .version = 50,
+            .scratch = core::workspace::FileAccessScope({sandbox_tmp}, {sandbox_tmp}),
+        },
+        core::context::SessionTransport::cli,
+        "scratch-relocated");
+
+    const auto inside = sandbox_tmp / "inside.txt";
+    REQUIRE_FALSE(detail::check_workspace_access(
+        inside, inside.string(), context, nullptr, names::kReadFile).has_value());
+
+    const auto outside = std::filesystem::path("/var/tmp/filo_scratch_outside.txt");
+    const auto outside_error = detail::check_workspace_access(
+        outside, outside.string(), context, nullptr, names::kReadFile);
+    REQUIRE(outside_error.has_value());
+    REQUIRE_THAT(*outside_error, Catch::Matchers::ContainsSubstring("Access denied"));
+
+    std::filesystem::remove_all(sandbox_tmp, ec);
 }
 
 TEST_CASE("Edit tools modify temp files outside an enforced workspace",
@@ -519,6 +769,7 @@ TEST_CASE("Edit tools modify temp files outside an enforced workspace",
             .additional = {},
             .enforce = true,
             .version = 47,
+            .scratch = core::workspace::FileAccessScope::host_temp_directories(),
         },
         core::context::SessionTransport::cli,
         "temp-edit-allowed");
@@ -550,198 +801,6 @@ TEST_CASE("Edit tools modify temp files outside an enforced workspace",
     const std::string content((std::istreambuf_iterator<char>(ifs)), {});
     REQUIRE(content == "after\nfinal\n");
     std::filesystem::remove(temp_file, ec);
-}
-
-TEST_CASE("ShellTool session cleanup clears temp read grants",
-          "[tools][workspace][temp]") {
-    const auto workspace_root = std::filesystem::current_path();
-    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
-    const auto context = test_support::make_session_context(
-        core::workspace::WorkspaceSnapshot{
-            .primary = workspace_root,
-            .additional = {},
-            .enforce = true,
-            .version = 47,
-        },
-        core::context::SessionTransport::cli,
-        "temp-grant-cleanup");
-
-    const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_cleanup_" + std::to_string(getpid()) + ".txt");
-    std::error_code ec;
-    std::filesystem::remove(temp_file, ec);
-
-#undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    ShellTool shell_tool(temp_file_access_registry);
-    ReadFileTool read_tool(temp_file_access_registry);
-
-    const auto shell_res = shell_tool.execute(
-        std::format(
-            R"({{"command":"printf 'cleanup temp grant\n' > '{}'"}})",
-            temp_file.string()),
-        context);
-    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
-
-    const auto allowed_read = read_tool.execute(
-        std::format(R"({{"path":"{}"}})", temp_file.string()),
-        context);
-    REQUIRE_THAT(allowed_read, Catch::Matchers::ContainsSubstring("cleanup temp grant"));
-
-    shell_tool.clear_session_state(context.session_id);
-    const auto denied_read = read_tool.execute(
-        std::format(R"({{"path":"{}"}})", temp_file.string()),
-        context);
-#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
-    REQUIRE_THAT(denied_read, Catch::Matchers::ContainsSubstring("Access denied"));
-
-    std::filesystem::remove(temp_file, ec);
-}
-
-TEST_CASE("TempFileAccessRegistry recognizes canonical and lexical temp paths",
-          "[tools][workspace][temp]") {
-    const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_path_recognition_" + std::to_string(getpid()) + ".txt");
-
-    REQUIRE(TempFileAccessRegistry::is_temp_path(temp_file));
-    REQUIRE(TempFileAccessRegistry::is_lexically_temp_path(
-        std::filesystem::path("/tmp") / "filo_lexical_temp_path.txt"));
-    REQUIRE_FALSE(TempFileAccessRegistry::is_temp_path("relative-temp-file.txt"));
-    REQUIRE_FALSE(TempFileAccessRegistry::is_lexically_temp_path("relative-temp-file.txt"));
-}
-
-TEST_CASE("ShellTool grants reads for temp files embedded in option-style arguments",
-          "[tools][workspace][temp]") {
-    const auto workspace_root = std::filesystem::current_path();
-    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
-    const auto context = test_support::make_session_context(
-        core::workspace::WorkspaceSnapshot{
-            .primary = workspace_root,
-            .additional = {},
-            .enforce = true,
-            .version = 46,
-        },
-        core::context::SessionTransport::cli,
-        "temp-grant-embedded-option");
-
-    const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_embedded_" + std::to_string(getpid()) + ".txt");
-    std::error_code ec;
-    std::filesystem::remove(temp_file, ec);
-
-#undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    ShellTool shell_tool(temp_file_access_registry);
-    const auto shell_res = shell_tool.execute(
-        std::format(
-            R"({{"command":"arg=--out={}; printf 'embedded temp grant\n' > ${{arg#--out=}}"}})",
-            temp_file.string()),
-        context);
-    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
-
-    ReadFileTool read_tool(temp_file_access_registry);
-    const auto read_res = read_tool.execute(
-        std::format(R"({{"path":"{}"}})", temp_file.string()),
-        context);
-#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
-    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("embedded temp grant"));
-
-    std::filesystem::remove(temp_file, ec);
-}
-
-TEST_CASE("ReadFileTool still denies unchanged mentioned temp files",
-          "[tools][workspace][temp]") {
-    const auto workspace_root = std::filesystem::current_path();
-    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
-    const auto context = test_support::make_session_context(
-        core::workspace::WorkspaceSnapshot{
-            .primary = workspace_root,
-            .additional = {},
-            .enforce = true,
-            .version = 43,
-        },
-        core::context::SessionTransport::cli,
-        "temp-grant-mentioned");
-
-    const auto temp_file = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_mentioned_" + std::to_string(getpid()) + ".txt");
-    {
-        std::ofstream ofs(temp_file);
-        ofs << "preexisting secret";
-    }
-
-#undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    ShellTool shell_tool(temp_file_access_registry);
-    const auto shell_res = shell_tool.execute(
-        std::format(
-            R"({{"command":"printf '{}\n'"}})",
-            temp_file.string()),
-        context);
-    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
-
-    ReadFileTool read_tool(temp_file_access_registry);
-    const auto read_res = read_tool.execute(
-        std::format(R"({{"path":"{}"}})", temp_file.string()),
-        context);
-#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
-    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Access denied"));
-
-    std::error_code ec;
-    std::filesystem::remove(temp_file, ec);
-}
-
-TEST_CASE("ReadFileTool does not grant temp symlink reads",
-          "[tools][workspace][temp]") {
-    const auto workspace_root = std::filesystem::current_path();
-    const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
-    const auto context = test_support::make_session_context(
-        core::workspace::WorkspaceSnapshot{
-            .primary = workspace_root,
-            .additional = {},
-            .enforce = true,
-            .version = 44,
-        },
-        core::context::SessionTransport::cli,
-        "temp-grant-symlink");
-
-    const auto temp_target = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_symlink_target_" + std::to_string(getpid()) + ".txt");
-    const auto temp_link = std::filesystem::temp_directory_path()
-        / ("filo_temp_grant_symlink_" + std::to_string(getpid()) + ".txt");
-
-    std::error_code ec;
-    std::filesystem::remove(temp_target, ec);
-    std::filesystem::remove(temp_link, ec);
-    {
-        std::ofstream ofs(temp_target);
-        ofs << "original";
-    }
-    std::filesystem::create_symlink(temp_target, temp_link, ec);
-    if (ec) {
-        std::filesystem::remove(temp_target, ec);
-        SKIP("Filesystem does not permit symlink creation in this environment.");
-    }
-
-#undef execute
-    auto temp_file_access_registry = std::make_shared<TempFileAccessRegistry>();
-    ShellTool shell_tool(temp_file_access_registry);
-    const auto shell_res = shell_tool.execute(
-        std::format(
-            R"({{"command":"printf 'changed through symlink\n' > '{}'"}})",
-            temp_link.string()),
-        context);
-    REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
-
-    ReadFileTool read_tool(temp_file_access_registry);
-    const auto read_res = read_tool.execute(
-        std::format(R"({{"path":"{}"}})", temp_link.string()),
-        context);
-#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
-    REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Access denied"));
-
-    std::filesystem::remove(temp_link, ec);
-    std::filesystem::remove(temp_target, ec);
 }
 
 TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",

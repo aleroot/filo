@@ -4,6 +4,7 @@
 #include "core/scm/ScmFactory.hpp"
 #include "core/workspace/PathVisibility.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
+#include "core/workspace/FileAccessScope.hpp"
 #include "core/workspace/Workspace.hpp"
 
 #include <algorithm>
@@ -25,21 +26,21 @@ TEST_CASE("Workspace bounds logic", "[Workspace]") {
     SECTION("Default behavior - unenforced") {
         ws.initialize(test_dir, {}, false);
         REQUIRE_FALSE(ws.is_enforced());
-        REQUIRE(ws.is_path_allowed(test_dir / "some_file.txt"));
-        REQUIRE(ws.is_path_allowed("/etc/passwd"));
-        REQUIRE(ws.is_path_allowed("C:\\Windows\\System32\\config"));
+        REQUIRE(ws.allows_read(test_dir / "some_file.txt"));
+        REQUIRE(ws.allows_read("/etc/passwd"));
+        REQUIRE(ws.allows_read("C:\\Windows\\System32\\config"));
     }
 
     SECTION("Enforced primary directory") {
         ws.initialize(test_dir, {}, true);
         REQUIRE(ws.is_enforced());
-        REQUIRE(ws.is_path_allowed(test_dir));
-        REQUIRE(ws.is_path_allowed(test_dir / "child_file.txt"));
-        REQUIRE(ws.is_path_allowed(test_dir / "nested" / "file.txt"));
+        REQUIRE(ws.allows_read(test_dir));
+        REQUIRE(ws.allows_read(test_dir / "child_file.txt"));
+        REQUIRE(ws.allows_read(test_dir / "nested" / "file.txt"));
 
-        REQUIRE_FALSE(ws.is_path_allowed(test_dir.parent_path()));
-        REQUIRE_FALSE(ws.is_path_allowed("/tmp/outside_file.txt"));
-        REQUIRE_FALSE(ws.is_path_allowed(test_dir / ".." / "outside.txt"));
+        REQUIRE_FALSE(ws.allows_read(test_dir.parent_path()));
+        REQUIRE_FALSE(ws.allows_read("/tmp/outside_file.txt"));
+        REQUIRE_FALSE(ws.allows_read(test_dir / ".." / "outside.txt"));
     }
 
     SECTION("Shorter target path is denied safely") {
@@ -47,8 +48,8 @@ TEST_CASE("Workspace bounds logic", "[Workspace]") {
         std::filesystem::create_directories(nested_root, ec);
         ws.initialize(nested_root, {}, true);
 
-        REQUIRE_FALSE(ws.is_path_allowed(test_dir / "nested"));
-        REQUIRE_FALSE(ws.is_path_allowed(test_dir));
+        REQUIRE_FALSE(ws.allows_read(test_dir / "nested"));
+        REQUIRE_FALSE(ws.allows_read(test_dir));
     }
 
     SECTION("Enforced with additional directories") {
@@ -59,13 +60,13 @@ TEST_CASE("Workspace bounds logic", "[Workspace]") {
 
         ws.initialize(test_dir, {add_dir1, add_dir2}, true);
 
-        REQUIRE(ws.is_path_allowed(test_dir / "file.txt"));
-        REQUIRE(ws.is_path_allowed(add_dir1));
-        REQUIRE(ws.is_path_allowed(add_dir1 / "file1.txt"));
-        REQUIRE(ws.is_path_allowed(add_dir2 / "file2.txt"));
+        REQUIRE(ws.allows_read(test_dir / "file.txt"));
+        REQUIRE(ws.allows_read(add_dir1));
+        REQUIRE(ws.allows_read(add_dir1 / "file1.txt"));
+        REQUIRE(ws.allows_read(add_dir2 / "file2.txt"));
 
-        REQUIRE_FALSE(ws.is_path_allowed("/tmp/outside_file.txt"));
-        REQUIRE_FALSE(ws.is_path_allowed(test_dir.parent_path() / "another.txt"));
+        REQUIRE_FALSE(ws.allows_read("/tmp/outside_file.txt"));
+        REQUIRE_FALSE(ws.allows_read(test_dir.parent_path() / "another.txt"));
 
         std::filesystem::remove_all(add_dir1, ec);
         std::filesystem::remove_all(add_dir2, ec);
@@ -95,8 +96,8 @@ TEST_CASE("SessionWorkspace resolves relative paths against its primary root", "
     REQUIRE(workspace.version() == 7);
     REQUIRE(workspace.resolve_path("nested/value.txt")
             == (root / "nested" / "value.txt").lexically_normal());
-    REQUIRE(workspace.is_path_allowed("nested/value.txt"));
-    REQUIRE_FALSE(workspace.is_path_allowed("../outside.txt"));
+    REQUIRE(workspace.allows_read("nested/value.txt"));
+    REQUIRE_FALSE(workspace.allows_read("../outside.txt"));
 
     std::filesystem::remove_all(root, ec);
 }
@@ -127,9 +128,9 @@ TEST_CASE("SessionContext delegates to its owned SessionWorkspace", "[Workspace]
     REQUIRE(context.effective_workspace().version == 23);
     REQUIRE(context.resolve_path("nested/value.txt")
             == (primary / "nested" / "value.txt").lexically_normal());
-    REQUIRE(context.is_path_allowed("nested/value.txt"));
-    REQUIRE(context.is_path_allowed(extra / "allowed.txt"));
-    REQUIRE_FALSE(context.is_path_allowed("../outside.txt"));
+    REQUIRE(context.allows_read("nested/value.txt"));
+    REQUIRE(context.allows_read(extra / "allowed.txt"));
+    REQUIRE_FALSE(context.allows_read("../outside.txt"));
 
     std::filesystem::remove_all(primary, ec);
     std::filesystem::remove_all(extra, ec);
@@ -164,9 +165,9 @@ TEST_CASE("SessionContext grants existing absolute paths for the session", "[Wor
     REQUIRE(context.extend_workspace({external, external_file, missing, "relative"}) == 2);
     REQUIRE(context.effective_workspace().version == 5);
     REQUIRE_FALSE(context.path_visibility);
-    REQUIRE(context.is_path_allowed(external / "nested.txt"));
-    REQUIRE(context.is_path_allowed(external_file));
-    REQUIRE_FALSE(context.is_path_allowed(base / "sibling.txt"));
+    REQUIRE(context.allows_read(external / "nested.txt"));
+    REQUIRE(context.allows_read(external_file));
+    REQUIRE_FALSE(context.allows_read(base / "sibling.txt"));
     REQUIRE(context.extend_workspace({external}) == 0);
     REQUIRE(context.effective_workspace().version == 5);
 
@@ -218,4 +219,140 @@ TEST_CASE("SourceControlProvider lists branch refs through abstraction", "[Works
 
     fs::current_path(guard.old, ec);
     fs::remove_all(temp_dir, ec);
+}
+
+TEST_CASE("Scratch scope widens workspace bounds without touching project roots",
+          "[Workspace][scratch]") {
+    using core::workspace::FileAccessScope;
+    using core::workspace::SessionWorkspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto project = std::filesystem::current_path(ec) / "test_workspace_scratch";
+    std::filesystem::create_directories(project, ec);
+    const auto scratch_root = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-bounds-{}", std::rand());
+    std::filesystem::create_directories(scratch_root, ec);
+
+    const SessionWorkspace workspace(WorkspaceSnapshot{
+        .primary = project,
+        .additional = {},
+        .enforce = true,
+        .version = 1,
+        .scratch = FileAccessScope({scratch_root}, {scratch_root}),
+    });
+
+    const auto canonical = [](const std::filesystem::path& path) {
+        return core::workspace::SessionWorkspace::normalize_path(path);
+    };
+    REQUIRE(workspace.allows_read(project / "file.txt"));
+    REQUIRE(workspace.allows_write(project / "file.txt"));
+    REQUIRE(workspace.allows_read(canonical(scratch_root / "scratch.txt")));
+    REQUIRE(workspace.allows_write(canonical(scratch_root / "nested" / "deep.txt")));
+    REQUIRE(workspace.is_scratch_path(canonical(scratch_root / "scratch.txt")));
+
+    // A project path is in scope but is not scratch; the two notions stay
+    // distinct so callers can tell why a path was admitted.
+    REQUIRE_FALSE(workspace.is_scratch_path(project / "file.txt"));
+
+    // Anything outside both remains denied.
+    REQUIRE_FALSE(workspace.allows_read("/etc/passwd"));
+    REQUIRE_FALSE(workspace.allows_write("/etc/passwd"));
+    REQUIRE_FALSE(workspace.allows_read(project.parent_path() / "sibling.txt"));
+
+    std::filesystem::remove_all(project, ec);
+    std::filesystem::remove_all(scratch_root, ec);
+}
+
+TEST_CASE("A read-only scratch root admits reads but refuses writes",
+          "[Workspace][scratch]") {
+    // Landrun's read-only mode grants the shell a larger readable temp set than
+    // writable set. A single set could not express that without either
+    // under-granting reads or over-granting writes.
+    using core::workspace::FileAccessScope;
+    using core::workspace::SessionWorkspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto project = std::filesystem::current_path(ec) / "test_workspace_ro_scratch";
+    std::filesystem::create_directories(project, ec);
+    const auto shared_temp = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-ro-{}", std::rand());
+    const auto private_temp = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-rw-{}", std::rand());
+    std::filesystem::create_directories(shared_temp, ec);
+    std::filesystem::create_directories(private_temp, ec);
+
+    const SessionWorkspace workspace(WorkspaceSnapshot{
+        .primary = project,
+        .additional = {},
+        .enforce = true,
+        .version = 1,
+        .scratch = FileAccessScope({shared_temp, private_temp}, {private_temp}),
+    });
+
+    const auto canonical = [](const std::filesystem::path& path) {
+        return core::workspace::SessionWorkspace::normalize_path(path);
+    };
+    REQUIRE(workspace.allows_read(canonical(shared_temp / "readable.txt")));
+    REQUIRE_FALSE(workspace.allows_write(canonical(shared_temp / "readable.txt")));
+    REQUIRE(workspace.allows_read(canonical(private_temp / "both.txt")));
+    REQUIRE(workspace.allows_write(canonical(private_temp / "both.txt")));
+
+    std::filesystem::remove_all(project, ec);
+    std::filesystem::remove_all(shared_temp, ec);
+    std::filesystem::remove_all(private_temp, ec);
+}
+
+TEST_CASE("FileAccessScope keeps every writable root readable",
+          "[Workspace][scratch]") {
+    using core::workspace::FileAccessScope;
+
+    std::error_code ec;
+    const auto writable = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-invariant-{}", std::rand());
+    std::filesystem::create_directories(writable, ec);
+
+    // Declared writable only; the type must fold it into the readable set so a
+    // caller cannot build a scope that permits a write it would refuse to read.
+    const FileAccessScope scope({}, {writable});
+    const auto probe = core::workspace::SessionWorkspace::normalize_path(
+        writable / "x.txt");
+    REQUIRE(scope.allows_write(probe));
+    REQUIRE(scope.allows_read(probe));
+
+    // Relative and unrelated paths are never in scope.
+    REQUIRE_FALSE(scope.allows_read("relative.txt"));
+    REQUIRE_FALSE(scope.allows_read(core::workspace::SessionWorkspace::normalize_path(
+        "/etc/passwd")));
+
+    REQUIRE(FileAccessScope{}.empty());
+    REQUIRE_FALSE(FileAccessScope{}.allows_read(writable / "x.txt"));
+
+    std::filesystem::remove_all(writable, ec);
+}
+
+TEST_CASE("An empty scratch scope restores strict project-root bounds",
+          "[Workspace][scratch]") {
+    using core::workspace::SessionWorkspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto project = std::filesystem::current_path(ec) / "test_workspace_no_scratch";
+    std::filesystem::create_directories(project, ec);
+
+    // Default-constructed scratch: the scope fails closed unless a composition
+    // root supplies one.
+    const SessionWorkspace workspace(WorkspaceSnapshot{
+        .primary = project,
+        .additional = {},
+        .enforce = true,
+        .version = 1,
+    });
+
+    REQUIRE(workspace.allows_read(project / "file.txt"));
+    REQUIRE_FALSE(workspace.allows_read("/tmp/outside_file.txt"));
+    REQUIRE_FALSE(workspace.is_scratch_path("/tmp/outside_file.txt"));
+
+    std::filesystem::remove_all(project, ec);
 }

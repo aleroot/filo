@@ -14,8 +14,12 @@ std::filesystem::path SessionContext::resolve_path(const std::filesystem::path& 
     return workspace_view().resolve_path(target_path);
 }
 
-bool SessionContext::is_path_allowed(const std::filesystem::path& target_path) const {
-    return workspace_view().is_path_allowed(target_path);
+bool SessionContext::allows_read(const std::filesystem::path& target_path) const {
+    return workspace_view().allows_read(target_path);
+}
+
+bool SessionContext::allows_write(const std::filesystem::path& target_path) const {
+    return workspace_view().allows_write(target_path);
 }
 
 std::size_t SessionContext::extend_workspace(
