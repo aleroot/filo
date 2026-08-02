@@ -104,10 +104,11 @@ namespace core::llm::protocols {
 /**
  * @brief A single subscription quota window reported by an OAuth/subscription API.
  *
- * Currently only Anthropic returns these (a 5-hour and a 7-day window).
- * Other providers (OpenAI, Gemini, Grok) do not return window utilization headers.
- * Adding a new window requires no struct changes — only one extra entry in the
- * protocol's header-parsing table.
+ * Providers may expose one or more windows: Anthropic returns independent
+ * 5-hour and 7-day limits, while Grok Build reports one weekly or monthly
+ * coding-credit period through its billing endpoint.
+ * Adding a new provider window requires no struct changes; its protocol simply
+ * parses the provider's headers or usage endpoint into another entry.
  */
 struct UsageWindow {
     std::string label;       ///< Window identifier shown in the status bar, e.g. "5h", "7d"

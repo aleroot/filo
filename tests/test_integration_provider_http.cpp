@@ -90,6 +90,51 @@ int bind_to_first_available_port(httplib::Server& server, int begin, int end) {
 
 } // namespace
 
+TEST_CASE("HttpLLMProvider preserves streamed non-2xx JSON error bodies",
+          "[integration][http][errors]") {
+    httplib::Server server;
+    server.Post("/v1/responses", [](const httplib::Request&, httplib::Response& res) {
+        res.status = 418;
+        res.set_content(
+            R"({"error":"Upstream diagnostic details."})",
+            "application/json");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() {
+        server.listen_after_bind();
+    });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "gpt-5",
+        std::make_unique<OpenAIResponsesProtocol>());
+
+    ChatRequest request;
+    request.model = "gpt-5";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request,
+        [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    const auto error = std::ranges::find_if(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error;
+    });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content,
+               Catch::Matchers::ContainsSubstring("Upstream diagnostic details"));
+    CHECK_THAT(error->content,
+               !Catch::Matchers::ContainsSubstring("[HTTP Error: 418 - ]"));
+}
+
 TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recovery",
           "[integration][authentication][reauthentication]") {
     auto provider = std::make_shared<HttpLLMProvider>(

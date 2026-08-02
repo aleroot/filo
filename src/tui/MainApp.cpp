@@ -780,17 +780,8 @@ RunResult run(RunOptions opts) {
     auto provider_setup_hint = [&](std::string_view provider_name) -> std::string {
         const auto it = config.providers.find(std::string(provider_name));
         if (it == config.providers.end()) return "";
-        if (provider_name.starts_with("grok") && it->second.api_key.empty()) {
-            return "Set XAI_API_KEY to start chatting with Grok.\n"
-                   "Get a key at: console.x.ai  (sign up → API Keys)\n"
-                   "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
-        }
-        if (provider_name.starts_with("qwen-token-plan") && it->second.api_key.empty()) {
-            return "Run `filo --auth qwen` and paste your dedicated Token Plan API key.\n"
-                   "Alternatively set QWEN_TOKEN_PLAN_API_KEY. Do not use a pay-as-you-go or Coding Plan key.\n"
-                   "Usage: https://home.qwencloud.com/token-plan\n";
-        }
-        return "";
+        return format_provider_setup_hint(
+            provider_name, it->second.api_key, it->second.auth_type);
     };
 
     auto startup_history_message = [&]() {
@@ -1718,6 +1709,7 @@ RunResult run(RunOptions opts) {
             if (label == "4h") return "4-hour window";
             if (label == "5h") return "5-hour window";
             if (label == "7d") return "7-day window";
+            if (label == "30d") return "30-day window";
             return std::string(label) + " window";
         };
 
@@ -7309,20 +7301,11 @@ RunResult run(RunOptions opts) {
         if (!budget_str.empty()) {
             if (is_subscription) {
                 auto total = core::budget::BudgetTracker::get_instance().session_total();
-                if (total.has_data()) {
-                    const core::budget::formatters::CompactTokenCountFormatter token_formatter;
-                    // ↑ = prompt tokens going UP to the LLM, ↓ = completion tokens coming DOWN from LLM
-                    budget_el = text("  \xe2\x86\x91"
-                                     + token_formatter.format(total.prompt_tokens)
-                                     + " \xe2\x86\x93"
-                                     + token_formatter.format(total.completion_tokens)
-                                     + (total.cached_prompt_tokens > 0
-                                            ? " C:" + token_formatter.format(total.cached_prompt_tokens)
-                                            : std::string{})
-                                     + (total.reasoning_tokens > 0
-                                            ? " R:" + token_formatter.format(total.reasoning_tokens)
-                                            : std::string{}))
-                                | color(Color::GrayLight);
+                const std::string token_usage = format_subscription_token_usage(
+                    total,
+                    !rate_limit_info.usage_windows.empty());
+                if (!token_usage.empty()) {
+                    budget_el = text("  " + token_usage) | color(Color::GrayLight);
                 }
             } else {
                 budget_el = text("  " + budget_str) | color(Color::GrayLight);
@@ -7441,9 +7424,10 @@ RunResult run(RunOptions opts) {
                 | ftxui::bold | bgcolor(modes[current_mode_idx].second) | color(Color::White));
         if (ui_show_model_info) {
             left_items.push_back(
-                text(" " + active_provider_name + " · "
-                     + (active_model_name.empty() ? "<provider default>" : active_model_name)
-                     + " ")
+                text(format_model_status_badge(
+                    active_provider_name,
+                    active_model_name,
+                    session_effort_value))
                     | bgcolor(ColorYellowDark) | color(Color::Black));
         }
         left_items.push_back(budget_el);

@@ -22,6 +22,12 @@
 namespace core::llm {
 
 namespace {
+    // CPR does not populate Response::text when a streaming write callback is
+    // installed. Preserve a bounded prefix so non-2xx JSON error bodies remain
+    // available to protocol-specific error formatters without buffering a
+    // successful streaming response in full.
+    constexpr std::size_t kMaxResponseBodyCaptureBytes = 64 * 1024;
+
     struct PreparedHttpStreamRequest {
         std::unique_ptr<protocols::ApiProtocolBase> protocol;
         std::string                                  payload;
@@ -886,7 +892,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     }
                 };
 
+                std::string response_body_capture;
+                response_body_capture.reserve(1024);
                 session.SetWriteCallback(cpr::WriteCallback([&buffer, &drain_complete_events,
+                                                             &response_body_capture,
                                                              &response_bytes_received,
                                                              &stream_error_seen,
                                                              cancel_requested = &self->cancel_requested_]
@@ -896,6 +905,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         return false;
                     }
                     response_bytes_received += static_cast<uint64_t>(data.size());
+                    if (response_body_capture.size() < kMaxResponseBodyCaptureBytes) {
+                        const std::size_t remaining =
+                            kMaxResponseBodyCaptureBytes - response_body_capture.size();
+                        response_body_capture.append(data.substr(0, remaining));
+                    }
                     buffer.append(data);
                     drain_complete_events();
                     return !stream_error_seen
@@ -929,15 +943,27 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     buffer.clear();
                     buffer_start = 0;
                 }
+                const std::string_view response_body = r.text.empty()
+                    ? std::string_view(response_body_capture)
+                    : std::string_view(r.text);
                 if (r.status_code != 200) {
-                    core::logging::debug("[HTTP] Response status={}, body={}", r.status_code, r.text.substr(0, 500));
+                    core::logging::debug(
+                        "[HTTP] Response status={}, body={}",
+                        r.status_code,
+                        response_body.substr(0, 500));
                 }
 
                 // Fire the response lifecycle hook.  Protocols use this to extract
                 // rate-limit headers, update metrics, or prepare any per-response state.
                 // The hook is a no-op for protocols that do not override it.
+                // Preserve the historical empty body for successful streaming
+                // responses; the bounded callback capture exists only to recover
+                // diagnostic bodies that CPR otherwise drops on HTTP failures.
+                const std::string_view lifecycle_body = r.status_code == 200
+                    ? std::string_view(r.text)
+                    : response_body;
                 const protocols::HttpResponse http_resp{
-                    static_cast<int>(r.status_code), r.text, r.header};
+                    static_cast<int>(r.status_code), lifecycle_body, r.header};
                 protocol->observe_response_headers(r.header, request_metadata);
                 protocol->on_response(http_resp);
 
@@ -1003,7 +1029,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 // Attempt one forced credential refresh on auth failures (OAuth providers).
                 const bool oauth_revoked_403 =
                     (r.status_code == 403
-                     && r.text.find("OAuth token has been revoked") != std::string::npos);
+                     && response_body.find("OAuth token has been revoked")
+                         != std::string_view::npos);
                 if ((r.status_code == 401 || oauth_revoked_403)
                     && !attempted_auth_recovery
                     && self->cred_source_) {

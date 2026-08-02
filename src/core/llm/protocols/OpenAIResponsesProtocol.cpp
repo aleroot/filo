@@ -167,12 +167,13 @@ void append_function_call_output_item(std::string& payload,
 }
 
 [[nodiscard]] std::vector<std::string> build_input_items(
-    const std::vector<Message>& messages) {
+    const std::vector<Message>& messages,
+    bool include_system_messages = false) {
     std::vector<std::string> items;
     std::size_t fallback_idx = 0;
 
     for (const auto& msg : messages) {
-        if (msg.role == "system") continue;
+        if (msg.role == "system" && !include_system_messages) continue;
 
         if (msg.role == "assistant") {
             for (const auto& continuation : msg.continuation_items) {
@@ -427,7 +428,11 @@ void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
     if (req.prompt_cache_key.empty()) {
         req.prompt_cache_key = session.prompt_cache_key;
     }
-    if (req.previous_response_id.empty() && !session.previous_response_id.empty()) {
+    if (conversation_context_strategy()
+        == ConversationContextStrategy::ReplayInput) {
+        req.previous_response_id.clear();
+    } else if (req.previous_response_id.empty()
+               && !session.previous_response_id.empty()) {
         req.previous_response_id = session.previous_response_id;
     }
 }
@@ -460,21 +465,29 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
 
     payload += R"({"model":")";
     payload += core::utils::escape_json_string(req.model);
-    payload += R"(","instructions":")";
-    payload += core::utils::escape_json_string(collect_instructions(req));
-    payload += R"(","stream":)";
+    payload += '"';
+    const bool replay_input = conversation_context_strategy()
+        == ConversationContextStrategy::ReplayInput;
+    if (!replay_input) {
+        payload += R"(,"instructions":")";
+        payload += core::utils::escape_json_string(collect_instructions(req));
+        payload += '"';
+    }
+    payload += R"(,"stream":)";
     payload += req.stream ? "true" : "false";
     if (options.include_store) {
         payload += R"(,"store":false)";
     }
 
-    const std::string_view previous_response_id = previous_response_id_override.has_value()
-        ? *previous_response_id_override
-        : std::string_view{req.previous_response_id};
-    if (!previous_response_id.empty()) {
-        payload += R"(,"previous_response_id":")";
-        payload += core::utils::escape_json_string(previous_response_id);
-        payload += '"';
+    if (!replay_input) {
+        const std::string_view previous_response_id = previous_response_id_override.has_value()
+            ? *previous_response_id_override
+            : std::string_view{req.previous_response_id};
+        if (!previous_response_id.empty()) {
+            payload += R"(,"previous_response_id":")";
+            payload += core::utils::escape_json_string(previous_response_id);
+            payload += '"';
+        }
     }
 
     if (req.temperature.has_value()) {
@@ -550,7 +563,14 @@ std::string OpenAIResponsesProtocol::serialize(const ChatRequest& req) const {
 std::string OpenAIResponsesProtocol::serialize_with_options(
     const ChatRequest& req,
     const SerializationOptions& options) const {
-    return serialize_with_input_items(req, build_input_items(req.messages), std::nullopt, options);
+    return serialize_with_input_items(
+        req,
+        build_input_items(
+            req.messages,
+            conversation_context_strategy()
+                == ConversationContextStrategy::ReplayInput),
+        std::nullopt,
+        options);
 }
 
 cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& auth) const {
@@ -1126,7 +1146,10 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
 
     last_rate_limit_ = info;
 
-    if (response.status_code == 200 && !last_response_id_.empty()) {
+    if (conversation_context_strategy()
+            == ConversationContextStrategy::StatefulPreviousResponse
+        && response.status_code == 200
+        && !last_response_id_.empty()) {
         std::scoped_lock lock(shared_state_->mutex);
         shared_state_->sessions[active_session_id_].previous_response_id = last_response_id_;
     }

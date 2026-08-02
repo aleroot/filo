@@ -61,6 +61,19 @@ public:
     }
 
 protected:
+    /// Defines how a Responses API implementation carries conversation context.
+    /// The default preserves state through previous_response_id; replay-only
+    /// implementations can instead place the complete conversation in input.
+    enum class ConversationContextStrategy {
+        StatefulPreviousResponse,
+        ReplayInput,
+    };
+
+    [[nodiscard]] virtual ConversationContextStrategy conversation_context_strategy()
+        const noexcept {
+        return ConversationContextStrategy::StatefulPreviousResponse;
+    }
+
     struct SerializationOptions {
         bool include_store = true;
         bool include_prompt_cache_key = true;

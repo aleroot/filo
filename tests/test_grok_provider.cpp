@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/GrokProtocol.hpp"
+#include "core/llm/protocols/GrokBillingUsage.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
@@ -914,6 +916,66 @@ TEST_CASE("GrokResponsesProtocol serializes hosted tools and encrypted reasoning
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("reasoning.encrypted_content"));
 }
 
+TEST_CASE("GrokResponsesProtocol lets hosted tools override duplicate local tools",
+          "[grok][serializer][responses][tools]") {
+    auto req = make_simple_request("grok-4.5");
+    for (const auto& name : {"web_search", "read_file"}) {
+        Tool tool;
+        tool.function.name = name;
+        tool.function.description = "A local tool";
+        req.tools.push_back(std::move(tool));
+    }
+
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"web_search"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("name":"web_search")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read_file")"));
+}
+
+TEST_CASE("GrokResponsesProtocol replays input without OpenAI continuity fields",
+          "[grok][serializer][responses][continuation]") {
+    ChatRequest req;
+    req.model = "grok-4.5";
+    req.previous_response_id = "resp_grok_1";
+    req.messages = {
+        Message{.role = "system", .content = "Persistent instructions"},
+        Message{.role = "user", .content = "Original request"},
+        Message{.role = "assistant", .content = "Searching"},
+        Message{.role = "tool", .content = "Search result", .tool_call_id = "call_1"},
+    };
+
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("instructions":)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("previous_response_id"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("type":"message","role":"system")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Persistent instructions"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Original request"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Search result"));
+
+    GrokResponsesProtocol protocol;
+    protocol.prepare_request(req);
+    REQUIRE(req.previous_response_id.empty());
+}
+
+TEST_CASE("GrokResponsesProtocol puts initial system prompts in input",
+          "[grok][serializer][responses][continuation]") {
+    auto req = make_simple_request("grok-4.5");
+    req.messages.insert(req.messages.begin(), Message{
+        .role = "system",
+        .content = "Persistent instructions",
+    });
+
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("instructions":)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("previous_response_id"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"system","content":[{"type":"input_text","text":"Persistent instructions")"));
+}
+
 TEST_CASE("GrokResponsesProtocol omits hosted tools when disabled",
           "[grok][serializer][responses]") {
     GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/false};
@@ -943,4 +1005,163 @@ TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported model
     GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};
     const auto payload = proto.serialize(make_simple_request("grok-4"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort")"));
+}
+
+TEST_CASE("Grok billing payload exposes the provider's real usage period",
+          "[grok][billing][rate_limit]") {
+    SECTION("weekly period with an explicit percentage") {
+        const auto windows = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "creditUsagePercent": 42.5,
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"}
+          }
+        })JSON");
+        REQUIRE(windows.size() == 1);
+        CHECK(windows[0].label == "7d");
+        CHECK(windows[0].utilization == Catch::Approx(0.425f));
+    }
+
+    SECTION("monthly period") {
+        const auto windows = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "creditUsagePercent": 12,
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_MONTHLY"}
+          }
+        })JSON");
+        REQUIRE(windows.size() == 1);
+        CHECK(windows[0].label == "30d");
+        CHECK(windows[0].utilization == Catch::Approx(0.12f));
+    }
+
+    SECTION("zero-valued protobuf percentage is omitted") {
+        const auto windows = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"}
+          }
+        })JSON");
+        REQUIRE(windows.size() == 1);
+        CHECK(windows[0].label == "7d");
+        CHECK(windows[0].utilization == 0.0f);
+    }
+
+    SECTION("legacy monthly fields remain supported") {
+        const auto windows = parse_grok_billing_usage(R"JSON({
+          "config": {"monthlyLimit": {"val": 10000}, "used": {"val": 2500}}
+        })JSON");
+        REQUIRE(windows.size() == 1);
+        CHECK(windows[0].label == "30d");
+        CHECK(windows[0].utilization == Catch::Approx(0.25f));
+    }
+
+    SECTION("weekly and independent legacy monthly windows are both retained") {
+        const auto windows = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "creditUsagePercent": 42.5,
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
+            "monthlyLimit": {"val": 10000},
+            "used": {"val": 2500}
+          }
+        })JSON");
+        REQUIRE(windows.size() == 2);
+        CHECK(windows[0].label == "7d");
+        CHECK(windows[0].utilization == Catch::Approx(0.425f));
+        CHECK(windows[1].label == "30d");
+        CHECK(windows[1].utilization == Catch::Approx(0.25f));
+    }
+
+    CHECK(parse_grok_billing_usage("not-json").empty());
+    CHECK(parse_grok_billing_usage(R"({"config":{}})").empty());
+}
+
+TEST_CASE("Grok billing source rejects non-Grok endpoints before network I/O",
+          "[grok][billing][security]") {
+    const auto source = make_grok_billing_usage_source();
+    const cpr::Header credentials{
+        {"Authorization", "Bearer secret"},
+        {"X-XAI-Token-Auth", "xai-grok-cli"},
+        {"x-grok-user-id", "user-123"},
+    };
+
+    CHECK(source->fetch("https://example.invalid/v1", credentials).empty());
+    CHECK(source->fetch(
+        "https://cli-chat-proxy.grok.com.evil.example/v1",
+        credentials).empty());
+    CHECK(source->fetch(
+        "http://cli-chat-proxy.grok.com/v1",
+        credentials).empty());
+
+    // Even the official host cannot trigger a request without all three
+    // identity fields required by Grok Build's billing endpoint.
+    CHECK(source->fetch(
+        "https://cli-chat-proxy.grok.com/v1",
+        cpr::Header{{"Authorization", "Bearer secret"}}).empty());
+}
+
+namespace {
+
+class FixedGrokBillingUsageSource final : public IGrokBillingUsageSource {
+public:
+    std::vector<UsageWindow> result = {
+        UsageWindow{"7d", 0.33f},
+        UsageWindow{"30d", 0.21f},
+    };
+    int calls = 0;
+    std::string observed_base_url;
+
+    std::vector<UsageWindow> fetch(
+        std::string_view base_url,
+        const cpr::Header&) override {
+        ++calls;
+        observed_base_url = base_url;
+        return result;
+    }
+};
+
+} // namespace
+
+TEST_CASE("Grok Responses enriches only its own rate-limit state",
+          "[grok][billing][rate_limit][solid]") {
+    auto source = std::make_shared<FixedGrokBillingUsageSource>();
+    GrokResponsesProtocol protocol{
+        /*service_tier=*/{},
+        /*enable_hosted_tools=*/true,
+        /*default_effort=*/{},
+        source,
+    };
+
+    protocol.on_response(HttpResponse{
+        200,
+        "{}",
+        cpr::Header{
+            {"x-ratelimit-limit-tokens", "1000"},
+            {"x-ratelimit-remaining-tokens", "750"},
+        },
+    });
+    protocol.enrich_rate_limit(
+        "https://cli-chat-proxy.grok.com/v1",
+        cpr::Header{{"Authorization", "Bearer test"}},
+        HttpResponse{200, "{}", {}});
+
+    const auto info = protocol.last_rate_limit();
+    CHECK(source->calls == 1);
+    CHECK(source->observed_base_url == "https://cli-chat-proxy.grok.com/v1");
+    CHECK(info.tokens_limit == 1000);
+    CHECK(info.tokens_remaining == 750);
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.usage_windows[0].label == "7d");
+    CHECK(info.usage_windows[0].utilization == Catch::Approx(0.33f));
+    CHECK(info.usage_windows[1].label == "30d");
+    CHECK(info.usage_windows[1].utilization == Catch::Approx(0.21f));
+
+    // A failed primary response never triggers a billing side request.
+    protocol.enrich_rate_limit(
+        "https://cli-chat-proxy.grok.com/v1",
+        {},
+        HttpResponse{401, "{}", {}});
+    CHECK(source->calls == 1);
+
+    // The generic Responses protocol has no Grok billing dependency or window.
+    OpenAIResponsesProtocol generic;
+    generic.on_response(HttpResponse{200, "{}", {}});
+    CHECK(generic.last_rate_limit().usage_windows.empty());
 }

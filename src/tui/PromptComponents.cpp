@@ -3,6 +3,7 @@
 #include "Conversation.hpp"
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
+#include "core/budget/TokenUsageFormatters.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
@@ -669,6 +670,63 @@ std::string format_runtime_status_summary(std::string_view provider_name,
         provider_name,
         model_name.empty() ? "<provider default>" : model_name,
         mcp_server_count);
+}
+
+std::string format_model_status_badge(std::string_view provider_name,
+                                      std::string_view model_name,
+                                      std::string_view effort_level) {
+    std::string label = std::format(
+        "{} · {}",
+        provider_name,
+        model_name.empty() ? "<provider default>" : model_name);
+    if (!effort_level.empty()) {
+        // `/effort off` is stored as `none` for the wire layer; show the user-
+        // facing command name so the footer matches what they typed.
+        const std::string_view effort_display =
+            (effort_level == "none") ? "off" : effort_level;
+        label += std::format(" · {}", effort_display);
+    }
+    return " " + label + " ";
+}
+
+std::string format_provider_setup_hint(std::string_view provider_name,
+                                       std::string_view api_key,
+                                       std::string_view auth_type) {
+    const std::string normalized_auth =
+        core::utils::str::to_lower_ascii_copy(auth_type);
+    const bool grok_oauth = normalized_auth == "oauth_xai"
+        || normalized_auth == "oauth_grok";
+
+    if (provider_name.starts_with("grok") && api_key.empty() && !grok_oauth) {
+        return "Set XAI_API_KEY to start chatting with Grok.\n"
+               "Get a key at: console.x.ai  (sign up → API Keys)\n"
+               "Grok presets: grok (default), grok-4-5, grok-4, grok-4-fast, grok-reasoning, grok-fast, grok-mini\n";
+    }
+    if (provider_name.starts_with("qwen-token-plan") && api_key.empty()) {
+        return "Run `filo --auth qwen` and paste your dedicated Token Plan API key.\n"
+               "Alternatively set QWEN_TOKEN_PLAN_API_KEY. Do not use a pay-as-you-go or Coding Plan key.\n"
+               "Usage: https://home.qwencloud.com/token-plan\n";
+    }
+    return {};
+}
+
+std::string format_subscription_token_usage(
+    const core::llm::TokenUsage& usage,
+    bool has_usage_windows) {
+    if (!usage.has_data()) return {};
+
+    const core::budget::formatters::CompactTokenCountFormatter formatter;
+    std::string label = std::format(
+        "↑{} ↓{}",
+        formatter.format(usage.prompt_tokens),
+        formatter.format(usage.completion_tokens));
+    if (!has_usage_windows && usage.cached_prompt_tokens > 0) {
+        label += " C:" + formatter.format(usage.cached_prompt_tokens);
+    }
+    if (!has_usage_windows && usage.reasoning_tokens > 0) {
+        label += " R:" + formatter.format(usage.reasoning_tokens);
+    }
+    return label;
 }
 
 Element render_turn_activity_indicator(TurnActivityState state,

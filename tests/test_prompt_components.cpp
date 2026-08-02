@@ -123,6 +123,52 @@ TEST_CASE("runtime status summary has one compact canonical format",
           == "provider: openai  —  model: <provider default>  —  MCP servers: 0");
 }
 
+TEST_CASE("model status badge includes effort only when non-default",
+          "[tui][status-bar][effort]") {
+    // Auto/default effort stays hidden so the footer remains `provider · model`.
+    CHECK(format_model_status_badge("openai", "gpt-5")
+          == " openai · gpt-5 ");
+    CHECK(format_model_status_badge("openai", "gpt-5", "")
+          == " openai · gpt-5 ");
+    CHECK(format_model_status_badge("openai", "", "")
+          == " openai · <provider default> ");
+
+    // Explicit effort is appended after another middle-dot separator.
+    CHECK(format_model_status_badge("openai", "gpt-5", "high")
+          == " openai · gpt-5 · high ");
+    CHECK(format_model_status_badge("grok", "grok-4-1-fast", "max")
+          == " grok · grok-4-1-fast · max ");
+    // Wire value `none` is displayed as the user-facing `/effort off` name.
+    CHECK(format_model_status_badge("openai", "gpt-5", "none")
+          == " openai · gpt-5 · off ");
+}
+
+TEST_CASE("Grok setup hint treats OAuth as a usable credential",
+          "[tui][authentication][grok]") {
+    CHECK(format_provider_setup_hint("grok", "", "oauth_xai").empty());
+    CHECK(format_provider_setup_hint("grok", "", "OAUTH_GROK").empty());
+    CHECK(format_provider_setup_hint("grok", "xai-test-key", "api_key").empty());
+
+    const auto missing = format_provider_setup_hint("grok", "", "");
+    CHECK_THAT(missing, Catch::Matchers::ContainsSubstring("Set XAI_API_KEY"));
+}
+
+TEST_CASE("subscription token badge hides details beside quota windows",
+          "[tui][status-bar][usage-windows]") {
+    const core::llm::TokenUsage usage{
+        .prompt_tokens = 92'100,
+        .completion_tokens = 1'800,
+        .cached_prompt_tokens = 56'600,
+        .reasoning_tokens = 1'700,
+    };
+
+    CHECK(format_subscription_token_usage(usage, false)
+          == "↑92.1k ↓1.8k C:56.6k R:1.7k");
+    CHECK(format_subscription_token_usage(usage, true)
+          == "↑92.1k ↓1.8k");
+    CHECK(format_subscription_token_usage({}, true).empty());
+}
+
 TEST_CASE("authentication recovery panel explains safe retry",
           "[tui][authentication]") {
     auto panel = render_authentication_recovery_panel(

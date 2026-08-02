@@ -5,6 +5,7 @@
 #include "core/auth/OAuthCredentialSource.hpp"
 #include "core/auth/XaiOAuthCredentialSource.hpp"
 #include "core/auth/XaiOAuthFlow.hpp"
+#include "core/auth/XaiGrokClientIdentity.hpp"
 #include "core/llm/ModelCatalogProvider.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderFactory.hpp"
@@ -118,6 +119,7 @@ TEST_CASE("xAI OAuth credentials include Grok session transport markers",
     token.expires_at = now_unix() + 3600;
     token.issuer = std::string(core::auth::XaiOAuthFlow::kIssuer);
     token.client_id = std::string(core::auth::XaiOAuthFlow::kClientId);
+    token.user_id = "user-123";
 
     auto manager = std::make_shared<core::auth::OAuthTokenManager>(
         "grok",
@@ -135,8 +137,15 @@ TEST_CASE("xAI OAuth credentials include Grok session transport markers",
     CHECK(auth.headers.at("Authorization") == "Bearer session-access");
     CHECK(auth.headers.at("X-XAI-Token-Auth") == "xai-grok-cli");
     CHECK(auth.headers.at("x-authenticateresponse") == "authenticate-response");
-    CHECK(auth.headers.at("x-grok-client-identifier") == "filo");
+    CHECK(auth.headers.at("x-grok-client-identifier") == "grok-shell");
+    CHECK(auth.headers.at("x-grok-client-version")
+        == core::auth::xai_grok::kClientVersion);
+    CHECK(auth.headers.at("x-grok-client-mode") == "interactive");
+    CHECK(auth.headers.at("User-Agent")
+        == core::auth::xai_grok::user_agent());
+    CHECK_THAT(auth.headers.at("User-Agent"), ContainsSubstring("grok-shell/0.2.117"));
     CHECK(auth.properties.at("oauth_issuer") == core::auth::XaiOAuthFlow::kIssuer);
+    CHECK(auth.properties.at("user_id") == "user-123");
 }
 
 TEST_CASE("Grok protocols add request-scoped proxy routing headers",
@@ -147,6 +156,7 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
     request.transport_turn_id = "request-1";
     request.auth_properties["oauth"] = "1";
     request.auth_properties["oauth_issuer"] = "https://auth.x.ai";
+    request.auth_properties["user_id"] = "user-123";
 
     cpr::Header chat_headers;
     core::llm::protocols::GrokProtocol chat;
@@ -155,13 +165,19 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
     CHECK(chat_headers.at("x-grok-conv-id") == "conversation-1");
     CHECK(chat_headers.at("x-grok-req-id") == "request-1");
     CHECK(chat_headers.at("x-grok-model-override") == "grok-4.5");
+    CHECK(chat_headers.at("x-grok-user-id") == "user-123");
 
     cpr::Header response_headers;
     core::llm::protocols::GrokResponsesProtocol responses;
     responses.prepare_headers(
         response_headers, request, "https://cli-chat-proxy.grok.com/v1");
     CHECK(response_headers.at("X-XAI-Token-Auth") == "xai-grok-cli");
-    CHECK(response_headers.at("x-grok-client-identifier") == "filo");
+    CHECK(response_headers.at("x-grok-client-identifier") == "grok-shell");
+    CHECK(response_headers.at("x-grok-client-version") == "0.2.117");
+    CHECK(response_headers.at("x-grok-client-mode") == "interactive");
+    CHECK(response_headers.at("x-grok-user-id") == "user-123");
+    CHECK(response_headers.at("User-Agent")
+        == core::auth::xai_grok::user_agent());
 
     SECTION("identity headers are restricted to the exact HTTPS proxy host") {
         for (const std::string_view untrusted_url : {
@@ -169,11 +185,20 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
                  "http://cli-chat-proxy.grok.com/v1",
                  "https://user@cli-chat-proxy.grok.com/v1",
              }) {
-            cpr::Header untrusted_headers;
+            core::auth::AuthInfo untrusted_auth;
+            untrusted_auth.headers["Authorization"] = "Bearer session-access";
+            core::auth::xai_grok::apply_proxy_identity_headers(
+                untrusted_auth.headers);
+            cpr::Header untrusted_headers = responses.build_headers(untrusted_auth);
             responses.prepare_headers(untrusted_headers, request, untrusted_url);
+            CHECK(untrusted_headers.at("Authorization") == "Bearer session-access");
             CHECK(untrusted_headers.find("X-XAI-Token-Auth")
                   == untrusted_headers.end());
             CHECK(untrusted_headers.find("x-grok-conv-id")
+                  == untrusted_headers.end());
+            CHECK(untrusted_headers.find("x-grok-client-version")
+                  == untrusted_headers.end());
+            CHECK(untrusted_headers.find("User-Agent")
                   == untrusted_headers.end());
         }
     }

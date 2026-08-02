@@ -4,6 +4,7 @@
 #include "DiffPreview.hpp"
 #include "CodeBlockRunner.hpp"
 #include "RewindPicker.hpp"
+#include "core/llm/Models.hpp"
 #include "core/scm/SourceControlProvider.hpp"
 #include "core/session/SessionStore.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -72,6 +73,30 @@ enum class ReviewPickerMode {
     std::string_view provider_name,
     std::string_view model_name,
     int mcp_server_count);
+
+/// Compact footer badge for the active provider/model, optionally including a
+/// non-default effort level. Empty `effort_level` means auto/provider default
+/// and is omitted so the badge stays `provider · model`. Internal value
+/// `none` is shown as `off` to match the `/effort` command language.
+[[nodiscard]] std::string format_model_status_badge(
+    std::string_view provider_name,
+    std::string_view model_name,
+    std::string_view effort_level = {});
+
+/// Return setup guidance only when the selected provider has no usable
+/// configured credential. OAuth-backed Grok profiles are already ready even
+/// though they intentionally have no API key.
+[[nodiscard]] std::string format_provider_setup_hint(
+    std::string_view provider_name,
+    std::string_view api_key,
+    std::string_view auth_type);
+
+/// Compact token counters for subscription providers. Cache and reasoning
+/// details are useful when no quota window is available, but become noise once
+/// the footer can show the provider's authoritative utilization windows.
+[[nodiscard]] std::string format_subscription_token_usage(
+    const core::llm::TokenUsage& usage,
+    bool has_usage_windows);
 
 /// Lifecycle of the compact footer signal for the assistant turn.
 enum class TurnActivityState {

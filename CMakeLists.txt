@@ -219,6 +219,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
     src/core/llm/protocols/MistralProtocol.cpp
     src/core/llm/protocols/KimiProtocol.cpp
+    src/core/llm/protocols/GrokBillingUsage.cpp
     src/core/llm/protocols/GrokProtocol.cpp
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp

@@ -106,6 +106,10 @@ TEST_CASE("OpenAIResponsesProtocol - serializer includes continuation/cache/tier
     ChatRequest req;
     req.model = "gpt-5";
     req.messages.push_back(Message{
+        .role = "system",
+        .content = "Keep OpenAI instructions."
+    });
+    req.messages.push_back(Message{
         .role = "user",
         .content = "Continue the previous turn."
     });
@@ -115,6 +119,10 @@ TEST_CASE("OpenAIResponsesProtocol - serializer includes continuation/cache/tier
     const std::string payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_prev_1")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("instructions":"Keep OpenAI instructions.")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("role":"system")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("prompt_cache_key":"filo-session-1")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("service_tier":"priority")"));
 }

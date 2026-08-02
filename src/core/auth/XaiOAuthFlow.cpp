@@ -3,9 +3,9 @@
 
 #include "AuthBrowserLauncher.hpp"
 #include "OAuthPkce.hpp"
+#include "XaiGrokClientIdentity.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/utils/Base64.hpp"
-#include "core/version/Version.hpp"
 
 #include <cpr/cpr.h>
 #include <httplib.h>
@@ -48,7 +48,7 @@ namespace {
 [[nodiscard]] cpr::Header xai_oauth_headers() {
     return cpr::Header{
         {"Accept", "application/json"},
-        {"x-grok-client-version", std::string(core::version::value)},
+        {"x-grok-client-version", std::string(xai_grok::kClientVersion)},
     };
 }
 

@@ -1,12 +1,13 @@
 #include "GrokProtocol.hpp"
+#include "GrokBuildEndpoint.hpp"
 #include "core/auth/XaiGrokClientIdentity.hpp"
 #include "core/utils/AsciiUtils.hpp"
-#include "core/utils/UriUtils.hpp"
 #include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
 #include <array>
 #include <cctype>
+#include <string>
 #include <string_view>
 
 namespace core::llm::protocols {
@@ -24,11 +25,12 @@ namespace {
 void prepare_grok_session_headers(cpr::Header& headers,
                                   const ChatRequest& request,
                                   std::string_view base_url) {
-    const auto host = core::utils::uri::extract_http_host(base_url);
-    if (!is_xai_oauth_request(request)
-        || !core::utils::ascii::istarts_with(base_url, "https://")
-        || !host.has_value()
-        || !core::utils::ascii::iequals(*host, "cli-chat-proxy.grok.com")) {
+    if (!is_xai_oauth_request(request)) return;
+    if (!grok_build::is_official_proxy(base_url)) {
+        // XaiOAuthCredentialSource also serves model discovery, so its generic
+        // auth map carries proxy identity headers. Remove them here when the
+        // inference destination is not the official Grok CLI proxy.
+        core::auth::xai_grok::remove_proxy_identity_headers(headers);
         return;
     }
 
@@ -44,6 +46,12 @@ void prepare_grok_session_headers(cpr::Header& headers,
     headers["x-grok-session-id"] = conversation_id;
     headers["x-grok-req-id"] = request_id;
     headers["x-grok-model-override"] = request.model;
+    if (const auto user_id = request.auth_properties.find("user_id");
+        user_id != request.auth_properties.end() && !user_id->second.empty()) {
+        // Chat requests use x-grok-user-id; the billing endpoint expects the
+        // same value translated to x-userid by GrokBillingUsageSource.
+        headers["x-grok-user-id"] = user_id->second;
+    }
 }
 
 } // namespace
@@ -72,6 +80,19 @@ bool grok_responses_supports_effort(std::string_view model) noexcept {
     return false;
 }
 
+GrokResponsesProtocol::GrokResponsesProtocol(
+    std::string service_tier,
+    bool enable_hosted_tools,
+    std::string default_effort,
+    std::shared_ptr<IGrokBillingUsageSource> billing_usage_source)
+    : OpenAIResponsesProtocol(/*include_reasoning_encrypted=*/true,
+                              std::move(service_tier))
+    , enable_hosted_tools_(enable_hosted_tools)
+    , default_effort_(std::move(default_effort))
+    , billing_usage_source_(billing_usage_source
+          ? std::move(billing_usage_source)
+          : make_grok_billing_usage_source()) {}
+
 void GrokProtocol::append_extra_fields(std::string&       payload,
                                         const ChatRequest& req) const {
     if (effort_ == GrokReasoningEffort::None) return;
@@ -99,8 +120,25 @@ void GrokResponsesProtocol::prepare_headers(cpr::Header& headers,
     prepare_grok_session_headers(headers, request, base_url);
 }
 
+void GrokResponsesProtocol::on_response(const HttpResponse& response) {
+    OpenAIResponsesProtocol::on_response(response);
+    grok_rate_limit_ = OpenAIResponsesProtocol::last_rate_limit();
+}
+
+void GrokResponsesProtocol::enrich_rate_limit(
+    std::string_view base_url,
+    const cpr::Header& request_headers,
+    const HttpResponse& response) {
+    if (response.status_code != 200 || !billing_usage_source_) return;
+    if (auto windows = billing_usage_source_->fetch(base_url, request_headers);
+        !windows.empty()) {
+        grok_rate_limit_.usage_windows = std::move(windows);
+    }
+}
+
 std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
     SerializationOptions options;
+    ChatRequest effective = request;
     if (enable_hosted_tools_) {
         // xAI hosted server-side tools. The Grok Build session proxy resolves
         // these internally, giving the model access to real-time web search
@@ -111,6 +149,14 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
             "web_search", "x_search",
         };
         options.hosted_tool_types = kHostedTools;
+
+        // xAI requires tool names to be unique. Its hosted implementation is
+        // authoritative for colliding names, so remove only those local tools
+        // here instead of changing shared OpenAI/DashScope serialization.
+        std::erase_if(effective.tools, [](const Tool& tool) {
+            return tool.function.name == "web_search"
+                || tool.function.name == "x_search";
+        });
     }
     // Apply a provider-configured effort default only when the session left
     // effort unset AND the model actually exposes the Responses effort knob.
@@ -123,7 +169,7 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
         && grok_responses_supports_effort(request.model)) {
         options.reasoning_effort_override = default_effort_;
     }
-    return serialize_with_options(request, options);
+    return serialize_with_options(effective, options);
 }
 
 std::string GrokProtocol::format_error_message(const HttpResponse& response) const {

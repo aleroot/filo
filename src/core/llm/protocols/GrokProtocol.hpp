@@ -51,8 +51,9 @@
 
 #include "OpenAIProtocol.hpp"
 #include "OpenAIResponsesProtocol.hpp"
+#include "GrokBillingUsage.hpp"
+#include <memory>
 #include <string_view>
-#include <optional>
 
 namespace core::llm::protocols {
 
@@ -219,11 +220,9 @@ public:
      */
     explicit GrokResponsesProtocol(std::string service_tier = {},
                                    bool enable_hosted_tools = true,
-                                   std::string default_effort = {})
-        : OpenAIResponsesProtocol(/*include_reasoning_encrypted=*/true,
-                                  std::move(service_tier))
-        , enable_hosted_tools_(enable_hosted_tools)
-        , default_effort_(std::move(default_effort)) {}
+                                   std::string default_effort = {},
+                                   std::shared_ptr<IGrokBillingUsageSource>
+                                       billing_usage_source = {});
 
     [[nodiscard]] std::string_view name() const noexcept override {
         return "grok_responses";
@@ -231,7 +230,10 @@ public:
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         auto cloned = std::make_unique<GrokResponsesProtocol>(
-            default_service_tier_, enable_hosted_tools_, default_effort_);
+            default_service_tier_,
+            enable_hosted_tools_,
+            default_effort_,
+            billing_usage_source_);
         share_continuity_state_with(*cloned);
         return cloned;
     }
@@ -253,9 +255,24 @@ public:
                          const ChatRequest& request,
                          std::string_view base_url) override;
 
+    void on_response(const HttpResponse& response) override;
+    void enrich_rate_limit(std::string_view base_url,
+                           const cpr::Header& request_headers,
+                           const HttpResponse& response) override;
+    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override {
+        return grok_rate_limit_;
+    }
+
 private:
+    [[nodiscard]] ConversationContextStrategy conversation_context_strategy()
+        const noexcept override {
+        return ConversationContextStrategy::ReplayInput;
+    }
+
     bool enable_hosted_tools_;
     std::string default_effort_;
+    std::shared_ptr<IGrokBillingUsageSource> billing_usage_source_;
+    RateLimitInfo grok_rate_limit_;
 };
 
 } // namespace core::llm::protocols

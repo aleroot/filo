@@ -418,6 +418,26 @@ TEST_CASE("DashScope Responses - Token Plan payload enables native features",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("include":[])"));
 }
 
+TEST_CASE("DashScope Responses retains its hosted/local tool serialization policy",
+          "[qwen][responses][token-plan][isolation]") {
+    auto req = make_simple_request("qwen3.8-max-preview");
+    Tool local_tool;
+    local_tool.function.name = "read_file";
+    local_tool.function.description = "Read a file";
+    req.tools.push_back(std::move(local_tool));
+
+    const auto payload = DashScopeResponsesProtocol({
+        .enable_hosted_tools = true,
+    }).serialize(req);
+
+    // Grok's collision policy must not reorder DashScope's established payload.
+    const auto hosted_pos = payload.find(R"({"type":"web_search"})");
+    const auto local_pos = payload.find(R"("name":"read_file")");
+    REQUIRE(hosted_pos != std::string::npos);
+    REQUIRE(local_pos != std::string::npos);
+    CHECK(hosted_pos < local_pos);
+}
+
 TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
           "[qwen][responses][token-plan][glm]") {
     auto req = make_simple_request("glm-5.2");
@@ -481,7 +501,10 @@ TEST_CASE("DashScope Responses - sends only incremental messages with previous r
         .enable_hosted_tools = false,
     }).serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("previous_response_id":"resp_previous")"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("Always be concise."));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("instructions":"Always be concise.")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("role":"system")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("new question"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("old question"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("old answer"));
