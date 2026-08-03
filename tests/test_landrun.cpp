@@ -496,10 +496,13 @@ TEST_CASE("scratch scope matches the sandbox temp grants in every mode",
     std::error_code ec;
     const auto base = std::filesystem::temp_directory_path(ec)
         / std::format("filo-scratch-invariant-{}", std::rand());
-    const auto primary = base / "project";
+    // Keep the synthetic project outside every shared temp root. On Linux,
+    // temp_directory_path() is /tmp, which is deliberately part of scratch.
+    // The compiler only needs an absolute project root; it need not exist.
+    const auto primary = base.root_path()
+        / std::format("filo-project-invariant-{}", std::rand());
     const auto runtime = base / "runtime";
     const auto host_tmpdir = base / "hosttmp";
-    std::filesystem::create_directories(primary, ec);
     std::filesystem::create_directories(runtime, ec);
     std::filesystem::create_directories(host_tmpdir, ec);
 
@@ -580,7 +583,11 @@ TEST_CASE("excluded paths are withheld from the scratch scope",
     namespace landrun = core::landrun;
 
     std::error_code ec;
-    const auto base = std::filesystem::temp_directory_path(ec)
+    // Deliberately nest beneath the unconditional shared /tmp grant. This is
+    // the Linux topology that exposed the regression; using
+    // temp_directory_path() would place the fixture elsewhere on macOS and
+    // leave the parent-grant/child-exclusion interaction untested.
+    const auto base = landrun::normalize_landrun_path("/tmp")
         / std::format("filo-scratch-excluded-{}", std::rand());
     const auto runtime = base / "runtime";
     const auto host_tmpdir = base / "hosttmp";

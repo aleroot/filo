@@ -332,6 +332,31 @@ TEST_CASE("FileAccessScope keeps every writable root readable",
     std::filesystem::remove_all(writable, ec);
 }
 
+TEST_CASE("FileAccessScope exclusions override an admitted ancestor",
+          "[Workspace][scratch]") {
+    using core::workspace::FileAccessScope;
+
+    std::error_code ec;
+    const auto scratch = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-scratch-exclusion-{}", std::rand());
+    const auto excluded = scratch / "private";
+    std::filesystem::create_directories(excluded, ec);
+    REQUIRE_FALSE(ec);
+
+    const FileAccessScope scope({scratch}, {scratch}, {excluded, excluded});
+    const auto normalized = [](const std::filesystem::path& path) {
+        return core::workspace::SessionWorkspace::normalize_path(path);
+    };
+    REQUIRE(scope.allows_read(normalized(scratch / "public.txt")));
+    REQUIRE(scope.allows_write(normalized(scratch / "public.txt")));
+    REQUIRE_FALSE(scope.allows_read(normalized(excluded)));
+    REQUIRE_FALSE(scope.allows_read(normalized(excluded / "secret.txt")));
+    REQUIRE_FALSE(scope.allows_write(normalized(excluded / "secret.txt")));
+    REQUIRE(scope.excluded_roots().size() == 1);
+
+    std::filesystem::remove_all(scratch, ec);
+}
+
 TEST_CASE("An empty scratch scope restores strict project-root bounds",
           "[Workspace][scratch]") {
     using core::workspace::SessionWorkspace;

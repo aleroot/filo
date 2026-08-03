@@ -52,21 +52,27 @@ void append_unique(
     return root_it == root.end();
 }
 
-[[nodiscard]] bool contains(
-    const std::vector<std::filesystem::path>& roots,
+[[nodiscard]] std::filesystem::path normalize_probe(
     const std::filesystem::path& resolved_path)
 {
-    if (roots.empty() || resolved_path.empty() || !resolved_path.is_absolute()) {
-        return false;
+    if (resolved_path.empty() || !resolved_path.is_absolute()) {
+        return {};
     }
     // Canonicalize only if the probe exists; otherwise stay lexical so both
     // sides of the comparison stay on the same footing as the roots.
     std::error_code ec;
-    const auto normalized = std::filesystem::exists(resolved_path, ec)
+    return std::filesystem::exists(resolved_path, ec)
         ? std::filesystem::weakly_canonical(resolved_path, ec).lexically_normal()
         : resolved_path.lexically_normal();
+}
+
+[[nodiscard]] bool contains_normalized(
+    const std::vector<std::filesystem::path>& roots,
+    const std::filesystem::path& normalized_path)
+{
+    if (roots.empty() || normalized_path.empty()) return false;
     return std::ranges::any_of(roots, [&](const std::filesystem::path& root) {
-        return is_within(root, normalized);
+        return is_within(root, normalized_path);
     });
 }
 
@@ -74,11 +80,17 @@ void append_unique(
 
 FileAccessScope::FileAccessScope(
     std::vector<std::filesystem::path> readable_roots,
-    std::vector<std::filesystem::path> writable_roots)
+    std::vector<std::filesystem::path> writable_roots,
+    std::vector<std::filesystem::path> excluded_roots)
 {
     normalize_roots(readable_roots, writable_roots);
+    std::vector<std::filesystem::path> normalized_excluded;
+    for (const auto& root : excluded_roots) {
+        append_unique(normalized_excluded, root);
+    }
     readable_roots_ = std::move(readable_roots);
     writable_roots_ = std::move(writable_roots);
+    excluded_roots_ = std::move(normalized_excluded);
 }
 
 void FileAccessScope::normalize_roots(
@@ -104,6 +116,11 @@ void FileAccessScope::normalize_roots(
 
 void FileAccessScope::normalize() {
     normalize_roots(readable_roots_, writable_roots_);
+    std::vector<std::filesystem::path> normalized_excluded;
+    for (const auto& root : excluded_roots_) {
+        append_unique(normalized_excluded, root);
+    }
+    excluded_roots_ = std::move(normalized_excluded);
 }
 
 FileAccessScope FileAccessScope::host_temp_directories() {
@@ -126,11 +143,15 @@ FileAccessScope FileAccessScope::host_temp_directories() {
 }
 
 bool FileAccessScope::allows_read(const std::filesystem::path& path) const {
-    return contains(readable_roots_, path);
+    const auto normalized = normalize_probe(path);
+    return !contains_normalized(excluded_roots_, normalized)
+        && contains_normalized(readable_roots_, normalized);
 }
 
 bool FileAccessScope::allows_write(const std::filesystem::path& path) const {
-    return contains(writable_roots_, path);
+    const auto normalized = normalize_probe(path);
+    return !contains_normalized(excluded_roots_, normalized)
+        && contains_normalized(writable_roots_, normalized);
 }
 
 } // namespace core::workspace

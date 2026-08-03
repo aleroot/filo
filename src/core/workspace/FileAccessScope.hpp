@@ -41,9 +41,10 @@ namespace core::workspace {
  * composition root (`main`) and flows down with the session it describes,
  * which keeps it trivially testable and free of process-wide mutable state.
  *
- * Roots are canonicalized once on construction so the query methods stay pure
- * lexical comparisons -- they are called per directory entry during traversal
- * and must not touch the filesystem.
+ * Roots are canonicalized once on construction so the query methods only need
+ * one normalization pass per probe. Excluded roots are evaluated before the
+ * corresponding allow set, which lets the scope represent policies such as
+ * "/tmp except /tmp/private" without widening native-tool access.
  *
  * Invariant: every writable root is also readable.
  */
@@ -53,8 +54,11 @@ public:
 
     /// Canonicalizes, de-duplicates, drops relative/empty entries, and folds
     /// the writable roots into the readable set to maintain the invariant.
+    /// Excluded roots deny both reads and writes beneath an otherwise admitted
+    /// root.
     FileAccessScope(std::vector<std::filesystem::path> readable_roots,
-                    std::vector<std::filesystem::path> writable_roots);
+                    std::vector<std::filesystem::path> writable_roots,
+                    std::vector<std::filesystem::path> excluded_roots = {});
 
     /// The host temp directories, read and write. The unsandboxed posture.
     [[nodiscard]] static FileAccessScope host_temp_directories();
@@ -83,12 +87,16 @@ public:
     [[nodiscard]] const std::vector<std::filesystem::path>& writable_roots() const noexcept {
         return writable_roots_;
     }
+    [[nodiscard]] const std::vector<std::filesystem::path>& excluded_roots() const noexcept {
+        return excluded_roots_;
+    }
 
     [[nodiscard]] bool operator==(const FileAccessScope&) const = default;
 
 private:
     std::vector<std::filesystem::path> readable_roots_;
     std::vector<std::filesystem::path> writable_roots_;
+    std::vector<std::filesystem::path> excluded_roots_;
 };
 
 } // namespace core::workspace

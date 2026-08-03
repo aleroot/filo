@@ -47,7 +47,24 @@ core::workspace::FileAccessScope landrun_temp_scope(
     add_shared_temp("/tmp");
     add_shared_temp(environment.host_tmpdir);
 
-    return core::workspace::FileAccessScope(std::move(readable), std::move(writable));
+    // A nested exclusion cannot remove its admitted parent root. Preserve it
+    // as a deny exception so native filesystem tools observe the same boundary
+    // as backends that can subtract protected paths. Exact and ancestor
+    // exclusions already prevented the root from being admitted above.
+    std::vector<std::filesystem::path> nested_exclusions;
+    for (const auto& entry : environment.excluded_paths) {
+        const auto normalized = normalize_landrun_path(entry);
+        const bool nested_in_readable = std::ranges::any_of(
+            readable, [&](const auto& root) {
+                const auto normalized_root = normalize_landrun_path(root);
+                return normalized_root != normalized
+                    && is_landrun_path_within(normalized_root, normalized);
+            });
+        if (nested_in_readable) nested_exclusions.push_back(normalized);
+    }
+
+    return core::workspace::FileAccessScope(
+        std::move(readable), std::move(writable), std::move(nested_exclusions));
 }
 
 LandrunPolicy LandrunPolicyCompiler::build(
