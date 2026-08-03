@@ -64,6 +64,18 @@ private:
     return value;
 }
 
+[[nodiscard]] bool is_filo_task_id(std::string_view value) {
+    constexpr std::string_view kPrefix = "task_";
+    constexpr std::size_t kHexDigits = 8;
+    if (!value.starts_with(kPrefix) || value.size() != kPrefix.size() + kHexDigits) {
+        return false;
+    }
+
+    return std::ranges::all_of(value.substr(kPrefix.size()), [](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
 [[nodiscard]] DelegatedAgentRunner::PermissionCheck adapt_permission_check(
     const SubagentOrchestrator::RunContext& context) {
     if (!context.permission_check) return {};
@@ -173,7 +185,9 @@ core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
         {
             .name = "task_id",
             .type = "string",
-            .description = "Optional prior task_id to resume an existing delegated subagent session.",
+            .description =
+                "Optional Filo task_id returned by an earlier successful task call. "
+                "Omit this field when starting a new task; never invent an ID.",
             .required = false,
         },
         {
@@ -588,7 +602,8 @@ std::string SubagentOrchestrator::build_task_description() const {
 
     description +=
         "\\nWhen finished, the subagent returns a concise final result to this conversation. "
-        "Use task_id to resume the same delegated thread later. "
+        "For a new task, omit task_id. To resume the same delegated thread later, pass "
+        "the exact task_id returned by its earlier successful call; never invent one. "
         "For multiple independent read-only investigations, issue several explore task calls "
         "together in one response so Filo can run them concurrently.";
 
@@ -609,7 +624,11 @@ std::shared_ptr<SubagentOrchestrator::TaskSession> SubagentOrchestrator::get_or_
 
     std::lock_guard lock(sessions_mutex_);
 
-    if (!requested_task_id.empty()) {
+    // Some providers synthesize a UUID for optional identifier fields even on
+    // the first call. Such a value cannot name a Filo session: our IDs live in
+    // the `task_XXXXXXXX` namespace. Treat foreign identifiers like an omitted
+    // optional field, while preserving a hard error for stale/mistyped Filo IDs.
+    if (is_filo_task_id(requested_task_id)) {
         const std::string requested(requested_task_id);
         const auto it = sessions_.find(requested);
         if (it == sessions_.end()) {

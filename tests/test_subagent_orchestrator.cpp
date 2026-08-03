@@ -199,6 +199,72 @@ TEST_CASE("SubagentOrchestrator resumes an existing task_id and keeps history", 
     REQUIRE(found_previous_assistant_message);
 }
 
+TEST_CASE("SubagentOrchestrator ignores a provider-invented UUID on an initial PLAN task",
+          "[agent][orchestration][plan][grok]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+    constexpr std::string_view kProviderName = "grok-task-id-regression";
+    core::llm::ProviderManager::get_instance().register_provider(
+        std::string(kProviderName), provider);
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"explore footer","prompt":"find footer rendering","subagent_type":"explore","task_id":"a6e1cefb-4395-4683-9894-9110dc24407d"})",
+        provider,
+        {
+            .active_provider_name = std::string(kProviderName),
+            .active_model = "grok-4.5",
+            .parent_mode = "PLAN",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_FALSE(result.contains("\"error\""));
+    const std::string task_id = extract_task_id(result);
+    REQUIRE(task_id.starts_with("task_"));
+    REQUIRE(task_id != "a6e1cefb-4395-4683-9894-9110dc24407d");
+    REQUIRE(provider->requests_snapshot().size() == 1);
+}
+
+TEST_CASE("SubagentOrchestrator still rejects an unknown Filo task_id",
+          "[agent][orchestration]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"resume footer","prompt":"continue footer rendering","subagent_type":"explore","task_id":"task_deadbeef"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "PLAN",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("Task session 'task_deadbeef' was not found"));
+    REQUIRE(provider->requests_snapshot().empty());
+}
+
+TEST_CASE("SubagentOrchestrator task schema says task_id is output-derived",
+          "[agent][orchestration][schema]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+
+    const auto definition = orchestrator.task_tool_definition();
+    const auto parameter = std::ranges::find_if(
+        definition.function.parameters,
+        [](const core::tools::ToolParameter& value) { return value.name == "task_id"; });
+
+    REQUIRE(parameter != definition.function.parameters.end());
+    CHECK_FALSE(parameter->required);
+    CHECK_THAT(parameter->description, Catch::Matchers::ContainsSubstring("Omit this field"));
+    CHECK_THAT(parameter->description, Catch::Matchers::ContainsSubstring("never invent"));
+    CHECK_THAT(definition.function.description, Catch::Matchers::ContainsSubstring("never invent"));
+}
+
 TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filtering", "[agent][orchestration]") {
     auto provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

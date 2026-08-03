@@ -97,6 +97,15 @@ int run_restricted_child(const std::filesystem::path& allowed,
     auto policy = make_policy(allowed);
     const auto driver = core::landrun::make_landrun_driver();
     if (const auto result = driver->apply(policy); !result.success) {
+        // Native sandboxes are intentionally irreversible and macOS refuses to
+        // stack Seatbelt profiles in some already-confined CI/agent hosts. The
+        // backend exists there, so probe() succeeds, but this integration test
+        // cannot exercise it. Preserve failures for malformed policies and all
+        // other initialization errors; only the host-level EPERM is a skip.
+        if (result.detail.contains(std::strerror(EPERM))) {
+            std::cerr << "SKIP: " << result.detail << '\n';
+            return 77;
+        }
         std::cerr << result.detail << '\n';
         return 10;
     }

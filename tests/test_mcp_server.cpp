@@ -7,12 +7,14 @@
 #include "core/utils/JsonWriter.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <format>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <simdjson.h>
 
@@ -399,6 +401,13 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
     {
         auto catalog_array = catalog.array();
         bool first = true;
+        constexpr std::array<std::string_view, 17> kBudgetedBuiltinNames{
+            "run_terminal_command", "apply_patch", "file_search", "read_file",
+            "write_file", "list_directory", "replace", "grep_search",
+            "search_replace", "delete_file", "move_file", "create_directory",
+            "web_search", "web_fetch", "memory", "get_workspace_config",
+            "delegate_task",
+        };
         for (auto tool : tools) {
             std::string_view name;
             std::string_view description;
@@ -407,7 +416,13 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
             REQUIRE(tool["description"].get(description) == simdjson::SUCCESS);
             REQUIRE(tool["inputSchema"].get(input_schema) == simdjson::SUCCESS);
 
-            if (name == "activate_skill") continue;
+            // ToolManager is intentionally process-global and other randomized
+            // tests may register agent probes or executable skills. This test's
+            // budget is for the fixed MCP built-ins, not those dynamic tools.
+            if (std::ranges::find(kBudgetedBuiltinNames, name)
+                == kBudgetedBuiltinNames.end()) {
+                continue;
+            }
 
             core::utils::JsonWriter projected_tool(1024);
             {
