@@ -12,7 +12,8 @@ namespace tui {
 //   Block:  headings (#-######), fenced/indented code, unordered/ordered lists,
 //           blockquotes, tables (|col|col|), horizontal rules, paragraphs
 //   Inline: **bold**, *italic*, ***bold-italic***, `code`, ~~strikethrough~~,
-//           [link text](url), backslash escapes
+//           [link text](url), backslash escapes; nested emphasis/links compose
+//           (e.g. *a **b** c*, [**label**](url))
 //
 // Plain paragraphs and mixed inline spans both wrap to the viewport width.
 ftxui::Element render_markdown(std::string_view text,

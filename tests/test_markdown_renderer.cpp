@@ -223,48 +223,217 @@ TEST_CASE("render_markdown — inline code unclosed backtick is literal", "[md][
 
 TEST_CASE("render_markdown — bold double star", "[md][inline]")
 {
-    smoke("This is **bold** text.");
+    auto el = render_markdown("This is **bold** text.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("This is bold text."));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(8, 0).bold);   // 'b' of bold
+    REQUIRE_FALSE(screen.CellAt(7, 0).bold); // space before bold
 }
 
 TEST_CASE("render_markdown — italic single star", "[md][inline]")
 {
-    smoke("This is *italic* text.");
+    auto el = render_markdown("This is *italic* text.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("This is italic text."));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("*"));
+    REQUIRE(screen.CellAt(8, 0).italic);
 }
 
 TEST_CASE("render_markdown — bold-italic triple star", "[md][inline]")
 {
-    smoke("This is ***bold italic*** text.");
+    auto el = render_markdown("***both***");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(20),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("both"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("*"));
+    REQUIRE(screen.CellAt(0, 0).bold);
+    REQUIRE(screen.CellAt(0, 0).italic);
 }
 
 TEST_CASE("render_markdown — bold double underscore", "[md][inline]")
 {
-    smoke("This is __bold__ text.");
+    auto el = render_markdown("This is __bold__ text.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("This is bold text."));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("__"));
+    REQUIRE(screen.CellAt(8, 0).bold);
 }
 
 TEST_CASE("render_markdown — italic single underscore", "[md][inline]")
 {
-    smoke("This is _italic_ text.");
+    auto el = render_markdown("This is _italic_ text.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("This is italic text."));
+    REQUIRE(screen.CellAt(8, 0).italic);
 }
 
 TEST_CASE("render_markdown — underscore inside word is literal", "[md][inline]")
 {
     // foo_bar_baz should not parse underscores as italic markers
-    smoke("foo_bar_baz");
+    const auto output = render_text("foo_bar_baz", 20);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("foo_bar_baz"));
 }
 
 TEST_CASE("render_markdown — unclosed bold is literal", "[md][inline]")
 {
-    smoke("**not closed");
+    const auto output = render_text("**not closed", 20);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("**not closed"));
 }
 
 TEST_CASE("render_markdown — multiple bold spans", "[md][inline]")
 {
-    smoke("**a** and **b**");
+    auto el = render_markdown("**a** and **b**");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(20),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("a and b"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(0, 0).bold);
+    REQUIRE(screen.CellAt(6, 0).bold); // 'b'
 }
 
 TEST_CASE("render_markdown — bold and italic mixed", "[md][inline]")
 {
-    smoke("**bold** and *italic* and `code`");
+    const auto output = render_text("**bold** and *italic* and `code`", 40);
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("bold"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("italic"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("code"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+}
+
+TEST_CASE("render_markdown — nested bold inside italic keeps no markers", "[md][inline][nested]")
+{
+    auto el = render_markdown("*italic and **bold** mix*");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("italic and bold mix"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("*"));
+    REQUIRE(screen.CellAt(0, 0).italic);
+    REQUIRE(screen.CellAt(11, 0).bold);   // 'b' of bold
+    REQUIRE(screen.CellAt(11, 0).italic);
+    REQUIRE_FALSE(screen.CellAt(16, 0).bold); // 'm' of outer italic text
+    REQUIRE(screen.CellAt(16, 0).italic);
+}
+
+TEST_CASE("render_markdown — nested italic inside bold keeps no markers", "[md][inline][nested]")
+{
+    auto el = render_markdown("**bold and *italic* mix**");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("bold and italic mix"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("*"));
+    REQUIRE(screen.CellAt(0, 0).bold);
+    REQUIRE(screen.CellAt(9, 0).italic); // 'i' of italic after "bold and "
+    REQUIRE(screen.CellAt(9, 0).bold);
+}
+
+TEST_CASE("render_markdown — bold inside link label", "[md][inline][nested]")
+{
+    auto el = render_markdown("[**bold link**](https://example.com)");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(50),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("bold link"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(0, 0).bold);
+    REQUIRE(screen.CellAt(0, 0).underlined);
+}
+
+TEST_CASE("render_markdown — code inside link label stays visibly linked", "[md][inline][nested]")
+{
+    auto el = render_markdown("[`code`](https://example.com)");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(50),
+                                        ftxui::Dimension::Fixed(2));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("code"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("`"));
+    REQUIRE(screen.CellAt(1, 0).underlined); // code tokens have one-cell padding
+}
+
+TEST_CASE("render_markdown — bold spans soft-broken paragraph lines", "[md][inline][nested]")
+{
+    auto el = render_markdown("start **bold\nacross** end");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(4));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("start bold"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("across end"));
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(6, 0).bold); // 'b' of bold on first visual row
+    REQUIRE(screen.CellAt(0, 1).bold); // 'a' of across on second row
+}
+
+TEST_CASE("render_markdown — bold spans blockquote soft lines", "[md][inline][nested]")
+{
+    auto el = render_markdown("> **bold\n> across**");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(4));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(2, 0).bold);
+    REQUIRE(screen.CellAt(2, 1).bold);
+}
+
+TEST_CASE("render_markdown — bold spans unordered-list continuation", "[md][inline][nested]")
+{
+    auto el = render_markdown("- **bold\n  across**");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(4));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(2, 0).bold);
+    REQUIRE(screen.CellAt(2, 1).bold);
+}
+
+TEST_CASE("render_markdown — bold spans ordered-list continuation", "[md][inline][nested]")
+{
+    auto el = render_markdown("1. **bold\n   across**");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+                                        ftxui::Dimension::Fixed(4));
+    ftxui::Render(screen, el);
+    const auto output = strip_ansi(screen.ToString());
+
+    REQUIRE_THAT(output, !Catch::Matchers::ContainsSubstring("**"));
+    REQUIRE(screen.CellAt(3, 0).bold);
+    REQUIRE(screen.CellAt(3, 1).bold);
 }
 
 // ============================================================================
@@ -376,6 +545,16 @@ TEST_CASE("render_markdown — unordered list nested indent", "[md][list]")
 TEST_CASE("render_markdown — unordered list loose", "[md][list]")
 {
     smoke("- item one\n\n- item two");
+}
+
+TEST_CASE("render_markdown — loose continuation does not gain a bullet", "[md][list]")
+{
+    auto el = render_markdown("- item\n\n  continuation");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(30),
+                                        ftxui::Dimension::Fixed(4));
+    ftxui::Render(screen, el);
+
+    REQUIRE(screen.CellAt(2, 2).character == "c");
 }
 
 TEST_CASE("render_markdown — unordered list with continuation", "[md][list]")

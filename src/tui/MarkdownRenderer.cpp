@@ -132,21 +132,26 @@ static std::string sanitize_for_ftxui(std::string_view input) {
 // Inline span types
 // ============================================================================
 
+// A span has one rendering role and a set of composable styles. Keeping these
+// separate prevents invalid role combinations (for example code + link URL)
+// without reintroducing a BoldItalic-style combinatorial enum.
 enum class SpanKind {
-    Normal,
-    Bold,
-    Italic,
-    BoldItalic,
+    Text,
     Code,
-    Strikethrough,
-    Link,
     LinkUrl,
 };
 
+struct SpanStyle {
+    bool bold   = false;
+    bool italic = false;
+    bool strike = false;
+    bool link   = false;
+};
+
 struct TextSpan {
-    SpanKind    kind = SpanKind::Normal;
+    SpanKind kind = SpanKind::Text;
+    SpanStyle style;
     std::string text;
-    std::string href; // Link only
 };
 
 // Find the next exact run of `delim_char` repeated `delim_len` times,
@@ -196,6 +201,38 @@ static std::size_t find_closing_backticks(std::string_view sv,
 // Inline parser
 // ============================================================================
 
+static std::vector<TextSpan> parse_inline(std::string_view text);
+
+// Re-parse emphasis/link/strike bodies so nested markers are not left literal.
+// Code spans stay leaf nodes (content is shown verbatim with code styling).
+static void append_nested(std::vector<TextSpan>& out,
+                          std::string_view content,
+                          SpanStyle inherited)
+{
+    if (content.empty()) return;
+
+    auto inner = parse_inline(content);
+    if (inner.empty()) {
+        TextSpan s;
+        s.text = std::string(content);
+        s.style = inherited;
+        out.push_back(std::move(s));
+        return;
+    }
+
+    for (auto& s : inner) {
+        // Generated URL suffixes are presentation metadata, not label content.
+        // Code keeps its own face/colours, but can still carry link underline.
+        if (s.kind == SpanKind::Text) {
+            s.style.bold = s.style.bold || inherited.bold;
+            s.style.italic = s.style.italic || inherited.italic;
+            s.style.strike = s.style.strike || inherited.strike;
+        }
+        if (inherited.link && s.kind != SpanKind::LinkUrl) s.style.link = true;
+        out.push_back(std::move(s));
+    }
+}
+
 static std::vector<TextSpan> parse_inline(std::string_view text)
 {
     std::vector<TextSpan> spans;
@@ -205,7 +242,7 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
 
     auto flush = [&]() {
         if (!current.empty()) {
-            spans.push_back({.kind = SpanKind::Normal, .text = std::move(current), .href = {}});
+            spans.push_back({.text = std::move(current)});
             current.clear();
         }
     };
@@ -227,9 +264,10 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
             std::size_t j = find_closing_backticks(text, tick_len, i + tick_len);
             if (j != std::string_view::npos) {
                 flush();
-                spans.push_back({.kind = SpanKind::Code,
-                    .text = std::string(text.substr(i + tick_len, j - i - tick_len)),
-                    .href = {}});
+                TextSpan s;
+                s.kind = SpanKind::Code;
+                s.text = std::string(text.substr(i + tick_len, j - i - tick_len));
+                spans.push_back(std::move(s));
                 i = j + tick_len;
                 continue;
             }
@@ -245,12 +283,16 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
                 std::size_t paren_end = text.find(')', bracket_end + 2);
                 if (paren_end != std::string_view::npos) {
                     flush();
-                    TextSpan s;
-                    s.kind = SpanKind::Link;
-                    s.text = std::string(text.substr(i + 1, bracket_end - i - 1));
-                    s.href = std::string(text.substr(bracket_end + 2,
-                                                      paren_end - bracket_end - 2));
-                    spans.push_back(std::move(s));
+                    const auto label = text.substr(i + 1, bracket_end - i - 1);
+                    const std::string href(text.substr(bracket_end + 2,
+                                                       paren_end - bracket_end - 2));
+                    append_nested(spans, label, {.link = true});
+                    if (!href.empty()) {
+                        TextSpan url;
+                        url.kind = SpanKind::LinkUrl;
+                        url.text = " (" + href + ")";
+                        spans.push_back(std::move(url));
+                    }
                     i = paren_end + 1;
                     continue;
                 }
@@ -264,9 +306,8 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
             std::size_t j = find_closing_delim(text, '~', 2, i + 2);
             if (j != std::string_view::npos) {
                 flush();
-                spans.push_back({.kind = SpanKind::Strikethrough,
-                    .text = std::string(text.substr(i + 2, j - i - 2)),
-                    .href = {}});
+                append_nested(spans, text.substr(i + 2, j - i - 2),
+                              {.strike = true});
                 i = j + 2;
                 continue;
             }
@@ -306,13 +347,13 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
                     }
 
                     flush();
-                    const std::string content(text.substr(
+                    const auto content = text.substr(
                         i + static_cast<std::size_t>(try_len),
-                        j - i - static_cast<std::size_t>(try_len)));
-                    SpanKind kind = try_len == 3 ? SpanKind::BoldItalic
-                                  : try_len == 2 ? SpanKind::Bold
-                                                 : SpanKind::Italic;
-                    spans.push_back({.kind = kind, .text = content, .href = {}});
+                        j - i - static_cast<std::size_t>(try_len));
+                    const bool add_bold = try_len >= 2;
+                    const bool add_italic = (try_len == 1 || try_len == 3);
+                    append_nested(spans, content,
+                                  {.bold = add_bold, .italic = add_italic});
                     i = j + static_cast<std::size_t>(try_len);
                     handled = true;
                     break;
@@ -331,13 +372,13 @@ static std::vector<TextSpan> parse_inline(std::string_view text)
     }
 
     if (!current.empty()) {
-        spans.push_back({.kind = SpanKind::Normal, .text = std::move(current), .href = {}});
+        spans.push_back({.text = std::move(current)});
     }
     return spans;
 }
 
 static void append_wrapping_tokens(std::vector<TextSpan>& out,
-                                   SpanKind kind,
+                                   const TextSpan& prototype,
                                    std::string_view text)
 {
     std::size_t start = 0;
@@ -351,11 +392,14 @@ static void append_wrapping_tokens(std::vector<TextSpan>& out,
             ++end;
         }
 
-        out.push_back({
-            .kind = whitespace ? SpanKind::Normal : kind,
-            .text = std::string(text.substr(start, end - start)),
-            .href = {},
-        });
+        TextSpan token = prototype;
+        token.text = std::string(text.substr(start, end - start));
+        // Keep whitespace unstyled so hflow gaps do not stretch bold/underline.
+        if (whitespace) {
+            token.kind = SpanKind::Text;
+            token.style = {};
+        }
+        out.push_back(std::move(token));
         start = end;
     }
 }
@@ -366,94 +410,110 @@ static std::vector<TextSpan> tokenize_spans_for_wrapping(const std::vector<TextS
     tokens.reserve(spans.size() * 2);
 
     for (const auto& span : spans) {
-        switch (span.kind) {
-            case SpanKind::Link: {
-                append_wrapping_tokens(tokens, SpanKind::Link, span.text);
-                if (!span.href.empty()) {
-                    std::string suffix = " (" + span.href + ")";
-                    append_wrapping_tokens(tokens, SpanKind::LinkUrl, suffix);
-                }
-                break;
-            }
-            case SpanKind::Code:
-                tokens.push_back({
-                    .kind = SpanKind::Code,
-                    .text = " " + span.text + " ",
-                    .href = {},
-                });
-                break;
-            default:
-                append_wrapping_tokens(tokens, span.kind, span.text);
-                break;
+        if (span.kind == SpanKind::Code) {
+            TextSpan token = span;
+            token.text = " " + span.text + " ";
+            tokens.push_back(std::move(token));
+            continue;
         }
+        append_wrapping_tokens(tokens, span, span.text);
     }
 
     return tokens;
 }
 
-static Element render_wrapping_token(const TextSpan& token, Color base)
+static Element apply_span_style(Element e, const TextSpan& span, Color base)
 {
-    switch (token.kind) {
-        case SpanKind::Normal:
-            return ftxui::text(token.text) | ftxui::color(base);
-        case SpanKind::Bold:
-            return ftxui::text(token.text) | ftxui::color(base) | ftxui::bold;
-        case SpanKind::Italic:
-            return ftxui::text(token.text) | ftxui::color(base) | italic;
-        case SpanKind::BoldItalic:
-            return ftxui::text(token.text) | ftxui::color(base) | ftxui::bold | italic;
-        case SpanKind::Strikethrough:
-            return ftxui::text(token.text) | ftxui::color(base) | strikethrough;
+    switch (span.kind) {
+        case SpanKind::Text:
+            e = std::move(e) | ftxui::color(
+                span.style.link ? Color{kMdLinkFg} : base);
+            break;
         case SpanKind::Code:
-            return ftxui::text(token.text)
-                | ftxui::color(kMdCodeFg)
-                | ftxui::bgcolor(kMdCodeBg);
-        case SpanKind::Link:
-            return ftxui::text(token.text)
-                | ftxui::color(kMdLinkFg)
-                | underlined;
+            e = std::move(e) | ftxui::color(kMdCodeFg) | ftxui::bgcolor(kMdCodeBg);
+            break;
         case SpanKind::LinkUrl:
-            return ftxui::text(token.text) | ftxui::color(Color::GrayDark) | dim;
+            e = std::move(e) | ftxui::color(Color::GrayDark) | dim;
+            break;
     }
-    return ftxui::text(token.text) | ftxui::color(base); // unreachable
+
+    if (span.style.link)   e = std::move(e) | underlined;
+    if (span.style.bold)   e = std::move(e) | ftxui::bold;
+    if (span.style.italic) e = std::move(e) | italic;
+    if (span.style.strike) e = std::move(e) | strikethrough;
+    return e;
 }
 
-// Render one line of inline markdown.
-// Single-style lines use paragraph() for wrapping.
-// Mixed style lines are tokenized and wrapped with hflow() to avoid clipping.
-static Element render_inline_line(std::string_view line, Color base)
+static Element render_wrapping_token(const TextSpan& token, Color base)
 {
-    if (line.empty()) return ftxui::text("");
+    return apply_span_style(ftxui::text(token.text), token, base);
+}
 
-    auto spans = parse_inline(line);
-    if (spans.empty()) return ftxui::text("") | ftxui::color(base);
+static Element render_span_row(const std::vector<TextSpan>& row, Color base)
+{
+    if (row.empty()) return ftxui::text("");
 
-    // Single span: use paragraph() for wrapping where possible
-    if (spans.size() == 1) {
-        const auto& s = spans[0];
-        switch (s.kind) {
-            case SpanKind::Normal:
-                return paragraph(s.text) | ftxui::color(base) | xflex;
-            case SpanKind::Bold:
-                return paragraph(s.text) | ftxui::color(base) | ftxui::bold | xflex;
-            case SpanKind::Italic:
-                return paragraph(s.text) | ftxui::color(base) | italic | xflex;
-            case SpanKind::BoldItalic:
-                return paragraph(s.text) | ftxui::color(base) | ftxui::bold | italic | xflex;
-            case SpanKind::Strikethrough:
-                return paragraph(s.text) | ftxui::color(base) | strikethrough | xflex;
-            default: break;
+    // Single plain/styled span (no code/link): paragraph() wraps cleanly.
+    if (row.size() == 1) {
+        const auto& s = row[0];
+        if (s.kind == SpanKind::Text && !s.style.link) {
+            return apply_span_style(paragraph(s.text), s, base) | xflex;
         }
     }
 
-    // Mixed or special spans: tokenized hflow to preserve wrapping.
-    const auto tokens = tokenize_spans_for_wrapping(spans);
+    const auto tokens = tokenize_spans_for_wrapping(row);
     Elements elems;
     elems.reserve(tokens.size());
     for (const auto& token : tokens) {
         elems.push_back(render_wrapping_token(token, base));
     }
     return hflow(std::move(elems)) | xflex;
+}
+
+// Parse once across soft newlines, then split the flattened styled spans back
+// into visual rows. Block renderers can add their own prefix to each row.
+static std::vector<Element> render_inline_rows(std::string_view text, Color base)
+{
+    auto spans = parse_inline(text);
+
+    // Split styled spans into rows on embedded '\n'.
+    std::vector<std::vector<TextSpan>> rows(1);
+    for (const auto& span : spans) {
+        std::size_t start = 0;
+        while (start <= span.text.size()) {
+            const std::size_t nl = span.text.find('\n', start);
+            const auto piece = (nl == std::string::npos)
+                ? span.text.substr(start)
+                : span.text.substr(start, nl - start);
+
+            if (!piece.empty()) {
+                TextSpan part = span;
+                part.text = piece;
+                rows.back().push_back(std::move(part));
+            }
+
+            if (nl == std::string::npos) break;
+            rows.emplace_back();
+            start = nl + 1;
+        }
+    }
+
+    std::vector<Element> lines;
+    lines.reserve(rows.size());
+    for (const auto& row : rows) {
+        lines.push_back(render_span_row(row, base));
+    }
+    return lines;
+}
+
+// Render one or more soft-broken lines without block-specific prefixes.
+static Element render_inline_line(std::string_view line, Color base)
+{
+    if (line.empty()) return ftxui::text("");
+
+    auto rows = render_inline_rows(line, base);
+    if (rows.size() == 1) return std::move(rows.front());
+    return vbox(std::move(rows)) | xflex;
 }
 
 // ============================================================================
@@ -928,87 +988,119 @@ static Element render_table(const Block& block)
     return gridbox(std::move(grid)) | UiBorder(Color::GrayDark) | xflex;
 }
 
+static std::string join_soft_lines(const std::vector<std::string>& lines)
+{
+    std::string joined;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (i != 0) joined.push_back('\n');
+        joined += lines[i];
+    }
+    return joined;
+}
+
 static Element render_blockquote(const Block& block, Color /*base*/)
 {
+    if (block.lines.empty()) return emptyElement();
+
+    const auto joined = join_soft_lines(block.lines);
+    auto inline_rows = render_inline_rows(joined, kMdQuoteFg);
     std::vector<Element> rows;
-    rows.reserve(block.lines.size());
-    for (const auto& l : block.lines) {
+    rows.reserve(inline_rows.size());
+    for (auto& inline_row : inline_rows) {
         rows.push_back(
             hbox({
                 ftxui::text("▌ ") | ftxui::color(kMdQuoteBar),
-                render_inline_line(l, kMdQuoteFg),
+                std::move(inline_row),
             }) | xflex
         );
     }
-    if (rows.empty()) return emptyElement();
     return vbox(std::move(rows));
 }
 
-static Element render_unordered_list(const Block& block, Color base)
+static Element render_list(const Block& block, Color base)
 {
     static constexpr std::array<const char*, 3> bullets = {"• ", "◦ ", "▸ "};
+    const bool ordered = block.kind == BlockKind::OrderedList;
 
-    std::vector<Element> rows;
-    rows.reserve(block.lines.size());
-    for (const auto& l : block.lines) {
-        if (is_blank(l)) {
-            rows.push_back(ftxui::text(""));
-            continue;
-        }
-        const int spaces = list_leading_spaces(l);
-        if (is_ul(l)) {
-            const int level  = std::min(spaces / 2, 2);
-            const std::string indent(static_cast<std::size_t>(level * 2), ' ');
-            rows.push_back(
-                hbox({
-                    ftxui::text(indent),
-                    ftxui::text(bullets[level]) | ftxui::color(kMdBulletFg),
-                    render_inline_line(list_item_content(l), base),
-                }) | xflex
-            );
-        } else {
-            // Continuation line
-            rows.push_back(
-                hbox({
-                    ftxui::text(std::string(static_cast<size_t>(spaces), ' ')),
-                    render_inline_line(l.substr(static_cast<size_t>(spaces)), base),
-                }) | xflex
-            );
-        }
-    }
-    return vbox(std::move(rows));
-}
-
-static Element render_ordered_list(const Block& block, Color base)
-{
     std::vector<Element> rows;
     rows.reserve(block.lines.size());
     int num = 1;
-    for (const auto& l : block.lines) {
+    for (std::size_t i = 0; i < block.lines.size();) {
+        const auto& l = block.lines[i];
         if (is_blank(l)) {
             rows.push_back(ftxui::text(""));
+            ++i;
             continue;
         }
-        const int spaces = list_leading_spaces(l);
-        if (is_ol(l)) {
-            const std::string indent(static_cast<std::size_t>(spaces), ' ');
-            const std::string marker = std::format("{}. ", num++);
+        const bool is_item = ordered ? is_ol(l) : is_ul(l);
+        if (!is_item) {
+            const int spaces = list_leading_spaces(l);
             rows.push_back(
                 hbox({
-                    ftxui::text(indent),
-                    ftxui::text(marker) | ftxui::color(kMdNumFg),
-                    render_inline_line(list_item_content(l), base),
+                    ftxui::text(std::string(static_cast<std::size_t>(spaces), ' ')),
+                    render_inline_line(l.substr(static_cast<std::size_t>(spaces)), base),
                 }) | xflex
             );
-        } else {
-            // Continuation line
+            ++i;
+            continue;
+        }
+
+        // Parse each logical item together with its continuation lines so
+        // emphasis can cross a soft newline without leaking into the next item.
+        const std::size_t end = [&] {
+            std::size_t next = i + 1;
+            while (next < block.lines.size() && !is_blank(block.lines[next])) {
+                const bool next_is_item = ordered
+                    ? is_ol(block.lines[next])
+                    : is_ul(block.lines[next]);
+                if (next_is_item) break;
+                ++next;
+            }
+            return next;
+        }();
+
+        std::vector<std::string> content_lines;
+        content_lines.reserve(end - i);
+        content_lines.push_back(list_item_content(l));
+        for (std::size_t j = i + 1; j < end; ++j) {
+            const int continuation_spaces = list_leading_spaces(block.lines[j]);
+            content_lines.emplace_back(block.lines[j].substr(
+                static_cast<std::size_t>(continuation_spaces)));
+        }
+        auto inline_rows = render_inline_rows(join_soft_lines(content_lines), base);
+
+        const int spaces = list_leading_spaces(l);
+        const int level = std::min(spaces / 2, 2);
+        const std::string indent = ordered
+            ? std::string(static_cast<std::size_t>(spaces), ' ')
+            : std::string(static_cast<std::size_t>(level * 2), ' ');
+        const std::string marker = ordered
+            ? std::format("{}. ", num++)
+            : bullets[level];
+        const Color marker_color = ordered ? Color{kMdNumFg} : Color{kMdBulletFg};
+        for (std::size_t j = 0; j < inline_rows.size(); ++j) {
+            if (j == 0) {
+                rows.push_back(
+                    hbox({
+                        ftxui::text(indent),
+                        ftxui::text(marker) | ftxui::color(marker_color),
+                        std::move(inline_rows[j]),
+                    }) | xflex
+                );
+                continue;
+            }
+
+            const auto& continuation = block.lines[i + j];
+            const int continuation_spaces = list_leading_spaces(continuation);
             rows.push_back(
                 hbox({
-                    ftxui::text(std::string(static_cast<size_t>(spaces), ' ')),
-                    render_inline_line(l.substr(static_cast<size_t>(spaces)), base),
+                    ftxui::text(std::string(
+                        static_cast<std::size_t>(continuation_spaces), ' ')),
+                    std::move(inline_rows[j]),
                 }) | xflex
             );
         }
+        i = end;
     }
     return vbox(std::move(rows));
 }
@@ -1016,14 +1108,11 @@ static Element render_ordered_list(const Block& block, Color base)
 static Element render_paragraph(const Block& block, Color base)
 {
     if (block.lines.empty()) return emptyElement();
-    std::vector<Element> rows;
-    rows.reserve(block.lines.size());
-    for (const auto& l : block.lines) {
-        rows.push_back(l.empty()
-                       ? ftxui::text("")
-                       : render_inline_line(l, base));
-    }
-    return vbox(std::move(rows)) | xflex;
+
+    // Join soft-broken lines so emphasis/links can span model line wraps
+    // (e.g. "start **bold\nacross** end"). Embedded '\n' is preserved as a
+    // visual row break inside render_inline_line.
+    return render_inline_line(join_soft_lines(block.lines), base);
 }
 
 static Element render_block(const Block& block, Color base)
@@ -1036,8 +1125,8 @@ static Element render_block(const Block& block, Color base)
         case BlockKind::IndentedCode:   return render_code_block(block);
         case BlockKind::Table:          return render_table(block);
         case BlockKind::Blockquote:     return render_blockquote(block, base);
-        case BlockKind::UnorderedList:  return render_unordered_list(block, base);
-        case BlockKind::OrderedList:    return render_ordered_list(block, base);
+        case BlockKind::UnorderedList:  [[fallthrough]];
+        case BlockKind::OrderedList:    return render_list(block, base);
         case BlockKind::Paragraph:      return render_paragraph(block, base);
     }
     return emptyElement(); // unreachable
