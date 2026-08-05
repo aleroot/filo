@@ -155,6 +155,7 @@ set(FILO_CORE_SOURCES
     src/exec/Prompter.cpp
     src/core/mcp/McpDispatcher.cpp
     src/core/mcp/McpClientSession.cpp
+    src/core/mcp/McpOAuth.cpp
     src/core/mcp/McpConnectionManager.cpp
     src/core/mcp/McpDynamicFeatureTools.cpp
     src/core/mcp/McpTaskManager.cpp
@@ -240,6 +241,8 @@ set(FILO_CORE_SOURCES
     src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
     src/core/auth/OAuthPkce.cpp
+    src/core/auth/OAuthLoopback.cpp
+    src/core/auth/OAuthTokenEndpoint.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp
     src/core/auth/QwenOAuthFlow.cpp
@@ -597,6 +600,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_main_exit.cpp
     tests/test_prompter_mode.cpp
     tests/test_mcp_client_session.cpp
+    tests/test_mcp_oauth.cpp
     tests/test_request_replay_cache.cpp
     tests/test_agent_stop.cpp
     tests/test_agent_loop_control.cpp
@@ -769,6 +773,7 @@ source_group(
         tests/test_main_exit.cpp
         tests/test_prompter_mode.cpp
         tests/test_mcp_client_session.cpp
+    tests/test_mcp_oauth.cpp
         tests/test_integration_daemon_reliability.cpp
         tests/test_integration_mcp_client_session.cpp
         tests/test_integration_prompt_input.cpp

@@ -582,6 +582,72 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         CHECK(captured_server->value().args.front() == R"(--root=C:\tmp\x)");
     }
 
+
+    SECTION("/mcp login and logout dispatch callbacks") {
+        auto login_name = std::make_shared<std::string>();
+        auto logout_name = std::make_shared<std::string>();
+        ctx.login_mcp_server_fn = [login_name](std::string_view name) {
+            *login_name = std::string(name);
+            return CommandOperationResult{.ok = true, .message = "logged in"};
+        };
+        ctx.logout_mcp_server_fn = [logout_name](std::string_view name) {
+            *logout_name = std::string(name);
+            return CommandOperationResult{.ok = true, .message = "logged out"};
+        };
+        ctx.list_mcp_servers_fn = []() {
+            core::config::McpServerConfig s;
+            s.name = "linear";
+            s.transport = "http";
+            s.url = "https://mcp.linear.app/mcp";
+            s.auth = "oauth";
+            return std::vector<core::config::McpServerConfig>{s};
+        };
+
+        *mock_history = "";
+        ctx.text = "/mcp login linear";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*login_name == "linear");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("logged in"));
+
+        *mock_history = "";
+        ctx.text = "/mcp logout linear";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*logout_name == "linear");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("logged out"));
+    }
+
+    SECTION("/mcp add http preserves Authorization headers") {
+        auto captured_server = std::make_shared<std::optional<core::config::McpServerConfig>>();
+        ctx.add_mcp_server_fn = [captured_server](
+                                    const core::config::McpServerConfig& server,
+                                    core::config::SettingsScope) {
+            *captured_server = server;
+            return CommandOperationResult{.ok = true, .message = "saved"};
+        };
+        ctx.list_mcp_servers_fn = [captured_server]() {
+            if (captured_server->has_value()) {
+                return std::vector<core::config::McpServerConfig>{captured_server->value()};
+            }
+            return std::vector<core::config::McpServerConfig>{};
+        };
+
+        *mock_history = "";
+        ctx.text =
+            "/mcp add --global --header \"Authorization: Bearer ${LINEAR_API_KEY}\" "
+            "linear http https://mcp.linear.app/mcp";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE(captured_server->has_value());
+        CHECK(captured_server->value().name == "linear");
+        CHECK(captured_server->value().transport == "http");
+        CHECK(captured_server->value().url == "https://mcp.linear.app/mcp");
+        REQUIRE(captured_server->value().headers.size() == 1);
+        CHECK(captured_server->value().headers.front().first == "Authorization");
+        CHECK(captured_server->value().headers.front().second
+              == "Bearer ${LINEAR_API_KEY}");
+    }
+
     SECTION("/mcp add reports unterminated quotes") {
         *mock_history = "";
         ctx.list_mcp_servers_fn = []() {

@@ -76,6 +76,8 @@
 #include "core/budget/BudgetTracker.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/mcp/McpConnectionManager.hpp"
+#include "core/mcp/McpOAuth.hpp"
+#include "core/auth/ui/ConsoleAuthUI.hpp"
 #include "core/mcp/RemoteActivity.hpp"
 #include "core/context/ContextMentions.hpp"
 #include "core/context/SteeringLoader.hpp"
@@ -4553,14 +4555,60 @@ RunResult run(RunOptions opts) {
                 &error)) {
             return {.ok = false, .message = error};
         }
+        std::string oauth_note;
+        if (core::mcp::mcp_server_wants_oauth(server)
+            && !core::mcp::has_mcp_oauth_session(
+                   server.name,
+                   core::config::ConfigManager::get_instance().get_config_dir())) {
+            std::string login_error;
+            std::string login_success;
+            auto run_login = [&]() {
+                try {
+                    core::auth::ui::ConsoleAuthUI ui;
+                    (void)core::mcp::login_mcp_oauth(
+                        server.name,
+                        server.url,
+                        core::config::ConfigManager::get_instance().get_config_dir(),
+                        core::mcp::McpOAuthLoginOptions{
+                            .preferred_scopes = server.oauth_scopes,
+                            .client_id = server.oauth_client_id,
+                            .client_secret = server.oauth_client_secret,
+                            .ui = &ui,
+                        });
+                    login_success = "OAuth login complete.";
+                } catch (const std::exception& e) {
+                    login_error = e.what();
+                }
+            };
+            auto closure = screen.WithRestoredIO(run_login);
+            closure();
+            if (login_error.empty()) {
+                const std::string reload_message = reload_mcp_live();
+                return {
+                    .ok = true,
+                    .message = std::format(
+                        "Saved MCP server '{}' to the {} overlay. {} {}",
+                        server.name,
+                        scope == core::config::SettingsScope::User ? "user" : "workspace",
+                        login_success,
+                        reload_message),
+                };
+            }
+            oauth_note = std::format(
+                " OAuth is required — run `/mcp login {}` ({}).",
+                server.name,
+                login_error);
+        }
+
         const std::string reload_message = reload_mcp_live();
         return {
             .ok = true,
             .message = std::format(
-                "Saved MCP server '{}' to the {} overlay. {}",
+                "Saved MCP server '{}' to the {} overlay. {}{}",
                 server.name,
                 scope == core::config::SettingsScope::User ? "user" : "workspace",
-                reload_message),
+                reload_message,
+                oauth_note),
         };
     };
 
@@ -4588,6 +4636,72 @@ RunResult run(RunOptions opts) {
 
     auto list_mcp_servers = [&]() {
         return core::config::ConfigManager::get_instance().get_config().mcp_servers;
+    };
+
+    auto login_mcp_server = [&](std::string_view server_name)
+        -> core::commands::CommandOperationResult {
+        const std::string name(server_name);
+        const auto servers = core::config::ConfigManager::get_instance().get_config().mcp_servers;
+        const auto it = std::find_if(
+            servers.begin(), servers.end(),
+            [&](const core::config::McpServerConfig& s) { return s.name == name; });
+        if (it == servers.end()) {
+            return {.ok = false, .message = "Unknown MCP server '" + name + "'."};
+        }
+        if (it->transport != "http" || it->url.empty()) {
+            return {.ok = false,
+                    .message = "MCP OAuth login requires an http server with a url."};
+        }
+
+        std::string error;
+        std::string success;
+        auto run_login = [&]() {
+            try {
+                core::auth::ui::ConsoleAuthUI ui;
+                (void)core::mcp::login_mcp_oauth(
+                    name,
+                    it->url,
+                    core::config::ConfigManager::get_instance().get_config_dir(),
+                    core::mcp::McpOAuthLoginOptions{
+                        .preferred_scopes = it->oauth_scopes,
+                        .client_id = it->oauth_client_id,
+                        .client_secret = it->oauth_client_secret,
+                        .ui = &ui,
+                    });
+                success = "Authenticated with '" + name + "'.";
+            } catch (const std::exception& e) {
+                error = e.what();
+            }
+        };
+
+        auto closure = screen.WithRestoredIO(run_login);
+        closure();
+
+        if (!error.empty()) {
+            return {.ok = false, .message = error};
+        }
+        const std::string reload_message = reload_mcp_live();
+        return {
+            .ok = true,
+            .message = success + " " + reload_message,
+        };
+    };
+
+    auto logout_mcp_server = [&](std::string_view server_name)
+        -> core::commands::CommandOperationResult {
+        const std::string name(server_name);
+        try {
+            core::mcp::logout_mcp_oauth(
+                name,
+                core::config::ConfigManager::get_instance().get_config_dir());
+            const std::string reload_message = reload_mcp_live();
+            return {
+                .ok = true,
+                .message = "Cleared OAuth session for '" + name + "'. " + reload_message,
+            };
+        } catch (const std::exception& e) {
+            return {.ok = false, .message = e.what()};
+        }
     };
 
     auto make_turn_callbacks =
@@ -5331,6 +5445,8 @@ RunResult run(RunOptions opts) {
             .list_mcp_servers_fn = list_mcp_servers,
             .add_mcp_server_fn = add_mcp_server,
             .remove_mcp_server_fn = remove_mcp_server,
+            .login_mcp_server_fn = login_mcp_server,
+            .logout_mcp_server_fn = logout_mcp_server,
             .list_active_terminals_fn = list_active_terminals,
             .stop_active_terminal_fn = stop_active_terminal,
             .direct_shell_command_fn = submit_direct_shell_command,

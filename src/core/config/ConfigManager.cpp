@@ -1176,6 +1176,61 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
             if (!srv["transport"].get(value)) server.transport = std::string(value);
             if (!srv["command"].get(value))   server.command = std::string(value);
             if (!srv["url"].get(value))       server.url = std::string(value);
+            if (!srv["auth"].get(value))      server.auth = std::string(value);
+            if (!srv["oauth_client_id"].get(value))
+                server.oauth_client_id = std::string(value);
+            if (!srv["oauth_client_secret"].get(value))
+                server.oauth_client_secret = std::string(value);
+
+            // request_timeout_ms | timeout_ms | timeout (seconds)
+            int64_t timeout_ms = 0;
+            if (!srv["request_timeout_ms"].get(timeout_ms) && timeout_ms > 0) {
+                server.request_timeout_ms = static_cast<int>(
+                    std::min<int64_t>(timeout_ms, 86'400'000));
+            } else if (!srv["timeout_ms"].get(timeout_ms) && timeout_ms > 0) {
+                server.request_timeout_ms = static_cast<int>(
+                    std::min<int64_t>(timeout_ms, 86'400'000));
+            } else {
+                double timeout_sec = 0;
+                if (!srv["timeout"].get(timeout_sec) && timeout_sec > 0) {
+                    const auto ms = static_cast<int64_t>(timeout_sec * 1000.0);
+                    server.request_timeout_ms = static_cast<int>(
+                        std::min<int64_t>(std::max<int64_t>(ms, 1), 86'400'000));
+                } else {
+                    int64_t timeout_sec_i = 0;
+                    if (!srv["timeout"].get(timeout_sec_i) && timeout_sec_i > 0) {
+                        server.request_timeout_ms = static_cast<int>(
+                            std::min<int64_t>(timeout_sec_i * 1000, 86'400'000));
+                    }
+                }
+            }
+
+            simdjson::dom::array oauth_scopes_arr;
+            if (!srv["oauth_scopes"].get(oauth_scopes_arr)) {
+                for (simdjson::dom::element scope_item : oauth_scopes_arr) {
+                    std::string_view scope_sv;
+                    if (scope_item.get(scope_sv) == simdjson::SUCCESS && !scope_sv.empty()) {
+                        server.oauth_scopes.emplace_back(scope_sv);
+                    }
+                }
+            } else if (!srv["oauth_scopes"].get(value) && !value.empty()) {
+                // space/comma separated string
+                std::string_view raw = value;
+                std::size_t i = 0;
+                while (i < raw.size()) {
+                    while (i < raw.size()
+                           && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == ',')) {
+                        ++i;
+                    }
+                    if (i >= raw.size()) break;
+                    const std::size_t start = i;
+                    while (i < raw.size()
+                           && raw[i] != ' ' && raw[i] != '\t' && raw[i] != ',') {
+                        ++i;
+                    }
+                    server.oauth_scopes.emplace_back(raw.substr(start, i - start));
+                }
+            }
 
             simdjson::dom::array args_arr;
             if (!srv["args"].get(args_arr)) {
@@ -1190,6 +1245,41 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
                 for (simdjson::dom::element env_item : env_arr) {
                     std::string_view env_value;
                     if (!env_item.get(env_value)) server.env.push_back(std::string(env_value));
+                }
+            }
+
+            // headers may be an object {"Authorization":"Bearer …"} or an array
+            // of "Name: value" / "Name=value" strings.
+            simdjson::dom::object headers_obj;
+            if (!srv["headers"].get(headers_obj)) {
+                for (auto [key, val] : headers_obj) {
+                    std::string_view header_value;
+                    if (val.get(header_value) == simdjson::SUCCESS) {
+                        server.headers.emplace_back(std::string(key), std::string(header_value));
+                    }
+                }
+            } else {
+                simdjson::dom::array headers_arr;
+                if (!srv["headers"].get(headers_arr)) {
+                    for (simdjson::dom::element header_item : headers_arr) {
+                        std::string_view header_value;
+                        if (header_item.get(header_value) != simdjson::SUCCESS) continue;
+                        const auto sep = header_value.find_first_of(":=");
+                        if (sep == std::string_view::npos || sep == 0) continue;
+                        std::string name(header_value.substr(0, sep));
+                        std::string value(header_value.substr(sep + 1));
+                        // Trim a single leading space after ':' for HTTP style.
+                        if (!value.empty() && value.front() == ' ') {
+                            value.erase(value.begin());
+                        }
+                        // Trim trailing/leading whitespace from the name.
+                        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+                            name.pop_back();
+                        }
+                        if (!name.empty()) {
+                            server.headers.emplace_back(std::move(name), std::move(value));
+                        }
+                    }
                 }
             }
 
@@ -1526,6 +1616,28 @@ std::string serialize_mcp_servers_overlay(const std::vector<McpServerConfig>& se
             if (!server.url.empty()) {
                 writer.comma().kv_str("url", server.url);
             }
+            if (!server.auth.empty()) {
+                writer.comma().kv_str("auth", server.auth);
+            }
+            if (server.request_timeout_ms > 0) {
+                writer.comma().key("request_timeout_ms").number(
+                    static_cast<int64_t>(server.request_timeout_ms));
+            }
+            if (!server.oauth_client_id.empty()) {
+                writer.comma().kv_str("oauth_client_id", server.oauth_client_id);
+            }
+            if (!server.oauth_client_secret.empty()) {
+                writer.comma().kv_str("oauth_client_secret", server.oauth_client_secret);
+            }
+            if (!server.oauth_scopes.empty()) {
+                writer.comma().key("oauth_scopes");
+                auto scopes_array = writer.array();
+                for (std::size_t scope_index = 0; scope_index < server.oauth_scopes.size();
+                     ++scope_index) {
+                    if (scope_index > 0) writer.comma();
+                    writer.str(server.oauth_scopes[scope_index]);
+                }
+            }
             if (!server.args.empty()) {
                 writer.comma().key("args");
                 auto args_array = writer.array();
@@ -1540,6 +1652,16 @@ std::string serialize_mcp_servers_overlay(const std::vector<McpServerConfig>& se
                 for (std::size_t env_index = 0; env_index < server.env.size(); ++env_index) {
                     if (env_index > 0) writer.comma();
                     writer.str(server.env[env_index]);
+                }
+            }
+            if (!server.headers.empty()) {
+                writer.comma().key("headers");
+                auto headers_object = writer.object();
+                for (std::size_t header_index = 0; header_index < server.headers.size();
+                     ++header_index) {
+                    if (header_index > 0) writer.comma();
+                    writer.kv_str(server.headers[header_index].first,
+                                  server.headers[header_index].second);
                 }
             }
         }

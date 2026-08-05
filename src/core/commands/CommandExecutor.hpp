@@ -124,6 +124,8 @@ struct CommandContext {
                                          core::config::SettingsScope)> add_mcp_server_fn = {};
     std::function<CommandOperationResult(std::string_view,
                                          core::config::SettingsScope)> remove_mcp_server_fn = {};
+    std::function<CommandOperationResult(std::string_view)> login_mcp_server_fn = {};
+    std::function<CommandOperationResult(std::string_view)> logout_mcp_server_fn = {};
     std::function<std::vector<ActiveTerminalInfo>()> list_active_terminals_fn = {};
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
     std::function<void(std::string)> direct_shell_command_fn = {};

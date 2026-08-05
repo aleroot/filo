@@ -323,6 +323,42 @@ Filo applies `.agentignore` to direct file reads, file search, grep search,
 directory listings, path-aware file modification tools, `@file` context
 mentions, and mention autocomplete.
 
+### External MCP servers (client)
+
+Filo can connect to external MCP servers and register their tools for the agent.
+Supported client transports:
+
+- **stdio** — spawn a local process (`command` + `args` + optional `env`)
+- **http** — Streamable HTTP (`url` + optional `headers`)
+
+HTTP mode speaks Streamable HTTP (MCP 2025-03-26+): JSON responses and
+`text/event-stream` SSE responses are both accepted. Header values support
+`${ENV_VAR}` / `$ENV_VAR` expansion at connect time so secrets stay out of config.
+
+Per-server request timeouts (HTTP default **120s**, stdio default **60s**):
+
+```json
+{
+  "name": "idea",
+  "transport": "http",
+  "url": "http://127.0.0.1:63342/mcp",
+  "auth": "none",
+  "request_timeout_ms": 300000
+}
+```
+
+`timeout` (seconds) and `timeout_ms` are accepted as aliases. CLI:
+`/mcp add --timeout 300 idea http http://127.0.0.1:63342/mcp`.
+
+OAuth sessions refresh proactively near expiry and **retry once after HTTP 401**
+(mid-session), using the same inter-process token lock as other Filo OAuth flows.
+Optional `oauth_scopes`, `oauth_client_id`, and `oauth_client_secret` skip inventing
+scopes or DCR when the authorization server requires a pre-registered client.
+
+Configure servers in `~/.config/filo/config.json`, `./.filo/config.json`, or the
+live overlays managed by `/mcp` (`~/.config/filo/mcp_servers.json` and
+`./.filo/mcp_servers.json`).
+
 ### Profiles
 
 Profiles let you keep multiple named configuration overlays and switch between them instantly.

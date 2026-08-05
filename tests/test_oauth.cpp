@@ -1320,3 +1320,65 @@ TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[Authen
     REQUIRE_THROWS(manager.logout("zai", /*revoke_remote=*/false));
     REQUIRE_THROWS(manager.logout("does-not-exist", /*revoke_remote=*/false));
 }
+
+#include "core/auth/OAuthLoopback.hpp"
+#include "core/auth/OAuthTokenEndpoint.hpp"
+
+TEST_CASE("parse_oauth_token_response — standard body", "[OAuthTokenEndpoint]") {
+    using namespace core::auth;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const auto token = parse_oauth_token_response(
+        R"({"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":120,"scope":"read write"})",
+        now,
+        "client-1",
+        "https://issuer.example");
+    CHECK(token.access_token == "at");
+    CHECK(token.refresh_token == "rt");
+    CHECK(token.token_type == "Bearer");
+    CHECK(token.client_id == "client-1");
+    CHECK(token.issuer == "https://issuer.example");
+    REQUIRE(token.scopes.size() == 2);
+    CHECK(token.scopes[0] == "read");
+    CHECK(token.scopes[1] == "write");
+    CHECK(token.expires_at == now + 120);
+}
+
+TEST_CASE("parse_oauth_token_response — error body throws", "[OAuthTokenEndpoint]") {
+    using namespace core::auth;
+    try {
+        (void)parse_oauth_token_response(
+            R"({"error":"invalid_grant","error_description":"gone"})",
+            0);
+        FAIL("expected throw");
+    } catch (const std::exception& e) {
+        CHECK_THAT(std::string(e.what()), Catch::Matchers::ContainsSubstring("invalid_grant"));
+    }
+}
+
+TEST_CASE("parse_oauth_manual_auth_input — code and URL", "[OAuthLoopback]") {
+    using namespace core::auth;
+    const auto plain = parse_oauth_manual_auth_input("  abc123  ");
+    CHECK(plain.code == "abc123");
+    CHECK_FALSE(plain.state.has_value());
+
+    const auto from_url = parse_oauth_manual_auth_input(
+        "http://127.0.0.1:17890/callback?code=xyz&state=s1");
+    CHECK(from_url.code == "xyz");
+    REQUIRE(from_url.state.has_value());
+    CHECK(*from_url.state == "s1");
+}
+
+TEST_CASE("OAuthLoopbackServer binds and exposes redirect_uri", "[OAuthLoopback]") {
+    using namespace core::auth;
+    OAuthLoopbackOptions opts;
+    opts.port_start = 18000;
+    opts.port_end = 18050;
+    opts.callback_path = "/callback";
+    OAuthLoopbackServer server(opts);
+    CHECK(server.port() >= 18000);
+    CHECK(server.port() <= 18050);
+    CHECK(server.redirect_uri().starts_with("http://127.0.0.1:"));
+    CHECK(server.redirect_uri().ends_with("/callback"));
+}

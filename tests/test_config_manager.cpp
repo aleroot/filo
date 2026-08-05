@@ -1620,3 +1620,97 @@ TEST_CASE("ConfigManager persists MCP server overlays", "[config][mcp]") {
 
     fs::remove_all(sandbox);
 }
+
+TEST_CASE("ConfigManager parses and persists MCP HTTP headers", "[config][mcp][headers]") {
+    const fs::path sandbox = make_temp_dir("filo_config_mcp_headers");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "mcp_servers": [
+            {
+                "name": "linear",
+                "transport": "http",
+                "url": "https://mcp.linear.app/mcp",
+                "headers": {
+                    "Authorization": "Bearer ${LINEAR_API_KEY}"
+                }
+            }
+        ]
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    REQUIRE(manager.get_config().mcp_servers.size() == 1);
+    const auto& linear = manager.get_config().mcp_servers.front();
+    CHECK(linear.name == "linear");
+    CHECK(linear.transport == "http");
+    CHECK(linear.url == "https://mcp.linear.app/mcp");
+    REQUIRE(linear.headers.size() == 1);
+    CHECK(linear.headers.front().first == "Authorization");
+    CHECK(linear.headers.front().second == "Bearer ${LINEAR_API_KEY}");
+
+    core::config::McpServerConfig updated = linear;
+    updated.headers = {{"Authorization", "Bearer ${LINEAR_API_KEY}"},
+                       {"X-Debug", "1"}};
+    std::string error;
+    REQUIRE(manager.persist_mcp_server(
+        updated,
+        core::config::SettingsScope::User,
+        project_dir,
+        &error));
+    REQUIRE(error.empty());
+
+    manager.load(project_dir);
+    REQUIRE(manager.get_config().mcp_servers.size() == 1);
+    REQUIRE(manager.get_config().mcp_servers.front().headers.size() == 2);
+
+    fs::remove_all(sandbox);
+}
+
+
+TEST_CASE("ConfigManager parses MCP auth field for OAuth remote servers",
+          "[config][mcp][oauth]") {
+    const fs::path sandbox = make_temp_dir("filo_config_mcp_auth");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path global_config = xdg_home / "filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_text(global_config, R"({
+        "mcp_servers": [
+            {
+                "name": "linear",
+                "transport": "http",
+                "url": "https://mcp.linear.app/mcp",
+                "auth": "oauth"
+            },
+            {
+                "name": "datadog",
+                "transport": "http",
+                "url": "https://mcp.datadoghq.com/api/unstable/mcp-server/mcp",
+                "auth": "none",
+                "headers": {
+                    "Authorization": "Bearer ${DD_API_KEY}"
+                }
+            }
+        ]
+    })");
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    manager.load(project_dir);
+
+    REQUIRE(manager.get_config().mcp_servers.size() == 2);
+    CHECK(manager.get_config().mcp_servers[0].name == "linear");
+    CHECK(manager.get_config().mcp_servers[0].auth == "oauth");
+    CHECK(manager.get_config().mcp_servers[1].name == "datadog");
+    CHECK(manager.get_config().mcp_servers[1].auth == "none");
+    REQUIRE(manager.get_config().mcp_servers[1].headers.size() == 1);
+
+    fs::remove_all(sandbox);
+}

@@ -95,7 +95,22 @@ struct McpServerConfig {
     std::vector<std::string> args;
     std::vector<std::string> env;  // additional env vars in KEY=VALUE form
     // http transport
-    std::string url;         // e.g. "http://localhost:9999/mcp"
+    std::string url;         // e.g. "https://mcp.linear.app/mcp"
+    // Extra HTTP headers for Streamable HTTP servers (Authorization, etc.).
+    // Values may contain ${ENV_VAR} / $ENV_VAR placeholders expanded at connect time.
+    std::vector<std::pair<std::string, std::string>> headers;
+    // HTTP auth mode:
+    //   ""       — auto (OAuth for https without Authorization header)
+    //   "oauth"  — always use interactive MCP OAuth session store
+    //   "none"   — never attach OAuth tokens (headers only)
+    std::string auth;
+    // Per-request timeout for MCP JSON-RPC calls (HTTP cpr timeout / stdio wait).
+    // 0 = transport default (HTTP 120s, stdio 60s).
+    int request_timeout_ms = 0;
+    // Optional OAuth login hints (used by /mcp login and discovery defaults).
+    std::vector<std::string> oauth_scopes;
+    std::string oauth_client_id;     // skip DCR when pre-registered
+    std::string oauth_client_secret; // confidential clients only (0600 store)
 };
 
 // ---------------------------------------------------------------------------

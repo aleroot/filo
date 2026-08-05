@@ -1,7 +1,9 @@
 #include "McpConnectionManager.hpp"
 #include "McpDynamicTool.hpp"
 #include "McpDynamicFeatureTools.hpp"
+#include "McpOAuth.hpp"
 #include "McpSamplingBridge.hpp"
+#include "../config/ConfigManager.hpp"
 #include "../logging/Logger.hpp"
 #include "../llm/LLMProvider.hpp"
 #include <stdexcept>
@@ -60,6 +62,9 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
         sampling_bridge_.reset();
     }
 
+    const std::string config_dir =
+        core::config::ConfigManager::get_instance().get_config_dir();
+
     for (const auto& srv_config : config.mcp_servers) {
         try {
             McpSamplingCallback sampling_callback;
@@ -71,8 +76,10 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
                 };
             }
 
+            // Pass config_dir so HttpMcpSession can resolve OAuth and refresh
+            // mid-session on 401 (do not bake a one-shot bearer into headers).
             std::shared_ptr<IMcpClientSession> session =
-                make_mcp_session(srv_config, sampling_callback);
+                make_mcp_session(srv_config, sampling_callback, config_dir);
             std::vector<McpToolDef> tools = session->initialize();
 
             ServerEntry entry;
@@ -122,9 +129,19 @@ void McpConnectionManager::connect_all(const core::config::AppConfig& config,
             servers_.push_back(std::move(entry));
 
         } catch (const std::exception& e) {
+            const std::string msg = e.what();
             core::logging::warn("[MCP] Could not connect to '{}': {}",
                                 srv_config.name,
-                                e.what());
+                                msg);
+            if (mcp_server_wants_oauth(srv_config)
+                && (msg.find("401") != std::string::npos
+                    || msg.find("403") != std::string::npos
+                    || msg.find("authentication") != std::string::npos)) {
+                core::logging::warn(
+                    "[MCP] '{}' appears to require OAuth. Run: /mcp login {}",
+                    srv_config.name,
+                    srv_config.name);
+            }
         }
     }
 }

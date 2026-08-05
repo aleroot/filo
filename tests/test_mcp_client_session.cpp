@@ -3,6 +3,7 @@
 
 #include "core/config/ConfigManager.hpp"
 #include "core/mcp/McpClientSession.hpp"
+#include "core/mcp/McpOAuth.hpp"
 #include "core/mcp/McpSamplingBridge.hpp"
 
 #include <algorithm>
@@ -507,4 +508,83 @@ TEST_CASE("McpSamplingBridge can switch provider/model backend",
         R"({"messages":[{"role":"user","content":{"type":"text","text":"hello"}}]})");
     REQUIRE_THAT(second, ContainsSubstring(R"("text":"from_b")"));
     REQUIRE_THAT(second, ContainsSubstring(R"("model":"model-b")"));
+}
+
+TEST_CASE("normalize_streamable_http_response_body accepts JSON and SSE",
+          "[mcp][client][http][streamable]") {
+    const std::string json = R"({"jsonrpc":"2.0","id":1,"result":{"ok":true}})";
+    CHECK(core::mcp::normalize_streamable_http_response_body(json) == json);
+
+    const std::string sse =
+        "event: message\n"
+        "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\n"
+        "\n"
+        "event: message\n"
+        "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"tools\":[]}}\n"
+        "\n";
+    const auto normalized = core::mcp::normalize_streamable_http_response_body(sse);
+    REQUIRE_THAT(normalized, ContainsSubstring(R"("id":7)"));
+    REQUIRE_THAT(normalized, ContainsSubstring(R"("tools":[])"));
+    CHECK(normalized.find("notifications/progress") == std::string::npos);
+}
+
+TEST_CASE("normalize_streamable_http_response_body joins multi-line SSE data",
+          "[mcp][client][http][streamable]") {
+    const std::string sse =
+        "data: {\"jsonrpc\":\"2.0\",\"id\":1,\n"
+        "data: \"result\":{\"value\":42}}\n"
+        "\n";
+    const auto normalized = core::mcp::normalize_streamable_http_response_body(sse);
+    REQUIRE_THAT(normalized, ContainsSubstring(R"("value":42)"));
+}
+
+TEST_CASE("expand_mcp_env_placeholders expands ${VAR} and $VAR",
+          "[mcp][client][http][env]") {
+    REQUIRE(::setenv("FILO_TEST_MCP_TOKEN", "secret-token", 1) == 0);
+
+    CHECK(core::mcp::expand_mcp_env_placeholders("Bearer ${FILO_TEST_MCP_TOKEN}")
+          == "Bearer secret-token");
+    CHECK(core::mcp::expand_mcp_env_placeholders("x-$FILO_TEST_MCP_TOKEN-y")
+          == "x-secret-token-y");
+    CHECK(core::mcp::expand_mcp_env_placeholders("cost is $$5") == "cost is $5");
+    CHECK(core::mcp::expand_mcp_env_placeholders("missing=${FILO_TEST_MCP_MISSING}")
+          == "missing=");
+
+    ::unsetenv("FILO_TEST_MCP_TOKEN");
+}
+
+TEST_CASE("parse_www_authenticate_resource_metadata extracts URL",
+          "[mcp][oauth][discovery]") {
+    const auto url = core::mcp::parse_www_authenticate_resource_metadata(
+        R"(Bearer realm="OAuth", resource_metadata="https://mcp.linear.app/.well-known/oauth-protected-resource/mcp", error="invalid_token")");
+    REQUIRE(url.has_value());
+    CHECK(*url
+          == "https://mcp.linear.app/.well-known/oauth-protected-resource/mcp");
+
+    CHECK_FALSE(core::mcp::parse_www_authenticate_resource_metadata("Bearer realm=\"x\"")
+                    .has_value());
+}
+
+TEST_CASE("mcp_server_wants_oauth defaults for remote HTTPS",
+          "[mcp][oauth]") {
+    core::config::McpServerConfig server;
+    server.name = "linear";
+    server.transport = "http";
+    server.url = "https://mcp.linear.app/mcp";
+    CHECK(core::mcp::mcp_server_wants_oauth(server));
+
+    server.auth = "none";
+    CHECK_FALSE(core::mcp::mcp_server_wants_oauth(server));
+
+    server.auth = "oauth";
+    CHECK(core::mcp::mcp_server_wants_oauth(server));
+
+    server.auth.clear();
+    server.headers = {{"Authorization", "Bearer x"}};
+    CHECK_FALSE(core::mcp::mcp_server_wants_oauth(server));
+}
+
+TEST_CASE("mcp_oauth_provider_id sanitizes names", "[mcp][oauth]") {
+    CHECK(core::mcp::mcp_oauth_provider_id("linear") == "mcp_linear");
+    CHECK(core::mcp::mcp_oauth_provider_id("my linear!") == "mcp_my_linear_");
 }

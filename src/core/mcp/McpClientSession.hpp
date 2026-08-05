@@ -13,10 +13,13 @@
 #include <optional>
 #include <chrono>
 #include <cpr/cpr.h>
+#include <memory>
 #include "../config/ConfigManager.hpp"
 #include "../tools/Tool.hpp"
 
 namespace core::mcp {
+
+class McpHttpAuth;
 
 // ---------------------------------------------------------------------------
 // McpToolDef — tool descriptor returned by tools/list.
@@ -190,12 +193,15 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// HttpMcpSession — sends MCP JSON-RPC over HTTP POST.
+// HttpMcpSession — Streamable HTTP MCP client (JSON and SSE response modes).
 // ---------------------------------------------------------------------------
 class HttpMcpSession : public IMcpClientSession {
 public:
     explicit HttpMcpSession(const core::config::McpServerConfig& config,
-                            McpSamplingCallback sampling_callback = {});
+                            McpSamplingCallback sampling_callback = {},
+                            std::chrono::milliseconds request_timeout =
+                                std::chrono::milliseconds{0},
+                            std::shared_ptr<McpHttpAuth> auth = nullptr);
     ~HttpMcpSession() override;
 
     [[nodiscard]] std::vector<McpToolDef> initialize() override;
@@ -227,6 +233,9 @@ private:
         cpr::Header headers;
     };
 
+    [[nodiscard]] cpr::Header build_request_headers(bool include_protocol_header) const;
+    [[nodiscard]] HttpJsonResponse post_json_once(const std::string& body,
+                                                  bool include_protocol_header);
     [[nodiscard]] HttpJsonResponse post_json(const std::string& body,
                                              bool include_protocol_header = true);
     [[nodiscard]] std::string send_request(std::string_view method,
@@ -238,6 +247,10 @@ private:
     std::string server_name_;
     std::string protocol_version_{"2025-11-25"};
     std::string session_id_;
+    // Non-auth extra headers (Authorization is owned by auth_ when present).
+    std::vector<std::pair<std::string, std::string>> extra_headers_;
+    std::shared_ptr<McpHttpAuth> auth_;
+    std::chrono::milliseconds request_timeout_;
     McpSamplingCallback sampling_callback_;
     std::atomic<int> next_id_{1};
     std::mutex request_mutex_;
@@ -247,12 +260,21 @@ private:
     std::atomic<bool> server_supports_prompts_{false};
 };
 
+// Normalize a Streamable HTTP response body to a single JSON-RPC message.
+// Accepts plain application/json bodies and text/event-stream SSE payloads.
+// Exposed for unit tests and shared HTTP response handling.
+[[nodiscard]] std::string normalize_streamable_http_response_body(std::string_view body);
+
+// Expand ${VAR} / $VAR placeholders using the process environment.
+[[nodiscard]] std::string expand_mcp_env_placeholders(std::string_view value);
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 [[nodiscard]] std::unique_ptr<IMcpClientSession>
 make_mcp_session(const core::config::McpServerConfig& config,
-                 McpSamplingCallback sampling_callback = {});
+                 McpSamplingCallback sampling_callback = {},
+                 std::string_view config_dir = {});
 
 // ---------------------------------------------------------------------------
 // parse_tools_list — converts a tools/list JSON result into McpToolDef vector.

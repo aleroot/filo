@@ -1,4 +1,5 @@
 #include "McpClientSession.hpp"
+#include "McpOAuth.hpp"
 #include "../landrun/LandrunSettings.hpp"
 #include "core/net/NetworkTraffic.hpp"
 #include "core/version/Version.hpp"
@@ -16,6 +17,8 @@
 #include <signal.h>
 
 #include <cerrno>
+#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
 #include <format>
@@ -27,6 +30,8 @@
 #include <iterator>
 #include <utility>
 #include <ranges>
+#include <cstdint>
+#include <limits>
 
 extern char** environ;  // POSIX: the current environment
 
@@ -131,6 +136,94 @@ void set_cloexec(int fd) noexcept {
         throw std::runtime_error("MCP: missing 'result' in response");
     }
     return std::string(simdjson::to_string(result));
+}
+
+[[nodiscard]] bool looks_like_json_rpc_message(std::string_view text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return false;
+    return text[first] == '{' || text[first] == '[';
+}
+
+[[nodiscard]] bool is_json_rpc_response_message(std::string_view json) {
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string ps(json);
+    simdjson::dom::element doc;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return false;
+
+    // Responses carry an id plus result or error. Notifications/requests do not.
+    simdjson::dom::element id_elem;
+    if (doc["id"].get(id_elem) != simdjson::SUCCESS) return false;
+    simdjson::dom::element result_or_error;
+    if (doc["result"].get(result_or_error) == simdjson::SUCCESS) return true;
+    if (doc["error"].get(result_or_error) == simdjson::SUCCESS) return true;
+    return false;
+}
+
+[[nodiscard]] std::string trim_ascii_ws_copy(std::string_view text) {
+    const auto begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string_view::npos) return {};
+    const auto end = text.find_last_not_of(" \t\r\n");
+    return std::string(text.substr(begin, end - begin + 1));
+}
+
+// Parse Streamable HTTP SSE payloads into the last JSON-RPC response message.
+[[nodiscard]] std::string extract_json_rpc_from_sse(std::string_view sse_body) {
+    std::string last_response;
+    std::string current_data;
+    bool have_data = false;
+
+    auto flush_event = [&]() {
+        if (!have_data) {
+            current_data.clear();
+            return;
+        }
+        const std::string payload = trim_ascii_ws_copy(current_data);
+        current_data.clear();
+        have_data = false;
+        if (payload.empty() || payload == "[DONE]") return;
+        if (!looks_like_json_rpc_message(payload)) return;
+        if (is_json_rpc_response_message(payload)) {
+            last_response = payload;
+        }
+    };
+
+    std::size_t pos = 0;
+    while (pos <= sse_body.size()) {
+        const auto next = sse_body.find('\n', pos);
+        const auto line_view = (next == std::string_view::npos)
+            ? sse_body.substr(pos)
+            : sse_body.substr(pos, next - pos);
+        pos = (next == std::string_view::npos) ? sse_body.size() + 1 : next + 1;
+
+        std::string_view line = line_view;
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+
+        if (line.empty()) {
+            flush_event();
+            continue;
+        }
+        if (line.starts_with(':')) {
+            // Comment / keep-alive
+            continue;
+        }
+        if (line.starts_with("data:")) {
+            std::string_view data = line.substr(5);
+            if (!data.empty() && data.front() == ' ') data.remove_prefix(1);
+            if (have_data) current_data.push_back('\n');
+            current_data.append(data);
+            have_data = true;
+        }
+        // Ignore event:/id:/retry: fields for response extraction.
+    }
+    flush_event();
+
+    if (last_response.empty()) {
+        throw std::runtime_error(
+            "MCP HTTP: SSE response did not contain a JSON-RPC result/error");
+    }
+    return last_response;
 }
 
 // Build the tools/call params JSON.
@@ -1106,12 +1199,34 @@ std::string StdioMcpSession::get_prompt(const std::string& prompt_name,
 // ===========================================================================
 
 HttpMcpSession::HttpMcpSession(const core::config::McpServerConfig& config,
-                               McpSamplingCallback sampling_callback)
+                               McpSamplingCallback sampling_callback,
+                               std::chrono::milliseconds request_timeout,
+                               std::shared_ptr<McpHttpAuth> auth)
     : url_(config.url)
     , server_name_(config.name)
+    , auth_(std::move(auth))
+    , request_timeout_(request_timeout.count() > 0
+                           ? request_timeout
+                           : mcp_request_timeout(config, kDefaultMcpHttpTimeout))
     , sampling_callback_(std::move(sampling_callback)) {
     if (url_.empty()) {
         throw std::runtime_error("MCP HTTP session: 'url' is empty");
+    }
+
+    // When auth_ owns Authorization, keep only non-Authorization extras here.
+    // Without auth_, expand all configured headers (static API keys, etc.).
+    extra_headers_.reserve(config.headers.size());
+    for (const auto& [name, value] : config.headers) {
+        if (name.empty()) continue;
+        if (auth_) {
+            std::string lower;
+            lower.reserve(name.size());
+            for (unsigned char c : name) {
+                lower.push_back(static_cast<char>(std::tolower(c)));
+            }
+            if (lower == "authorization") continue;
+        }
+        extra_headers_.emplace_back(name, expand_mcp_env_placeholders(value));
     }
 }
 
@@ -1119,8 +1234,7 @@ HttpMcpSession::~HttpMcpSession() {
     shutdown();
 }
 
-HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& body,
-                                                           bool include_protocol_header) {
+cpr::Header HttpMcpSession::build_request_headers(bool include_protocol_header) const {
     cpr::Header headers{
         {"Content-Type", "application/json"},
         {"Accept",       "application/json, text/event-stream"}
@@ -1131,11 +1245,35 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& bo
     if (!session_id_.empty()) {
         headers["MCP-Session-Id"] = session_id_;
     }
+    for (const auto& [name, value] : extra_headers_) {
+        headers[name] = value;
+    }
+    // Dynamic OAuth / static Authorization from the auth provider (may refresh).
+    if (auth_) {
+        for (const auto& [name, value] : auth_->request_headers()) {
+            headers[name] = value;
+        }
+    }
+    return headers;
+}
+
+HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json_once(
+    const std::string& body,
+    bool include_protocol_header) {
+    cpr::Header headers = build_request_headers(include_protocol_header);
+
+    // Clamp to int32 for cpr; request_timeout_ is already non-negative.
+    const auto timeout_ms = request_timeout_.count() > 0
+        ? static_cast<int32_t>(std::min<std::int64_t>(
+              request_timeout_.count(),
+              static_cast<std::int64_t>(std::numeric_limits<int32_t>::max())))
+        : static_cast<int32_t>(kDefaultMcpHttpTimeout.count());
 
     cpr::Response r = cpr::Post(
         cpr::Url{url_},
         headers,
-        cpr::Body{body}
+        cpr::Body{body},
+        cpr::Timeout{timeout_ms}
     );
     const bool request_observed =
         r.error.code == cpr::ErrorCode::OK || r.status_code != 0 || !r.text.empty();
@@ -1149,15 +1287,44 @@ HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& bo
     if (r.error.code != cpr::ErrorCode::OK) {
         throw std::runtime_error("MCP HTTP: " + r.error.message);
     }
-    if (r.status_code < 200 || r.status_code >= 300) {
-        throw std::runtime_error(
-            std::format("MCP HTTP {}: {}", r.status_code, r.text));
-    }
     return HttpJsonResponse{
         .status_code = r.status_code,
-        .body = r.text,
+        .body = std::move(r.text),
         .headers = std::move(r.header),
     };
+}
+
+HttpMcpSession::HttpJsonResponse HttpMcpSession::post_json(const std::string& body,
+                                                           bool include_protocol_header) {
+    auto response = post_json_once(body, include_protocol_header);
+
+    // Mid-session OAuth recovery: one forced refresh + single retry on 401.
+    if (response.status_code == 401 && auth_ && auth_->can_refresh()) {
+        if (auth_->refresh_after_unauthorized()) {
+            response = post_json_once(body, include_protocol_header);
+        }
+    }
+
+    // 202 Accepted is valid for pure notifications under Streamable HTTP.
+    if (response.status_code < 200 || response.status_code >= 300) {
+        std::string detail = response.body;
+        if (detail.size() > 512) {
+            detail.resize(512);
+            detail += "…";
+        }
+        if (response.status_code == 401 || response.status_code == 403) {
+            throw std::runtime_error(std::format(
+                "MCP HTTP {}: authentication failed for '{}'. "
+                "Run `/mcp login {}` or set Authorization via headers "
+                "(e.g. Bearer API key) and reconnect.",
+                response.status_code,
+                server_name_,
+                server_name_));
+        }
+        throw std::runtime_error(
+            std::format("MCP HTTP {}: {}", response.status_code, detail));
+    }
+    return response;
 }
 
 void HttpMcpSession::update_server_capabilities(std::string_view initialize_result) {
@@ -1193,7 +1360,7 @@ std::string HttpMcpSession::send_request(std::string_view method,
         std::lock_guard lock(request_mutex_);
         raw = post_json(body).body;
     }
-    return extract_result(raw);
+    return extract_result(normalize_streamable_http_response_body(raw));
 }
 
 std::vector<McpToolDef> HttpMcpSession::initialize() {
@@ -1214,7 +1381,8 @@ std::vector<McpToolDef> HttpMcpSession::initialize() {
         }
     }
 
-    const auto init_result = extract_result(init_response.body);
+    const auto init_result = extract_result(
+        normalize_streamable_http_response_body(init_response.body));
     update_server_capabilities(init_result);
     update_negotiated_protocol_version(init_result);
 
@@ -1250,8 +1418,11 @@ void HttpMcpSession::shutdown() noexcept {
     if (session_id_.empty()) return;
 
     try {
-        cpr::Header headers{{"MCP-Session-Id", session_id_}};
-        [[maybe_unused]] const auto response = cpr::Delete(cpr::Url{url_}, headers);
+        cpr::Header headers = build_request_headers(/*include_protocol_header=*/true);
+        [[maybe_unused]] const auto response = cpr::Delete(
+            cpr::Url{url_},
+            headers,
+            cpr::Timeout{static_cast<int32_t>(request_timeout_.count())});
     } catch (...) {}
 
     session_id_.clear();
@@ -1342,20 +1513,114 @@ std::string HttpMcpSession::get_prompt(const std::string& prompt_name,
 }
 
 // ===========================================================================
+// Streamable HTTP helpers (public)
+// ===========================================================================
+
+std::string expand_mcp_env_placeholders(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+
+    for (std::size_t i = 0; i < value.size();) {
+        if (value[i] != '$') {
+            out.push_back(value[i++]);
+            continue;
+        }
+
+        // Escape: $$ -> $
+        if (i + 1 < value.size() && value[i + 1] == '$') {
+            out.push_back('$');
+            i += 2;
+            continue;
+        }
+
+        std::string_view name;
+        std::size_t consume = 0;
+        if (i + 1 < value.size() && value[i + 1] == '{') {
+            const auto close = value.find('}', i + 2);
+            if (close == std::string_view::npos) {
+                out.push_back(value[i++]);
+                continue;
+            }
+            name = value.substr(i + 2, close - (i + 2));
+            consume = close - i + 1;
+        } else {
+            std::size_t j = i + 1;
+            while (j < value.size()) {
+                const char c = value[j];
+                const bool ok =
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '_';
+                if (!ok) break;
+                ++j;
+            }
+            if (j == i + 1) {
+                out.push_back(value[i++]);
+                continue;
+            }
+            name = value.substr(i + 1, j - (i + 1));
+            consume = j - i;
+        }
+
+        if (name.empty()) {
+            out.push_back(value[i++]);
+            continue;
+        }
+
+        const std::string name_str(name);
+        if (const char* env = std::getenv(name_str.c_str())) {
+            out += env;
+        }
+        // Missing env vars expand to empty, matching common shell behavior for optional secrets.
+        i += consume;
+    }
+
+    return out;
+}
+
+std::string normalize_streamable_http_response_body(std::string_view body) {
+    const std::string trimmed = trim_ascii_ws_copy(body);
+    if (trimmed.empty()) {
+        throw std::runtime_error("MCP HTTP: empty response body");
+    }
+
+    if (looks_like_json_rpc_message(trimmed)) {
+        return trimmed;
+    }
+
+    // Streamable HTTP allows text/event-stream responses for requests.
+    // Heuristic: treat bodies with SSE data: lines as SSE even if Content-Type
+    // was not preserved by the transport layer.
+    if (trimmed.find("data:") != std::string::npos) {
+        return extract_json_rpc_from_sse(trimmed);
+    }
+
+    throw std::runtime_error("MCP HTTP: unrecognized response body format");
+}
+
+// ===========================================================================
 // Factory
 // ===========================================================================
 
 std::unique_ptr<IMcpClientSession>
 make_mcp_session(const core::config::McpServerConfig& config,
-                 McpSamplingCallback sampling_callback) {
+                 McpSamplingCallback sampling_callback,
+                 std::string_view config_dir) {
     if (config.transport == "http") {
+        auto auth = make_mcp_http_auth(config, config_dir);
+        const auto timeout = mcp_request_timeout(config, kDefaultMcpHttpTimeout);
         return std::make_unique<HttpMcpSession>(
             config,
-            std::move(sampling_callback));
+            std::move(sampling_callback),
+            timeout,
+            std::move(auth));
     }
+    const auto timeout = mcp_request_timeout(config, kDefaultMcpStdioTimeout);
     return std::make_unique<StdioMcpSession>(
         config,
-        std::move(sampling_callback));
+        std::move(sampling_callback),
+        timeout);
 }
 
 } // namespace core::mcp

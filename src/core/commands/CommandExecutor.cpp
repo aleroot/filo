@@ -645,8 +645,39 @@ std::string format_mcp_servers(const std::vector<core::config::McpServerConfig>&
             if (!server.args.empty()) {
                 out << " " << join(" ", server.args);
             }
+            if (!server.env.empty()) {
+                out << " env=" << server.env.size();
+            }
         } else if (!server.url.empty()) {
             out << " " << server.url;
+            if (!server.auth.empty()) {
+                out << " auth=" << server.auth;
+            }
+            if (server.request_timeout_ms > 0) {
+                out << " timeout_ms=" << server.request_timeout_ms;
+            }
+            if (!server.headers.empty()) {
+                out << " headers=";
+                bool first = true;
+                for (const auto& [name, value] : server.headers) {
+                    if (!first) out << ',';
+                    first = false;
+                    out << name;
+                    // Never print secret values (Authorization, API keys).
+                    const auto lower = to_lower_ascii(name);
+                    if (lower.find("authorization") != std::string::npos ||
+                        lower.find("api-key") != std::string::npos ||
+                        lower.find("api_key") != std::string::npos ||
+                        lower.find("token") != std::string::npos ||
+                        lower.find("secret") != std::string::npos) {
+                        out << "=<redacted>";
+                    } else if (value.size() > 24) {
+                        out << '=' << value.substr(0, 12) << "…";
+                    } else {
+                        out << '=' << value;
+                    }
+                }
+            }
         }
         out << '\n';
     }
@@ -3188,8 +3219,16 @@ public:
                 "\nℹ  Usage:\n"
                 "   /mcp list\n"
                 "   /mcp add [--global|--workspace] [--env KEY=VALUE ...] <name> stdio <command> [args...]\n"
-                "   /mcp add [--global|--workspace] <name> http <url>\n"
-                "   /mcp remove [--global|--workspace] <name>\n");
+                "   /mcp add [--global|--workspace] [--oauth|--no-oauth] [--timeout <seconds>] [--header 'Name: value' ...] <name> http <url>\n"
+                "   /mcp login <name>     Interactive OAuth for a remote HTTP MCP server\n"
+                "   /mcp logout <name>    Clear saved OAuth tokens for a server\n"
+                "   /mcp remove [--global|--workspace] <name>\n"
+                "\n"
+                "   Examples:\n"
+                "   /mcp add --global linear http https://mcp.linear.app/mcp\n"
+                "   /mcp login linear\n"
+                "   /mcp add --global --header \"Authorization: Bearer ${LINEAR_API_KEY}\" linear-key http https://mcp.linear.app/mcp\n"
+                "   /mcp add --global linear stdio npx -y mcp-remote https://mcp.linear.app/mcp\n");
         };
 
         if (tokens.empty() || to_lower_ascii(tokens.front()) == "list") {
@@ -3201,7 +3240,11 @@ public:
         std::size_t index = 1;
         core::config::SettingsScope scope = core::config::SettingsScope::Workspace;
 
-        auto consume_scope_options = [&](std::vector<std::string>& env_values) -> bool {
+        std::optional<std::string> auth_override;
+        std::optional<int> timeout_ms_override;
+        auto consume_scope_options =
+            [&](std::vector<std::string>& env_values,
+                std::vector<std::pair<std::string, std::string>>* headers = nullptr) -> bool {
             while (index < tokens.size()) {
                 const std::string option = to_lower_ascii(tokens[index]);
                 if (option == "--global") {
@@ -3214,12 +3257,83 @@ public:
                     ++index;
                     continue;
                 }
+                if (option == "--oauth") {
+                    auth_override = "oauth";
+                    ++index;
+                    continue;
+                }
+                if (option == "--no-oauth") {
+                    auth_override = "none";
+                    ++index;
+                    continue;
+                }
+                if (option == "--timeout" || option == "--timeout-ms") {
+                    if (index + 1 >= tokens.size()) {
+                        ctx.append_history_fn(
+                            "\n✗  /mcp --timeout requires a positive duration.\n");
+                        return false;
+                    }
+                    const std::string raw = tokens[index + 1];
+                    char* end = nullptr;
+                    const double value = std::strtod(raw.c_str(), &end);
+                    if (end == raw.c_str() || value <= 0) {
+                        ctx.append_history_fn(
+                            "\n✗  /mcp --timeout must be a positive number "
+                            "(seconds, or milliseconds with --timeout-ms).\n");
+                        return false;
+                    }
+                    const bool as_ms = (option == "--timeout-ms")
+                        || raw.ends_with("ms");
+                    double ms = as_ms ? value : value * 1000.0;
+                    if (raw.ends_with("s") && !raw.ends_with("ms")) {
+                        ms = value * 1000.0;
+                    }
+                    if (ms < 1.0) ms = 1.0;
+                    if (ms > 86'400'000.0) ms = 86'400'000.0;
+                    timeout_ms_override = static_cast<int>(ms);
+                    index += 2;
+                    continue;
+                }
                 if (option == "--env") {
                     if (index + 1 >= tokens.size()) {
                         ctx.append_history_fn("\n✗  /mcp --env requires KEY=VALUE.\n");
                         return false;
                     }
                     env_values.push_back(std::string(tokens[index + 1]));
+                    index += 2;
+                    continue;
+                }
+                if (option == "--header") {
+                    if (headers == nullptr) {
+                        ctx.append_history_fn(
+                            "\n✗  /mcp --header is only valid for http MCP servers.\n");
+                        return false;
+                    }
+                    if (index + 1 >= tokens.size()) {
+                        ctx.append_history_fn(
+                            "\n✗  /mcp --header requires 'Name: value' or 'Name=value'.\n");
+                        return false;
+                    }
+                    const std::string_view raw = tokens[index + 1];
+                    const auto sep = raw.find_first_of(":=");
+                    if (sep == std::string_view::npos || sep == 0) {
+                        ctx.append_history_fn(
+                            "\n✗  /mcp --header requires 'Name: value' or 'Name=value'.\n");
+                        return false;
+                    }
+                    std::string name(raw.substr(0, sep));
+                    std::string value(raw.substr(sep + 1));
+                    while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) {
+                        name.pop_back();
+                    }
+                    if (!value.empty() && value.front() == ' ') {
+                        value.erase(value.begin());
+                    }
+                    if (name.empty()) {
+                        ctx.append_history_fn("\n✗  /mcp --header name cannot be empty.\n");
+                        return false;
+                    }
+                    headers->emplace_back(std::move(name), std::move(value));
                     index += 2;
                     continue;
                 }
@@ -3235,7 +3349,8 @@ public:
             }
 
             std::vector<std::string> env_values;
-            if (!consume_scope_options(env_values)) {
+            std::vector<std::pair<std::string, std::string>> header_values;
+            if (!consume_scope_options(env_values, &header_values)) {
                 return;
             }
             if (index + 2 >= tokens.size()) {
@@ -3247,8 +3362,14 @@ public:
             server.name = std::string(tokens[index++]);
             server.transport = to_lower_ascii(tokens[index++]);
             server.env = std::move(env_values);
+            server.headers = std::move(header_values);
 
             if (server.transport == "stdio") {
+                if (!server.headers.empty()) {
+                    ctx.append_history_fn(
+                        "\n✗  /mcp --header is only valid for http MCP servers.\n");
+                    return;
+                }
                 if (index >= tokens.size()) {
                     usage();
                     return;
@@ -3256,6 +3377,9 @@ public:
                 server.command = std::string(tokens[index++]);
                 while (index < tokens.size()) {
                     server.args.push_back(std::string(tokens[index++]));
+                }
+                if (timeout_ms_override.has_value()) {
+                    server.request_timeout_ms = *timeout_ms_override;
                 }
             } else if (server.transport == "http") {
                 if (index >= tokens.size()) {
@@ -3266,6 +3390,15 @@ public:
                 if (index != tokens.size()) {
                     usage();
                     return;
+                }
+                if (auth_override.has_value()) {
+                    server.auth = *auth_override;
+                } else if (server.headers.empty() && server.url.starts_with("https://")) {
+                    // Default remote HTTPS MCP servers to interactive OAuth.
+                    server.auth = "oauth";
+                }
+                if (timeout_ms_override.has_value()) {
+                    server.request_timeout_ms = *timeout_ms_override;
                 }
             } else {
                 ctx.append_history_fn("\n✗  MCP transport must be `stdio` or `http`.\n");
@@ -3282,6 +3415,55 @@ public:
             if (result.ok) {
                 ctx.append_history_fn(format_mcp_servers(ctx.list_mcp_servers_fn()));
             }
+            return;
+        }
+
+        if (action == "login") {
+            if (!ctx.login_mcp_server_fn) {
+                ctx.append_history_fn("\n✗  MCP OAuth login is unavailable in this context.\n");
+                return;
+            }
+            std::vector<std::string> ignored_env;
+            if (!consume_scope_options(ignored_env)) {
+                return;
+            }
+            if (index >= tokens.size()) {
+                usage();
+                return;
+            }
+            const auto result = ctx.login_mcp_server_fn(tokens[index]);
+            ctx.append_history_fn(std::format(
+                "\n{}  {}\n",
+                result.ok ? "✓" : "✗",
+                result.message.empty()
+                    ? (result.ok ? "MCP OAuth login complete." : "MCP OAuth login failed.")
+                    : result.message));
+            if (result.ok && ctx.list_mcp_servers_fn) {
+                ctx.append_history_fn(format_mcp_servers(ctx.list_mcp_servers_fn()));
+            }
+            return;
+        }
+
+        if (action == "logout") {
+            if (!ctx.logout_mcp_server_fn) {
+                ctx.append_history_fn("\n✗  MCP OAuth logout is unavailable in this context.\n");
+                return;
+            }
+            std::vector<std::string> ignored_env;
+            if (!consume_scope_options(ignored_env)) {
+                return;
+            }
+            if (index >= tokens.size()) {
+                usage();
+                return;
+            }
+            const auto result = ctx.logout_mcp_server_fn(tokens[index]);
+            ctx.append_history_fn(std::format(
+                "\n{}  {}\n",
+                result.ok ? "✓" : "✗",
+                result.message.empty()
+                    ? (result.ok ? "MCP OAuth session cleared." : "MCP OAuth logout failed.")
+                    : result.message));
             return;
         }
 
