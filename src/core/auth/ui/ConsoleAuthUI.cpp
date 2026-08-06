@@ -1,7 +1,6 @@
 #include "ConsoleAuthUI.hpp"
+#include "core/auth/SecretInput.hpp"
 #include <iostream>
-#include <algorithm>
-#include <cctype>
 #if !defined(_WIN32)
 #include <termios.h>
 #include <unistd.h>
@@ -56,15 +55,7 @@ std::string ConsoleAuthUI::prompt_secret(const std::string& prompt_label) {
     }
 #endif
 
-    // Trim whitespace
-    input.erase(input.begin(), std::find_if(input.begin(), input.end(), [](unsigned char ch) {
-        return !std::isspace(ch);
-    }));
-    input.erase(std::find_if(input.rbegin(), input.rend(), [](unsigned char ch) {
-        return !std::isspace(ch);
-    }).base(), input.end());
-
-    return input;
+    return core::auth::normalize_secret_input(input);
 }
 
 void ConsoleAuthUI::show_success(const std::string& message) {

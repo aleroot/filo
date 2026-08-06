@@ -405,7 +405,7 @@ TEST_CASE("resolve_skill_turn routes Token Plan model hints to Token Plan only",
             "qwen-token-plan": {
                 "api_type": "dashscope",
                 "base_url": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-                "model": "qwen3.8-max-preview"
+                "model": "qwen3.8-max"
             }
         }
     })");

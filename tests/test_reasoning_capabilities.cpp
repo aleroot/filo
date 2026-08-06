@@ -77,7 +77,7 @@ TEST_CASE("Kimi protocol reports selectable and required reasoning modes",
 TEST_CASE("DashScope protocols own Qwen reasoning policy", "[llm][effort][qwen]") {
     DashScopeProtocol chat;
     DashScopeResponsesProtocol responses;
-    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
+    for (const auto model : {"qwen3.8-max", "qwen3.7-max",
                              "qwen3.7-plus", "qwen3.6-flash", "qwen3-coder-plus"}) {
         CAPTURE(model);
         for (const auto* protocol : {static_cast<ApiProtocolBase*>(&chat),

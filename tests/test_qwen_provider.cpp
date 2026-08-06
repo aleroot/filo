@@ -442,7 +442,7 @@ TEST_CASE("DashScopeProtocol - effort can disable hybrid thinking",
 
 TEST_CASE("DashScopeProtocol - qwen3.8 sends the native effort tier alone",
           "[qwen][serializer][thinking][effort]") {
-    auto req = make_simple_request("qwen3.8-max-preview");
+    auto req = make_simple_request("qwen3.8-max");
     req.effort = "max";
 
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
@@ -455,7 +455,7 @@ TEST_CASE("DashScopeProtocol - qwen3.8 sends the native effort tier alone",
 
 TEST_CASE("DashScopeProtocol - qwen3.8 mandatory thinking rejects disable on the wire",
           "[qwen][serializer][thinking][effort]") {
-    auto req = make_simple_request("qwen3.8-max-preview");
+    auto req = make_simple_request("qwen3.8-max");
     req.effort = "none";
 
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
@@ -534,7 +534,7 @@ TEST_CASE("DashScopeProtocol - omits Qwen thinking fields for third-party models
 
 TEST_CASE("DashScope Responses - Token Plan payload enables native features",
           "[qwen][responses][token-plan]") {
-    auto req = make_simple_request("qwen3.8-max-preview");
+    auto req = make_simple_request("qwen3.8-max");
     req.prompt_cache_key = "filo-session";
     req.effort = "max";
 
@@ -555,7 +555,7 @@ TEST_CASE("DashScope Responses - Token Plan payload enables native features",
 
 TEST_CASE("DashScope Responses retains its hosted/local tool serialization policy",
           "[qwen][responses][token-plan][isolation]") {
-    auto req = make_simple_request("qwen3.8-max-preview");
+    auto req = make_simple_request("qwen3.8-max");
     Tool local_tool;
     local_tool.function.name = "read_file";
     local_tool.function.description = "Read a file";
@@ -605,7 +605,7 @@ TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
 TEST_CASE("Qwen Token Plan hosted tools are selected by model generation",
           "[qwen][responses][token-plan][traits]") {
     CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
-        "qwen3.8-max-preview"));
+        "qwen3.8-max"));
     CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
         "qwen3.7-plus"));
     CHECK(core::llm::qwen_model_supports_token_plan_hosted_tools(
@@ -887,7 +887,7 @@ TEST_CASE("DashScope Responses - does not concatenate provisional and completed 
 TEST_CASE("Token Plan follows Qwen Code's Chat Completions generation path",
           "[qwen][token-plan][routing]") {
     DashScopeTokenPlanProtocol protocol;
-    const auto req = make_simple_request("qwen3.8-max-preview");
+    const auto req = make_simple_request("qwen3.8-max");
     const auto payload = protocol.serialize(req);
 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
@@ -902,7 +902,7 @@ TEST_CASE("Token Plan sends local images as Chat Completions data URLs",
     const auto image = make_temp_qwen_image_file();
 
     ChatRequest req;
-    req.model = "qwen3.8-max-preview";
+    req.model = "qwen3.8-max";
     req.messages.push_back(Message{
         .role = "user",
         .content = "Read the error in this screenshot.",
@@ -1169,7 +1169,7 @@ TEST_CASE("ModelRegistry - qwen3-coder-plus is registered", "[qwen][registry]") 
 TEST_CASE("ModelRegistry - Token Plan featured models have first-class cards",
           "[qwen][registry][token-plan]") {
     const auto& registry = ModelRegistry::instance();
-    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
+    for (const auto model : {"qwen3.8-max", "qwen3.7-max",
                              "qwen3.7-plus", "qwen3.6-plus",
                              "qwen3.6-flash"}) {
         CAPTURE(model);
@@ -1190,7 +1190,7 @@ TEST_CASE("ModelRegistry - Token Plan vision and structured-output capabilities 
         REQUIRE_FALSE(registry.supports(model, ModelCapability::Vision));
         REQUIRE_FALSE(registry.supports(model, ModelCapability::VideoInput));
     }
-    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-plus",
+    for (const auto model : {"qwen3.8-max", "qwen3.7-plus",
                              "qwen3.6-plus"}) {
         CAPTURE(model);
         REQUIRE(registry.supports(model, ModelCapability::Vision));

@@ -1073,9 +1073,9 @@ std::vector<ModelInfo> build_qwen_catalog() {
     return {
         // ── Current Qwen Cloud / Token Plan family ───────────────────────
         {
-            .canonical_id      = "qwen3.8-max-preview",
+            .canonical_id      = "qwen3.8-max",
             .aliases           = {},
-            .display_name      = "Qwen3.8 Max Preview (Token Plan)",
+            .display_name      = "Qwen3.8 Max (Token Plan)",
             .provider          = "qwen",
             .context_window    = 1'000'000,
             .max_output_tokens = 64'000,

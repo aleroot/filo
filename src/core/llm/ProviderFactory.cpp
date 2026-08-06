@@ -21,6 +21,7 @@
 #include "../auth/ApiKeyCredentialSource.hpp"
 #include "../auth/AuthenticationManager.hpp"
 #include "../auth/GoogleCodeAssist.hpp"
+#include "../auth/SecretInput.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
@@ -39,16 +40,18 @@ enum class OpenAIWireApi { ChatCompletions, Responses };
 std::string resolve_key(
     std::string_view config_key,
     std::string_view env_var) {
-    if (!config_key.empty()) return std::string(config_key);
+    if (!config_key.empty()) {
+        return core::auth::normalize_secret_input(config_key);
+    }
     if (!env_var.empty()) {
         if (const char* e = std::getenv(std::string(env_var).c_str());
             e && *e) {
-            return e;
+            return core::auth::normalize_secret_input(e);
         }
         if (env_var == "KIMI_API_KEY") {
             if (const char* e = std::getenv("MOONSHOT_API_KEY");
                 e && *e) {
-                return e;
+                return core::auth::normalize_secret_input(e);
             }
         }
     }

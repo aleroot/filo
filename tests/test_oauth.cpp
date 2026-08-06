@@ -15,6 +15,7 @@
 #include "core/auth/OAuthCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
 #include "core/auth/AuthenticationManager.hpp"
+#include "core/auth/SecretInput.hpp"
 #include "core/config/ConfigManager.hpp"
 
 #include <algorithm>
@@ -1051,6 +1052,36 @@ TEST_CASE("AuthenticationManager login(qwen) configures Token Plan API key",
     REQUIRE(overlay.find(
         R"("qwen-token-plan":{"api_key":"test-token-plan-key"})")
         != std::string::npos);
+}
+
+TEST_CASE("AuthenticationManager strips bracketed paste markers from API keys",
+          "[AuthenticationManager][auth][bracketed-paste]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("\x1b[200~sk-sp-test-token-plan-key\x1b[201~\n");
+    ScopedCinRedirect redirect(input);
+    manager.login("qwen");
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+
+    REQUIRE(overlay.find(R"("api_key":"sk-sp-test-token-plan-key")")
+            != std::string::npos);
+    REQUIRE(overlay.find("\x1b[200~") == std::string::npos);
+    REQUIRE(overlay.find("\x1b[201~") == std::string::npos);
+}
+
+TEST_CASE("normalize_secret_input repairs persisted bracketed-paste credentials",
+          "[auth][bracketed-paste]") {
+    REQUIRE(core::auth::normalize_secret_input(
+                " \x1b[200~sk-sp-existing-key\x1b[201~ ")
+            == "sk-sp-existing-key");
+    REQUIRE(core::auth::normalize_secret_input(
+                "\x1b[200~\x1b[200~nested\x1b[201~\x1b[201~")
+            == "nested");
 }
 
 // ── OpenAIOAuthFlow — static pure functions ───────────────────────────────────
