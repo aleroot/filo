@@ -23,6 +23,13 @@
 
 namespace core::llm::protocols {
 
+[[nodiscard]] constexpr bool is_openai_retryable_status(
+    int status_code) noexcept {
+    return status_code == 408 || status_code == 409 || status_code == 429
+        || status_code == 500 || status_code == 502 || status_code == 503
+        || status_code == 504 || status_code == 529;
+}
+
 /**
  * @brief Parse a single SSE data-line JSON chunk from any OpenAI-compatible API.
  *
@@ -105,6 +112,8 @@ public:
     }
 
     void on_response(const HttpResponse& response) override;
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {

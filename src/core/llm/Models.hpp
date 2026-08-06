@@ -3,9 +3,11 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <ranges>
 #include <unordered_map>
 #include <sstream>
 #include <iomanip>
+#include <iterator>
 #include <charconv>
 #include <cstdint>
 #include <filesystem>
@@ -650,6 +652,12 @@ struct Serializer {
         EveryAssistant,
     };
 
+    struct PromptCacheAnchors {
+        bool first_system_message = false;
+        bool latest_message = false;
+        bool last_tool = false;
+    };
+
     struct Options {
         // Vendor extension: providers disagree on whether historical assistant
         // reasoning is forbidden, replayed only when present, or structurally
@@ -664,6 +672,10 @@ struct Serializer {
         // Some providers need provider-specific schema normalization.
         std::function<std::string(std::string_view, bool)> transform_tool_schema;
         std::function<std::optional<std::string>(const Tool&)> serialize_tool_override;
+        // Provider-neutral cache anchors. Protocol adapters opt in and own the
+        // wire contract; the shared serializer only applies the requested JSON
+        // annotation to the selected content/tool objects.
+        PromptCacheAnchors prompt_cache;
     };
 
     static std::string serialize(const ChatRequest& req) {
@@ -712,10 +724,18 @@ struct Serializer {
             payload += R"(,"tools":[)";
             for (size_t i = 0; i < req.tools.size(); ++i) {
                 const auto& def = req.tools[i].function;
+                std::string serialized_tool;
                 if (options.serialize_tool_override) {
                     if (auto serialized = options.serialize_tool_override(req.tools[i]);
                         serialized.has_value()) {
-                        payload += *serialized;
+                        serialized_tool = std::move(*serialized);
+                        if (options.prompt_cache.last_tool
+                            && i + 1 == req.tools.size()
+                            && serialized_tool.ends_with('}')) {
+                            serialized_tool.pop_back();
+                            serialized_tool += R"(,"cache_control":{"type":"ephemeral"}})";
+                        }
+                        payload += serialized_tool;
                         if (i < req.tools.size() - 1) payload += ",";
                         continue;
                     }
@@ -729,18 +749,35 @@ struct Serializer {
                     return std::string(schema);
                 };
 
-                payload += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":)";
+                serialized_tool += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":)";
                 const std::string canonical_schema =
                     core::tools::schema::canonical_input_schema(def);
-                payload += transform_schema(canonical_schema, false);
-                payload += "}}";
+                serialized_tool += transform_schema(canonical_schema, false);
+                serialized_tool += "}}";
+                if (options.prompt_cache.last_tool && i + 1 == req.tools.size()) {
+                    serialized_tool.pop_back();
+                    serialized_tool += R"(,"cache_control":{"type":"ephemeral"}})";
+                }
+                payload += serialized_tool;
                 if (i < req.tools.size() - 1) payload += ",";
             }
             payload += "]";
         }
 
         payload += R"(,"messages":[)";
+        const auto first_system = std::ranges::find_if(
+            req.messages, [](const Message& message) {
+                return message.role == "system";
+            });
+        const std::size_t first_system_index = first_system == req.messages.end()
+            ? req.messages.size()
+            : static_cast<std::size_t>(std::distance(req.messages.begin(), first_system));
         for (size_t i = 0; i < req.messages.size(); ++i) {
+            const bool cache_message =
+                (options.prompt_cache.first_system_message
+                 && i == first_system_index)
+                || (options.prompt_cache.latest_message
+                    && i + 1 == req.messages.size());
             payload += R"({"role":")";
             payload += core::utils::escape_json_string(req.messages[i].role);
             payload += "\"";
@@ -752,8 +789,8 @@ struct Serializer {
                 payload += R"(,"tool_call_id":")" + core::utils::escape_json_string(req.messages[i].tool_call_id) + "\"";
             }
             if (!req.messages[i].content_parts.empty()) {
-                payload += R"(,"content":[)";
-                bool first_part = true;
+                std::vector<std::string> serialized_parts;
+                serialized_parts.reserve(req.messages[i].content_parts.size() + 1);
                 bool has_text_part = false;
                 for (const auto& part : req.messages[i].content_parts) {
                     if (part.type == ContentPartType::Text && !part.text.empty()) {
@@ -764,61 +801,80 @@ struct Serializer {
                 if (!has_text_part && !req.messages[i].content.empty()
                     && req.messages[i].content
                         != render_content_parts_as_text(req.messages[i].content_parts)) {
-                    payload += R"({"type":"text","text":")";
-                    payload += core::utils::escape_json_string(req.messages[i].content);
-                    payload += R"("})";
-                    first_part = false;
+                    serialized_parts.push_back(
+                        R"({"type":"text","text":")"
+                        + core::utils::escape_json_string(req.messages[i].content)
+                        + R"("})");
                 }
                 for (const auto& part : req.messages[i].content_parts) {
                     if (part.type == ContentPartType::Text) {
                         if (part.text.empty()) continue;
-                        if (!first_part) payload += ",";
-                        payload += R"({"type":"text","text":")";
-                        payload += core::utils::escape_json_string(part.text);
-                        payload += R"("})";
-                        first_part = false;
+                        serialized_parts.push_back(
+                            R"({"type":"text","text":")"
+                            + core::utils::escape_json_string(part.text)
+                            + R"("})");
                         continue;
                     }
 
                     if (const auto encoded = encode_media_part(part); encoded.has_value()) {
-                        if (!first_part) payload += ",";
+                        std::string serialized_part;
                         const std::string_view kind = media_kind(encoded->type);
-                        payload += R"({"type":")";
-                        payload += kind;
-                        payload += R"(_url",")";
-                        payload += kind;
-                        payload += R"(_url":{"url":")";
-                        payload += core::utils::escape_json_string(encoded->data_url());
-                        payload += R"(")";
+                        serialized_part += R"({"type":")";
+                        serialized_part += kind;
+                        serialized_part += R"(_url",")";
+                        serialized_part += kind;
+                        serialized_part += R"(_url":{"url":")";
+                        serialized_part += core::utils::escape_json_string(encoded->data_url());
+                        serialized_part += R"(")";
                         if (!encoded->media_id.empty()) {
-                            payload += R"(,"id":")";
-                            payload += core::utils::escape_json_string(encoded->media_id);
-                            payload += R"(")";
+                            serialized_part += R"(,"id":")";
+                            serialized_part += core::utils::escape_json_string(encoded->media_id);
+                            serialized_part += R"(")";
                         }
                         if (encoded->type == ContentPartType::Image) {
-                            payload += R"(,"detail":")";
-                            payload += core::utils::escape_json_string(encoded->detail);
-                            payload += R"(")";
+                            serialized_part += R"(,"detail":")";
+                            serialized_part += core::utils::escape_json_string(encoded->detail);
+                            serialized_part += R"(")";
                         }
-                        payload += "}}";
-                        first_part = false;
+                        serialized_part += "}}";
+                        serialized_parts.push_back(std::move(serialized_part));
                     } else {
-                        if (!first_part) payload += ",";
-                        payload += R"({"type":"text","text":")";
-                        payload += core::utils::escape_json_string(
-                            unavailable_media_attachment_text(part.type, media_reference(part)));
-                        payload += R"("})";
-                        first_part = false;
+                        serialized_parts.push_back(
+                            R"({"type":"text","text":")"
+                            + core::utils::escape_json_string(
+                                unavailable_media_attachment_text(
+                                    part.type, media_reference(part)))
+                            + R"("})");
                     }
                 }
-                if (first_part) {
-                    payload += R"({"type":"text","text":")";
-                    payload += core::utils::escape_json_string(req.messages[i].content);
-                    payload += R"("})";
+                if (serialized_parts.empty()) {
+                    serialized_parts.push_back(
+                        R"({"type":"text","text":")"
+                        + core::utils::escape_json_string(req.messages[i].content)
+                        + R"("})");
+                }
+                if (cache_message && serialized_parts.back().ends_with('}')) {
+                    serialized_parts.back().pop_back();
+                    serialized_parts.back() +=
+                        R"(,"cache_control":{"type":"ephemeral"}})";
+                }
+                payload += R"(,"content":[)";
+                for (std::size_t part_index = 0;
+                     part_index < serialized_parts.size(); ++part_index) {
+                    if (part_index != 0) payload += ',';
+                    payload += serialized_parts[part_index];
                 }
                 payload += "]";
             } else if (!req.messages[i].content.empty()) {
-                payload += R"(,"content":")" + core::utils::escape_json_string(req.messages[i].content) + "\"";
+                if (cache_message) {
+                    payload += R"(,"content":[{"type":"text","text":")"
+                        + core::utils::escape_json_string(req.messages[i].content)
+                        + R"(","cache_control":{"type":"ephemeral"}}])";
+                } else {
+                    payload += R"(,"content":")"
+                        + core::utils::escape_json_string(req.messages[i].content)
+                        + "\"";
+                }
             } else if (req.messages[i].tool_calls.empty()) {
                 payload += R"(,"content":null)";
             }

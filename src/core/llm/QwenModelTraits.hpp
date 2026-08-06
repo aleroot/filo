@@ -11,5 +11,9 @@ namespace core::llm {
     std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_token_plan_hosted_tools(
     std::string_view model_id);
+[[nodiscard]] bool qwen_model_supports_tiered_effort(
+    std::string_view model_id);
+[[nodiscard]] bool qwen_model_requires_thinking(
+    std::string_view model_id);
 
 } // namespace core::llm

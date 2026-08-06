@@ -43,6 +43,22 @@ public:
 
 };
 
+class RetryableServerErrorProtocol final : public OpenAIProtocol {
+public:
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return "retryable_test";
+    }
+
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
+        return std::make_unique<RetryableServerErrorProtocol>(*this);
+    }
+
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override {
+        return response.status_code == 500;
+    }
+};
+
 class ScopedServerStop {
 public:
     explicit ScopedServerStop(httplib::Server& server)
@@ -133,6 +149,160 @@ TEST_CASE("HttpLLMProvider preserves streamed non-2xx JSON error bodies",
                Catch::Matchers::ContainsSubstring("Upstream diagnostic details"));
     CHECK_THAT(error->content,
                !Catch::Matchers::ContainsSubstring("[HTTP Error: 418 - ]"));
+}
+
+TEST_CASE("HttpLLMProvider honors protocol retry policy for server errors",
+          "[integration][http][retry]") {
+    httplib::Server server;
+    std::atomic<int> attempts{0};
+    server.Post("/v1/chat/completions",
+                [&](const httplib::Request&, httplib::Response& res) {
+        if (++attempts == 1) {
+            res.status = 500;
+            res.set_content(R"({"error":{"message":"temporary"}})",
+                            "application/json");
+            return;
+        }
+        res.set_content(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n"
+            "data: [DONE]\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "test-model",
+        std::make_unique<RetryableServerErrorProtocol>());
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(attempts.load() == 2);
+    CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
+        return chunk.content == "recovered";
+    }));
+}
+
+TEST_CASE("HttpLLMProvider aborts a request whose response never starts",
+          "[integration][http][timeout]") {
+    httplib::Server server;
+    server.Post("/v1/chat/completions",
+                [](const httplib::Request&, httplib::Response& res) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(750));
+        res.set_content("data: [DONE]\n\n", "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::Unknown,
+        std::string{},
+        nullptr,
+        nullptr,
+        std::string{},
+        HttpStreamTransportOptions{
+            .timeouts = {
+                .response_start = std::chrono::milliseconds(100),
+                .inactivity = std::chrono::seconds(1),
+            },
+            .retries = {.max_retries = 0},
+        });
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    const auto error = std::ranges::find_if(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error;
+    });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content,
+               Catch::Matchers::ContainsSubstring("request timeout"));
+}
+
+TEST_CASE("HttpLLMProvider aborts an inactive response stream",
+          "[integration][http][timeout]") {
+    httplib::Server server;
+    server.Post("/v1/chat/completions",
+                [](const httplib::Request&, httplib::Response& res) {
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [phase = 0](std::size_t, httplib::DataSink& sink) mutable {
+                if (phase++ == 0) {
+                    return sink.write(": connected\n\n", 13);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(750));
+                sink.write("data: [DONE]\n\n", 14);
+                sink.done();
+                return false;
+            });
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "test-model",
+        std::make_unique<OpenAIProtocol>(),
+        core::config::ApiType::Unknown,
+        std::string{},
+        nullptr,
+        nullptr,
+        std::string{},
+        HttpStreamTransportOptions{
+            .timeouts = {
+                .response_start = std::chrono::seconds(1),
+                .inactivity = std::chrono::milliseconds(100),
+            },
+            .retries = {.max_retries = 0},
+        });
+
+    ChatRequest request;
+    request.model = "test-model";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    const auto error = std::ranges::find_if(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error;
+    });
+    REQUIRE(error != chunks.end());
+    CHECK_THAT(error->content,
+               Catch::Matchers::ContainsSubstring("idle timeout"));
 }
 
 TEST_CASE("HttpLLMProvider reports an actionable, safely retryable OAuth recovery",

@@ -1155,4 +1155,9 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
     }
 }
 
+bool OpenAIResponsesProtocol::is_retryable(
+    const HttpResponse& response) const noexcept {
+    return is_openai_retryable_status(response.status_code);
+}
+
 } // namespace core::llm::protocols

@@ -31,6 +31,7 @@
 #include "ModelCatalogSelector.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
+#include "transport/StreamResilience.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include <atomic>
@@ -45,6 +46,8 @@ namespace core::llm {
 namespace transport {
 class CurlWebSocketTransport;
 }
+
+using HttpStreamTransportOptions = transport::HttpStreamResiliencePolicy;
 
 /**
  * @brief Generic HTTP LLM provider driven by an ApiProtocolBase.
@@ -86,7 +89,8 @@ public:
                     std::string                                    provider_name = {},
                     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source = {},
                     std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector = {},
-                    std::string                                    service_id = {});
+                    std::string                                    service_id = {},
+                    HttpStreamTransportOptions                     transport_options = {});
     ~HttpLLMProvider() override;
 
     void stream_response(const ChatRequest&                    request,
@@ -183,6 +187,7 @@ private:
     std::string                                    service_id_;
     std::shared_ptr<IProviderClientIdentitySource>  client_identity_source_;
     std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector_;
+    HttpStreamTransportOptions                      transport_options_;
     WebSocketTransportState                        websocket_;
     std::atomic_bool                               cancel_requested_{false};
 };

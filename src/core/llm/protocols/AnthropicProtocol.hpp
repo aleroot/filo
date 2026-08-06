@@ -180,6 +180,9 @@ public:
                                          std::string_view model) const override;
 
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
+    [[nodiscard]] bool requires_terminal_event() const noexcept override {
+        return true;
+    }
     [[nodiscard]] ParseResult      parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name()  const noexcept override { return "anthropic"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(

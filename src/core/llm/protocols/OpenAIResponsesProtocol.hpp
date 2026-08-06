@@ -50,6 +50,8 @@ public:
         std::string_view model) const noexcept override;
 
     void on_response(const HttpResponse& response) override;
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
     [[nodiscard]] const std::string& last_response_id() const noexcept { return last_response_id_; }
 

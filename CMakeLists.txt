@@ -198,6 +198,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/KimiModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
+    src/core/llm/transport/StreamResilience.cpp
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
     src/core/llm/ModelMetadata.cpp
@@ -573,6 +574,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_complexity_scorer.cpp
     tests/test_prompt_input.cpp
     tests/test_http_response_lifecycle.cpp
+    tests/test_stream_resilience.cpp
     tests/test_session.cpp
     tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp

@@ -220,6 +220,48 @@ TEST_CASE("Token Plan - 429 error message distinguishes quota from rate limit",
     REQUIRE_THAT(rpm_msg, Catch::Matchers::ContainsSubstring("Reduce request frequency"));
 }
 
+TEST_CASE("Token Plan - allocation quota SSE errors fail fast",
+          "[qwen][sse][errors][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event:error\n"
+        ":HTTP_STATUS/429\n"
+        R"(data:{"request_id":"req-123","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"})");
+
+    REQUIRE(result.stream_error);
+    CHECK_FALSE(result.retryable_stream_error);
+    CHECK(result.stream_error_type == "Throttling.AllocationQuota");
+    CHECK(result.stream_error_message == "Allocated quota exceeded");
+    CHECK(protocol.last_rate_limit().is_rate_limited);
+    CHECK(protocol.last_rate_limit().unified_overage_status == "rejected");
+}
+
+TEST_CASE("Token Plan - transient SSE throttles remain retryable",
+          "[qwen][sse][errors][retry]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto result = protocol.parse_event(
+        "event: error\n"
+        R"(data: {"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"})");
+
+    REQUIRE(result.stream_error);
+    CHECK(result.retryable_stream_error);
+    CHECK(protocol.last_rate_limit().is_rate_limited);
+    CHECK(protocol.last_rate_limit().unified_overage_status.empty());
+}
+
+TEST_CASE("Token Plan - error_finish chunks are surfaced as stream errors",
+          "[qwen][sse][errors]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data: {"choices":[{"delta":{"content":"Throttling: TPM limit reached"},"finish_reason":"error_finish","index":0}]})");
+
+    REQUIRE(result.stream_error);
+    CHECK(result.retryable_stream_error);
+    CHECK(result.stream_error_type == "error_finish");
+    CHECK(result.stream_error_message == "Throttling: TPM limit reached");
+    CHECK(result.chunks.empty());
+}
+
 TEST_CASE("Qwen catalog selector chooses the highest live server generation",
           "[qwen][model-catalog]") {
     const auto selector = core::llm::providers::make_qwen_model_catalog_selector();
@@ -396,6 +438,89 @@ TEST_CASE("DashScopeProtocol - effort can disable hybrid thinking",
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":false)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+}
+
+TEST_CASE("DashScopeProtocol - qwen3.8 sends the native effort tier alone",
+          "[qwen][serializer][thinking][effort]") {
+    auto req = make_simple_request("qwen3.8-max-preview");
+    req.effort = "max";
+
+    const auto payload = DashScopeProtocol(8192, "high").serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_effort":"max")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+}
+
+TEST_CASE("DashScopeProtocol - qwen3.8 mandatory thinking rejects disable on the wire",
+          "[qwen][serializer][thinking][effort]") {
+    auto req = make_simple_request("qwen3.8-max-preview");
+    req.effort = "none";
+
+    const auto payload = DashScopeProtocol(8192, "high").serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+}
+
+TEST_CASE("DashScopeProtocol - streaming requests carry cache anchors and metadata",
+          "[qwen][serializer][cache][metadata]") {
+    ChatRequest req;
+    req.model = "qwen3.7-plus";
+    req.stream = true;
+    req.session_id = "session-42";
+    req.transport_turn_id = "prompt-7";
+    req.messages = {
+        Message{.role = "system", .content = "Stable instructions"},
+        Message{.role = "user", .content = "Latest prompt"},
+    };
+    Tool first_tool;
+    first_tool.function.name = "read_file";
+    first_tool.function.description = "Read a file";
+    Tool last_tool;
+    last_tool.function.name = "run_command";
+    last_tool.function.description = "Run a command";
+    req.tools = {std::move(first_tool), std::move(last_tool)};
+
+    const auto payload = DashScopeTokenPlanProtocol{}.serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("metadata":{"sessionId":"session-42","promptId":"prompt-7"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("text":"Stable instructions","cache_control":{"type":"ephemeral"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("text":"Latest prompt","cache_control":{"type":"ephemeral"})"));
+    const auto first_tool_position = payload.find(R"("name":"read_file")");
+    const auto last_tool_position = payload.find(R"("name":"run_command")");
+    const auto tool_cache_position = payload.find(
+        R"("cache_control":{"type":"ephemeral"})", last_tool_position);
+    const auto messages_position = payload.find(R"("messages")");
+    REQUIRE(first_tool_position != std::string::npos);
+    REQUIRE(last_tool_position != std::string::npos);
+    REQUIRE(tool_cache_position != std::string::npos);
+    CHECK(first_tool_position < last_tool_position);
+    CHECK(last_tool_position < tool_cache_position);
+    CHECK(tool_cache_position < messages_position);
+}
+
+TEST_CASE("DashScopeProtocol - non-streaming cache control is system-only",
+          "[qwen][serializer][cache]") {
+    ChatRequest req;
+    req.model = "qwen3.7-plus";
+    req.stream = false;
+    req.messages = {
+        Message{.role = "system", .content = "Stable instructions"},
+        Message{.role = "user", .content = "Latest prompt"},
+    };
+
+    const auto payload = DashScopeTokenPlanProtocol{}.serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("text":"Stable instructions","cache_control":{"type":"ephemeral"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("content":"Latest prompt")"));
 }
 
 TEST_CASE("DashScopeProtocol - omits Qwen thinking fields for third-party models",
@@ -788,6 +913,7 @@ TEST_CASE("Token Plan sends local images as Chat Completions data URLs",
     });
 
     const auto payload = protocol.serialize(req);
+    require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image_url")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
@@ -805,6 +931,9 @@ TEST_CASE("Token Plan routes third-party models through Chat Completions",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("input":[)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("cache_control"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("content":"Hello")"));
     REQUIRE(protocol.build_url("https://example.test/v1", req.model)
             == "https://example.test/v1/chat/completions");
 }
@@ -842,6 +971,20 @@ TEST_CASE("Token Plan adapter preserves future Qwen reasoning capabilities",
 TEST_CASE("DashScopeProtocol - 429 is retryable", "[qwen][retry]") {
     DashScopeProtocol proto;
     REQUIRE(proto.is_retryable(make_response(429).view()));
+}
+
+TEST_CASE("Token Plan - allocation quota HTTP failures are not retried",
+          "[qwen][retry][ratelimit]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto quota = make_response(
+        429,
+        R"({"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"})");
+    const auto transient = make_response(
+        429,
+        R"({"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"})");
+
+    CHECK_FALSE(protocol.is_retryable(quota.view()));
+    CHECK(protocol.is_retryable(transient.view()));
 }
 
 TEST_CASE("DashScopeProtocol - 500/502/503/504 are retryable", "[qwen][retry]") {
@@ -1027,7 +1170,8 @@ TEST_CASE("ModelRegistry - Token Plan featured models have first-class cards",
           "[qwen][registry][token-plan]") {
     const auto& registry = ModelRegistry::instance();
     for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max",
-                             "qwen3.7-plus", "qwen3.6-flash"}) {
+                             "qwen3.7-plus", "qwen3.6-plus",
+                             "qwen3.6-flash"}) {
         CAPTURE(model);
         const auto info = registry.get_info(model);
         REQUIRE(info.has_value());
@@ -1041,14 +1185,16 @@ TEST_CASE("ModelRegistry - Token Plan featured models have first-class cards",
 TEST_CASE("ModelRegistry - Token Plan vision and structured-output capabilities match docs",
           "[qwen][registry][token-plan]") {
     const auto& registry = ModelRegistry::instance();
-    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-max"}) {
+    for (const auto model : {"qwen3.7-max", "qwen3.6-flash"}) {
         CAPTURE(model);
         REQUIRE_FALSE(registry.supports(model, ModelCapability::Vision));
-        REQUIRE_FALSE(registry.supports(model, ModelCapability::JsonMode));
+        REQUIRE_FALSE(registry.supports(model, ModelCapability::VideoInput));
     }
-    for (const auto model : {"qwen3.7-plus", "qwen3.6-flash"}) {
+    for (const auto model : {"qwen3.8-max-preview", "qwen3.7-plus",
+                             "qwen3.6-plus"}) {
         CAPTURE(model);
         REQUIRE(registry.supports(model, ModelCapability::Vision));
+        REQUIRE(registry.supports(model, ModelCapability::VideoInput));
         REQUIRE(registry.supports(model, ModelCapability::JsonMode));
     }
 }

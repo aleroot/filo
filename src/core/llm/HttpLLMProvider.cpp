@@ -16,8 +16,6 @@
 #include <exception>
 #include <filesystem>
 #include <format>
-#include <random>
-#include <thread>
 
 namespace core::llm {
 
@@ -146,44 +144,6 @@ namespace {
         return size;
     }
 
-    // Exponential backoff with jitter for rate limit retries.
-    // Uses retry_after from the API when available (429/529 responses).
-    [[nodiscard]] bool backoff_sleep_with_retry_after(
-        int attempt,
-        int retry_after_seconds,
-        const std::atomic_bool* cancel_requested = nullptr) {
-        constexpr int base_ms = 500;
-        constexpr int cap_ms = 30000;  // Max 30 seconds
-        
-        int delay_ms;
-        if (retry_after_seconds > 0) {
-            // Use server-provided retry_after with small buffer
-            delay_ms = retry_after_seconds * 1000 + 100;
-        } else {
-            // Exponential backoff: 500ms, 1000ms, 2000ms, 4000ms...
-            delay_ms = std::min(base_ms * (1 << (attempt - 1)), cap_ms);
-        }
-        
-        // Add jitter: ±25% randomization to prevent thundering herd
-        static thread_local std::mt19937 rng(std::random_device{}());
-        std::uniform_int_distribution<int> jitter(-delay_ms / 4, delay_ms / 4);
-        delay_ms = std::max(100, delay_ms + jitter(rng));
-        
-        auto remaining = std::chrono::milliseconds(delay_ms);
-        constexpr auto kSlice = std::chrono::milliseconds(100);
-        while (remaining.count() > 0) {
-            if (cancel_requested != nullptr
-                && cancel_requested->load(std::memory_order_acquire)) {
-                return false;
-            }
-            const auto slice = std::min(remaining, kSlice);
-            std::this_thread::sleep_for(slice);
-            remaining -= slice;
-        }
-        return cancel_requested == nullptr
-            || !cancel_requested->load(std::memory_order_acquire);
-    }
-
     [[nodiscard]] bool looks_like_loopback_base_url(std::string_view base_url) {
         return core::utils::uri::is_loopback_http_url(base_url);
     }
@@ -211,7 +171,8 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
                                  std::string                                    provider_name,
                                  std::shared_ptr<IProviderClientIdentitySource>  client_identity_source,
                                  std::shared_ptr<const IModelCatalogSelector>    model_catalog_selector,
-                                 std::string                                    service_id)
+                                 std::string                                    service_id,
+                                 HttpStreamTransportOptions                     transport_options)
     : base_url_(std::move(base_url))
     , cred_source_(std::move(cred_source))
     , default_model_(std::move(default_model))
@@ -221,6 +182,7 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
     , service_id_(std::move(service_id))
     , client_identity_source_(std::move(client_identity_source))
     , model_catalog_selector_(std::move(model_catalog_selector))
+    , transport_options_(transport_options)
 {}
 
 HttpLLMProvider::~HttpLLMProvider() = default;
@@ -529,7 +491,8 @@ std::shared_ptr<LLMProvider> HttpLLMProvider::fork_for_parallel_request() const 
         provider_name_,
         client_identity_source_,
         model_catalog_selector_,
-        service_id_);
+        service_id_,
+        transport_options_);
 }
 
 void HttpLLMProvider::reset_conversation_state() {
@@ -749,11 +712,19 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
             }
 
-            // Retry configuration for 429/529 errors
-            constexpr int max_retries = 3;
-            int retry_attempt = 0;
-            int retry_after_seconds = 0;
+            transport::RetryController retry_controller(
+                self->transport_options_.retries);
             bool attempted_auth_recovery = false;
+
+            const auto prepare_retry = [&](const transport::RetrySchedule& retry) {
+                if (!transport::wait_for_retry(
+                        retry.delay, self->cancel_requested_)) {
+                    callback(StreamChunk::make_final());
+                    return false;
+                }
+                protocol->reset_state();
+                return true;
+            };
 
             while (true) {
                 std::string buffer;
@@ -765,7 +736,17 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 std::string stream_error_type;
                 std::string stream_error_message;
                 bool        output_emitted = false;
-                const bool  requires_terminal_event = protocol->name() == "anthropic";
+                const bool requires_terminal_event =
+                    protocol->requires_terminal_event();
+                transport::StreamWatchdog watchdog(
+                    self->transport_options_.timeouts);
+
+                uint64_t response_bytes_received = 0;
+                const uint64_t request_bytes_sent =
+                    static_cast<uint64_t>(payload.size())
+                    + core::net::estimated_http_header_bytes(headers);
+                cpr::Header response_headers_seen;
+                bool observed_transport_headers = false;
 
                 // Prevent stale usage from previous requests if this request does not
                 // emit a usage chunk.
@@ -776,26 +757,25 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetHeader(headers);
                 session.SetBody(cpr::Body{payload});
                 session.SetProgressCallback(cpr::ProgressCallback(
-                    [cancel_requested = &self->cancel_requested_](
+                    [cancel_requested = &self->cancel_requested_,
+                     &watchdog](
                         cpr::cpr_pf_arg_t,
                         cpr::cpr_pf_arg_t,
                         cpr::cpr_pf_arg_t,
                         cpr::cpr_pf_arg_t,
                         intptr_t) -> bool {
-                        return !cancel_requested->load(std::memory_order_acquire);
+                        if (cancel_requested->load(std::memory_order_acquire)) {
+                            return false;
+                        }
+                        return watchdog.poll();
                     }));
 
-                uint64_t response_bytes_received = 0;
-                const uint64_t request_bytes_sent =
-                    static_cast<uint64_t>(payload.size())
-                    + core::net::estimated_http_header_bytes(headers);
-                cpr::Header response_headers_seen;
-                bool observed_transport_headers = false;
                 session.SetHeaderCallback(cpr::HeaderCallback(
                     [&protocol, &response_headers_seen,
                      &observed_transport_headers, &request_metadata,
-                     &response_bytes_received]
+                     &response_bytes_received, &watchdog]
                     (std::string_view line, intptr_t /*userdata*/) -> bool {
+                        if (!watchdog.observe_activity()) return false;
                         response_bytes_received += static_cast<uint64_t>(line.size());
                         if (core::utils::str::trim_ascii_view(line).empty()) {
                             if (!observed_transport_headers) {
@@ -898,12 +878,14 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                                              &response_body_capture,
                                                              &response_bytes_received,
                                                              &stream_error_seen,
+                                                             &watchdog,
                                                              cancel_requested = &self->cancel_requested_]
                                                             (std::string_view data,
                                                              intptr_t /*userdata*/) -> bool {
                     if (cancel_requested->load(std::memory_order_acquire)) {
                         return false;
                     }
+                    if (!watchdog.observe_activity()) return false;
                     response_bytes_received += static_cast<uint64_t>(data.size());
                     if (response_body_capture.size() < kMaxResponseBodyCaptureBytes) {
                         const std::size_t remaining =
@@ -976,12 +958,12 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 if (stream_error_seen || incomplete_required_stream) {
                     const bool retryable_stream_failure =
                         incomplete_required_stream || stream_error_retryable;
-                    if (retryable_stream_failure
-                        && !output_emitted
-                        && retry_attempt < max_retries) {
-                        retry_attempt++;
-                        const auto rate_limit_info = protocol->last_rate_limit();
-                        retry_after_seconds = rate_limit_info.retry_after;
+                    const auto rate_limit_info = protocol->last_rate_limit();
+                    const auto retry = retry_controller.schedule(
+                        retryable_stream_failure,
+                        output_emitted,
+                        std::chrono::seconds(rate_limit_info.retry_after));
+                    if (retry.has_value()) {
                         core::logging::warn(
                             "[HTTP] Retrying {} stream failure type='{}' message='{}' attempt={}/{}",
                             protocol->name(),
@@ -991,17 +973,10 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                        ? "stream ended before terminal event"
                                        : "stream ended before start event")
                                 : stream_error_message,
-                            retry_attempt,
-                            max_retries);
+                            retry->attempt,
+                            retry->max_retries);
 
-                        if (!backoff_sleep_with_retry_after(
-                                retry_attempt,
-                                retry_after_seconds,
-                                &self->cancel_requested_)) {
-                            callback(StreamChunk::make_final());
-                            break;
-                        }
-                        protocol->reset_state();
+                        if (!prepare_retry(*retry)) break;
                         continue;
                     }
 
@@ -1024,6 +999,25 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     }
                     callback(StreamChunk::make_error(std::move(message)));
                     break;
+                }
+
+                const bool transport_failed =
+                    r.error.code != cpr::ErrorCode::OK;
+                const auto transport_retry = retry_controller.schedule(
+                    transport_failed, output_emitted);
+                if (transport_retry.has_value()) {
+                    const std::string_view timeout_label =
+                        transport::timeout_log_label(watchdog.timeout_kind());
+                    const std::string_view failure = timeout_label.empty()
+                        ? std::string_view(r.error.message)
+                        : timeout_label;
+                    core::logging::warn(
+                        "[HTTP] Retrying transport failure '{}' attempt={}/{}",
+                        failure,
+                        transport_retry->attempt,
+                        transport_retry->max_retries);
+                    if (!prepare_retry(*transport_retry)) break;
+                    continue;
                 }
 
                 // Attempt one forced credential refresh on auth failures (OAuth providers).
@@ -1066,36 +1060,30 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     }
                 }
 
-                // Check if we should retry (429 rate limit or 529 overloaded)
-                if (r.status_code == 429 || r.status_code == 529) {
-                    if (retry_attempt < max_retries) {
-                        retry_attempt++;
-
-                        // Extract retry_after from the protocol's rate limit info
-                        // For Anthropic, this comes from the retry-after header
-                        auto rate_limit_info = protocol->last_rate_limit();
-                        retry_after_seconds = rate_limit_info.retry_after;
-
-                        // Notify user of retry
-                        if (retry_after_seconds > 0) {
-                            callback(StreamChunk::make_error(
-                                std::format("\n[Rate limited ({}). Retrying in {}s (attempt {}/{})...]",
-                                           r.status_code, retry_after_seconds, retry_attempt, max_retries)));
-                        } else {
-                            callback(StreamChunk::make_error(
-                                std::format("\n[Server overloaded ({}). Retrying with backoff (attempt {}/{})...]",
-                                           r.status_code, retry_attempt, max_retries)));
-                        }
-
-                        if (!backoff_sleep_with_retry_after(
-                                retry_attempt,
-                                retry_after_seconds,
-                                &self->cancel_requested_)) {
-                            callback(StreamChunk::make_final());
-                            break;
-                        }
-                        continue;  // Retry the request
+                // Protocols own status-code semantics (including permanent
+                // quota failures that deliberately bypass retries).
+                const auto retry_rate_limit = protocol->last_rate_limit();
+                const auto http_retry = retry_controller.schedule(
+                    protocol->is_retryable(http_resp),
+                    output_emitted,
+                    std::chrono::seconds(retry_rate_limit.retry_after));
+                if (http_retry.has_value()) {
+                    // Notify the caller without assuming a provider-specific
+                    // meaning for the retryable status.
+                    if (retry_rate_limit.retry_after > 0) {
+                        callback(StreamChunk::make_error(
+                            std::format("\n[Transient HTTP failure ({}). Retrying in {}s (attempt {}/{})...]",
+                                       r.status_code, retry_rate_limit.retry_after,
+                                       http_retry->attempt, http_retry->max_retries)));
+                    } else {
+                        callback(StreamChunk::make_error(
+                            std::format("\n[Transient HTTP failure ({}). Retrying with backoff (attempt {}/{})...]",
+                                       r.status_code, http_retry->attempt,
+                                       http_retry->max_retries)));
                     }
+
+                    if (!prepare_retry(*http_retry)) break;
+                    continue;
                 }
 
                 try {
@@ -1117,9 +1105,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 self->set_last_rate_limit_info(rate_limit_info);
 
                 if (r.error.code != cpr::ErrorCode::OK) {
-                    core::logging::error("[HTTP] Connection error: {}", r.error.message);
+                    const std::string_view timeout_message =
+                        transport::timeout_user_message(watchdog.timeout_kind());
+                    const std::string transport_message = timeout_message.empty()
+                        ? r.error.message
+                        : std::string(timeout_message);
+                    core::logging::error(
+                        "[HTTP] Connection error: {}", transport_message);
                     callback(StreamChunk::make_error(
-                        "\n[Error connecting to " + url + ": " + r.error.message + "]"));
+                        "\n[Error connecting to " + url + ": "
+                        + transport_message + "]"));
                 } else if (r.status_code != 200) {
                     core::logging::error("[HTTP] Error status={}", r.status_code);
                     callback(StreamChunk::make_error(

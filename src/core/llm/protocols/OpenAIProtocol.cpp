@@ -737,6 +737,11 @@ void OpenAIProtocol::on_response(const HttpResponse& response) {
         parse_openai_compatible_rate_limit_headers(response.headers, response.status_code);
 }
 
+bool OpenAIProtocol::is_retryable(
+    const HttpResponse& response) const noexcept {
+    return is_openai_retryable_status(response.status_code);
+}
+
 std::string ZaiProtocol::serialize(const ChatRequest& req) const {
     Serializer::Options options;
     options.reasoning_content_policy =

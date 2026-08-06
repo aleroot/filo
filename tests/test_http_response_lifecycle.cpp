@@ -97,11 +97,17 @@ TEST_CASE("Default format_error_message - empty body produces valid string", "[l
     REQUIRE(!msg.empty());
 }
 
-TEST_CASE("Default is_retryable - always false for unknown protocol", "[lifecycle][default]") {
+TEST_CASE("OpenAIProtocol is_retryable follows transient HTTP semantics",
+          "[lifecycle][openai][retry]") {
     OpenAIProtocol    protocol;
     const cpr::Header headers;
 
-    for (const int code : {400, 401, 429, 500, 502, 503, 529}) {
+    for (const int code : {408, 409, 429, 500, 502, 503, 504, 529}) {
+        const HttpResponse resp{code, "", headers};
+        INFO("status_code = " << code);
+        REQUIRE(protocol.is_retryable(resp));
+    }
+    for (const int code : {400, 401, 403, 404, 422}) {
         const HttpResponse resp{code, "", headers};
         INFO("status_code = " << code);
         REQUIRE_FALSE(protocol.is_retryable(resp));

@@ -1053,11 +1053,16 @@ std::vector<ModelInfo> build_qwen_catalog() {
         static_cast<uint32_t>(ModelCapability::Reasoning) |
         static_cast<uint32_t>(ModelCapability::PromptCaching);
 
-    // Vision-capable models (qwen3-vl, qwen3.5-plus).
+    // Image-capable models (qwen3-vl and legacy Plus variants).
     constexpr ModelCapabilities CAP_QWEN_VL =
         CAP_FULL |
         static_cast<uint32_t>(ModelCapability::Reasoning) |
         static_cast<uint32_t>(ModelCapability::PromptCaching);
+
+    // Token Plan multimodal models accept both image and video input.
+    constexpr ModelCapabilities CAP_QWEN_MULTIMODAL =
+        CAP_QWEN_VL |
+        static_cast<uint32_t>(ModelCapability::VideoInput);
 
     // Coder models: tools + reasoning, no vision (VL is a separate model line).
     constexpr ModelCapabilities CAP_QWEN_CODER =
@@ -1075,7 +1080,7 @@ std::vector<ModelInfo> build_qwen_catalog() {
             .context_window    = 1'000'000,
             .max_output_tokens = 64'000,
             .max_reasoning_tokens = 256'000,
-            .capabilities      = CAP_QWEN_CODER,
+            .capabilities      = CAP_QWEN_MULTIMODAL,
             .tier              = ModelTier::Powerful,
             .pricing           = {0.0, 0.0, 0.0, 0.0},
             .knowledge_cutoff  = "2026-06",
@@ -1103,10 +1108,24 @@ std::vector<ModelInfo> build_qwen_catalog() {
             .context_window    = 1'000'000,
             .max_output_tokens = 64'000,
             .max_reasoning_tokens = 256'000,
-            .capabilities      = CAP_QWEN_VL,
+            .capabilities      = CAP_QWEN_MULTIMODAL,
             .tier              = ModelTier::Balanced,
             .pricing           = {0.40, 1.60, -1.0, -1.0},
             .knowledge_cutoff  = "2026-05",
+            .constraints       = kStandardConstraints,
+        },
+        {
+            .canonical_id      = "qwen3.6-plus",
+            .aliases           = {},
+            .display_name      = "Qwen3.6 Plus",
+            .provider          = "qwen",
+            .context_window    = 1'000'000,
+            .max_output_tokens = 64'000,
+            .max_reasoning_tokens = 80'000,
+            .capabilities      = CAP_QWEN_MULTIMODAL,
+            .tier              = ModelTier::Balanced,
+            .pricing           = {0.40, 1.60, -1.0, -1.0},
+            .knowledge_cutoff  = "2026-04",
             .constraints       = kStandardConstraints,
         },
         {
@@ -1117,7 +1136,7 @@ std::vector<ModelInfo> build_qwen_catalog() {
             .context_window    = 1'000'000,
             .max_output_tokens = 64'000,
             .max_reasoning_tokens = 80'000,
-            .capabilities      = CAP_QWEN_VL,
+            .capabilities      = CAP_QWEN_TEXT,
             .tier              = ModelTier::Fast,
             .pricing           = {0.25, 1.50, -1.0, -1.0},
             .knowledge_cutoff  = "2026-04",

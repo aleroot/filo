@@ -344,6 +344,15 @@ public:
     event_delimiter() const noexcept = 0;
 
     /**
+     * Whether a successful stream must contain a protocol-defined terminal
+     * event. Protocols with explicit start/stop lifecycles override this so
+     * the generic transport can distinguish a clean EOF from truncation.
+     */
+    [[nodiscard]] virtual bool requires_terminal_event() const noexcept {
+        return false;
+    }
+
+    /**
      * @brief Parse one discrete event into chunks and state signals.
      *
      * Called for each unit produced by splitting the stream on event_delimiter().
