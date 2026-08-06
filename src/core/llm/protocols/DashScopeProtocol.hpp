@@ -41,7 +41,6 @@
 
 #include "OpenAIProtocol.hpp"
 #include "OpenAIResponsesProtocol.hpp"
-#include "../QwenModelTraits.hpp"
 
 namespace core::llm::protocols {
 
@@ -179,8 +178,9 @@ private:
 /**
  * Qwen Cloud implementation of the OpenAI Responses API.
  *
- * Used for Qwen models on Token Plan. Qwen-only reasoning and hosted Harness
- * features are selected per model.
+ * This remains an explicit, standalone integration for endpoints that expose
+ * Responses. The normal Token Plan agent path is owned by
+ * DashScopeTokenPlanProtocol and follows Qwen Code's Chat Completions pipeline.
  */
 class DashScopeResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
@@ -214,20 +214,18 @@ private:
 };
 
 /**
- * Model-aware protocol router for Alibaba Cloud Token Plan.
+ * Token Plan adapter for Alibaba's OpenAI-compatible Chat Completions API.
  *
- * Token Plan exposes one model catalog but not one universal generation API:
- * Qwen text models support Responses, while third-party models such as GLM and
- * DeepSeek are served through Chat Completions. This protocol owns both wire
- * strategies and selects one per request, keeping transport and UI code
- * independent of vendor-specific routing rules.
+ * Qwen Code uses Chat Completions for its normal agent generation pipeline.
+ * Keeping that choice in this provider-specific adapter prevents Token Plan
+ * policy from leaking into the shared OpenAI serializer while retaining the
+ * plan's quota/error handling in one place.
  */
 class DashScopeTokenPlanProtocol final : public ApiProtocolBase {
 public:
     struct Options {
         int thinking_budget = 0;
         std::string default_effort = "high";
-        bool enable_hosted_tools = true;
     };
 
     DashScopeTokenPlanProtocol();
@@ -260,19 +258,10 @@ public:
 private:
     DashScopeTokenPlanProtocol(
         Options options,
-        std::unique_ptr<ApiProtocolBase> chat,
-        std::unique_ptr<ApiProtocolBase> responses);
-
-    void select_for_model(std::string_view model) noexcept;
-    [[nodiscard]] ApiProtocolBase& active() noexcept;
-    [[nodiscard]] const ApiProtocolBase& active() const noexcept;
-    [[nodiscard]] const ApiProtocolBase& protocol_for(
-        std::string_view model) const noexcept;
+        std::unique_ptr<ApiProtocolBase> delegate);
 
     Options options_;
-    std::unique_ptr<ApiProtocolBase> chat_;
-    std::unique_ptr<ApiProtocolBase> responses_;
-    QwenTokenPlanWireApi active_wire_api_ = QwenTokenPlanWireApi::Responses;
+    std::unique_ptr<ApiProtocolBase> delegate_;
 
     // The Token Plan inference endpoints never return rate-limit/usage headers
     // (verified for chat/completions, responses and the Anthropic-compatible

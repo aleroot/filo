@@ -537,8 +537,8 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "",
         std::vector<ApiKeyProviderSeed>{},
         "QWEN_TOKEN_PLAN_API_KEY",
-        "Uses the Token Plan Responses API with Qwen reasoning, hosted tools, "
-        "session cache, and subscription billing. Manage usage at "
+        "Uses the Token Plan Chat Completions API with Qwen reasoning and "
+        "subscription billing. Manage usage at "
         "https://home.qwencloud.com/token-plan."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",

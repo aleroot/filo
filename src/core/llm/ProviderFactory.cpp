@@ -311,39 +311,34 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         protocol = std::make_unique<protocols::KimiProtocol>();
         break;
     case ApiType::DashScope:
-        // Token Plan defaults to the Responses API for native effort levels,
-        // hosted tools, and server-side session caching. Ordinary DashScope
-        // remains on Chat Completions unless explicitly configured otherwise.
-        if (parse_openai_wire_api(
-                wire_api,
-                builtin ? builtin->default_wire_api : "chat_completions")
-            == OpenAIWireApi::Responses) {
-            if (qwen_token_plan) {
-                protocol = std::make_unique<protocols::DashScopeTokenPlanProtocol>(
-                    protocols::DashScopeTokenPlanProtocol::Options{
-                        .thinking_budget = config.thinking_budget,
-                        .default_effort = config.reasoning_effort.empty()
-                            ? "high"
-                            : config.reasoning_effort,
-                        .enable_hosted_tools = true,
-                    });
-            } else {
-                protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
-                    protocols::DashScopeResponsesProtocol::Options{
+        // Qwen Code's normal Token Plan agent pipeline uses Chat Completions.
+        // Keep that compatibility choice in the Qwen adapter, including for
+        // existing configs generated with the former `responses` default.
+        if (qwen_token_plan) {
+            protocol = std::make_unique<protocols::DashScopeTokenPlanProtocol>(
+                protocols::DashScopeTokenPlanProtocol::Options{
+                    .thinking_budget = config.thinking_budget,
                     .default_effort = config.reasoning_effort.empty()
                         ? "high"
                         : config.reasoning_effort,
-                        .enable_hosted_tools = false,
-                        .deployment = protocols::DashScopeDeployment::Standard,
-                    });
-            }
+                });
+        } else if (parse_openai_wire_api(
+                       wire_api,
+                       builtin ? builtin->default_wire_api : "chat_completions")
+                   == OpenAIWireApi::Responses) {
+            protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
+                protocols::DashScopeResponsesProtocol::Options{
+                    .default_effort = config.reasoning_effort.empty()
+                        ? "high"
+                        : config.reasoning_effort,
+                    .enable_hosted_tools = false,
+                    .deployment = protocols::DashScopeDeployment::Standard,
+                });
         } else {
             protocol = std::make_unique<protocols::DashScopeProtocol>(
                 config.thinking_budget,
                 config.reasoning_effort,
-                qwen_token_plan
-                    ? protocols::DashScopeDeployment::TokenPlan
-                    : protocols::DashScopeDeployment::Standard);
+                protocols::DashScopeDeployment::Standard);
         }
         break;
     case ApiType::Anthropic: {

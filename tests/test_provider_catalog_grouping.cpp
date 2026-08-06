@@ -236,7 +236,7 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     REQUIRE(token_plan != nullptr);
     CHECK(token_plan->prefix == "qwen-token-plan");
     CHECK(token_plan->registry_provider == "qwen");
-    CHECK(token_plan->default_wire_api == "responses");
+    CHECK(token_plan->default_wire_api == "chat_completions");
 
     CHECK(find_builtin_provider_definition("grokker") == nullptr);
     CHECK(find_builtin_provider_definition("kimiko") == nullptr);

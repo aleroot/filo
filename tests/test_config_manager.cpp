@@ -438,6 +438,8 @@ TEST_CASE("ConfigManager defaults leave openai wire_api unset", "[config]") {
     const auto& config = manager.get_config();
     REQUIRE(config.providers.contains("openai"));
     REQUIRE(config.providers.at("openai").wire_api.empty());
+    REQUIRE(config.providers.contains("qwen-token-plan"));
+    REQUIRE(config.providers.at("qwen-token-plan").wire_api.empty());
 
     fs::remove_all(sandbox);
 }

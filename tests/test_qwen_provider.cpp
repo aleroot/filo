@@ -13,6 +13,8 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 
 #include <simdjson.h>
+#include <filesystem>
+#include <fstream>
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -57,6 +59,14 @@ static void require_valid_json(std::string_view payload) {
     simdjson::padded_string json{std::string(payload)};
     simdjson::dom::element document;
     REQUIRE(parser.parse(json).get(document) == simdjson::SUCCESS);
+}
+
+static std::filesystem::path make_temp_qwen_image_file() {
+    const auto path = std::filesystem::temp_directory_path()
+        / "filo-qwen-token-plan-image.png";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << "fake-image";
+    return path;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -749,16 +759,41 @@ TEST_CASE("DashScope Responses - does not concatenate provisional and completed 
           == R"({"path":"Lampo/Prompter"})");
 }
 
-TEST_CASE("Token Plan routes Qwen models through Responses",
+TEST_CASE("Token Plan follows Qwen Code's Chat Completions generation path",
           "[qwen][token-plan][routing]") {
     DashScopeTokenPlanProtocol protocol;
     const auto req = make_simple_request("qwen3.8-max-preview");
     const auto payload = protocol.serialize(req);
 
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("input":[)"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("input":[)"));
     REQUIRE(protocol.build_url("https://example.test/v1", req.model)
-            == "https://example.test/v1/responses");
+            == "https://example.test/v1/chat/completions");
+}
+
+TEST_CASE("Token Plan sends local images as Chat Completions data URLs",
+          "[qwen][token-plan][routing][vision]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto image = make_temp_qwen_image_file();
+
+    ChatRequest req;
+    req.model = "qwen3.8-max-preview";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Read the error in this screenshot.",
+        .content_parts = {
+            ContentPart::make_text("Read the error in this screenshot."),
+            ContentPart::make_image(image.string(), "image/png"),
+        },
+    });
+
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image_url")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("data:image/png;base64,"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"input_image")"));
+    REQUIRE(protocol.build_url("https://example.test/v1", req.model)
+            == "https://example.test/v1/chat/completions");
 }
 
 TEST_CASE("Token Plan routes third-party models through Chat Completions",
@@ -794,16 +829,8 @@ TEST_CASE("Token Plan Chat route parses fragmented GLM tool arguments",
             == R"("value":"ok"})");
 }
 
-TEST_CASE("Token Plan wire routing is future-friendly and isolates third parties",
+TEST_CASE("Token Plan adapter preserves future Qwen reasoning capabilities",
           "[qwen][token-plan][routing][traits]") {
-    CHECK(qwen_token_plan_wire_api("qwen3.8-max-preview")
-          == QwenTokenPlanWireApi::Responses);
-    CHECK(qwen_token_plan_wire_api("qwen4-coder")
-          == QwenTokenPlanWireApi::Responses);
-    CHECK(qwen_token_plan_wire_api("glm-5.2")
-          == QwenTokenPlanWireApi::ChatCompletions);
-    CHECK(qwen_token_plan_wire_api("deepseek-v4-pro")
-          == QwenTokenPlanWireApi::ChatCompletions);
     CHECK(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen4-coder")
           .supports_effort());
 }
@@ -942,7 +969,7 @@ TEST_CASE("ProviderFactory - qwen with thinking_budget creates provider", "[qwen
     REQUIRE(provider != nullptr);
 }
 
-TEST_CASE("ProviderFactory - Qwen Token Plan is subscription-backed Responses API",
+TEST_CASE("ProviderFactory - Qwen Token Plan is subscription-backed Chat Completions",
           "[qwen][factory][token-plan]") {
     core::config::ProviderConfig cfg;
     cfg.api_key = "sk-sp-test";
@@ -965,7 +992,7 @@ TEST_CASE("ProviderFactory - custom Token Plan endpoint keeps subscription billi
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
     cfg.model = "qwen3.7-plus";
     cfg.api_key = "sk-sp-test";
-    cfg.wire_api = "responses";
+    cfg.wire_api = "chat_completions";
 
     auto provider = core::llm::ProviderFactory::create_provider("company-qwen", cfg);
     REQUIRE(provider != nullptr);

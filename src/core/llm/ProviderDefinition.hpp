@@ -50,7 +50,7 @@ inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
         "qwen-token-plan", "qwen", "qwen", config::ApiType::DashScope,
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-        "QWEN_TOKEN_PLAN_API_KEY", ProviderAuthStyle::Bearer, "responses",
+        "QWEN_TOKEN_PLAN_API_KEY", ProviderAuthStyle::Bearer, "chat_completions",
     },
     BuiltinProviderDefinition{
         "grok", "grok", "grok", config::ApiType::OpenAI,

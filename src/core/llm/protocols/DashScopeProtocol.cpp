@@ -436,91 +436,58 @@ DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(Options options)
           std::make_unique<DashScopeProtocol>(
               options.thinking_budget,
               options.default_effort,
-              DashScopeDeployment::TokenPlan),
-          std::make_unique<DashScopeResponsesProtocol>(
-              DashScopeResponsesProtocol::Options{
-                  .default_effort = options.default_effort,
-                  .enable_hosted_tools = options.enable_hosted_tools,
-                  .deployment = DashScopeDeployment::TokenPlan,
-              })) {}
+              DashScopeDeployment::TokenPlan)) {}
 
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(
     Options options,
-    std::unique_ptr<ApiProtocolBase> chat,
-    std::unique_ptr<ApiProtocolBase> responses)
+    std::unique_ptr<ApiProtocolBase> delegate)
     : options_(std::move(options))
-    , chat_(std::move(chat))
-    , responses_(std::move(responses)) {}
-
-void DashScopeTokenPlanProtocol::select_for_model(
-    std::string_view model) noexcept {
-    active_wire_api_ = qwen_token_plan_wire_api(model);
-}
-
-ApiProtocolBase& DashScopeTokenPlanProtocol::active() noexcept {
-    return active_wire_api_ == QwenTokenPlanWireApi::Responses
-        ? *responses_
-        : *chat_;
-}
-
-const ApiProtocolBase& DashScopeTokenPlanProtocol::active() const noexcept {
-    return active_wire_api_ == QwenTokenPlanWireApi::Responses
-        ? *responses_
-        : *chat_;
-}
-
-const ApiProtocolBase& DashScopeTokenPlanProtocol::protocol_for(
-    std::string_view model) const noexcept {
-    return qwen_token_plan_wire_api(model) == QwenTokenPlanWireApi::Responses
-        ? *responses_
-        : *chat_;
-}
+    , delegate_(std::move(delegate)) {}
 
 void DashScopeTokenPlanProtocol::prepare_request(ChatRequest& request) {
-    select_for_model(request.model);
-    active().prepare_request(request);
+    delegate_->prepare_request(request);
 }
 
 std::string DashScopeTokenPlanProtocol::serialize(
     const ChatRequest& req) const {
-    return protocol_for(req.model).serialize(req);
+    return delegate_->serialize(req);
 }
 
 cpr::Header DashScopeTokenPlanProtocol::build_headers(
     const core::auth::AuthInfo& auth) const {
-    return active().build_headers(auth);
+    return delegate_->build_headers(auth);
 }
 
 std::string DashScopeTokenPlanProtocol::build_url(
     std::string_view base_url,
     std::string_view model) const {
-    return protocol_for(model).build_url(base_url, model);
+    return delegate_->build_url(base_url, model);
 }
 
 std::string_view DashScopeTokenPlanProtocol::event_delimiter() const noexcept {
-    return active().event_delimiter();
+    return delegate_->event_delimiter();
 }
 
 ParseResult DashScopeTokenPlanProtocol::parse_event(
     std::string_view raw_event) {
-    return active().parse_event(raw_event);
+    return delegate_->parse_event(raw_event);
 }
 
 ReasoningCapabilities DashScopeTokenPlanProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
-    return qwen_reasoning_capabilities(model);
+    return delegate_->reasoning_capabilities(model);
 }
 
 std::unique_ptr<ApiProtocolBase> DashScopeTokenPlanProtocol::clone() const {
     return std::unique_ptr<ApiProtocolBase>{
         new DashScopeTokenPlanProtocol(
-            options_, chat_->clone(), responses_->clone())};
+            options_, delegate_->clone())};
 }
 
 void DashScopeTokenPlanProtocol::on_response(
     const HttpResponse& response) {
     // Keep the inner protocol's behaviour (usage parsing, header-based limits).
-    active().on_response(response);
+    delegate_->on_response(response);
 
     // The Token Plan inference endpoints expose no rate-limit/usage headers, so
     // on a successful response there is nothing additional to capture. The only
@@ -531,7 +498,7 @@ void DashScopeTokenPlanProtocol::on_response(
 
     if (response.status_code != 429) return;
 
-    RateLimitInfo info = active().last_rate_limit();
+    RateLimitInfo info = delegate_->last_rate_limit();
     info.is_rate_limited = true;
     info.unified_status = "rate_limited";
     if (const int32_t retry_after = parse_int_header(response.headers, "retry-after");
@@ -550,23 +517,21 @@ void DashScopeTokenPlanProtocol::on_response(
 
 std::string DashScopeTokenPlanProtocol::format_error_message(
     const HttpResponse& response) const {
-    return active().format_error_message(response);
+    return delegate_->format_error_message(response);
 }
 
 bool DashScopeTokenPlanProtocol::is_retryable(
     const HttpResponse& response) const noexcept {
-    return active().is_retryable(response);
+    return delegate_->is_retryable(response);
 }
 
 RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
     if (has_rate_limit_override_) return rate_limit_override_;
-    return active().last_rate_limit();
+    return delegate_->last_rate_limit();
 }
 
 void DashScopeTokenPlanProtocol::reset_state() {
-    chat_->reset_state();
-    responses_->reset_state();
-    active_wire_api_ = QwenTokenPlanWireApi::Responses;
+    delegate_->reset_state();
     has_rate_limit_override_ = false;
     rate_limit_override_ = {};
 }
