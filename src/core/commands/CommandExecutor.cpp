@@ -827,7 +827,8 @@ void run_provider_auth(const std::string& provider,
                        const std::string& config_dir,
                        const std::function<void(std::function<void()>)>& suspend_fn,
                        const std::function<void(const std::string&)>& append_fn,
-                       const std::function<std::string(std::string_view)>& switch_model_fn = {}) {
+                       const std::function<std::string(std::string_view)>& switch_model_fn = {},
+                       const std::function<std::string()>& refresh_providers_fn = {}) {
     struct AuthState {
         bool success = false;
         bool completed = false;
@@ -841,7 +842,7 @@ void run_provider_auth(const std::string& provider,
     };
 
     auto state = std::make_shared<AuthState>();
-    suspend_fn([provider, config_dir, state, switch_model_fn]() {
+    suspend_fn([provider, config_dir, state, switch_model_fn, refresh_providers_fn]() {
         try {
             const auto outcome = core::auth::login_and_persist(
                 provider, config_dir);
@@ -861,7 +862,11 @@ void run_provider_auth(const std::string& provider,
                           << state->profile_error << "\n";
             }
 
-            if (state->profile_persisted && switch_model_fn) {
+            // API-key providers capture their key when constructed. Rebuild
+            // them from the updated overlay before the first post-login turn.
+            if (state->profile_persisted && refresh_providers_fn) {
+                state->model_switch_message = refresh_providers_fn();
+            } else if (state->profile_persisted && switch_model_fn) {
                 state->model_switch_message = switch_model_fn(state->selected_provider);
             }
 
@@ -1034,7 +1039,8 @@ public:
                 auto append_fn  = ctx.append_history_fn;
                 auto suspend_fn = ctx.suspend_tui_fn;
                 auto switch_model_fn = ctx.switch_model_fn;
-                ctx.open_provider_picker_fn(available, [append_fn, suspend_fn, config_dir, switch_model_fn](std::optional<std::string> chosen) {
+                auto refresh_providers_fn = ctx.refresh_providers_fn;
+                ctx.open_provider_picker_fn(available, [append_fn, suspend_fn, config_dir, switch_model_fn, refresh_providers_fn](std::optional<std::string> chosen) {
                     if (!chosen.has_value()) {
                         append_fn("\n\xe2\x84\xb9  Authentication cancelled.\n");
                         return;
@@ -1043,7 +1049,8 @@ public:
                                       config_dir,
                                       suspend_fn,
                                       append_fn,
-                                      switch_model_fn);
+                                      switch_model_fn,
+                                      refresh_providers_fn);
                 });
                 return;
             }
@@ -1065,7 +1072,8 @@ public:
                               config_dir,
                               ctx.suspend_tui_fn,
                               ctx.append_history_fn,
-                              ctx.switch_model_fn);
+                              ctx.switch_model_fn,
+                              ctx.refresh_providers_fn);
             return;
         }
 
@@ -1080,7 +1088,8 @@ public:
                           config_dir,
                           ctx.suspend_tui_fn,
                           ctx.append_history_fn,
-                          ctx.switch_model_fn);
+                          ctx.switch_model_fn,
+                          ctx.refresh_providers_fn);
     }
 };
 

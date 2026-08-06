@@ -57,6 +57,8 @@ struct CommandContext {
     std::function<void()> quit_fn = {};
     std::function<std::string()> model_status_fn = {};
     std::function<std::string(std::string_view)> switch_model_fn = {};
+    // Rebuild live providers after /auth changes credentials on disk.
+    std::function<std::string()> refresh_providers_fn = {};
     std::function<std::string()> profile_status_fn = {};
     std::function<std::string(std::string_view)> switch_profile_fn = {};
     std::function<std::string()> effort_status_fn = {};

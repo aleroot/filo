@@ -1344,6 +1344,25 @@ TEST_CASE("OAuthTokenManager observes logout performed by another manager",
     }
 }
 
+TEST_CASE("OAuthTokenManager observes login performed by another manager",
+          "[OAuthTokenManager][reauthentication]") {
+    TempDir tmp;
+    auto store = std::make_shared<FileTokenStore>(tmp.path);
+    auto manager = std::make_shared<OAuthTokenManager>(
+        "openai-pkce",
+        std::make_shared<StubFlow>(),
+        store,
+        /*allow_interactive_login=*/false);
+
+    REQUIRE_THROWS_AS(manager->get_valid_token(), ReauthenticationRequired);
+
+    OAuthToken signed_in = make_token(3600);
+    signed_in.access_token = "new-session-token";
+    FileTokenStore(tmp.path).save("openai-pkce", signed_in);
+
+    CHECK(manager->get_valid_token().access_token == "new-session-token");
+}
+
 TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[AuthenticationManager][logout]") {
     TempDir tmp;
     auto manager = AuthenticationManager::create_with_defaults(tmp.path);

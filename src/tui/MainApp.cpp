@@ -5329,6 +5329,7 @@ RunResult run(RunOptions opts) {
             .quit_fn          = screen.ExitLoopClosure(),
             .model_status_fn  = describe_models,
             .switch_model_fn  = switch_provider,
+            .refresh_providers_fn = apply_active_profile_live,
             .profile_status_fn = profile_status,
             .switch_profile_fn = switch_profile,
             .effort_status_fn = describe_effort,

@@ -949,6 +949,11 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(manager.get_config().providers.at("openai").auth_type == "oauth_openai_pkce");
     REQUIRE(manager.get_config().providers.at("openai").model == "gpt-5.4");
 
+    REQUIRE(manager.persist_login_profile("google", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "gemini");
+    REQUIRE(manager.get_config().providers.at("gemini").auth_type == "oauth_google");
+
     REQUIRE(manager.persist_login_profile("x.ai", &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().default_provider == "grok");
