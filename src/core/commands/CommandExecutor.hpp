@@ -14,6 +14,7 @@
 #include "../../core/memory/MemoryPolicy.hpp"
 #include "../../core/memory/MemoryStore.hpp"
 #include "../../core/session/SessionData.hpp"
+#include "../../core/session/SessionStats.hpp"
 
 namespace core::commands {
 
@@ -53,6 +54,9 @@ struct CommandContext {
     std::function<void(const std::string&)> append_history_fn;
     std::function<void(const std::string&)> append_assistant_output_fn = {};
     std::shared_ptr<core::agent::Agent> agent;
+    /// Session metrics registry injected by the execution root; /usage reads
+    /// the current thread's stats from here (never from a global singleton).
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
     std::function<void()> clear_screen_fn = {};
     std::function<void()> quit_fn = {};
     std::function<std::string()> model_status_fn = {};
@@ -68,7 +72,12 @@ struct CommandContext {
     std::function<bool()> open_model_picker_fn = {};
     std::function<bool(std::string_view)> open_command_option_picker_fn = {};
     std::function<bool()> open_settings_picker_fn = {};
+    /// Browse runtimes currently loaded in this process.
+    std::function<bool()> open_threads_picker_fn = {};
+    /// Browse persisted conversation sessions (legacy /sessions behavior).
     std::function<bool()> open_sessions_picker_fn = {};
+    /// Archive the current conversation and open a blank thread (Ctrl+N / /new).
+    std::function<void()> start_new_thread_fn = {};
     std::function<bool()> open_prompts_picker_fn = {};
     std::function<void(std::string_view)> resume_session_fn = {};
     // Renames the current session (empty = clear). Returns outcome message.

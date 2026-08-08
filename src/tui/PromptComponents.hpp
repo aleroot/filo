@@ -11,10 +11,13 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 #include <utility>
 
 namespace tui {
+
+enum class SessionPickerResource;
 
 struct SettingsPanelRow {
     std::string label;
@@ -55,6 +58,12 @@ struct ConversationSearchHit {
     int message_index = -1;
     std::string role;
     std::string snippet;
+};
+
+struct ThreadTab {
+    std::string label;
+    bool active = false;
+    bool running = false;
 };
 
 using ReviewBaseRef = core::scm::BranchRef;
@@ -133,18 +142,23 @@ ftxui::Element render_mention_prompt_panel(const std::vector<MentionSuggestion>&
                                            ftxui::Element input_line,
                                            std::string_view input_text);
 
+/// @p origin_label identifies the thread that triggered the prompt; empty
+/// for the current thread, rendered when a hidden thread requests approval.
 ftxui::Element render_permission_prompt_panel(std::string_view tool_name,
                                               std::string_view args_preview,
                                               const ToolDiffPreview& diff_preview,
                                               std::string_view allow_label,
-                                              int selected_index);
+                                              int selected_index,
+                                              std::string_view origin_label = {});
 
 ftxui::Element render_startup_banner_panel(std::string_view provider_name,
                                            std::string_view model_name,
                                            int mcp_server_count,
                                            std::string_view context_sources_label,
                                            std::string_view provider_setup_hint,
-                                           std::string_view clock_label = {});
+                                           std::string_view clock_label = {},
+                                           const std::vector<ThreadTab>& thread_tabs = {},
+                                           std::vector<ftxui::Box>* thread_tab_hitboxes = nullptr);
 
 ftxui::Element render_model_selection_panel(int selected_index,
                                             std::string_view manual_description,
@@ -189,8 +203,19 @@ ftxui::Element render_local_model_picker_panel(std::string_view current_dir,
                                                const std::vector<LocalModelEntry>& entries,
                                                int selected_index);
 
-ftxui::Element render_session_picker_panel(const std::vector<core::session::SessionInfo>& sessions,
-                                           int selected_index);
+/// Shared renderer whose explicit resource controls thread-vs-session chrome.
+/// @p filtered is the currently visible catalogue.
+ftxui::Element render_session_picker_panel(
+    const std::vector<core::session::SessionInfo>& filtered,
+    int selected_index,
+    SessionPickerResource resource,
+    std::string_view current_session_id = {},
+    std::string_view query = {},
+    bool filter_active = false,
+    bool rename_active = false,
+    std::string_view rename_buffer = {},
+    std::string_view status_message = {},
+    const std::unordered_set<std::string>& running_session_ids = {});
 
 ftxui::Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
                                            int selected_index,

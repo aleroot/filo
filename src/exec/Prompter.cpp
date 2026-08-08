@@ -642,10 +642,16 @@ RunDiagnostics run_for_test(const RunOptions& options,
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
+    auto session_stats_registry =
+        core::session::SessionStatsRegistry::shared_instance();
     auto agent = std::make_shared<core::agent::Agent>(
         runtime.provider,
         tool_manager,
-        agent_session_context);
+        agent_session_context,
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        session_stats_registry,
+        &core::budget::BudgetTracker::get_instance());
     agent->set_active_provider_name(runtime.provider_name);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);
@@ -676,9 +682,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     }
 
     auto& budget_tracker = core::budget::BudgetTracker::get_instance();
-    budget_tracker.set_session_id({});
-    budget_tracker.reset_session();
-    core::session::SessionStats::get_instance().reset();
+    budget_tracker.reset_session(std::string_view{});
 
     const auto session_dir = session_dir_override.value_or(
         core::session::SessionStore::default_sessions_dir());
@@ -744,15 +748,16 @@ RunDiagnostics run_for_test(const RunOptions& options,
         }
     }
 
-    budget_tracker.set_session_id(session_id);
     agent->set_session_id(session_id);
+    session_stats_registry->reset(session_id);
 
     // Keep one stable external session id for the entire prompter run even if
     // the internal persisted session rotates between tool-loop steps.
     const std::string emitted_session_id = session_id;
 
     agent->set_efficiency_decision_fn(
-        [agent, &store, &session_id, &session_name, &created_at, &runtime](
+        [agent, session_stats_registry,
+         &store, &session_id, &session_name, &created_at, &runtime](
             const core::session::SessionEfficiencyDecision&) {
             auto snap_messages = agent->get_history();
             auto snap_mode = agent->get_mode();
@@ -772,11 +777,11 @@ RunDiagnostics run_for_test(const RunOptions& options,
             archived.todos = agent->get_todos();
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
-            const auto total = budget.session_total();
+            const auto total = budget.session_total(session_id);
             archived.stats.prompt_tokens = total.prompt_tokens;
             archived.stats.completion_tokens = total.completion_tokens;
-            archived.stats.cost_usd = budget.session_cost_usd();
-            const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
+            archived.stats.cost_usd = budget.session_cost_usd(session_id);
+            const auto stats_snapshot = session_stats_registry->snapshot(session_id);
             archived.stats.turn_count = stats_snapshot.turn_count;
             archived.stats.tool_calls_total = stats_snapshot.tool_calls_total;
             archived.stats.tool_calls_success = stats_snapshot.tool_calls_success;
@@ -792,13 +797,12 @@ RunDiagnostics run_for_test(const RunOptions& options,
             }
 
             agent->compact_history(archived.handoff_summary);
-            core::budget::BudgetTracker::get_instance().reset_session();
-            core::session::SessionStats::get_instance().reset();
+            core::budget::BudgetTracker::get_instance().reset_session(session_id);
 
             session_id = core::session::SessionStore::generate_id();
             created_at = core::session::SessionStore::now_iso8601();
-            core::budget::BudgetTracker::get_instance().set_session_id(session_id);
             agent->set_session_id(session_id);
+            session_stats_registry->reset(session_id);
         });
 
     std::mutex emit_mutex;
@@ -955,9 +959,10 @@ RunDiagnostics run_for_test(const RunOptions& options,
         diagnostics.final_text_response = streamed_text;
     }
 
-    const auto totals = core::budget::BudgetTracker::get_instance().session_total();
-    const auto cost_usd = core::budget::BudgetTracker::get_instance().session_cost_usd();
-    const auto snapshot = core::session::SessionStats::get_instance().snapshot();
+    const auto totals = core::budget::BudgetTracker::get_instance().session_total(session_id);
+    const auto cost_usd =
+        core::budget::BudgetTracker::get_instance().session_cost_usd(session_id);
+    const auto snapshot = session_stats_registry->snapshot(session_id);
     const auto stats_json = build_stats_json(snapshot, totals, cost_usd, tool_stats);
     const bool request_failed = snapshot.api_calls_total > snapshot.api_calls_success;
 

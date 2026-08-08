@@ -36,7 +36,10 @@ struct QuestionRequest {
     std::string id;
     std::string tool_call_id;
     std::vector<QuestionItem> questions;
-    
+    /// Session that asked, so multi-session front ends can attribute the
+    /// dialog to the right conversation and cancel the correct agent.
+    std::string session_id;
+
     // Promise for async result
     std::shared_ptr<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>
         promise;

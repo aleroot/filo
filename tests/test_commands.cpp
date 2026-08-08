@@ -670,6 +670,30 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Available providers:"));
     }
 
+    SECTION("/threads and /sessions dispatch distinct browsers") {
+        bool threads_opened = false;
+        bool sessions_opened = false;
+        ctx.open_threads_picker_fn = [&]() {
+            threads_opened = true;
+            return true;
+        };
+        ctx.open_sessions_picker_fn = [&]() {
+            sessions_opened = true;
+            return true;
+        };
+
+        ctx.text = "/threads";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(threads_opened);
+        CHECK_FALSE(sessions_opened);
+
+        threads_opened = false;
+        ctx.text = "/sessions";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK_FALSE(threads_opened);
+        CHECK(sessions_opened);
+    }
+
     SECTION("/auth command without provider opens menu and supports cancel in interactive mode") {
         *mock_history = "";
         ctx.suspend_tui_fn = [](std::function<void()> task) { task(); };
@@ -1681,6 +1705,17 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(help_it != commands.end());
         REQUIRE(help_it->aliases == std::vector<std::string>{"/?", "/h"});
         REQUIRE_FALSE(help_it->accepts_arguments);
+
+        const auto threads_it = std::find_if(
+            commands.begin(), commands.end(),
+            [](const CommandDescriptor& cmd) { return cmd.name == "/threads"; });
+        const auto sessions_it = std::find_if(
+            commands.begin(), commands.end(),
+            [](const CommandDescriptor& cmd) { return cmd.name == "/sessions"; });
+        REQUIRE(threads_it != commands.end());
+        REQUIRE(sessions_it != commands.end());
+        CHECK(threads_it->aliases.empty());
+        CHECK(sessions_it->aliases.empty());
 
         const auto model_it = std::find_if(commands.begin(), commands.end(), [](const CommandDescriptor& cmd) {
             return cmd.name == "/model";

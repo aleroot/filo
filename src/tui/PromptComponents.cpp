@@ -1,10 +1,12 @@
 #include "PromptComponents.hpp"
+#include "SessionPicker.hpp"
 #include "Constants.hpp"
 #include "Conversation.hpp"
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/ThreadCatalog.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -16,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -771,7 +774,9 @@ Element render_startup_banner_panel(std::string_view provider_name,
                                     int mcp_server_count,
                                     std::string_view context_sources_label,
                                     std::string_view provider_setup_hint,
-                                    std::string_view clock_label) {
+                                    std::string_view clock_label,
+                                    const std::vector<ThreadTab>& thread_tabs,
+                                    std::vector<Box>* thread_tab_hitboxes) {
     static constexpr std::array<std::string_view, 6> kBannerLogoLines = {
         "  ███████╗██╗██╗      ██████╗",
         "  ██╔════╝██║██║     ██╔═══██╗",
@@ -787,20 +792,48 @@ Element render_startup_banner_panel(std::string_view provider_name,
     // The logo anchors the top-left of the banner. A live clock is pinned to
     // the opposite top-right corner: the logo block sets the row height and the
     // single-line clock is top-aligned within that hbox, so it lands on the
-    // first row. Match the context label's trailing cell so their visible
-    // right edges align. (AGENTS.md and friends stay at the bottom-right.)
+    // first row. The lower-right corner is composed separately on the summary
+    // row so thread tabs sit at the opposite corner of the same header.
     Elements logo_rows;
     logo_rows.reserve(kBannerLogoLines.size());
     for (const auto line : kBannerLogoLines) {
         logo_rows.push_back(text(std::string(line)) | color(ColorYellowBright) | ftxui::bold);
     }
-    Element clock_el = clock_label.empty()
+    Element clock = clock_label.empty()
         ? emptyElement()
-        : text(std::string(clock_label) + " ") | color(Color::GrayLight);
+        : text(std::string(clock_label) + " ") | color(Color::GrayLight)
+            | ftxui::align_right;
+
+    const bool show_thread_tabs = thread_tabs.size() > 1;
+    if (thread_tab_hitboxes) {
+        thread_tab_hitboxes->clear();
+        if (show_thread_tabs) {
+            thread_tab_hitboxes->resize(thread_tabs.size());
+        }
+    }
+    Element rendered_thread_tabs = emptyElement();
+    if (show_thread_tabs) {
+        Elements tabs;
+        for (std::size_t i = 0; i < thread_tabs.size(); ++i) {
+            const auto& tab = thread_tabs[i];
+            const std::string marker = tab.running && !tab.active ? "● " : "";
+            auto rendered = text(std::format(" {}{} ", marker, fit_column(tab.label, 16)))
+                | color(tab.active ? Color::Black
+                                   : static_cast<Color>(ColorYellowBright));
+            if (tab.active) {
+                rendered = rendered | ftxui::bold | bgcolor(ColorYellowDark);
+            }
+            if (thread_tab_hitboxes) {
+                rendered = std::move(rendered) | reflect((*thread_tab_hitboxes)[i]);
+            }
+            tabs.push_back(std::move(rendered));
+        }
+        rendered_thread_tabs = hbox(std::move(tabs)) | ftxui::align_right;
+    }
     rows.push_back(hbox({
         vbox(std::move(logo_rows)),
         filler(),
-        std::move(clock_el),
+        vbox({std::move(clock)}),
     }));
 
     rows.push_back(text(""));
@@ -809,13 +842,20 @@ Element render_startup_banner_panel(std::string_view provider_name,
         model_name,
         mcp_server_count);
 
-    if (!context_sources_label.empty()) {
-        rows.push_back(hbox({
+    if (!context_sources_label.empty() || show_thread_tabs) {
+        Elements summary_row{
             text(summary) | color(Color::White),
             filler(),
-            text(" " + std::string(context_sources_label) + " ")
-                | color(Color::GrayLight),
-        }));
+        };
+        if (!context_sources_label.empty()) {
+            summary_row.push_back(
+                text(" " + std::string(context_sources_label) + " ")
+                    | color(Color::GrayLight));
+        }
+        if (show_thread_tabs) {
+            summary_row.push_back(std::move(rendered_thread_tabs));
+        }
+        rows.push_back(hbox(std::move(summary_row)));
     } else {
         rows.push_back(paragraph(summary) | color(Color::White) | xflex);
     }
@@ -901,7 +941,8 @@ Element render_permission_prompt_panel(std::string_view tool_name,
                                        std::string_view args_preview,
                                        const ToolDiffPreview& diff_preview,
                                        std::string_view allow_label,
-                                       int selected_index) {
+                                       int selected_index,
+                                       std::string_view origin_label) {
     const auto option_once = make_selection_row(
         "[1] Yes",
         "Run this tool call now.",
@@ -932,6 +973,12 @@ Element render_permission_prompt_panel(std::string_view tool_name,
     std::vector<Element> children = {
         hbox({
             text("\xe2\x9a\xa0 WARNING ") | ftxui::bold | color(ColorWarn),
+            // A hidden thread can reach this overlay too; the label makes it
+            // clear which conversation is asking so Ctrl+C stops the right one.
+            !origin_label.empty()
+                ? text(std::format("thread: {}", origin_label))
+                      | ftxui::bold | color(ColorYellowBright)
+                : text(""),
             filler(),
             text("Up/Down: select  Enter: confirm  1/Y  2/A  3  4/N")
                 | color(Color::GrayDark)
@@ -1321,18 +1368,26 @@ Element render_local_model_picker_panel(std::string_view current_dir,
       | size(HEIGHT, GREATER_THAN, 12);
 }
 
-Element render_session_picker_panel(const std::vector<core::session::SessionInfo>& sessions,
-                                    int selected_index) {
+Element render_session_picker_panel(
+    const std::vector<core::session::SessionInfo>& filtered,
+    int selected_index,
+    SessionPickerResource resource,
+    std::string_view current_session_id,
+    std::string_view query,
+    bool filter_active,
+    bool rename_active,
+    std::string_view rename_buffer,
+    std::string_view status_message,
+    const std::unordered_set<std::string>& running_session_ids) {
     // Fixed display-width columns keep every row lined up regardless of how
-    // long individual ids, names, provider or model strings are.
+    // long individual ids, titles, provider or model strings are.
     constexpr int kMarkerWidth = 3;
     constexpr int kIdWidth     = 8;
-    constexpr int kNameWidth   = 20;
-    constexpr int kTimeWidth   = 16;
-    constexpr int kDirWidth    = 20; // abbreviated project working directory
-    constexpr int kModelWidth  = 24;
+    constexpr int kTitleWidth  = 36;
+    constexpr int kTimeWidth   = 12;
+    constexpr int kDirWidth    = 18;
+    constexpr int kModelWidth  = 22;
     constexpr int kTurnsWidth  = 5;
-    constexpr int kModeWidth   = 8; // BUILD / PLAN / RESEARCH
     constexpr std::string_view kGap = "  ";
 
     const auto header_cell = [](std::string_view label, int width, bool right = false) {
@@ -1340,78 +1395,159 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
                | color(Color::GrayDark);
     };
 
-    if (sessions.empty()) {
-        return vbox({
-            hbox({
-                text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
-                filler(),
-                text("Esc: close") | color(Color::GrayDark),
-            }),
-            separator(),
-            text("  No saved sessions yet.") | color(Color::White),
-            text("  Sessions are stored automatically once a conversation starts.") | dim,
+    const bool browsing_threads =
+        resource == SessionPickerResource::ActiveThreads;
+    const std::string_view title = browsing_threads ? " THREADS " : " SESSIONS ";
+    const std::string_view browse_help = browsing_threads
+        ? "↑↓ · Enter switch · N new · R rename · C close · / filter · Esc"
+        : "↑↓  ·  Enter resume  ·  Del delete  ·  / filter  ·  Esc";
+
+    Elements chrome = {
+        hbox({
+            text(std::string{title}) | ftxui::bold | color(Color::Black)
+                | bgcolor(ColorYellowBright),
+            text(filtered.empty()
+                     ? "  empty"
+                     : std::format("  {} of {}",
+                                   std::clamp(selected_index, 0,
+                                              std::max(0, static_cast<int>(filtered.size()) - 1)) + 1,
+                                   filtered.size()))
+                | color(Color::GrayLight),
             filler(),
-        }) | UiBorder(ColorYellowBright)
-           | size(HEIGHT, EQUAL, 10);
+            text(rename_active
+                     ? "Enter save  ·  Esc cancel"
+                     : filter_active
+                         ? "type to filter  ·  Enter/Esc done"
+                         : std::string{browse_help})
+                | color(Color::GrayDark),
+        }),
+        separator(),
+    };
+
+    if (filter_active || !query.empty()) {
+        chrome.push_back(hbox({
+            text(filter_active ? " Filter: " : " Filtered: ") | color(ColorYellowBright),
+            text(std::string{query}) | color(Color::White),
+            text(filter_active ? "█" : "") | color(ColorYellowBright),
+            filler(),
+        }));
+    }
+    if (rename_active) {
+        chrome.push_back(hbox({
+            text(" Rename: ") | color(ColorYellowBright),
+            text(std::string{rename_buffer}) | color(Color::White),
+            text("█") | color(ColorYellowBright),
+            filler(),
+        }));
+    }
+    if (!status_message.empty() && !rename_active && !filter_active) {
+        chrome.push_back(text(std::format("  {}", status_message)) | color(Color::GrayLight));
     }
 
-    const int total = static_cast<int>(sessions.size());
+    if (filtered.empty()) {
+        const std::string empty_message = query.empty()
+            ? (browsing_threads
+                   ? "  No active threads. Press N (or Ctrl+N) to start one."
+                   : "  No saved sessions yet.")
+            : (browsing_threads
+                   ? "  No active threads match this filter."
+                   : "  No saved sessions match this filter.");
+        chrome.push_back(text(empty_message)
+                         | color(Color::White));
+        chrome.push_back(text(browsing_threads
+                                  ? "  /threads switches live work; N creates another active thread."
+                                  : "  Sessions are stored automatically once a conversation starts.")
+                         | dim);
+        chrome.push_back(filler());
+        return vbox(std::move(chrome)) | UiBorder(ColorYellowBright)
+               | size(HEIGHT, EQUAL, 12);
+    }
+
+    const int total = static_cast<int>(filtered.size());
     const int selected = std::clamp(selected_index, 0, total - 1);
+    const auto now = std::chrono::system_clock::now();
+    const auto groups = core::session::group_threads_by_recency(filtered, now);
 
-    const int max_visible = 8;
-    const int start_idx = std::max(0, std::min(selected - max_visible / 2,
-                                               total - max_visible));
-    const int end_idx = std::min(start_idx + max_visible, total);
+    // Build a flat render list interleaved with group headers, tracking which
+    // flat row maps to which filtered index for viewport centering.
+    struct RenderRow {
+        bool is_header = false;
+        std::string header_label;
+        int filtered_index = -1;
+    };
+    std::vector<RenderRow> rows;
+    rows.reserve(filtered.size() + groups.size());
+    int selected_row = 0;
+    for (const auto& group : groups) {
+        rows.push_back(RenderRow{
+            .is_header = true,
+            .header_label = group.label,
+        });
+        for (const std::size_t idx : group.indices) {
+            if (static_cast<int>(idx) == selected) {
+                selected_row = static_cast<int>(rows.size());
+            }
+            rows.push_back(RenderRow{
+                .is_header = false,
+                .filtered_index = static_cast<int>(idx),
+            });
+        }
+    }
 
-    const bool show_names = std::any_of(
-        sessions.begin(), sessions.end(),
-        [](const core::session::SessionInfo& s) { return !s.name.empty(); });
+    const int max_visible = 10;
+    const int row_total = static_cast<int>(rows.size());
+    const int start_idx = std::max(0, std::min(selected_row - max_visible / 2,
+                                               std::max(0, row_total - max_visible)));
+    const int end_idx = std::min(start_idx + max_visible, row_total);
 
     Elements visible_rows;
     visible_rows.reserve(static_cast<std::size_t>(end_idx - start_idx) + 2);
 
-    for (int i = start_idx; i < end_idx; ++i) {
-        const auto& s = sessions[static_cast<std::size_t>(i)];
-        const bool is_selected = (i == selected);
-
-        std::string ts = s.last_active_at.empty() ? s.created_at : s.last_active_at;
-        if (ts.size() > 10 && ts[10] == 'T') {
-            ts[10] = ' ';
+    for (int ri = start_idx; ri < end_idx; ++ri) {
+        const auto& row = rows[static_cast<std::size_t>(ri)];
+        if (row.is_header) {
+            visible_rows.push_back(hbox({
+                text(std::format("  {} ", row.header_label)) | ftxui::bold | color(Color::GrayLight),
+                text(std::string(24, '-')) | color(Color::GrayDark) | dim,
+                filler(),
+            }));
+            continue;
         }
-        if (ts.size() > static_cast<std::size_t>(kTimeWidth)) {
-            ts.resize(static_cast<std::size_t>(kTimeWidth));
-        }
 
-        std::string model_cell = s.provider.empty()
+        const auto& s = filtered[static_cast<std::size_t>(row.filtered_index)];
+        const bool is_selected = (row.filtered_index == selected);
+        const bool is_current = core::session::is_current_thread(s, current_session_id);
+        const bool is_running = running_session_ids.contains(s.session_id);
+
+        const std::string stamp = s.last_active_at.empty() ? s.created_at : s.last_active_at;
+        const std::string relative = core::session::format_relative_time(stamp, now);
+        const std::string title = core::session::thread_display_title(s);
+        const std::string model_cell = s.provider.empty()
             ? s.model
             : std::format("{}/{}", s.provider, s.model);
 
-        std::string mode = s.mode;
-        std::transform(mode.begin(), mode.end(), mode.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-
-        const Color id_color      = is_selected ? Color{Color::Black} : static_cast<Color>(ColorYellowBright);
         const Color primary_color = is_selected ? Color::Black : Color::White;
         const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;
-        const Color mode_color = is_selected
+        const Color id_color = is_selected
             ? Color{Color::Black}
-            : (mode == "BUILD" ? static_cast<Color>(ColorYellowDark)
-                               : static_cast<Color>(ColorQuestionCyan));
+            : static_cast<Color>(ColorYellowBright);
 
         Elements cells;
-        cells.push_back(text(is_selected ? " \xe2\x96\xb6 " : "   ")
-                        | color(is_selected ? Color{Color::Black} : Color{Color::GrayDark}));
+        cells.push_back(text(is_selected
+                                 ? " ▸ "
+                                 : (is_current ? " ● " : (is_running ? " ◌ " : "   ")))
+                        | color(is_selected ? Color{Color::Black}
+                                            : ((is_current || is_running)
+                                                   ? static_cast<Color>(ColorYellowBright)
+                                                          : Color{Color::GrayDark})));
         cells.push_back(text(fit_column(s.session_id, kIdWidth)) | ftxui::bold | color(id_color));
         cells.push_back(text(std::string{kGap}));
-        if (show_names) {
-            cells.push_back(text(fit_column(s.name.empty() ? "\xe2\x80\x94" : s.name, kNameWidth))
-                            | color(s.name.empty() ? muted_color : primary_color));
-            cells.push_back(text(std::string{kGap}));
-        }
-        cells.push_back(text(fit_column(ts, kTimeWidth)) | color(muted_color));
+        cells.push_back(text(fit_column(title, kTitleWidth)) | color(primary_color));
+        cells.push_back(text(std::string{kGap}));
+        cells.push_back(text(fit_column(relative, kTimeWidth)) | color(muted_color));
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_path_column(
-                s.working_dir.empty() ? std::string{"\xe2\x80\x94"} : abbreviate_path(s.working_dir),
+                s.working_dir.empty() ? std::string{"—"} : abbreviate_path(s.working_dir),
                 kDirWidth))
                         | color(s.working_dir.empty() ? muted_color : primary_color));
         cells.push_back(text(std::string{kGap}));
@@ -1420,27 +1556,38 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_column_right(std::to_string(s.turn_count), kTurnsWidth))
                         | color(muted_color));
-        cells.push_back(text(std::string{kGap}));
-        cells.push_back(text(fit_column(mode, kModeWidth)) | color(mode_color));
+        if (is_current) {
+            cells.push_back(text(std::string{kGap}));
+            cells.push_back(text("current")
+                            | color(is_selected
+                                        ? Color{Color::Black}
+                                        : static_cast<Color>(ColorYellowDark)));
+        } else if (is_running) {
+            cells.push_back(text(std::string{kGap}));
+            cells.push_back(text("running")
+                            | color(is_selected
+                                        ? Color{Color::Black}
+                                        : static_cast<Color>(ColorYellowBright)));
+        }
         cells.push_back(filler());
 
-        auto row = hbox(std::move(cells));
+        auto rendered = hbox(std::move(cells));
         if (is_selected) {
-            row = row | bgcolor(ColorYellowDark);
+            rendered = rendered | bgcolor(ColorYellowDark);
         }
-        visible_rows.push_back(std::move(row));
+        visible_rows.push_back(std::move(rendered));
     }
 
     if (start_idx > 0) {
         visible_rows.insert(visible_rows.begin(), hbox({
-            text(" \xe2\x86\x91 ") | color(ColorYellowDark),
+            text(" ↑ ") | color(ColorYellowDark),
             text(std::format("{} more above", start_idx)) | color(Color::GrayDark) | dim,
         }));
     }
-    if (end_idx < total) {
+    if (end_idx < row_total) {
         visible_rows.push_back(hbox({
-            text(" \xe2\x86\x93 ") | color(ColorYellowDark),
-            text(std::format("{} more below", total - end_idx)) | color(Color::GrayDark) | dim,
+            text(" ↓ ") | color(ColorYellowDark),
+            text(std::format("{} more below", row_total - end_idx)) | color(Color::GrayDark) | dim,
         }));
     }
 
@@ -1448,35 +1595,23 @@ Element render_session_picker_panel(const std::vector<core::session::SessionInfo
     header_cells.push_back(text(std::string(static_cast<std::size_t>(kMarkerWidth), ' ')));
     header_cells.push_back(header_cell("ID", kIdWidth));
     header_cells.push_back(text(std::string{kGap}));
-    if (show_names) {
-        header_cells.push_back(header_cell("NAME", kNameWidth));
-        header_cells.push_back(text(std::string{kGap}));
-    }
-    header_cells.push_back(header_cell("LAST ACTIVE", kTimeWidth));
+    header_cells.push_back(header_cell("TITLE", kTitleWidth));
+    header_cells.push_back(text(std::string{kGap}));
+    header_cells.push_back(header_cell("ACTIVE", kTimeWidth));
     header_cells.push_back(text(std::string{kGap}));
     header_cells.push_back(header_cell("DIR", kDirWidth));
     header_cells.push_back(text(std::string{kGap}));
     header_cells.push_back(header_cell("PROVIDER/MODEL", kModelWidth));
     header_cells.push_back(text(std::string{kGap}));
     header_cells.push_back(header_cell("TURNS", kTurnsWidth, /*right=*/true));
-    header_cells.push_back(text(std::string{kGap}));
-    header_cells.push_back(header_cell("MODE", kModeWidth));
     header_cells.push_back(filler());
 
-    return vbox({
-        hbox({
-            text(" SESSIONS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
-            text(std::format("  {} of {}", selected + 1, total)) | color(Color::GrayLight),
-            filler(),
-            text("\xe2\x86\x91\xe2\x86\x93 navigate  \xc2\xb7  Enter resume  \xc2\xb7  Del delete  \xc2\xb7  Esc close")
-                | color(Color::GrayDark),
-        }),
-        separator(),
-        hbox(std::move(header_cells)) | dim,
-        vbox(std::move(visible_rows)),
-        filler(),
-    }) | UiBorder(ColorYellowBright)
-      | size(HEIGHT, GREATER_THAN, 13);
+    chrome.push_back(hbox(std::move(header_cells)) | dim);
+    chrome.push_back(vbox(std::move(visible_rows)));
+    chrome.push_back(filler());
+
+    return vbox(std::move(chrome)) | UiBorder(ColorYellowBright)
+           | size(HEIGHT, GREATER_THAN, 14);
 }
 
 // Build a single-line preview of a (potentially multi-line) prompt: collapse

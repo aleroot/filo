@@ -39,6 +39,9 @@ public:
         return instance;
     }
 
+    // Legacy single-session cursor. Concurrent execution roots must never
+    // mutate or read this cursor; they must pass a session id to every scoped
+    // operation. It remains solely for source compatibility with embedders.
     void set_session_id(std::string session_id) {
         std::lock_guard lock(mutex_);
         session_id_ = std::move(session_id);
@@ -64,9 +67,9 @@ public:
                 bool should_estimate_cost = true) noexcept {
         if (!usage.has_data()) return;
         try {
-            if (!context.session_id.empty()) {
-                set_session_id(context.session_id);
-            }
+            // Explicitly scoped records must not change the legacy cursor.
+            // Doing so makes an unrelated zero-argument read depend on which
+            // concurrent thread happened to record most recently.
             ledger_.record({
                 .kind = TokenLedgerEventKind::Actual,
                 .source = context.source,
@@ -109,9 +112,16 @@ public:
         return ledger_.event_count();
     }
 
+    // Legacy single-session overloads. Concurrent callers must use the
+    // session-id overloads below; these intentionally remain compatibility
+    // shims rather than participating in thread selection.
     void reset_session() noexcept {
+        reset_session(session_id());
+    }
+
+    void reset_session(std::string_view session_id) noexcept {
         try {
-            const std::string scoped_session = session_id();
+            const std::string scoped_session{session_id};
             if (scoped_session.empty()) {
                 ledger_.reset();
             } else {
@@ -122,8 +132,13 @@ public:
     }
 
     [[nodiscard]] core::llm::TokenUsage session_total() const noexcept {
+        return session_total(session_id());
+    }
+
+    [[nodiscard]] core::llm::TokenUsage session_total(
+        std::string_view session_id) const noexcept {
         try {
-            const auto snapshot = actual_snapshot();
+            const auto snapshot = actual_snapshot(session_id);
             const auto token_count = [](int64_t value) {
                 return static_cast<int32_t>(std::clamp<int64_t>(
                     value, 0, std::numeric_limits<int32_t>::max()));
@@ -143,10 +158,15 @@ public:
     }
 
     [[nodiscard]] core::llm::TokenUsage last_turn() const noexcept {
+        return last_turn(session_id());
+    }
+
+    [[nodiscard]] core::llm::TokenUsage last_turn(
+        std::string_view session_id) const noexcept {
         try {
             const auto events = ledger_.recent_events(
                 1,
-                actual_filter());
+                actual_filter(session_id));
             if (events.empty()) {
                 return {};
             }
@@ -157,31 +177,41 @@ public:
     }
 
     [[nodiscard]] double session_cost_usd() const noexcept {
+        return session_cost_usd(session_id());
+    }
+
+    [[nodiscard]] double session_cost_usd(std::string_view session_id) const noexcept {
         try {
-            return actual_snapshot().cost_usd();
+            return actual_snapshot(session_id).cost_usd();
         } catch (...) {
             return 0.0;
         }
     }
 
     [[nodiscard]] std::string status_string() const {
-        auto total = session_total();
+        return status_string(session_id());
+    }
+
+    [[nodiscard]] std::string status_string(std::string_view session_id) const {
+        auto total = session_total(session_id);
         if (!total.has_data()) return "";
-        return formatters::TokenUsageStatusFormatter<>{}.format(total, session_cost_usd());
+        return formatters::TokenUsageStatusFormatter<>{}.format(
+            total,
+            session_cost_usd(session_id));
     }
 
 private:
     BudgetTracker() noexcept = default;
 
-    [[nodiscard]] TokenLedgerFilter actual_filter() const {
+    [[nodiscard]] static TokenLedgerFilter actual_filter(std::string_view session_id) {
         return TokenLedgerFilter{
-            .session_id = session_id(),
+            .session_id = std::string{session_id},
             .kind = TokenLedgerEventKind::Actual,
         };
     }
 
-    [[nodiscard]] TokenLedgerSnapshot actual_snapshot() const {
-        return ledger_.snapshot(actual_filter());
+    [[nodiscard]] TokenLedgerSnapshot actual_snapshot(std::string_view session_id) const {
+        return ledger_.snapshot(actual_filter(session_id));
     }
 
     mutable std::mutex mutex_;

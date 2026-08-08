@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -37,6 +38,10 @@ public:
     [[nodiscard]] std::optional<RouterGuardrails> guardrails() const;
 
     [[nodiscard]] bool set_active_policy(std::string policy_name);
+
+    /// Returns an independent routing engine with the same configuration and
+    /// active policy. Live threads must not share mutable policy selection.
+    [[nodiscard]] std::shared_ptr<RouterEngine> fork() const;
 
     // Single best-candidate decision (original behaviour, used by tests and callers
     // that only want the top pick without the retry/fallback machinery).

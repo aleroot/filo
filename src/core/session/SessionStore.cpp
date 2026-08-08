@@ -1,6 +1,7 @@
 #include "SessionStore.hpp"
 
 #include "ActiveSessionLease.hpp"
+#include "ThreadCatalog.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -43,14 +44,17 @@ std::string SessionStore::generate_id() {
     return id;
 }
 
-std::string SessionStore::now_iso8601() {
-    const auto now = std::chrono::system_clock::now();
-    const auto tt  = std::chrono::system_clock::to_time_t(now);
+std::string SessionStore::to_iso8601(std::chrono::system_clock::time_point when) {
+    const auto tt = std::chrono::system_clock::to_time_t(when);
     std::tm tm{};
     gmtime_r(&tt, &tm);
     return std::format("{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}Z",
         tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
         tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
+std::string SessionStore::now_iso8601() {
+    return to_iso8601(std::chrono::system_clock::now());
 }
 
 std::filesystem::path SessionStore::default_sessions_dir() {
@@ -675,6 +679,7 @@ std::vector<SessionInfo> SessionStore::list() const {
         info.provider       = d.provider;
         info.model          = d.model;
         info.mode           = d.mode;
+        info.preview        = first_user_message_preview(d.messages);
         info.turn_count     = d.stats.turn_count;
         info.path           = p;
         result.push_back(std::move(info));

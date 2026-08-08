@@ -16,6 +16,7 @@
 #include "tui/Autocomplete.hpp"
 #include "tui/Constants.hpp"
 #include "tui/PickerState.hpp"
+#include "tui/SessionPicker.hpp"
 
 #include <ftxui/screen/screen.hpp>
 
@@ -113,6 +114,76 @@ TEST_CASE("render_startup_banner_panel — stays readable with provider metadata
     REQUIRE(clock_line_end != std::string::npos);
     REQUIRE(context_line_end != std::string::npos);
     REQUIRE(clock_line_end - clock_end == context_line_end - context_end);
+}
+
+TEST_CASE("render_startup_banner_panel shows tabs only for multiple threads",
+          "[tui][banner][threads]") {
+    auto single = render_startup_banner_panel(
+        "provider", "model", 0, {}, {}, "12:34:56",
+        {{.label = "filo", .active = true}});
+    auto single_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(100), ftxui::Dimension::Fit(single));
+    ftxui::Render(single_screen, single);
+    REQUIRE_THAT(strip_ansi(single_screen.ToString()),
+                 !Catch::Matchers::ContainsSubstring(" filo "));
+
+    std::vector<ftxui::Box> tab_hitboxes;
+    auto multiple = render_startup_banner_panel(
+        "provider", "model", 0, {}, {}, "12:34:56",
+        {
+            {.label = "filo", .active = true},
+            {.label = "filo 2", .running = true},
+        },
+        &tab_hitboxes);
+    auto multiple_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(100), ftxui::Dimension::Fit(multiple));
+    ftxui::Render(multiple_screen, multiple);
+    const auto output = strip_ansi(multiple_screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring(" filo "));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("filo 2"));
+
+    const auto clock_position = output.find("12:34:56");
+    const auto provider_position = output.find("provider: provider");
+    const auto tabs_position = output.find(" filo ");
+    REQUIRE(clock_position != std::string::npos);
+    REQUIRE(provider_position != std::string::npos);
+    REQUIRE(tabs_position != std::string::npos);
+    // Clock owns the upper-right corner; tabs share the banner's bottom row
+    // with provider/model metadata and therefore occupy the lower-right.
+    CHECK(output.rfind('\n', provider_position)
+          == output.rfind('\n', tabs_position));
+    CHECK(output.rfind('\n', clock_position)
+          < output.rfind('\n', tabs_position));
+
+    REQUIRE(tab_hitboxes.size() == 2);
+    CHECK(tab_hitboxes[0].x_min <= tab_hitboxes[0].x_max);
+    CHECK(tab_hitboxes[0].y_min <= tab_hitboxes[0].y_max);
+    CHECK(tab_hitboxes[0].x_max < tab_hitboxes[1].x_min);
+    CHECK(tab_hitboxes[0].y_min == tab_hitboxes[1].y_min);
+}
+
+TEST_CASE("thread and session browsers expose distinct actions",
+          "[tui][session_picker][render]") {
+    auto threads = render_session_picker_panel(
+        {}, 0, SessionPickerResource::ActiveThreads);
+    auto thread_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(120), ftxui::Dimension::Fit(threads));
+    ftxui::Render(thread_screen, threads);
+    const auto thread_output = strip_ansi(thread_screen.ToString());
+    REQUIRE_THAT(thread_output, Catch::Matchers::ContainsSubstring("THREADS"));
+    REQUIRE_THAT(thread_output, Catch::Matchers::ContainsSubstring("N (or Ctrl+N)"));
+
+    auto sessions = render_session_picker_panel(
+        {}, 0, SessionPickerResource::SavedSessions);
+    auto session_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(120), ftxui::Dimension::Fit(sessions));
+    ftxui::Render(session_screen, sessions);
+    const auto session_output = strip_ansi(session_screen.ToString());
+    REQUIRE_THAT(session_output, Catch::Matchers::ContainsSubstring("SESSIONS"));
+    REQUIRE_THAT(session_output,
+                 Catch::Matchers::ContainsSubstring("No saved sessions yet"));
+    REQUIRE_THAT(session_output,
+                 !Catch::Matchers::ContainsSubstring("N (or Ctrl+N)"));
 }
 
 TEST_CASE("runtime status summary has one compact canonical format",

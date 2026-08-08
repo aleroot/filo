@@ -1167,10 +1167,28 @@ public:
     }
 };
 
+class ThreadsCommand : public Command {
+public:
+    std::string get_name() const override { return "/threads"; }
+    std::string get_description() const override {
+        return "Browse active threads; switch, rename, create, or close one";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (ctx.open_threads_picker_fn && ctx.open_threads_picker_fn()) {
+            return;
+        }
+        ctx.append_history_fn("\n\xe2\x9a\xa0  Thread management is only available in the interactive TUI.\n");
+    }
+};
+
 class SessionsCommand : public Command {
 public:
     std::string get_name() const override { return "/sessions"; }
-    std::string get_description() const override { return "List and manage conversation sessions"; }
+    std::string get_description() const override {
+        return "List and manage saved conversation sessions";
+    }
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
@@ -1178,6 +1196,25 @@ public:
             return;
         }
         ctx.append_history_fn("\n\xe2\x9a\xa0  Session management is only available in the interactive TUI.\n");
+    }
+};
+
+class NewThreadCommand : public Command {
+public:
+    std::string get_name() const override { return "/new"; }
+    std::vector<std::string> get_aliases() const override { return {"/thread"}; }
+    std::string get_description() const override {
+        return "Start a new thread, saving the current one (Ctrl+N)";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.start_new_thread_fn) {
+            ctx.append_history_fn(
+                "\n\xe2\x9a\xa0  Starting a new thread is only available in the interactive TUI.\n");
+            return;
+        }
+        ctx.start_new_thread_fn();
     }
 };
 
@@ -1375,7 +1412,9 @@ public:
             "  /help, /?, /h       Show this help message\n"
             "  /clear, /cls        Clear the screen and conversation history\n"
             "  /quit, /exit, /q    Exit the application\n"
-            "  /sessions           List and manage conversation sessions\n"
+            "  /threads            Switch, rename, create, or close active threads\n"
+            "  /sessions           List, resume, or delete saved sessions\n"
+            "  /new, /thread       Start a new thread (saves the current one)\n"
             "  /prompts            Browse and reuse previous prompts\n"
             "  /resume [id|name]   Restore a saved session by ID, index, or name\n"
             "  /continue           Resume last session when empty, else push the current one on\n"
@@ -1408,6 +1447,8 @@ public:
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
+            "  Ctrl+N   Start a new thread (saves the current conversation)\n"
+            "  Ctrl+H/J Open the thread browser on enhanced-keyboard terminals\n"
             "  Ctrl+P   Open the model picker without clearing the current input\n"
             "  Ctrl+T   Browse and reuse previous prompts\n"
             "  Ctrl+F   Search the conversation history\n"
@@ -2021,9 +2062,17 @@ public:
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
 
-        const auto snapshot = core::session::SessionStats::get_instance().snapshot();
-        const auto total = core::budget::BudgetTracker::get_instance().session_total();
-        const double cost = core::budget::BudgetTracker::get_instance().session_cost_usd();
+        // Metrics are always read from the registry the execution root
+        // injected (DI), scoped to the current thread's session id.
+        const std::string scoped_session_id = ctx.agent
+            ? ctx.agent->session_id()
+            : std::string{};
+        const auto snapshot = (ctx.session_stats_registry && !scoped_session_id.empty())
+            ? ctx.session_stats_registry->snapshot(scoped_session_id)
+            : core::session::SessionStats::get_instance().snapshot();
+        const auto& budget = core::budget::BudgetTracker::get_instance();
+        const auto total = budget.session_total(scoped_session_id);
+        const double cost = budget.session_cost_usd(scoped_session_id);
 
         if (snapshot.turn_count == 0 && !total.has_data()) {
             ctx.append_history_fn(
@@ -3579,7 +3628,9 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<QuitCommand>());
     register_command(std::make_unique<ClearCommand>());
     register_command(std::make_unique<HelpCommand>());
+    register_command(std::make_unique<ThreadsCommand>());
     register_command(std::make_unique<SessionsCommand>());
+    register_command(std::make_unique<NewThreadCommand>());
     register_command(std::make_unique<PromptsCommand>());
     register_command(std::make_unique<ResumeCommand>());
     register_command(std::make_unique<ContinueCommand>());

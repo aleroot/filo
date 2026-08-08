@@ -178,6 +178,8 @@ set(FILO_CORE_SOURCES
     src/tui/MarkdownRenderer.cpp
     src/tui/MainApp.cpp
     src/tui/KeyInput.cpp
+    src/tui/SessionPicker.cpp
+    src/tui/ThreadRuntime.cpp
     src/tui/SessionReplay.cpp
     src/tui/Text.cpp
     src/tui/PromptInput.cpp
@@ -340,6 +342,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp
     src/core/session/SessionStore.cpp
+    src/core/session/ThreadCatalog.cpp
     src/core/session/ActiveSessionLease.cpp
     src/core/session/GoalManager.cpp
     src/core/goal/GoalGraph.cpp
@@ -576,6 +579,9 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_http_response_lifecycle.cpp
     tests/test_stream_resilience.cpp
     tests/test_session.cpp
+    tests/test_thread_catalog.cpp
+    tests/test_session_picker.cpp
+    tests/test_thread_runtime.cpp
     tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp
     tests/test_budget_tracker.cpp
@@ -750,6 +756,9 @@ source_group(
         tests/test_auto_classifier.cpp
         tests/test_prompt_input.cpp
         tests/test_session.cpp
+        tests/test_thread_catalog.cpp
+        tests/test_session_picker.cpp
+        tests/test_thread_runtime.cpp
         tests/test_agent_ignore.cpp
         tests/test_session_efficiency.cpp
         tests/test_sessions_lifecycle.cpp

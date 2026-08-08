@@ -104,9 +104,12 @@ std::vector<std::string> SubagentOrchestrator::ExecutionPlan::allowed_tool_names
     return names;
 }
 
-SubagentOrchestrator::SubagentOrchestrator(core::tools::ToolManager& tool_manager,
-                                           const core::config::AppConfig* app_config)
+SubagentOrchestrator::SubagentOrchestrator(
+    core::tools::ToolManager& tool_manager,
+    const core::config::AppConfig* app_config,
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry)
     : tool_manager_(tool_manager)
+    , session_stats_registry_(std::move(session_stats_registry))
     , profiles_(make_default_profiles())
     , app_config_(app_config) {
     if (app_config != nullptr) {
@@ -328,6 +331,7 @@ std::string SubagentOrchestrator::execute_task(
         .task_description = description,
         .parent_tool_call_id = context.parent_tool_call_id,
         .resume_state = std::move(resume_state),
+        .session_stats_registry = session_stats_registry_,
         .timeout = std::chrono::minutes(30),
         .cancellation_requested = context.cancellation_requested,
         .permission_check = adapt_permission_check(context),

@@ -389,7 +389,7 @@ ProviderCapabilities RouterProvider::capabilities() const {
 std::shared_ptr<LLMProvider> RouterProvider::fork_for_parallel_request() const {
     return std::make_shared<RouterProvider>(
         provider_manager_,
-        router_engine_,
+        router_engine_ ? router_engine_->fork() : nullptr,
         provider_default_models_,
         true);
 }
@@ -445,6 +445,10 @@ void RouterProvider::reset_conversation_state() {
 std::string RouterProvider::active_policy() const {
     if (!router_engine_) return {};
     return router_engine_->active_policy();
+}
+
+bool RouterProvider::set_active_policy(std::string policy_name) {
+    return router_engine_ && router_engine_->set_active_policy(std::move(policy_name));
 }
 
 std::string RouterProvider::last_route_summary() const {

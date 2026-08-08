@@ -47,13 +47,18 @@ struct ToolCallStats {
 };
 
 // ---------------------------------------------------------------------------
-// SessionStats — rich, session-wide metrics singleton.
+// SessionStats — rich, session-wide metrics accumulator.
 // Tracks per-model breakdowns and turn/tool counters.
 // All public methods are thread-safe.
+//
+// The legacy process-wide accessor remains available for callers that own one
+// session. Concurrent front ends use SessionStatsRegistry instead.
 // ---------------------------------------------------------------------------
 class SessionStats {
 public:
-    static SessionStats& get_instance() noexcept {
+    SessionStats() noexcept : started_at_(std::chrono::system_clock::now()) {}
+
+    [[nodiscard]] static SessionStats& get_instance() noexcept {
         static SessionStats instance;
         return instance;
     }
@@ -300,8 +305,6 @@ public:
     }
 
 private:
-    SessionStats() noexcept : started_at_(std::chrono::system_clock::now()) {}
-
     std::chrono::system_clock::time_point started_at_;
     std::atomic<int32_t>    turn_count_{0};
     std::atomic<int32_t>    tool_calls_total_{0};
@@ -312,6 +315,80 @@ private:
     std::unordered_map<std::string, std::unique_ptr<ModelCallStats>> per_model_;
     mutable std::shared_mutex                                       tools_mutex_;
     std::unordered_map<std::string, std::unique_ptr<ToolCallStats>> per_tool_;
+};
+
+// Session-keyed metrics facade used by concurrent runtimes. Each Agent records
+// against the immutable session id captured for its step, so selecting another
+// TUI thread cannot redirect accounting.
+//
+// Execution roots inject a shared registry into every Agent they create. The
+// shared_instance() accessor is the compatibility composition root used by the
+// CLI/TUI entry points and older embedders; tests may still construct isolated
+// registries directly.
+class SessionStatsRegistry {
+public:
+    SessionStatsRegistry() = default;
+    SessionStatsRegistry(const SessionStatsRegistry&) = delete;
+    SessionStatsRegistry& operator=(const SessionStatsRegistry&) = delete;
+
+    [[nodiscard]] static std::shared_ptr<SessionStatsRegistry> shared_instance() {
+        static auto instance = std::make_shared<SessionStatsRegistry>();
+        return instance;
+    }
+
+    [[nodiscard]] static SessionStatsRegistry& get_instance() {
+        return *shared_instance();
+    }
+
+    void record_turn(std::string_view session_id,
+                     std::string_view model,
+                     const core::llm::TokenUsage& usage,
+                     bool should_estimate_cost = true) {
+        state_for(session_id)->record_turn(model, usage, should_estimate_cost);
+    }
+
+    void record_tool_call(std::string_view session_id,
+                          std::string_view tool_name,
+                          bool success,
+                          int32_t argument_tokens = 0,
+                          int32_t result_tokens = 0,
+                          int32_t attributed_completion_tokens = 0,
+                          int64_t attributed_cost_micro_usd = 0) {
+        state_for(session_id)->record_tool_call(
+            tool_name,
+            success,
+            argument_tokens,
+            result_tokens,
+            attributed_completion_tokens,
+            attributed_cost_micro_usd);
+    }
+
+    void record_api_call(std::string_view session_id, bool success) {
+        state_for(session_id)->record_api_call(success);
+    }
+
+    [[nodiscard]] SessionStats::Snapshot snapshot(std::string_view session_id) {
+        return state_for(session_id)->snapshot();
+    }
+
+    void reset(std::string_view session_id) {
+        std::lock_guard lock(mutex_);
+        states_.erase(std::string{session_id});
+    }
+
+private:
+    [[nodiscard]] std::shared_ptr<SessionStats> state_for(std::string_view session_id) {
+        const std::string key{session_id};
+        std::lock_guard lock(mutex_);
+        auto& state = states_[key];
+        if (!state) {
+            state = std::make_shared<SessionStats>();
+        }
+        return state;
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<std::string, std::shared_ptr<SessionStats>> states_;
 };
 
 } // namespace core::session

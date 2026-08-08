@@ -561,7 +561,8 @@ int main(int argc, char** argv) {
         // Print the end-of-session summary report.
         core::session::SessionReport::print(
             core::budget::BudgetTracker::get_instance(),
-            core::session::SessionStats::get_instance().snapshot(),
+            core::session::SessionStatsRegistry::get_instance().snapshot(
+                run_result.session_id),
             run_result.session_id,
             run_result.session_file_path);
     } else {

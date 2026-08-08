@@ -64,7 +64,7 @@ Guidelines:
 
 std::string AskUserQuestionTool::execute(
     const std::string& args_json,
-    [[maybe_unused]] const core::context::SessionContext& context) {
+    const core::context::SessionContext& context) {
     if (!questionCallback_) {
         return R"({"error":"AskUserQuestion tool not initialized with a UI callback."})";
     }
@@ -83,6 +83,7 @@ std::string AskUserQuestionTool::execute(
 
     QuestionRequest request;
     request.id = generateUuid();
+    request.session_id = context.session_id;
     request.promise = std::make_shared<std::promise<std::optional<std::vector<std::pair<std::string, std::string>>>>>();
 
     for (auto question_elem : questions_array) {

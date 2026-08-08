@@ -24,6 +24,10 @@ namespace core::config {
 struct AppConfig;
 }
 
+namespace core::session {
+class SessionStatsRegistry;
+}
+
 namespace core::agent {
 
 class SubagentOrchestrator {
@@ -73,8 +77,10 @@ public:
         [[nodiscard]] std::vector<std::string> allowed_tool_names() const;
     };
 
-    explicit SubagentOrchestrator(core::tools::ToolManager& tool_manager,
-                                  const core::config::AppConfig* app_config = nullptr);
+    explicit SubagentOrchestrator(
+        core::tools::ToolManager& tool_manager,
+        const core::config::AppConfig* app_config = nullptr,
+        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {});
 
     [[nodiscard]] core::llm::Tool task_tool_definition() const;
     [[nodiscard]] std::expected<ExecutionPlan, std::string> build_execution_plan(
@@ -147,6 +153,7 @@ private:
     [[nodiscard]] static std::string normalize_mode(std::string_view mode);
 
     core::tools::ToolManager& tool_manager_;
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry_;
     std::vector<Profile> profiles_;
     mutable std::mutex profiles_mutex_;
     const core::config::AppConfig* app_config_ = nullptr;

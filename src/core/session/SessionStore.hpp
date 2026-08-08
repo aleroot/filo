@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SessionData.hpp"
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -19,6 +20,8 @@ struct SessionInfo {
     std::string           provider;
     std::string           model;
     std::string           mode;
+    /// Collapsed first user-message preview used as the thread title fallback.
+    std::string           preview;
     int32_t               turn_count = 0;
     std::filesystem::path path;
 };
@@ -78,6 +81,12 @@ public:
 
     /// Current UTC time formatted as ISO 8601.
     [[nodiscard]] static std::string now_iso8601();
+
+    /// Format an arbitrary UTC time point as ISO 8601 (shared by now_iso8601
+    /// and callers that persist in-memory timestamps, e.g. live-thread
+    /// activity).
+    [[nodiscard]] static std::string to_iso8601(
+        std::chrono::system_clock::time_point when);
 
     /// Normalize a working-directory string into a canonical absolute path so
     /// that two logically-identical directories compare equal regardless of

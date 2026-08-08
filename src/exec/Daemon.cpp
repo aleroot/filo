@@ -12,6 +12,7 @@
 #include "../core/mcp/RemoteActivity.hpp"
 #include "../core/tools/ToolManager.hpp"
 #include "../core/context/SessionContext.hpp"
+#include "../core/session/SessionStore.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
 #include "../core/utils/StringUtils.hpp"
@@ -1180,7 +1181,8 @@ void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
         tool_manager,
         core::context::make_session_context(
             core::workspace::Workspace::get_instance().snapshot(),
-            core::context::SessionTransport::unspecified));
+            core::context::SessionTransport::unspecified,
+            core::session::SessionStore::generate_id()));
     agent->set_active_provider_name(config.default_provider);
 
     std::string final_response;

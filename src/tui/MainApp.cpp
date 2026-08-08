@@ -9,6 +9,8 @@
 #include "CodeBlockRunServices.hpp"
 #include "KeyInput.hpp"
 #include "SessionReplay.hpp"
+#include "SessionPicker.hpp"
+#include "ThreadRuntime.hpp"
 #include "SelectionClipboardCopier.hpp"
 #include "Text.hpp"
 #include "editor/ExternalEditorController.hpp"
@@ -20,6 +22,7 @@
 #include "RemoteActivityPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
+#include "core/session/ThreadCatalog.hpp"
 #include "core/commands/GoalExecutor.hpp"
 #include "core/goal/GoalEngine.hpp"
 #include "core/session/GoalManager.hpp"
@@ -179,8 +182,25 @@ struct DirectShellState {
         core::tools::shell::make_shell_executor()};
     std::mutex run_mutex;
     mutable std::mutex active_mutex;
+    std::condition_variable active_cv;
     std::optional<core::commands::ActiveTerminalInfo> active_command;
     std::chrono::steady_clock::time_point active_started_at{};
+    std::size_t workers_in_flight = 0;
+
+    void begin_worker() {
+        std::lock_guard lock(active_mutex);
+        ++workers_in_flight;
+    }
+
+    void finish_worker() {
+        {
+            std::lock_guard lock(active_mutex);
+            if (workers_in_flight > 0) {
+                --workers_in_flight;
+            }
+        }
+        active_cv.notify_all();
+    }
 
     void mark_active(std::string session_id,
                      std::string command,
@@ -197,9 +217,12 @@ struct DirectShellState {
     }
 
     void clear_active() {
-        std::lock_guard lock(active_mutex);
-        active_command.reset();
-        active_started_at = {};
+        {
+            std::lock_guard lock(active_mutex);
+            active_command.reset();
+            active_started_at = {};
+        }
+        active_cv.notify_all();
     }
 
     [[nodiscard]] std::optional<core::commands::ActiveTerminalInfo>
@@ -229,6 +252,20 @@ struct DirectShellState {
             return false;
         }
         return executor->interrupt();
+    }
+
+    void interrupt_active() {
+        std::lock_guard lock(active_mutex);
+        if (active_command.has_value() && executor) {
+            static_cast<void>(executor->interrupt());
+        }
+    }
+
+    void wait_until_idle() {
+        std::unique_lock lock(active_mutex);
+        active_cv.wait(lock, [&]() {
+            return !active_command.has_value() && workers_in_flight == 0;
+        });
     }
 
     core::tools::shell::IShellExecutor::Result run(std::string_view command,
@@ -582,19 +619,8 @@ RunResult run(RunOptions opts) {
         }
     }
 
-    enum class ModelSelectionMode {
-        Manual,
-        Router,
-        Auto,   // Smart routing with AutoClassifier task classification
-    };
-
-    // Outcome of the most recent assistant turn. Drives the footer marker
-    // shown once the turn winds down: tick on success, cross otherwise.
-    enum class TurnCompletionStatus {
-        None,       // Nothing to report yet: no marker.
-        Succeeded,  // The response was generated successfully: tick.
-        Failed,     // The turn was cancelled or ended with an error: cross.
-    };
+    using ModelSelectionMode = tui::ModelSelectionMode;
+    using ModelSelectionSnapshot = tui::ModelSelectionSnapshot;
 
     auto parse_model_selection_mode = [](std::string_view mode) {
         std::string normalized;
@@ -670,10 +696,11 @@ RunResult run(RunOptions opts) {
     auto router_engine = std::make_shared<core::llm::routing::RouterEngine>(
         config.router,
         registered_providers);
-    auto router_provider = std::make_shared<core::llm::providers::RouterProvider>(
+    auto router_provider_template = std::make_shared<core::llm::providers::RouterProvider>(
         provider_manager,
         router_engine,
         provider_default_models);
+    auto router_provider = router_provider_template;
 
     bool router_available = config.router.enabled && !router_engine->list_policies().empty();
 
@@ -689,12 +716,6 @@ RunResult run(RunOptions opts) {
     std::string active_model_name;
     std::string session_effort_value; // empty => auto/provider default
 
-    struct ModelSelectionSnapshot {
-        ModelSelectionMode mode = ModelSelectionMode::Manual;
-        std::string manual_provider_name;
-        std::string manual_model_name;
-        std::string router_policy;
-    };
     std::optional<ModelSelectionSnapshot> previous_model_selection;
 
     std::shared_ptr<core::llm::LLMProvider> llm_provider;
@@ -753,6 +774,10 @@ RunResult run(RunOptions opts) {
         model_selection_mode == ModelSelectionMode::Manual ? manual_model_name : std::string{});
 
     // ── Agent ────────────────────────────────────────────────────────────────
+    // One session-keyed metrics registry is injected into every Agent. The
+    // process composition root also reads it for the exit report.
+    auto session_stats_registry =
+        core::session::SessionStatsRegistry::shared_instance();
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
@@ -763,7 +788,11 @@ RunResult run(RunOptions opts) {
     auto agent = std::make_shared<core::agent::Agent>(
         llm_provider,
         tool_manager,
-        agent_session_context);
+        agent_session_context,
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        session_stats_registry,
+        &core::budget::BudgetTracker::get_instance());
     agent->set_active_provider_name(active_provider_name);
     agent->set_auto_compact_threshold(
         config.auto_compact_threshold,
@@ -805,9 +834,9 @@ RunResult run(RunOptions opts) {
         return summary;
     };
 
-    std::vector<UiMessage> ui_messages;
+    auto selected_messages = std::make_shared<std::vector<UiMessage>>();
     if (const auto message = startup_history_message(); !message.empty()) {
-        append_ui_message(ui_messages, make_system_message(message));
+        append_ui_message(*selected_messages, make_system_message(message));
     }
 
     std::string input_text;
@@ -821,16 +850,9 @@ RunResult run(RunOptions opts) {
         std::chrono::steady_clock::time_point::min();
     std::mutex  ui_mutex;
     auto direct_shell_state = std::make_shared<DirectShellState>();
-    std::atomic_bool assistant_turn_active{false};
-    std::atomic<TurnCompletionStatus> assistant_turn_completion_status{
-        TurnCompletionStatus::None};
     std::atomic<std::size_t> direct_shell_animation_count{0};
-    struct PendingAgentTurn {
-        std::string text;
-        core::agent::Agent::TurnCallbacks callbacks;
-    };
-    std::deque<PendingAgentTurn> queued_steering_turns;
     struct PendingAuthenticationRecovery {
+        ThreadRuntime::Ptr runtime;
         core::llm::AuthenticationRecoveryRequest request;
         core::auth::AuthenticationProviderDescriptor provider;
         std::string retry_text;
@@ -843,7 +865,6 @@ RunResult run(RunOptions opts) {
         int selected = 0;
     };
     AuthenticationRecoveryState authentication_recovery_state;
-    ActivityTimerRegistry turn_activity_timers;
     
     // Rate limit tracking for status bar and notifications
     struct RateLimitState {
@@ -864,6 +885,8 @@ RunResult run(RunOptions opts) {
     };
     RemoteActivityPanelState remote_activity_panel_state;
     Box remote_activity_pill_box{0, -1, 0, -1};
+    std::vector<Box> thread_tab_hitboxes;
+    std::vector<std::string> thread_tab_session_ids;
     SelectionClipboardCopier selection_clipboard_copier;
     auto screen = App::Fullscreen();
     // Enable mouse tracking for scrolling and focus.
@@ -997,18 +1020,17 @@ RunResult run(RunOptions opts) {
     // Persistent prompt history with navigation.
     core::history::PersistentPromptHistory prompt_history(history_store);
 
-    ApprovalMode approval_mode = opts.startup_trust.trust_all_tools
-        ? ApprovalMode::Yolo
-        : parse_approval_mode(config.default_approval_mode);
+    const bool startup_yolo_enabled = opts.startup_trust.trust_all_tools
+        || parse_approval_mode(config.default_approval_mode) == ApprovalMode::Yolo;
 
     // Session trust rules used for auto-approval in this session.
     // Rules are canonical strings (for example: shell:git, files:write,
     // tool:write_file) and are managed by `/tools` plus the permission overlay.
-    std::unordered_set<std::string> session_allowed;
+    std::unordered_set<std::string> startup_session_allow_rules;
     for (const auto& raw_rule : opts.startup_trust.session_allow_rules) {
         const auto normalized = core::permissions::normalize_session_allow_rule(raw_rule);
         if (!normalized.empty()) {
-            session_allowed.insert(normalized);
+            startup_session_allow_rules.insert(normalized);
         }
     }
 
@@ -1022,11 +1044,24 @@ RunResult run(RunOptions opts) {
         std::string                                     remember_rule;
         std::string                                     allow_label;
         std::shared_ptr<std::promise<bool>>             promise;
+        /// Thread asking for permission and a display label; Ctrl+C must stop
+        /// this thread's agent (not necessarily the currently visible one).
+        ThreadRuntime::Ptr                              origin_runtime;
+        std::string                                     origin_label;
     };
     PermissionState perm_state;
     std::mutex permission_prompt_mutex;
     std::condition_variable permission_prompt_cv;
     bool permission_prompt_in_flight = false;
+    // Set at shutdown under ui_mutex; permission waiters treat it as an
+    // immediate deny so they never block the idle barriers during exit.
+    bool permission_prompt_shutdown = false;
+    // AskUserQuestion overlays are also single-slot UI resources. Concurrent
+    // threads wait here instead of displacing (and silently cancelling) the
+    // question already visible to the user.
+    std::mutex question_prompt_mutex;
+    std::condition_variable question_prompt_cv;
+    bool question_prompt_shutdown = false;
 
     struct ModelPickerState {
         bool active = false;
@@ -1110,11 +1145,6 @@ RunResult run(RunOptions opts) {
     };
     LocalModelPickerState local_model_picker_state;
 
-    struct SessionPickerState {
-        bool active = false;
-        int selected = 0;
-        std::vector<core::session::SessionInfo> sessions;
-    };
     SessionPickerState session_picker_state;
 
     struct PromptsPickerState {
@@ -1338,6 +1368,15 @@ RunResult run(RunOptions opts) {
         core::session::SessionStore::default_sessions_dir());
     auto memory_store = std::make_shared<core::memory::MemoryStore>();
 
+    const std::string project_thread_base_name = [] {
+        try {
+            const auto leaf = std::filesystem::current_path().filename().string();
+            return leaf.empty() ? std::string{"thread"} : leaf;
+        } catch (...) {
+            return std::string{"thread"};
+        }
+    }();
+
     std::string session_id          = core::session::SessionStore::generate_id();
     std::string session_name;       // optional user-assigned name (/rename)
     std::string session_created_at  = core::session::SessionStore::now_iso8601();
@@ -1347,12 +1386,6 @@ RunResult run(RunOptions opts) {
     // on first use so it can capture the fully-built command context.
     std::shared_ptr<core::goal::GoalEngine> goal_engine;
     std::string pending_goal_graph_snapshot;
-    struct SessionSaveState {
-        std::mutex write_mutex;
-        std::atomic<std::uint64_t> latest_requested{0};
-    };
-    auto session_save_state = std::make_shared<SessionSaveState>();
-
     // If resuming, compute the path now so we can return it in RunResult.
     auto compute_session_path = [&]() {
         core::session::SessionData tmp;
@@ -1387,7 +1420,7 @@ RunResult run(RunOptions opts) {
         if (lease) {
             lease->commit();
         } else {
-            append_ui_message(ui_messages, make_warning_message(std::format(
+            append_ui_message(*selected_messages, make_warning_message(std::format(
                 "Session '{}' was not resumed because {}. Starting a fresh session instead.",
                 startup_data->session_id,
                 lease.error())));
@@ -1423,7 +1456,7 @@ RunResult run(RunOptions opts) {
         // Restore session file path.
         session_file_path = session_store->compute_path(data).string();
 
-        ui_messages = build_resumed_ui_messages(
+        *selected_messages = build_resumed_ui_messages(
             data,
             SessionReplayOptions{.include_continue_hint = true});
 
@@ -1434,11 +1467,11 @@ RunResult run(RunOptions opts) {
         if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
                 data.working_dir, std::filesystem::current_path().string());
             notice.has_value()) {
-            append_ui_message(ui_messages, make_warning_message(std::move(*notice)));
+            append_ui_message(*selected_messages, make_warning_message(std::move(*notice)));
         }
     } else if (!missing_session_label.empty()) {
         // --resume pointed at something that doesn't exist — warn the user.
-        append_ui_message(ui_messages, make_warning_message(
+        append_ui_message(*selected_messages, make_warning_message(
             std::format("Session '{}' not found. Starting a fresh session.",
                 missing_session_label)));
     }
@@ -1457,10 +1490,92 @@ RunResult run(RunOptions opts) {
         }
         lease->commit();
     }
-    core::budget::BudgetTracker::get_instance().set_session_id(session_id);
-    core::budget::BudgetTracker::get_instance().reset_session();
-    core::session::SessionStats::get_instance().reset();
+    core::budget::BudgetTracker::get_instance().reset_session(session_id);
+    session_stats_registry->reset(session_id);
     agent->set_session_id(session_id);
+
+    ThreadRuntimeRegistry thread_runtimes;
+    auto current_runtime = std::make_shared<ThreadRuntime>(
+        ThreadRuntimeMetadata{
+            .session_id = session_id,
+            .thread_name = "main",
+            .session_name = session_name,
+            .created_at = session_created_at,
+            .file_path = session_file_path,
+            .provider = active_provider_name,
+            .model = active_model_name,
+            .model_selection = ModelSelectionSnapshot{
+                .mode = model_selection_mode,
+                .manual_provider_name = manual_provider_name,
+                .manual_model_name = manual_model_name,
+                .router_policy = active_router_policy,
+            },
+            .yolo_enabled = startup_yolo_enabled,
+            .permission_rules = startup_session_allow_rules,
+            .goal = startup_data.has_value() ? startup_data->goal : std::nullopt,
+            .goal_graph = startup_data.has_value() ? startup_data->goal_graph : std::nullopt,
+        },
+        agent,
+        selected_messages,
+        session_leases.retain(session_id));
+    // Stable runtime identity for ordering. Labels and session ids can change
+    // independently, but the process's initial thread must always stay first.
+    const auto main_runtime = current_runtime;
+    if (!thread_runtimes.insert(current_runtime)
+        || !thread_runtimes.select(session_id)) {
+        core::logging::error("Could not initialize the thread runtime registry.");
+        return {};
+    }
+
+    auto allocate_project_thread_name = [&]() {
+        std::unordered_set<std::string> used_names;
+        for (const auto& runtime : thread_runtimes.snapshot()) {
+            if (const auto name = runtime->metadata().thread_name; !name.empty()) {
+                used_names.insert(name);
+            }
+        }
+        if (!used_names.contains(project_thread_base_name)) {
+            return project_thread_base_name;
+        }
+        for (std::size_t ordinal = 2;; ++ordinal) {
+            auto candidate = std::format("{} {}", project_thread_base_name, ordinal);
+            if (!used_names.contains(candidate)) {
+                return candidate;
+            }
+        }
+    };
+
+    auto sync_runtime_metadata = [&]() {
+        std::optional<core::session::SessionGoalGraph> graph;
+        if (goal_engine) {
+            const auto status = goal_engine->status();
+            if (status.has_graph) {
+                graph = core::session::SessionGoalGraph{
+                    .plan_version = status.plan_version,
+                    .run_state = std::string(core::goal::to_string(status.run_state)),
+                    .snapshot = goal_engine->snapshot_json(),
+                    .updated_at = core::session::SessionStore::now_iso8601(),
+                };
+            }
+        }
+        current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+            metadata.session_id = session_id;
+            metadata.session_name = session_name;
+            metadata.created_at = session_created_at;
+            metadata.file_path = session_file_path;
+            metadata.provider = active_provider_name;
+            metadata.model = active_model_name;
+            metadata.model_selection = ModelSelectionSnapshot{
+                .mode = model_selection_mode,
+                .manual_provider_name = manual_provider_name,
+                .manual_model_name = manual_model_name,
+                .router_policy = active_router_policy,
+            };
+            metadata.previous_model_selection = previous_model_selection;
+            metadata.goal = goal_manager.current();
+            metadata.goal_graph = std::move(graph);
+        });
+    };
 
     // ── Helper lambdas ───────────────────────────────────────────────────────
 
@@ -1478,52 +1593,80 @@ RunResult run(RunOptions opts) {
                 && direct_shell_state->has_active_for(session_id))) {
             {
                 std::lock_guard lock(ui_mutex);
-                append_ui_message(ui_messages, make_warning_message(
+                append_ui_message(*selected_messages, make_warning_message(
                     "Stop all active work before clearing the session. "
                     "Filo kept the current history intact."));
             }
             wake_ui();
             return;
         }
-        turn_activity_timers.clear();
-        assistant_turn_active.store(false, std::memory_order_relaxed);
-        assistant_turn_completion_status.store(TurnCompletionStatus::None,
-                                               std::memory_order_relaxed);
+        current_runtime->reset_turn_state();
         {
             std::lock_guard lock(ui_mutex);
-            ui_messages.clear();
-            queued_steering_turns.clear();
+            selected_messages->clear();
             review_activity_state.active = false;
             review_activity_state.hint.clear();
             review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
             if (const auto message = startup_history_message(); !message.empty()) {
-                append_ui_message(ui_messages, make_system_message(message));
+                append_ui_message(*selected_messages, make_system_message(message));
             }
             goal_manager.clear();
+            goal_engine.reset();
+            pending_goal_graph_snapshot.clear();
         }
         reset_history_view();
         animation_cv.notify_one();
         agent->set_session_goal(std::nullopt);
         agent->clear_todos();
         agent->clear_history();
-        core::budget::BudgetTracker::get_instance().reset_session();
-        core::session::SessionStats::get_instance().reset();
-        // Start a fresh session after /clear.
-        session_id         = core::session::SessionStore::generate_id();
+        core::budget::BudgetTracker::get_instance().reset_session(session_id);
+        session_stats_registry->reset(session_id);
+
+        // Start a fresh session after /clear, with a proper exclusive lease.
+        const std::string new_session_id = core::session::SessionStore::generate_id();
+        const std::string new_created_at = core::session::SessionStore::now_iso8601();
+        core::session::SessionData fresh;
+        fresh.session_id = new_session_id;
+        fresh.created_at = new_created_at;
+        auto next_lease = session_leases.reserve(fresh);
+        if (!next_lease) {
+            {
+                std::lock_guard lock(ui_mutex);
+                append_ui_message(*selected_messages, make_warning_message(std::format(
+                    "Could not start a fresh session: {}. History was still cleared, "
+                    "but the previous session id was kept.",
+                    next_lease.error())));
+            }
+            wake_ui();
+            return;
+        }
+
+        const std::string previous_session_id = session_id;
+        session_id         = new_session_id;
         session_name.clear();
-        session_created_at = core::session::SessionStore::now_iso8601();
-        core::budget::BudgetTracker::get_instance().set_session_id(session_id);
+        session_created_at = new_created_at;
         agent->set_session_id(session_id);
         compute_session_path();
+        next_lease->commit();
+        current_runtime->set_lease(session_leases.retain(session_id));
+        sync_runtime_metadata();
+        if (!thread_runtimes.rekey(previous_session_id, session_id)) {
+            core::logging::warn(
+                "Could not rekey cleared thread runtime {} to {}.",
+                previous_session_id,
+                session_id);
+        }
+        session_leases.release(previous_session_id);
         wake_ui();
     };
 
     auto append_history = [&](const std::string& str) {
         std::lock_guard lock(ui_mutex);
-        if (ui_messages.empty() || ui_messages.back().type != MessageType::System) {
-            append_ui_message(ui_messages, make_system_message(str));
+        if (selected_messages->empty()
+            || selected_messages->back().type != MessageType::System) {
+            append_ui_message(*selected_messages, make_system_message(str));
         } else {
-            ui_messages.back().text += str;
+            selected_messages->back().text += str;
         }
         wake_ui();
     };
@@ -1555,8 +1698,11 @@ RunResult run(RunOptions opts) {
     // Both stop_active_terminal() and the Ctrl+C quit-when-idle gate rely on
     // this predicate so they can never disagree about what "idle" means.
     auto has_stoppable_activity = [&]() -> bool {
+        // Account for hidden threads too: with parallel sessions, work can be
+        // running in a thread that is not currently selected, and Ctrl+C
+        // must never quit while any of it is active.
         return !list_active_terminals().empty()
-            || assistant_turn_active.load(std::memory_order_relaxed);
+            || !thread_runtimes.running_session_ids().empty();
     };
 
     auto stop_active_terminal = [&]() -> core::commands::CommandOperationResult {
@@ -1567,28 +1713,55 @@ RunResult run(RunOptions opts) {
         const bool had_direct_shell =
             direct_shell_state && direct_shell_state->has_active_for(session_id);
 
+        // Stop the current thread's agent, plus every hidden thread that is
+        // still working, so a single stop gesture settles the whole session.
         agent->request_stop();
+        std::size_t hidden_stopped = 0;
+        for (const auto& runtime : thread_runtimes.snapshot()) {
+            if (runtime->turn_active() && runtime->agent() != agent) {
+                runtime->agent()->request_stop();
+                ++hidden_stopped;
+            }
+        }
         if (had_direct_shell && direct_shell_state) {
             [[maybe_unused]] const bool interrupted =
                 direct_shell_state->interrupt_active_for(session_id);
         }
-        return {
-            .ok = true,
-            .message = had_terminal
-                ? "Stop requested for the active terminal command."
-                : "Stop requested for the active generation and any running subagents.",
-        };
+        std::string message = had_terminal
+            ? "Stop requested for the active terminal command."
+            : "Stop requested for the active generation and any running subagents.";
+        if (hidden_stopped > 0) {
+            message += std::format(
+                " Also stopping {} hidden thread{}.",
+                hidden_stopped,
+                hidden_stopped == 1 ? "" : "s");
+        }
+        return {.ok = true, .message = message};
     };
 
     auto append_assistant_output = [&](const std::string& str) {
         std::lock_guard lock(ui_mutex);
-        append_ui_message(ui_messages, make_assistant_message(str, current_time_str(), false));
+        append_ui_message(
+            *selected_messages,
+            make_assistant_message(str, current_time_str(), false));
         wake_ui();
     };
 
     auto animation_cadence = [&]() -> std::optional<AnimationCadence> {
+        // Race fix: this lambda runs on the animation thread while thread
+        // swaps (resume_session / start_new_thread) repoint `current_runtime`
+        // and `selected_messages` on the UI thread. Read both pointers under
+        // ui_mutex so the animation thread never observes a torn swap; all
+        // reads below then go through the local strong references.
+        ThreadRuntime::Ptr runtime_snapshot;
+        std::shared_ptr<std::vector<UiMessage>> messages_snapshot;
+        {
+            std::lock_guard lock(ui_mutex);
+            runtime_snapshot = current_runtime;
+            messages_snapshot = selected_messages;
+        }
         const bool assistant_active =
-            assistant_turn_active.load(std::memory_order_relaxed);
+            runtime_snapshot && runtime_snapshot->turn_active();
         bool remote_activity_active = false;
         bool remote_completion_fresh = false;
         if (opts.remote_mcp_server_enabled) {
@@ -1614,8 +1787,8 @@ RunResult run(RunOptions opts) {
         if (!assistant_active && !review_active && !conversation_animation_active) {
             // Defensive fallback for restored or externally-updated activity
             // cards that are not owned by the normal assistant/shell counters.
-            conversation_animation_active =
-                conversation_uses_animation(ui_messages, true);
+            conversation_animation_active = messages_snapshot
+                && conversation_uses_animation(*messages_snapshot, true);
         }
         const auto cadence = select_animation_cadence(
             ui_show_spinner.load(std::memory_order_relaxed),
@@ -1649,8 +1822,8 @@ RunResult run(RunOptions opts) {
         const std::string lowered_query = to_lower_ascii(query);
         constexpr std::size_t kMaxSearchHits = 256;
 
-        for (std::size_t i = 0; i < ui_messages.size(); ++i) {
-            const auto& message = ui_messages[i];
+        for (std::size_t i = 0; i < selected_messages->size(); ++i) {
+            const auto& message = (*selected_messages)[i];
             const std::string searchable = search_text_for_message(message);
             if (searchable.empty()) {
                 continue;
@@ -1792,13 +1965,16 @@ RunResult run(RunOptions opts) {
 
     auto is_yolo_mode_enabled = [&]() -> bool {
         std::lock_guard lock(ui_mutex);
-        return approval_mode == ApprovalMode::Yolo;
+        return current_runtime->metadata().yolo_enabled;
     };
 
     auto set_yolo_mode_enabled = [&](bool enabled) {
         {
             std::lock_guard lock(ui_mutex);
-            approval_mode = enabled ? ApprovalMode::Yolo : ApprovalMode::Prompt;
+            current_runtime->mutate_metadata(
+                [enabled](ThreadRuntimeMetadata& metadata) {
+                    metadata.yolo_enabled = enabled;
+                });
         }
         wake_ui();
     };
@@ -1807,7 +1983,8 @@ RunResult run(RunOptions opts) {
         std::vector<std::string> rules;
         {
             std::lock_guard lock(ui_mutex);
-            rules.assign(session_allowed.begin(), session_allowed.end());
+            const auto metadata = current_runtime->metadata();
+            rules.assign(metadata.permission_rules.begin(), metadata.permission_rules.end());
         }
         std::sort(rules.begin(), rules.end());
         return rules;
@@ -1827,8 +2004,9 @@ RunResult run(RunOptions opts) {
         bool inserted = false;
         {
             std::lock_guard lock(ui_mutex);
-            const auto [_, did_insert] = session_allowed.insert(normalized);
-            inserted = did_insert;
+            current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                inserted = metadata.permission_rules.insert(normalized).second;
+            });
         }
 
         wake_ui();
@@ -1860,7 +2038,9 @@ RunResult run(RunOptions opts) {
         bool removed = false;
         {
             std::lock_guard lock(ui_mutex);
-            removed = session_allowed.erase(normalized) > 0;
+            current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                removed = metadata.permission_rules.erase(normalized) > 0;
+            });
         }
 
         wake_ui();
@@ -1884,8 +2064,10 @@ RunResult run(RunOptions opts) {
         std::size_t removed = 0;
         {
             std::lock_guard lock(ui_mutex);
-            removed = session_allowed.size();
-            session_allowed.clear();
+            current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                removed = metadata.permission_rules.size();
+                metadata.permission_rules.clear();
+            });
         }
         wake_ui();
         return {
@@ -1956,88 +2138,255 @@ RunResult run(RunOptions opts) {
             std::move(sampling_model));
     };
 
+    std::function<void(const ThreadRuntime::Ptr&)> configure_runtime_agent;
+    std::function<void(const ThreadRuntime::Ptr&)> configure_runtime_efficiency;
+    using SaveResult = std::optional<std::string>;
+    std::function<std::future<SaveResult>(ThreadRuntime::Ptr)> save_runtime_snapshot;
+
+    auto make_thread_agent = [&](const core::session::SessionData& data)
+        -> std::expected<std::shared_ptr<core::agent::Agent>, std::string> {
+        std::shared_ptr<core::llm::LLMProvider> base_provider;
+        try {
+            if (!data.provider.empty()
+                && core::llm::contains_provider(registered_providers, data.provider)) {
+                base_provider = provider_manager.get_provider(data.provider);
+            } else {
+                base_provider = current_runtime->agent()->get_provider();
+            }
+        } catch (const std::exception& error) {
+            return std::unexpected(error.what());
+        }
+        if (!base_provider) {
+            return std::unexpected("No provider is available for the thread.");
+        }
+
+        auto isolated_provider = base_provider->fork_for_parallel_request();
+        if (!isolated_provider) {
+            return std::unexpected(std::format(
+                "Provider '{}' cannot create an isolated concurrent request. "
+                "The current thread is still running; wait for it to finish or "
+                "select a provider with parallel-request support.",
+                data.provider.empty() ? active_provider_name : data.provider));
+        }
+
+        auto context = core::context::make_session_context(
+            core::workspace::Workspace::get_instance().snapshot(),
+            core::context::SessionTransport::cli,
+            data.session_id);
+        auto created = std::make_shared<core::agent::Agent>(
+            std::move(isolated_provider),
+            tool_manager,
+            std::move(context),
+            core::agent::ToolResultStore::default_root(),
+            std::shared_ptr<core::power::SleepInhibitor>{},
+            session_stats_registry,
+            &core::budget::BudgetTracker::get_instance());
+        created->set_active_provider_name(
+            data.provider.empty() ? active_provider_name : data.provider);
+        created->set_auto_compact_threshold(
+            config.auto_compact_threshold,
+            !config.auto_compact_threshold_explicit);
+        created->set_effort_level(session_effort_value);
+        created->set_active_model(data.model.empty() ? active_model_name : data.model);
+        created->load_history(data.messages, data.context_summary, data.mode);
+        created->restore_todos(data.todos);
+        return created;
+    };
+
+    // Human label for a thread: its name when named, else its short id.
+    // Used by permission/question overlays to identify hidden requesters.
+    auto thread_display_label = [](const ThreadRuntime::Ptr& runtime) -> std::string {
+        if (!runtime) {
+            return {};
+        }
+        const auto metadata = runtime->metadata();
+        return metadata.thread_name.empty() ? metadata.session_id : metadata.thread_name;
+    };
+
+    // Snapshot a live thread's in-memory state into SessionData so resume
+    // paths never fall back to stale on-disk data for a runtime that is
+    // already loaded (single source of truth = the runtime itself).
+    auto live_session_data = [&](const ThreadRuntime::Ptr& runtime)
+        -> std::optional<core::session::SessionData> {
+        if (!runtime) {
+            return std::nullopt;
+        }
+        const auto metadata = runtime->metadata();
+        core::session::SessionData data;
+        data.session_id = metadata.session_id;
+        data.name = metadata.session_name;
+        data.created_at = metadata.created_at;
+        data.last_active_at =
+            core::session::SessionStore::to_iso8601(runtime->last_activity());
+        data.working_dir = std::filesystem::current_path().string();
+        data.provider = metadata.provider;
+        data.model = metadata.model;
+        data.mode = runtime->agent()->get_mode();
+        data.context_summary = runtime->agent()->get_context_summary();
+        data.messages = runtime->agent()->get_history();
+        data.goal = metadata.goal;
+        data.goal_graph = metadata.goal_graph;
+        data.todos = runtime->agent()->get_todos();
+        return data;
+    };
+
     auto resume_session = [&](const core::session::SessionData& data)
         -> std::optional<std::string> {
-        if (agent->turn_in_progress()
-            || (direct_shell_state
-                && direct_shell_state->has_active_for(session_id))) {
-            return std::string(
-                "Stop all active work before resuming another session.");
+        if (data.session_id == session_id) {
+            return std::nullopt;
         }
+
+        sync_runtime_metadata();
+        if (save_runtime_snapshot && !agent->get_history().empty()) {
+            save_runtime_snapshot(current_runtime);
+        }
+
         auto next_lease = session_leases.reserve(data);
         if (!next_lease) return next_lease.error();
-        turn_activity_timers.clear();
-        assistant_turn_active.store(false, std::memory_order_relaxed);
-        assistant_turn_completion_status.store(TurnCompletionStatus::None,
-                                               std::memory_order_relaxed);
+
+        auto target_runtime = thread_runtimes.find(data.session_id);
+        if (!target_runtime) {
+            auto next_agent = make_thread_agent(data);
+            if (!next_agent) {
+                return next_agent.error();
+            }
+            auto next_messages = std::make_shared<std::vector<UiMessage>>(
+                build_resumed_ui_messages(data));
+            if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
+                    data.working_dir, std::filesystem::current_path().string());
+                notice.has_value()) {
+                append_ui_message(*next_messages, make_warning_message(std::move(*notice)));
+            }
+            next_lease->commit();
+            target_runtime = std::make_shared<ThreadRuntime>(
+                ThreadRuntimeMetadata{
+                    .session_id = data.session_id,
+                    .thread_name = allocate_project_thread_name(),
+                    .session_name = data.name,
+                    .created_at = data.created_at,
+                    .file_path = session_store->compute_path(data).string(),
+                    .provider = data.provider,
+                    .model = data.model,
+                    .model_selection = ModelSelectionSnapshot{
+                        .mode = ModelSelectionMode::Manual,
+                        .manual_provider_name = data.provider,
+                        .manual_model_name = data.model,
+                    },
+                    .yolo_enabled = startup_yolo_enabled,
+                    .permission_rules = startup_session_allow_rules,
+                    .goal = data.goal,
+                    .goal_graph = data.goal_graph,
+                },
+                *next_agent,
+                std::move(next_messages),
+                session_leases.retain(data.session_id));
+            if (!thread_runtimes.insert(target_runtime)) {
+                return std::string("Could not register the resumed thread runtime.");
+            }
+            if (configure_runtime_agent) {
+                configure_runtime_agent(target_runtime);
+            }
+        } else {
+            next_lease->commit();
+        }
+
+        const auto metadata = target_runtime->metadata();
         {
             std::lock_guard lock(ui_mutex);
-            session_id         = data.session_id;
-            session_name       = data.name;
-            session_created_at = data.created_at;
+            current_runtime = target_runtime;
+            agent = target_runtime->agent();
+            llm_provider = agent->get_provider();
+            session_effort_value = agent->get_effort_level();
+            router_provider = std::dynamic_pointer_cast<
+                core::llm::providers::RouterProvider>(llm_provider);
+            selected_messages = target_runtime->messages();
+            session_id         = metadata.session_id;
+            session_name       = metadata.session_name;
+            session_created_at = metadata.created_at;
+            session_file_path  = metadata.file_path;
             goal_manager.restore(data.goal);
             pending_goal_graph_snapshot =
                 data.goal_graph.has_value() ? data.goal_graph->snapshot : std::string{};
             goal_engine.reset(); // rebuilt against the resumed session
-            agent->restore_todos(data.todos);
-
-            // Restore agent state.
-            agent->load_history(data.messages, data.context_summary, data.mode);
             agent->set_session_goal(goal_manager.active_goal());
 
             // Align mode picker.
             for (std::size_t i = 0; i < modes.size(); ++i) {
-                if (modes[i].first == data.mode) {
+                if (modes[i].first == agent->get_mode()) {
                     current_mode_idx = static_cast<int>(i);
                     break;
                 }
             }
 
-            // Restore session file path.
-            session_file_path = session_store->compute_path(data).string();
-
-            ui_messages = build_resumed_ui_messages(data);
-
-            // Same cross-project guard as the startup --resume path: warn when
-            // the resumed session belongs to a different directory.
-            if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
-                    data.working_dir, std::filesystem::current_path().string());
-                notice.has_value()) {
-                append_ui_message(ui_messages, make_warning_message(std::move(*notice)));
-            }
-            
-            // Re-sync TUI status labels to the resumed session's provider/model
-            manual_provider_name = data.provider;
-            manual_model_name    = data.model;
-            // If the resumed session used a provider we still have, switch to it.
-            if (core::llm::contains_provider(registered_providers, data.provider)) {
-                try {
-                    auto p = provider_manager.get_provider(data.provider);
-                    agent->set_provider(p);
-                    agent->set_active_provider_name(data.provider);
-                    agent->set_active_model(data.model);
-                    model_selection_mode = ModelSelectionMode::Manual;
-                    sync_mcp_sampling_backend(p, data.model);
-                } catch(...) {}
-            }
+            // Restore the selector state owned by this runtime. A thread may
+            // be in Manual, Router, or Auto mode independently of every other
+            // live thread.
+            model_selection_mode = metadata.model_selection.mode;
+            manual_provider_name = metadata.model_selection.manual_provider_name;
+            manual_model_name = metadata.model_selection.manual_model_name;
+            active_router_policy = metadata.model_selection.router_policy;
+            previous_model_selection = metadata.previous_model_selection;
             refresh_status_labels();
-            next_lease->commit();
         }
+        static_cast<void>(thread_runtimes.select(session_id));
+        sync_mcp_sampling_backend(
+            agent->get_provider(),
+            model_selection_mode == ModelSelectionMode::Manual
+                ? manual_model_name
+                : std::string{});
         reset_history_view();
         animation_cv.notify_one();
         wake_ui();
         return std::nullopt;
     };
 
-    auto open_sessions_picker = [&]() -> bool {
+    auto active_thread_catalogue = [&]() {
+        std::vector<core::session::SessionInfo> catalogue;
+        for (const auto& runtime : thread_runtimes.snapshot()) {
+            const auto metadata = runtime->metadata();
+            core::session::SessionInfo live;
+            live.session_id = metadata.session_id;
+            live.name = metadata.thread_name;
+            live.created_at = metadata.created_at;
+            live.last_active_at =
+                core::session::SessionStore::to_iso8601(runtime->last_activity());
+            live.working_dir = std::filesystem::current_path().string();
+            live.provider = metadata.provider;
+            live.model = metadata.model;
+            live.mode = runtime->agent()->get_mode();
+            live.preview = core::session::first_user_message_preview(
+                runtime->agent()->get_history());
+            live.turn_count =
+                session_stats_registry->snapshot(metadata.session_id).turn_count;
+            live.path = metadata.file_path;
+            catalogue.push_back(std::move(live));
+        }
+        core::session::order_active_threads(catalogue, main_runtime->session_id());
+        return catalogue;
+    };
+
+    auto open_threads_picker = [&]() -> bool {
+        auto catalogue = active_thread_catalogue();
+        std::string current_id;
         {
             std::lock_guard lock(ui_mutex);
-            session_picker_state.sessions = session_store->list();
-            if (session_picker_state.sessions.empty()) {
-                return false;
-            }
-            session_picker_state.active = true;
-            session_picker_state.selected = 0;
+            current_id = session_id;
+            open_thread_picker(session_picker_state, std::move(catalogue), current_id);
+        }
+        wake_ui();
+        return true;
+    };
+
+    auto open_sessions_picker = [&]() -> bool {
+        auto catalogue = session_store->list();
+        if (catalogue.empty()) {
+            return false;
+        }
+        std::string current_id;
+        {
+            std::lock_guard lock(ui_mutex);
+            current_id = session_id;
+            open_session_picker(session_picker_state, std::move(catalogue), current_id);
         }
         wake_ui();
         return true;
@@ -2139,12 +2488,13 @@ RunResult run(RunOptions opts) {
         original.todos           = snap_todos;
 
         const auto& budget = core::budget::BudgetTracker::get_instance();
-        const auto total = budget.session_total();
+        const auto total = budget.session_total(old_session_id);
         original.stats.prompt_tokens = total.prompt_tokens;
         original.stats.completion_tokens = total.completion_tokens;
-        original.stats.cost_usd = budget.session_cost_usd();
+        original.stats.cost_usd = budget.session_cost_usd(old_session_id);
 
-        const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
+        const auto stats_snapshot =
+            session_stats_registry->snapshot(old_session_id);
         original.stats.turn_count = stats_snapshot.turn_count;
         original.stats.tool_calls_total = stats_snapshot.tool_calls_total;
         original.stats.tool_calls_success = stats_snapshot.tool_calls_success;
@@ -2168,9 +2518,12 @@ RunResult run(RunOptions opts) {
         }
 
         std::string error;
-        session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel);
+        const auto save_generation = current_runtime->request_save();
         {
-            std::lock_guard save_lock(session_save_state->write_mutex);
+            std::lock_guard save_lock(current_runtime->save_mutex());
+            if (!current_runtime->is_latest_save(save_generation)) {
+                return std::unexpected("A newer session snapshot superseded the branch request.");
+            }
             if (!session_store->save(original, &error)) {
                 return std::unexpected(std::format(
                     "Failed to preserve session: {}",
@@ -2192,8 +2545,13 @@ RunResult run(RunOptions opts) {
             session_file_path = session_store->compute_path(branch).string();
             branch_lease->commit();
         }
-        core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
         agent->set_session_id(new_session_id);
+        current_runtime->set_lease(session_leases.retain(new_session_id));
+        sync_runtime_metadata();
+        if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
+            return std::unexpected("Failed to rekey the branch runtime.");
+        }
+        session_leases.release(old_session_id);
         wake_ui();
         return SessionBranchIds{old_session_id, new_session_id};
     };
@@ -2209,15 +2567,24 @@ RunResult run(RunOptions opts) {
             result->second);
     };
 
-    agent->set_efficiency_decision_fn(
-        [agent, session_store, &ui_mutex, &session_id, &session_name, &session_created_at,
+    configure_runtime_efficiency = [&](const ThreadRuntime::Ptr& runtime) {
+      auto runtime_agent = runtime->agent();
+      runtime_agent->set_efficiency_decision_fn(
+        [runtime, runtime_agent, session_store, session_stats_registry,
+         &thread_runtimes, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &ui_messages, &wake_ui, &goal_manager,
+         &selected_messages, &wake_ui, &goal_manager,
          &session_leases](const core::session::SessionEfficiencyDecision& decision) {
-            auto snap_messages = agent->get_history();
-            auto snap_mode = agent->get_mode();
-            auto snap_context = agent->get_context_summary();
-            auto snap_todos = agent->get_todos();
+            // Rotation rewrites session identity and selected presentation
+            // state. Defer it while this runtime is hidden; the next visible
+            // turn may evaluate the same pressure again without data loss.
+            if (thread_runtimes.current() != runtime) {
+                return;
+            }
+            auto snap_messages = runtime_agent->get_history();
+            auto snap_mode = runtime_agent->get_mode();
+            auto snap_context = runtime_agent->get_context_summary();
+            auto snap_todos = runtime_agent->get_todos();
 
             core::session::SessionData archived;
             {
@@ -2238,11 +2605,12 @@ RunResult run(RunOptions opts) {
             archived.handoff_summary = core::session::build_handoff_summary(archived);
 
             const auto& budget = core::budget::BudgetTracker::get_instance();
-            const auto total = budget.session_total();
+            const auto total = budget.session_total(archived.session_id);
             archived.stats.prompt_tokens = total.prompt_tokens;
             archived.stats.completion_tokens = total.completion_tokens;
-            archived.stats.cost_usd = budget.session_cost_usd();
-            const auto stats_snapshot = core::session::SessionStats::get_instance().snapshot();
+            archived.stats.cost_usd = budget.session_cost_usd(archived.session_id);
+            const auto stats_snapshot =
+                session_stats_registry->snapshot(archived.session_id);
             archived.stats.turn_count = stats_snapshot.turn_count;
             archived.stats.tool_calls_total = stats_snapshot.tool_calls_total;
             archived.stats.tool_calls_success = stats_snapshot.tool_calls_success;
@@ -2255,7 +2623,7 @@ RunResult run(RunOptions opts) {
                     save_error);
                 {
                     std::lock_guard lock(ui_mutex);
-                    append_ui_message(ui_messages, make_warning_message(std::format(
+                    append_ui_message(*selected_messages, make_warning_message(std::format(
                         "Filo skipped an internal session rotation because it could not archive the current segment.\nSession: {}\nReason: {}\nYour full context is still intact and no history was compacted.",
                         archived.session_id,
                         save_error.empty() ? std::string("unknown archival error.") : save_error)));
@@ -2278,21 +2646,44 @@ RunResult run(RunOptions opts) {
                 return;
             }
 
-            agent->compact_history(archived.handoff_summary);
-            core::budget::BudgetTracker::get_instance().reset_session();
-            core::session::SessionStats::get_instance().reset();
-            core::budget::BudgetTracker::get_instance().set_session_id(new_session_id);
-            agent->set_session_id(new_session_id);
+            runtime_agent->compact_history(archived.handoff_summary);
+            // Runtime-local identity: always safe — this agent is the only
+            // consumer of its own session id.
+            runtime_agent->set_session_id(new_session_id);
+
+            // TOCTOU guard: the selected-thread check at the top of this
+            // lambda is advisory only. Re-validate under ui_mutex that this
+            // runtime still owns the shared session identity before touching
+            // process-wide state; a thread switch in between would otherwise
+            // let rotation overwrite another thread's globals.
+            bool still_selected = false;
+            {
+                std::lock_guard lock(ui_mutex);
+                still_selected = (session_id == old_session_id);
+                if (still_selected) {
+                    session_id = new_session_id;
+                    session_created_at = new_created_at;
+                    session_file_path = session_store->compute_path(new_segment).string();
+                }
+            }
+            if (!still_selected) {
+                core::logging::warn(
+                    "Thread selection changed mid-rotation; the rotated segment "
+                    "continues as a background thread ({})",
+                    runtime->session_id());
+            } else {
+                core::budget::BudgetTracker::get_instance().reset_session(old_session_id);
+                // The old segment's stats were persisted into `archived.stats`
+                // above; drop them so the registry does not grow per rotation.
+                session_stats_registry->reset(old_session_id);
+            }
 
             {
                 std::lock_guard lock(ui_mutex);
-                session_id = new_session_id;
-                session_created_at = new_created_at;
-                session_file_path = session_store->compute_path(new_segment).string();
                 const std::string reason = decision.reason.empty()
                     ? std::string("session growth exceeded the efficiency budget.")
                     : decision.reason;
-                append_ui_message(ui_messages, make_system_disclosure_message(
+                append_ui_message(*selected_messages, make_system_disclosure_message(
                     "Internal session rotated to keep the working set lean (context preserved).",
                     std::format(
                         "Previous segment: {}\nNew segment: {}\nReason: {}",
@@ -2301,15 +2692,61 @@ RunResult run(RunOptions opts) {
                         reason)));
                 new_segment_lease->commit();
             }
+            runtime->set_lease(session_leases.retain(new_session_id));
+            runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                metadata.session_id = new_session_id;
+                metadata.created_at = new_created_at;
+                metadata.file_path = session_store->compute_path(new_segment).string();
+            });
+            if (!thread_runtimes.rekey(old_session_id, new_session_id)) {
+                core::logging::warn(
+                    "Could not rekey rotated thread runtime {} to {}.",
+                    old_session_id,
+                    new_session_id);
+            }
+            session_leases.release(old_session_id);
             wake_ui();
         });
+    };
+    configure_runtime_efficiency(current_runtime);
 
     std::function<std::string()> apply_active_profile_live;
     std::function<std::string()> reload_mcp_live;
 
-    auto activate_manual_mode = [&]() -> std::string {
+    auto provider_for_current_thread = [&](std::string_view provider_name)
+        -> std::expected<std::shared_ptr<core::llm::LLMProvider>, std::string> {
+        std::shared_ptr<core::llm::LLMProvider> provider;
         try {
-            auto provider = provider_manager.get_provider(manual_provider_name);
+            provider = provider_manager.get_provider(std::string(provider_name));
+        } catch (const std::exception& error) {
+            return std::unexpected(error.what());
+        }
+
+        // Preserve the legacy provider instance in the ordinary one-thread
+        // case. Once concurrent runtimes exist, every model switch must use a
+        // private provider, just as a separate Filo process would.
+        if (thread_runtimes.snapshot().size() == 1) {
+            return provider;
+        }
+        auto isolated = provider->fork_for_parallel_request();
+        if (!isolated) {
+            return std::unexpected(std::format(
+                "Provider '{}' cannot isolate concurrent thread requests.",
+                provider_name));
+        }
+        return isolated;
+    };
+
+    auto activate_manual_mode = [&]() -> std::string {
+        auto selected_provider = provider_for_current_thread(manual_provider_name);
+        if (!selected_provider) {
+            return std::format(
+                "Failed to activate Manual mode using '{}': {}",
+                manual_provider_name,
+                selected_provider.error());
+        }
+        try {
+            auto provider = *selected_provider;
             agent->set_provider(provider);
             agent->set_active_provider_name(manual_provider_name);
             llm_provider = provider;
@@ -2317,6 +2754,7 @@ RunResult run(RunOptions opts) {
             agent->set_active_model(manual_model_name);
             sync_mcp_sampling_backend(provider, manual_model_name);
             refresh_status_labels();
+            sync_runtime_metadata();
 
             std::string message = std::format(
                 "Switched to Manual mode: {} ({})",
@@ -2339,18 +2777,31 @@ RunResult run(RunOptions opts) {
         if (!router_available) {
             return "Router mode is unavailable: add at least one policy in config.router.policies.";
         }
-        if (!router_provider) {
+        if (!router_provider_template) {
             return "Router mode is unavailable: router provider was not initialised.";
         }
 
+        auto selected_provider = std::dynamic_pointer_cast<
+            core::llm::providers::RouterProvider>(
+                router_provider_template->fork_for_parallel_request());
+        if (!selected_provider) {
+            return "Router mode could not create an isolated provider for this thread.";
+        }
+        if (!active_router_policy.empty()
+            && !selected_provider->set_active_policy(active_router_policy)) {
+            return std::format(
+                "Router policy '{}' is no longer available.", active_router_policy);
+        }
+        router_provider = selected_provider;
         model_selection_mode = ModelSelectionMode::Router;
-        active_router_policy = router_provider->active_policy();
+        active_router_policy = selected_provider->active_policy();
         agent->set_provider(router_provider);
         agent->set_active_provider_name("router");
         llm_provider = router_provider;
         agent->set_active_model(router_policy_label());
         sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
+        sync_runtime_metadata();
 
         return std::format(
             "Switched to Router mode ({})",
@@ -2361,18 +2812,31 @@ RunResult run(RunOptions opts) {
         if (!router_available) {
             return "Auto mode is unavailable: configure config.router with strategy=smart and at least one policy.";
         }
-        if (!router_provider) {
+        if (!router_provider_template) {
             return "Auto mode is unavailable: router provider was not initialised.";
         }
 
+        auto selected_provider = std::dynamic_pointer_cast<
+            core::llm::providers::RouterProvider>(
+                router_provider_template->fork_for_parallel_request());
+        if (!selected_provider) {
+            return "Auto mode could not create an isolated provider for this thread.";
+        }
+        if (!active_router_policy.empty()
+            && !selected_provider->set_active_policy(active_router_policy)) {
+            return std::format(
+                "Router policy '{}' is no longer available.", active_router_policy);
+        }
+        router_provider = selected_provider;
         model_selection_mode = ModelSelectionMode::Auto;
-        active_router_policy = router_provider->active_policy();
+        active_router_policy = selected_provider->active_policy();
         agent->set_provider(router_provider);
         agent->set_active_provider_name("auto");
         llm_provider = router_provider;
         agent->set_active_model("auto");
         sync_mcp_sampling_backend(router_provider, {});
         refresh_status_labels();
+        sync_runtime_metadata();
 
         return std::format(
             "Switched to Auto mode — task-aware smart routing via policy '{}'",
@@ -2420,10 +2884,11 @@ RunResult run(RunOptions opts) {
         router_engine = std::make_shared<core::llm::routing::RouterEngine>(
             config.router,
             registered_providers);
-        router_provider = std::make_shared<core::llm::providers::RouterProvider>(
+        router_provider_template = std::make_shared<core::llm::providers::RouterProvider>(
             provider_manager,
             router_engine,
             provider_default_models);
+        router_provider = router_provider_template;
         router_available = config.router.enabled && !router_engine->list_policies().empty();
         active_router_policy = router_engine->active_policy();
 
@@ -2749,6 +3214,7 @@ RunResult run(RunOptions opts) {
         const ModelSelectionSnapshot after = current_model_selection_snapshot();
         if (!same_model_selection(before, after)) {
             previous_model_selection = before;
+            sync_runtime_metadata();
         }
     };
 
@@ -2774,7 +3240,7 @@ RunResult run(RunOptions opts) {
             }
             case ModelSelectionMode::Router: {
                 if (!target.router_policy.empty()
-                    && !router_engine->set_active_policy(target.router_policy)) {
+                    && !router_engine->has_policy(target.router_policy)) {
                     return std::format(
                         "Previous router policy '{}' is no longer available.",
                         target.router_policy);
@@ -2784,7 +3250,7 @@ RunResult run(RunOptions opts) {
             }
             case ModelSelectionMode::Auto: {
                 if (!target.router_policy.empty()
-                    && !router_engine->set_active_policy(target.router_policy)) {
+                    && !router_engine->has_policy(target.router_policy)) {
                     return std::format(
                         "Previous router policy '{}' is no longer available.",
                         target.router_policy);
@@ -2806,6 +3272,7 @@ RunResult run(RunOptions opts) {
         std::string message = restore_model_selection(target);
         if (message.starts_with("Switched")) {
             previous_model_selection = before;
+            sync_runtime_metadata();
         }
         return with_persisted_model_preferences(std::move(message));
     };
@@ -3241,9 +3708,6 @@ RunResult run(RunOptions opts) {
             if (!router_available) {
                 return "Router policy exists but router mode is disabled in configuration.";
             }
-            if (!router_engine->set_active_policy(policy_name)) {
-                return std::format("Could not activate router policy '{}'.", policy_name);
-            }
             const ModelSelectionSnapshot before = current_model_selection_snapshot();
             active_router_policy = policy_name;
             return finalize(before, activate_router_mode());
@@ -3675,13 +4139,19 @@ RunResult run(RunOptions opts) {
 
         if (before.router.default_policy != after.router.default_policy
             && !after.router.default_policy.empty()) {
-            if (!router_engine->set_active_policy(after.router.default_policy)) {
+            if (!router_engine->has_policy(after.router.default_policy)) {
                 return std::format(
                     "Router policy '{}' is not available in this session.",
                     after.router.default_policy);
             }
-            active_router_policy = router_engine->active_policy();
-            refresh_status_labels();
+            active_router_policy = after.router.default_policy;
+            if (model_selection_mode == ModelSelectionMode::Router) {
+                static_cast<void>(activate_router_mode());
+            } else if (model_selection_mode == ModelSelectionMode::Auto) {
+                static_cast<void>(activate_auto_mode());
+            } else {
+                sync_runtime_metadata();
+            }
         }
 
         ui_show_banner = visibility_setting_enabled(after.ui_banner, true);
@@ -3931,20 +4401,22 @@ RunResult run(RunOptions opts) {
         wake_ui();  // wake up the render loop
     });
 
-    // Permission function given to the Agent.
-    auto permission_fn = [&](std::string_view tool_name,
-                             std::string_view args) -> bool {
+    // Permission function given to each Agent. Capturing the owning runtime
+    // keeps auto-approval annotations on the correct hidden conversation.
+    auto make_permission_fn = [&](const ThreadRuntime::Ptr& runtime) {
+        return [&, runtime](std::string_view tool_name,
+                            std::string_view args) -> bool {
         bool yolo_enabled = false;
         {
-            std::lock_guard lock(ui_mutex);
-            yolo_enabled = approval_mode == ApprovalMode::Yolo;
+            yolo_enabled = runtime->metadata().yolo_enabled;
         }
         if (yolo_enabled) {
             {
                 std::lock_guard lock(ui_mutex);
                 // Keep YOLO approvals inside the current tool card instead of
                 // flooding the system-history stream.
-                for (auto msg_it = ui_messages.rbegin(); msg_it != ui_messages.rend(); ++msg_it) {
+                auto messages = runtime->messages();
+                for (auto msg_it = messages->rbegin(); msg_it != messages->rend(); ++msg_it) {
                     if (msg_it->type != MessageType::Assistant || !msg_it->pending) {
                         continue;
                     }
@@ -3973,8 +4445,8 @@ RunResult run(RunOptions opts) {
         // Check session trust rules ("don't ask again for this").
         bool is_allowed = false;
         {
-            std::lock_guard lock(ui_mutex);
-            for (const auto& allow_rule : session_allowed) {
+            const auto metadata = runtime->metadata();
+            for (const auto& allow_rule : metadata.permission_rules) {
                 if (core::permissions::session_allow_rule_matches(
                         allow_rule,
                         tool_name,
@@ -3995,8 +4467,12 @@ RunResult run(RunOptions opts) {
         {
             std::unique_lock slot_lock(permission_prompt_mutex);
             permission_prompt_cv.wait(slot_lock, [&]() {
-                return !permission_prompt_in_flight;
+                return permission_prompt_shutdown || !permission_prompt_in_flight;
             });
+            if (permission_prompt_shutdown) {
+                // The app is winding down: deny instead of blocking exit.
+                return false;
+            }
             permission_prompt_in_flight = true;
         }
         struct PermissionPromptSlotGuard {
@@ -4040,14 +4516,33 @@ RunResult run(RunOptions opts) {
                 core::permissions::make_session_allow_rule(tool_name, args);
             perm_state.allow_label  = make_allow_label(tool_name, args);
             perm_state.promise      = prom;
+            // Attribute the overlay to the requesting thread. A hidden thread
+            // can reach the user too; Ctrl+C must stop the right agent.
+            perm_state.origin_runtime = runtime;
+            perm_state.origin_label = thread_display_label(runtime);
         }
         wake_ui();
         return fut.get();
+        };
     };
 
     // ── AskUserQuestion callback ─────────────────────────────────────────────
     ask_user_tool->setQuestionCallback([&](core::tools::QuestionRequest request) {
-        auto displaced_promise = question_dialog.open(std::move(request));
+        auto origin_runtime = thread_runtimes.find(request.session_id);
+        std::unique_lock slot_lock(question_prompt_mutex);
+        question_prompt_cv.wait(slot_lock, [&]() {
+            return question_prompt_shutdown || !question_dialog.active();
+        });
+        if (question_prompt_shutdown) {
+            request.promise->set_value(std::nullopt);
+            return;
+        }
+        const bool origin_is_hidden = origin_runtime
+            && thread_runtimes.current() != origin_runtime;
+        auto displaced_promise = question_dialog.open(
+            std::move(request),
+            origin_is_hidden ? thread_display_label(origin_runtime) : std::string{});
+        slot_lock.unlock();
         wake_ui();
 
         if (displaced_promise) {
@@ -4057,22 +4552,29 @@ RunResult run(RunOptions opts) {
         // Wait for the result (UI will resolve the promise)
     });
 
-    agent->set_permission_fn(permission_fn);
+    auto append_runtime_history = [&](const ThreadRuntime::Ptr& runtime,
+                                      const std::string& str) {
+        std::lock_guard lock(ui_mutex);
+        auto messages = runtime->messages();
+        if (messages->empty() || messages->back().type != MessageType::System) {
+            append_ui_message(*messages, make_system_message(str));
+        } else {
+            messages->back().text += str;
+        }
+        animation_cv.notify_one();
+        wake_ui();
+    };
 
-    // ── Loop-break callback ──────────────────────────────────────────────────
-    agent->set_loop_break_fn([&](int rounds) {
-        append_history(std::format(
-            "\n\xe2\x9a\xa0  Agent paused after {} consecutive tool failures"
-            " \xe2\x80\x94 provide guidance or /clear to start fresh.\n", rounds));
-    });
-
-    auto update_ui_message = [&](std::string_view message_id, auto&& updater) {
+    auto update_ui_message = [&](const ThreadRuntime::Ptr& runtime,
+                                 std::string_view message_id,
+                                 auto&& updater) {
         {
             std::lock_guard lock(ui_mutex);
-            auto it = std::ranges::find_if(ui_messages, [&](const UiMessage& message) {
+            auto messages = runtime->messages();
+            auto it = std::ranges::find_if(*messages, [&](const UiMessage& message) {
                 return message.id == message_id;
             });
-            if (it == ui_messages.end()) {
+            if (it == messages->end()) {
                 return;
             }
 
@@ -4083,10 +4585,12 @@ RunResult run(RunOptions opts) {
     };
 
     auto update_live_assistant_message =
-        [&](const std::shared_ptr<LiveAssistantTimeline>& timeline, auto&& updater) {
+        [&](const ThreadRuntime::Ptr& runtime,
+            const std::shared_ptr<LiveAssistantTimeline>& timeline,
+            auto&& updater) {
         {
             std::lock_guard lock(ui_mutex);
-            if (auto* message = timeline->current(ui_messages)) {
+            if (auto* message = timeline->current(*runtime->messages())) {
                 updater(*message);
             }
         }
@@ -4094,8 +4598,16 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
-    auto save_session_snapshot = [&, session_save_state]() {
-        auto snap_messages = agent->get_history();
+    save_runtime_snapshot = [&](ThreadRuntime::Ptr runtime)
+        -> std::future<SaveResult> {
+        auto completion_promise = std::make_shared<std::promise<SaveResult>>();
+        auto completion_future = completion_promise->get_future();
+        if (!runtime) {
+            completion_promise->set_value(std::string{"No thread runtime to save."});
+            return completion_future;
+        }
+        auto runtime_agent = runtime->agent();
+        auto snap_messages = runtime_agent->get_history();
         // Stamp the live activity-phase duration onto the persisted assistant
         // messages so a resumed session can still render "Thought for Ns"
         // disclosures. The duration lives on the UI message; match it back to
@@ -4105,7 +4617,7 @@ RunResult run(RunOptions opts) {
             std::unordered_map<std::string, std::string> elapsed_by_reasoning;
             {
                 std::lock_guard lock(ui_mutex);
-                for (const auto& m : ui_messages) {
+                for (const auto& m : *runtime->messages()) {
                     if (m.type == MessageType::Assistant && m.finalized
                         && !m.reasoning_elapsed.empty() && !m.reasoning_text.empty()) {
                         elapsed_by_reasoning.emplace(
@@ -4123,110 +4635,306 @@ RunResult run(RunOptions opts) {
                 }
             }
         }
-        const auto snap_mode = agent->get_mode();
-        const auto snap_context = agent->get_context_summary();
+        const auto snap_mode = runtime_agent->get_mode();
+        const auto snap_context = runtime_agent->get_context_summary();
         const auto working_dir = std::filesystem::current_path().string();
 
-        std::string sid;
-        std::string sname;
-        std::string created_at;
-        std::string provider_name;
-        std::string model_name;
-        core::session::ActiveSessionLease::Ptr session_lease;
-        std::optional<core::session::SessionGoal> snap_goal;
-        std::optional<core::session::SessionGoalGraph> snap_goal_graph;
-        auto snap_todos = agent->get_todos();
-        {
+        if (thread_runtimes.current() == runtime) {
             std::lock_guard lock(ui_mutex);
-            sid = session_id;
-            sname = session_name;
-            created_at = session_created_at;
-            provider_name = active_provider_name;
-            model_name = active_model_name;
-            session_lease = session_leases.retain();
-            snap_goal = goal_manager.current();
-            // Durable execution: persist the whole DAG so a goal can resume
-            // mid-graph after a restart.
-            if (goal_engine) {
-                const auto graph_status = goal_engine->status();
-                if (graph_status.has_graph) {
-                    snap_goal_graph = core::session::SessionGoalGraph{
-                        .plan_version = graph_status.plan_version,
-                        .run_state = std::string(core::goal::to_string(graph_status.run_state)),
-                        .snapshot = goal_engine->snapshot_json(),
-                        .updated_at = core::session::SessionStore::now_iso8601(),
-                    };
-                }
-            }
+            sync_runtime_metadata();
         }
+        const auto metadata = runtime->metadata();
+        auto snap_todos = runtime_agent->get_todos();
 
-        const std::uint64_t generation =
-            session_save_state->latest_requested.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const std::uint64_t generation = runtime->request_save();
+        const auto& budget = core::budget::BudgetTracker::get_instance();
+        const auto total = budget.session_total(metadata.session_id);
+        const double cost = budget.session_cost_usd(metadata.session_id);
+        const auto stats = session_stats_registry->snapshot(metadata.session_id);
 
-        std::thread([session_store, sid, sname, created_at,
-                     provider_name, model_name,
+        runtime->begin_save();
+        try {
+          std::thread([session_store, runtime, metadata,
                      working_dir,
                      snap_messages = std::move(snap_messages),
                      snap_mode, snap_context,
-                     snap_goal = std::move(snap_goal),
-                     snap_goal_graph = std::move(snap_goal_graph),
                      snap_todos = std::move(snap_todos),
-                     session_lease = std::move(session_lease),
-                     session_save_state,
-                     generation]() {
-            // Keep this session exclusive until its detached snapshot completes.
-            (void)session_lease;
+                     total, cost, stats,
+                     generation,
+                     completion_promise]() {
+            struct SaveCompletion {
+                ThreadRuntime::Ptr runtime;
+                ~SaveCompletion() { runtime->finish_save(); }
+            } completion{runtime};
+            const auto complete = [&](SaveResult result) noexcept {
+                try {
+                    completion_promise->set_value(std::move(result));
+                } catch (...) {
+                    // The writer must never let promise bookkeeping escape
+                    // its detached thread entry point.
+                }
+            };
+            try {
+                // Keep this session exclusive until its detached snapshot completes.
+                const auto session_lease = runtime->lease();
+                (void)session_lease;
 
-            core::session::SessionData data;
-            data.session_id        = sid;
-            data.name              = sname;
-            data.created_at        = created_at;
-            data.last_active_at    = core::session::SessionStore::now_iso8601();
-            data.working_dir       = working_dir;
-            data.provider          = provider_name;
-            data.model             = model_name;
-            data.mode              = snap_mode;
-            data.context_summary   = snap_context;
-            data.messages          = snap_messages;
-            data.goal              = snap_goal;
-            data.goal_graph        = snap_goal_graph;
-            data.todos             = snap_todos;
+                core::session::SessionData data;
+                data.session_id        = metadata.session_id;
+                data.name              = metadata.session_name;
+                data.created_at        = metadata.created_at;
+                data.last_active_at    = core::session::SessionStore::now_iso8601();
+                data.working_dir       = working_dir;
+                data.provider          = metadata.provider;
+                data.model             = metadata.model;
+                data.mode              = snap_mode;
+                data.context_summary   = snap_context;
+                data.messages          = snap_messages;
+                data.goal              = metadata.goal;
+                data.goal_graph        = metadata.goal_graph;
+                data.todos             = snap_todos;
+                data.stats.prompt_tokens     = total.prompt_tokens;
+                data.stats.completion_tokens = total.completion_tokens;
+                data.stats.cost_usd          = cost;
+                data.stats.turn_count         = stats.turn_count;
+                data.stats.tool_calls_total   = stats.tool_calls_total;
+                data.stats.tool_calls_success = stats.tool_calls_success;
+                data.handoff_summary          = core::session::build_handoff_summary(data);
 
-            const auto& budget = core::budget::BudgetTracker::get_instance();
-            const auto total = budget.session_total();
-            data.stats.prompt_tokens     = total.prompt_tokens;
-            data.stats.completion_tokens = total.completion_tokens;
-            data.stats.cost_usd          = budget.session_cost_usd();
+                std::lock_guard save_lock(runtime->save_mutex());
+                if (!runtime->is_latest_save(generation)) {
+                    complete(std::nullopt);
+                    return;
+                }
 
-            const auto snap = core::session::SessionStats::get_instance().snapshot();
-            data.stats.turn_count         = snap.turn_count;
-            data.stats.tool_calls_total   = snap.tool_calls_total;
-            data.stats.tool_calls_success = snap.tool_calls_success;
-            data.handoff_summary          = core::session::build_handoff_summary(data);
-
-            std::lock_guard save_lock(session_save_state->write_mutex);
-            if (generation != session_save_state->latest_requested.load(std::memory_order_acquire)) {
-                return;
-            }
-
-            std::string error;
-            if (!session_store->save(data, &error)) {
+                std::string error;
+                if (session_store->save(data, &error)) {
+                    complete(std::nullopt);
+                    return;
+                }
+                const std::string message = error.empty()
+                    ? std::string{"unknown save error"}
+                    : std::move(error);
                 core::logging::warn(
                     "Failed to save session snapshot {}: {}",
-                    sid,
-                    error.empty() ? std::string("unknown save error") : error);
+                    metadata.session_id,
+                    message);
+                complete(message);
+            } catch (const std::exception& error) {
+                const std::string message = std::format(
+                    "Session snapshot threw an exception: {}", error.what());
+                core::logging::warn(
+                    "Failed to save session snapshot {}: {}",
+                    metadata.session_id,
+                    message);
+                complete(message);
+            } catch (...) {
+                const std::string message =
+                    "Session snapshot threw an unknown exception.";
+                core::logging::warn(
+                    "Failed to save session snapshot {}: {}",
+                    metadata.session_id,
+                    message);
+                complete(message);
             }
-        }).detach();
+          }).detach();
+        } catch (const std::exception& error) {
+            runtime->finish_save();
+            const std::string message = std::format(
+                "Could not start session snapshot writer: {}", error.what());
+            core::logging::warn(
+                "Failed to start session snapshot writer {}: {}",
+                metadata.session_id,
+                message);
+            try {
+                completion_promise->set_value(message);
+            } catch (...) {
+            }
+        }
+        return completion_future;
+    };
+
+    auto save_session_snapshot = [&]() {
+        save_runtime_snapshot(current_runtime);
+    };
+
+    configure_runtime_agent = [&](const ThreadRuntime::Ptr& runtime) {
+        runtime->agent()->set_permission_fn(make_permission_fn(runtime));
+        runtime->agent()->set_loop_break_fn([&, runtime](int rounds) {
+            append_runtime_history(runtime, std::format(
+                "\n\xe2\x9a\xa0  Agent paused after {} consecutive tool failures"
+                " \xe2\x80\x94 provide guidance or /clear to start fresh.\n",
+                rounds));
+        });
+        configure_runtime_efficiency(runtime);
+    };
+    configure_runtime_agent(current_runtime);
+
+    // Archive the current conversation (if any) and open a blank thread.
+    // Agentty-compatible: Ctrl+N / /new. Distinct from /clear which also
+    // resets history but does not guarantee a durable snapshot first.
+    auto start_new_thread = [&]() -> std::optional<std::string> {
+        const bool has_history = !agent->get_history().empty();
+        const std::string next_thread_name = allocate_project_thread_name();
+        const std::string previous_title = thread_display_label(current_runtime);
+
+        const std::string new_session_id = core::session::SessionStore::generate_id();
+        const std::string new_created_at = core::session::SessionStore::now_iso8601();
+        core::session::SessionData fresh;
+        fresh.session_id = new_session_id;
+        fresh.created_at = new_created_at;
+        fresh.provider = active_provider_name;
+        fresh.model = active_model_name;
+        fresh.mode = agent->get_mode();
+        auto next_lease = session_leases.reserve(fresh);
+        if (!next_lease) {
+            return std::format("Could not start a new thread: {}", next_lease.error());
+        }
+
+        auto next_agent = make_thread_agent(fresh);
+        if (!next_agent) {
+            return std::format("Could not start a new thread: {}", next_agent.error());
+        }
+
+        auto next_messages = std::make_shared<std::vector<UiMessage>>();
+        std::string notice = "New thread started.";
+        if (has_history) {
+            notice = std::format(
+                "Saved previous thread ({}) and started a new one. "
+                "Use /threads to switch threads.",
+                previous_title);
+        }
+        append_ui_message(*next_messages, make_system_message(
+            std::format("\n»  {}\n", notice)));
+        if (const auto message = startup_history_message(); !message.empty()) {
+            append_ui_message(*next_messages, make_system_message(message));
+        }
+
+        next_lease->commit();
+        auto next_runtime = std::make_shared<ThreadRuntime>(
+            ThreadRuntimeMetadata{
+                .session_id = new_session_id,
+                .thread_name = next_thread_name,
+                .session_name = {},
+                .created_at = new_created_at,
+                .file_path = session_store->compute_path(fresh).string(),
+                .provider = active_provider_name,
+                .model = active_model_name,
+                .model_selection = ModelSelectionSnapshot{
+                    .mode = model_selection_mode,
+                    .manual_provider_name = manual_provider_name,
+                    .manual_model_name = manual_model_name,
+                    .router_policy = active_router_policy,
+                },
+                .previous_model_selection = previous_model_selection,
+                .yolo_enabled = startup_yolo_enabled,
+                .permission_rules = startup_session_allow_rules,
+            },
+            *next_agent,
+            std::move(next_messages),
+            session_leases.retain(new_session_id));
+        if (!thread_runtimes.insert(next_runtime)) {
+            return std::string("Could not register the new thread runtime.");
+        }
+        configure_runtime_agent(next_runtime);
+
+        sync_runtime_metadata();
+        if (has_history) {
+            save_session_snapshot();
+        }
+
+        {
+            std::lock_guard lock(ui_mutex);
+            current_runtime = next_runtime;
+            agent = next_runtime->agent();
+            llm_provider = agent->get_provider();
+            session_effort_value = agent->get_effort_level();
+            router_provider = std::dynamic_pointer_cast<
+                core::llm::providers::RouterProvider>(llm_provider);
+            selected_messages = next_runtime->messages();
+            review_activity_state.active = false;
+            review_activity_state.hint.clear();
+            review_activity_state.started_at =
+                std::chrono::steady_clock::time_point::min();
+            session_picker_state = {};
+            goal_manager.clear();
+            goal_engine.reset();
+            pending_goal_graph_snapshot.clear();
+            session_id = new_session_id;
+            session_name.clear();
+            session_created_at = new_created_at;
+            session_file_path = session_store->compute_path(fresh).string();
+        }
+
+        static_cast<void>(thread_runtimes.select(new_session_id));
+        reset_history_view();
+        animation_cv.notify_one();
+        core::budget::BudgetTracker::get_instance().reset_session(new_session_id);
+        wake_ui();
+        return std::nullopt;
+    };
+
+    // Archive and release one live runtime without deleting its saved
+    // session. The process's main/current/running threads are intentionally
+    // protected so closing can never invalidate shared UI state or active
+    // callbacks.
+    auto close_thread = [&](std::string_view target_session_id)
+        -> std::optional<std::string> {
+        auto runtime = thread_runtimes.find(target_session_id);
+        if (!runtime) {
+            return std::format(
+                "Active thread {} is no longer available.", target_session_id);
+        }
+        if (runtime == main_runtime) {
+            return "The main thread cannot be closed.";
+        }
+        if (runtime == thread_runtimes.current()) {
+            return "Switch to another thread before closing the current one.";
+        }
+        const bool has_active_shell = std::ranges::any_of(
+            core::tools::ShellTool::active_commands(),
+            [&](const auto& command) {
+                return command.session_id == target_session_id;
+            });
+        if (runtime->turn_active() || runtime->queued_turn_count() > 0
+            || has_active_shell
+            || (direct_shell_state
+                && direct_shell_state->has_active_for(target_session_id))) {
+            return "Stop the thread's active work before closing it.";
+        }
+
+        if (!runtime->agent()->get_history().empty()) {
+            auto save_result = save_runtime_snapshot(runtime).get();
+            if (save_result.has_value()) {
+                return std::format(
+                    "Could not archive thread {}: {}",
+                    thread_display_label(runtime),
+                    *save_result);
+            }
+        }
+        // Older superseded saves may still be winding down. Do not release
+        // their runtime/lease until every writer has passed its completion
+        // guard.
+        runtime->wait_until_saved();
+        if (!thread_runtimes.erase(target_session_id)) {
+            return "The thread became active while it was being closed.";
+        }
+
+        runtime->set_lease(nullptr);
+        session_leases.release(target_session_id);
+        session_stats_registry->reset(target_session_id);
+        core::budget::BudgetTracker::get_instance().reset_session(target_session_id);
+        return std::nullopt;
     };
 
     auto latest_completed_assistant_output = [&]() {
         std::lock_guard lock(ui_mutex);
-        return latest_completed_assistant_source(ui_messages);
+        return latest_completed_assistant_source(*selected_messages);
     };
 
     auto open_code_blocks = [&](std::optional<std::size_t> one_based_block)
         -> core::commands::CommandOperationResult {
-        if (assistant_turn_active.load(std::memory_order_acquire)) {
+        if (current_runtime->turn_active()) {
             return {.ok = false, .message = "Stop the active turn before running response code."};
         }
         const std::string response = latest_completed_assistant_output();
@@ -4243,7 +4951,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto open_rewind_menu = [&]() -> bool {
-        if (assistant_turn_active.load(std::memory_order_acquire)) {
+        if (current_runtime->turn_active()) {
             append_history("\nℹ  Stop the active turn before rewinding.\n");
             return true;
         }
@@ -4256,7 +4964,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto rewind_to_message = [&](const RewindPickerOption& target) {
-        if (assistant_turn_active.load(std::memory_order_acquire)) {
+        if (current_runtime->turn_active()) {
             append_history("\nℹ  Stop the active turn before rewinding.\n");
             return;
         }
@@ -4272,7 +4980,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             const auto user_count = std::ranges::count_if(
-                ui_messages,
+                *selected_messages,
                 [](const UiMessage& message) { return message.type == MessageType::User; });
             ui_target_exists = target.user_ordinal < static_cast<std::size_t>(user_count);
         }
@@ -4294,7 +5002,7 @@ RunResult run(RunOptions opts) {
         agent->load_history(prefix, {}, mode);
         {
             std::lock_guard lock(ui_mutex);
-            (void)truncate_ui_before_user_turn(ui_messages, target.user_ordinal);
+            (void)truncate_ui_before_user_turn(*selected_messages, target.user_ordinal);
             input_text = target.prompt;
             input_cursor_position = static_cast<int>(input_text.size());
         }
@@ -4705,41 +5413,39 @@ RunResult run(RunOptions opts) {
     };
 
     auto make_turn_callbacks =
-        [&](std::shared_ptr<LiveAssistantTimeline> timeline) {
+        [&](const ThreadRuntime::Ptr& runtime,
+            std::shared_ptr<LiveAssistantTimeline> timeline) {
         core::agent::Agent::TurnCallbacks callbacks;
-        callbacks.on_step_begin = [timeline,
+        callbacks.on_step_begin = [runtime, timeline,
                                    &ui_mutex,
-                                   &ui_messages,
-                                   &assistant_turn_active,
-                                   &turn_activity_timers,
                                    &animation_cv,
                                    &wake_ui]() {
-            assistant_turn_active.store(true, std::memory_order_relaxed);
             {
                 std::lock_guard lock(ui_mutex);
+                auto& timers = runtime->activity_timers();
                 const std::string previous_id(timeline->current_message_id());
                 std::string previous_elapsed;
                 if (timeline->step_started()) {
                     previous_elapsed = format_elapsed_compact(
-                        turn_activity_timers.elapsed(previous_id)
+                        timers.elapsed(previous_id)
                             .value_or(std::chrono::seconds{0}));
                 }
                 UiMessage* message =
-                    timeline->begin_step(ui_messages, std::move(previous_elapsed));
+                    timeline->begin_step(*runtime->messages(), std::move(previous_elapsed));
                 if (message == nullptr) {
-                    turn_activity_timers.stop(previous_id);
+                    timers.stop(previous_id);
                 } else if (message->id != previous_id) {
-                    turn_activity_timers.stop(previous_id);
-                    turn_activity_timers.start(message->id);
+                    timers.stop(previous_id);
+                    timers.start(message->id);
                 }
             }
             animation_cv.notify_one();
             wake_ui();
         };
         callbacks.on_reasoning =
-            [timeline, &update_live_assistant_message](
+            [runtime, timeline, &update_live_assistant_message](
                 const std::string& delta) {
-                update_live_assistant_message(timeline, [&](UiMessage& message) {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
                     // Reasoning that arrives after finalization is dropped; a
                     // completed card must not reopen its live thinking box.
                     if (message.finalized) {
@@ -4753,9 +5459,9 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_tool_start =
-            [timeline, &update_live_assistant_message](
+            [runtime, timeline, &update_live_assistant_message](
                 const core::llm::ToolCall& tool_call) {
-                update_live_assistant_message(timeline, [&](UiMessage& message) {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
                     if (message.finalized) {
                         return;
                     }
@@ -4773,10 +5479,10 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_tool_finish =
-            [timeline, &update_live_assistant_message](
+            [runtime, timeline, &update_live_assistant_message](
                 const core::llm::ToolCall& tool_call,
                 const core::llm::Message& result) {
-                update_live_assistant_message(timeline, [&](UiMessage& message) {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
                     auto* tool = find_tool_activity(message, tool_call.id);
 
                     if (tool == nullptr) {
@@ -4807,13 +5513,13 @@ RunResult run(RunOptions opts) {
                 });
             };
         callbacks.on_subagent_event =
-            [timeline, &update_live_assistant_message](
+            [runtime, timeline, &update_live_assistant_message](
                 const core::agent::SubagentEvent& event) {
                 if (event.parent_tool_call_id.empty() || event.task_id.empty()) {
                     return;
                 }
 
-                update_live_assistant_message(timeline, [&](UiMessage& message) {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
                     auto* parent_tool = find_tool_activity(message, event.parent_tool_call_id);
                     if (parent_tool == nullptr) {
                         message.tools.push_back(make_tool_activity(
@@ -4942,8 +5648,8 @@ RunResult run(RunOptions opts) {
         // pollute the assistant response body and re-mark the finalized message
         // as pending, which leaves the UI stuck on "Analyzing..." and breaks
         // /copy ("Nothing to copy yet").
-        callbacks.on_status_log = [&append_history](const std::string& status) {
-            append_history(status);
+        callbacks.on_status_log = [runtime, &append_runtime_history](const std::string& status) {
+            append_runtime_history(runtime, status);
         };
         callbacks.allow_efficiency_rotation = true;
         callbacks.min_context_utilization_for_rotation = 0.75;
@@ -4953,28 +5659,9 @@ RunResult run(RunOptions opts) {
     // ── Agent turn submission ─────────────────────────────────────────────────
     // Extracted so that SkillCommand can inject an expanded prompt as a full
     // agent turn (with user message card + tool cards) via send_user_message_fn.
-    std::function<void(std::string, core::agent::Agent::TurnCallbacks)> submit_agent_turn;
-
-    auto take_queued_steering_turn_or_mark_idle =
-        [&](bool turn_succeeded) -> std::optional<PendingAgentTurn> {
-        std::lock_guard lock(ui_mutex);
-        if (queued_steering_turns.empty()) {
-            assistant_turn_active.store(false, std::memory_order_release);
-            // The turn wound down with nothing queued behind it: let the status
-            // bar settle on the outcome marker — a tick when the response was
-            // generated successfully, a cross when it was cancelled or errored.
-            assistant_turn_completion_status.store(
-                turn_succeeded ? TurnCompletionStatus::Succeeded
-                               : TurnCompletionStatus::Failed,
-                std::memory_order_release);
-            wake_ui();
-            return std::nullopt;
-        }
-        auto next = std::move(queued_steering_turns.front());
-        queued_steering_turns.pop_front();
-        wake_ui();
-        return next;
-    };
+    std::function<void(ThreadRuntime::Ptr,
+                       std::string,
+                       core::agent::Agent::TurnCallbacks)> submit_agent_turn;
 
     auto submit_or_queue_agent_turn =
         [&](std::string text, core::agent::Agent::TurnCallbacks turn_callbacks) {
@@ -4982,54 +5669,52 @@ RunResult run(RunOptions opts) {
                 return;
             }
 
-            bool should_submit_now = false;
-            {
-                std::lock_guard lock(ui_mutex);
-                if (assistant_turn_active.load(std::memory_order_acquire)
-                    || !queued_steering_turns.empty()) {
-                    queued_steering_turns.push_back(PendingAgentTurn{
-                        .text = std::move(text),
-                        .callbacks = std::move(turn_callbacks),
-                    });
-                } else {
-                    assistant_turn_active.store(true, std::memory_order_release);
-                    should_submit_now = true;
-                }
-            }
+            auto runtime = current_runtime;
+            PendingAgentTurn pending{
+                .text = std::move(text),
+                .callbacks = std::move(turn_callbacks),
+            };
+            const bool should_submit_now = runtime->begin_or_queue(pending);
 
             if (!should_submit_now) {
-                agent->request_stop();
-                append_history("\n↪  Steering queued; stopping the current turn.\n");
+                runtime->request_stop();
+                append_runtime_history(
+                    runtime,
+                    "\n↪  Steering queued; stopping the current turn.\n");
                 wake_ui();
                 return;
             }
-            submit_agent_turn(std::move(text), std::move(turn_callbacks));
+            submit_agent_turn(
+                runtime,
+                std::move(pending.text),
+                std::move(pending.callbacks));
         };
 
-    submit_agent_turn = [&](std::string text,
+    submit_agent_turn = [&](ThreadRuntime::Ptr runtime,
+                            std::string text,
                             core::agent::Agent::TurnCallbacks turn_callbacks) {
         if (text.empty()) {
             return;
         }
-        assistant_turn_active.store(true, std::memory_order_release);
-        assistant_turn_completion_status.store(TurnCompletionStatus::None,
-                                               std::memory_order_release);
         std::string timestamp = current_time_str();
         std::string assistant_message_id;
         {
             std::lock_guard lock(ui_mutex);
-            append_ui_message(ui_messages, make_user_message(text, timestamp));
-            append_ui_message(ui_messages, make_assistant_message("", "", true));
-            assistant_message_id = ui_messages.back().id;
+            auto messages = runtime->messages();
+            append_ui_message(*messages, make_user_message(text, timestamp));
+            append_ui_message(*messages, make_assistant_message("", "", true));
+            assistant_message_id = messages->back().id;
         }
         auto live_timeline =
             std::make_shared<LiveAssistantTimeline>(assistant_message_id);
-        reset_history_view();
-        turn_activity_timers.start(assistant_message_id);
+        if (thread_runtimes.current() == runtime) {
+            reset_history_view();
+        }
+        runtime->activity_timers().start(assistant_message_id);
         animation_cv.notify_one();
         wake_ui();
 
-        auto effective_callbacks = make_turn_callbacks(live_timeline);
+        auto effective_callbacks = make_turn_callbacks(runtime, live_timeline);
         auto retry_callbacks = turn_callbacks;
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
@@ -5040,7 +5725,8 @@ RunResult run(RunOptions opts) {
                 turn_callbacks.min_context_utilization_for_rotation;
         }
         effective_callbacks.on_authentication_required =
-            [retry_text = text,
+            [runtime,
+             retry_text = text,
              retry_callbacks = std::move(retry_callbacks),
              &authentication_recovery_state,
              &authentication_manager,
@@ -5064,6 +5750,7 @@ RunResult run(RunOptions opts) {
                     }
 
                     PendingAuthenticationRecovery pending{
+                        .runtime = runtime,
                         .request = request,
                         .provider = *provider,
                         .retry_text = retry_text,
@@ -5080,21 +5767,24 @@ RunResult run(RunOptions opts) {
                 wake_ui();
             };
 
-        std::thread([text = std::string(text),
+        runtime->begin_worker();
+        try {
+          std::thread([text = std::string(text),
                      base_dir = std::filesystem::current_path(),
-                     agent,
+                     runtime,
                      effective_callbacks = std::move(effective_callbacks),
                      live_timeline,
                      &update_live_assistant_message,
                      &submit_agent_turn,
-                     &take_queued_steering_turn_or_mark_idle,
-                     &assistant_turn_active,
-                     &turn_activity_timers,
                      &ui_mutex,
-                     &ui_messages,
                      &animation_cv,
                      &wake_ui,
-                     &save_session_snapshot]() mutable {
+                     &save_runtime_snapshot]() mutable {
+            struct WorkerCompletion {
+                ThreadRuntime::Ptr runtime;
+                ~WorkerCompletion() { runtime->finish_worker(); }
+            } worker_completion{runtime};
+            auto agent = runtime->agent();
             const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
             // An absolute @ mention is an explicit user selection. Finder
             // drag-and-drop arrives through bracketed paste in this form.
@@ -5109,16 +5799,15 @@ RunResult run(RunOptions opts) {
             }
 
             agent->send_message(user_message,
-                [live_timeline,
-                 &update_live_assistant_message,
-                 &assistant_turn_active](const std::string& chunk) {
-                    update_live_assistant_message(live_timeline, [&](UiMessage& message) {
+                [runtime, live_timeline,
+                 &update_live_assistant_message](const std::string& chunk) {
+                    update_live_assistant_message(runtime, live_timeline, [&](UiMessage& message) {
                         // Never revert a finalized assistant message back to
                         // pending. Late/out-of-band callbacks (e.g. compaction
                         // status racing the done callback) must not resurrect
                         // the "Analyzing..." spinner or block /copy.
                         if (!message.finalized
-                            && assistant_turn_active.load(std::memory_order_relaxed)) {
+                            && runtime->turn_active()) {
                             message.pending = true;
                         }
                         if (message.thinking) {
@@ -5137,15 +5826,12 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                [live_timeline, agent,
+                [runtime, live_timeline, agent,
                  &submit_agent_turn,
-                 &take_queued_steering_turn_or_mark_idle,
-                 &turn_activity_timers,
                  &ui_mutex,
-                 &ui_messages,
                  &animation_cv,
                  &wake_ui,
-                 &save_session_snapshot]() {
+                 &save_runtime_snapshot]() {
                     const bool was_stopped = agent->is_stop_requested();
                     // A turn only counts as successfully completed when it was
                     // neither cancelled (ESC/Ctrl+C) nor ended with an error.
@@ -5156,25 +5842,48 @@ RunResult run(RunOptions opts) {
                             live_timeline->current_message_id());
                         const std::string reasoning_elapsed =
                             format_elapsed_compact(
-                                turn_activity_timers.elapsed(current_id)
+                                runtime->activity_timers().elapsed(current_id)
                                     .value_or(std::chrono::seconds{0}));
-                        turn_activity_timers.stop(current_id);
+                        runtime->activity_timers().stop(current_id);
                         live_timeline->finish(
-                            ui_messages,
+                            *runtime->messages(),
                             reasoning_elapsed,
                             was_stopped);
                     }
                     animation_cv.notify_one();
                     wake_ui();
-                    save_session_snapshot();
-                    if (auto next_turn = take_queued_steering_turn_or_mark_idle(turn_succeeded);
+                    save_runtime_snapshot(runtime);
+                    if (auto next_turn = runtime->finish_turn(turn_succeeded);
                         next_turn.has_value()) {
-                        submit_agent_turn(std::move(next_turn->text),
+                        submit_agent_turn(runtime,
+                                          std::move(next_turn->text),
                                           std::move(next_turn->callbacks));
                     }
                 },
                 std::move(effective_callbacks));
-        }).detach();
+          }).detach();
+        } catch (const std::exception& error) {
+            runtime->finish_worker();
+            {
+                std::lock_guard lock(ui_mutex);
+                live_timeline->finish(
+                    *runtime->messages(),
+                    {},
+                    true);
+                append_ui_message(
+                    *runtime->messages(),
+                    make_warning_message(std::format(
+                        "Could not start the agent worker: {}",
+                        error.what())));
+            }
+            if (auto next_turn = runtime->finish_turn(false); next_turn.has_value()) {
+                submit_agent_turn(
+                    runtime,
+                    std::move(next_turn->text),
+                    std::move(next_turn->callbacks));
+            }
+            wake_ui();
+        }
     };
 
     auto submit_skill_turn = [&](const std::string& text,
@@ -5202,12 +5911,13 @@ RunResult run(RunOptions opts) {
 
         std::string message_id;
         std::string direct_shell_session_id;
+        auto runtime = current_runtime;
         {
             std::lock_guard lock(ui_mutex);
             append_ui_message(
-                ui_messages,
+                *runtime->messages(),
                 make_shell_command_message(command, current_time_str(), true));
-            message_id = ui_messages.back().id;
+            message_id = runtime->messages()->back().id;
             direct_shell_session_id = session_id;
         }
         direct_shell_animation_count.fetch_add(1, std::memory_order_release);
@@ -5216,15 +5926,21 @@ RunResult run(RunOptions opts) {
         wake_ui();
 
         const std::string working_dir = std::filesystem::current_path().string();
-        std::thread([command = std::move(command),
+        direct_shell_state->begin_worker();
+        try {
+          std::thread([command = std::move(command),
                      working_dir,
                      direct_shell_session_id = std::move(direct_shell_session_id),
                      message_id = std::move(message_id),
+                     runtime,
                      direct_shell_state,
-                     agent,
                      &direct_shell_animation_count,
-                     &save_session_snapshot,
+                     &save_runtime_snapshot,
                      &update_ui_message]() mutable {
+            struct WorkerCompletion {
+                std::shared_ptr<DirectShellState> state;
+                ~WorkerCompletion() { state->finish_worker(); }
+            } completion{direct_shell_state};
             core::tools::shell::IShellExecutor::Result result;
             if (direct_shell_state && direct_shell_state->executor) {
                 result = direct_shell_state->run(
@@ -5247,7 +5963,7 @@ RunResult run(RunOptions opts) {
                 make_direct_shell_history_content(command, result.output);
 
             direct_shell_animation_count.fetch_sub(1, std::memory_order_acq_rel);
-            update_ui_message(message_id, [&](UiMessage& message) {
+            update_ui_message(runtime, message_id, [&](UiMessage& message) {
                 if (message.type != MessageType::ShellCommand) {
                     return;
                 }
@@ -5257,15 +5973,25 @@ RunResult run(RunOptions opts) {
                 message.stopped = result.exit_code != 0;
             });
 
-            if (agent) {
+            if (auto agent = runtime->agent()) {
                 agent->append_history_message(core::llm::Message{
                     .role = "user",
                     .content = shell_history_content,
                     .synthetic = true,
                 });
-                save_session_snapshot();
+                save_runtime_snapshot(runtime);
             }
-        }).detach();
+          }).detach();
+        } catch (const std::exception& error) {
+            direct_shell_state->finish_worker();
+            direct_shell_animation_count.fetch_sub(1, std::memory_order_acq_rel);
+            update_ui_message(runtime, message_id, [&](UiMessage& message) {
+                message.secondary_text = error.what();
+                message.pending = false;
+                message.finalized = true;
+                message.stopped = true;
+            });
+        }
     };
 
     // ── Input component ──────────────────────────────────────────────────────
@@ -5297,7 +6023,8 @@ RunResult run(RunOptions opts) {
                 || conversation_search_state.active
                 || settings_panel_state.active
                 || remote_activity_panel_state.active
-                || prompts_picker_state.active) return;
+                || prompts_picker_state.active
+                || session_picker_state.active) return;
         }
         if (input_text.empty()) return;
         std::string text = input_text;
@@ -5325,6 +6052,7 @@ RunResult run(RunOptions opts) {
             .append_history_fn = append_history,
             .append_assistant_output_fn = append_assistant_output,
             .agent            = agent,
+            .session_stats_registry = session_stats_registry,
             .clear_screen_fn  = clear_screen,
             .quit_fn          = screen.ExitLoopClosure(),
             .model_status_fn  = describe_models,
@@ -5339,12 +6067,29 @@ RunResult run(RunOptions opts) {
             .open_model_picker_fn = open_model_picker,
             .open_command_option_picker_fn = open_command_option_picker,
             .open_settings_picker_fn = open_settings_picker,
+            .open_threads_picker_fn = open_threads_picker,
             .open_sessions_picker_fn = open_sessions_picker,
+            .start_new_thread_fn = [&]() {
+                if (const auto err = start_new_thread(); err.has_value()) {
+                    append_history(std::format("\n✗  {}\n", *err));
+                }
+            },
             .open_prompts_picker_fn = open_prompts_picker,
             .resume_session_fn = [&](std::string_view id_or_idx) {
-                auto data_opt = id_or_idx.empty()
-                    ? session_store->load_most_recent()
-                    : session_store->load(id_or_idx);
+                // Prefer an already-loaded runtime: its in-memory state is
+                // authoritative, and a brand-new thread may not exist on
+                // disk yet. Only fall back to the store for cold sessions.
+                std::optional<core::session::SessionData> data_opt;
+                if (!id_or_idx.empty()) {
+                    if (auto runtime = thread_runtimes.find(id_or_idx)) {
+                        data_opt = live_session_data(runtime);
+                    }
+                }
+                if (!data_opt.has_value()) {
+                    data_opt = id_or_idx.empty()
+                        ? session_store->load_most_recent()
+                        : session_store->load(id_or_idx);
+                }
 
                 if (!data_opt.has_value()) {
                     append_history(std::format(
@@ -5565,7 +6310,8 @@ RunResult run(RunOptions opts) {
             const auto revision = ui_state_revision.load(std::memory_order_acquire);
             if (history_snapshot_revision != revision) {
                 std::lock_guard lock(ui_mutex);
-                history_snapshot = std::make_shared<const std::vector<UiMessage>>(ui_messages);
+                history_snapshot =
+                    std::make_shared<const std::vector<UiMessage>>(*selected_messages);
                 history_snapshot_revision = revision;
             }
             return history_snapshot;
@@ -5580,8 +6326,9 @@ RunResult run(RunOptions opts) {
                 .show_reasoning = ui_show_reasoning,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
-                .activity_elapsed = [&turn_activity_timers](std::string_view message_id) {
-                    const auto elapsed = turn_activity_timers.elapsed(message_id);
+                .activity_elapsed = [&current_runtime](std::string_view message_id) {
+                    const auto elapsed =
+                        current_runtime->activity_timers().elapsed(message_id);
                     return elapsed.has_value() ? format_elapsed_compact(*elapsed) : std::string{};
                 },
             };
@@ -5606,6 +6353,35 @@ RunResult run(RunOptions opts) {
                 external_editor.cancel();
             }
             return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed) {
+            const std::size_t target_count = std::min(
+                thread_tab_hitboxes.size(),
+                thread_tab_session_ids.size());
+            for (std::size_t i = 0; i < target_count; ++i) {
+                if (!thread_tab_hitboxes[i].Contain(event.mouse().x, event.mouse().y)) {
+                    continue;
+                }
+                const std::string target_session_id = thread_tab_session_ids[i];
+                if (target_session_id == session_id) {
+                    return true;
+                }
+                if (auto runtime = thread_runtimes.find(target_session_id)) {
+                    if (auto data = live_session_data(runtime)) {
+                        {
+                            std::lock_guard lock(ui_mutex);
+                            session_picker_state = {};
+                        }
+                        if (const auto error = resume_session(*data); error.has_value()) {
+                            append_history(std::format("\n✗  {}\n", *error));
+                        }
+                    }
+                }
+                return true;
+            }
         }
 
         if (opts.remote_mcp_server_enabled
@@ -5711,7 +6487,7 @@ RunResult run(RunOptions opts) {
                 case RewindPickerOption::Action::SummarizeAndCompact:
                     compact_history_from_rewind(
                         *agent,
-                        assistant_turn_active.load(std::memory_order_relaxed),
+                        current_runtime->turn_active(),
                         append_history,
                         save_session_snapshot);
                     break;
@@ -5806,10 +6582,14 @@ RunResult run(RunOptions opts) {
                 // Remove the failed user/error pair from model history before
                 // replaying. The transcript keeps the visible diagnostic, but
                 // the provider receives one clean copy of the user request.
-                agent->undo_last();
-                submit_agent_turn(
-                    std::move(authentication_recovery->retry_text),
-                    std::move(authentication_recovery->retry_callbacks));
+                auto retry_runtime = authentication_recovery->runtime;
+                retry_runtime->agent()->undo_last();
+                if (retry_runtime->begin_turn()) {
+                    submit_agent_turn(
+                        retry_runtime,
+                        std::move(authentication_recovery->retry_text),
+                        std::move(authentication_recovery->retry_callbacks));
+                }
             } else {
                 append_history(std::format(
                     "\n✓  {} reconnected. The interrupted request was not replayed "
@@ -5843,11 +6623,13 @@ RunResult run(RunOptions opts) {
         bool enable_always_allow = false;
         std::string always_allow_rule;
         std::string always_allow_label;
+        ThreadRuntime::Ptr permission_runtime;
         bool perm_was_active = false;
         {
             std::lock_guard lock(ui_mutex);
             if (perm_state.active) {
                 perm_was_active = true;
+                permission_runtime = perm_state.origin_runtime;
                 // ── Option indices:
                 //   0 = Yes, once
                 //   1 = Yes, don't ask again for this
@@ -5894,7 +6676,13 @@ RunResult run(RunOptions opts) {
                     perm_prom   = std::move(perm_state.promise);
                     perm_answer = false;
                     perm_state.active = false;
-                    agent->request_stop();
+                    // Stop the thread that asked, which may be a hidden one;
+                    // fall back to the visible agent if attribution is lost.
+                    if (perm_state.origin_runtime) {
+                        perm_state.origin_runtime->request_stop();
+                    } else {
+                        agent->request_stop();
+                    }
                 } else if (event == Event::Character('4')
                            || event == Event::Character('n')
                            || event == Event::Character('N')
@@ -5910,20 +6698,29 @@ RunResult run(RunOptions opts) {
         if (perm_was_active) {
             // Resolve the promise FIRST (before re-acquiring ui_mutex) to avoid
             // a race where the worker thread wakes up and tries to re-enter the
-            // permission check while we're still holding the lock for session_allowed.
+            // permission check while we're still updating its runtime state.
             if (perm_prom && perm_answer.has_value()) {
                 perm_prom->set_value(*perm_answer);
             }
             if (enable_always_allow && !always_allow_rule.empty()) {
-                {
-                    std::lock_guard lock(ui_mutex);
-                    session_allowed.insert(always_allow_rule);
+                if (!permission_runtime) {
+                    permission_runtime = current_runtime;
                 }
+                permission_runtime->mutate_metadata(
+                    [&](ThreadRuntimeMetadata& metadata) {
+                        metadata.permission_rules.insert(always_allow_rule);
+                    });
                 // Session allow-list updated - no status message needed
                 (void)always_allow_label;
             }
             if (enable_yolo_from_permission) {
-                set_yolo_mode_enabled(true);
+                if (!permission_runtime) {
+                    permission_runtime = current_runtime;
+                }
+                permission_runtime->mutate_metadata(
+                    [](ThreadRuntimeMetadata& metadata) {
+                        metadata.yolo_enabled = true;
+                    });
                 append_history(
                     "\n\xe2\x9a\xa0  Approval mode set to YOLO: sensitive tools will auto-run.\n");
             }
@@ -5943,9 +6740,18 @@ RunResult run(RunOptions opts) {
                 input_component->TakeFocus();
             }
             if (question_result.stop_agent) {
-                agent->request_stop();
+                if (auto origin = thread_runtimes.find(
+                        question_result.origin_session_id)) {
+                    origin->request_stop();
+                } else {
+                    agent->request_stop();
+                }
             }
+            const bool resolved_question = question_result.has_resolution();
             question_result.resolve();
+            if (resolved_question) {
+                question_prompt_cv.notify_one();
+            }
             return true;
         }
 
@@ -6220,73 +7026,174 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        bool session_picker_was_active = false;
-        std::optional<int> session_choice;
-        std::optional<int> session_delete_idx;
+        SessionPickerEventResult session_picker_result;
+        SessionPickerResource session_picker_resource =
+            SessionPickerResource::SavedSessions;
         {
             std::lock_guard lock(ui_mutex);
             if (session_picker_state.active) {
-                session_picker_was_active = true;
-                const int count = static_cast<int>(session_picker_state.sessions.size());
-                if (event == Event::ArrowUp) {
-                    if (count > 0) {
-                        session_picker_state.selected = (session_picker_state.selected + count - 1) % count;
-                    }
-                } else if (event == Event::ArrowDown) {
-                    if (count > 0) {
-                        session_picker_state.selected = (session_picker_state.selected + 1) % count;
-                    }
-                } else if (event == Event::Return) {
-                    if (count > 0) {
-                        session_choice = session_picker_state.selected;
-                        session_picker_state.active = false;
-                    }
-                } else if (event == Event::Backspace || event == Event::Delete) {
-                    if (count > 0) {
-                        session_delete_idx = session_picker_state.selected;
-                    }
-                } else if (event == Event::Escape) {
-                    session_picker_state.active = false;
-                }
+                session_picker_resource = session_picker_state.resource;
+                session_picker_result = handle_session_picker_event(session_picker_state, event);
             }
         }
-        if (session_picker_was_active) {
-            if (session_delete_idx.has_value()) {
-                std::string error;
-                std::string sid;
-                {
-                    std::lock_guard lock(ui_mutex);
-                    sid = session_picker_state.sessions[static_cast<size_t>(*session_delete_idx)].session_id;
-                }
-                if (session_store->remove(sid, &error)) {
-                    std::lock_guard lock(ui_mutex);
-                    session_picker_state.sessions = session_store->list();
-                    if (session_picker_state.sessions.empty()) {
-                        session_picker_state.active = false;
-                    } else {
-                        session_picker_state.selected = std::min(
-                            session_picker_state.selected,
-                            static_cast<int>(session_picker_state.sessions.size()) - 1);
-                    }
-                } else {
-                    append_history(std::format("\n\xe2\x9c\x97  Failed to delete session: {}\n", error));
+        if (session_picker_result.handled) {
+            if (session_picker_result.action == SessionPickerAction::NewThread) {
+                if (const auto err = start_new_thread(); err.has_value()) {
+                    append_history(std::format("\n✗  {}\n", *err));
                 }
                 return true;
             }
-            if (session_choice.has_value()) {
+            if (session_picker_result.action == SessionPickerAction::CloseThread
+                && session_picker_result.filtered_index.has_value()) {
+                std::string sid;
+                std::string query;
+                int selected = 0;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    const auto idx = static_cast<std::size_t>(
+                        *session_picker_result.filtered_index);
+                    if (idx < session_picker_state.filtered.size()) {
+                        sid = session_picker_state.filtered[idx].session_id;
+                    }
+                    query = session_picker_state.query;
+                    selected = session_picker_state.selected;
+                }
+                if (sid.empty()) {
+                    return true;
+                }
+                if (const auto error = close_thread(sid); error.has_value()) {
+                    std::lock_guard lock(ui_mutex);
+                    session_picker_state.status_message = *error;
+                    return true;
+                }
+
+                auto catalogue = active_thread_catalogue();
+                std::lock_guard lock(ui_mutex);
+                open_thread_picker(session_picker_state, std::move(catalogue), session_id);
+                session_picker_state.query = std::move(query);
+                refresh_session_picker_filter(session_picker_state);
+                session_picker_state.selected = std::min(
+                    selected,
+                    std::max(0,
+                        static_cast<int>(session_picker_state.filtered.size()) - 1));
+                session_picker_state.status_message =
+                    std::format("Closed active thread {}", sid);
+                return true;
+            }
+            if (session_picker_result.action == SessionPickerAction::Delete
+                && session_picker_result.filtered_index.has_value()) {
+                std::string error;
+                std::string sid;
+                std::string current_id;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    const auto idx = static_cast<std::size_t>(*session_picker_result.filtered_index);
+                    if (idx < session_picker_state.filtered.size()) {
+                        sid = session_picker_state.filtered[idx].session_id;
+                    }
+                    current_id = session_id;
+                }
+                if (sid.empty()) {
+                    return true;
+                }
+                if (sid == current_id) {
+                    append_history(
+                        "\n✗  Cannot delete the session owned by the current active thread.\n");
+                    return true;
+                }
+                if (thread_runtimes.find(sid)) {
+                    append_history(
+                        "\n✗  Cannot delete a saved session while it belongs to an active thread.\n");
+                    return true;
+                }
+                if (session_store->remove(sid, &error)) {
+                    session_stats_registry->reset(sid);
+                    core::budget::BudgetTracker::get_instance().reset_session(sid);
+                    auto catalogue = session_store->list();
+                    std::lock_guard lock(ui_mutex);
+                    const auto query = session_picker_state.query;
+                    const auto selected = session_picker_state.selected;
+                    open_session_picker(session_picker_state, std::move(catalogue), current_id);
+                    session_picker_state.query = query;
+                    refresh_session_picker_filter(session_picker_state);
+                    if (session_picker_state.sessions.empty()) {
+                        session_picker_state.active = false;
+                    }
+                    session_picker_state.selected = std::min(
+                        selected,
+                        std::max(0, static_cast<int>(session_picker_state.filtered.size()) - 1));
+                    session_picker_state.status_message =
+                        std::format("Deleted saved session {}", sid);
+                } else {
+                    append_history(std::format("\n✗  Failed to delete session: {}\n", error));
+                }
+                return true;
+            }
+            if (session_picker_result.action == SessionPickerAction::RenameCommit
+                && session_picker_result.filtered_index.has_value()) {
+                std::string sid;
+                {
+                    std::lock_guard lock(ui_mutex);
+                    const auto idx = static_cast<std::size_t>(*session_picker_result.filtered_index);
+                    if (idx < session_picker_state.filtered.size()) {
+                        sid = session_picker_state.filtered[idx].session_id;
+                    }
+                }
+                if (!sid.empty()) {
+                    if (auto runtime = thread_runtimes.find(sid)) {
+                        runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                            metadata.thread_name = session_picker_result.rename_name;
+                        });
+                        static_cast<void>(open_threads_picker());
+                        return true;
+                    }
+                    append_history(std::format(
+                        "\n✗  Active thread {} is no longer available.\n", sid));
+                }
+                return true;
+            }
+            if (session_picker_result.action == SessionPickerAction::Open
+                && session_picker_result.filtered_index.has_value()) {
                 core::session::SessionInfo info;
                 {
                     std::lock_guard lock(ui_mutex);
-                    info = session_picker_state.sessions[static_cast<size_t>(*session_choice)];
-                }
-                auto data_opt = session_store->load_by_id(info.session_id);
-                if (data_opt) {
-                    if (const auto resume_error = resume_session(*data_opt);
-                        resume_error.has_value()) {
-                        append_history(std::format("\n✗  {}\n", *resume_error));
+                    const auto idx = static_cast<std::size_t>(*session_picker_result.filtered_index);
+                    if (idx < session_picker_state.filtered.size()) {
+                        info = session_picker_state.filtered[idx];
                     }
-                } else {
-                    append_history(std::format("\n\xe2\x9c\x97  Failed to load session {}.\n", info.session_id));
+                }
+                if (!info.session_id.empty()) {
+                    std::optional<core::session::SessionData> data_opt;
+                    if (session_picker_resource
+                        == SessionPickerResource::ActiveThreads) {
+                        if (auto runtime = thread_runtimes.find(info.session_id)) {
+                            data_opt = live_session_data(runtime);
+                        }
+                    } else {
+                        // The catalogue remains persistence-backed. If its
+                        // session already belongs to a live thread, however,
+                        // that runtime is the authoritative in-memory owner.
+                        if (auto runtime = thread_runtimes.find(info.session_id)) {
+                            data_opt = live_session_data(runtime);
+                        } else {
+                            data_opt = session_store->load_by_id(info.session_id);
+                        }
+                    }
+                    if (data_opt) {
+                        if (const auto resume_error = resume_session(*data_opt);
+                            resume_error.has_value()) {
+                            append_history(std::format("\n✗  {}\n", *resume_error));
+                        }
+                    } else {
+                        append_history(
+                            session_picker_resource == SessionPickerResource::ActiveThreads
+                                ? std::format(
+                                      "\n✗  Active thread {} is no longer available.\n",
+                                      info.session_id)
+                                : std::format(
+                                      "\n✗  Failed to load saved session {}.\n",
+                                      info.session_id));
+                    }
                 }
             }
             return true;
@@ -6763,7 +7670,7 @@ RunResult run(RunOptions opts) {
                 std::size_t message_count = 0;
                 {
                     std::lock_guard lock(ui_mutex);
-                    message_count = ui_messages.size();
+                    message_count = selected_messages->size();
                 }
                 history_component->JumpToMessage(
                     static_cast<std::size_t>(*search_jump_index),
@@ -6793,7 +7700,7 @@ RunResult run(RunOptions opts) {
         }
 
         if (event == Event::Escape
-            && assistant_turn_active.load(std::memory_order_relaxed)) {
+            && current_runtime->turn_active()) {
             [[maybe_unused]] const auto ignored = stop_active_terminal();
             return true;
         }
@@ -6801,11 +7708,16 @@ RunResult run(RunOptions opts) {
         auto command_snapshot = current_command_snapshot();
         sync_command_picker(command_snapshot);
         if (!command_snapshot.suggestions.empty() && !command_picker.suppressed) {
+            if (event == Event::Return
+                && command_snapshot.active.has_value()
+                && trim_ascii(input_text) == command_snapshot.active->token) {
+                // Submit a command-only input directly from the autocomplete
+                // layer. Letting an exact command fall through to the focused
+                // Input component required a second navigation event on some
+                // terminals after the command opened an overlay.
+                return execute_selected_command();
+            }
             if (event == Event::Return && has_pending_command_completion()) {
-                if (command_snapshot.active.has_value()
-                    && trim_ascii(input_text) == command_snapshot.active->token) {
-                    return execute_selected_command();
-                }
                 return accept_selected_command();
             }
             if (event == Event::Tab) {
@@ -6883,6 +7795,19 @@ RunResult run(RunOptions opts) {
             if (!open_prompts_picker()) {
                 append_history("\n\xe2\x9a\xa0  No saved prompts are available yet.\n");
             }
+            return true;
+        }
+        // Ctrl+N — start a new thread (agentty-compatible). Archives the current
+        // conversation so it remains switchable via /threads.
+        if (is_ctrl_n_event(event)) {
+            if (const auto err = start_new_thread(); err.has_value()) {
+                append_history(std::format("\n✗  {}\n", *err));
+            }
+            return true;
+        }
+        // Enhanced-keyboard Ctrl+J / Ctrl+H aliases open the thread browser.
+        if (is_ctrl_j_event(event) || is_ctrl_h_event(event)) {
+            open_threads_picker();
             return true;
         }
         if (is_ctrl_l_event(event)) {  // Ctrl+L — clear screen (same as /clear)
@@ -7020,7 +7945,7 @@ RunResult run(RunOptions opts) {
         bool                   review_activity_active = false;
         bool                   settings_panel_active = false;
         bool                   authentication_recovery_active = false;
-        std::string            perm_tool, perm_args, perm_allow_label;
+        std::string            perm_tool, perm_args, perm_allow_label, perm_origin_label;
         std::string            review_activity_hint;
         std::string            settings_panel_status;
         std::string            authentication_recovery_provider;
@@ -7057,7 +7982,16 @@ RunResult run(RunOptions opts) {
         std::vector<tui::LocalModelEntry> local_model_picker_entries;
         bool                            session_picker_active = false;
         int                             session_picker_selected = 0;
-        std::vector<core::session::SessionInfo> session_picker_sessions;
+        SessionPickerResource           session_picker_resource =
+            SessionPickerResource::SavedSessions;
+        std::vector<core::session::SessionInfo> session_picker_filtered;
+        std::string                     session_picker_current_id;
+        std::string                     session_picker_query;
+        bool                            session_picker_filter_active = false;
+        bool                            session_picker_rename_active = false;
+        std::string                     session_picker_rename_buffer;
+        std::string                     session_picker_status;
+        std::unordered_set<std::string> session_picker_running_ids;
         bool                            prompts_picker_active = false;
         int                             prompts_picker_selected = 0;
         std::vector<std::string>        prompts_picker_prompts;
@@ -7087,6 +8021,7 @@ RunResult run(RunOptions opts) {
             perm_diff         = perm_state.diff_preview;
             perm_selected     = perm_state.selected;
             perm_allow_label  = perm_state.allow_label;
+            perm_origin_label = perm_state.origin_label;
             model_picker_active   = model_picker_state.active;
             model_picker_selected = model_picker_state.selected;
             model_provider_picker_active = model_provider_picker_state.active;
@@ -7136,7 +8071,16 @@ RunResult run(RunOptions opts) {
             local_model_picker_entries  = local_model_picker_state.entries;
             session_picker_active = session_picker_state.active;
             session_picker_selected = session_picker_state.selected;
-            session_picker_sessions = session_picker_state.sessions;
+            session_picker_resource = session_picker_state.resource;
+            session_picker_filtered = session_picker_state.filtered;
+            session_picker_current_id = session_picker_state.current_session_id;
+            session_picker_query = session_picker_state.query;
+            session_picker_filter_active =
+                session_picker_state.mode == SessionPickerMode::Filter;
+            session_picker_rename_active =
+                session_picker_state.mode == SessionPickerMode::Rename;
+            session_picker_rename_buffer = session_picker_state.rename_buffer;
+            session_picker_status = session_picker_state.status_message;
             prompts_picker_active = prompts_picker_state.active;
             prompts_picker_selected = prompts_picker_state.selected;
             prompts_picker_prompts = prompts_picker_state.prompts;
@@ -7154,7 +8098,7 @@ RunResult run(RunOptions opts) {
             stderr_panel_lines = stderr_panel_state.lines;
             remote_activity_panel_active = remote_activity_panel_state.active;
             remote_activity_panel_selected = remote_activity_panel_state.selected;
-            queued_steering_count = queued_steering_turns.size();
+            queued_steering_count = current_runtime->queued_turn_count();
         }
         auto remote_activity_snapshot = opts.remote_mcp_server_enabled
             ? remote_activity_hub.snapshot(remote_activity_panel_active)
@@ -7168,6 +8112,50 @@ RunResult run(RunOptions opts) {
                 core::mcp::RemoteServerState::starting;
         }
         external_editor_status = external_editor.status_label();
+        session_picker_running_ids = thread_runtimes.running_session_ids();
+
+        std::vector<ThreadTab> thread_tabs;
+        thread_tab_session_ids.clear();
+        if (auto runtimes = thread_runtimes.snapshot(); runtimes.size() > 1) {
+            struct RuntimeTabSnapshot {
+                ThreadRuntime::Ptr runtime;
+                ThreadRuntimeMetadata metadata;
+            };
+            std::vector<RuntimeTabSnapshot> snapshots;
+            snapshots.reserve(runtimes.size());
+            for (auto& runtime : runtimes) {
+                snapshots.push_back({runtime, runtime->metadata()});
+            }
+            std::ranges::sort(snapshots, [&main_runtime](const auto& lhs, const auto& rhs) {
+                const bool lhs_is_main = lhs.runtime == main_runtime;
+                const bool rhs_is_main = rhs.runtime == main_runtime;
+                if (lhs_is_main != rhs_is_main) {
+                    return lhs_is_main;
+                }
+                if (lhs.metadata.created_at != rhs.metadata.created_at) {
+                    return lhs.metadata.created_at < rhs.metadata.created_at;
+                }
+                return lhs.metadata.session_id < rhs.metadata.session_id;
+            });
+            const auto selected_runtime = thread_runtimes.current();
+            thread_tabs.reserve(snapshots.size());
+            thread_tab_session_ids.reserve(snapshots.size());
+            for (std::size_t i = 0; i < snapshots.size(); ++i) {
+                const auto& item = snapshots[i];
+                std::string label = item.metadata.thread_name;
+                if (label.empty()) {
+                    label = i == 0
+                        ? std::string{"main"}
+                        : std::format("{} {}", project_thread_base_name, i + 1);
+                }
+                thread_tabs.push_back(ThreadTab{
+                    .label = std::move(label),
+                    .active = item.runtime == selected_runtime,
+                    .running = item.runtime->turn_active(),
+                });
+                thread_tab_session_ids.push_back(item.metadata.session_id);
+            }
+        }
 
         const bool question_dialog_active = question_dialog.active();
         
@@ -7181,7 +8169,12 @@ RunResult run(RunOptions opts) {
                 core::mcp::McpConnectionManager::get_instance().connected_count(),
                 context_sources_label,
                 provider_setup_hint(active_provider_name),
-                current_time_str());
+                current_time_str(),
+                thread_tabs,
+                &thread_tab_hitboxes);
+        } else {
+            thread_tab_hitboxes.clear();
+            thread_tab_session_ids.clear();
         }
 
         // ── Permission overlay ───────────────────────────────────────────
@@ -7240,7 +8233,17 @@ RunResult run(RunOptions opts) {
                 conversation_search_hits,
                 conversation_search_selected);
         } else if (session_picker_active) {
-            bottom_el = render_session_picker_panel(session_picker_sessions, session_picker_selected);
+            bottom_el = render_session_picker_panel(
+                session_picker_filtered,
+                session_picker_selected,
+                session_picker_resource,
+                session_picker_current_id,
+                session_picker_query,
+                session_picker_filter_active,
+                session_picker_rename_active,
+                session_picker_rename_buffer,
+                session_picker_status,
+                session_picker_running_ids);
         } else if (prompts_picker_active) {
             bottom_el = render_prompts_picker_panel(
                 prompts_picker_prompts,
@@ -7315,7 +8318,8 @@ RunResult run(RunOptions opts) {
                 perm_args,
                 perm_diff,
                 perm_allow_label,
-                perm_selected);
+                perm_selected,
+                perm_origin_label);
         } else {
             Element input_el =
                 input_component->Render() | color(tui::ColorYellowBright) | xflex;
@@ -7339,8 +8343,11 @@ RunResult run(RunOptions opts) {
 
         // ── Status bar ───────────────────────────────────────────────────
         const std::size_t tick = animation_tick.load(std::memory_order_relaxed);
-        const bool response_in_progress = assistant_turn_active.load(std::memory_order_acquire);
-        std::string budget_str = core::budget::BudgetTracker::get_instance().status_string();
+        const bool response_in_progress = current_runtime->turn_active();
+        const std::string visible_session_id = current_runtime->session_id();
+        std::string budget_str =
+            core::budget::BudgetTracker::get_instance().status_string(
+                visible_session_id);
         const auto context_window = agent->context_window_snapshot();
         const int32_t ctx_pct = context_window.remaining_pct;
 
@@ -7417,7 +8424,8 @@ RunResult run(RunOptions opts) {
         Element budget_el = text("");
         if (!budget_str.empty()) {
             if (is_subscription) {
-                auto total = core::budget::BudgetTracker::get_instance().session_total();
+                auto total = core::budget::BudgetTracker::get_instance().session_total(
+                    visible_session_id);
                 const std::string token_usage = format_subscription_token_usage(
                     total,
                     !rate_limit_info.usage_windows.empty());
@@ -7553,7 +8561,7 @@ RunResult run(RunOptions opts) {
         if (response_in_progress) {
             turn_activity_state = TurnActivityState::Active;
         } else {
-            switch (assistant_turn_completion_status.load(std::memory_order_acquire)) {
+            switch (current_runtime->completion_status()) {
                 case TurnCompletionStatus::Succeeded:
                     turn_activity_state = TurnActivityState::Completed;
                     break;
@@ -7675,6 +8683,45 @@ RunResult run(RunOptions opts) {
 
     screen.Loop(renderer);
 
+    // Force-dismiss any interactive blockers before the idle barriers, or a
+    // waiting worker would block shutdown forever (permission slot queue,
+    // unanswered question dialog, queued steering turns).
+    {
+        std::lock_guard lock(ui_mutex);
+        if (perm_state.active && perm_state.promise) {
+            auto pending = std::move(perm_state.promise);
+            perm_state.active = false;
+            perm_state.origin_runtime.reset();
+            pending->set_value(false);
+        }
+    }
+    {
+        std::lock_guard lock(permission_prompt_mutex);
+        permission_prompt_shutdown = true;
+        permission_prompt_cv.notify_all();
+    }
+    {
+        std::lock_guard lock(question_prompt_mutex);
+        question_prompt_shutdown = true;
+        question_prompt_cv.notify_all();
+    }
+    {
+        auto dismissed = question_dialog.force_interrupt();
+        if (dismissed.has_resolution()) {
+            dismissed.resolve();
+            question_prompt_cv.notify_all();
+        }
+    }
+
+    // Detached turn launchers only retain runtime-owned state, but their TUI
+    // callbacks still reference this composition root. Stop and join logically
+    // (via the runtime idle barrier) before any captured service is destroyed.
+    thread_runtimes.request_stop_all();
+    direct_shell_state->interrupt_active();
+    thread_runtimes.wait_until_all_idle();
+    direct_shell_state->wait_until_idle();
+    thread_runtimes.wait_until_all_saved();
+
     if (opts.remote_mcp_server_enabled) {
         // Barrier: blocks until no daemon thread is inside the callback, so the
         // captured locals below can be destroyed safely as run() unwinds.
@@ -7693,9 +8740,11 @@ RunResult run(RunOptions opts) {
     core::logging::Logger::get_instance().clear_callback_sink();
     core::agent::PermissionGate::get_instance().set_notify_fn({});
     ask_user_tool->setQuestionCallback({});
-    agent->set_permission_fn({});
-    agent->set_loop_break_fn({});
-    agent->set_efficiency_decision_fn({});
+    for (const auto& runtime : thread_runtimes.snapshot()) {
+        runtime->agent()->set_permission_fn({});
+        runtime->agent()->set_loop_break_fn({});
+        runtime->agent()->set_efficiency_decision_fn({});
+    }
 
     if (mention_index_thread.joinable()) {
         mention_index_thread.join();

@@ -174,6 +174,29 @@ bool is_ctrl_t_event(const ftxui::Event& event) {
     return is_ctrl_letter_event(event, 't');
 }
 
+bool is_ctrl_n_event(const ftxui::Event& event) {
+    return is_ctrl_letter_event(event, 'n');
+}
+
+bool is_ctrl_j_event(const ftxui::Event& event) {
+    // FTXUI defines Event::Return as Special({10}), which is the same raw byte
+    // as classic Ctrl+J (LF). Matching the raw control byte would make every
+    // Enter open the thread browser. Only accept unambiguous encoded forms:
+    // kitty keyboard protocol and modifyOtherKeys CSI sequences.
+    const std::string& input = event.input();
+    return is_ctrl_letter_kitty_sequence(input, 'j')
+        || is_ctrl_letter_modify_other_keys_sequence(input, 'j');
+}
+
+bool is_ctrl_h_event(const ftxui::Event& event) {
+    // Raw Ctrl+H is byte 8, which FTXUI deliberately normalizes to Backspace.
+    // Only enhanced keyboard protocols can distinguish the binding without
+    // stealing normal text editing.
+    const std::string& input = event.input();
+    return is_ctrl_letter_kitty_sequence(input, 'h')
+        || is_ctrl_letter_modify_other_keys_sequence(input, 'h');
+}
+
 bool is_ctrl_enter_event(const ftxui::Event& event) {
     // modifyOtherKeys CSI: ESC[27;<modifier>;<key>~  where key 13 = Enter.
     const auto parsed = parse_modify_other_keys(event.input());

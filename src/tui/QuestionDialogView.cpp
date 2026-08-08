@@ -123,7 +123,8 @@ Element render_question_option(
 
 Element render_question_dialog_panel(
     const QuestionDialogState& state,
-    Element other_input_editor) {
+    Element other_input_editor,
+    std::string_view origin_label) {
     if (state.questions.empty()
         || state.current_question_index < 0
         || state.current_question_index >= static_cast<int>(state.questions.size())) {
@@ -191,6 +192,10 @@ Element render_question_dialog_panel(
             text(" ? QUESTION ")
                 | ftxui::bold
                 | color(ColorQuestionCyan),
+            !origin_label.empty()
+                ? text(std::format("thread: {}", origin_label))
+                      | ftxui::bold | color(ColorQuestionCyan)
+                : text(""),
             filler(),
             text(help) | color(Color::GrayDark),
         }),

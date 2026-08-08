@@ -22,7 +22,6 @@ Switch models with `--model` or `/model` — local, hybrid, or remote, no lock-i
 
 <table>
 <tr><td><b>A real terminal interface</b></td><td>Full FTXUI TUI with streaming tool output, slash-command autocomplete, session resume, context mentions, and clipboard image paste.</td></tr>
-<tr><td><b>Handyman for Lampo</b></td><td>MCP tools optimized so <a href="https://apps.apple.com/app/lampo/id6760648195">Lampo</a>’s sandboxed local models can code against the real filesystem and shell; Lampo can also edit Filo’s draft prompts on macOS.</td></tr>
 <tr><td><b>Embedded local AI</b></td><td>C++ core can link <code>llama.cpp</code> for in-process GGUF inference; Ollama over localhost is first-class too. The HTTP daemon binds <code>127.0.0.1</code> by default.</td></tr>
 <tr><td><b>Smart hybrid routing</b></td><td>In-process policies (<code>smart</code>, <code>fallback</code>, <code>latency</code>, <code>load_balance</code>) mix local and remote backends with automatic fallback, spend/quota guardrails, and complexity-based tier routing.</td></tr>
 <tr><td><b>MCP server and client</b></td><td>Expose Filo’s coding tools to hosts such as Lampo, or connect Filo to external MCP servers over stdio or Streamable HTTP.</td></tr>
@@ -108,6 +107,7 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 - Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
 - Agent Skills support with `.filo/skills` and on-demand activation
 - `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
+- First-class thread management (`Ctrl+N` new thread, `/threads` for active runtimes; `Ctrl+H`/`Ctrl+J` aliases on enhanced-keyboard terminals) — project-named tabs let you switch without tmux/screen while hidden threads keep working. In `/threads`, `C` archives and closes an idle non-main thread without deleting its saved session. `/sessions` remains the saved-conversation manager.
 - Session persistence and resume
 - Global + workspace config layering
 - MCP dispatcher shared across stdio and HTTP transports
@@ -284,19 +284,43 @@ On macOS, Filo can open the current draft in Lampo’s Prompter instead of `$VIS
 
 ## Settings
 
-Most day-to-day options live in the interactive TUI. Open **`/settings`** for preferences (model defaults, prompt editor backend on macOS, and other UI/workflow choices).
+Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, auto-compaction, tool compression). Model selection is separate via **`/model`**.
+
+Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settings.json` (workspace). Workspace values override user values.
+
+| Setting | Key | Options |
+|---|---|---|
+| Start Mode | `default_mode` | `BUILD`, `DEBUG`, `RESEARCH`, `EXECUTE` |
+| Approval Mode | `default_approval_mode` | `prompt`, `yolo` |
+| Default Router Policy | `default_router_policy` | configured policy names |
+| Prompt Editor | `prompt_editor` | `system` (uses `$VISUAL` / `$EDITOR`), `lampo` (macOS), or an editor command |
+| Startup Banner | `ui_banner` | `show`, `hide` |
+| Footer | `ui_footer` | `show`, `hide` |
+| Model Badge | `ui_model_info` | `show`, `hide` |
+| Context Meter | `ui_context_usage` | `show`, `hide` |
+| Message Timestamps | `ui_timestamps` | `show`, `hide` |
+| Activity Spinner | `ui_spinner` | `show`, `hide` |
+| Reasoning | `ui_reasoning` | `show`, `hide` |
+| Auto-Compaction | `auto_compact_threshold` | `0` (off), `25000`, `50000`, `100000`, `200000` |
+| Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
 
 Useful slash commands:
 
 | Command | What it does |
 |---|---|
-| `/settings` | Interactive preferences |
-| `/model` | Switch model / provider for the session |
-| `/login` · `/logout` | OAuth for supported providers |
-| `/compression` | Context compression (`off`, `light`, `full`, `ultra`) |
-| `/mcp` | Connect Filo to external MCP tool servers |
+| `/settings` | Interactive preferences panel (user or workspace scope) |
+| `/model` | Switch model / provider / router target |
+| `/auth` · `/login` | Authenticate with a provider |
+| `/logout` | Sign out of a provider OAuth session |
+| `/compression` · `/compress` | Tool output compression (`off`, `light`, `full`, `ultra`) |
+| `/effort` | Model effort (`auto`, `low`, `medium`, `high`, `max`) |
+| `/yolo` | Toggle auto-approval for sensitive tools |
+| `/mcp` | List or manage external MCP tool servers |
 | `/profile` | List, switch, or clear named profiles |
-| `/rename` | Name the current session for later resume |
+| `/threads` · `/new` | Switch, rename, create, or close active threads |
+| `/sessions` · `/resume` · `/continue` · `/rename` | Manage and resume saved conversation sessions |
+| `/goal` · `/todo` · `/memory` | Session goal, todos, and durable memory |
+| `/help` | Full command and keyboard shortcut list |
 
 Skills without an `entry_point` also appear as slash commands: `/<skill-name> [arguments]`.
 
@@ -311,19 +335,13 @@ cmake --preset linux-debug -DFILO_ENABLE_LLAMACPP=ON
 cmake --build --preset linux-debug
 ```
 
-Then select a `llamacpp` provider/model from the TUI (`/model` or `/settings`) after configuring the local backend.
+Then select a `llamacpp` provider/model from the TUI (`/model`) after configuring the local backend.
 
 ---
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and code style.
-
-```bash
-cmake --preset linux-debug
-cmake --build --preset linux-debug
-ctest --preset linux-debug --output-on-failure
-```
 
 ---
 

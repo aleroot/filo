@@ -27,6 +27,9 @@ struct QuestionDialogEventResult {
     bool restore_main_input_focus = false;
     QuestionDialogPromise promise;
     std::optional<QuestionDialogAnswers> answers;
+    /// Session that owns the waiting tool call. Needed to interrupt a hidden
+    /// thread instead of whichever thread happens to be visible.
+    std::string origin_session_id;
 
     [[nodiscard]] bool has_resolution() const noexcept {
         return promise != nullptr;
@@ -45,7 +48,17 @@ public:
     QuestionDialogController& operator=(QuestionDialogController&&) = delete;
 
     [[nodiscard]] QuestionDialogPromise open(
-        core::tools::QuestionRequest request);
+        core::tools::QuestionRequest request,
+        std::string origin_label = {});
+
+    /// Thread label captured by open(); rendered next to the dialog so users
+    /// know which conversation is waiting on them.
+    [[nodiscard]] std::string origin_label() const;
+
+    /// Force-dismiss an active dialog with an interrupt. Used at shutdown so
+    /// the waiting tool thread never blocks process exit; returns the result
+    /// whose promise must still be resolved by the caller.
+    [[nodiscard]] QuestionDialogEventResult force_interrupt();
 
     [[nodiscard]] bool active() const;
     [[nodiscard]] ftxui::Component editor_component() const;
@@ -66,6 +79,8 @@ private:
     mutable std::mutex mutex_;
     QuestionDialogState state_;
     QuestionDialogPromise promise_;
+    std::string origin_label_;
+    std::string origin_session_id_;
     bool submit_requested_ = false;
     ftxui::Component editor_component_;
 };

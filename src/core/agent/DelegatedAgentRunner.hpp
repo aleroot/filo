@@ -15,6 +15,10 @@ namespace core::tools {
 class ToolManager;
 }
 
+namespace core::session {
+class SessionStatsRegistry;
+}
+
 namespace core::agent {
 
 class DelegatedAgentRunner {
@@ -46,6 +50,9 @@ public:
         std::string task_description;
         std::string parent_tool_call_id;
         std::optional<ResumeState> resume_state;
+        /// Shared metrics registry of the parent execution root; subagent
+        /// accounting flows into it instead of a private registry.
+        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
         std::chrono::milliseconds timeout = std::chrono::minutes(30);
         std::function<void(const std::shared_ptr<core::agent::Agent>&)> on_agent_ready = {};
         std::function<bool()> cancellation_requested = {};

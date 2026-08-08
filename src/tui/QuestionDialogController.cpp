@@ -55,7 +55,8 @@ QuestionDialogController::QuestionDialogController() {
 }
 
 QuestionDialogPromise QuestionDialogController::open(
-    core::tools::QuestionRequest request) {
+    core::tools::QuestionRequest request,
+    std::string origin_label) {
     std::vector<QuestionDialogItem> questions;
     questions.reserve(request.questions.size());
     for (auto& question : request.questions) {
@@ -80,9 +81,20 @@ QuestionDialogPromise QuestionDialogController::open(
     auto displaced = std::move(promise_);
     activate_question_dialog(state_, std::move(questions));
     promise_ = std::move(request.promise);
+    origin_label_ = std::move(origin_label);
+    origin_session_id_ = std::move(request.session_id);
     submit_requested_ = false;
     focus_other_editor_if_selected();
     return displaced;
+}
+
+std::string QuestionDialogController::origin_label() const {
+    std::lock_guard lock(mutex_);
+    return origin_label_;
+}
+
+QuestionDialogEventResult QuestionDialogController::force_interrupt() {
+    return handle_event(ftxui::Event::Escape, /*is_interrupt=*/true);
 }
 
 bool QuestionDialogController::active() const {
@@ -96,9 +108,12 @@ Component QuestionDialogController::editor_component() const {
 
 Element QuestionDialogController::render() {
     std::lock_guard lock(mutex_);
+    // Only label hidden threads: an empty label keeps the dialog exactly as
+    // the single-thread experience has always looked.
     return render_question_dialog_panel(
         state_,
-        editor_component_->Render());
+        editor_component_->Render(),
+        origin_label_);
 }
 
 void QuestionDialogController::focus_other_editor_if_selected() {
@@ -127,6 +142,8 @@ void QuestionDialogController::apply_answer_progress(
         result.restore_main_input_focus = true;
         result.answers = state_.answers;
         result.promise = std::move(promise_);
+        result.origin_session_id = std::move(origin_session_id_);
+        origin_label_.clear();
         break;
     case QuestionDialogAnswerProgress::Ignored:
     case QuestionDialogAnswerProgress::EmptyOther:
@@ -138,6 +155,8 @@ void QuestionDialogController::dismiss(
     bool is_interrupt,
     QuestionDialogEventResult& result) {
     state_.active = false;
+    result.origin_session_id = std::move(origin_session_id_);
+    origin_label_.clear();
     result.stop_agent = is_interrupt;
     result.restore_main_input_focus = true;
     result.promise = std::move(promise_);

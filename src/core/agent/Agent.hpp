@@ -20,6 +20,15 @@
 #include "PermissionGate.hpp"
 #include "ToolCallDeduplicator.hpp"
 #include "ToolResultStore.hpp"
+
+namespace core::budget {
+class BudgetTracker;
+}
+
+namespace core::session {
+class SessionStatsRegistry;
+}
+
 #include <filesystem>
 #include <memory>
 #include <vector>
@@ -80,11 +89,19 @@ public:
         double min_context_utilization_for_rotation = 0.0;
     };
 
+    /// Dependency-injection constructor. Execution roots that run concurrent
+    /// sessions (the threads TUI) inject a shared SessionStatsRegistry so
+    /// every thread's accounting stays isolated; when no registry is supplied
+    /// the process-shared compatibility registry is used. A budget tracker can
+    /// likewise be injected for testability (defaults to the process tracker).
     Agent(std::shared_ptr<core::llm::LLMProvider> provider,
           core::tools::ToolManager& skill_manager,
           core::context::SessionContext session_context,
           std::filesystem::path tool_result_root = ToolResultStore::default_root(),
-          std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor = {});
+          std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor = {},
+          std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {},
+          core::budget::BudgetTracker* budget_tracker = nullptr);
+    ~Agent();
 
     // -----------------------------------------------------------------------
     // Cancellation support — stop the current LLM response generation.
@@ -106,6 +123,7 @@ public:
     /// callback wins. Session/history replacement must not run while this is
     /// true.
     [[nodiscard]] bool turn_in_progress() const noexcept;
+    [[nodiscard]] std::string session_id() const;
 
     void set_mode(const std::string& mode);
     void set_session_id(std::string session_id);
@@ -372,6 +390,10 @@ private:
     std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor_;
     core::tools::ToolManager& skill_manager_;
     core::context::SessionContext session_context_;
+    /// Injected/shared session metrics registry; declared before the
+    /// orchestrator so subagents can share it.
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry_;
+    core::budget::BudgetTracker* budget_tracker_ = nullptr;
     SubagentOrchestrator orchestrator_;
     core::session::TodoManager todo_manager_;
     core::tools::TodoTool todo_tool_;

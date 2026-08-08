@@ -155,8 +155,8 @@ void SessionReport::print(const core::budget::BudgetTracker& budget,
 
     const auto now   = std::chrono::system_clock::now();
     const auto wall  = std::chrono::duration_cast<std::chrono::seconds>(now - snap.started_at);
-    const auto total = budget.session_total();
-    const double cost = budget.session_cost_usd();
+    const auto total = budget.session_total(session_id);
+    const double cost = budget.session_cost_usd(session_id);
 
     // ── horizontal rule helper ──────────────────────────────────────────────
     auto hr = [&](std::string_view left, std::string_view right) {

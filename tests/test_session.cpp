@@ -838,6 +838,36 @@ TEST_CASE("ActiveSessionLeaseManager commits ownership transactionally",
     CHECK(follower.retain()->session_id() == data.session_id);
 }
 
+TEST_CASE("ActiveSessionLeaseManager retains multiple live thread leases",
+          "[session][concurrency][thread_runtime]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_multi_thread_leases"};
+    core::session::SessionStore store{tmp.path};
+    const auto first = make_test_session("thread01");
+    const auto second = make_test_session("thread02");
+
+    core::session::ActiveSessionLeaseManager owner{store};
+    auto first_reservation = owner.reserve(first);
+    REQUIRE(first_reservation.has_value());
+    first_reservation->commit();
+    auto second_reservation = owner.reserve(second);
+    REQUIRE(second_reservation.has_value());
+    second_reservation->commit();
+
+    REQUIRE(owner.retain(first.session_id));
+    REQUIRE(owner.retain(second.session_id));
+    CHECK(owner.retain()->session_id() == second.session_id);
+
+    core::session::ActiveSessionLeaseManager follower{store};
+    CHECK_FALSE(follower.reserve(first).has_value());
+    CHECK_FALSE(follower.reserve(second).has_value());
+
+    owner.release(first.session_id);
+    CHECK_FALSE(owner.retain(first.session_id));
+    CHECK(owner.retain(second.session_id));
+    CHECK(follower.reserve(first).has_value());
+    CHECK_FALSE(follower.reserve(second).has_value());
+}
+
 // ---------------------------------------------------------------------------
 // SessionStats
 // ---------------------------------------------------------------------------
@@ -864,6 +894,32 @@ TEST_CASE("SessionStats accumulates turns and per-model stats", "[session][stats
     CHECK(snap.per_model[0].completion_tokens == 130);
     CHECK(snap.per_model[1].model == "grok-code-fast-1");
     CHECK(snap.per_model[1].call_count == 1);
+}
+
+TEST_CASE("SessionStatsRegistry isolates concurrent thread metrics",
+          "[session][stats][thread_runtime]") {
+    auto& stats = core::session::SessionStatsRegistry::get_instance();
+    stats.reset("thread-a");
+    stats.reset("thread-b");
+
+    const core::llm::TokenUsage usage{
+        .prompt_tokens = 100,
+        .completion_tokens = 50,
+        .total_tokens = 150,
+    };
+    stats.record_api_call("thread-a", true);
+    stats.record_turn("thread-a", "model-a", usage);
+    stats.record_tool_call("thread-a", "read_file", true);
+    stats.record_turn("thread-b", "model-b", usage);
+
+    const auto first = stats.snapshot("thread-a");
+    const auto second = stats.snapshot("thread-b");
+    CHECK(first.turn_count == 1);
+    CHECK(first.api_calls_total == 1);
+    CHECK(first.tool_calls_total == 1);
+    CHECK(second.turn_count == 1);
+    CHECK(second.api_calls_total == 0);
+    CHECK(second.tool_calls_total == 0);
 }
 
 TEST_CASE("SessionStats can skip cost estimation for local providers", "[session][stats]") {

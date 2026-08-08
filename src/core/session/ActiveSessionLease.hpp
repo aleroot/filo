@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace core::session {
 
@@ -82,8 +83,14 @@ public:
     [[nodiscard]] std::expected<Reservation, std::string> reserve(
         const SessionData& data);
 
-    // Retains the active lease for asynchronous work on its session.
+    // Retains the most recently selected lease for compatibility.
     [[nodiscard]] ActiveSessionLease::Ptr retain() const;
+
+    // Retains a specific live thread lease for asynchronous work.
+    [[nodiscard]] ActiveSessionLease::Ptr retain(std::string_view session_id) const;
+
+    // Releases an idle thread lease. Active work must retain its own Ptr.
+    void release(std::string_view session_id);
 
 private:
     [[nodiscard]] ActiveSessionLease::Ptr find_active(
@@ -91,7 +98,8 @@ private:
 
     struct State {
         mutable std::mutex mutex;
-        ActiveSessionLease::Ptr active;
+        std::unordered_map<std::string, ActiveSessionLease::Ptr> leases;
+        std::string selected_session_id;
     };
 
     const SessionStore& store_;

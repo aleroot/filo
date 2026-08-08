@@ -57,7 +57,8 @@ void ActiveSessionLeaseManager::Reservation::commit() {
     if (!state_) return;
     auto state = std::move(state_);
     std::lock_guard lock(state->mutex);
-    state->active = std::move(lease_);
+    state->selected_session_id = lease_->session_id();
+    state->leases.insert_or_assign(state->selected_session_id, std::move(lease_));
 }
 
 ActiveSessionLeaseManager::ActiveSessionLeaseManager(const SessionStore& store)
@@ -82,15 +83,30 @@ ActiveSessionLeaseManager::reserve(const SessionData& data) {
 
 ActiveSessionLease::Ptr ActiveSessionLeaseManager::retain() const {
     std::lock_guard lock(state_->mutex);
-    return state_->active;
+    const auto it = state_->leases.find(state_->selected_session_id);
+    return it == state_->leases.end() ? nullptr : it->second;
+}
+
+ActiveSessionLease::Ptr ActiveSessionLeaseManager::retain(
+    std::string_view session_id) const {
+    std::lock_guard lock(state_->mutex);
+    const auto it = state_->leases.find(std::string{session_id});
+    return it == state_->leases.end() ? nullptr : it->second;
+}
+
+void ActiveSessionLeaseManager::release(std::string_view session_id) {
+    std::lock_guard lock(state_->mutex);
+    state_->leases.erase(std::string{session_id});
+    if (state_->selected_session_id == session_id) {
+        state_->selected_session_id.clear();
+    }
 }
 
 ActiveSessionLease::Ptr ActiveSessionLeaseManager::find_active(
     std::string_view session_id) const {
     std::lock_guard lock(state_->mutex);
-    return state_->active && state_->active->session_id() == session_id
-        ? state_->active
-        : nullptr;
+    const auto it = state_->leases.find(std::string{session_id});
+    return it == state_->leases.end() ? nullptr : it->second;
 }
 
 } // namespace core::session

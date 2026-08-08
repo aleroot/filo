@@ -273,6 +273,7 @@ TEST_CASE("QuestionDialogController owns selection and promise resolution",
           "[tui][question-dialog][controller]") {
     QuestionDialogController controller;
     auto request = make_request();
+    request.session_id = "origin-session";
     auto future = request.promise->get_future();
 
     CHECK_FALSE(controller.open(std::move(request)));
@@ -281,6 +282,7 @@ TEST_CASE("QuestionDialogController owns selection and promise resolution",
     auto result = controller.handle_event(ftxui::Event::Return, false);
     REQUIRE(result.handled);
     REQUIRE(result.has_resolution());
+    CHECK(result.origin_session_id == "origin-session");
     CHECK(result.restore_main_input_focus);
     CHECK_FALSE(result.stop_agent);
     result.resolve();
@@ -403,6 +405,7 @@ TEST_CASE("QuestionDialogController stops the agent when interrupted",
           "[tui][question-dialog][controller][other]") {
     QuestionDialogController controller;
     auto request = make_request();
+    request.session_id = "hidden-thread";
     auto future = request.promise->get_future();
     CHECK_FALSE(controller.open(std::move(request)));
 
@@ -413,6 +416,7 @@ TEST_CASE("QuestionDialogController stops the agent when interrupted",
     REQUIRE(cancel.handled);
     REQUIRE(cancel.has_resolution());
     CHECK(cancel.stop_agent);
+    CHECK(cancel.origin_session_id == "hidden-thread");
     cancel.resolve();
 
     CHECK_FALSE(future.get().has_value());

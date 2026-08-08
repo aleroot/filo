@@ -64,6 +64,27 @@ TEST_CASE("KeyInput detects Ctrl+T prompts-picker events", "[tui][key_input]") {
     REQUIRE_FALSE(tui::is_ctrl_t_event(ftxui::Event::Special({16})));  // Ctrl+P
 }
 
+TEST_CASE("KeyInput detects thread-management shortcuts", "[tui][key_input][thread]") {
+    // Ctrl+N (new thread) — raw byte 14, kitty, modifyOtherKeys.
+    REQUIRE(tui::is_ctrl_n_event(ftxui::Event::Special({14})));
+    REQUIRE(tui::is_ctrl_n_event(ftxui::Event::Special("\x1B[110;5u")));
+    REQUIRE(tui::is_ctrl_n_event(ftxui::Event::Special("\x1B[27;5;110~")));
+    REQUIRE_FALSE(tui::is_ctrl_n_event(ftxui::Event::Character('n')));
+
+    // Ctrl+J (thread browser) must NOT match FTXUI Return (also raw byte 10).
+    REQUIRE_FALSE(tui::is_ctrl_j_event(ftxui::Event::Return));
+    REQUIRE_FALSE(tui::is_ctrl_j_event(ftxui::Event::Special({10})));
+    REQUIRE(tui::is_ctrl_j_event(ftxui::Event::Special("\x1B[106;5u")));
+    REQUIRE(tui::is_ctrl_j_event(ftxui::Event::Special("\x1B[27;5;106~")));
+    REQUIRE_FALSE(tui::is_ctrl_j_event(ftxui::Event::Character('j')));
+
+    // Ctrl+H is only distinguishable from Backspace with an enhanced protocol.
+    REQUIRE_FALSE(tui::is_ctrl_h_event(ftxui::Event::Special({8})));
+    REQUIRE(tui::is_ctrl_h_event(ftxui::Event::Special("\x1B[104;5u")));
+    REQUIRE(tui::is_ctrl_h_event(ftxui::Event::Special("\x1B[27;5;104~")));
+    REQUIRE_FALSE(tui::is_ctrl_h_event(ftxui::Event::Return));
+}
+
 TEST_CASE("KeyInput detects Ctrl+Enter events", "[tui][key_input]") {
     // modifyOtherKeys CSI: ESC[27;5;13~  (modifier 5 = Ctrl, key 13 = Enter)
     REQUIRE(tui::is_ctrl_enter_event(ftxui::Event::Special("\x1B[27;5;13~")));

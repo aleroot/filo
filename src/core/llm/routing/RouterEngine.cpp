@@ -85,6 +85,15 @@ bool RouterEngine::set_active_policy(std::string policy_name) {
     return true;
 }
 
+std::shared_ptr<RouterEngine> RouterEngine::fork() const {
+    std::shared_lock lock(rwmutex_);
+    auto copy = std::make_shared<RouterEngine>(config_, providers_);
+    if (!active_policy_.empty()) {
+        static_cast<void>(copy->set_active_policy(active_policy_));
+    }
+    return copy;
+}
+
 RouteDecision RouterEngine::route(const RouteContext& context) {
     // Shared lock: multiple agent threads can route concurrently.
     std::shared_lock lock(rwmutex_);

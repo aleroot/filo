@@ -71,7 +71,10 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
     auto agent = std::make_shared<core::agent::Agent>(
         request.provider,
         request.tool_manager,
-        request.session_context);
+        request.session_context,
+        ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        request.session_stats_registry);
     agent->set_active_provider_name(request.provider_name);
     agent->set_mode(request.mode);
     if (!request.model.empty()) {

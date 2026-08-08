@@ -17,6 +17,9 @@ bool is_ctrl_c_event(const ftxui::Event& event);
 bool is_ctrl_p_event(const ftxui::Event& event);
 bool is_ctrl_r_event(const ftxui::Event& event);
 bool is_ctrl_t_event(const ftxui::Event& event);
+bool is_ctrl_n_event(const ftxui::Event& event);
+bool is_ctrl_j_event(const ftxui::Event& event);
+bool is_ctrl_h_event(const ftxui::Event& event);
 
 /// True when @p event is a Ctrl+Enter keypress (modifyOtherKeys CSI sequence
 /// ESC[27;5;13~). Used by list pickers that distinguish Enter (activate) from

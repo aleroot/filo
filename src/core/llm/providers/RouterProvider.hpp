@@ -29,6 +29,7 @@ public:
     void reset_conversation_state() override;
 
     [[nodiscard]] std::string active_policy() const;
+    [[nodiscard]] bool set_active_policy(std::string policy_name);
     [[nodiscard]] std::string last_route_summary() const;
     [[nodiscard]] std::string last_guardrail_summary() const;
 

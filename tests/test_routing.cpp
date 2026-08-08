@@ -832,6 +832,35 @@ TEST_CASE("set_active_policy switches routing behaviour", "[routing][engine]") {
     REQUIRE(engine.active_policy() == "beta-policy"); // unchanged
 }
 
+TEST_CASE("forked router policy is isolated from its source", "[routing][engine][threads]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "alpha-policy",
+        "policies": {
+            "alpha-policy": {
+                "strategy": "fallback",
+                "defaults": [{ "provider": "alpha", "model": "alpha-model" }]
+            },
+            "beta-policy": {
+                "strategy": "fallback",
+                "defaults": [{ "provider": "beta", "model": "beta-model" }]
+            }
+        }
+    })";
+
+    auto config = parse_router_from_json(json);
+    core::llm::routing::RouterEngine source(
+        std::move(config), providers({"alpha", "beta"}));
+    auto fork = source.fork();
+
+    REQUIRE(fork);
+    REQUIRE(fork->set_active_policy("beta-policy"));
+    CHECK(source.active_policy() == "alpha-policy");
+    CHECK(fork->active_policy() == "beta-policy");
+    CHECK(source.route({.prompt = "task"}).provider == "alpha");
+    CHECK(fork->route({.prompt = "task"}).provider == "beta");
+}
+
 // ─── route_chain ──────────────────────────────────────────────────────────────
 
 TEST_CASE("route_chain returns all candidates in fallback order", "[routing][chain]") {

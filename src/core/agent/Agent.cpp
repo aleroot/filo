@@ -356,14 +356,26 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              core::tools::ToolManager& skill_manager,
              core::context::SessionContext session_context,
              std::filesystem::path tool_result_root,
-             std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor)
+             std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor,
+             std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry,
+             core::budget::BudgetTracker* budget_tracker)
     : provider_(std::move(provider))
     , sleep_inhibitor_(sleep_inhibitor
           ? std::move(sleep_inhibitor)
           : core::power::make_sleep_inhibitor())
     , skill_manager_(skill_manager)
     , session_context_(std::move(session_context))
-    , orchestrator_(skill_manager_, &core::config::ConfigManager::get_instance().get_config())
+    // Dependency injection: the execution root shares one registry across all
+    // of its agents; the process-shared registry preserves legacy callers.
+    , session_stats_registry_(session_stats_registry
+          ? std::move(session_stats_registry)
+          : core::session::SessionStatsRegistry::shared_instance())
+    , budget_tracker_(budget_tracker
+          ? budget_tracker
+          : &core::budget::BudgetTracker::get_instance())
+    , orchestrator_(skill_manager_,
+                    &core::config::ConfigManager::get_instance().get_config(),
+                    session_stats_registry_)
     , todo_manager_(&core::session::SessionStore::now_iso8601)
     , todo_tool_(todo_manager_)
     , tool_result_store_(std::move(tool_result_root))
@@ -372,6 +384,8 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
 }
+
+Agent::~Agent() = default;
 
 // ---------------------------------------------------------------------------
 // Cancellation support
@@ -407,6 +421,10 @@ bool Agent::last_turn_failed() const {
 
 bool Agent::turn_in_progress() const noexcept {
     return turn_in_progress_.load(std::memory_order_acquire);
+}
+
+std::string Agent::session_id() const {
+    return session_context_snapshot().session_id;
 }
 
 bool Agent::is_turn_current(const std::shared_ptr<TurnState>& turn_state) const {
@@ -1354,7 +1372,9 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // ── Final chunk ──────────────────────────────────────────────────
         // Record API call outcome (is_error is true for HTTP 4XX/5XX or connection errors)
-        core::session::SessionStats::get_instance().record_api_call(!chunk.is_error);
+        self->session_stats_registry_->record_api_call(
+            step_session_context.session_id,
+            !chunk.is_error);
         if (chunk.is_error) {
             self->turn_failed_.store(true, std::memory_order_release);
         }
@@ -1376,7 +1396,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 ? std::string("agent")
                 : turn_callbacks.ledger_actor;
             if (usage.has_data()) {
-                core::budget::BudgetTracker::get_instance().record_event({
+                self->budget_tracker_->record_event({
                     .kind = core::budget::TokenLedgerEventKind::Actual,
                     .source = ledger_actor.starts_with("subagent:")
                         ? core::budget::TokenLedgerSource::Subagent
@@ -1389,8 +1409,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     .billable = should_estimate_cost,
                 });
             }
-            core::session::SessionStats::get_instance().record_turn(
-                model, usage, should_estimate_cost);
+            self->session_stats_registry_->record_turn(
+                step_session_context.session_id,
+                model,
+                usage,
+                should_estimate_cost);
 
             if (!tool_calls_accum->empty()) {
                 const std::size_t count = tool_calls_accum->size();
@@ -1899,7 +1922,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         tool_call.function.arguments);
                 const int32_t result_tokens =
                     core::session::SessionStats::estimate_payload_tokens(msg.content);
-                core::session::SessionStats::get_instance().record_tool_call(
+                self->session_stats_registry_->record_tool_call(
+                    step_session_context.session_id,
                     tool_call.function.name,
                     tool_ok,
                     argument_tokens,
@@ -1913,7 +1937,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 const std::string ledger_actor = turn_callbacks.ledger_actor.empty()
                     ? std::string("agent")
                     : turn_callbacks.ledger_actor;
-                core::budget::BudgetTracker::get_instance().record_event({
+                self->budget_tracker_->record_event({
                     .kind = core::budget::TokenLedgerEventKind::Estimate,
                     .source = core::budget::TokenLedgerSource::ToolPayload,
                     .session_id = step_session_context.session_id,

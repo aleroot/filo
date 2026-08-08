@@ -153,8 +153,8 @@ TEST_CASE("TokenLedger is safe for concurrent recorders",
 TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters",
           "[budget][token_ledger]") {
     auto& tracker = BudgetTracker::get_instance();
-    tracker.set_session_id({});
-    tracker.reset_session();
+    tracker.reset_session(std::string_view{});
+    tracker.set_session_id("legacy-single-session");
 
     tracker.record(
         {.prompt_tokens = 120, .completion_tokens = 30},
@@ -165,7 +165,8 @@ TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters"
             .source = TokenLedgerSource::ModelCall,
         });
 
-    const auto total = tracker.session_total();
+    CHECK(tracker.session_id() == "legacy-single-session");
+    const auto total = tracker.session_total("session-budget");
     CHECK(total.prompt_tokens == 120);
     CHECK(total.completion_tokens == 30);
     CHECK(total.total_tokens == 150);
@@ -177,9 +178,12 @@ TEST_CASE("BudgetTracker records through TokenLedger without duplicate counters"
     REQUIRE(snapshot.event_count == 1);
     CHECK(snapshot.prompt_tokens == total.prompt_tokens);
     CHECK(snapshot.completion_tokens == total.completion_tokens);
+    CHECK_FALSE(tracker.status_string("session-budget").empty());
+    CHECK(tracker.status_string("different-session").empty());
+    CHECK(tracker.last_turn("session-budget").has_data());
 
+    tracker.reset_session(std::string_view{});
     tracker.set_session_id({});
-    tracker.reset_session();
 }
 
 TEST_CASE("BudgetTracker presentation scope excludes gateway usage from active sessions",
