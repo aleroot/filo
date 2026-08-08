@@ -6,50 +6,36 @@
 
 **Filo** is a high-performance AI coding assistant written in modern C++.
 
+It began as the *handyman* for [Lampo](https://apps.apple.com/app/lampo/id6760648195): the private, on-device AI workspace for Apple Silicon. Lampo ships on the Mac App Store under App Sandbox, so it cannot freely reach the filesystem, shell, or developer tooling. Filo was built to sit beside it and do that work: open projects, read and write files, search code, apply patches, and run commands when Lampo’s models need real hands on the machine.
+
+After those early days, Filo grew into a fully fledged terminal coding agent that stands on its own. You can run it end-to-end without Lampo: interactive TUI, skills, session resume, and non-interactive prompter mode for scripts and CI. The Lampo partnership remains first-class when you want it.
+
+Because Filo is written in modern C++, it can be compiled with embedded [llama.cpp](https://github.com/ggml-org/llama.cpp) (`FILO_ENABLE_LLAMACPP=ON`) and run local GGUF models **in-process**, no separate inference server required. Pair that with any remote providers you configure, and Filo’s built-in **smart router** can blend them: prefer local for everyday work, fall back or escalate to remote when a task needs more capacity, and keep spend/quota guardrails under your control.
+
 It runs in multiple runtime modes:
 - interactive terminal app (TUI)
 - non-interactive prompter mode for scripts/CI
 - MCP server over stdio
-- HTTP daemon exposing MCP and/or OpenAI/Anthropic-compatible API endpoints
+- HTTP daemon exposing MCP and/or compatible chat API endpoints
 
-## Why Filo
+Switch models with `--model` or `/model` — local, hybrid, or remote, no lock-in.
 
-Filo focuses on speed, control, and local-first workflows without giving up multi-provider flexibility.
+<table>
+<tr><td><b>A real terminal interface</b></td><td>Full FTXUI TUI with streaming tool output, slash-command autocomplete, session resume, context mentions, and clipboard image paste.</td></tr>
+<tr><td><b>Handyman for Lampo</b></td><td>MCP tools optimized so <a href="https://apps.apple.com/app/lampo/id6760648195">Lampo</a>’s sandboxed local models can code against the real filesystem and shell; Lampo can also edit Filo’s draft prompts on macOS.</td></tr>
+<tr><td><b>Embedded local AI</b></td><td>C++ core can link <code>llama.cpp</code> for in-process GGUF inference; Ollama over localhost is first-class too. The HTTP daemon binds <code>127.0.0.1</code> by default.</td></tr>
+<tr><td><b>Smart hybrid routing</b></td><td>In-process policies (<code>smart</code>, <code>fallback</code>, <code>latency</code>, <code>load_balance</code>) mix local and remote backends with automatic fallback, spend/quota guardrails, and complexity-based tier routing.</td></tr>
+<tr><td><b>MCP server and client</b></td><td>Expose Filo’s coding tools to hosts such as Lampo, or connect Filo to external MCP servers over stdio or Streamable HTTP.</td></tr>
+<tr><td><b>Prompter for automation</b></td><td>Single-shot and streaming modes for scripts and CI, with <code>text</code>, <code>json</code>, and <code>stream-json</code> output formats.</td></tr>
+<tr><td><b>Agent Skills</b></td><td>On-demand instruction packages under <code>.filo/skills</code>, slash-command activation, and compatibility with common skill roots.</td></tr>
+<tr><td><b>Embedded Python</b></td><td>Persistent in-process interpreter tool with optional <code>FILO_PYTHON_VENV</code> isolation.</td></tr>
+</table>
 
-## What Is Different In Filo
+---
 
-### 1) Local-first architecture
+## Quick Start
 
-- Local providers are first-class: Ollama over localhost and embedded `llama.cpp` for in-process GGUF inference( `FILO_ENABLE_LLAMACPP=ON`).
-- Router guardrails can exempt providers flagged as local (`enforce_on_local: false`), keeping embedded local backends available when remote limits are hit.
-- The daemon listens on `127.0.0.1` by default.
-
-### 2) Embedded smart routing
-
-- In-process router engine with policy rules and strategies: `smart`, `fallback`, `latency`, `load_balance`.
-- Automatic fallback chains with per-candidate retries.
-- Guardrails for spend and quota reserves (`max_session_cost_usd`, token/request/window reserve ratios).
-- Auto-classifier that scores prompt complexity and routes to fast/balanced/powerful tiers.
-
-### 3) Embedded Python runtime
-
-- Built-in `python` tool executes code inside an embedded interpreter.
-- Interpreter state persists across calls (variables/imports/functions carry over).
-- Optional venv isolation via `FILO_PYTHON_VENV`.
-
-## Feature Highlights
-
-- C++26 core with streaming-first provider protocols
-- TUI built with FTXUI
-- Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
-- Agent Skills support with `.filo/skills` and on-demand activation
-- `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
-- Session persistence and resume
-- Global + workspace config layering
-- MCP dispatcher shared across stdio and HTTP transports
-- OAuth and API-key credentials
-
-## Prerequisites
+### Prerequisites
 
 - CMake `>= 3.28`
 - C++26 compiler (GCC 15+ or Clang 17+ recommended)
@@ -80,46 +66,54 @@ cmake --build --preset xcode-debug --target run_integration_tests
 
 ### Install
 
-Install the configured build using CMake's standard prefix handling:
-
 ```bash
+# Linux
 cmake --install build/Linux/linux-debug --prefix "$HOME/.local"
-```
 
-For the Xcode preset, select the configuration explicitly:
-
-```bash
+# macOS (Xcode preset — select the configuration explicitly)
 cmake --install build/Darwin/xcode-debug --config Debug --prefix "$HOME/.local"
 ```
 
-The executable is installed to `<prefix>/bin/filo`. Verify it with
-`filo --version`.
+The executable is installed to `<prefix>/bin/filo`. Verify with `filo --version`.
 
-## Enable Embedded `llama.cpp`
+Configure providers and credentials from the TUI (`/settings`, `/model`, `/login`) or your preferred environment. Local backends such as Ollama (`http://localhost:11434` by default) and embedded `llama.cpp` need no cloud keys.
 
-Linux:
+---
 
-```bash
-cmake --preset linux-debug -DFILO_ENABLE_LLAMACPP=ON
-cmake --build --preset linux-debug
-```
+## What Makes Filo Different
 
-Minimal local provider example:
+### Local-first architecture
 
-```json
-{
-  "default_provider": "local",
-  "providers": {
-    "local": {
-      "api_type": "llamacpp",
-      "model": "qwen2.5-coder-7b",
-      "model_path": "/absolute/path/to/model.gguf",
-      "context_size": 8192,
-      "gpu_layers": 35
-    }
-  }
-}
-```
+- Local providers are first-class: Ollama over localhost and embedded `llama.cpp` for in-process GGUF inference (`FILO_ENABLE_LLAMACPP=ON`).
+- Router guardrails can exempt providers flagged as local (`enforce_on_local: false`), keeping embedded local backends available when remote limits are hit.
+- The daemon listens on `127.0.0.1` by default.
+
+### Embedded smart routing
+
+- In-process router engine with policy rules and strategies: `smart`, `fallback`, `latency`, `load_balance`.
+- Automatic fallback chains with per-candidate retries.
+- Guardrails for spend and quota reserves (`max_session_cost_usd`, token/request/window reserve ratios).
+- Auto-classifier that scores prompt complexity and routes to fast/balanced/powerful tiers.
+
+### Embedded Python runtime
+
+- Built-in `python` tool executes code inside an embedded interpreter.
+- Interpreter state persists across calls (variables/imports/functions carry over).
+- Optional venv isolation via `FILO_PYTHON_VENV`.
+
+### Feature highlights
+
+- C++26 core with streaming-first provider protocols
+- TUI built with FTXUI
+- Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
+- Agent Skills support with `.filo/skills` and on-demand activation
+- `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
+- Session persistence and resume
+- Global + workspace config layering
+- MCP dispatcher shared across stdio and HTTP transports
+- OAuth and API-key credentials
+
+---
 
 ## Runtime Modes
 
@@ -132,29 +126,31 @@ Minimal local provider example:
 | API gateway only | `filo --api --headless --port 8080` |
 | MCP + API gateway | `filo --mcp tcp --headless --api --port 8080` |
 
-Daemon transport notes:
+### Daemon / transport
+
 - `--mcp` without a value defaults to `stdio`.
 - `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
 - `--daemon` is still accepted as a deprecated alias for `--mcp tcp`.
 - Set `FILO_MCP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on `/mcp`.
 - For LAN worker deployments, use `--host 0.0.0.0` only with a bearer token and network access controls.
 - The API gateway is off by default to keep daemon startup minimal and local-first.
-- `--api` starts the same HTTP daemon and exposes OpenAI/Anthropic-compatible proxy endpoints:
+- `--api` starts the same HTTP daemon and exposes compatible chat proxy endpoints:
   - `GET /v1/models`
-  - `POST /v1/chat/completions` (OpenAI-style)
-  - `POST /v1/messages` (Anthropic-style)
+  - `POST /v1/chat/completions`
+  - `POST /v1/messages`
 - Combine `--api` with `--mcp tcp` if you want both `/mcp` and `/v1/*` on one port.
 - Model routing in API gateway endpoints:
-  - `policy/<policy_name>` routes via filo smart router policy.
+  - `policy/<policy_name>` routes via Filo smart router policy.
   - `<provider>/<model>` routes directly to a configured provider/model.
   - `<provider>` routes to that provider's default configured model.
 
-Useful CLI flags:
+### Useful CLI flags
+
 - `--version` print the Filo version and exit
 - `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
 - `--daemon` deprecated alias for `--mcp tcp`
-- `--api` enable optional OpenAI/Anthropic-compatible proxy mode
-- `filo --auth <provider> [login|logout]` authenticate or sign out and exit; the action defaults to `login`, so `filo --auth openai` starts ChatGPT OAuth. Tokens are revoked server-side on logout when the provider supports it (Google, OpenAI, Grok)
+- `--api` enable optional chat API proxy mode
+- `filo --auth <provider> [login|logout]` authenticate or sign out and exit
 - `--list-sessions` list resumable sessions
 - `--model <MODEL|PROVIDER|PROVIDER/MODEL>` select a model for this process only without changing saved defaults
 - `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
@@ -165,9 +161,9 @@ Useful CLI flags:
 - `--include-partial-messages` include deltas in `stream-json`
 - `-c, --continue` continue the latest project-scoped session (TUI + prompter)
 - `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
-- `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Normal permission prompts remain active, while shell commands retain ordinary filesystem and internet access when the sandbox is off. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
+- `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
 
-Prompter examples:
+### Prompter examples
 
 ```bash
 # Direct prompt
@@ -192,340 +188,144 @@ filo --continue -p "Now apply the follow-up refactor"
 filo -w ../Lampo -w ../filo
 ```
 
-## Provider Setup
+---
 
-Filo supports both API-key and OAuth-based providers.
+## Lampo
 
-Typical API-key setup:
+[Lampo](https://apps.apple.com/app/lampo/id6760648195) is a private, on-device AI workspace for Apple Silicon (macOS). Filo and Lampo integrate in both directions:
 
-```bash
-export XAI_API_KEY="..."
-export OPENAI_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
-export GEMINI_API_KEY="..."
-export MISTRAL_API_KEY="..."
-export KIMI_API_KEY="..."
-export ZAI_API_KEY="..."
-export DASHSCOPE_API_KEY="..."
-```
+| Direction | What it enables |
+|---|---|
+| **Filo → Lampo (MCP tools)** | Lampo’s local models can call Filo’s coding tools — filesystem, shell, search, patches — outside Lampo’s App Sandbox. |
+| **Lampo → Filo (prompt editor)** | Edit Filo’s current draft in Lampo’s Prompter UI (`Ctrl+G`), then return the saved text to the TUI. |
 
-Grok supports the same account-based OAuth flow as Grok Build, while API-key
-authentication remains available:
+### 1) Filo as an MCP tools server for Lampo
 
-```bash
-# Browser-based OAuth with a local PKCE callback
-filo --auth grok
+Filo’s MCP server (`filo-mcp`) exposes local coding tools so a host such as Lampo can act on the real filesystem and run shell commands. Server instructions describe the preferred workflow: search before reading, line-sliced reads for large files, `search_replace` / `apply_patch` for edits, and persistent shell state across calls.
 
-# Clear the saved Grok OAuth session
-filo --auth grok logout
-```
+**Coding-oriented tools include** (MCP registration set):
 
-Inside the interactive TUI, use `/login grok` and `/logout grok`. OAuth-backed
-Grok profiles use the Grok session proxy and expose
-the account's session-only models; `XAI_API_KEY` profiles continue to use the
-public xAI API.
+- **Read / search:** `read_file`, `list_directory`, `file_search`, `grep_search`
+- **Write / edit:** `write_file`, `search_replace`, `apply_patch`, `replace`, `delete_file`, `move_file`, `create_directory`
+- **Shell:** `run_terminal_command`
+- **Workspace / orchestration:** `get_workspace_config`, `delegate_task`
+- **Web (when enabled):** `web_search`, `fetch_url`
+- **Skills:** `activate_skill` when instruction skills are installed
 
-For local Ollama, default endpoint is:
-- `http://localhost:11434`
+Paths may be absolute or relative to the active workspace. Use `--work-dir` / `-w` to set the primary project and optional additional allowed roots.
 
-## Configuration
+#### Streamable HTTP (Filo daemon)
 
-Config files are layered in this order:
-
-1. `~/.config/filo/config.json`
-2. `~/.config/filo/auth_defaults.json`
-3. `~/.config/filo/settings.json`
-4. `./.filo/config.json`
-5. `./.filo/settings.json`
-6. `~/.config/filo/profile_defaults.json`
-7. `~/.config/filo/model_defaults.json`
-
-Use `config.json` for providers/router/subagents.
-Use `settings.json` for managed UI/workflow preferences.
-
-### Prompt editor
-
-Press `Ctrl+G` to edit the current draft in an external editor, exactly like Claude Code.
-
-The default backend follows the standard `VISUAL` / `EDITOR` convention, so `vim`, `nano`, `hx` and friends work out of the box:
-
-```json
-{
-  "prompt_editor": "system"
-}
-```
-
-Any other value is used as an explicit editor command, which is handy when you want Filo to use a different editor from the rest of your shell:
-
-```json
-{
-  "prompt_editor": "nano"
-}
-```
-
-GUI editors are automatically launched in blocking mode (`code --wait`,`subl -w`), and the vi family runs with `-i NONE` so a user init file cannot repurpose the scratch buffer.
-
-On macOS only, the [Lampo App Store app](https://apps.apple.com/it/app/lampo/id6760648195?l=en-GB&mt=12
-Lampo) is offered as an additional backend:
-
-```json
-{
-  "prompt_editor": "lampo"
-}
-```
-
-Pick a backend interactively under `/settings`; the list only shows backends
-compiled into your platform's build. Lampo is opt-in and does not change the
-behaviour of any other editor.
-
-### Concurrent instances
-
-Filo supports multiple interactive processes with independent active models.
-The first running interactive process owns the saved model defaults for its
-lifetime. Model changes in that process are saved for future launches as usual;
-model changes in later concurrent processes are session-only and are labeled as
-such in the TUI. When the owner exits, another running process can take ownership
-on its next model switch.
-
-Use `--model` when launching intentionally different processes without changing
-the saved default:
+Best when Filo should keep running independently of Lampo:
 
 ```bash
-filo --model openai/gpt-5.4
-filo --model claude/claude-sonnet-5
+# Preferred modern flags (binds 127.0.0.1:8080 by default)
+filo --mcp tcp --headless --host 127.0.0.1 --port 8080
+
+# Deprecated but still accepted alias for --mcp tcp:
+# filo --daemon --headless --host 127.0.0.1 --port 8080
 ```
 
-Prompt history and memory mutations are serialized across processes. Saved
-conversation files are written atomically, and Filo will not resume or delete a
-conversation that is already active in another process.
-
-Optional context compression can be enabled in `config.json`:
-
-```json
-{
-  "context_compression": "light"
-}
-```
-
-`light` keeps exact small tool results, but stores oversized `read_file` and shell outputs in the agent history as compact summaries with size, digest, signal lines, and head/tail excerpts. The default is `off`.
-
-Use `"full"` for the native context-cache mode: first or changed `read_file` calls stay exact, repeated unchanged reads collapse to small path-based cache stubs, instruction files are always preserved, and common shell outputs such as `git status`, `git diff`, build, and test logs are retained as signal-focused summaries. Diff summaries preserve structural diff lines verbatim.
-
-Use `"ultra"` when token pressure matters more than keeping broad excerpts: it applies the same native cache and command-family summaries as `full`, but with tighter budgets for `read_file` and shell output. Instruction files are still preserved exactly.
-
-In the interactive TUI, use `/compression` to pick a mode from a menu, or `/compression ultra` / `/compress ultra` to switch directly.
-
-### Agent Ignore
-
-Add a `.agentignore` file at the workspace root to keep sensitive or noisy files
-out of Filo-controlled context discovery. Patterns use gitignore-style matching.
-Filo applies `.agentignore` to direct file reads, file search, grep search,
-directory listings, path-aware file modification tools, `@file` context
-mentions, and mention autocomplete.
-
-### External MCP servers (client)
-
-Filo can connect to external MCP servers and register their tools for the agent.
-Supported client transports:
-
-- **stdio** — spawn a local process (`command` + `args` + optional `env`)
-- **http** — Streamable HTTP (`url` + optional `headers`)
-
-HTTP mode speaks Streamable HTTP (MCP 2025-03-26+): JSON responses and
-`text/event-stream` SSE responses are both accepted. Header values support
-`${ENV_VAR}` / `$ENV_VAR` expansion at connect time so secrets stay out of config.
-
-Per-server request timeouts (HTTP default **120s**, stdio default **60s**):
-
-```json
-{
-  "name": "idea",
-  "transport": "http",
-  "url": "http://127.0.0.1:63342/mcp",
-  "auth": "none",
-  "request_timeout_ms": 300000
-}
-```
-
-`timeout` (seconds) and `timeout_ms` are accepted as aliases. CLI:
-`/mcp add --timeout 300 idea http http://127.0.0.1:63342/mcp`.
-
-OAuth sessions refresh proactively near expiry and **retry once after HTTP 401**
-(mid-session), using the same inter-process token lock as other Filo OAuth flows.
-Optional `oauth_scopes`, `oauth_client_id`, and `oauth_client_secret` skip inventing
-scopes or DCR when the authorization server requires a pre-registered client.
-
-Configure servers in `~/.config/filo/config.json`, `./.filo/config.json`, or the
-live overlays managed by `/mcp` (`~/.config/filo/mcp_servers.json` and
-`./.filo/mcp_servers.json`).
-
-### Profiles
-
-Profiles let you keep multiple named configuration overlays and switch between them instantly.
-This is useful for context switching (for example: `work`, `oss`, `local`), without rewriting
-your main config each time.
-
-What profiles support:
-
-- Define named overlays under `profiles` in `config.json`
-- Inherit from one or more parent profiles with `extends_from`
-- Override normal config fields (provider/model selection, mode, approval mode, router, MCP servers, subagents, UI defaults)
-- Switch in TUI with `/profile <name>` and apply changes live in the current session
-- Persist the active profile in `~/.config/filo/profile_defaults.json` for future launches
-
-Example profile config:
-
-```json
-{
-  "profiles": {
-    "work": {
-      "description": "Company defaults",
-      "default_provider": "openai",
-      "default_mode": "BUILD"
-    },
-    "oss": {
-      "extends_from": ["work"],
-      "default_provider": "grok",
-      "default_approval_mode": "prompt"
-    }
-  }
-}
-```
-
-Quick usage:
-
-1. Define profiles under `profiles` in `~/.config/filo/config.json` or `./.filo/config.json`.
-2. In TUI, run `/profile` (or `/profile list`) to see active and available profiles.
-3. Switch profile with `/profile <name>` (for example `/profile work`).
-4. Remove the persisted profile with `/profile clear`.
-
-Commands:
+Health check:
 
 ```bash
-/profile
-/profile list
-/profile work
-/profile oss
-/profile clear
+curl http://127.0.0.1:8080/ping
 ```
 
-Precedence note: `FILO_PROFILE=<name>` forces a profile for that process and overrides the persisted selection until unset.
+In Lampo, set **Transport** to `Streamable HTTP` and the endpoint to:
 
-### Agent Skills
+```text
+http://127.0.0.1:8080/mcp
+```
 
-Filo supports Agent Skills-style instruction packages. Each skill is a directory
-with a `SKILL.md` file containing YAML frontmatter with at least `name` and
-`description`, followed by Markdown instructions.
-
-The official project-local location is `./.filo/skills/<name>/SKILL.md`.
-Filo-native skill roots have precedence over compatibility roots such as
-`.claude/skills` and `.agents/skills`; project-local `.filo/skills` has the
-highest precedence. Use `.filo/skills` for skills that are specific to Filo or
-this repository.
-
-Instruction skills are disclosed to the model as a compact catalog and loaded
-on demand through the `activate_skill` tool. Bundled `scripts/`, `references/`,
-and `assets/` files are listed during activation and can be read by calling
-`activate_skill` again with `resource_path`.
-
-To use the public Agent Skills collection in one project:
+Optional auth for the HTTP MCP endpoint:
 
 ```bash
-mkdir -p .filo
-git clone https://github.com/addyosmani/agent-skills.git .filo/agent-skills
-ln -s agent-skills/skills .filo/skills
+export FILO_MCP_BEARER_TOKEN="your-secret"
+filo --mcp tcp --headless --host 127.0.0.1 --port 8080
 ```
 
-To install it globally instead:
+Clients must then send `Authorization: Bearer <token>`. Prefer localhost unless remote access is required; if you bind `0.0.0.0`, combine a bearer token with firewall rules and never expose MCP to the public internet unprotected.
+
+> **macOS: transparent daemon with `launchctl`**
+>
+> To keep Filo available for Lampo without a terminal window, install a user LaunchAgent that runs the same MCP TCP command at login and restarts it if it exits.
+>
+> ```bash
+> # 1) Write ~/Library/LaunchAgents/com.filo.mcp.plist (adjust ProgramArguments paths)
+> # 2) Load it:
+> launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
+> # later:
+> launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
+> ```
+>
+> Minimal plist shape: `Label` `com.filo.mcp`, `RunAtLoad` + `KeepAlive` true, `ProgramArguments` = absolute path to `filo` plus `--mcp` `tcp` `--headless` `--host` `127.0.0.1` `--port` `8080`, optional `StandardOutPath` / `StandardErrorPath` under `~/Library/Logs`. Point Lampo at `http://127.0.0.1:8080/mcp` as usual.
+
+### 2) Lampo as Filo’s prompt editor
+
+On macOS, Filo can open the current draft in Lampo’s Prompter instead of `$VISUAL` / `$EDITOR`. Filo implements Lampo’s client-neutral Prompter CLI protocol natively — no adapter script is required.
+
+**Interactive setup**
+
+1. Install [Lampo from the Mac App Store](https://apps.apple.com/app/lampo/id6760648195)
+2. In Filo’s TUI, open **`/settings`**
+3. Choose **Lampo** as the prompt editor backend
+
+**Usage**
+
+- Press **`Ctrl+G`** to edit the current draft in Lampo
+- **`Ctrl+X`** is also available as an alternate external-editor shortcut
+- Filo shows opening / editing state, then restores the saved text into the input box when you save in Lampo
+- Cancelling in Lampo leaves Filo’s draft unchanged
+
+> Lampo is opt-in, available only in macOS builds, and does not change the behaviour of other editor backends.
+
+---
+
+## Settings
+
+Most day-to-day options live in the interactive TUI. Open **`/settings`** for preferences (model defaults, prompt editor backend on macOS, and other UI/workflow choices).
+
+Useful slash commands:
+
+| Command | What it does |
+|---|---|
+| `/settings` | Interactive preferences |
+| `/model` | Switch model / provider for the session |
+| `/login` · `/logout` | OAuth for supported providers |
+| `/compression` | Context compression (`off`, `light`, `full`, `ultra`) |
+| `/mcp` | Connect Filo to external MCP tool servers |
+| `/profile` | List, switch, or clear named profiles |
+| `/rename` | Name the current session for later resume |
+
+Skills without an `entry_point` also appear as slash commands: `/<skill-name> [arguments]`.
+
+---
+
+## Enable Embedded `llama.cpp`
+
+Build with embedded local GGUF inference:
 
 ```bash
-mkdir -p ~/.config/filo
-git clone https://github.com/addyosmani/agent-skills.git ~/.config/filo/agent-skills
-ln -s agent-skills/skills ~/.config/filo/skills
+cmake --preset linux-debug -DFILO_ENABLE_LLAMACPP=ON
+cmake --build --preset linux-debug
 ```
 
-If `.filo/skills` or `~/.config/filo/skills` already exists, copy individual
-skill directories into it instead of replacing the directory.
+Then select a `llamacpp` provider/model from the TUI (`/model` or `/settings`) after configuring the local backend.
 
-After installation, start Filo from the project. The model will see skill names
-such as `using-agent-skills`, `code-review-and-quality`, and
-`frontend-ui-engineering` in its system catalog and should call `activate_skill`
-before using the matching workflow. When a skill references a bundled resource,
-for example `scripts/idea-refine.sh`, the model can load it with
-`activate_skill` and the same `resource_path`.
+---
 
-Skills without `entry_point` are also available as slash commands in the TUI:
-`/<skill-name> [arguments]`. The body may use `$ARGUMENTS` as a placeholder.
-Filo-specific Python tool skills continue to use `entry_point` and the existing
-`get_schema()` / `execute()` Python contract.
+## Contributing
 
-### Smart router with local-first policy example
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and code style.
 
-```json
-{
-  "router": {
-    "enabled": true,
-    "default_policy": "local-first",
-    "scoring": {
-      "mode": "hybrid",
-      "weights": {
-        "word_count": 3.0,
-        "heading_count": 1.5,
-        "max_heading_depth": 1.0,
-        "list_item_count": 2.0,
-        "link_count": 1.0,
-        "code_block_count": 1.5,
-        "table_row_count": 1.0,
-        "reasoning_term_count": 0.0,
-        "math_symbol_count": 0.0,
-        "constraint_term_count": 0.0,
-        "question_count": 0.0
-      }
-    },
-    "guardrails": {
-      "max_session_cost_usd": 5.0,
-      "min_requests_remaining_ratio": 0.20,
-      "min_tokens_remaining_ratio": 0.20,
-      "min_window_remaining_ratio": 0.20,
-      "enforce_on_local": false
-    },
-    "policies": {
-      "local-first": {
-        "strategy": "fallback",
-        "defaults": [
-          { "provider": "local", "model": "qwen2.5-coder-7b", "retries": 0 },
-          { "provider": "ollama", "model": "llama3", "retries": 0 },
-          { "provider": "grok", "model": "grok-code-fast-1", "retries": 1 }
-        ],
-        "rules": [
-          {
-            "name": "deep-reasoning",
-            "priority": 10,
-            "strategy": "fallback",
-            "when": {
-              "min_prompt_chars": 260,
-              "any_keywords": ["debug", "root cause", "architecture", "migration"]
-            },
-            "candidates": [
-              { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
-              { "provider": "grok-4-5", "model": "grok-4.5", "retries": 1 }
-            ]
-          }
-        ]
-      }
-    }
-  }
-}
+```bash
+cmake --preset linux-debug
+cmake --build --preset linux-debug
+ctest --preset linux-debug --output-on-failure
 ```
 
-## Architecture Snapshot
-
-- `src/core/llm/` provider abstraction, protocols, routing
-- `src/core/tools/` tool execution (shell/files/patch/search/python)
-- `src/core/mcp/` MCP dispatcher and client/session handling
-- `src/tui/` terminal UI components
-- `src/exec/` stdio MCP server, daemon, and prompter entrypoints
-- `src/core/auth/` API key and OAuth flows
+---
 
 ## License
 
