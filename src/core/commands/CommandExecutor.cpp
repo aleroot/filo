@@ -1875,8 +1875,13 @@ public:
             return;
         }
 
-        ctx.set_yolo_mode_enabled_fn(next);
-        ctx.append_history_fn(next
+        const bool effective = ctx.set_yolo_mode_enabled_fn(next);
+        if (effective != next) {
+            ctx.append_history_fn(
+                "\n⚠  Approval mode remains YOLO because it was enabled on the command line.\n");
+            return;
+        }
+        ctx.append_history_fn(effective
             ? "\n⚠  Approval mode set to YOLO: sensitive tools now run without confirmation.\n"
             : "\nℹ  Approval mode set to PROMPT: sensitive tools require confirmation.\n");
     }

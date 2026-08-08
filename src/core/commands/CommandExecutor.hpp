@@ -89,7 +89,9 @@ struct CommandContext {
     std::function<void(std::function<void()>)> dispatch_async_fn = {};
     std::function<std::string()> settings_status_fn = {};
     std::function<bool()> yolo_mode_enabled_fn = {};
-    std::function<void(bool)> set_yolo_mode_enabled_fn = {};
+    /// Returns the effective value. A command-line policy may force YOLO on
+    /// even when an interactive caller requests off.
+    std::function<bool(bool)> set_yolo_mode_enabled_fn = {};
     ToolRuleCallbacks tool_rules = {};
     std::function<std::string()> fork_session_fn = {};
     std::function<bool()> open_rewind_picker_fn = {};

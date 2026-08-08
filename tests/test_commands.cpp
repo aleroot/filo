@@ -167,6 +167,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         },
         .set_yolo_mode_enabled_fn = [yolo_enabled](bool enabled) {
             *yolo_enabled = enabled;
+            return enabled;
         },
         .tool_rules = {
             .list = [tool_rules]() {
@@ -1036,6 +1037,20 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Unknown /yolo option"));
+    }
+
+    SECTION("/yolo cannot disable a command-line override") {
+        *mock_history = "";
+        ctx.yolo_mode_enabled_fn = []() { return true; };
+        ctx.set_yolo_mode_enabled_fn = [](bool) { return true; };
+
+        ctx.text = "/yolo off";
+        const bool handled = executor.try_execute(ctx.text, ctx);
+
+        REQUIRE(handled == true);
+        REQUIRE_THAT(
+            *mock_history,
+            Catch::Matchers::ContainsSubstring("enabled on the command line"));
     }
 
     SECTION("/tools status and list show trust rules") {

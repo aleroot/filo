@@ -1020,7 +1020,8 @@ RunResult run(RunOptions opts) {
     // Persistent prompt history with navigation.
     core::history::PersistentPromptHistory prompt_history(history_store);
 
-    const bool startup_yolo_enabled = opts.startup_trust.trust_all_tools
+    const bool command_line_yolo_enabled = opts.startup_trust.trust_all_tools;
+    const bool startup_yolo_enabled = command_line_yolo_enabled
         || parse_approval_mode(config.default_approval_mode) == ApprovalMode::Yolo;
 
     // Session trust rules used for auto-approval in this session.
@@ -1511,7 +1512,7 @@ RunResult run(RunOptions opts) {
                 .router_policy = active_router_policy,
             },
             .yolo_enabled = startup_yolo_enabled,
-            .permission_rules = startup_session_allow_rules,
+            .permission_rules = {},
             .goal = startup_data.has_value() ? startup_data->goal : std::nullopt,
             .goal_graph = startup_data.has_value() ? startup_data->goal_graph : std::nullopt,
         },
@@ -1965,18 +1966,20 @@ RunResult run(RunOptions opts) {
 
     auto is_yolo_mode_enabled = [&]() -> bool {
         std::lock_guard lock(ui_mutex);
-        return current_runtime->metadata().yolo_enabled;
+        return command_line_yolo_enabled
+            || current_runtime->metadata().yolo_enabled;
     };
 
     auto set_yolo_mode_enabled = [&](bool enabled) {
         {
             std::lock_guard lock(ui_mutex);
             current_runtime->mutate_metadata(
-                [enabled](ThreadRuntimeMetadata& metadata) {
-                    metadata.yolo_enabled = enabled;
+                [enabled, command_line_yolo_enabled](ThreadRuntimeMetadata& metadata) {
+                    metadata.yolo_enabled = command_line_yolo_enabled || enabled;
                 });
         }
         wake_ui();
+        return command_line_yolo_enabled || enabled;
     };
 
     auto list_tool_rules = [&]() -> std::vector<std::string> {
@@ -1985,8 +1988,13 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             const auto metadata = current_runtime->metadata();
             rules.assign(metadata.permission_rules.begin(), metadata.permission_rules.end());
+            rules.insert(
+                rules.end(),
+                startup_session_allow_rules.begin(),
+                startup_session_allow_rules.end());
         }
         std::sort(rules.begin(), rules.end());
+        rules.erase(std::unique(rules.begin(), rules.end()), rules.end());
         return rules;
     };
 
@@ -2004,9 +2012,11 @@ RunResult run(RunOptions opts) {
         bool inserted = false;
         {
             std::lock_guard lock(ui_mutex);
-            current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
-                inserted = metadata.permission_rules.insert(normalized).second;
-            });
+            if (!startup_session_allow_rules.contains(normalized)) {
+                current_runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+                    inserted = metadata.permission_rules.insert(normalized).second;
+                });
+            }
         }
 
         wake_ui();
@@ -2032,6 +2042,14 @@ RunResult run(RunOptions opts) {
             return {
                 .ok = false,
                 .message = "Trust rule cannot be empty.",
+            };
+        }
+        if (startup_session_allow_rules.contains(normalized)) {
+            return {
+                .ok = false,
+                .message = std::format(
+                    "Rule `{}` comes from the command line and applies to every thread.",
+                    normalized),
             };
         }
 
@@ -2273,7 +2291,7 @@ RunResult run(RunOptions opts) {
                         .manual_model_name = data.model,
                     },
                     .yolo_enabled = startup_yolo_enabled,
-                    .permission_rules = startup_session_allow_rules,
+                    .permission_rules = {},
                     .goal = data.goal,
                     .goal_graph = data.goal_graph,
                 },
@@ -4408,7 +4426,8 @@ RunResult run(RunOptions opts) {
                             std::string_view args) -> bool {
         bool yolo_enabled = false;
         {
-            yolo_enabled = runtime->metadata().yolo_enabled;
+            yolo_enabled = command_line_yolo_enabled
+                || runtime->metadata().yolo_enabled;
         }
         if (yolo_enabled) {
             {
@@ -4446,15 +4465,16 @@ RunResult run(RunOptions opts) {
         bool is_allowed = false;
         {
             const auto metadata = runtime->metadata();
-            for (const auto& allow_rule : metadata.permission_rules) {
-                if (core::permissions::session_allow_rule_matches(
+            const auto matches = [&](const auto& rules) {
+                return std::ranges::any_of(rules, [&](const auto& allow_rule) {
+                    return core::permissions::session_allow_rule_matches(
                         allow_rule,
                         tool_name,
-                        args)) {
-                    is_allowed = true;
-                    break;
-                }
-            }
+                        args);
+                });
+            };
+            is_allowed = matches(startup_session_allow_rules)
+                || matches(metadata.permission_rules);
         }
         if (is_allowed) {
             // Auto-approved via session allow-list - no status message needed
@@ -4828,7 +4848,7 @@ RunResult run(RunOptions opts) {
                 },
                 .previous_model_selection = previous_model_selection,
                 .yolo_enabled = startup_yolo_enabled,
-                .permission_rules = startup_session_allow_rules,
+                .permission_rules = {},
             },
             *next_agent,
             std::move(next_messages),
