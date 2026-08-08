@@ -324,6 +324,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
+    src/core/tools/DashScopeWebSearchBackend.cpp
     src/core/tools/DirectWebFetchBackend.cpp
     src/core/tools/KimiWebSearchBackend.cpp
     src/core/tools/OpenAIWebSearchBackend.cpp

@@ -1566,6 +1566,75 @@ TEST_CASE("WebFetchTool rejects non-http URLs before network access", "[tools][w
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("valid http:// or https:// URL"));
 }
 
+TEST_CASE("DashScope web search backend supports Qwen/Token Plan endpoints",
+          "[tools][web][qwen]") {
+    const auto backend = core::tools::web::make_dashscope_web_search_backend();
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("dashscope-web-search-token-plan"),
+        .model_name = "qwen3.8-max",
+        .provider = make_metadata_provider(
+            core::config::ApiType::DashScope,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"),
+    }));
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("dashscope-web-search-intl"),
+        .model_name = "qwen3-max",
+        .provider = make_metadata_provider(
+            core::config::ApiType::DashScope,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("dashscope-web-search-openai"),
+        .model_name = "gpt-5.5",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.openai.com/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("dashscope-web-search-no-credentials"),
+        .model_name = "qwen3.8-max",
+        .provider = make_metadata_provider(
+            core::config::ApiType::DashScope,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+            false),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("dashscope-web-search-wrong-host"),
+        .model_name = "qwen3.8-max",
+        .provider = make_metadata_provider(
+            core::config::ApiType::DashScope,
+            "https://example.com/v1"),
+    }));
+}
+
+TEST_CASE("DashScope web search rejects domain filters",
+          "[tools][web][qwen]") {
+    const auto backend = core::tools::web::make_dashscope_web_search_backend();
+    const core::tools::ToolInvocationContext context{
+        .session_context = make_tool_test_context("dashscope-web-search-domains"),
+        .model_name = "qwen3.8-max",
+        .provider = make_metadata_provider(
+            core::config::ApiType::DashScope,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"),
+    };
+
+    core::tools::web::SearchRequest request{
+        .query = "C++ dependency injection",
+        .domains = {
+            .allowed_domains = {"cppreference.com"},
+        },
+    };
+
+    const auto result = backend->search(request, context);
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE_THAT(result.error(), Catch::Matchers::ContainsSubstring("does not support"));
+}
+
 TEST_CASE("OpenAI web search backend only supports native Responses endpoints",
           "[tools][web]") {
     const auto backend = core::tools::web::make_openai_web_search_backend();
