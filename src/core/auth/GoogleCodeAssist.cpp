@@ -17,9 +17,11 @@ constexpr std::string_view kDefaultEndpoint = "https://cloudcode-pa.googleapis.c
 constexpr std::string_view kDocsUrl = "https://goo.gle/gemini-cli-auth-docs#workspace-gca";
 constexpr std::string_view kApiVersion = "v1internal";
 
-[[nodiscard]] std::string client_metadata_json(std::string_view project_id) {
-    std::string json =
-        R"({"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI")";
+[[nodiscard]] std::string client_metadata_json(std::string_view project_id,
+                                               std::string_view ide_type) {
+    std::string json = R"({"ideType":")";
+    json += core::utils::escape_json_string(ide_type.empty() ? "IDE_UNSPECIFIED" : ide_type);
+    json += R"(","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI")";
     if (!project_id.empty()) {
         json += R"(,"duetProject":")";
         json += core::utils::escape_json_string(project_id);
@@ -29,7 +31,8 @@ constexpr std::string_view kApiVersion = "v1internal";
     return json;
 }
 
-[[nodiscard]] std::string load_code_assist_payload(std::string_view project_id) {
+[[nodiscard]] std::string load_code_assist_payload(std::string_view project_id,
+                                                   std::string_view ide_type) {
     std::string json = "{";
     if (!project_id.empty()) {
         json += R"("cloudaicompanionProject":")";
@@ -37,13 +40,14 @@ constexpr std::string_view kApiVersion = "v1internal";
         json += R"(",)";
     }
     json += R"("metadata":)";
-    json += client_metadata_json(project_id);
+    json += client_metadata_json(project_id, ide_type);
     json += '}';
     return json;
 }
 
 [[nodiscard]] std::string onboard_user_payload(std::string_view tier_id,
-                                               std::string_view project_id) {
+                                               std::string_view project_id,
+                                               std::string_view ide_type) {
     std::string json = R"({"tierId":")";
     json += core::utils::escape_json_string(tier_id);
     json += '"';
@@ -53,7 +57,7 @@ constexpr std::string_view kApiVersion = "v1internal";
         json += '"';
     }
     json += R"(,"metadata":)";
-    json += client_metadata_json(project_id);
+    json += client_metadata_json(project_id, ide_type);
     json += '}';
     return json;
 }
@@ -178,7 +182,8 @@ TierInfo select_onboard_tier(const LoadCodeAssistResponseData& response) {
 }
 
 std::string setup_user(std::string_view access_token,
-                       std::shared_ptr<ui::AuthUI> ui) {
+                       std::shared_ptr<ui::AuthUI> ui,
+                       std::string_view ide_type) {
     std::string project_id;
     if (const auto configured = configured_project_override(); configured.has_value()) {
         project_id = *configured;
@@ -193,7 +198,7 @@ std::string setup_user(std::string_view access_token,
     cpr::Response load_response = post_json(
         load_url,
         access_token,
-        load_code_assist_payload(project_id));
+        load_code_assist_payload(project_id, ide_type));
     if (load_response.status_code != 200) {
         throw std::runtime_error(format_endpoint_error("loadCodeAssist", load_response));
     }
@@ -216,7 +221,7 @@ std::string setup_user(std::string_view access_token,
         cpr::Response onboard_response = post_json(
             onboard_url,
             access_token,
-            onboard_user_payload(tier.id, project_id));
+            onboard_user_payload(tier.id, project_id, ide_type));
         if (onboard_response.status_code != 200) {
             throw std::runtime_error(format_endpoint_error("onboardUser", onboard_response));
         }

@@ -2,7 +2,6 @@
 #include "ModelMetadata.hpp"
 #include "ModelRegistry.hpp"
 #include "protocols/ApiProtocol.hpp"
-#include "protocols/GeminiProtocol.hpp"
 #include "transport/CurlWebSocketTransport.hpp"
 #include "transport/HttpHeaderUtils.hpp"
 #include "../auth/OAuthErrors.hpp"
@@ -47,14 +46,7 @@ namespace {
     [[nodiscard]] std::string normalize_metadata_model(
         std::string_view model,
         const protocols::ApiProtocolBase* protocol) {
-        if (!protocol) return std::string(model);
-
-        const std::string_view protocol_name = protocol->name();
-        if (protocol_name == "gemini" || protocol_name == "gemini_code_assist") {
-            return protocols::normalize_requested_gemini_model(model);
-        }
-
-        return std::string(model);
+        return protocol ? protocol->model_id(model) : std::string(model);
     }
 
     [[nodiscard]] TokenUsage token_usage_from(const protocols::ParseResult& result) noexcept {

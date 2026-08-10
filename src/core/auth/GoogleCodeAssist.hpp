@@ -32,6 +32,7 @@ struct OnboardUserOperation {
 [[nodiscard]] OnboardUserOperation parse_onboard_user_response(std::string_view json);
 [[nodiscard]] TierInfo select_onboard_tier(const LoadCodeAssistResponseData& response);
 [[nodiscard]] std::string setup_user(std::string_view access_token,
-                                     std::shared_ptr<ui::AuthUI> ui = nullptr);
+                                     std::shared_ptr<ui::AuthUI> ui = nullptr,
+                                     std::string_view ide_type = "IDE_UNSPECIFIED");
 
 } // namespace core::auth::google_code_assist

@@ -15,7 +15,7 @@
 #include "protocols/DashScopeProtocol.hpp"
 #include "protocols/AnthropicProtocol.hpp"
 #include "protocols/GeminiProtocol.hpp"
-#include "protocols/GeminiCodeAssistProtocol.hpp"
+#include "protocols/GeminiAntigravityProtocol.hpp"
 #include "protocols/OllamaProtocol.hpp"
 #include "OpenAIEndpointUtils.hpp"
 #include "../auth/ApiKeyCredentialSource.hpp"
@@ -205,8 +205,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::logging::debug("Using Grok OAuth session endpoint: {}", base_url);
     }
 
-    if (cred && canonical_type == "gemini"
-        && normalized_auth_type == "oauth_google") {
+    if (cred && canonical_type == "gemini" && normalized_auth_type == "oauth_google") {
         base_url = core::auth::google_code_assist::code_assist_endpoint();
         core::logging::debug("Using Gemini Code Assist endpoint: {}", base_url);
     }
@@ -355,7 +354,11 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     }
     case ApiType::Gemini:
         if (normalized_auth_type == "oauth_google") {
-            protocol = std::make_unique<protocols::GeminiCodeAssistProtocol>();
+            // The gemini-cli OAuth flow Google used to support for
+            // individual / Google AI Pro / Ultra accounts was deprecated;
+            // "oauth_google" now signs in via the (unofficial) Antigravity
+            // client and needs its request/header shape to match.
+            protocol = std::make_unique<protocols::GeminiAntigravityProtocol>();
         } else {
             protocol = std::make_unique<protocols::GeminiProtocol>();
         }

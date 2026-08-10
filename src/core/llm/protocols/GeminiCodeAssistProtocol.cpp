@@ -80,7 +80,11 @@ std::string serialize_gemini_code_assist_request(const ChatRequest& req,
 
 void GeminiCodeAssistProtocol::prepare_request(ChatRequest& request) {
     if (request.model.empty()) return;
-    request.model = normalize_requested_gemini_model(request.model);
+    request.model = model_id(request.model);
+}
+
+std::string GeminiCodeAssistProtocol::model_id(std::string_view model) const {
+    return normalize_requested_gemini_model(model);
 }
 
 std::string GeminiCodeAssistProtocol::serialize(const ChatRequest& req) const {

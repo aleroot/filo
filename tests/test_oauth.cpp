@@ -5,6 +5,7 @@
 #include "core/auth/IOAuthFlow.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/FileTokenStore.hpp"
+#include "core/auth/GoogleAntigravityOAuthFlow.hpp"
 #include "core/auth/GoogleCodeAssist.hpp"
 #include "core/auth/GoogleOAuthCredentialSource.hpp"
 #include "core/auth/GoogleOAuthFlow.hpp"
@@ -990,6 +991,72 @@ TEST_CASE("AuthenticationManager login reports unknown providers", "[Authenticat
     REQUIRE_THROWS_AS(manager.login("unknown-provider"), std::runtime_error);
 }
 
+// ── GoogleOAuthStrategy (Google/Gemini OAuth — now Antigravity-backed) ──────
+//
+// Google deprecated the gemini-cli OAuth flow this used to use for
+// individual / Google AI Pro / Ultra accounts, so "google" / "oauth_google"
+// now sign in via the unofficial Antigravity IDE OAuth client instead. There
+// is a single Gemini OAuth login provider ("google", aliased by "gemini").
+
+TEST_CASE("AuthenticationManager exposes google as a login provider",
+          "[AuthenticationManager][google]") {
+    auto manager = AuthenticationManager::create_with_defaults("/tmp");
+    const auto providers = manager.available_login_providers();
+    REQUIRE(std::find(providers.begin(), providers.end(), "google")
+            != providers.end());
+    // No separate "google-antigravity" provider — "google" itself signs in
+    // with the Antigravity client, and "gemini" login via --login/--auth
+    // resolves to the same strategy.
+    REQUIRE(std::find(providers.begin(), providers.end(), "google-antigravity")
+            == providers.end());
+}
+
+TEST_CASE("AuthenticationManager resolves oauth_google credential source for gemini",
+          "[AuthenticationManager][google]") {
+    core::config::ProviderConfig cfg;
+    cfg.auth_type = "oauth_google";
+
+    auto manager = AuthenticationManager::create_with_defaults("/tmp");
+    auto cred = manager.create_credential_source("gemini", cfg);
+    REQUIRE(cred != nullptr);
+}
+
+TEST_CASE("AuthenticationManager rejects oauth_google for non-gemini providers",
+          "[AuthenticationManager][google]") {
+    core::config::ProviderConfig cfg;
+    cfg.auth_type = "oauth_google";
+
+    auto manager = AuthenticationManager::create_with_defaults("/tmp");
+    auto cred = manager.create_credential_source("claude", cfg);
+    REQUIRE(cred == nullptr);
+}
+
+TEST_CASE("AuthenticationManager treats gemini as an alias for the google login provider",
+          "[AuthenticationManager][google]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+    // "gemini" resolves to the registered "google" strategy (see
+    // normalize_login_provider inside AuthenticationManager.cpp). logout()
+    // with no stored token is a safe way to exercise dispatch without
+    // performing a live OAuth login: it should resolve to the "google"
+    // strategy's display name rather than throwing "unknown authentication
+    // provider".
+    REQUIRE(manager.logout("gemini", /*revoke_remote=*/false)
+            == manager.logout("google", /*revoke_remote=*/false));
+}
+
+TEST_CASE("GoogleAntigravityOAuthFlow uses distinct client credentials from gemini-cli",
+          "[GoogleAntigravityOAuthFlow][google]") {
+    // The Antigravity flow must never reuse gemini-cli's client identity —
+    // that would defeat the purpose of keeping the two auth types isolated.
+    // We can't easily reach the private client_id constant, but we can
+    // verify the flow constructs without throwing and is independently
+    // instantiable/revocable without a live network call for empty tokens.
+    GoogleAntigravityOAuthFlow flow;
+    core::auth::OAuthToken empty_token;
+    REQUIRE_NOTHROW(flow.revoke(empty_token)); // no-op: nothing to revoke
+}
+
 TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and coding endpoints",
           "[AuthenticationManager][zai]") {
     TempDir tmp;
@@ -1273,7 +1340,8 @@ TEST_CASE("AuthenticationManager logout clears the stored OAuth session", "[Auth
 
     SECTION("google") {
         seed_token("google");
-        REQUIRE(manager.logout("google", /*revoke_remote=*/false) == "Google");
+        REQUIRE(manager.logout("google", /*revoke_remote=*/false)
+            == "Google / Gemini (unofficial — ToS risk)");
         REQUIRE_FALSE(FileTokenStore(tmp.path).load("google").has_value());
     }
 

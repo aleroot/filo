@@ -69,10 +69,10 @@ constexpr auto kCatalogRetryMaxDelay = std::chrono::minutes{30};
 
 [[nodiscard]] bool should_skip_provider(config::ApiType api_type,
                                         std::string_view base_url,
-                                        std::string_view protocol_name) {
+                                        const protocols::ApiProtocolBase& protocol) {
     return api_type == config::ApiType::Unknown
         || api_type == config::ApiType::LlamaCppLocal
-        || protocol_name == "gemini_code_assist"
+        || !protocol.supports_model_catalog()
         || (api_type == config::ApiType::OpenAI
             && openai_endpoint::is_azure_openai_base_url(base_url));
 }
@@ -288,7 +288,7 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     ModelCatalogDiscoveryResult discovery;
 
     const std::string provider_key(provider_name);
-    if (should_skip_provider(api_type, base_url, protocol.name())) {
+    if (should_skip_provider(api_type, base_url, protocol)) {
         discovery.permanent_skip = true;
         return discovery;
     }

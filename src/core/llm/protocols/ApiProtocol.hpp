@@ -375,6 +375,26 @@ public:
     [[nodiscard]] virtual std::string_view
     name() const noexcept = 0;
 
+    /**
+     * @brief Resolve protocol-specific model aliases to a canonical model ID.
+     *
+     * The generic provider uses this value for model metadata lookups before
+     * the per-request protocol clone is prepared. Protocols that accept model
+     * aliases should override this method so transport orchestration remains
+     * independent of protocol names and model conventions.
+     *
+     * The default implementation preserves the requested model unchanged.
+     */
+    [[nodiscard]] virtual std::string
+    model_id(std::string_view model) const {
+        return std::string(model);
+    }
+
+    /** Whether this wire protocol supports its API family's model catalog endpoint. */
+    [[nodiscard]] virtual bool supports_model_catalog() const noexcept {
+        return true;
+    }
+
     /** Provider/model reasoning controls accepted by this wire protocol. */
     [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(
         [[maybe_unused]] std::string_view model) const noexcept {

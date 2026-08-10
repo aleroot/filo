@@ -1,8 +1,8 @@
 #include "AuthenticationManager.hpp"
 #include "ClaudeOAuthFlow.hpp"
 #include "FileTokenStore.hpp"
+#include "GoogleAntigravityOAuthFlow.hpp"
 #include "GoogleOAuthCredentialSource.hpp"
-#include "GoogleOAuthFlow.hpp"
 #include "KimiOAuthFlow.hpp"
 #include "QwenOAuthFlow.hpp"
 #include "XaiOAuthFlow.hpp"
@@ -50,6 +50,9 @@ std::string normalize_login_provider(std::string_view provider) {
         || requested == "zai_coding" || requested == "zai-coding-plan"
         || requested == "z.aicodingplan") {
         return "zai";
+    }
+    if (requested == "gemini") {
+        return "google";
     }
     if (requested == "qwen-token-plan" || requested == "qwen_token_plan"
         || requested == "qwencloud" || requested == "qwen-cloud") {
@@ -267,14 +270,34 @@ private:
     std::string docs_hint_;
 };
 
+/**
+ * @brief Google (Gemini) OAuth strategy — subscription (Google AI Pro/Ultra)
+ *        login for the `gemini` provider.
+ *
+ * Google deprecated the gemini-cli OAuth flow for individual / Google AI Pro
+ * and Ultra accounts (June 2026) and replaced it with a closed-source
+ * "Antigravity CLI" that does not publish an integrable client_id. This
+ * strategy signs in using OAuth client credentials supplied via environment
+ * variables (see GoogleAntigravityOAuthFlow.hpp) — it is the only way left
+ * to authenticate
+ * a personal Google AI Pro/Ultra subscription without an API key.
+ *
+ * This is NOT an officially supported integration: it violates Google's
+ * Antigravity Terms of Service, and Google has suspended/banned real
+ * accounts for this exact pattern. `GoogleAntigravityOAuthFlow::login()`
+ * always shows a risk disclosure before proceeding — using it is entirely
+ * at the user's own risk and responsibility.
+ */
 class GoogleOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "google"; }
-    std::string_view display_name() const noexcept override { return "Google"; }
+    std::string_view display_name() const noexcept override {
+        return "Google / Gemini (unofficial — ToS risk)";
+    }
     std::string_view token_store_key() const noexcept override { return "google"; }
 
     std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
-        return std::make_shared<GoogleOAuthFlow>();
+        return std::make_shared<GoogleAntigravityOAuthFlow>();
     }
 
     bool supports(std::string_view provider_type,
@@ -285,16 +308,18 @@ public:
     std::shared_ptr<ICredentialSource> create_credential_source(
         const core::config::ProviderConfig& /*provider_config*/,
         std::string_view config_dir) const override {
-        auto flow = std::make_shared<GoogleOAuthFlow>();
+        auto flow = std::make_shared<GoogleAntigravityOAuthFlow>();
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store),
             /*allow_interactive_login=*/false);
-        return std::make_shared<GoogleOAuthCredentialSource>(std::move(manager));
+        return std::make_shared<GoogleOAuthCredentialSource>(
+            std::move(manager), /*ide_type=*/"ANTIGRAVITY");
     }
 
     void login(std::string_view config_dir) const override {
-        auto flow = std::make_shared<GoogleOAuthFlow>(std::make_shared<ui::ConsoleAuthUI>());
+        auto flow = std::make_shared<GoogleAntigravityOAuthFlow>(
+            std::make_shared<ui::ConsoleAuthUI>());
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store));
@@ -303,8 +328,11 @@ public:
 
     std::vector<std::string> post_login_hints() const override {
         return {
+            "\xE2\x9A\xA0  Unofficial: this uses Google's Antigravity IDE OAuth client, "
+            "not a supported integration. Google's Antigravity ToS prohibit this and "
+            "accounts have been banned for it — use entirely at your own risk.",
             "Set \"auth_type\": \"oauth_google\" on a Gemini provider in "
-            "~/.config/filo/config.json to use it."
+            "~/.config/filo/config.json to use it.",
         };
     }
 };

@@ -19,8 +19,9 @@ std::string join_scopes(const std::vector<std::string>& scopes) {
 } // namespace
 
 GoogleOAuthCredentialSource::GoogleOAuthCredentialSource(
-    std::shared_ptr<OAuthTokenManager> manager)
-    : manager_(std::move(manager)) {}
+    std::shared_ptr<OAuthTokenManager> manager,
+    std::string ide_type)
+    : manager_(std::move(manager)), ide_type_(std::move(ide_type)) {}
 
 AuthInfo GoogleOAuthCredentialSource::get_auth() {
     OAuthToken token = manager_->get_valid_token();
@@ -40,7 +41,8 @@ AuthInfo GoogleOAuthCredentialSource::get_auth() {
             } else if (!cached_project_id_.empty()) {
                 project_id = cached_project_id_;
             } else if (!project_initialized_) {
-                project_id = google_code_assist::setup_user(token.access_token);
+                project_id = google_code_assist::setup_user(
+                    token.access_token, /*ui=*/nullptr, ide_type_);
                 project_initialized_ = true;
             }
         }

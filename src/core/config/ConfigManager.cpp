@@ -342,7 +342,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .default_model = "gpt-5.6-sol",
         };
     }
-    if (normalized == "google") {
+    if (normalized == "google" || normalized == "gemini") {
         return LoginProfileMapping{
             .provider_name = "gemini",
             .auth_type = "oauth_google",

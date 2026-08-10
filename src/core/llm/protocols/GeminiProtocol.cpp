@@ -496,7 +496,11 @@ GeminiUsageMetadata extract_gemini_usage_metadata(std::string_view json_sv) {
 
 void GeminiProtocol::prepare_request(ChatRequest& request) {
     if (request.model.empty()) return;
-    request.model = normalize_requested_gemini_model(request.model);
+    request.model = model_id(request.model);
+}
+
+std::string GeminiProtocol::model_id(std::string_view model) const {
+    return normalize_requested_gemini_model(model);
 }
 
 std::string GeminiProtocol::serialize(const ChatRequest& req) const {

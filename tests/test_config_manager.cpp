@@ -954,6 +954,15 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(manager.get_config().default_provider == "gemini");
     REQUIRE(manager.get_config().providers.at("gemini").auth_type == "oauth_google");
 
+    // "gemini" is an accepted alias for the same (only remaining) Gemini
+    // OAuth login — Google deprecated the gemini-cli OAuth flow this used to
+    // be, so oauth_google now signs in via the unofficial Antigravity client
+    // under the hood.
+    REQUIRE(manager.persist_login_profile("gemini", &error));
+    REQUIRE(error.empty());
+    REQUIRE(manager.get_config().default_provider == "gemini");
+    REQUIRE(manager.get_config().providers.at("gemini").auth_type == "oauth_google");
+
     REQUIRE(manager.persist_login_profile("x.ai", &error));
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().default_provider == "grok");

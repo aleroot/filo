@@ -7,6 +7,7 @@
 #include "core/llm/ModelMetadata.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
+#include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
@@ -1468,9 +1469,13 @@ TEST_CASE("ModelCatalogAvailability treats unsupported catalog probes as permane
     CHECK_FALSE(availability.try_mark_refreshing(kProvider));
 }
 
-TEST_CASE("Model discovery skips Gemini Code Assist catalog probes",
+TEST_CASE("Model discovery follows the protocol catalog capability",
           "[llm][model-catalog][discovery]") {
     core::llm::protocols::GeminiCodeAssistProtocol protocol;
+    core::llm::protocols::GeminiAntigravityProtocol antigravity;
+
+    CHECK_FALSE(protocol.supports_model_catalog());
+    CHECK_FALSE(antigravity.supports_model_catalog());
 
     const auto result = discover_and_register_models(
         "gemini",
@@ -1480,8 +1485,20 @@ TEST_CASE("Model discovery skips Gemini Code Assist catalog probes",
         protocol);
 
     CHECK_FALSE(result.attempted);
+    CHECK(result.permanent_skip);
     CHECK(result.fetched == 0);
     CHECK(result.ok());
+
+    const auto antigravity_result = discover_and_register_models(
+        "gemini-antigravity",
+        core::config::ApiType::Gemini,
+        "https://cloudcode-pa.googleapis.com",
+        nullptr,
+        antigravity);
+
+    CHECK_FALSE(antigravity_result.attempted);
+    CHECK(antigravity_result.permanent_skip);
+    CHECK(antigravity_result.ok());
 }
 
 TEST_CASE("Model discovery explicitly skips providers without callable catalogs",

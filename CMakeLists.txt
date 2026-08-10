@@ -229,6 +229,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/AnthropicProtocol.cpp
     src/core/llm/protocols/GeminiProtocol.cpp
     src/core/llm/protocols/GeminiCodeAssistProtocol.cpp
+    src/core/llm/protocols/GeminiAntigravityProtocol.cpp
     src/core/llm/protocols/OllamaProtocol.cpp
     src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp
@@ -241,6 +242,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/AuthBrowserLauncher.cpp
     src/core/auth/GoogleCodeAssist.cpp
     src/core/auth/GoogleOAuthFlow.cpp
+    src/core/auth/GoogleAntigravityOAuthFlow.cpp
     src/core/auth/GoogleOAuthCredentialSource.cpp
     src/core/auth/ClaudeOAuthFlow.cpp
     src/core/auth/OAuthPkce.cpp

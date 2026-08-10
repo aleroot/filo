@@ -96,6 +96,7 @@ public:
     [[nodiscard]] std::string_view event_delimiter() const noexcept override { return "\n\n"; }
     [[nodiscard]] ParseResult      parse_event(std::string_view raw_event) override;
     [[nodiscard]] std::string_view name()  const noexcept override { return "gemini"; }
+    [[nodiscard]] std::string model_id(std::string_view model) const override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<GeminiProtocol>(*this);

@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
@@ -245,6 +246,16 @@ TEST_CASE("normalize_requested_gemini_model resolves Gemini aliases by default",
     REQUIRE(normalize_requested_gemini_model("flash-lite") == "gemini-3.1-flash-lite-preview");
 }
 
+TEST_CASE("Gemini protocols own canonical model alias resolution", "[GeminiProvider][models]") {
+    GeminiProtocol gemini;
+    GeminiCodeAssistProtocol code_assist;
+    GeminiAntigravityProtocol antigravity;
+
+    REQUIRE(gemini.model_id("flash") == "gemini-3-flash-preview");
+    REQUIRE(code_assist.model_id("flash") == "gemini-3-flash-preview");
+    REQUIRE(antigravity.model_id("flash") == "gemini-3-flash-preview");
+}
+
 TEST_CASE("HttpLLMProvider normalizes Gemini shorthand aliases for metadata lookups",
           "[GeminiProvider][models]") {
     HttpLLMProvider provider(
@@ -273,6 +284,19 @@ TEST_CASE("HttpLLMProvider normalizes Gemini shorthand aliases for metadata look
     const auto errors = provider.validate_request(request);
     REQUIRE(errors.size() == 1);
     REQUIRE_THAT(errors.front(), Catch::Matchers::ContainsSubstring("65536"));
+}
+
+TEST_CASE("HttpLLMProvider uses inherited protocol model canonicalization",
+          "[GeminiProvider][models][antigravity]") {
+    HttpLLMProvider provider(
+        "https://cloudcode-pa.googleapis.com",
+        nullptr,
+        "pro",
+        std::make_unique<GeminiAntigravityProtocol>());
+
+    const auto info = provider.get_model_info();
+    REQUIRE(info.has_value());
+    REQUIRE(info->canonical_id == "gemini-3.1-pro-preview");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -422,6 +446,70 @@ TEST_CASE("Gemini Code Assist protocol parses wrapped response and usage", "[gem
     REQUIRE(result.chunks.front().content == "Hello from CA");
     REQUIRE(result.prompt_tokens == 7);
     REQUIRE(result.completion_tokens == 9);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GeminiAntigravityProtocol — unofficial Antigravity OAuth variant
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("GeminiAntigravityProtocol wraps request with userAgent and requestId",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.auth_properties["project_id"] = "project-123";
+    req.messages.push_back(Message{.role = "user", .content = "Hello"});
+
+    const std::string payload = protocol.serialize(req);
+
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gemini-2.5-flash")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("project":"project-123")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("request":{)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("userAgent":"antigravity")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("requestId":"filo-antigravity-)"));
+
+    // Must still be a single well-formed JSON object.
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(payload).get(doc) == simdjson::SUCCESS);
+}
+
+TEST_CASE("GeminiAntigravityProtocol requestId is unique per call", "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.messages.push_back(Message{.role = "user", .content = "Hi"});
+
+    const std::string first = protocol.serialize(req);
+    const std::string second = protocol.serialize(req);
+    REQUIRE(first != second);
+}
+
+TEST_CASE("GeminiAntigravityProtocol build_headers sets Antigravity client identity",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    core::auth::AuthInfo auth;
+    auth.headers["Authorization"] = "Bearer test-token";
+
+    const cpr::Header headers = protocol.build_headers(auth);
+
+    REQUIRE(headers.at("Authorization") == "Bearer test-token");
+    REQUIRE(headers.at("Content-Type") == "application/json");
+    REQUIRE(headers.count("User-Agent") == 1);
+    REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::ContainsSubstring("antigravity/"));
+    REQUIRE(headers.at("X-Goog-Api-Client") == "google-cloud-sdk vscode_cloudshelleditor/0.1");
+    REQUIRE_THAT(headers.at("Client-Metadata"),
+                 Catch::Matchers::ContainsSubstring(R"("ideType":"ANTIGRAVITY")"));
+    REQUIRE_THAT(headers.at("Client-Metadata"),
+                 Catch::Matchers::ContainsSubstring(R"("pluginType":"GEMINI")"));
+}
+
+TEST_CASE("GeminiAntigravityProtocol name and url match Cloud Code Assist wire format",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    REQUIRE(protocol.name() == "gemini_antigravity");
+    REQUIRE(protocol.build_url("https://cloudcode-pa.googleapis.com", "gemini-2.5-flash")
+            == "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
