@@ -623,6 +623,19 @@ TEST_CASE("JsonUtils: UTF-8-safe JSON escaping replaces malformed bytes",
     CHECK(parser.parse(json).get(document) == simdjson::SUCCESS);
 }
 
+TEST_CASE("JsonWriter repairs malformed UTF-8 by default", "[json_writer][utf8]") {
+    JsonWriter writer;
+    writer.str(std::string("before ") + "\xc2" + " after");
+
+    REQUIRE(simdjson::validate_utf8(writer.view()));
+    REQUIRE(writer.view() == R"("before \ufffd after")");
+
+    const std::string repaired = repair_utf8(
+        std::string("before ") + "\xc2" + " after");
+    REQUIRE(simdjson::validate_utf8(repaired));
+    REQUIRE(repaired == std::string("before ") + "\xef\xbf\xbd" + " after");
+}
+
 // -----------------------------------------------------------------------------
 // Pre-reservation and buffer behavior
 // -----------------------------------------------------------------------------

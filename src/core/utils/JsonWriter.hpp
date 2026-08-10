@@ -18,7 +18,7 @@
 //  • std::inplace_vector used by callers for zero-heap required-field lists.
 // ---------------------------------------------------------------------------
 
-#include "JsonUtils.hpp"    // append_escaped, kEscapeTable
+#include "JsonUtils.hpp"    // append_escaped
 #include <charconv>         // std::to_chars
 #include <concepts>         // std::integral
 #include <string>
@@ -73,8 +73,8 @@ public:
         return *this;
     }
 
-    // Escaped string value — wraps the content in quotes and calls
-    // append_escaped, which auto-vectorises with -O3 -march=native.
+    // Escaped string value. append_escaped guarantees both JSON syntax and
+    // valid UTF-8; valid strings stay on its vectorized fast path.
     JsonWriter& str(std::string_view v) {
         buf_ += '"';
         append_escaped(buf_, v);

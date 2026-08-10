@@ -387,8 +387,13 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
     try {
         simdjson::dom::parser parser;
         simdjson::dom::element doc;
+        std::string repaired_json;
         if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
-            return std::nullopt;
+            if (simdjson::validate_utf8(json)) return std::nullopt;
+            repaired_json = core::utils::repair_utf8(json);
+            if (parser.parse(repaired_json).get(doc) != simdjson::SUCCESS) {
+                return std::nullopt;
+            }
         }
 
         int64_t stored_version = 1;

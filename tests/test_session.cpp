@@ -12,6 +12,7 @@
 #include "core/tools/TodoTool.hpp"
 #include "TestSessionContext.hpp"
 #include <ftxui/screen/string.hpp>
+#include <simdjson.h>
 
 #include <atomic>
 #include <chrono>
@@ -243,6 +244,56 @@ TEST_CASE("SessionStore round-trips messages with special JSON characters", "[se
     const auto loaded = store.load_by_id("escape01");
     REQUIRE(loaded.has_value());
     CHECK(loaded->messages[0].content == "He said \"hello\"\nLine2\\nBackslash");
+}
+
+TEST_CASE("SessionStore repairs malformed UTF-8 while saving", "[session][json][utf8]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_utf8_save"};
+    core::session::SessionStore store{tmp.path};
+
+    auto data = make_test_session("utf8save");
+    data.messages[0].content = std::string("bad ") + "\xc2" + " tool output";
+    REQUIRE(store.save(data));
+
+    const auto path = store.compute_path(data);
+    std::ifstream input(path, std::ios::binary);
+    const std::string persisted{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    REQUIRE(simdjson::validate_utf8(persisted));
+
+    const auto loaded = store.load_by_id("utf8save");
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->messages[0].content
+          == std::string("bad ") + "\xef\xbf\xbd" + " tool output");
+}
+
+TEST_CASE("SessionStore recovers legacy sessions containing malformed UTF-8",
+          "[session][json][utf8][migration]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_utf8_load"};
+    core::session::SessionStore store{tmp.path};
+
+    auto data = make_test_session("utf8load");
+    REQUIRE(store.save(data));
+    const auto path = store.compute_path(data);
+
+    std::ifstream input(path, std::ios::binary);
+    std::string persisted{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    const auto content = persisted.find("Hello, Filo!");
+    REQUIRE(content != std::string::npos);
+    persisted.replace(content, std::string_view("Hello, Filo!").size(),
+                      std::string("legacy ") + "\xc2" + " output");
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output.write(persisted.data(), static_cast<std::streamsize>(persisted.size()));
+    }
+    REQUIRE_FALSE(simdjson::validate_utf8(persisted));
+
+    const auto loaded = store.load_by_id("utf8load");
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->messages[0].content
+          == std::string("legacy ") + "\xef\xbf\xbd" + " output");
 }
 
 TEST_CASE("SessionStore preserves synthetic message metadata", "[session][json][rewind]") {

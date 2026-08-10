@@ -666,6 +666,31 @@ TEST_CASE("ClaudeSerializer - backslash in content is escaped", "[claude][serial
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"(C:\\path)"));
 }
 
+TEST_CASE("ClaudeSerializer - malformed tool results cannot poison request JSON",
+          "[claude][serializer][escape][utf8]") {
+    ChatRequest req = make_simple_request();
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .tool_calls = {ToolCall{
+            .id = "tool_1",
+            .function = {.name = "fetch_url", .arguments = "{}"},
+        }},
+    });
+    req.messages.push_back(Message{
+        .role = "tool",
+        .content = std::string("bad ") + "\xc2" + " fetch result",
+        .name = "fetch_url",
+        .tool_call_id = "tool_1",
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+
+    REQUIRE(simdjson::validate_utf8(payload));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"(bad \ufffd fetch result)"));
+    require_valid_json(payload);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ClaudeSerializer — structural validity
 // ─────────────────────────────────────────────────────────────────────────────

@@ -21,6 +21,13 @@ TEST_CASE("ascii::is_alnum recognizes ASCII letters and digits", "[utils][ascii]
     REQUIRE_FALSE(core::utils::ascii::is_alnum(static_cast<unsigned char>(0xC0)));
 }
 
+TEST_CASE("ascii::is_space is locale-independent and ASCII-only", "[utils][ascii]") {
+    for (const unsigned char ch : {' ', '\t', '\n', '\r', '\f', '\v'}) {
+        REQUIRE(core::utils::ascii::is_space(ch));
+    }
+    REQUIRE_FALSE(core::utils::ascii::is_space(0xA0));
+}
+
 TEST_CASE("ascii::iequals is ASCII case-insensitive", "[utils][ascii]") {
     REQUIRE(core::utils::ascii::iequals("file", "FILE"));
     REQUIRE(core::utils::ascii::iequals("LocalHost", "localhost"));
@@ -65,4 +72,15 @@ TEST_CASE("str::collapse_ascii_whitespace_copy trims and collapses runs",
           "[utils][string]") {
     REQUIRE(core::utils::str::collapse_ascii_whitespace_copy("  a\t b\r\n c  ")
             == "a b c");
+}
+
+TEST_CASE("str ASCII whitespace helpers preserve UTF-8 non-breaking spaces",
+          "[utils][string][utf8]") {
+    const std::string nbsp = "\xc2\xa0";
+    const std::string input = nbsp + "  a\t b  " + nbsp;
+
+    REQUIRE(core::utils::str::trim_ascii_copy(input)
+            == nbsp + "  a\t b  " + nbsp);
+    REQUIRE(core::utils::str::collapse_ascii_whitespace_copy(input)
+            == nbsp + " a b " + nbsp);
 }

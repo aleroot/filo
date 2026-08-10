@@ -62,7 +62,7 @@ namespace {
 
 } // namespace
 
-void append_escaped(std::string& out, std::string_view sv) {
+void append_escaped_unchecked(std::string& out, std::string_view sv) {
     const char* p         = sv.data();
     const char* const end = p + sv.size();
 
@@ -93,12 +93,12 @@ void append_escaped(std::string& out, std::string_view sv) {
     }
 }
 
-void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
+void append_escaped(std::string& out, std::string_view sv) {
     // simdjson validates in vector-width chunks. Keeping validation separate
     // lets valid external data use the bulk escaper without per-code-point
     // branches; only malformed byte streams enter the repair path below.
     if (simdjson::validate_utf8(sv)) {
-        append_escaped(out, sv);
+        append_escaped_unchecked(out, sv);
         return;
     }
 
@@ -116,7 +116,7 @@ void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
 
         const auto byte = static_cast<unsigned char>(*q);
         if (byte < 0x80u) {
-            append_escaped(out, std::string_view(q, 1));
+            append_escaped_unchecked(out, std::string_view(q, 1));
             p = q + 1;
             continue;
         }
@@ -134,6 +134,40 @@ void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
             p = q + sequence_length;
         }
     }
+}
+
+void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
+    append_escaped(out, sv);
+}
+
+std::string repair_utf8(std::string_view sv) {
+    if (simdjson::validate_utf8(sv)) return std::string(sv);
+
+    static constexpr std::string_view kReplacement = "\xef\xbf\xbd";
+    std::string out;
+    out.reserve(sv.size());
+
+    const char* p = sv.data();
+    const char* const end = p + sv.size();
+    while (p != end) {
+        const char* q = std::find_if(
+            p,
+            end,
+            [](unsigned char byte) noexcept { return byte >= 0x80u; });
+        out.append(p, q);
+        if (q == end) break;
+
+        const std::size_t sequence_length =
+            valid_utf8_sequence_length(q, end);
+        if (sequence_length == 0) {
+            out += kReplacement;
+            p = q + 1;
+        } else {
+            out.append(q, sequence_length);
+            p = q + sequence_length;
+        }
+    }
+    return out;
 }
 
 namespace {

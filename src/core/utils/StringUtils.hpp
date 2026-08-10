@@ -3,7 +3,6 @@
 #include "AsciiUtils.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -20,10 +19,14 @@ namespace core::utils::str {
 }
 
 [[nodiscard]] inline std::string_view trim_ascii_view(std::string_view value) {
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+    while (!value.empty()
+           && core::utils::ascii::is_space(
+               static_cast<unsigned char>(value.front()))) {
         value.remove_prefix(1);
     }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+    while (!value.empty()
+           && core::utils::ascii::is_space(
+               static_cast<unsigned char>(value.back()))) {
         value.remove_suffix(1);
     }
     return value;
@@ -38,7 +41,7 @@ namespace core::utils::str {
     out.reserve(value.size());
     bool previous_space = true;
     for (const unsigned char ch : value) {
-        if (std::isspace(ch)) {
+        if (core::utils::ascii::is_space(ch)) {
             if (!previous_space) out.push_back(' ');
             previous_space = true;
             continue;

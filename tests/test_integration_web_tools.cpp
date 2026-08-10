@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <httplib.h>
+#include <simdjson.h>
 
 #include "core/config/ConfigManager.hpp"
 #include "core/context/SessionContext.hpp"
@@ -199,4 +200,21 @@ TEST_CASE("Web fetch output truncation preserves UTF-8 boundaries", "[integratio
 
     REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"("truncated":true)"));
     REQUIRE_FALSE(json.find("\xE2\x82\xAC") != std::string::npos);
+}
+
+TEST_CASE("Web response JSON repairs malformed external bytes",
+          "[integration][tools][web][utf8]") {
+    core::tools::web::FetchResponse response{
+        .final_url = "https://example.com",
+        .content_type = "text/plain",
+        .title = std::string("bad ") + "\xc2" + " title",
+        .text = std::string("bad ") + "\xc2" + " content",
+        .status_code = 200,
+    };
+
+    const auto json = core::tools::web::fetch_response_to_json(response);
+
+    REQUIRE(simdjson::validate_utf8(json));
+    REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"(bad \ufffd title)"));
+    REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"(bad \ufffd content)"));
 }

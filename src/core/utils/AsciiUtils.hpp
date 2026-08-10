@@ -18,6 +18,11 @@ namespace core::utils::ascii {
         || (ch >= 'a' && ch <= 'z');
 }
 
+[[nodiscard]] constexpr bool is_space(unsigned char ch) noexcept {
+    return ch == ' ' || ch == '\t' || ch == '\n'
+        || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 [[nodiscard]] inline bool iequals(std::string_view lhs, std::string_view rhs) noexcept {
     return lhs.size() == rhs.size()
         && std::ranges::equal(

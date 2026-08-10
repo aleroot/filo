@@ -28,20 +28,26 @@ inline constexpr auto kEscapeTable = [] noexcept {
 }();
 
 // ---------------------------------------------------------------------------
-// append_escaped — core primitive.
+// append_escaped — safe core primitive.
 //
-// Appends the JSON-escaped form of sv directly into out.
-// The inner scan loop uses std::find_if with a table-lookup predicate; with
-// -O3 -march=native the compiler vectorises this to SSE2/AVX2, processing
-// 16–32 bytes per iteration before falling back to the per-character escape
-// path.  Clean chunks are bulk-copied with std::string::append.
+// Appends the JSON-escaped form of sv directly into out and guarantees valid
+// UTF-8. Validation uses simdjson's vectorized fast path; malformed bytes take
+// the rare repair path and are represented as U+FFFD.
 // ---------------------------------------------------------------------------
 void append_escaped(std::string& out, std::string_view sv);
 
-// Validates arbitrary external bytes before JSON escaping. Malformed UTF-8 is
-// replaced with U+FFFD. Use this at byte-producing I/O boundaries; ordinary
-// application strings should use append_escaped() and avoid the extra scan.
+// Explicit opt-out for strings whose UTF-8 validity is already guaranteed.
+// This performs JSON syntax escaping only. Prefer append_escaped() unless the
+// caller owns and proves the invariant.
+void append_escaped_unchecked(std::string& out, std::string_view sv);
+
+// Backward-compatible spelling retained for callers that document an external
+// byte boundary. It has the same behavior as append_escaped().
 void append_escaped_utf8_safe(std::string& out, std::string_view sv);
+
+// Returns valid UTF-8, replacing every malformed byte with U+FFFD. Valid input
+// is copied without per-code-point decoding after a vectorized validation pass.
+[[nodiscard]] std::string repair_utf8(std::string_view sv);
 
 // ---------------------------------------------------------------------------
 // escape_json_string — convenience wrapper.
