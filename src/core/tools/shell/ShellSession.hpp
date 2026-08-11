@@ -63,6 +63,25 @@ template <typename WriteFn>
     return result == WriteAllResult::failed_no_progress;
 }
 
+// True unless every line of the command is blank or a shell comment.
+// Wrapping a comment-only command in a brace group would leave the group
+// body empty (`{ # comment\n}`) — a syntax error that makes the
+// non-interactive session shell exit, losing all persisted state.
+[[nodiscard]] inline bool has_executable_content(std::string_view command) noexcept {
+    std::size_t pos = 0;
+    while (pos <= command.size()) {
+        const std::size_t end = command.find('\n', pos);
+        const std::string_view line = end == std::string_view::npos
+            ? command.substr(pos)
+            : command.substr(pos, end - pos);
+        const std::size_t first = line.find_first_not_of(" \t\r");
+        if (first != std::string_view::npos && line[first] != '#') return true;
+        if (end == std::string_view::npos) break;
+        pos = end + 1;
+    }
+    return false;
+}
+
 /**
  * @brief Persistent bash subprocess with pipe-based I/O.
  *
@@ -86,10 +105,32 @@ template <typename WriteFn>
  * If bash exits for any reason (user called @c exit, OOM-kill, timeout kill,
  * etc.) the next call to run() transparently restarts the session.
  *
- * ### Process group
- * The child bash is placed in its own process group (setpgid) so that
- * killpg() on timeout terminates bash and every sub-process it spawned
- * (compilers, linkers, sub-makes, etc.) atomically.
+ * ### Process group / session
+ * The child bash is started in a new session (setsid via POSIX_SPAWN_SETSID,
+ * falling back to a dedicated process group where the flag is unavailable),
+ * so it has no controlling terminal and is its own process-group leader
+ * (pgid == pid).  killpg() on timeout therefore terminates bash and every
+ * sub-process it spawned (compilers, linkers, sub-makes, etc.) atomically.
+ * Having no controlling terminal is also what makes interactive prompts
+ * fail fast for ANY program: opening /dev/tty fails (ENXIO), so passphrase,
+ * credential, or confirmation prompts error out immediately instead of
+ * blocking forever on input nobody can supply.  This is the same general
+ * mechanism used by other agent runtimes (e.g. OpenAI codex spawns every
+ * shell command with setsid + null stdin), and unlike per-tool environment
+ * overrides (GIT_TERMINAL_PROMPT, SSH_ASKPASS, ...) it needs no knowledge
+ * of which tool might prompt.
+ *
+ * ### Non-interactive execution
+ * Each user command is wrapped in a brace group whose stdin is redirected
+ * from /dev/null:  `{ <command>\n} < /dev/null`.  bash keeps the control pipe
+ * as its own stdin, so the sentinel line can never be swallowed by a command
+ * that reads stdin (ssh, cat, read, hooks...), which previously caused the
+ * session to wait for a sentinel that would never arrive — i.e. a hang until
+ * the timeout.  A brace group (not a subshell) is used so that cd/export and
+ * other state changes still persist across run() calls.  Together with the
+ * missing controlling terminal (above), this makes every interactive prompt
+ * fail fast — stdin reads hit EOF and /dev/tty opens fail — without any
+ * tool-specific environment overrides.
  *
  * ### Thread safety
  * NOT thread-safe.  Callers must serialize access with a mutex.
@@ -142,8 +183,25 @@ public:
 
         // Inject the user command followed by our sentinel.
         // printf is used (not echo) to avoid locale / -e flag variations.
-        std::string full{command};
-        full += "\nprintf '\\n";
+        //
+        // The command runs inside a brace group with stdin redirected from
+        // /dev/null (a brace group, NOT a subshell, so cd/export persist).
+        // bash reads script input line-by-line, which leaves the sentinel
+        // line sitting in the kernel pipe buffer while the command runs;
+        // without the redirect, any command that reads stdin (ssh, cat,
+        // read, hooks...) would swallow the sentinel line and the session
+        // would then wait forever for a sentinel that never comes.
+        std::string full;
+        if (has_executable_content(command)) {
+            full  = "{ ";
+            full += command;
+            full += "\n} < /dev/null\n";
+        } else {
+            // Blank / comment-only commands must not produce an empty brace
+            // group (syntax error) — run a harmless no-op instead.
+            full = ":\n";
+        }
+        full += "printf '\\n";
         full += sentinel_;
         full += ":%d\\n' $?\n";
 
@@ -279,12 +337,30 @@ private:
         sigset_t default_signals;
         if (sigemptyset(&default_signals) != 0
             || sigaddset(&default_signals, SIGINT) != 0
-            || ::posix_spawnattr_setsigdefault(&attributes, &default_signals) != 0
-            || ::posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+            || ::posix_spawnattr_setsigdefault(&attributes, &default_signals) != 0) {
             abandon_spawn_setup();
             return;
         }
-        short spawn_flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF;
+        short spawn_flags = POSIX_SPAWN_SETSIGDEF;
+#ifdef POSIX_SPAWN_SETSID
+        // New session: the child gets no controlling terminal, so nothing in
+        // the process tree can block forever on an unanswerable /dev/tty
+        // prompt.  setsid also makes the child its own process-group leader
+        // (pgid == pid), which is exactly what killpg()-based teardown needs.
+        spawn_flags |= POSIX_SPAWN_SETSID;
+#else
+        // Fall back to a dedicated process group; killpg() still reaches every
+        // sub-process.  Residual limitation: the tree keeps the parent's
+        // controlling terminal, so a program that opens /dev/tty directly can
+        // still block until the timeout on such platforms (Linux and macOS
+        // both provide POSIX_SPAWN_SETSID, so this path is not expected in
+        // practice).
+        if (::posix_spawnattr_setpgroup(&attributes, 0) != 0) {
+            abandon_spawn_setup();
+            return;
+        }
+        spawn_flags |= POSIX_SPAWN_SETPGROUP;
+#endif
 #ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
         // Only stdio recreated by the file actions crosses the helper boundary.
         spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
@@ -312,9 +388,13 @@ private:
         }
 
         // ---- parent ----
+#ifndef POSIX_SPAWN_SETSID
         // Mirror setpgid so there is no race: if the parent calls killpg()
         // before the child's setpgid() completes, it still finds the group.
+        // (With POSIX_SPAWN_SETSID the child is a session leader in its own
+        // group from the start, and setpgid() across sessions would fail.)
         ::setpgid(child_pid, child_pid);
+#endif
         pid_.store(child_pid, std::memory_order_release);
         pgid_.store(child_pid, std::memory_order_release);
 

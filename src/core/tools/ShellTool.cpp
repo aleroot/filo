@@ -172,7 +172,7 @@ ToolDefinition ShellTool::get_definition() const {
         .title = "Run Terminal Command",
         .description =
             "Run a local command in persistent bash. stdout and stderr are merged; check exit_code. "
-            "working_dir uses a per-call subshell. Timeout defaults to 600 seconds.",
+            "working_dir uses a per-call subshell. Timeout defaults to 600 seconds. ",
         .parameters = {
             {"command",          "string", "Bash command.", true},
             {"working_dir",      "string",
