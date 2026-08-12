@@ -309,6 +309,7 @@ Useful slash commands:
 | Command | What it does |
 |---|---|
 | `/settings` | Interactive preferences panel (user or workspace scope) |
+| `/dir`   | Add an extra directory, or change the primary working directory |
 | `/model` | Switch model / provider / router target |
 | `/auth` · `/login` | Authenticate with a provider |
 | `/logout` | Sign out of a provider OAuth session |

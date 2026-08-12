@@ -1,19 +1,46 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <format>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
+
 #include "core/mcp/RemoteActivity.hpp"
 #include "tui/RemoteActivityPanel.hpp"
+#include "tui/TuiTheme.hpp"
 
 using core::mcp::RemoteActivityHub;
 using core::mcp::RemoteServerState;
 using core::mcp::RemoteToolStatus;
+
+namespace {
+
+std::string strip_ansi(std::string_view input) {
+    std::string output;
+    output.reserve(input.size());
+    for (std::size_t i = 0; i < input.size();) {
+        if (input[i] == '\x1b' && i + 1 < input.size() && input[i + 1] == '[') {
+            i += 2;
+            while (i < input.size()) {
+                const char ch = input[i++];
+                if (ch >= '@' && ch <= '~') break;
+            }
+            continue;
+        }
+        output.push_back(input[i++]);
+    }
+    return output;
+}
+
+} // namespace
 
 TEST_CASE("remote MCP client names are safe and have a stable fallback",
           "[mcp][remote-activity]") {
@@ -85,6 +112,52 @@ TEST_CASE("remote footer uses protocol client name and generic fallback",
     status = tui::format_remote_footer_status(hub.snapshot());
     CHECK(status.label.find("Client") != std::string::npos);
     CHECK(status.label.find("Lampo") == std::string::npos);
+}
+
+TEST_CASE("remote footer separates the MCP label and uses foreground color only",
+          "[tui][mcp][remote-activity][rendering]") {
+    const tui::RemoteFooterStatus status{
+        .label = "Lampo · seen 6m 16s ago",
+        .tone = tui::RemoteFooterTone::neutral,
+    };
+    auto footer = ftxui::hbox({
+        ftxui::text("○"),
+        tui::render_remote_footer_status(status),
+    });
+    auto screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(40),
+        ftxui::Dimension::Fixed(1));
+    ftxui::Render(screen, footer);
+
+    const std::string rendered = strip_ansi(screen.ToString());
+    CHECK(rendered.starts_with("○  ⚡ Lampo · seen 6m 16s ago "));
+    CHECK(screen.CellAt(3, 0).background_color == ftxui::Color::Default);
+    CHECK(screen.CellAt(6, 0).background_color == ftxui::Color::Default);
+
+    using ToneColor = std::pair<tui::RemoteFooterTone, ftxui::Color>;
+    const std::array<ToneColor, 5> tone_colors{{
+        {tui::RemoteFooterTone::neutral, ftxui::Color::GrayLight},
+        {tui::RemoteFooterTone::ready, ftxui::Color::Green},
+        {tui::RemoteFooterTone::running,
+         static_cast<ftxui::Color>(tui::ColorYellowBright)},
+        {tui::RemoteFooterTone::success, ftxui::Color::Green},
+        {tui::RemoteFooterTone::error,
+         static_cast<ftxui::Color>(tui::ColorToolFail)},
+    }};
+    for (const auto& [tone, expected_color] : tone_colors) {
+        auto tone_screen = ftxui::Screen::Create(
+            ftxui::Dimension::Fixed(24),
+            ftxui::Dimension::Fixed(1));
+        ftxui::Render(
+            tone_screen,
+            tui::render_remote_footer_status({.label = "MCP", .tone = tone}));
+
+        CHECK(tone_screen.CellAt(2, 0).foreground_color == expected_color);
+        for (int x = 0; x < tone_screen.dimx(); ++x) {
+            CHECK(tone_screen.CellAt(x, 0).background_color
+                  == ftxui::Color::Default);
+        }
+    }
 }
 
 TEST_CASE("remote activity history stays bounded even when nothing finishes",

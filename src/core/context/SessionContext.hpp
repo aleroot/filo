@@ -50,6 +50,11 @@ struct SessionContext {
     // Extends the workspace and invalidates visibility derived from its roots.
     std::size_t extend_workspace(
         const std::vector<std::filesystem::path>& paths);
+
+    // Replaces the primary workspace root and invalidates visibility derived
+    // from it. Returns false when the candidate directory is invalid or
+    // already the current primary; see SessionWorkspace::set_primary.
+    bool set_workspace_primary(const std::filesystem::path& new_primary);
 };
 
 [[nodiscard]] SessionContext make_session_context(

@@ -143,6 +143,13 @@ struct CommandContext {
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
     std::function<void(std::string)> direct_shell_command_fn = {};
     std::function<CommandOperationResult(std::optional<std::size_t>)> open_code_block_runner_fn = {};
+    // Replaces the primary working directory: chdirs the process, updates
+    // the process-wide default workspace, and rebases the active session's
+    // roots. Implemented by the composition root because it coordinates OS
+    // state and global defaults that the agent alone must not own; adding an
+    // *additional* directory needs no such coordination and goes straight
+    // through ctx.agent->grant_workspace_paths.
+    std::function<CommandOperationResult(std::string_view)> change_workspace_root_fn = {};
 };
 
 struct CommandDescriptor {

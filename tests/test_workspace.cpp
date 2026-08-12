@@ -174,6 +174,50 @@ TEST_CASE("SessionContext grants existing absolute paths for the session", "[Wor
     std::filesystem::remove_all(base, ec);
 }
 
+TEST_CASE("SessionContext replaces the primary workspace root", "[Workspace][SessionContext]") {
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-session-change-primary-{}", std::rand());
+    const auto primary = base / "primary";
+    const auto nested_additional = primary / "nested-add";
+    const auto sibling_additional = base / "sibling-add";
+    const auto next_primary = base / "next-primary";
+    const auto missing = base / "missing";
+    std::filesystem::create_directories(nested_additional, ec);
+    std::filesystem::create_directories(sibling_additional, ec);
+    std::filesystem::create_directories(next_primary, ec);
+
+    auto context = core::context::make_session_context(WorkspaceSnapshot{
+        .primary = primary,
+        .additional = {sibling_additional},
+        .enforce = true,
+        .version = 1,
+    });
+    context.path_visibility = std::make_shared<core::workspace::PathVisibility>(
+        std::make_shared<core::workspace::AllowAllPathVisibilityPolicy>());
+
+    // A missing directory or the current primary are both rejected, and
+    // rejection must not disturb visibility caching or bump the version.
+    REQUIRE_FALSE(context.set_workspace_primary(missing));
+    REQUIRE_FALSE(context.set_workspace_primary(primary));
+    REQUIRE(context.path_visibility);
+    REQUIRE(context.effective_workspace().version == 1);
+
+    REQUIRE(context.set_workspace_primary(next_primary));
+    REQUIRE_FALSE(context.path_visibility);
+    REQUIRE(context.effective_workspace().version == 2);
+    REQUIRE(context.workspace_view().primary()
+        == core::workspace::SessionWorkspace::normalize_path(next_primary));
+    REQUIRE(context.allows_read(next_primary / "file.txt"));
+    REQUIRE_FALSE(context.allows_read(primary / "file.txt"));
+    // A sibling additional root unrelated to the old primary survives the swap.
+    REQUIRE(context.allows_read(sibling_additional / "file.txt"));
+
+    std::filesystem::remove_all(base, ec);
+}
+
 TEST_CASE("SourceControlProvider lists branch refs through abstraction", "[Workspace][SCM]") {
     if (std::system("git --version >/dev/null 2>&1") != 0) {
         SKIP("git is not available in this environment");

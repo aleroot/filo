@@ -447,6 +447,136 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("No active goal"));
     }
 
+    SECTION("/workspace with no agent falls back to a helpful message") {
+        *mock_history = "";
+        ctx.text = "/workspace";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE(*option_picker_command == "/workspace");
+        REQUIRE_THAT(*mock_history,
+            Catch::Matchers::ContainsSubstring("No agent available to inspect the workspace."));
+    }
+
+    SECTION("/workspace add reports a missing agent") {
+        ctx.agent = nullptr;
+        *mock_history = "";
+        ctx.text = "/workspace add /tmp";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history,
+            Catch::Matchers::ContainsSubstring("No agent available to extend the workspace."));
+    }
+
+    SECTION("/workspace add extends the session workspace") {
+        auto provider = std::make_shared<NoopProvider>();
+
+        // Build an explicitly enforced workspace rather than relying on the
+        // ambient global Workspace singleton: add_additional_paths() is a
+        // no-op when enforcement is off (everything already reads as
+        // in-scope), and the singleton's enforcement flag depends on
+        // whichever test last initialized it.
+        std::error_code ec;
+        const auto primary_dir = std::filesystem::temp_directory_path(ec)
+            / std::format("filo-workspace-cmd-primary-{}", std::rand());
+        std::filesystem::create_directories(primary_dir, ec);
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+                .primary = primary_dir,
+                .additional = {},
+                .enforce = true,
+            }));
+
+        const auto extra_dir = std::filesystem::temp_directory_path(ec)
+            / std::format("filo-workspace-cmd-add-{}", std::rand());
+        std::filesystem::create_directories(extra_dir, ec);
+
+        *mock_history = "";
+        ctx.text = "/workspace add " + extra_dir.string();
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Added"));
+
+        const auto snapshot = ctx.agent->workspace_snapshot();
+        const auto normalized = core::workspace::SessionWorkspace::normalize_path(extra_dir);
+        REQUIRE(std::ranges::find(snapshot.additional(), normalized) != snapshot.additional().end());
+
+        // Re-adding the same directory is a no-op and reports as such.
+        *mock_history = "";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("was not added"));
+
+        std::filesystem::remove_all(extra_dir, ec);
+        std::filesystem::remove_all(primary_dir, ec);
+    }
+
+    SECTION("/workspace change delegates to the change_workspace_root_fn callback") {
+        std::string requested_path;
+        bool succeed = true;
+        ctx.change_workspace_root_fn = [&](std::string_view path) {
+            requested_path = std::string(path);
+            return core::commands::CommandOperationResult{
+                .ok = succeed,
+                .message = succeed
+                    ? std::string("Switched the working directory to '/tmp/some-project'.")
+                    : std::string("boom"),
+            };
+        };
+
+        *mock_history = "";
+        ctx.text = "/workspace change /tmp/some-project";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE(requested_path == "/tmp/some-project");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched the working directory"));
+
+        succeed = false;
+        *mock_history = "";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("boom"));
+    }
+
+    SECTION("/workspace change without a callback reports unavailable") {
+        *mock_history = "";
+        ctx.text = "/workspace change /tmp";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history,
+            Catch::Matchers::ContainsSubstring("not available in this session"));
+    }
+
+    SECTION("/workspace rejects unknown actions and malformed arguments") {
+        *mock_history = "";
+        ctx.text = "/workspace bogus";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage:"));
+
+        *mock_history = "";
+        ctx.text = "/workspace add";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage:"));
+
+        *mock_history = "";
+        ctx.text = "/workspace add too many tokens";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("unquoted spaces"));
+    }
+
+    SECTION("/workspace status and the /dir alias report the current roots") {
+        auto provider = std::make_shared<NoopProvider>();
+        ctx.agent = std::make_shared<core::agent::Agent>(
+            provider,
+            core::tools::ToolManager::get_instance(),
+            test_support::make_workspace_session_context());
+
+        *mock_history = "";
+        ctx.text = "/workspace status";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Primary:"));
+
+        *mock_history = "";
+        *option_picker_command = "";
+        ctx.text = "/dir";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE(*option_picker_command == "/workspace");
+    }
+
     SECTION("/usage command shows totals, models, and tools") {
         auto& stats = core::session::SessionStats::get_instance();
         auto& budget = core::budget::BudgetTracker::get_instance();

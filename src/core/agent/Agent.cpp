@@ -476,13 +476,23 @@ void Agent::set_session_id(std::string session_id) {
     }
 }
 
-void Agent::grant_workspace_paths(
+std::size_t Agent::grant_workspace_paths(
     const std::vector<std::filesystem::path>& paths) {
     std::lock_guard lock(history_mutex_);
     const auto added = session_context_.extend_workspace(paths);
     if (added > 0) {
         refresh_stable_prompt_state_unlocked();
     }
+    return added;
+}
+
+bool Agent::change_workspace_root(const std::filesystem::path& new_primary) {
+    std::lock_guard lock(history_mutex_);
+    const bool changed = session_context_.set_workspace_primary(new_primary);
+    if (changed) {
+        refresh_stable_prompt_state_unlocked();
+    }
+    return changed;
 }
 
 core::workspace::SessionWorkspace Agent::workspace_snapshot() const {

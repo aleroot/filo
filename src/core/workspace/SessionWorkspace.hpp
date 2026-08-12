@@ -127,6 +127,35 @@ public:
         return added;
     }
 
+    // Replaces the primary workspace root in place. Validates that the new
+    // root exists as a directory before normalizing and applying it, and
+    // drops any additional roots that are now redundant (nested under the
+    // new primary), mirroring add_additional_paths' de-duplication. Returns
+    // false (leaving the snapshot untouched) when the candidate is empty,
+    // not a directory, or identical to the current primary.
+    bool set_primary(const std::filesystem::path& new_primary) {
+        if (new_primary.empty()) {
+            return false;
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(new_primary, ec)) {
+            return false;
+        }
+
+        const auto normalized = normalize_path(new_primary);
+        if (normalized == snapshot_.primary) {
+            return false;
+        }
+
+        snapshot_.primary = normalized;
+        std::erase_if(snapshot_.additional, [&](const auto& existing) {
+            return is_subpath(normalized, existing);
+        });
+        ++snapshot_.version;
+        return true;
+    }
+
     [[nodiscard]] static WorkspaceSnapshot normalize_snapshot(WorkspaceSnapshot snapshot) {
         snapshot.primary = snapshot.primary.empty()
             ? std::filesystem::path{}

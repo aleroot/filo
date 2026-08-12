@@ -31,6 +31,14 @@ std::size_t SessionContext::extend_workspace(
     return added;
 }
 
+bool SessionContext::set_workspace_primary(const std::filesystem::path& new_primary) {
+    const bool changed = workspace.set_primary(new_primary);
+    if (changed) {
+        path_visibility.reset();
+    }
+    return changed;
+}
+
 SessionContext make_session_context(core::workspace::WorkspaceSnapshot snapshot,
                                     SessionTransport transport,
                                     std::string session_id) {

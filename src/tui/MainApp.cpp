@@ -1094,6 +1094,7 @@ RunResult run(RunOptions opts) {
         std::string help_text;
         std::vector<tui::OptionPickerRow> options;
         std::function<std::string(std::string_view)> on_select;
+        bool prefill_input = false;
     };
     CommandOptionPickerState command_option_picker_state;
 
@@ -4303,6 +4304,70 @@ RunResult run(RunOptions opts) {
             *normalized);
     };
 
+    // Replaces the primary working directory for /workspace change: chdirs
+    // the process, rebases the process-wide default workspace (so new
+    // threads inherit it), and rebases the active thread's session
+    // workspace. Lives at the composition root because only it may touch
+    // process-global state (cwd, the Workspace singleton); the agent itself
+    // only owns its own SessionContext (see Agent::change_workspace_root).
+    auto change_workspace_root = [&](std::string_view requested_path)
+        -> core::commands::CommandOperationResult {
+        if (requested_path.empty()) {
+            return {.ok = false, .message = "Provide a directory to switch to."};
+        }
+
+        std::error_code ec;
+        const auto resolved = core::workspace::SessionWorkspace::normalize_path(
+            std::filesystem::path(requested_path));
+        if (!std::filesystem::is_directory(resolved, ec)) {
+            return {
+                .ok = false,
+                .message = std::format("'{}' is not an existing directory.", std::string(requested_path)),
+            };
+        }
+
+        if (core::landrun::LandrunSettings::instance().enabled()) {
+            const char* home_value = std::getenv("HOME");
+            if (home_value && *home_value
+                && core::landrun::is_landrun_path_within(
+                       resolved,
+                       core::workspace::SessionWorkspace::normalize_path(home_value))) {
+                return {
+                    .ok = false,
+                    .message =
+                        "Refusing to switch into a directory that would expose the entire "
+                        "home directory under secure mode. Pick a project directory, or "
+                        "restart with --sandbox off.",
+                };
+            }
+        }
+
+        std::filesystem::current_path(resolved, ec);
+        if (ec) {
+            return {
+                .ok = false,
+                .message = std::format("Could not switch to '{}': {}", resolved.string(), ec.message()),
+            };
+        }
+
+        const auto previous = core::workspace::Workspace::get_instance().snapshot();
+        core::workspace::Workspace::get_instance().initialize(
+            resolved, previous.additional, previous.enforce, previous.scratch);
+
+        // set_primary is a no-op when the target equals the current root
+        // (e.g. the session was already rebased by a prior call); either way
+        // the process and process-wide default above have been updated, so
+        // report success regardless of whether the session-level root moved.
+        if (agent) {
+            agent->change_workspace_root(resolved);
+        }
+
+        return {
+            .ok = true,
+            .message = std::format("Switched the working directory to '{}'.", resolved.string()),
+        };
+    };
+
     auto open_command_option_picker = [&](std::string_view command_name) -> bool {
         CommandOptionPickerState next;
         next.active = true;
@@ -4334,6 +4399,19 @@ RunResult run(RunOptions opts) {
                 {.value = "ultra", .label = "Ultra", .description = "Use the tightest built-in budgets for high token pressure."},
             };
             next.on_select = switch_compression;
+        } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
+            next.title = "WORKSPACE";
+            next.help_text = "Enter to prefill the command, then type or paste the directory. Esc closes this panel.";
+            next.prefill_input = true;
+            next.options = {
+                {.value = "add", .label = "Add directory",
+                 .description = "Grant this session read/write access to another directory."},
+                {.value = "change", .label = "Change directory",
+                 .description = "Switch the primary working directory (like restarting in a new folder)."},
+            };
+            next.on_select = [](std::string_view value) {
+                return std::format("/workspace {} ", value);
+            };
         } else {
             return false;
         }
@@ -6217,6 +6295,7 @@ RunResult run(RunOptions opts) {
             .stop_active_terminal_fn = stop_active_terminal,
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
+            .change_workspace_root_fn = change_workspace_root,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;
@@ -6988,6 +7067,7 @@ RunResult run(RunOptions opts) {
         bool command_option_picker_was_active = false;
         std::optional<std::string> command_option_choice;
         std::function<std::string(std::string_view)> command_option_on_select;
+        bool command_option_prefill = false;
         {
             std::lock_guard lock(ui_mutex);
             if (command_option_picker_state.active) {
@@ -7013,6 +7093,7 @@ RunResult run(RunOptions opts) {
                                     command_option_picker_state.selected)]
                                 .value;
                         command_option_on_select = command_option_picker_state.on_select;
+                        command_option_prefill = command_option_picker_state.prefill_input;
                         command_option_picker_state.active = false;
                     }
                 } else if (event == Event::Escape) {
@@ -7025,6 +7106,7 @@ RunResult run(RunOptions opts) {
                                     .options[static_cast<std::size_t>(n - 1)]
                                     .value;
                             command_option_on_select = command_option_picker_state.on_select;
+                            command_option_prefill = command_option_picker_state.prefill_input;
                             command_option_picker_state.active = false;
                             break;
                         }
@@ -7035,13 +7117,19 @@ RunResult run(RunOptions opts) {
         if (command_option_picker_was_active) {
             if (command_option_choice.has_value() && command_option_on_select) {
                 const std::string result = command_option_on_select(*command_option_choice);
-                const bool success = result.starts_with("Set")
-                    || result.starts_with("Switched")
-                    || result.starts_with("Cleared")
-                    || result.starts_with("Applied");
-                append_history(std::format(
-                    "\n{}\n",
-                    success ? "✓  " + result : "✗  " + result));
+                if (command_option_prefill) {
+                    std::lock_guard lock(ui_mutex);
+                    input_text = result;
+                    input_cursor_position = static_cast<int>(input_text.size());
+                } else {
+                    const bool success = result.starts_with("Set")
+                        || result.starts_with("Switched")
+                        || result.starts_with("Cleared")
+                        || result.starts_with("Applied");
+                    append_history(std::format(
+                        "\n{}\n",
+                        success ? "✓  " + result : "✗  " + result));
+                }
             }
             return true;
         }
@@ -8599,32 +8687,8 @@ RunResult run(RunOptions opts) {
         if (opts.remote_mcp_server_enabled) {
             const auto remote_status = format_remote_footer_status(
                 remote_activity_snapshot);
-            Color foreground = Color::GrayLight;
-            Color background = Color::GrayDark;
-            switch (remote_status.tone) {
-                case RemoteFooterTone::ready:
-                    foreground = Color::Black;
-                    background = Color::Green;
-                    break;
-                case RemoteFooterTone::running:
-                    foreground = Color::Black;
-                    background = ColorYellowBright;
-                    break;
-                case RemoteFooterTone::success:
-                    foreground = Color::Black;
-                    background = Color::Green;
-                    break;
-                case RemoteFooterTone::error:
-                    foreground = Color::Black;
-                    background = ColorToolFail;
-                    break;
-                case RemoteFooterTone::neutral:
-                    break;
-            }
             left_items.push_back(
-                text(" " + remote_status.label + " ")
-                | color(foreground)
-                | bgcolor(background)
+                render_remote_footer_status(remote_status)
                 | reflect(remote_activity_pill_box));
         }
         left_items.push_back(guardrail_el);

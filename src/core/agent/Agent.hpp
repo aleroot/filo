@@ -129,9 +129,18 @@ public:
     void set_session_id(std::string session_id);
 
     // Atomically extends the session workspace and refreshes prompt state that
-    // describes or depends on its roots.
-    void grant_workspace_paths(
+    // describes or depends on its roots. Returns the number of paths
+    // actually granted (existing files/directories not already in scope).
+    std::size_t grant_workspace_paths(
         const std::vector<std::filesystem::path>& paths);
+    // Atomically replaces the session's primary workspace root and refreshes
+    // prompt state that describes or depends on it. Unlike
+    // grant_workspace_paths, this swaps the root rather than extending it;
+    // callers that also need the OS process and any global workspace
+    // defaults updated (e.g. the /workspace change command) must do so
+    // themselves. Returns false when new_primary is not an existing
+    // directory or is already the current primary.
+    bool change_workspace_root(const std::filesystem::path& new_primary);
     [[nodiscard]] core::workspace::SessionWorkspace workspace_snapshot() const;
     void set_session_goal(std::optional<core::session::SessionGoal> goal);
     /// Supplies the live goal-graph context for the dynamic prompt suffix.

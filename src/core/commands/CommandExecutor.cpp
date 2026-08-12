@@ -428,6 +428,36 @@ std::string trim_copy(std::string_view input) {
     return std::string(trim(input));
 }
 
+// Splits a possibly multi-line status body into individual "ℹ  <line>"
+// notifications, one per non-empty line, with a leading blank line before
+// the first. This is the shared rendering used by every status-style
+// command (/model, /profile, /effort, /settings, /workspace) so their
+// multi-line "Active: ...\n        Available: ..." bodies render
+// consistently. Falls back to a single notice when body has no content.
+void emit_info_lines(const CommandContext& ctx,
+                     const std::string& body,
+                     std::string_view fallback_message) {
+    std::string remaining = body;
+    bool first = true;
+    while (!remaining.empty()) {
+        const auto nl = remaining.find('\n');
+        std::string line = nl == std::string::npos
+            ? remaining
+            : remaining.substr(0, nl);
+        remaining = nl == std::string::npos ? std::string{} : remaining.substr(nl + 1);
+        const auto start = line.find_first_not_of(" \t");
+        if (start == std::string::npos) {
+            continue;
+        }
+        ctx.append_history_fn(std::format(
+            "{}ℹ  {}\n", first ? "\n" : "", line.substr(start)));
+        first = false;
+    }
+    if (first) {
+        ctx.append_history_fn(std::format("\nℹ  {}\n", fallback_message));
+    }
+}
+
 std::filesystem::path expand_user_path(std::string_view input) {
     std::string text = trim_copy(input);
     if (text == "~" || text.starts_with("~/")) {
@@ -1429,6 +1459,7 @@ public:
             "  /profile [name]     Show/list/switch named configuration profiles\n"
             "  /effort [level]     Open/show/set model effort (auto|low|medium|high|max)\n"
             "  /settings           Open the settings panel for user/workspace preferences\n"
+            "  /workspace [action] Show workspace roots, or add/change a working directory\n"
             "  /yolo [on|off]      Toggle or set auto-approval for sensitive tools\n"
             "  /tools [action]     Manage session trust rules for sensitive tools\n"
             "  /usage              Show token usage, cost, and tool payload breakdown\n"
@@ -1596,22 +1627,7 @@ public:
                 ? ctx.model_status_fn()
                 : "Use /model manual, /model router, /model <provider-name>, or /model <provider-name> <model>.";
             // body may be multi-line ("Active: ...\n        Available: ...")
-            // emit each non-empty segment as a separate info notification
-            std::string remaining = body;
-            bool first = true;
-            while (!remaining.empty()) {
-                const auto nl = remaining.find('\n');
-                std::string line = nl == std::string::npos
-                    ? remaining
-                    : remaining.substr(0, nl);
-                remaining = nl == std::string::npos ? "" : remaining.substr(nl + 1);
-                const auto start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                ctx.append_history_fn(std::format(
-                    "{}\xe2\x84\xb9  {}\n", first ? "\n" : "", line.substr(start)));
-                first = false;
-            }
-            if (first) ctx.append_history_fn("\n\xe2\x84\xb9  No model info available.\n");
+            emit_info_lines(ctx, body, "No model info available.");
             return;
         }
 
@@ -1639,31 +1655,13 @@ public:
         std::string_view arg = trim(std::string_view{ctx.text}.substr(
             std::min(ctx.text.size(), std::string::size_type{8})));
 
-        auto emit_info_body = [&](const std::string& body) {
-            std::string remaining = body;
-            bool first = true;
-            while (!remaining.empty()) {
-                const auto nl = remaining.find('\n');
-                std::string line = nl == std::string::npos
-                    ? remaining
-                    : remaining.substr(0, nl);
-                remaining = nl == std::string::npos ? "" : remaining.substr(nl + 1);
-                const auto start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                ctx.append_history_fn(std::format(
-                    "{}ℹ  {}\n", first ? "\n" : "", line.substr(start)));
-                first = false;
-            }
-            if (first) ctx.append_history_fn("\nℹ  No profile information is available.\n");
-        };
-
         const std::string lowered = to_lower_ascii(arg);
         if (arg.empty() || lowered == "status"
             || lowered == "list" || lowered == "ls") {
             const std::string body = ctx.profile_status_fn
                 ? ctx.profile_status_fn()
                 : "Use /profile <name> to switch profiles (not available in this session).";
-            emit_info_body(body);
+            emit_info_lines(ctx, body, "No profile information is available.");
             return;
         }
 
@@ -1692,24 +1690,6 @@ public:
         std::string_view arg = trim(std::string_view{ctx.text}.substr(
             std::min(ctx.text.size(), std::string::size_type{7})));
 
-        auto emit_info_body = [&](const std::string& body) {
-            std::string remaining = body;
-            bool first = true;
-            while (!remaining.empty()) {
-                const auto nl = remaining.find('\n');
-                std::string line = nl == std::string::npos
-                    ? remaining
-                    : remaining.substr(0, nl);
-                remaining = nl == std::string::npos ? "" : remaining.substr(nl + 1);
-                const auto start = line.find_first_not_of(" \t");
-                if (start == std::string::npos) continue;
-                ctx.append_history_fn(std::format(
-                    "{}ℹ  {}\n", first ? "\n" : "", line.substr(start)));
-                first = false;
-            }
-            if (first) ctx.append_history_fn("\nℹ  No effort information is available.\n");
-        };
-
         if (arg.empty()) {
             if (ctx.open_command_option_picker_fn
                 && ctx.open_command_option_picker_fn(get_name())) {
@@ -1718,7 +1698,7 @@ public:
             const std::string body = ctx.effort_status_fn
                 ? ctx.effort_status_fn()
                 : "Use /effort auto|low|medium|high|max, or /effort status.";
-            emit_info_body(body);
+            emit_info_lines(ctx, body, "No effort information is available.");
             return;
         }
 
@@ -1727,7 +1707,7 @@ public:
             const std::string body = ctx.effort_status_fn
                 ? ctx.effort_status_fn()
                 : "Use /effort auto|low|medium|high|max.";
-            emit_info_body(body);
+            emit_info_lines(ctx, body, "No effort information is available.");
             return;
         }
 
@@ -1801,28 +1781,118 @@ public:
                 workspace_path.string());
         }
 
-        std::string remaining = std::move(body);
-        bool first = true;
-        while (!remaining.empty()) {
-            const auto nl = remaining.find('\n');
-            std::string line = nl == std::string::npos
-                ? remaining
-                : remaining.substr(0, nl);
-            remaining = nl == std::string::npos ? "" : remaining.substr(nl + 1);
-            const auto start = line.find_first_not_of(" \t");
-            if (start == std::string::npos) {
-                continue;
+        emit_info_lines(ctx, body, "No settings information is available.");
+    }
+};
+
+// Adds an additional directory to the session workspace, or replaces the
+// primary working directory, without restarting Filo. Mirrors the
+// positional workspace-directory CLI arguments (primary dir first,
+// additional dirs after): /workspace add <path> is the runtime equivalent
+// of an extra CLI directory argument, and /workspace change <path> is the
+// runtime equivalent of the first one.
+class WorkspaceCommand : public Command {
+public:
+    std::string get_name() const override { return "/workspace"; }
+    std::vector<std::string> get_aliases() const override { return {"/dir", "/dirs"}; }
+    std::string get_description() const override {
+        return "Show workspace roots, or add/change a working directory";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+
+        const auto parsed = split_shell_like_tokens(trailing_arguments(ctx.text));
+        if (!parsed.error.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", parsed.error));
+            return;
+        }
+        const auto& tokens = parsed.tokens;
+
+        auto usage = [&]() {
+            ctx.append_history_fn(
+                "\nℹ  Usage:\n"
+                "   /workspace                 Show the current workspace roots\n"
+                "   /workspace add <path>      Grant this session access to another directory\n"
+                "   /workspace change <path>   Switch the primary working directory\n");
+        };
+
+        if (tokens.empty()) {
+            if (ctx.open_command_option_picker_fn
+                && ctx.open_command_option_picker_fn(get_name())) {
+                return;
             }
-            ctx.append_history_fn(std::format(
-                "{}ℹ  {}\n",
-                first ? "\n" : "",
-                line.substr(start)));
-            first = false;
+            emit_info_lines(ctx, describe_workspace(ctx), "No workspace information is available.");
+            return;
         }
 
-        if (first) {
-            ctx.append_history_fn("\nℹ  No settings information is available.\n");
+        const std::string action = to_lower_ascii(tokens.front());
+        if (action == "status" || action == "list") {
+            emit_info_lines(ctx, describe_workspace(ctx), "No workspace information is available.");
+            return;
         }
+        if (action != "add" && action != "change") {
+            usage();
+            return;
+        }
+        if (tokens.size() < 2) {
+            usage();
+            return;
+        }
+        if (tokens.size() > 2) {
+            ctx.append_history_fn(
+                "\n✗  Path contains unquoted spaces; wrap it in quotes.\n");
+            return;
+        }
+
+        const std::filesystem::path requested = expand_user_path(tokens[1]);
+
+        if (action == "add") {
+            if (!ctx.agent) {
+                ctx.append_history_fn("\n✗  No agent available to extend the workspace.\n");
+                return;
+            }
+            const auto added = ctx.agent->grant_workspace_paths({requested});
+            ctx.append_history_fn(std::format(
+                "\n{}\n",
+                added > 0
+                    ? "✓  Added '" + requested.string() + "' to the workspace."
+                    : "✗  '" + requested.string()
+                        + "' was not added. It must be an existing file or directory "
+                          "that isn't already in scope."));
+            return;
+        }
+
+        if (!ctx.change_workspace_root_fn) {
+            ctx.append_history_fn(
+                "\n✗  Changing the working directory is not available in this session.\n");
+            return;
+        }
+        const auto result = ctx.change_workspace_root_fn(requested.string());
+        ctx.append_history_fn(std::format(
+            "\n{}\n",
+            result.ok ? "✓  " + result.message : "✗  " + result.message));
+    }
+
+private:
+    static std::string describe_workspace(const CommandContext& ctx) {
+        if (!ctx.agent) {
+            return "No agent available to inspect the workspace.";
+        }
+        const auto workspace = ctx.agent->workspace_snapshot();
+
+        std::string body = std::format("Primary: {}", workspace.primary().string());
+        if (workspace.additional().empty()) {
+            body += "\n        Additional: <none>";
+        } else {
+            body += "\n        Additional:";
+            for (const auto& dir : workspace.additional()) {
+                body += "\n          - " + dir.string();
+            }
+        }
+        body += "\n        Use /workspace add <path> or /workspace change <path>.";
+        return body;
     }
 };
 
@@ -3650,6 +3720,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<ProfileCommand>());
     register_command(std::make_unique<EffortCommand>());
     register_command(std::make_unique<SettingsCommand>());
+    register_command(std::make_unique<WorkspaceCommand>());
     register_command(std::make_unique<YoloCommand>());
     register_command(std::make_unique<ToolsCommand>());
     register_command(std::make_unique<UsageCommand>());

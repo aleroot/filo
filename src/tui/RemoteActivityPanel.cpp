@@ -143,23 +143,15 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
 RemoteFooterStatus format_remote_footer_status(
     const RemoteActivitySnapshot& snapshot,
     std::chrono::steady_clock::time_point now) {
-    constexpr std::string_view icon = "⚡";
-
     switch (snapshot.server_state) {
         case RemoteServerState::disabled:
             return {};
         case RemoteServerState::starting:
-            return {std::format("{} MCP · starting", icon),
-                    RemoteFooterTone::running,
-                    true};
+            return {"MCP · starting", RemoteFooterTone::running, true};
         case RemoteServerState::failed:
-            return {std::format("{} MCP · unavailable", icon),
-                    RemoteFooterTone::error,
-                    false};
+            return {"MCP · unavailable", RemoteFooterTone::error, false};
         case RemoteServerState::stopped:
-            return {std::format("{} MCP · stopped", icon),
-                    RemoteFooterTone::error,
-                    false};
+            return {"MCP · stopped", RemoteFooterTone::error, false};
         case RemoteServerState::listening:
             break;
     }
@@ -205,8 +197,7 @@ RemoteFooterStatus format_remote_footer_status(
     if (snapshot.unacknowledged_errors > 0) {
         return {
             std::format(
-                "{} {} · {} issue{}",
-                icon,
+                "{} · {} issue{}",
                 client_label,
                 snapshot.unacknowledged_errors,
                 snapshot.unacknowledged_errors == 1 ? "" : "s"),
@@ -219,8 +210,7 @@ RemoteFooterStatus format_remote_footer_status(
         if (running.size() == 1) {
             return {
                 std::format(
-                    "{} {} · {} · {}",
-                    icon,
+                    "{} · {} · {}",
                     client_label,
                     compact_tool_name(running.front()->tool_name),
                     activity_duration(*running.front(), now)),
@@ -229,7 +219,7 @@ RemoteFooterStatus format_remote_footer_status(
             };
         }
         return {
-            std::format("{} {} · {} running", icon, client_label, running.size()),
+            std::format("{} · {} running", client_label, running.size()),
             RemoteFooterTone::running,
             true,
         };
@@ -241,8 +231,7 @@ RemoteFooterStatus format_remote_footer_status(
             && now - latest.finished_at <= std::chrono::seconds{2}) {
             return {
                 std::format(
-                    "{} {} · {} · {}",
-                    icon,
+                    "{} · {} · {}",
                     client_name_for(snapshot, latest.session_id),
                     compact_tool_name(latest.tool_name),
                     activity_duration(latest, now)),
@@ -262,17 +251,14 @@ RemoteFooterStatus format_remote_footer_status(
         }
     }
     if (latest_open == nullptr) {
-        return {std::format("{} MCP · waiting", icon),
-                RemoteFooterTone::neutral,
-                false};
+        return {"MCP · waiting", RemoteFooterTone::neutral, false};
     }
 
     const auto since_seen = now - latest_open->last_seen;
     if (since_seen > std::chrono::seconds{30}) {
         return {
             std::format(
-                "{} {} · seen {}",
-                icon,
+                "{} · seen {}",
                 latest_open->name,
                 elapsed_label(latest_open->last_seen, now)),
             RemoteFooterTone::neutral,
@@ -281,13 +267,41 @@ RemoteFooterStatus format_remote_footer_status(
     }
     return {
         std::format(
-            "{} {} · {}",
-            icon,
+            "{} · {}",
             latest_open->name,
             latest_open->ready ? "ready" : "connecting"),
         latest_open->ready ? RemoteFooterTone::ready : RemoteFooterTone::neutral,
         false,
     };
+}
+
+Element render_remote_footer_status(const RemoteFooterStatus& status) {
+    if (status.label.empty()) return text("");
+
+    Color foreground = Color::GrayLight;
+    switch (status.tone) {
+        case RemoteFooterTone::ready:
+        case RemoteFooterTone::success:
+            foreground = Color::Green;
+            break;
+        case RemoteFooterTone::running:
+            foreground = ColorYellowBright;
+            break;
+        case RemoteFooterTone::error:
+            foreground = ColorToolFail;
+            break;
+        case RemoteFooterTone::neutral:
+            break;
+    }
+
+    // Keep two cells of separation from the assistant activity indicator (or
+    // the preceding footer item when no turn is active). FTXUI already reserves
+    // both terminal cells occupied by U+26A1, so it must remain unconstrained
+    // rather than being forced into a one-cell box.
+    return hbox({
+        text("  "),
+        text("⚡ " + status.label + " ") | color(foreground),
+    });
 }
 
 Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
