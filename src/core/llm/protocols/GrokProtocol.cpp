@@ -1,5 +1,6 @@
 #include "GrokProtocol.hpp"
 #include "GrokBuildEndpoint.hpp"
+#include "SseUtils.hpp"
 #include "core/auth/XaiGrokClientIdentity.hpp"
 #include "core/utils/AsciiUtils.hpp"
 #include "core/utils/Uuid.hpp"
@@ -7,12 +8,102 @@
 #include <simdjson.h>
 #include <array>
 #include <cctype>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace core::llm::protocols {
 
 namespace {
+
+struct GrokResponsesStreamError {
+    std::string type;
+    std::string message;
+};
+
+[[nodiscard]] std::string read_string_field(
+    simdjson::dom::object object,
+    std::string_view key) {
+    std::string_view value;
+    if (object[key].get(value) == simdjson::SUCCESS && !value.empty()) {
+        return std::string(value);
+    }
+    return {};
+}
+
+[[nodiscard]] std::optional<GrokResponsesStreamError>
+parse_grok_responses_stream_error(std::string_view raw_event) {
+    sse::ParsedEventView parsed;
+    std::string data_scratch;
+    if (!sse::parse_event_payload(raw_event, parsed, data_scratch)
+        || parsed.is_done) {
+        return std::nullopt;
+    }
+
+    thread_local simdjson::dom::parser parser;
+    simdjson::padded_string padded(parsed.data);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+
+    std::string event_type(parsed.event);
+    if (event_type.empty()) {
+        std::string_view payload_type;
+        if (doc["type"].get(payload_type) == simdjson::SUCCESS) {
+            event_type = std::string(payload_type);
+        }
+    }
+    if (event_type != "response.failed" && event_type != "error") {
+        return std::nullopt;
+    }
+
+    GrokResponsesStreamError result;
+    const auto read_error = [&](simdjson::dom::object error) {
+        if (result.type.empty()) result.type = read_string_field(error, "code");
+        if (result.type.empty()) result.type = read_string_field(error, "type");
+        if (result.message.empty()) result.message = read_string_field(error, "message");
+    };
+
+    simdjson::dom::object response;
+    if (doc["response"].get(response) == simdjson::SUCCESS) {
+        simdjson::dom::object error;
+        if (response["error"].get(error) == simdjson::SUCCESS) {
+            read_error(error);
+        }
+        if (result.message.empty()) {
+            result.message = read_string_field(response, "message");
+        }
+    }
+
+    simdjson::dom::object error;
+    if (doc["error"].get(error) == simdjson::SUCCESS) {
+        read_error(error);
+    }
+    if (result.type.empty()) result.type = read_string_field(doc, "code");
+    if (result.message.empty()) result.message = read_string_field(doc, "message");
+    if (result.type.empty()) result.type = event_type;
+    if (result.message.empty()) result.message = "Grok response stream failed.";
+    return result;
+}
+
+[[nodiscard]] bool grok_retry_vetoed(const HttpResponse& response) noexcept {
+    for (const auto& [name, value] : response.headers) {
+        if (core::utils::ascii::iequals(name, "x-should-retry")
+            && core::utils::ascii::iequals(value, "false")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_grok_retryable_response(
+    const HttpResponse& response) noexcept {
+    if (grok_retry_vetoed(response)) return false;
+    const int status = response.status_code;
+    return status == 408 || status == 409 || status == 429
+        || (status >= 500 && status <= 599 && status != 525 && status != 526);
+}
 
 [[nodiscard]] bool is_xai_oauth_request(const ChatRequest& request) {
     const auto oauth = request.auth_properties.find("oauth");
@@ -172,6 +263,18 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
     return serialize_with_options(effective, options);
 }
 
+ParseResult GrokResponsesProtocol::parse_event(std::string_view raw_event) {
+    if (auto error = parse_grok_responses_stream_error(raw_event)) {
+        ParseResult result;
+        result.stream_error = true;
+        result.retryable_stream_error = true;
+        result.stream_error_type = std::move(error->type);
+        result.stream_error_message = std::move(error->message);
+        return result;
+    }
+    return OpenAIResponsesProtocol::parse_event(raw_event);
+}
+
 std::string GrokProtocol::format_error_message(const HttpResponse& response) const {
     const int code = response.status_code;
     
@@ -273,13 +376,12 @@ std::string GrokProtocol::format_error_message(const HttpResponse& response) con
 }
 
 bool GrokProtocol::is_retryable(const HttpResponse& response) const noexcept {
-    // xAI retryable status codes (aligned with OpenAI + xAI-specific 529)
-    return response.status_code == 429 ||  // Rate limit
-           response.status_code == 500 ||  // Internal server error
-           response.status_code == 502 ||  // Bad gateway
-           response.status_code == 503 ||  // Service unavailable
-           response.status_code == 504 ||  // Gateway timeout
-           response.status_code == 529;    // xAI-specific: overloaded
+    return is_grok_retryable_response(response);
+}
+
+bool GrokResponsesProtocol::is_retryable(
+    const HttpResponse& response) const noexcept {
+    return is_grok_retryable_response(response);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

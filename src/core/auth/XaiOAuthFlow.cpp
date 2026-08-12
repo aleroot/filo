@@ -169,6 +169,8 @@ std::vector<std::string> XaiOAuthFlow::default_scopes() {
         "api:access",
         "conversations:read",
         "conversations:write",
+        "workspaces:read",
+        "workspaces:write",
     };
 }
 

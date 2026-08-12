@@ -115,6 +115,77 @@ public:
     }
 };
 
+class CountingTool final : public core::tools::Tool {
+public:
+    explicit CountingTool(std::string name)
+        : name_(std::move(name)) {}
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = name_,
+            .title = "Counting tool",
+            .description = "Records executions for failed-turn safety tests.",
+            .parameters = {},
+            .annotations = {
+                .read_only_hint = true,
+                .idempotent_hint = true,
+            },
+        };
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string&,
+        const core::context::SessionContext&) override {
+        executions_.fetch_add(1, std::memory_order_acq_rel);
+        return R"({"ok":true})";
+    }
+
+    [[nodiscard]] int execution_count() const noexcept {
+        return executions_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::string name_;
+    std::atomic<int> executions_{0};
+};
+
+class ToolThenErrorProvider final : public core::llm::LLMProvider {
+public:
+    explicit ToolThenErrorProvider(std::string tool_name)
+        : tool_name_(std::move(tool_name)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        calls_.fetch_add(1, std::memory_order_acq_rel);
+
+        core::llm::ToolCall tool_call;
+        tool_call.index = 0;
+        tool_call.id = "failed-turn-call";
+        tool_call.type = "function";
+        tool_call.function.name = tool_name_;
+        tool_call.function.arguments = "{}";
+
+        core::llm::StreamChunk tool_chunk;
+        tool_chunk.tools = {std::move(tool_call)};
+        tool_chunk.continuation_items.push_back(core::llm::ContinuationItem{
+            .provider = "openai",
+            .kind = "reasoning",
+            .payload = R"({"type":"reasoning","id":"failed-reasoning"})",
+        });
+        callback(tool_chunk);
+        callback(core::llm::StreamChunk::make_error("\n[provider stream failed]"));
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::string tool_name_;
+    std::atomic<int> calls_{0};
+};
+
 class InfiniteToolLoopProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -613,6 +684,33 @@ TEST_CASE("Agent appends history-only user messages without model turn", "[agent
     REQUIRE_THAT(history[0].content,
                  Catch::Matchers::ContainsSubstring("This produced the following result"));
     CHECK(provider->requests_snapshot().empty());
+}
+
+TEST_CASE("Agent never executes tool calls from a failed terminal response",
+          "[agent][tool][error][regression]") {
+    const std::string tool_name = "failed_terminal_counting_tool";
+    auto tool = std::make_shared<CountingTool>(tool_name);
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(tool);
+    auto provider = std::make_shared<ToolThenErrorProvider>(tool_name);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    send_and_wait(agent, "Do not run a provisional tool after failure.");
+
+    CHECK(provider->call_count() == 1);
+    CHECK(tool->execution_count() == 0);
+    const auto history = agent->get_history();
+    CHECK(std::ranges::none_of(history, [](const core::llm::Message& message) {
+        return !message.tool_calls.empty()
+            || !message.continuation_items.empty()
+            || message.role == "tool";
+    }));
+    REQUIRE_FALSE(history.empty());
+    CHECK_THAT(history.back().content,
+               Catch::Matchers::ContainsSubstring("provider stream failed"));
 }
 
 TEST_CASE("Clearing history invalidates a late provider callback",

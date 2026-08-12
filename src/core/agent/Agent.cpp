@@ -1467,12 +1467,19 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         core::llm::Message asst_msg;
         asst_msg.role               = "assistant";
         asst_msg.content            = *assistant_response;
-        asst_msg.tool_calls         = self->is_stop_requested()
+        // A stopped or failed attempt cannot commit provisional tool calls or
+        // opaque continuation state. Replaying either would make the next turn
+        // depend on a model response that never completed successfully.
+        const bool discard_uncommitted_state =
+            self->is_stop_requested() || chunk.is_error;
+        asst_msg.tool_calls         = discard_uncommitted_state
             ? std::vector<core::llm::ToolCall>{}
             : *tool_calls_accum;
         asst_msg.reasoning_content  = *reasoning_accum;
         asst_msg.reasoning_protocol = *reasoning_protocol_accum;
-        asst_msg.continuation_items = *continuation_accum;
+        asst_msg.continuation_items = discard_uncommitted_state
+            ? std::vector<core::llm::ContinuationItem>{}
+            : *continuation_accum;
 
         if (!chunk.is_error
             && asst_msg.tool_calls.empty()
@@ -1549,6 +1556,11 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // Check if we were stopped - if so, don't proceed to tool execution
         if (self->is_stop_requested()) {
+            done_callback();
+            return;
+        }
+
+        if (chunk.is_error) {
             done_callback();
             return;
         }

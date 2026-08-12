@@ -12,6 +12,7 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
@@ -193,6 +194,59 @@ TEST_CASE("HttpLLMProvider honors protocol retry policy for server errors",
     CHECK(attempts.load() == 2);
     CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
         return chunk.content == "recovered";
+    }));
+}
+
+TEST_CASE("HttpLLMProvider retries a Grok Responses generation failure before output",
+          "[integration][http][retry][grok][responses]") {
+    httplib::Server server;
+    std::atomic<int> attempts{0};
+    server.Post("/v1/responses",
+                [&](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Content-Type", "text/event-stream");
+        if (++attempts == 1) {
+            res.set_content(
+                "event: response.failed\n"
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"Internal error during token generation\"}}}\n\n",
+                "text/event-stream");
+            return;
+        }
+        res.set_content(
+            "event: response.output_text.delta\n"
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\n"
+            "event: response.completed\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_recovered\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "grok-4.6",
+        std::make_unique<GrokResponsesProtocol>());
+
+    ChatRequest request;
+    request.model = "grok-4.6";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(attempts.load() == 2);
+    CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
+        return chunk.content == "recovered";
+    }));
+    CHECK(std::ranges::none_of(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error;
     }));
 }
 

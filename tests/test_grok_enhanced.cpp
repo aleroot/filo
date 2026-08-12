@@ -273,6 +273,33 @@ TEST_CASE("GrokProtocol - is_retryable for 500-504", "[grok][protocol][retry]") 
     REQUIRE(protocol.is_retryable({504, "{}", headers}));
 }
 
+TEST_CASE("GrokProtocol - retries transient Cloudflare and uncommon server errors",
+          "[grok][protocol][retry]") {
+    GrokProtocol protocol;
+    cpr::Header headers;
+    for (const int status : {501, 507, 520, 521, 522, 523, 524, 529, 530, 599}) {
+        CHECK(protocol.is_retryable({status, "{}", headers}));
+    }
+}
+
+TEST_CASE("GrokProtocol - does not retry Cloudflare origin TLS failures",
+          "[grok][protocol][retry]") {
+    GrokProtocol protocol;
+    GrokResponsesProtocol responses;
+    cpr::Header headers;
+    CHECK_FALSE(protocol.is_retryable({525, "{}", headers}));
+    CHECK_FALSE(protocol.is_retryable({526, "{}", headers}));
+    CHECK_FALSE(responses.is_retryable({525, "{}", headers}));
+    CHECK(responses.is_retryable({530, "{}", headers}));
+}
+
+TEST_CASE("GrokProtocol - honors the server retry veto",
+          "[grok][protocol][retry]") {
+    GrokProtocol protocol;
+    cpr::Header headers{{"X-Should-Retry", "false"}};
+    CHECK_FALSE(protocol.is_retryable({503, "{}", headers}));
+}
+
 TEST_CASE("GrokProtocol - is_not_retryable for 4xx client errors", "[grok][protocol][retry]") {
     GrokProtocol protocol;
     cpr::Header headers;

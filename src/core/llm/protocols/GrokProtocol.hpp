@@ -158,8 +158,10 @@ public:
     /**
      * @brief Returns true for status codes that warrant automatic retry.
      *
-     * Retryable: 429 (rate limit), 500, 502, 503, 504, 529 (overloaded).
-     * Non-retryable: 400, 401, 403, 404.
+     * Retryable: 408, 409, 429, and transient 5xx responses, including xAI
+     * overload and Cloudflare edge failures. Cloudflare origin-TLS failures
+     * 525/526 are terminal, as is any response carrying
+     * `x-should-retry: false`.
      */
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
 
@@ -251,6 +253,11 @@ public:
     /// Injects the xAI hosted server-side tools when enabled.
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
 
+    /// xAI reports model-generation failures inside otherwise-successful SSE
+    /// responses. Classify those frames as transient stream failures so the
+    /// transport can safely retry attempts that emitted no output.
+    [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
+
     void prepare_headers(cpr::Header& headers,
                          const ChatRequest& request,
                          std::string_view base_url) override;
@@ -259,6 +266,8 @@ public:
     void enrich_rate_limit(std::string_view base_url,
                            const cpr::Header& request_headers,
                            const HttpResponse& response) override;
+    [[nodiscard]] bool is_retryable(
+        const HttpResponse& response) const noexcept override;
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override {
         return grok_rate_limit_;
     }

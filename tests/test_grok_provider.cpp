@@ -1007,6 +1007,35 @@ TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported model
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort")"));
 }
 
+TEST_CASE("GrokResponsesProtocol classifies generation failures as retryable stream errors",
+          "[grok][responses][sse][retry]") {
+    GrokResponsesProtocol protocol;
+
+    const auto result = protocol.parse_event(
+        "event: response.failed\n"
+        "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"Internal error during token generation\"}}}");
+
+    CHECK(result.stream_error);
+    CHECK(result.retryable_stream_error);
+    CHECK_FALSE(result.done);
+    CHECK(result.chunks.empty());
+    CHECK(result.stream_error_type == "server_error");
+    CHECK(result.stream_error_message == "Internal error during token generation");
+}
+
+TEST_CASE("GrokResponsesProtocol recognizes unframed error events",
+          "[grok][responses][sse][retry]") {
+    GrokResponsesProtocol protocol;
+
+    const auto result = protocol.parse_event(
+        R"({"type":"error","code":"internal_error","message":"temporary failure"})");
+
+    CHECK(result.stream_error);
+    CHECK(result.retryable_stream_error);
+    CHECK(result.stream_error_type == "internal_error");
+    CHECK(result.stream_error_message == "temporary failure");
+}
+
 TEST_CASE("Grok billing payload exposes the provider's real usage period",
           "[grok][billing][rate_limit]") {
     SECTION("weekly period with an explicit percentage") {
