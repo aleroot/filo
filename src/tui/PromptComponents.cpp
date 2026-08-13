@@ -3,12 +3,14 @@
 #include "Constants.hpp"
 #include "Conversation.hpp"
 #include "StringUtils.hpp"
+#include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ThreadCatalog.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
+#include "core/utils/PathUtils.hpp"
 #include "core/utils/StringUtils.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
@@ -114,104 +116,6 @@ std::string extract_patch_target(std::string_view patch) {
     }
 
     return "patch";
-}
-
-// --- Column layout helpers -------------------------------------------------
-// Terminal columns only line up when every cell occupies the same number of
-// display cells. std::format's width specifier counts bytes, which breaks on
-// UTF-8 and on strings that need truncating, so pad/trim by display width.
-
-std::string fit_column(std::string_view text, int width) {
-    if (width <= 0) {
-        return {};
-    }
-
-    const int text_width = string_width(text);
-    if (text_width == width) {
-        return std::string{text};
-    }
-    if (text_width < width) {
-        return std::string{text} + std::string(static_cast<std::size_t>(width - text_width), ' ');
-    }
-
-    std::string out;
-    int used = 0;
-    for (const auto& glyph : Utf8ToGlyphs(text)) {
-        if (glyph.empty()) {
-            continue;
-        }
-        const int glyph_width = string_width(glyph);
-        if (used + glyph_width > width - 1) {
-            break;
-        }
-        out += glyph;
-        used += glyph_width;
-    }
-    out += "\xe2\x80\xa6"; // ellipsis
-    used += 1;
-    if (used < width) {
-        out += std::string(static_cast<std::size_t>(width - used), ' ');
-    }
-    return out;
-}
-
-std::string fit_column_right(std::string_view text, int width) {
-    const int text_width = string_width(text);
-    if (text_width >= width) {
-        return fit_column(text, width);
-    }
-    return std::string(static_cast<std::size_t>(width - text_width), ' ') + std::string{text};
-}
-
-// Shorten an absolute path for display: collapse the user's home directory to
-// "~". Keeps the working-dir column readable without leaking the full path.
-std::string abbreviate_path(std::string_view path) {
-    if (path.empty()) {
-        return {};
-    }
-    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-        const std::string_view home_sv{home};
-        if (path.starts_with(home_sv)) {
-            return "~" + std::string{path.substr(home_sv.size())};
-        }
-    }
-    return std::string{path};
-}
-
-// Like fit_column, but truncates from the LEFT for paths: the distinguishing
-// part of a project path is its tail (the folder name), so "…/Projects/filo"
-// is far more useful than "~/Documents/Develop…".
-std::string fit_path_column(std::string_view path, int width) {
-    if (width <= 0) {
-        return {};
-    }
-    const int text_width = string_width(path);
-    if (text_width <= width) {
-        return fit_column(path, width);
-    }
-    // Walk glyphs right-to-left, keeping as many trailing glyphs as fit, then
-    // prepend an ellipsis.
-    const auto glyphs = Utf8ToGlyphs(path);
-    std::string tail;
-    int used = 1; // reserve one cell for the leading ellipsis
-    for (auto it = glyphs.rbegin(); it != glyphs.rend(); ++it) {
-        if (it->empty()) {
-            continue;
-        }
-        const int gw = string_width(*it);
-        if (used + gw > width) {
-            break;
-        }
-        tail.insert(tail.begin(), it->begin(), it->end());
-        used += gw;
-    }
-    tail.insert(tail.begin(), '\xe2'); // leading '…'
-    tail.insert(tail.begin() + 1, '\x80');
-    tail.insert(tail.begin() + 2, '\xa6');
-    if (used < width) {
-        tail += std::string(static_cast<std::size_t>(width - used), ' ');
-    }
-    return tail;
 }
 
 struct PermissionField {
@@ -1547,7 +1451,9 @@ Element render_session_picker_panel(
         cells.push_back(text(fit_column(relative, kTimeWidth)) | color(muted_color));
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_path_column(
-                s.working_dir.empty() ? std::string{"—"} : abbreviate_path(s.working_dir),
+                s.working_dir.empty()
+                    ? std::string{"—"}
+                    : core::utils::path::abbreviate_user_path(s.working_dir),
                 kDirWidth))
                         | color(s.working_dir.empty() ? muted_color : primary_color));
         cells.push_back(text(std::string{kGap}));

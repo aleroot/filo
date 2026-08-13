@@ -7,6 +7,8 @@
 #include "Conversation.hpp"
 #include "CodeBlockRunner.hpp"
 #include "CodeBlockRunServices.hpp"
+#include "FileSystemPicker.hpp"
+#include "FileSystemPickerView.hpp"
 #include "KeyInput.hpp"
 #include "SessionReplay.hpp"
 #include "SessionPicker.hpp"
@@ -33,6 +35,7 @@
 #include "core/memory/MemoryStore.hpp"
 #include "core/scm/ScmFactory.hpp"
 #include "core/history/PromptHistoryStore.hpp"
+#include "core/utils/PathUtils.hpp"
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/app.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -1146,6 +1149,12 @@ RunResult run(RunOptions opts) {
         std::vector<tui::LocalModelEntry> entries;
     };
     LocalModelPickerState local_model_picker_state;
+
+    // Reusable filesystem browser. The confirmation callback lives *beside* the
+    // state rather than inside it: the component stays free of application
+    // concerns, and the per-frame state snapshot stays a cheap value copy.
+    FileSystemPickerState file_picker_state;
+    std::function<void(const std::filesystem::path&)> file_picker_on_confirm;
 
     SessionPickerState session_picker_state;
 
@@ -4368,6 +4377,140 @@ RunResult run(RunOptions opts) {
         };
     };
 
+    // ── Reusable filesystem browser ──────────────────────────────────────────
+    // One entry point for every feature that needs a path from the user. The
+    // caller supplies *what* it wants (`FileSystemPickerRequest`) and *what to
+    // do with the answer*; overlay bookkeeping and the keyboard contract are
+    // handled once, here and in FileSystemPicker.
+
+    auto file_picker_quick_roots = [agent]() -> std::vector<FileSystemQuickRoot> {
+        std::vector<FileSystemQuickRoot> roots;
+        if (agent) {
+            const auto workspace = agent->workspace_snapshot();
+            if (!workspace.primary().empty()) {
+                roots.push_back({.label = "Workspace", .path = workspace.primary()});
+            }
+            for (const auto& extra : workspace.additional()) {
+                roots.push_back({.label = extra.filename().string(), .path = extra});
+            }
+        }
+        if (const auto home = core::utils::path::home_directory(); !home.empty()) {
+            roots.push_back({.label = "Home", .path = home});
+        }
+        return roots;
+    };
+
+    auto open_file_picker = [&](FileSystemPickerRequest request,
+                               std::function<void(const std::filesystem::path&)> on_confirm) {
+        if (request.quick_roots.empty()) {
+            request.quick_roots = file_picker_quick_roots();
+        }
+        // An empty start directory is fine: the component falls back through
+        // the working directory, the home directory, and finally the root.
+        {
+            std::lock_guard lock(ui_mutex);
+            open_file_system_picker(file_picker_state, std::move(request));
+            file_picker_on_confirm = std::move(on_confirm);
+            // Only one bottom panel can own the keyboard at a time.
+            command_option_picker_state.active = false;
+            model_picker_state.active = false;
+            model_provider_picker_state.active = false;
+            provider_model_picker_state.active = false;
+            local_model_picker_state.active = false;
+            settings_panel_state.active = false;
+        }
+        wake_ui();
+    };
+
+    /// `/workspace add` and `/workspace change` used to prefill the command and
+    /// leave the user to type an absolute path from memory. Both now browse.
+    auto open_workspace_directory_picker = [&](std::string_view action) -> bool {
+        const bool changing = action == "change";
+        if (!changing && !agent) {
+            return false;  // Nothing owns the workspace to extend.
+        }
+
+        FileSystemPickerRequest request{
+            .title = changing ? "CHANGE WORKING DIRECTORY" : "ADD WORKSPACE FOLDER",
+            // The panel documents its own keys; a caller hint should explain
+            // the consequence of choosing, which the keys cannot convey.
+            .hint = changing
+                ? "The folder you choose becomes the primary working directory."
+                : "The folder you choose gains session read/write access.",
+            .target = FileSystemPickerTarget::Directory,
+        };
+
+        open_file_picker(std::move(request), [&, changing](const std::filesystem::path& chosen) {
+            if (changing) {
+                const auto result = change_workspace_root(chosen.string());
+                append_history(std::format(
+                    "\n{}\n",
+                    result.ok ? "\xe2\x9c\x93  " + result.message
+                              : "\xe2\x9c\x97  " + result.message));
+                return;
+            }
+            const auto added = agent->grant_workspace_paths({chosen});
+            append_history(std::format(
+                "\n{}\n",
+                added > 0
+                    ? std::format("\xe2\x9c\x93  Added '{}' to the workspace.", chosen.string())
+                    : std::format(
+                        "\xe2\x9c\x97  '{}' was not added. It must be an existing directory "
+                        "that isn't already in scope.",
+                        chosen.string())));
+        });
+        return true;
+    };
+
+    /// Ctrl+B: pick a file from disk and drop it into the prompt as an
+    /// `@mention`, so attaching context no longer requires drag-and-drop.
+    auto open_attachment_picker = [&]() {
+        const std::filesystem::path workspace_root =
+            agent ? agent->workspace_snapshot().primary() : std::filesystem::path{};
+        open_file_picker(
+            FileSystemPickerRequest{
+                .title = "ATTACH FILE",
+                .hint = "The file you choose is inserted into the prompt "
+                        "as an @mention.",
+                .target = FileSystemPickerTarget::File,
+                .start_directory = workspace_root,
+            },
+            [&, workspace_root](const std::filesystem::path& chosen) {
+                // Workspace-relative mentions keep prompts short and portable;
+                // files outside it fall back to the absolute path.
+                std::error_code ec;
+                const auto relative = workspace_root.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::relative(chosen, workspace_root, ec);
+                const bool inside = !ec && !relative.empty()
+                    && !relative.generic_string().starts_with("..");
+                const std::string mention_path =
+                    inside ? relative.generic_string() : chosen.generic_string();
+
+                std::lock_guard lock(ui_mutex);
+                auto cursor = static_cast<std::size_t>(std::clamp(
+                    input_cursor_position, 0, static_cast<int>(input_text.size())));
+                // Keep the mention a standalone token when it lands after a word.
+                if (cursor > 0
+                    && !core::utils::ascii::is_space(
+                        static_cast<unsigned char>(input_text[cursor - 1]))) {
+                    input_text.insert(cursor, " ");
+                    ++cursor;
+                }
+                // Reuse the mention formatter so quoting and trailing-space
+                // rules match the `@` autocomplete exactly.
+                const auto completed = core::context::apply_mention_completion(
+                    input_text,
+                    core::context::ActiveMention{
+                        .replace_begin = cursor,
+                        .replace_end = cursor,
+                    },
+                    mention_path);
+                input_text = completed.text;
+                input_cursor_position = static_cast<int>(completed.cursor);
+            });
+    };
+
     auto open_command_option_picker = [&](std::string_view command_name) -> bool {
         CommandOptionPickerState next;
         next.active = true;
@@ -4401,16 +4544,18 @@ RunResult run(RunOptions opts) {
             next.on_select = switch_compression;
         } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
             next.title = "WORKSPACE";
-            next.help_text = "Enter to prefill the command, then type or paste the directory. Esc closes this panel.";
-            next.prefill_input = true;
+            next.help_text = "Enter opens a folder browser. Esc closes this panel.";
             next.options = {
                 {.value = "add", .label = "Add directory",
                  .description = "Grant this session read/write access to another directory."},
                 {.value = "change", .label = "Change directory",
                  .description = "Switch the primary working directory (like restarting in a new folder)."},
             };
-            next.on_select = [](std::string_view value) {
-                return std::format("/workspace {} ", value);
+            // Hands straight over to the folder browser; an empty result tells
+            // the picker plumbing that this selection reports its own outcome.
+            next.on_select = [&](std::string_view value) -> std::string {
+                open_workspace_directory_picker(value);
+                return {};
             };
         } else {
             return false;
@@ -6122,6 +6267,7 @@ RunResult run(RunOptions opts) {
                 || settings_panel_state.active
                 || remote_activity_panel_state.active
                 || prompts_picker_state.active
+                || file_picker_state.active
                 || session_picker_state.active) return;
         }
         if (input_text.empty()) return;
@@ -6164,6 +6310,7 @@ RunResult run(RunOptions opts) {
             .switch_compression_fn = switch_compression,
             .open_model_picker_fn = open_model_picker,
             .open_command_option_picker_fn = open_command_option_picker,
+            .open_directory_picker_fn = open_workspace_directory_picker,
             .open_settings_picker_fn = open_settings_picker,
             .open_threads_picker_fn = open_threads_picker,
             .open_sessions_picker_fn = open_sessions_picker,
@@ -6333,6 +6480,7 @@ RunResult run(RunOptions opts) {
                 || rewind_picker_state.active
                 || code_block_runner.active()
                 || conversation_search_state.active
+                || file_picker_state.active
                 || settings_panel_state.active) {
                 return true;
             }
@@ -7117,7 +7265,10 @@ RunResult run(RunOptions opts) {
         if (command_option_picker_was_active) {
             if (command_option_choice.has_value() && command_option_on_select) {
                 const std::string result = command_option_on_select(*command_option_choice);
-                if (command_option_prefill) {
+                if (result.empty()) {
+                    // The handler took over the interaction (e.g. it opened a
+                    // follow-up picker) and will report its own outcome.
+                } else if (command_option_prefill) {
                     std::lock_guard lock(ui_mutex);
                     input_text = result;
                     input_cursor_position = static_cast<int>(input_text.size());
@@ -7642,6 +7793,31 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
+        // ── Filesystem browser (folder / file picker) ─────────────────────────
+        // The component owns the whole keyboard contract; MainApp only decides
+        // what a confirmed path means, via the callback registered on open.
+        FileSystemPickerEventResult file_picker_result;
+        std::function<void(const std::filesystem::path&)> file_picker_confirm;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (file_picker_state.active) {
+                file_picker_result =
+                    handle_file_system_picker_event(file_picker_state, event);
+                if (file_picker_result.action != FileSystemPickerAction::None) {
+                    file_picker_confirm = std::exchange(file_picker_on_confirm, {});
+                }
+            }
+        }
+        if (file_picker_result.handled) {
+            // Invoked outside the lock: handlers may re-enter the UI state.
+            if (file_picker_result.action == FileSystemPickerAction::Confirm
+                && file_picker_confirm) {
+                file_picker_confirm(file_picker_result.path);
+            }
+            wake_ui();
+            return true;
+        }
+
         // ── Local model picker ────────────────────────────────────────────────
         bool local_model_picker_was_active = false;
         std::optional<std::filesystem::path> local_model_selected_path;
@@ -7796,6 +7972,11 @@ RunResult run(RunOptions opts) {
                 refresh_conversation_search_locked();
             }
             wake_ui();
+            return true;
+        }
+
+        if (is_ctrl_letter_event(event, 'b')) {  // Ctrl+B — browse for an attachment
+            open_attachment_picker();
             return true;
         }
 
@@ -8088,6 +8269,7 @@ RunResult run(RunOptions opts) {
         int                             local_model_picker_selected = 0;
         std::string                     local_model_picker_dir;
         std::vector<tui::LocalModelEntry> local_model_picker_entries;
+        FileSystemPickerState           file_picker_snapshot;
         bool                            session_picker_active = false;
         int                             session_picker_selected = 0;
         SessionPickerResource           session_picker_resource =
@@ -8177,6 +8359,7 @@ RunResult run(RunOptions opts) {
             local_model_picker_selected = local_model_picker_state.selected;
             local_model_picker_dir      = local_model_picker_state.current_dir.string();
             local_model_picker_entries  = local_model_picker_state.entries;
+            file_picker_snapshot        = file_picker_state;
             session_picker_active = session_picker_state.active;
             session_picker_selected = session_picker_state.selected;
             session_picker_resource = session_picker_state.resource;
@@ -8383,6 +8566,8 @@ RunResult run(RunOptions opts) {
                 review_picker_input,
                 review_picker_base_refs,
                 review_picker_base_ref_selected);
+        } else if (file_picker_snapshot.active) {
+            bottom_el = render_file_system_picker_panel(file_picker_snapshot);
         } else if (local_model_picker_active) {
             bottom_el = render_local_model_picker_panel(
                 local_model_picker_dir,

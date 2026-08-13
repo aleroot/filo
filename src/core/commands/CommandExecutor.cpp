@@ -28,6 +28,7 @@
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/utils/Base64.hpp"
+#include "core/utils/PathUtils.hpp"
 #include "GoalExecutor.hpp"
 #include "ReviewExecutor.hpp"
 
@@ -458,15 +459,7 @@ void emit_info_lines(const CommandContext& ctx,
     }
 }
 
-std::filesystem::path expand_user_path(std::string_view input) {
-    std::string text = trim_copy(input);
-    if (text == "~" || text.starts_with("~/")) {
-        if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
-            return std::filesystem::path(home) / text.substr(text == "~" ? 1 : 2);
-        }
-    }
-    return std::filesystem::path(text);
-}
+using core::utils::path::expand_user_path;
 
 std::string format_token_count(int32_t n) {
     return core::budget::formatters::CompactTokenCountFormatter{}.format(n);
@@ -1483,6 +1476,7 @@ public:
             "  Ctrl+P   Open the model picker without clearing the current input\n"
             "  Ctrl+T   Browse and reuse previous prompts\n"
             "  Ctrl+F   Search the conversation history\n"
+            "  Ctrl+B   Browse the filesystem and attach a file as an @mention\n"
             "  Ctrl+G   Open the current input in the configured prompt editor\n"
             "  Ctrl+R   Inspect and run fenced code from the latest response\n"
             "  F2       Cycle agent mode (BUILD → DEBUG → RESEARCH → EXECUTE)\n"
@@ -1814,8 +1808,9 @@ public:
             ctx.append_history_fn(
                 "\nℹ  Usage:\n"
                 "   /workspace                 Show the current workspace roots\n"
-                "   /workspace add <path>      Grant this session access to another directory\n"
-                "   /workspace change <path>   Switch the primary working directory\n");
+                "   /workspace add [path]      Grant this session access to another directory\n"
+                "   /workspace change [path]   Switch the primary working directory\n"
+                "   Omit the path to browse for a folder instead of typing one.\n");
         };
 
         if (tokens.empty()) {
@@ -1837,6 +1832,11 @@ public:
             return;
         }
         if (tokens.size() < 2) {
+            // No path given: browsing beats guessing. Only fall back to the
+            // usage text when this front-end has no picker (e.g. headless).
+            if (ctx.open_directory_picker_fn && ctx.open_directory_picker_fn(action)) {
+                return;
+            }
             usage();
             return;
         }

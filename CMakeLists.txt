@@ -169,6 +169,8 @@ set(FILO_CORE_SOURCES
     src/tui/CodeBlockRunner.cpp
     src/tui/CodeBlockRunServices.cpp
     src/tui/DiffPreview.cpp
+    src/tui/FileSystemPicker.cpp
+    src/tui/FileSystemPickerView.cpp
     src/tui/editor/ExternalEditorController.cpp
     src/tui/editor/PromptBuffer.cpp
     src/tui/editor/PromptEditorCatalog.cpp
@@ -182,6 +184,7 @@ set(FILO_CORE_SOURCES
     src/tui/ThreadRuntime.cpp
     src/tui/SessionReplay.cpp
     src/tui/Text.cpp
+    src/tui/TextLayout.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
     src/tui/QuestionDialog.cpp
@@ -599,6 +602,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
+    tests/test_file_system_picker.cpp
     tests/test_question_dialog.cpp
     tests/test_history_component.cpp
     tests/test_key_input.cpp
@@ -774,6 +778,7 @@ source_group(
         tests/test_conversation.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
+        tests/test_file_system_picker.cpp
         tests/test_question_dialog.cpp
         tests/test_history_component.cpp
         tests/test_key_input.cpp

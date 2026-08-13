@@ -71,6 +71,10 @@ struct CommandContext {
     std::function<std::string(std::string_view)> switch_compression_fn = {};
     std::function<bool()> open_model_picker_fn = {};
     std::function<bool(std::string_view)> open_command_option_picker_fn = {};
+    /// Browse the filesystem for a directory instead of demanding a typed path.
+    /// @p action is the verb the chosen folder should be applied to
+    /// ("add" | "change"). Returns false when no browser is available.
+    std::function<bool(std::string_view)> open_directory_picker_fn = {};
     std::function<bool()> open_settings_picker_fn = {};
     /// Browse runtimes currently loaded in this process.
     std::function<bool()> open_threads_picker_fn = {};
