@@ -625,6 +625,42 @@ TEST_CASE("ShellTool heredoc content survives the command wrapper",
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
+TEST_CASE("ShellTool working_dir wrapper preserves a trailing heredoc delimiter",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    SECTION("unquoted delimiter") {
+        // The heredoc deliberately ends the command.  The working-directory
+        // subshell must put its closing ')' on a later line or bash sees
+        // `EOF)` instead of the required standalone delimiter and waits until
+        // timeout.  Expansion also proves the command ran in working_dir.
+        auto res = tool.execute(
+            R"json({"command":"cat <<EOF\ncwd=$PWD\nEOF","working_dir":"/var","timeout_seconds":2})json");
+
+        // macOS canonicalizes /var to /private/var; Linux keeps /var.
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("cwd="));
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("/var"));
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+        REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+    }
+
+    SECTION("quoted delimiter") {
+        // Quoted delimiters are the common form for embedded Python scripts
+        // because they prevent the shell from expanding the script body.
+        auto res = tool.execute(
+            R"json({"command":"cat <<'PY'\nquoted_heredoc_body\nPY","working_dir":"/var","timeout_seconds":2})json");
+
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("quoted_heredoc_body"));
+        REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+        REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+    }
+
+    // Completion detection must remain aligned after the multiline command.
+    auto next = tool.execute(R"({"command":"echo sync_after_working_dir_heredoc"})");
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("sync_after_working_dir_heredoc"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
 TEST_CASE("ShellTool trailing comment does not break the command wrapper",
           "[integration][tools][shell]") {
     ShellTool tool;
@@ -635,6 +671,20 @@ TEST_CASE("ShellTool trailing comment does not break the command wrapper",
         R"({"command":"echo trailing_comment_ok # done"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("trailing_comment_ok"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+
+    // The working-directory subshell also has closing syntax.  It must be on
+    // the next line so this comment cannot swallow the closing parenthesis.
+    auto working_dir_res = tool.execute(
+        R"({"command":"echo working_dir_comment_ok # done","working_dir":"/var","timeout_seconds":2})");
+    REQUIRE_THAT(
+        working_dir_res,
+        Catch::Matchers::ContainsSubstring("working_dir_comment_ok"));
+    REQUIRE_THAT(
+        working_dir_res,
+        Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    REQUIRE_THAT(
+        working_dir_res,
+        !Catch::Matchers::ContainsSubstring("TIMEOUT"));
 }
 
 TEST_CASE("ShellTool comment-only command is a harmless no-op",

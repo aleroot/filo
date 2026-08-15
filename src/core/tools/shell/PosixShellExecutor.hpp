@@ -42,7 +42,12 @@ public:
             effective += detail::shell_single_quote(working_dir);
             effective += "' && ";
             effective += command;
-            effective += ')';
+            // Keep the subshell terminator on its own line.  Appending shell
+            // syntax directly to an arbitrary command can corrupt constructs
+            // whose meaning depends on the line boundary: `EOF` becomes
+            // `EOF)` for a trailing heredoc, while a trailing comment swallows
+            // the `)`.  Either case prevents reliable completion detection.
+            effective += "\n)";
         }
 
         detail::ShellSession::Result r = session_.run(effective, timeout);
