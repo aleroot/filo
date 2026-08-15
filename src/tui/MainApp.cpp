@@ -8919,12 +8919,20 @@ RunResult run(RunOptions opts) {
             turn_activity_state,
             ui_show_spinner.load(std::memory_order_relaxed),
             tick));
+        // The inbound MCP server status is a standalone affordance: instead of
+        // stacking it after the turn indicators, it gets its own centered slot
+        // in the status bar (composed below).
+        bool remote_mcp_status_visible = false;
+        Element remote_mcp_status_el = text("");
         if (opts.remote_mcp_server_enabled) {
             const auto remote_status = format_remote_footer_status(
                 remote_activity_snapshot);
-            left_items.push_back(
-                render_remote_footer_status(remote_status)
-                | reflect(remote_activity_pill_box));
+            if (!remote_status.label.empty()) {
+                remote_mcp_status_visible = true;
+                remote_mcp_status_el =
+                    render_remote_footer_status(remote_status)
+                    | reflect(remote_activity_pill_box);
+            }
         }
         left_items.push_back(guardrail_el);
         left_items.push_back(queued_steering_el);
@@ -8936,15 +8944,29 @@ RunResult run(RunOptions opts) {
             || opts.remote_mcp_server_enabled
             || queued_steering_count > 0;
         auto left_el = show_status_footer
-            ? hbox(std::move(left_items)) | xflex
+            ? hbox(std::move(left_items))
             : text("");
 
-        auto status_el = (show_status_footer || quit_confirm_active())
-            ? hbox({
-                left_el,
-                right_el,
-            }) | xflex
-            : text("");
+        auto status_el = text("");
+        if (show_status_footer || quit_confirm_active()) {
+            if (remote_mcp_status_visible) {
+                // Symmetric fillers center the MCP status pill in the space
+                // between the two clusters; it yields to them on narrow
+                // terminals instead of overlapping either side.
+                status_el = hbox({
+                    left_el,
+                    filler(),
+                    std::move(remote_mcp_status_el),
+                    filler(),
+                    std::move(right_el),
+                }) | xflex;
+            } else {
+                status_el = hbox({
+                    left_el | xflex,
+                    right_el,
+                }) | xflex;
+            }
+        }
 
         Elements window_rows;
         window_rows.reserve(5);

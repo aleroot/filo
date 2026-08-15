@@ -28,9 +28,10 @@ struct RemoteFooterStatus {
     const core::mcp::RemoteActivitySnapshot& snapshot,
     std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
-/// Render the compact footer status with a stable visual gap from the turn
-/// activity spinner that precedes it. Tone is communicated with foreground
-/// color only so the persistent status remains visually lightweight.
+/// Render the compact footer status pill. It is hosted in its own centered
+/// slot in the status bar, so it carries no leading gap: padding would offset
+/// it from the middle. Tone is communicated with foreground color only so the
+/// persistent status remains visually lightweight.
 [[nodiscard]] ftxui::Element render_remote_footer_status(
     const RemoteFooterStatus& status);
 

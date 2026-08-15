@@ -114,25 +114,23 @@ TEST_CASE("remote footer uses protocol client name and generic fallback",
     CHECK(status.label.find("Lampo") == std::string::npos);
 }
 
-TEST_CASE("remote footer separates the MCP label and uses foreground color only",
+TEST_CASE("remote footer pill has no embedded gap and uses foreground color only",
           "[tui][mcp][remote-activity][rendering]") {
     const tui::RemoteFooterStatus status{
         .label = "Lampo · seen 6m 16s ago",
         .tone = tui::RemoteFooterTone::neutral,
     };
-    auto footer = ftxui::hbox({
-        ftxui::text("○"),
-        tui::render_remote_footer_status(status),
-    });
+    // The pill is hosted in its own centered status-bar slot, so any embedded
+    // padding would visibly offset it from the middle of the bar.
     auto screen = ftxui::Screen::Create(
         ftxui::Dimension::Fixed(40),
         ftxui::Dimension::Fixed(1));
-    ftxui::Render(screen, footer);
+    ftxui::Render(screen, tui::render_remote_footer_status(status));
 
     const std::string rendered = strip_ansi(screen.ToString());
-    CHECK(rendered.starts_with("○  ⚡ Lampo · seen 6m 16s ago "));
-    CHECK(screen.CellAt(3, 0).background_color == ftxui::Color::Default);
-    CHECK(screen.CellAt(6, 0).background_color == ftxui::Color::Default);
+    CHECK(rendered.starts_with("⚡ Lampo · seen 6m 16s ago "));
+    CHECK(screen.CellAt(0, 0).background_color == ftxui::Color::Default);
+    CHECK(screen.CellAt(4, 0).background_color == ftxui::Color::Default);
 
     using ToneColor = std::pair<tui::RemoteFooterTone, ftxui::Color>;
     const std::array<ToneColor, 5> tone_colors{{
@@ -152,7 +150,7 @@ TEST_CASE("remote footer separates the MCP label and uses foreground color only"
             tone_screen,
             tui::render_remote_footer_status({.label = "MCP", .tone = tone}));
 
-        CHECK(tone_screen.CellAt(2, 0).foreground_color == expected_color);
+        CHECK(tone_screen.CellAt(0, 0).foreground_color == expected_color);
         for (int x = 0; x < tone_screen.dimx(); ++x) {
             CHECK(tone_screen.CellAt(x, 0).background_color
                   == ftxui::Color::Default);

@@ -294,14 +294,12 @@ Element render_remote_footer_status(const RemoteFooterStatus& status) {
             break;
     }
 
-    // Keep two cells of separation from the assistant activity indicator (or
-    // the preceding footer item when no turn is active). FTXUI already reserves
-    // both terminal cells occupied by U+26A1, so it must remain unconstrained
-    // rather than being forced into a one-cell box.
-    return hbox({
-        text("  "),
-        text("⚡ " + status.label + " ") | color(foreground),
-    });
+    // FTXUI already reserves both terminal cells occupied by U+26A1, so it
+    // must remain unconstrained rather than being forced into a one-cell box.
+    // The pill carries no leading padding: separation is supplied by the
+    // centered layout that hosts it, and padding here would offset it from
+    // the middle of the status bar.
+    return text("⚡ " + status.label + " ") | color(foreground);
 }
 
 Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
