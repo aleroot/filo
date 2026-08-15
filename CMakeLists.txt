@@ -222,6 +222,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ProviderClientIdentity.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
+    src/core/llm/protocols/ZaiProtocol.cpp
     src/core/llm/protocols/OpenAIUsage.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
     src/core/llm/protocols/MistralProtocol.cpp

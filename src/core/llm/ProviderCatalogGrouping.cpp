@@ -11,7 +11,8 @@
 namespace core::llm {
 namespace {
 
-constexpr std::array<std::string_view, 4> kZaiCodingModels{{
+constexpr std::array<std::string_view, 5> kZaiCodingModels{{
+    "glm-5.3",
     "glm-5.2",
     "glm-5-turbo",
     "glm-4.7",
@@ -98,8 +99,11 @@ constexpr std::array<std::string_view, 5> kQwenTokenPlanTextModels{{
     if (group_name == "zai" && is_zai_coding_source(provider_name)) {
         source.category_label = "Coding endpoint.";
         source.registry_model_filter = zai_coding_filter();
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "zai") {
+        source.category_label = "General API.";
         source.registry_model_filter = zai_regular_filter();
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "kimi" && is_kimi_code_source(provider_name)) {
         source.service_id = std::string(kimi_service_id(KimiService::Code));
         source.category_label = "Kimi Code subscription.";
@@ -202,6 +206,15 @@ std::string provider_catalog_group_name(std::string_view provider_name) {
         return std::string(definition->catalog_group);
     }
     return std::string(provider_name);
+}
+
+std::string provider_catalog_selection_key(
+    std::string_view service_id,
+    std::string_view model_id) {
+    std::string key = normalized(service_id);
+    key.push_back('\x1f');
+    key += normalized(model_id);
+    return key;
 }
 
 ProviderCatalogGroup provider_catalog_group_for(

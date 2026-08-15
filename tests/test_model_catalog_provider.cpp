@@ -883,7 +883,28 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     auto zai = make_model_catalog_provider(
         core::config::ApiType::OpenAI,
         "zai");
-    CHECK(zai == nullptr);
+    REQUIRE(zai != nullptr);
+    CHECK(zai->provider_name() == "zai");
+    CHECK(zai->model_list_path() == "/models");
+
+    auto zai_coding = make_model_catalog_provider(
+        core::config::ApiType::OpenAI,
+        "zai-coding");
+    REQUIRE(zai_coding != nullptr);
+    CHECK(zai_coding->provider_name() == "zai-coding");
+    CHECK(zai_coding->model_list_path() == "/models");
+
+    const auto zai_result = zai_coding->parse_models_response(R"JSON({
+      "object": "list",
+      "data": [
+        {"id": "glm-5.3", "object": "model"},
+        {"id": "glm-future-live", "object": "model"}
+      ]
+    })JSON");
+    REQUIRE(zai_result.ok());
+    REQUIRE(zai_result.models.size() == 2);
+    CHECK(zai_result.models[0].canonical_id == "glm-5.3");
+    CHECK(zai_result.models[1].canonical_id == "glm-future-live");
 }
 
 TEST_CASE("Remote model discovery skips quietly without credentials",
@@ -1501,7 +1522,7 @@ TEST_CASE("Model discovery follows the protocol catalog capability",
     CHECK(antigravity_result.ok());
 }
 
-TEST_CASE("Model discovery explicitly skips providers without callable catalogs",
+TEST_CASE("Model discovery distinguishes authenticated catalogs from unsupported ones",
           "[llm][model-catalog][discovery]") {
     core::llm::protocols::OpenAIProtocol protocol;
 
@@ -1511,8 +1532,9 @@ TEST_CASE("Model discovery explicitly skips providers without callable catalogs"
         "https://api.z.ai/api/paas/v4",
         nullptr,
         protocol);
-    CHECK(zai.permanent_skip);
+    CHECK_FALSE(zai.permanent_skip);
     CHECK_FALSE(zai.attempted);
+    CHECK(zai.error == "missing credentials for remote model discovery");
 
     // Azure's data-plane model list contains base models, while requests
     // require user-chosen deployment names. Listing it would populate the

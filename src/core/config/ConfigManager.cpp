@@ -575,7 +575,7 @@ AppConfig make_default_config() {
     add_provider("kimi-128k",      "moonshot-v1-128k");
     add_provider("qwen-token-plan", {}, "high");
     add_provider("zai",            "glm-5.1");
-    add_provider("zai-coding",     "glm-4.7");
+    add_provider("zai-coding",     "glm-5.3");
     add_provider("ollama",         "llama3", {}, {}, "http://localhost:11434");
 
     SubagentConfig general;
@@ -644,7 +644,7 @@ std::string default_config_json() {
         "kimi-128k":      { "model": "moonshot-v1-128k" },
         "qwen-token-plan":{ "reasoning_effort": "high" },
         "zai":            { "model": "glm-5.1" },
-        "zai-coding":     { "model": "glm-4.7" },
+        "zai-coding":     { "model": "glm-5.3" },
         "ollama":         { "model": "llama3", "base_url": "http://localhost:11434" }
     },
     "subagents": {

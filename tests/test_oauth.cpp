@@ -1095,7 +1095,7 @@ TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and c
             != std::string::npos);
     REQUIRE(overlay.find(R"("zai":{"model":"glm-5.1","api_key":"test-zai-key"})")
             != std::string::npos);
-    REQUIRE(overlay.find(R"("zai-coding":{"model":"glm-5.2","api_key":"test-zai-key"})")
+    REQUIRE(overlay.find(R"("zai-coding":{"model":"glm-5.3","api_key":"test-zai-key"})")
             != std::string::npos);
 }
 

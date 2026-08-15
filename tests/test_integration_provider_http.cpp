@@ -16,6 +16,7 @@
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/protocols/ZaiProtocol.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -517,7 +518,7 @@ TEST_CASE("Z.ai protocol enriches usage windows from dashboard quota endpoint",
                    ++requests;
                    authorization = req.get_header_value("Authorization");
                    res.set_content(
-                       R"({"code":200,"msg":"Operation successful","data":{"limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"usage":100,"currentValue":0,"remaining":100,"percentage":0,"nextResetTime":1785332618972,"usageDetails":[{"modelCode":"search-prime","usage":0},{"modelCode":"web-reader","usage":0},{"modelCode":"zread","usage":0}]},{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":11,"nextResetTime":1782759322207},{"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":2,"nextResetTime":1783345418971}],"level":"lite"},"success":true})",
+                       R"({"code":200,"msg":"Operation successful","data":{"limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"usage":100,"currentValue":0,"remaining":100,"percentage":0,"nextResetTime":1785332618972,"usageDetails":[{"modelCode":"search-prime","usage":0},{"modelCode":"web-reader","usage":0},{"modelCode":"zread","usage":0}]},{"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":11,"nextResetTime":1782759322207},{"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":2,"nextResetTime":1783345418971}],"level":"lite"},"success":true})",
                        "application/json");
                });
 

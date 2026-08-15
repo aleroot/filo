@@ -31,12 +31,6 @@ make_model_catalog_provider(
             if (provider_name.starts_with("mistral")) {
                 return std::make_unique<MistralModelCatalogProvider>(name);
             }
-            // Z.AI's published OpenAPI specification does not expose a model
-            // listing operation. Avoid probing a known-unsupported route.
-            if (provider_name == "zai"
-                || provider_name.starts_with("zai-")) {
-                return nullptr;
-            }
             return std::make_unique<OpenAICompatibleModelCatalogProvider>(
                 name,
                 include_session_only_models);

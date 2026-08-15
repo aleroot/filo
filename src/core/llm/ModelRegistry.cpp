@@ -116,6 +116,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Z.ai GLM Models
     // -----------------------------------------------------------------------
+    { "glm-5.3",          1000000 },
     { "glm-5.2",          1000000 },
     { "glm-5-turbo",     200000 },
     { "glm-5.1",         200000 },
@@ -725,6 +726,20 @@ std::vector<ModelInfo> build_zai_catalog() {
         static_cast<uint32_t>(ModelCapability::Reasoning);
 
     return {
+        {
+            .canonical_id = "glm-5.3",
+            .aliases = {},
+            .display_name = "GLM-5.3",
+            .provider = "zai",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 64'000,
+            .capabilities = CAP_GLM,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.0, 0.0, -1.0, -1.0},
+            .knowledge_cutoff = "2026-04",
+            .constraints = kStandardConstraints,
+        },
         {
             .canonical_id = "glm-5.2",
             .aliases = {},

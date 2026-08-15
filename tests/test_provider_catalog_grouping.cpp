@@ -22,16 +22,29 @@ TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
     REQUIRE(groups[1].provider_name == "zai");
     REQUIRE(groups[1].sources.size() == 2);
     REQUIRE(groups[1].sources[0].provider_name == "zai");
+    REQUIRE(groups[1].sources[0].category_label == "General API.");
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.1"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.3"));
     REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.2"));
 
     REQUIRE(groups[1].sources[1].provider_name == "zai-coding");
     REQUIRE(groups[1].sources[1].category_label == "Coding endpoint.");
+    REQUIRE(groups[1].sources[1].includes_registry_model("glm-5.3"));
     REQUIRE(groups[1].sources[1].includes_registry_model("glm-5.2"));
     REQUIRE(groups[1].sources[1].includes_registry_model("glm-5-turbo"));
     REQUIRE(groups[1].sources[1].includes_registry_model("glm-4.7"));
     REQUIRE(groups[1].sources[1].includes_registry_model("glm-4.5-air"));
     REQUIRE_FALSE(groups[1].sources[1].includes_registry_model("glm-5.1"));
+    REQUIRE(groups[1].sources[1].includes_api_model("glm-future-live"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("embedding-4"));
+
+    const auto general_key = core::llm::provider_catalog_selection_key(
+        groups[1].sources[0].service_id, "GLM-5.3");
+    const auto coding_key = core::llm::provider_catalog_selection_key(
+        groups[1].sources[1].service_id, "glm-5.3");
+    REQUIRE(general_key != coding_key);
+    REQUIRE(general_key == core::llm::provider_catalog_selection_key(
+        "ZAI", "glm-5.3"));
 }
 
 TEST_CASE("Provider catalog group lookup maps category source names to visible provider",

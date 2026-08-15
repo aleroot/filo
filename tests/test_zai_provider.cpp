@@ -6,6 +6,7 @@
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/llm/protocols/ZaiProtocol.hpp"
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -157,6 +158,74 @@ TEST_CASE("Z.ai protocol parses streamed reasoning_content",
     REQUIRE(result.chunks[0].content == "answer");
 }
 
+TEST_CASE("Z.ai protocol distinguishes 429 business errors",
+          "[zai][protocol][errors]") {
+    ZaiProtocol general;
+
+    const HttpResponse insufficient_balance{
+        429,
+        R"({"error":{"code":"1113","message":"Insufficient balance or no resource package."}})",
+        {},
+    };
+    general.on_response(insufficient_balance);
+    CHECK_FALSE(general.is_retryable(insufficient_balance));
+    CHECK_FALSE(general.last_rate_limit().is_rate_limited);
+    const std::string balance_message =
+        general.format_error_message(insufficient_balance);
+    CHECK(balance_message.find("Z.ai Error 1113") != std::string::npos);
+    CHECK(balance_message.find("General API") != std::string::npos);
+    CHECK(balance_message.find("Coding endpoint") != std::string::npos);
+
+    const HttpResponse request_throttle{
+        429,
+        R"({"error":{"code":"1302","message":"Rate limit reached for requests"}})",
+        {},
+    };
+    general.on_response(request_throttle);
+    CHECK(general.is_retryable(request_throttle));
+    CHECK(general.last_rate_limit().is_rate_limited);
+
+    const HttpResponse overloaded{
+        429,
+        R"({"error":{"code":1305,"message":"The service may be temporarily overloaded"}})",
+        {},
+    };
+    general.on_response(overloaded);
+    CHECK(general.is_retryable(overloaded));
+    CHECK_FALSE(general.last_rate_limit().is_rate_limited);
+
+    const HttpResponse model_not_in_plan{
+        429,
+        R"({"error":{"code":"1311","message":"The current plan does not include this model"}})",
+        {},
+    };
+    general.on_response(model_not_in_plan);
+    CHECK_FALSE(general.is_retryable(model_not_in_plan));
+    CHECK_FALSE(general.last_rate_limit().is_rate_limited);
+
+    const HttpResponse resettable_limit{
+        429,
+        R"({"error":{"code":"1316","message":"Usage limit reached for the past 5 hours"}})",
+        {},
+    };
+    general.on_response(resettable_limit);
+    CHECK_FALSE(general.is_retryable(resettable_limit));
+    CHECK(general.last_rate_limit().is_rate_limited);
+}
+
+TEST_CASE("Z.ai protocol does not invent quota state for unstructured 429 responses",
+          "[zai][protocol][errors]") {
+    ZaiProtocol protocol;
+    const HttpResponse response{429, "upstream rejected request", {}};
+
+    protocol.on_response(response);
+
+    CHECK_FALSE(protocol.is_retryable(response));
+    CHECK_FALSE(protocol.last_rate_limit().is_rate_limited);
+    CHECK(protocol.format_error_message(response)
+          == "[HTTP Error: 429 - upstream rejected request]");
+}
+
 TEST_CASE("Z.ai protocol parses unified 5h and 7d utilization headers",
           "[zai][rate_limit]") {
     ZaiProtocol protocol;
@@ -200,10 +269,13 @@ TEST_CASE("Z.ai Coding Plan protocol enables Z.ai thinking config",
 TEST_CASE("ModelRegistry includes Z.ai GLM coding models", "[zai][registry]") {
     auto& registry = ModelRegistry::instance();
 
+    REQUIRE(registry.has_model("glm-5.3"));
     REQUIRE(registry.has_model("glm-5.2"));
     REQUIRE(registry.has_model("glm-5-turbo"));
     REQUIRE(registry.has_model("glm-4.7"));
     REQUIRE(registry.has_model("glm-4.5-air"));
+    REQUIRE(get_max_context_size("glm-5.3") == 1000000);
+    REQUIRE(registry.get_info("glm-5.3")->max_output_tokens == 128000);
     REQUIRE(get_max_context_size("glm-5.2") == 1000000);
     REQUIRE(registry.get_info("glm-5.2")->max_output_tokens == 128000);
     REQUIRE(get_max_context_size("glm-5-turbo") == 200000);
@@ -211,7 +283,7 @@ TEST_CASE("ModelRegistry includes Z.ai GLM coding models", "[zai][registry]") {
     REQUIRE(get_max_context_size("glm-4.5-air") == 200000);
 }
 
-TEST_CASE("Z.ai Coding Plan protocol rejects non-plan models before HTTP",
+TEST_CASE("Z.ai Coding Plan protocol accepts future GLM models and rejects other families",
           "[zai][validation][coding]") {
     ZaiCodingProtocol protocol;
 
@@ -220,10 +292,15 @@ TEST_CASE("Z.ai Coding Plan protocol rejects non-plan models before HTTP",
     valid.messages.push_back(Message{.role = "user", .content = "hi"});
     REQUIRE_NOTHROW(protocol.prepare_request(valid));
 
+    ChatRequest future;
+    future.model = "glm-future-live";
+    future.messages.push_back(Message{.role = "user", .content = "hi"});
+    REQUIRE_NOTHROW(protocol.prepare_request(future));
+
     ChatRequest invalid;
-    invalid.model = "glm-5.1";
+    invalid.model = "gpt-5";
     invalid.messages.push_back(Message{.role = "user", .content = "hi"});
     REQUIRE_THROWS_WITH(
         protocol.prepare_request(invalid),
-        Catch::Matchers::ContainsSubstring("supports only glm-5.2"));
+        Catch::Matchers::ContainsSubstring("requires a GLM model"));
 }

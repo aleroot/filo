@@ -8,6 +8,7 @@
 #include "providers/LlamaCppProvider.hpp"
 #endif
 #include "protocols/OpenAIProtocol.hpp"
+#include "protocols/ZaiProtocol.hpp"
 #include "protocols/OpenAIResponsesProtocol.hpp"
 #include "protocols/MistralProtocol.hpp"
 #include "protocols/KimiProtocol.hpp"

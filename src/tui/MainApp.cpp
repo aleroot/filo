@@ -1940,8 +1940,8 @@ RunResult run(RunOptions opts) {
                     msg += std::format(" (retry in {}s)",
                                        rate_limit_state.latest.retry_after);
                 }
-                msg += ". The request was blocked; it will resume when the "
-                       "limit resets.\n";
+                msg += ". The request was blocked. Try again after the "
+                       "provider's limit resets.\n";
                 append_history(msg);
             }
             return;
@@ -3340,7 +3340,7 @@ RunResult run(RunOptions opts) {
 
     auto provider_model_rows = [&](std::string_view provider_name) {
         std::vector<tui::ModelPickerRow> rows;
-        std::unordered_set<std::string> seen;
+        std::unordered_set<std::string> seen_selections;
         std::unordered_set<std::string> seen_services;
 
         const auto catalog_group =
@@ -3349,7 +3349,8 @@ RunResult run(RunOptions opts) {
             return rows;
         }
 
-        auto add_row = [&](std::string id,
+        auto add_row = [&](std::string_view service_id,
+                           std::string id,
                            std::string selector,
                            std::string source_provider,
                            std::string description,
@@ -3358,7 +3359,9 @@ RunResult run(RunOptions opts) {
             if (id.empty()) {
                 id = "<provider default>";
             }
-            if (!seen.insert(id).second) {
+            const std::string selection_key =
+                core::llm::provider_catalog_selection_key(service_id, id);
+            if (!seen_selections.insert(selection_key).second) {
                 return;
             }
             const bool active = model_selection_mode == ModelSelectionMode::Manual
@@ -3458,6 +3461,7 @@ RunResult run(RunOptions opts) {
                         core::llm::ModelRegistry::instance().lookup(
                             configured_default));
                 add_row(
+                    effective_source->service_id,
                     configured_default,
                     configured_default,
                     source_provider,
@@ -3469,6 +3473,7 @@ RunResult run(RunOptions opts) {
             }
             for (const auto& model : resolved.models) {
                 add_row(
+                    effective_source->service_id,
                     model.canonical_id,
                     model.canonical_id,
                     source_provider,
@@ -3481,7 +3486,8 @@ RunResult run(RunOptions opts) {
 
         if (rows.empty()) {
             const auto& source_provider = catalog_group.sources.front().provider_name;
-            add_row("<provider default>",
+            add_row(catalog_group.sources.front().service_id,
+                    "<provider default>",
                     "",
                     source_provider,
                     "Use the provider default configured by the backend.",

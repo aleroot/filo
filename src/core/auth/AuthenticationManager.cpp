@@ -575,11 +575,11 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "glm-5.1",
         std::vector<ApiKeyProviderSeed>{{
             .provider_name = "zai-coding",
-            .model = "glm-5.2",
+            .model = "glm-5.3",
         }},
         "ZAI_API_KEY",
         "The same key is also saved for the Coding Plan endpoint "
-        "for glm-5.2, glm-5-turbo, glm-4.7, and glm-4.5-air."));
+        "with account-scoped models discovered automatically."));
     return manager;
 }
 

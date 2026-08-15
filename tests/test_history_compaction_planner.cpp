@@ -12,6 +12,7 @@
 #include "core/llm/protocols/OllamaProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/protocols/ZaiProtocol.hpp"
 
 #include <array>
 #include <memory>

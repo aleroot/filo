@@ -50,6 +50,18 @@ struct ProviderCatalogGroup {
 
 [[nodiscard]] std::string provider_catalog_group_name(std::string_view provider_name);
 
+/**
+ * Stable identity for a selectable model on one provider service.
+ *
+ * Model IDs are not globally unique across services: the same ID can be
+ * offered by both a pay-as-you-go API and a subscription endpoint with
+ * different billing and entitlement semantics. Picker deduplication must
+ * therefore preserve the service dimension.
+ */
+[[nodiscard]] std::string provider_catalog_selection_key(
+    std::string_view service_id,
+    std::string_view model_id);
+
 [[nodiscard]] ProviderCatalogGroup provider_catalog_group_for(
     std::string_view provider_name,
     std::span<const std::string> configured_provider_names);
