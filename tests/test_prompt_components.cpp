@@ -129,7 +129,7 @@ TEST_CASE("render_startup_banner_panel shows tabs only for multiple threads",
 
     std::vector<ftxui::Box> tab_hitboxes;
     auto multiple = render_startup_banner_panel(
-        "provider", "model", 0, {}, {}, "12:34:56",
+        "provider", "model", 0, "AGENTS.md", {}, "12:34:56",
         {
             {.label = "filo", .active = true},
             {.label = "filo 2", .running = true},
@@ -141,19 +141,27 @@ TEST_CASE("render_startup_banner_panel shows tabs only for multiple threads",
     const auto output = strip_ansi(multiple_screen.ToString());
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring(" filo "));
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("filo 2"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("AGENTS.md"));
 
     const auto clock_position = output.find("12:34:56");
+    const auto context_position = output.find("AGENTS.md");
     const auto provider_position = output.find("provider: provider");
     const auto tabs_position = output.find(" filo ");
     REQUIRE(clock_position != std::string::npos);
+    REQUIRE(context_position != std::string::npos);
     REQUIRE(provider_position != std::string::npos);
     REQUIRE(tabs_position != std::string::npos);
-    // Clock owns the upper-right corner; tabs share the banner's bottom row
-    // with provider/model metadata and therefore occupy the lower-right.
+    // Multi-thread mode gives the upper-right column to the clock and context
+    // source on consecutive rows. Tabs continue to share the banner's bottom
+    // row with provider/model metadata.
+    CHECK(output.rfind('\n', clock_position)
+          < output.rfind('\n', context_position));
+    CHECK(output.rfind('\n', context_position)
+          < output.rfind('\n', tabs_position));
     CHECK(output.rfind('\n', provider_position)
           == output.rfind('\n', tabs_position));
-    CHECK(output.rfind('\n', clock_position)
-          < output.rfind('\n', tabs_position));
+    CHECK(output.rfind('\n', context_position)
+          != output.rfind('\n', provider_position));
 
     REQUIRE(tab_hitboxes.size() == 2);
     CHECK(tab_hitboxes[0].x_min <= tab_hitboxes[0].x_max);

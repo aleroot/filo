@@ -845,9 +845,10 @@ RunResult run(RunOptions opts) {
     std::string input_text;
     int input_cursor_position = 0;
     DoubleEscapeState double_escape_state;
-    // Double-press-to-quit confirmation for Ctrl+D (on an empty prompt).
-    // Stores the key label that armed it so the footer hint names the right
-    // key, plus the expiry deadline. Ctrl+C quits immediately when idle.
+    // Double-press-to-quit confirmation for Ctrl+D on the main thread (with an
+    // empty prompt). Secondary threads use one empty-prompt press to close the
+    // tab. Stores the key label that armed app exit so the footer hint names
+    // the right key, plus the expiry deadline. Ctrl+C quits immediately when idle.
     std::string quit_confirm_key;
     std::chrono::steady_clock::time_point quit_confirm_deadline =
         std::chrono::steady_clock::time_point::min();
@@ -5117,6 +5118,24 @@ RunResult run(RunOptions opts) {
         return std::nullopt;
     };
 
+    auto thread_has_active_work = [&](const ThreadRuntime::Ptr& runtime) {
+        if (!runtime) {
+            return false;
+        }
+        const std::string target_session_id = runtime->session_id();
+        const bool has_active_shell = std::ranges::any_of(
+            core::tools::ShellTool::active_commands(),
+            [&](const auto& command) {
+                return command.session_id == target_session_id;
+            });
+        return runtime->turn_active()
+            || runtime->queued_turn_count() > 0
+            || runtime->workers_in_flight() > 0
+            || has_active_shell
+            || (direct_shell_state
+                && direct_shell_state->has_active_for(target_session_id));
+    };
+
     // Archive and release one live runtime without deleting its saved
     // session. The process's main/current/running threads are intentionally
     // protected so closing can never invalidate shared UI state or active
@@ -5134,15 +5153,7 @@ RunResult run(RunOptions opts) {
         if (runtime == thread_runtimes.current()) {
             return "Switch to another thread before closing the current one.";
         }
-        const bool has_active_shell = std::ranges::any_of(
-            core::tools::ShellTool::active_commands(),
-            [&](const auto& command) {
-                return command.session_id == target_session_id;
-            });
-        if (runtime->turn_active() || runtime->queued_turn_count() > 0
-            || has_active_shell
-            || (direct_shell_state
-                && direct_shell_state->has_active_for(target_session_id))) {
+        if (thread_has_active_work(runtime)) {
             return "Stop the thread's active work before closing it.";
         }
 
@@ -5168,6 +5179,30 @@ RunResult run(RunOptions opts) {
         session_stats_registry->reset(target_session_id);
         core::budget::BudgetTracker::get_instance().reset_session(target_session_id);
         return std::nullopt;
+    };
+
+    // Ctrl+D on an empty secondary thread behaves like closing a terminal tab:
+    // return to the persistent main runtime, then archive and release the tab
+    // that was visible. The normal close path remains the single authority for
+    // persistence, leases, stats, and budget cleanup.
+    auto close_current_secondary_thread = [&]() -> std::optional<std::string> {
+        auto closing_runtime = thread_runtimes.current();
+        if (!closing_runtime || closing_runtime == main_runtime) {
+            return "The main thread cannot be closed.";
+        }
+        if (thread_has_active_work(closing_runtime)) {
+            return "Stop the thread's active work before closing it.";
+        }
+
+        const std::string closing_session_id = closing_runtime->session_id();
+        const auto main_data = live_session_data(main_runtime);
+        if (!main_data.has_value()) {
+            return "The main thread is no longer available.";
+        }
+        if (const auto error = resume_session(*main_data); error.has_value()) {
+            return std::format("Could not return to the main thread: {}", *error);
+        }
+        return close_thread(closing_session_id);
     };
 
     auto latest_completed_assistant_output = [&]() {
@@ -8174,13 +8209,22 @@ RunResult run(RunOptions opts) {
             return navigate_history_next();
         }
 
-        // ── Ctrl+D: delete-right in prompt, double-press to exit on empty ────
+        // ── Ctrl+D: delete-right; close a secondary tab or confirm app exit ─
         if (is_ctrl_d_event(event)) {
             if (!input_text.empty()) {
                 // Normalize terminal-specific Ctrl+D variants through PromptInput's
                 // canonical control-byte handler.
                 reset_quit_confirm();
                 input_component->OnEvent(Event::Special({4}));
+                return true;
+            }
+
+            if (current_runtime != main_runtime) {
+                reset_quit_confirm();
+                if (const auto error = close_current_secondary_thread();
+                    error.has_value()) {
+                    append_history(std::format("\n✗  {}\n", *error));
+                }
                 return true;
             }
 

@@ -696,8 +696,10 @@ Element render_startup_banner_panel(std::string_view provider_name,
     // The logo anchors the top-left of the banner. A live clock is pinned to
     // the opposite top-right corner: the logo block sets the row height and the
     // single-line clock is top-aligned within that hbox, so it lands on the
-    // first row. The lower-right corner is composed separately on the summary
-    // row so thread tabs sit at the opposite corner of the same header.
+    // first row. In multi-thread mode the context-source label moves into the
+    // same right-hand column, directly below the clock, leaving the summary
+    // row exclusively for runtime metadata and thread tabs. With one thread,
+    // the original bottom-row placement is preserved.
     Elements logo_rows;
     logo_rows.reserve(kBannerLogoLines.size());
     for (const auto line : kBannerLogoLines) {
@@ -734,10 +736,17 @@ Element render_startup_banner_panel(std::string_view provider_name,
         }
         rendered_thread_tabs = hbox(std::move(tabs)) | ftxui::align_right;
     }
+    Elements banner_right_column{std::move(clock)};
+    if (show_thread_tabs && !context_sources_label.empty()) {
+        banner_right_column.push_back(
+            text(" " + std::string(context_sources_label) + " ")
+                | color(Color::GrayLight)
+                | ftxui::align_right);
+    }
     rows.push_back(hbox({
         vbox(std::move(logo_rows)),
         filler(),
-        vbox({std::move(clock)}),
+        vbox(std::move(banner_right_column)),
     }));
 
     rows.push_back(text(""));
@@ -751,7 +760,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
             text(summary) | color(Color::White),
             filler(),
         };
-        if (!context_sources_label.empty()) {
+        if (!show_thread_tabs && !context_sources_label.empty()) {
             summary_row.push_back(
                 text(" " + std::string(context_sources_label) + " ")
                     | color(Color::GrayLight));

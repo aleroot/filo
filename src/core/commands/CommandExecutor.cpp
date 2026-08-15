@@ -1483,7 +1483,7 @@ public:
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
             "  Ctrl+O   Toggle verbose output view (compact/full)\n"
             "  Ctrl+X   Open the prompt editor (Gemini CLI-compatible alias)\n"
-            "  Ctrl+D   Delete char right; when input is empty press twice to quit\n"
+            "  Ctrl+D   Delete char right; empty: close secondary or double-press on main to quit\n"
             "  Ctrl+L   Clear the screen\n"
             "  Esc      Stop active generation or terminal command\n"
             "  Esc Esc  Clear draft to history, or open rewind menu on empty input\n"

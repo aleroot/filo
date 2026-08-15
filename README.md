@@ -107,7 +107,7 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 - Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
 - Agent Skills support with `.filo/skills` and on-demand activation
 - `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
-- First-class thread management (`Ctrl+N` new thread, `/threads` for active runtimes; `Ctrl+H`/`Ctrl+J` aliases on enhanced-keyboard terminals) — project-named tabs let you switch without tmux/screen while hidden threads keep working. In `/threads`, `C` archives and closes an idle non-main thread without deleting its saved session. `/sessions` remains the saved-conversation manager.
+- First-class thread management (`Ctrl+N` new thread, `/threads` for active runtimes; `Ctrl+H`/`Ctrl+J` aliases on enhanced-keyboard terminals) — project-named tabs let you switch without tmux/screen while hidden threads keep working. On an empty prompt, `Ctrl+D` archives and closes the current idle secondary thread; the main thread retains double-`Ctrl+D` app exit. In `/threads`, `C` closes any idle non-main thread without deleting its saved session. `/sessions` remains the saved-conversation manager.
 - Session persistence and resume
 - Global + workspace config layering
 - MCP dispatcher shared across stdio and HTTP transports
