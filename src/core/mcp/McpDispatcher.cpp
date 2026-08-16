@@ -38,12 +38,11 @@
 #include <fstream>
 #include <string_view>
 #include <array>
+#include <atomic>
 #include <format>
-#include <mutex>
 #include <optional>
 #include <ranges>
 #include <system_error>
-#include <unordered_map>
 #include <vector>
 
 namespace core::mcp {
@@ -60,26 +59,27 @@ namespace uri = core::utils::uri;
 
 /// MCP protocol versions this server understands, in preference order.
 /// The first entry is returned when the client requests an unknown version.
-constexpr std::array<std::string_view, 2> kSupportedProtocolVersions{
-    "2025-11-25",  ///< Current version — includes structuredContent in tools/call
+constexpr std::array<std::string_view, 3> kSupportedProtocolVersions{
+    "2026-07-28",  ///< Stateless MCP
+    "2025-11-25",  ///< Legacy Streamable HTTP
     "2024-11-05",  ///< Legacy version
 };
 
 /// Default version announced and used when no matching version is negotiated.
-constexpr std::string_view kDefaultProtocolVersion = kSupportedProtocolVersions.front();
-constexpr std::string_view kTaskProtocolVersion = "2025-11-25";
+constexpr std::string_view kLegacyProtocolVersion = "2025-11-25";
+constexpr std::string_view kDefaultProtocolVersion = kLegacyProtocolVersion;
 constexpr const char* kTasksExtensionIdentifier = "io.modelcontextprotocol/tasks";
 
-/// Human-readable instructions embedded in the initialize response.
-/// Lampo's local model reads these to understand the server's capabilities and
-/// preferred usage patterns without trial-and-error.
+/// Human-readable instructions returned by discovery and legacy initialize.
 constexpr std::string_view kServerInstructions =
-    "filo-mcp provides local coding tools outside Lampo's sandbox. "
+    "filo-mcp provides local coding tools in the configured workspace. "
     "Paths may be absolute or relative to the active workspace. "
     "Prefer file_search or grep_search before read_file, and use line slices for large files. "
     "Prefer search_replace for exact edits or apply_patch for diffs; write_file replaces a whole file. "
-    "Shell state persists between calls; check run_terminal_command.exit_code. "
-    "write_file.previous_content supports diff display without another read.";
+    "Check run_terminal_command.exit_code after shell calls. "
+    "write_file.previous_content supports diff display without another read. "
+    "delegate_task start/resume run in the background: task-capable clients receive an MCP "
+    "task handle; other clients receive the completed tool result.";
 
 namespace {
 
@@ -90,7 +90,7 @@ namespace {
 /**
  * @brief Typed container for a JSON-RPC 2.0 request @c id.
  *
- * MCP 2025-11-25 §3.1 restricts request IDs to integers and strings.
+ * MCP restricts request IDs to integers and strings.
  * Null, boolean, float, object, and array IDs are invalid.
  *
  * @c Kind::none means no @c id field was present — the message is a
@@ -112,54 +112,6 @@ struct RequestId {
 /// @returns @c true if @p version is in the server's supported list.
 [[nodiscard]] bool is_supported_protocol_version(std::string_view version) {
     return std::ranges::find(kSupportedProtocolVersions, version) != kSupportedProtocolVersions.end();
-}
-
-[[nodiscard]] std::mutex& negotiated_protocols_mutex() {
-    static std::mutex mutex;
-    return mutex;
-}
-
-[[nodiscard]] std::unordered_map<std::string, std::string>& negotiated_protocols() {
-    static std::unordered_map<std::string, std::string> protocols;
-    return protocols;
-}
-
-[[nodiscard]] std::unordered_map<std::string, bool>& negotiated_task_clients() {
-    static std::unordered_map<std::string, bool> clients;
-    return clients;
-}
-
-[[nodiscard]] std::string session_protocol_key(const core::context::SessionContext& context) {
-    return context.session_id.empty() ? std::string("__default__") : context.session_id;
-}
-
-void remember_negotiated_session(const core::context::SessionContext& context,
-                                 std::string_view protocol,
-                                 bool client_supports_tasks) {
-    std::lock_guard lock(negotiated_protocols_mutex());
-    const auto key = session_protocol_key(context);
-    negotiated_protocols()[key] = std::string(protocol);
-    negotiated_task_clients()[key] = client_supports_tasks;
-}
-
-[[nodiscard]] std::string negotiated_protocol_for_session(
-    const core::context::SessionContext& context) {
-    std::lock_guard lock(negotiated_protocols_mutex());
-    const auto it = negotiated_protocols().find(session_protocol_key(context));
-    if (it == negotiated_protocols().end()) {
-        return std::string(kDefaultProtocolVersion);
-    }
-    return it->second;
-}
-
-[[nodiscard]] bool session_supports_tasks(const core::context::SessionContext& context) {
-    return negotiated_protocol_for_session(context) == kTaskProtocolVersion;
-}
-
-[[nodiscard]] bool session_client_supports_tasks(const core::context::SessionContext& context) {
-    std::lock_guard lock(negotiated_protocols_mutex());
-    const auto it = negotiated_task_clients().find(session_protocol_key(context));
-    return it != negotiated_task_clients().end() && it->second;
 }
 
 /**
@@ -239,7 +191,6 @@ void write_response_id(JsonWriter& w, const RequestId& id) {
 
 struct InitializeInfo {
     std::string protocol_version;
-    bool client_supports_tasks = false;
 };
 
 [[nodiscard]] bool has_tasks_extension_capability(
@@ -269,11 +220,6 @@ struct InitializeInfo {
     if (params["protocolVersion"].get_string().get(requested) == simdjson::SUCCESS
         && is_supported_protocol_version(requested)) {
         info.protocol_version = std::string(requested);
-    }
-
-    simdjson::ondemand::object capabilities;
-    if (params["capabilities"].get_object().get(capabilities) == simdjson::SUCCESS) {
-        info.client_supports_tasks = has_tasks_extension_capability(capabilities);
     }
 
     return info;
@@ -535,13 +481,47 @@ struct PromptTemplate {
  * @param result  A pre-serialised JSON value string for the @c result field.
  * @return The complete JSON-RPC response string.
  */
-static std::string make_response(const RequestId& id, std::string_view result) {
-    JsonWriter w(64 + result.size());
+[[nodiscard]] std::string modernize_result(std::string_view result) {
+    if (result.size() < 2 || result.front() != '{' || result.back() != '}') {
+        return std::string(result);
+    }
+
+    const std::string_view inner = result.substr(1, result.size() - 2);
+    JsonWriter w(result.size() + 160);
+    {
+        auto object = w.object();
+        w.key("_meta");
+        {
+            auto meta = w.object();
+            w.key("io.modelcontextprotocol/serverInfo");
+            {
+                auto server = w.object();
+                w.kv_str("name", "filo-mcp").comma()
+                    .kv_str("version", core::version::value);
+            }
+        }
+        if (!inner.starts_with(R"("resultType":)")) {
+            w.comma().kv_str("resultType", "complete");
+        }
+        if (!inner.empty()) {
+            w.comma().raw(inner);
+        }
+    }
+    return std::move(w).take();
+}
+
+static std::string make_response(const RequestId& id,
+                                 std::string_view result,
+                                 McpProtocolMode mode) {
+    const std::string modern_result = mode == McpProtocolMode::stateless
+        ? modernize_result(result)
+        : std::string(result);
+    JsonWriter w(64 + modern_result.size());
     {
         auto _obj = w.object();
         w.kv_str("jsonrpc", "2.0").comma();
         write_response_id(w, id);
-        w.comma().kv_raw("result", result);
+        w.comma().kv_raw("result", modern_result);
     }
     return std::move(w).take();
 }
@@ -564,6 +544,36 @@ static std::string make_error(const RequestId& id, int code, std::string_view ms
         {
             auto _err = w.object();
             w.kv_num("code", code).comma().kv_str("message", msg);
+        }
+    }
+    return std::move(w).take();
+}
+
+[[nodiscard]] std::string make_missing_task_capability_error(const RequestId& id) {
+    JsonWriter w(256);
+    {
+        auto object = w.object();
+        w.kv_str("jsonrpc", "2.0").comma();
+        write_response_id(w, id);
+        w.comma().key("error");
+        {
+            auto error = w.object();
+            w.kv_num("code", -32021).comma()
+                .kv_str("message", "Missing required client capability.").comma()
+                .key("data");
+            {
+                auto data = w.object();
+                w.key("requiredCapabilities");
+                {
+                    auto capabilities = w.object();
+                    w.key("extensions");
+                    {
+                        auto extensions = w.object();
+                        w.key(kTasksExtensionIdentifier);
+                        { auto tasks = w.object(); }
+                    }
+                }
+            }
         }
     }
     return std::move(w).take();
@@ -643,7 +653,7 @@ static constexpr std::string_view kInvalidRequest{
  *
  * ### Emitted tool object fields (MCP 2025-11-25)
  * - @c name        — programmatic identifier
- * - @c title       — human-readable display name (optional, aids Lampo UI)
+ * - @c title       — human-readable display name (optional, aids client UIs)
  * - @c description — prose description for the LLM
  * - @c inputSchema — JSON Schema object built from @c ToolDefinition::parameters
  * - @c annotations — behavioral hints (@c readOnlyHint, @c destructiveHint,
@@ -659,7 +669,9 @@ static const std::string& tools_list_result() {
         JsonWriter w(8192);
         {
             auto _root = w.object();
-            w.key("tools");
+            w.kv_num("ttlMs", 0).comma()
+                .kv_str("cacheScope", "private").comma()
+                .key("tools");
             {
                 auto _arr = w.array();
                 bool first_tool = true;
@@ -760,10 +772,6 @@ struct ParsedPromptGetRequest {
                                                   const core::context::SessionContext& context) {
     const bool has_prompts = !discover_prompt_templates().empty();
     const InitializeInfo initialize = parse_initialize_info(root);
-    remember_negotiated_session(
-        context,
-        initialize.protocol_version,
-        initialize.client_supports_tasks);
     JsonWriter rw(1024);
     {
         auto _res = rw.object();
@@ -776,14 +784,6 @@ struct ParsedPromptGetRequest {
             {
                 auto _tools = rw.object();
                 rw.kv_bool("listChanged", false);
-            }
-            if (initialize.protocol_version == kTaskProtocolVersion) {
-                rw.comma().key("extensions");
-                {
-                    auto _extensions = rw.object();
-                    rw.key(kTasksExtensionIdentifier);
-                    auto _tasks = rw.object();
-                }
             }
             rw.comma().key("resources");
             {
@@ -838,11 +838,51 @@ struct ParsedPromptGetRequest {
     return std::move(rw).take();
 }
 
+[[nodiscard]] std::string build_discover_result() {
+    const bool has_prompts = !discover_prompt_templates().empty();
+    JsonWriter rw(1024);
+    {
+        auto result = rw.object();
+        rw.key("supportedVersions");
+        {
+            auto versions = rw.array();
+            for (std::size_t index = 0; index < kSupportedProtocolVersions.size(); ++index) {
+                if (index != 0) rw.comma();
+                rw.str(kSupportedProtocolVersions[index]);
+            }
+        }
+        rw.comma().key("capabilities");
+        {
+            auto capabilities = rw.object();
+            rw.key("tools");
+            { auto tools = rw.object(); }
+            rw.comma().key("resources");
+            { auto resources = rw.object(); }
+            if (has_prompts) {
+                rw.comma().key("prompts");
+                auto prompts = rw.object();
+            }
+            rw.comma().key("extensions");
+            {
+                auto extensions = rw.object();
+                rw.key(kTasksExtensionIdentifier);
+                auto tasks = rw.object();
+            }
+        }
+        rw.comma().kv_str("instructions", kServerInstructions)
+            .comma().kv_num("ttlMs", 0)
+            .comma().kv_str("cacheScope", "private");
+    }
+    return std::move(rw).take();
+}
+
 [[nodiscard]] std::string build_resources_templates_list_result() {
     JsonWriter rw(128);
     {
         auto _res = rw.object();
-        rw.key("resourceTemplates");
+        rw.kv_num("ttlMs", 0).comma()
+            .kv_str("cacheScope", "private").comma()
+            .key("resourceTemplates");
         {
             auto _arr = rw.array();
         }
@@ -856,7 +896,9 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(512 + prompts.size() * 256);
     {
         auto _res = rw.object();
-        rw.key("prompts");
+        rw.kv_num("ttlMs", 0).comma()
+            .kv_str("cacheScope", "private").comma()
+            .key("prompts");
         {
             auto _arr = rw.array();
             bool first_prompt = true;
@@ -893,7 +935,9 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(2048);
     {
         auto _res = rw.object();
-        rw.key("resources");
+        rw.kv_num("ttlMs", 0).comma()
+            .kv_str("cacheScope", "private").comma()
+            .key("resources");
         {
             auto _arr = rw.array();
 
@@ -1034,7 +1078,9 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(4096);
     {
         auto _res = rw.object();
-        rw.key("contents");
+        rw.kv_num("ttlMs", 0).comma()
+            .kv_str("cacheScope", "private").comma()
+            .key("contents");
         {
             auto _arr = rw.array();
             auto _item = rw.object();
@@ -1216,7 +1262,8 @@ private:
 
 [[nodiscard]] RpcExpected<std::string> build_tool_call_result(
     const ParsedToolCallRequest& request,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
     auto& sm = core::tools::ToolManager::get_instance();
     auto tool_def = sm.get_tool_definition(request.name);
@@ -1231,27 +1278,25 @@ private:
 
     RemoteToolCallReporter remote_reporter(
         context, request.name, request.arguments_json);
+    auto execution_context = context;
+    const bool modern = mode == McpProtocolMode::stateless;
+    if (modern) {
+        static std::atomic<uint64_t> next_request_scope{1};
+        execution_context.session_id = std::format(
+            "modern-request-{}",
+            next_request_scope.fetch_add(1, std::memory_order_relaxed));
+    }
     const std::string tool_result = sm.execute_tool(
         request.name,
         request.arguments_json,
-        context);
+        execution_context);
+    if (modern) {
+        sm.clear_session_state(execution_context.session_id);
+    }
     const ToolCallResultClassification classification =
         classify_tool_call_payload(tool_result);
     remote_reporter.finish(tool_result, classification.is_error);
     return build_call_tool_result_from_payload(tool_result, classification);
-}
-
-[[nodiscard]] bool is_long_running_delegate_task_call(const ParsedToolCallRequest& request) {
-    if (request.name != core::tools::TaskTool::kToolName) return false;
-
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(request.arguments_json).get(doc) != simdjson::SUCCESS) return false;
-
-    std::string_view action;
-    if (doc["action"].get(action) != simdjson::SUCCESS) return false;
-
-    return action == "start" || action == "resume";
 }
 
 [[nodiscard]] RpcExpected<std::string> build_prompt_get_result(
@@ -1291,18 +1336,21 @@ private:
 
 [[nodiscard]] std::string build_task_state_json(
     const core::mcp::McpTaskManager::TaskState& task,
-    const std::optional<core::mcp::McpTaskManager::ResultPayload>& payload = std::nullopt) {
+    const std::optional<core::mcp::McpTaskManager::ResultPayload>& payload = std::nullopt,
+    std::optional<std::string_view> result_type = std::nullopt) {
     JsonWriter writer(512 + (payload.has_value() ? payload->result_json.size() + payload->error_message.size() : 0));
     {
         auto root = writer.object();
+        if (result_type.has_value()) {
+            writer.kv_str("resultType", *result_type).comma();
+        }
         writer.kv_str("taskId", task.task_id).comma();
         writer.kv_str("status", task.status).comma();
         writer.kv_str("statusMessage", task.status_message).comma();
         writer.kv_str("createdAt", task.created_at).comma();
         writer.kv_str("lastUpdatedAt", task.last_updated_at);
-        if (task.ttl_ms.has_value()) {
-            writer.comma().kv_num("ttlMs", *task.ttl_ms);
-        }
+        if (task.ttl_ms.has_value()) writer.comma().kv_num("ttlMs", *task.ttl_ms);
+        else writer.comma().key("ttlMs").null_val();
         if (task.poll_interval_ms.has_value()) {
             writer.comma().kv_num("pollIntervalMs", *task.poll_interval_ms);
         }
@@ -1322,25 +1370,26 @@ private:
     return std::move(writer).take();
 }
 
+/// Long-running delegations are the ones worth wrapping in an MCP task: `start`
+/// and `resume` hand work to a background worker, while `status`, `list`, and
+/// `cancel` answer immediately and should stay plain tool calls.
+[[nodiscard]] bool is_long_running_delegate_task_call(const ParsedToolCallRequest& request) {
+    if (request.name != core::tools::TaskTool::kToolName) return false;
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    if (parser.parse(request.arguments_json).get(doc) != simdjson::SUCCESS) return false;
+
+    std::string_view action;
+    if (doc["action"].get(action) != simdjson::SUCCESS) return false;
+
+    return action == "start" || action == "resume";
+}
+
 [[nodiscard]] std::string build_create_task_result(
     const core::mcp::McpTaskManager::CreateResult& create_result)
 {
-    JsonWriter writer(512 + create_result.immediate_response.size());
-    {
-        auto root = writer.object();
-        writer.kv_str("resultType", "task").comma();
-        writer.kv_raw("task", build_task_state_json(create_result.task));
-        if (!create_result.immediate_response.empty()) {
-            writer.comma().key("_meta");
-            {
-                auto meta = writer.object();
-                writer.kv_str(
-                    "io.modelcontextprotocol/model-immediate-response",
-                    create_result.immediate_response);
-            }
-        }
-    }
-    return std::move(writer).take();
+    return build_task_state_json(create_result.task, std::nullopt, "task");
 }
 
 [[nodiscard]] RpcExpected<std::string> parse_task_id_param(
@@ -1358,39 +1407,64 @@ private:
     return std::string(task_id);
 }
 
+[[nodiscard]] bool request_supports_tasks(simdjson::ondemand::object& root) {
+    simdjson::ondemand::object params;
+    if (root["params"].get_object().get(params) != simdjson::SUCCESS) return false;
+    simdjson::ondemand::object meta;
+    if (params["_meta"].get_object().get(meta) != simdjson::SUCCESS) return false;
+    simdjson::ondemand::object capabilities;
+    if (meta["io.modelcontextprotocol/clientCapabilities"]
+            .get_object().get(capabilities) != simdjson::SUCCESS) return false;
+    return has_tasks_extension_capability(capabilities);
+}
+
 using MethodHandler = std::string (*)(
     const RequestId&,
     simdjson::ondemand::object&,
-    const core::context::SessionContext&);
+    const core::context::SessionContext&,
+    McpProtocolMode);
 
 [[nodiscard]] std::string handle_initialize(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
-    return make_response(id, build_initialize_result(root, context));
+    return make_response(id, build_initialize_result(root, context), mode);
+}
+
+[[nodiscard]] std::string handle_server_discover(
+    const RequestId& id,
+    simdjson::ondemand::object&,
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
+{
+    return make_response(id, build_discover_result(), mode);
 }
 
 [[nodiscard]] std::string handle_resources_templates_list(
     const RequestId& id,
     simdjson::ondemand::object&,
-    [[maybe_unused]] const core::context::SessionContext& context)
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
 {
-    return make_response(id, build_resources_templates_list_result());
+    return make_response(id, build_resources_templates_list_result(), mode);
 }
 
 [[nodiscard]] std::string handle_prompts_list(
     const RequestId& id,
     simdjson::ondemand::object&,
-    [[maybe_unused]] const core::context::SessionContext& context)
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
 {
-    return make_response(id, build_prompts_list_result(discover_prompt_templates()));
+    return make_response(id, build_prompts_list_result(discover_prompt_templates()), mode);
 }
 
 [[nodiscard]] std::string handle_prompts_get(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    [[maybe_unused]] const core::context::SessionContext& context)
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
 {
     auto request = parse_prompt_get_request(root);
     if (!request) return make_rpc_error(id, request.error());
@@ -1398,21 +1472,23 @@ using MethodHandler = std::string (*)(
     auto result = build_prompt_get_result(*request);
     if (!result) return make_rpc_error(id, result.error());
 
-    return make_response(id, *result);
+    return make_response(id, *result, mode);
 }
 
 [[nodiscard]] std::string handle_resources_list(
     const RequestId& id,
     simdjson::ondemand::object&,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
-    return make_response(id, build_resources_list_result(context));
+    return make_response(id, build_resources_list_result(context), mode);
 }
 
 [[nodiscard]] std::string handle_resources_read(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
     auto path = parse_resources_read_path(root);
     if (!path) return make_rpc_error(id, path.error());
@@ -1420,21 +1496,23 @@ using MethodHandler = std::string (*)(
     auto result = build_resources_read_result(*path, context);
     if (!result) return make_rpc_error(id, result.error());
 
-    return make_response(id, *result);
+    return make_response(id, *result, mode);
 }
 
 [[nodiscard]] std::string handle_tools_list(
     const RequestId& id,
     simdjson::ondemand::object&,
-    [[maybe_unused]] const core::context::SessionContext& context)
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
 {
-    return make_response(id, tools_list_result());
+    return make_response(id, tools_list_result(), mode);
 }
 
 [[nodiscard]] std::string handle_tools_call(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
     auto request = parse_tool_call_request(root);
     if (!request) return make_rpc_error(id, request.error());
@@ -1445,9 +1523,9 @@ using MethodHandler = std::string (*)(
         return make_error(id, -32602, std::format("Unknown tool: {}", request->name));
     }
 
+    // Task augmentation is negotiated independently on each stateless request.
     if (request->client_supports_tasks
-        && session_client_supports_tasks(context)
-        && session_supports_tasks(context)
+        && mode == McpProtocolMode::stateless
         && is_long_running_delegate_task_call(*request)) {
         if (auto validation_error = validate_tool_arguments(*tool_def, request->arguments_json)) {
             return make_error(id, -32602, *validation_error);
@@ -1458,22 +1536,26 @@ using MethodHandler = std::string (*)(
             request->arguments_json,
             context,
             std::nullopt);
-        return make_response(id, build_create_task_result(create_result));
+        return make_response(id, build_create_task_result(create_result), mode);
     }
 
-    auto result = build_tool_call_result(*request, context);
+    auto result = build_tool_call_result(*request, context, mode);
     if (!result) return make_rpc_error(id, result.error());
 
-    return make_response(id, *result);
+    return make_response(id, *result, mode);
 }
 
 [[nodiscard]] std::string handle_tasks_get(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
-    if (!session_supports_tasks(context)) {
+    if (mode != McpProtocolMode::stateless) {
         return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
+    }
+    if (!request_supports_tasks(root)) {
+        return make_missing_task_capability_error(id);
     }
 
     auto task_id = parse_task_id_param(root);
@@ -1485,16 +1567,21 @@ using MethodHandler = std::string (*)(
     }
     return make_response(
         id,
-        build_task_state_json(snapshot->task, snapshot->result));
+        build_task_state_json(snapshot->task, snapshot->result),
+        mode);
 }
 
 [[nodiscard]] std::string handle_tasks_cancel(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
-    if (!session_supports_tasks(context)) {
+    if (mode != McpProtocolMode::stateless) {
         return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
+    }
+    if (!request_supports_tasks(root)) {
+        return make_missing_task_capability_error(id);
     }
 
     auto task_id = parse_task_id_param(root);
@@ -1506,19 +1593,23 @@ using MethodHandler = std::string (*)(
         case McpTaskManager::CancelError::not_found:
             return make_error(id, -32602, std::format("Task not found: {}", *task_id));
         case McpTaskManager::CancelError::already_terminal:
-            return make_response(id, "{}");
+            return make_response(id, "{}", mode);
         }
     }
-    return make_response(id, "{}");
+    return make_response(id, "{}", mode);
 }
 
 [[nodiscard]] std::string handle_tasks_update(
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
-    if (!session_supports_tasks(context)) {
+    if (mode != McpProtocolMode::stateless) {
         return make_error(id, -32601, "Task methods are not available for the negotiated MCP protocol.");
+    }
+    if (!request_supports_tasks(root)) {
+        return make_missing_task_capability_error(id);
     }
 
     auto task_id = parse_task_id_param(root);
@@ -1528,15 +1619,16 @@ using MethodHandler = std::string (*)(
     if (!snapshot.has_value()) {
         return make_error(id, -32602, std::format("Task not found: {}", *task_id));
     }
-    return make_response(id, "{}");
+    return make_response(id, "{}", mode);
 }
 
 [[nodiscard]] std::string handle_ping(
     const RequestId& id,
     simdjson::ondemand::object&,
-    [[maybe_unused]] const core::context::SessionContext& context)
+    const core::context::SessionContext&,
+    McpProtocolMode mode)
 {
-    return make_response(id, "{}");
+    return make_response(id, "{}", mode);
 }
 
 struct MethodRoute {
@@ -1544,7 +1636,8 @@ struct MethodRoute {
     MethodHandler handler;
 };
 
-constexpr std::array<MethodRoute, 12> kMethodRoutes{{
+constexpr std::array<MethodRoute, 13> kMethodRoutes{{
+    {"server/discover", &handle_server_discover},
     {"initialize", &handle_initialize},
     {"prompts/list", &handle_prompts_list},
     {"prompts/get", &handle_prompts_get},
@@ -1563,13 +1656,14 @@ constexpr std::array<MethodRoute, 12> kMethodRoutes{{
     std::string_view method,
     const RequestId& id,
     simdjson::ondemand::object& root,
-    const core::context::SessionContext& context)
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
 {
     const auto it = std::ranges::find(kMethodRoutes, method, &MethodRoute::name);
     if (it == kMethodRoutes.end()) {
         return make_error(id, -32601, "Method not found");
     }
-    return it->handler(id, root, context);
+    return it->handler(id, root, context, mode);
 }
 
 } // anonymous namespace
@@ -1579,7 +1673,8 @@ constexpr std::array<MethodRoute, 12> kMethodRoutes{{
 // ---------------------------------------------------------------------------
 
 std::string McpDispatcher::dispatch(const std::string& json_request,
-                                   const core::context::SessionContext& context) {
+                                   const core::context::SessionContext& context,
+                                   McpProtocolMode mode) {
     if (json_request.empty()) return std::string(kParseError);
 
     simdjson::ondemand::parser parser;
@@ -1613,7 +1708,7 @@ std::string McpDispatcher::dispatch(const std::string& json_request,
         return {};
     }
 
-    return route_method(method, id, root, context);
+    return route_method(method, id, root, context, mode);
 }
 
 } // namespace core::mcp

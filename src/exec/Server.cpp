@@ -117,6 +117,35 @@ void write_response_id(JsonWriter& w, const ResponseId& id) {
     return std::move(w).take();
 }
 
+[[nodiscard]] std::string make_unsupported_protocol_error_body(
+    const ResponseId& id,
+    std::string_view requested) {
+    JsonWriter w(320);
+    {
+        auto object = w.object();
+        w.kv_str("jsonrpc", "2.0").comma();
+        write_response_id(w, id);
+        w.comma().key("error");
+        {
+            auto error = w.object();
+            w.kv_num("code", -32022).comma()
+                .kv_str("message", "Unsupported MCP protocol version.").comma()
+                .key("data");
+            {
+                auto data = w.object();
+                w.kv_str("requested", requested).comma().key("supported");
+                {
+                    auto supported = w.array();
+                    w.str("2026-07-28").comma()
+                        .str("2025-11-25").comma()
+                        .str("2024-11-05");
+                }
+            }
+        }
+    }
+    return std::move(w).take();
+}
+
 [[nodiscard]] std::optional<ParsedJsonRpcMessage>
 parse_jsonrpc_message(std::string_view json_body) {
     simdjson::ondemand::parser parser;
@@ -171,6 +200,30 @@ parse_jsonrpc_message(std::string_view json_body) {
     }
 
     return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> request_protocol_version(
+    std::string_view json_body) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(json_body)};
+    simdjson::dom::element document;
+    std::string_view version;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS
+        || document["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"]
+               .get(version) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return std::string(version);
+}
+
+[[nodiscard]] bool has_modern_client_capabilities(std::string_view json_body) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(json_body)};
+    simdjson::dom::element document;
+    simdjson::dom::object capabilities;
+    return parser.parse(padded).get(document) == simdjson::SUCCESS
+        && document["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+               .get(capabilities) == simdjson::SUCCESS;
 }
 
 [[nodiscard]] bool response_id_equals(const ResponseId& id, std::string_view expected) {
@@ -460,6 +513,32 @@ void run_server() {
                         line);
                 }
                 continue;
+            }
+
+            if (parsed->kind == ParsedJsonRpcMessage::Kind::request) {
+                if (const auto version = request_protocol_version(line)) {
+                    if (*version != "2026-07-28") {
+                        emit_response(make_unsupported_protocol_error_body(parsed->id, *version));
+                    } else if (!has_modern_client_capabilities(line)) {
+                        emit_response(make_jsonrpc_error_body(
+                            parsed->id,
+                            -32602,
+                            "Invalid params: missing io.modelcontextprotocol/clientCapabilities metadata."));
+                    } else {
+                        emit_response(dispatcher.dispatch(
+                            line,
+                            session_context,
+                            core::mcp::McpProtocolMode::stateless));
+                    }
+                    continue;
+                }
+                if (parsed->method == "server/discover") {
+                    emit_response(make_jsonrpc_error_body(
+                        parsed->id,
+                        -32602,
+                        "Invalid params: missing MCP 2026-07-28 request metadata."));
+                    continue;
+                }
             }
 
             if (phase == SessionPhase::awaiting_initialize) {

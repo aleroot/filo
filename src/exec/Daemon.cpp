@@ -16,6 +16,7 @@
 #include "../core/session/SessionStore.hpp"
 #include "../core/utils/JsonUtils.hpp"
 #include "../core/utils/JsonWriter.hpp"
+#include "../core/utils/Base64.hpp"
 #include "../core/utils/StringUtils.hpp"
 #include "../core/workspace/Workspace.hpp"
 #include "../core/logging/Logger.hpp"
@@ -201,6 +202,35 @@ void write_response_id(JsonWriter& w, const ResponseId& id) {
         {
             auto _err = w.object();
             w.kv_num("code", code).comma().kv_str("message", message);
+        }
+    }
+    return std::move(w).take();
+}
+
+[[nodiscard]] std::string make_unsupported_protocol_error_body(
+    const ResponseId& id,
+    std::string_view requested) {
+    JsonWriter w(320);
+    {
+        auto object = w.object();
+        w.kv_str("jsonrpc", "2.0").comma();
+        write_response_id(w, id);
+        w.comma().key("error");
+        {
+            auto error = w.object();
+            w.kv_num("code", -32022).comma()
+                .kv_str("message", "Unsupported MCP-Protocol-Version header.").comma()
+                .key("data");
+            {
+                auto data = w.object();
+                w.kv_str("requested", requested).comma().key("supported");
+                {
+                    auto supported = w.array();
+                    w.str("2026-07-28").comma()
+                        .str("2025-11-25").comma()
+                        .str("2024-11-05");
+                }
+            }
         }
     }
     return std::move(w).take();
@@ -480,7 +510,81 @@ extract_request_id_for_replay(std::string_view json_body) {
 [[nodiscard]] bool has_supported_protocol_header(const httplib::Request& req) {
     if (!req.has_header("MCP-Protocol-Version")) return true;
     const std::string version = req.get_header_value("MCP-Protocol-Version");
-    return version == "2024-11-05" || version == "2025-11-25";
+    return version == "2024-11-05"
+        || version == "2025-11-25"
+        || version == "2026-07-28";
+}
+
+[[nodiscard]] std::optional<std::string> decode_mcp_header_value(std::string_view value) {
+    constexpr std::string_view prefix = "=?base64?";
+    constexpr std::string_view suffix = "?=";
+    if (!value.starts_with(prefix) || !value.ends_with(suffix)) {
+        return std::string(value);
+    }
+    return core::utils::Base64::decode(
+        value.substr(prefix.size(), value.size() - prefix.size() - suffix.size()));
+}
+
+[[nodiscard]] std::optional<std::string> modern_request_name(
+    std::string_view body,
+    std::string_view method) {
+    const std::string_view field = method == "resources/read" ? "uri"
+        : (method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel")
+            ? "taskId"
+            : (method == "tools/call" || method == "prompts/get") ? "name" : "";
+    if (field.empty()) return std::string{};
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(body)};
+    simdjson::dom::element document;
+    std::string_view value;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS
+        || document["params"][field].get(value) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    return std::string(value);
+}
+
+[[nodiscard]] std::optional<std::string> validate_modern_request(
+    const httplib::Request& req,
+    const ParsedJsonRpcMessage& parsed) {
+    if (!req.has_header("Mcp-Method")
+        || req.get_header_value("Mcp-Method") != parsed.method) {
+        return "Mcp-Method header does not match the JSON-RPC method.";
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{req.body};
+    simdjson::dom::element document;
+    std::string_view body_version;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS
+        || document["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"]
+                .get(body_version) != simdjson::SUCCESS
+        || body_version != "2026-07-28") {
+        return "MCP-Protocol-Version header does not match request _meta.";
+    }
+
+    const auto expected_name = modern_request_name(req.body, parsed.method);
+    if (!expected_name.has_value()) {
+        return "Request is missing the field required for Mcp-Name.";
+    }
+    if (expected_name->empty()) return std::nullopt;
+    if (!req.has_header("Mcp-Name")) return "Missing required Mcp-Name header.";
+    const auto actual_name = decode_mcp_header_value(req.get_header_value("Mcp-Name"));
+    if (!actual_name.has_value() || *actual_name != *expected_name) {
+        return "Mcp-Name header does not match the JSON-RPC request.";
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool has_modern_client_capabilities(std::string_view body) {
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(body)};
+    simdjson::dom::element document;
+    simdjson::dom::object capabilities;
+    return parser.parse(padded).get(document) == simdjson::SUCCESS
+        && document["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+               .get(capabilities) == simdjson::SUCCESS;
 }
 
 [[nodiscard]] std::pair<std::string, std::shared_ptr<HttpSessionState>>
@@ -589,7 +693,8 @@ take_pending_server_response(HttpSessionState& session,
 [[nodiscard]] detail::McpDispatchResult dispatch_mcp_payload(
     const std::string& body,
     const std::optional<core::workspace::WorkspaceSnapshot>& workspace_override,
-    std::string_view session_id) {
+    std::string_view session_id,
+    core::mcp::McpProtocolMode mode = core::mcp::McpProtocolMode::legacy) {
     detail::McpDispatchResult result;
     const auto snapshot = workspace_override.value_or(
         core::workspace::Workspace::get_instance().snapshot());
@@ -598,7 +703,7 @@ take_pending_server_response(HttpSessionState& session,
         core::context::SessionTransport::mcp_http,
         std::string(session_id));
 
-    result.body = core::mcp::McpDispatcher::get_instance().dispatch(body, session_context);
+    result.body = core::mcp::McpDispatcher::get_instance().dispatch(body, session_context, mode);
     if (result.body.empty()) {
         result.status = 202;
         return result;
@@ -619,8 +724,11 @@ void write_mcp_result(httplib::Response& res, const detail::McpDispatchResult& r
 
 void set_cors_headers(const httplib::Request& req, httplib::Response& res) {
     res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE");
-    res.set_header("Access-Control-Allow-Headers",
-                   "Content-Type, Accept, Authorization, MCP-Protocol-Version, MCP-Session-Id, Last-Event-ID");
+    const std::string allowed_headers = req.has_header("Access-Control-Request-Headers")
+        ? req.get_header_value("Access-Control-Request-Headers")
+        : "Content-Type, Accept, Authorization, MCP-Protocol-Version, MCP-Session-Id, "
+          "Mcp-Method, Mcp-Name, Last-Event-ID";
+    res.set_header("Access-Control-Allow-Headers", allowed_headers);
     res.set_header("Access-Control-Expose-Headers", "MCP-Session-Id");
     res.set_header("Access-Control-Max-Age", "86400");
     res.set_header("Vary", "Origin");
@@ -692,7 +800,10 @@ void handle_mcp_get(const std::string& host,
     set_cors_headers(req, res);
     if (!enforce_mcp_authorization(req, res)) return;
     res.status = 405;
-    res.set_header("Allow", "POST, GET, OPTIONS, DELETE");
+    res.set_header("Allow",
+                   req.get_header_value("MCP-Protocol-Version") == "2026-07-28"
+                       ? "POST, OPTIONS"
+                       : "POST, GET, OPTIONS, DELETE");
     res.set_content(R"({"error":"Method Not Allowed — use POST /mcp"})",
                     "application/json");
 }
@@ -703,6 +814,14 @@ void handle_mcp_delete(const std::string& host,
     if (!enforce_origin_policy(req, res, host)) return;
     set_cors_headers(req, res);
     if (!enforce_mcp_authorization(req, res)) return;
+
+    if (req.get_header_value("MCP-Protocol-Version") == "2026-07-28") {
+        res.status = 405;
+        res.set_header("Allow", "POST, OPTIONS");
+        res.set_content(R"({"error":"Method Not Allowed — MCP 2026-07-28 has no protocol sessions"})",
+                        "application/json");
+        return;
+    }
 
     if (!req.has_header("MCP-Session-Id")) {
         res.status = 400;
@@ -756,15 +875,66 @@ void handle_mcp_post(const std::string& host,
         return;
     }
 
+    const auto parsed = parse_jsonrpc_message(req.body);
+
     if (!has_supported_protocol_header(req)) {
         res.status = 400;
-        res.set_content(
-            R"({"error":"Unsupported MCP-Protocol-Version header. Supported: 2025-11-25, 2024-11-05."})",
+        const ResponseId id = parsed.has_value() ? parsed->id : ResponseId{};
+        res.set_content(make_unsupported_protocol_error_body(
+            id,
+            req.get_header_value("MCP-Protocol-Version")),
             "application/json");
         return;
     }
 
-    const auto parsed = parse_jsonrpc_message(req.body);
+    const bool modern = req.has_header("MCP-Protocol-Version")
+        && req.get_header_value("MCP-Protocol-Version") == "2026-07-28";
+    if (modern) {
+        if (!parsed.has_value()) {
+            res.status = 400;
+            res.set_content(R"({"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null})",
+                            "application/json");
+            return;
+        }
+        if (parsed->kind != ParsedJsonRpcMessage::Kind::request) {
+            res.status = 400;
+            res.set_content(make_jsonrpc_error_body(
+                parsed->id,
+                -32600,
+                "Invalid Request: MCP 2026-07-28 HTTP accepts JSON-RPC requests only."),
+                "application/json");
+            return;
+        }
+        if (const auto validation_error = validate_modern_request(req, *parsed)) {
+            res.status = 400;
+            res.set_content(make_jsonrpc_error_body(parsed->id, -32020, *validation_error),
+                            "application/json");
+            return;
+        }
+        if (!has_modern_client_capabilities(req.body)) {
+            res.status = 400;
+            res.set_content(make_jsonrpc_error_body(
+                parsed->id,
+                -32602,
+                "Invalid params: missing io.modelcontextprotocol/clientCapabilities metadata."),
+                "application/json");
+            return;
+        }
+
+        auto result = dispatch_mcp_payload(
+            req.body,
+            std::nullopt,
+            {},
+            core::mcp::McpProtocolMode::stateless);
+        if (result.body.find(R"("code":-32601)") != std::string::npos) {
+            result.status = 404;
+        } else if (result.body.find(R"("code":-32021)") != std::string::npos) {
+            result.status = 400;
+        }
+        write_mcp_result(res, result);
+        return;
+    }
+
     std::shared_ptr<HttpSessionState> session;
     std::string session_id;
     std::optional<core::workspace::WorkspaceSnapshot> workspace_override;
@@ -1027,21 +1197,24 @@ void handle_mcp_post(const std::string& host,
                 try {
                     if (pending_roots_response->future.wait_for(std::chrono::seconds{15})
                         != std::future_status::ready) {
+                        // Roots are an optimisation, not a precondition: the server
+                        // already has a configured workspace. Failing the call here
+                        // made every tools/call depend on a client round trip, so a
+                        // client that answers slowly (or not at all) could never use
+                        // any tool. Degrade to the known workspace instead.
+                        std::optional<core::workspace::WorkspaceSnapshot> fallback_workspace;
                         {
                             std::lock_guard<std::mutex> lock(session_ptr->mutex);
                             session_ptr->pending_server_responses.erase(
                                 string_response_id_key(roots_request_id));
                             fail_session_workspace_refresh(*session_ptr);
+                            fallback_workspace = session_ptr->cached_workspace;
                         }
-                        core::tools::ToolManager::get_instance().clear_session_state(session_id);
-                        detail::McpDispatchResult timeout_result{
-                            .status = 200,
-                            .body = make_jsonrpc_error_body(
-                                request_id,
-                                -32002,
-                                "Timed out waiting for roots/list response"),
-                        };
-                        return finish_and_stream(timeout_result, false);
+                        const auto fallback_result = dispatch_mcp_payload(
+                            original_request_body,
+                            fallback_workspace,
+                            session_id);
+                        return finish_and_stream(fallback_result, false);
                     }
 
                     std::string roots_response_body = pending_roots_response->future.get();

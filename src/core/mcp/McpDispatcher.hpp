@@ -6,8 +6,13 @@
 
 namespace core::mcp {
 
+enum class McpProtocolMode {
+    legacy,
+    stateless,
+};
+
 /**
- * @brief Routes a single MCP 2025-11-25 JSON-RPC message to the correct handler
+ * @brief Routes one modern or legacy MCP JSON-RPC message to the correct handler
  *        and returns the JSON-RPC response string.
  *
  * @c McpDispatcher is the single source of truth for the MCP protocol logic.
@@ -15,10 +20,11 @@ namespace core::mcp {
  * HTTP Streamable-HTTP transport (@c exec::daemon::run_server in Daemon.cpp)
  * delegate all protocol work to this class so there is exactly one implementation.
  *
- * ### Supported methods (MCP 2025-11-25)
+ * ### Supported methods
  *
  * | Method                        | Role        | Notes                                              |
  * |-------------------------------|-------------|----------------------------------------------------|
+ * | @c server/discover            | Request     | Advertises modern versions and capabilities        |
  * | @c initialize                 | Request     | Negotiates protocol version; returns capabilities  |
  * | @c prompts/list               | Request     | Returns discovered prompt skills                   |
  * | @c prompts/get                | Request     | Expands one prompt skill into MCP prompt messages  |
@@ -80,7 +86,8 @@ public:
      *         @em not send an empty response to the client — silently drop it.
      */
     std::string dispatch(const std::string& json_request,
-                         const core::context::SessionContext& context);
+                         const core::context::SessionContext& context,
+                         McpProtocolMode mode = McpProtocolMode::legacy);
 
 private:
     McpDispatcher();

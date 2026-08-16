@@ -45,7 +45,6 @@ public:
 
     struct CreateResult {
         TaskState task;
-        std::string immediate_response;
     };
 
     enum class CancelError {

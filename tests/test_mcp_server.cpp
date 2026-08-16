@@ -36,6 +36,24 @@ static core::context::SessionContext make_mcp_test_context() {
         "mcp-test-session");
 }
 
+static std::string dispatch_modern(std::string_view request) {
+    auto context = make_mcp_test_context();
+    return disp().dispatch(
+        std::string(request),
+        context,
+        core::mcp::McpProtocolMode::stateless);
+}
+
+TEST_CASE("MCP 2.0 tool calls do not share implicit shell state", "[mcp][modern]") {
+    const auto set_state = dispatch_modern(
+        R"({"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"export FILO_MCP_STATE=leaked"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})");
+    REQUIRE_THAT(set_state, Catch::Matchers::ContainsSubstring(R"("resultType":"complete")"));
+
+    const auto read_state = dispatch_modern(
+        R"({"jsonrpc":"2.0","id":302,"method":"tools/call","params":{"name":"run_terminal_command","arguments":{"command":"printf '%s' \"${FILO_MCP_STATE-unset}\""},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})");
+    REQUIRE_THAT(read_state, Catch::Matchers::ContainsSubstring(R"("output":"unset")"));
+}
+
 #define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
 
 /// Returns true if @p s is a well-formed JSON document.
@@ -259,9 +277,10 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     REQUIRE_FALSE(tools_list_changed);
 
     simdjson::dom::element tasks_extension;
-    REQUIRE(doc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"]
-                .get(tasks_extension) == simdjson::SUCCESS);
-    REQUIRE(doc["result"]["capabilities"]["tasks"].get(tasks_extension) != simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["extensions"].get(tasks_extension)
+            != simdjson::SUCCESS);
+    REQUIRE(doc["result"]["capabilities"]["tasks"].get(tasks_extension)
+            != simdjson::SUCCESS);
 
     bool resources_subscribe = true;
     bool resources_list_changed = true;
@@ -274,6 +293,28 @@ TEST_CASE("MCP initialize advertises only implemented capabilities", "[mcp]") {
     REQUIRE(doc["result"]["capabilities"]["roots"].get(ignored) != simdjson::SUCCESS);
     REQUIRE(doc["result"]["capabilities"]["prompts"].get(ignored) != simdjson::SUCCESS);
     REQUIRE(doc["result"]["capabilities"]["logging"].get(ignored) != simdjson::SUCCESS);
+}
+
+TEST_CASE("MCP 2026-07-28 discovery advertises stateless capabilities", "[mcp]") {
+    const auto response = dispatch_modern(
+        R"({"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}},"id":78})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(response).get(doc) == simdjson::SUCCESS);
+    std::string_view result_type;
+    REQUIRE(doc["result"]["resultType"].get(result_type) == simdjson::SUCCESS);
+    REQUIRE(result_type == "complete");
+    std::string_view version;
+    REQUIRE(doc["result"]["supportedVersions"].at(0).get(version) == simdjson::SUCCESS);
+    REQUIRE(version == "2026-07-28");
+    simdjson::dom::element tasks_extension;
+    REQUIRE(doc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"]
+                .get(tasks_extension) == simdjson::SUCCESS);
+    std::string_view server_name;
+    REQUIRE(doc["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
+                .get(server_name) == simdjson::SUCCESS);
+    REQUIRE(server_name == "filo-mcp");
 }
 
 TEST_CASE("MCP initialize advertises prompts capability when prompt skills exist", "[mcp][prompts]") {

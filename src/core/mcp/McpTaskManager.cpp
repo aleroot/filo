@@ -7,8 +7,6 @@
 #include "../tools/TaskTool.hpp"
 #include "../tools/ToolManager.hpp"
 
-#include <simdjson.h>
-
 #include <algorithm>
 #include <chrono>
 #include <exception>
@@ -31,28 +29,6 @@ constexpr int64_t kPollIntervalMs = 1'000;
 
 [[nodiscard]] bool is_terminal(std::string_view status) {
     return status == "completed" || status == "failed" || status == "cancelled";
-}
-
-[[nodiscard]] std::string payload_error_message(std::string_view payload) {
-    if (payload.empty()) return "Tool execution returned an empty result.";
-
-    thread_local simdjson::dom::parser parser;
-    simdjson::padded_string padded(payload);
-    simdjson::dom::element doc;
-    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
-        return "Tool execution returned invalid JSON.";
-    }
-
-    simdjson::dom::object object;
-    if (doc.get(object) != simdjson::SUCCESS) {
-        return "Tool execution returned a non-object JSON result.";
-    }
-
-    std::string_view message;
-    if (object["error"].get(message) == simdjson::SUCCESS && !message.empty()) {
-        return std::string(message);
-    }
-    return "Tool execution failed.";
 }
 
 struct TaskRunner {
@@ -158,7 +134,9 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
     record->entry = entry;
     record->stop_source = std::stop_source();
 
-    TaskRunner runner = build_runner(tool_name, arguments_json, context);
+    auto task_context = context;
+    task_context.session_id = entry->state.task_id;
+    TaskRunner runner = build_runner(tool_name, arguments_json, task_context);
     record->request_cancel = std::move(runner.request_cancel);
     std::thread worker(
         [entry,
@@ -201,18 +179,15 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
                 {
                     std::lock_guard lock(entry->mutex);
                     if (!entry->finished) {
-                        entry->state.status = classification.is_error ? "failed" : "completed";
+                        // Tool-level failures are successful tools/call results
+                        // with isError=true. Only JSON-RPC/protocol failures use
+                        // the task "failed" state.
+                        entry->state.status = "completed";
                         entry->state.status_message = classification.is_error
-                            ? "The delegated task finished with an execution error."
+                            ? "The delegated task completed with a tool error."
                             : "The delegated task completed successfully.";
-                        if (classification.is_error) {
-                            entry->payload.has_error = true;
-                            entry->payload.error_code = -32000;
-                            entry->payload.error_message = payload_error_message(payload_json);
-                        } else {
-                            entry->payload.has_error = false;
-                            entry->payload.result_json = final_result;
-                        }
+                        entry->payload.has_error = false;
+                        entry->payload.result_json = final_result;
                         entry->finished = true;
                         committed = true;
                     }
@@ -287,11 +262,7 @@ McpTaskManager::CreateResult McpTaskManager::create_task_tool_call(
         accepted_state = entry->state;
     }
 
-    return CreateResult{
-        .task = std::move(accepted_state),
-        .immediate_response =
-            "Task accepted. Poll tasks/get for status updates and the final result.",
-    };
+    return CreateResult{.task = std::move(accepted_state)};
 }
 
 std::optional<McpTaskManager::TaskSnapshot> McpTaskManager::get(

@@ -636,6 +636,93 @@ TEST_CASE("Daemon rejects requests without MCP session header after initializati
     REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring("MCP-Session-Id"));
 }
 
+TEST_CASE("Daemon serves MCP 2026-07-28 without protocol sessions",
+          "[daemon][reliability][mcp-modern]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    httplib::Headers discover_headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", "2026-07-28"},
+        {"Mcp-Method", "server/discover"},
+    };
+    auto discover = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"daemon-test","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}})",
+        std::move(discover_headers));
+    REQUIRE(discover);
+    REQUIRE(discover->status == 200);
+    REQUIRE_FALSE(discover->has_header("MCP-Session-Id"));
+    REQUIRE_THAT(discover->body, Catch::Matchers::ContainsSubstring(R"("resultType":"complete")"));
+    REQUIRE_THAT(discover->body, Catch::Matchers::ContainsSubstring(R"("2026-07-28")"));
+
+    httplib::Headers list_headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", "2026-07-28"},
+        {"Mcp-Method", "tools/list"},
+    };
+    auto tools = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})",
+        std::move(list_headers));
+    REQUIRE(tools);
+    REQUIRE(tools->status == 200);
+    REQUIRE_FALSE(tools->has_header("MCP-Session-Id"));
+    REQUIRE_THAT(tools->body, Catch::Matchers::ContainsSubstring(R"("resultType":"complete")"));
+    REQUIRE_THAT(tools->body, Catch::Matchers::ContainsSubstring(R"("cacheScope":"private")"));
+}
+
+TEST_CASE("Daemon validates MCP 2026-07-28 routing headers",
+          "[daemon][reliability][mcp-modern]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    httplib::Headers headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", "2026-07-28"},
+        {"Mcp-Method", "tools/list"},
+    };
+    auto response = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})",
+        std::move(headers));
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE_THAT(response->body, Catch::Matchers::ContainsSubstring(R"("code":-32020)"));
+}
+
+TEST_CASE("Daemon requires per-request capabilities for MCP 2026-07-28",
+          "[daemon][reliability][mcp-modern]") {
+    const int port = next_test_port();
+    DaemonRunner daemon(port);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    httplib::Headers headers{
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json, text/event-stream"},
+        {"MCP-Protocol-Version", "2026-07-28"},
+        {"Mcp-Method", "tools/list"},
+    };
+    auto response = post_mcp_request(
+        port,
+        R"({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}})",
+        std::move(headers));
+    REQUIRE(response);
+    REQUIRE(response->status == 400);
+    REQUIRE_THAT(response->body, Catch::Matchers::ContainsSubstring(R"("code":-32602)"));
+}
+
 TEST_CASE("Daemon rejects missing Accept header on /mcp",
           "[daemon][reliability]") {
     const int port = next_test_port();
@@ -678,6 +765,8 @@ TEST_CASE("Daemon rejects unsupported MCP protocol version",
     REQUIRE(res);
     REQUIRE(res->status == 400);
     REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring("Unsupported MCP-Protocol-Version"));
+    REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring(R"("requested":"2099-01-01")"));
+    REQUIRE_THAT(res->body, Catch::Matchers::ContainsSubstring(R"("supported":["2026-07-28")"));
 }
 
 TEST_CASE("Daemon requires bearer authorization for MCP when configured",

@@ -222,8 +222,10 @@ void write_file(const fs::path& path, std::string_view content) {
 }
 
 [[nodiscard]] std::string dispatch_json(std::string_view request,
-                                        const core::context::SessionContext& context) {
-    return dispatcher().dispatch(std::string(request), context);
+                                        const core::context::SessionContext& context,
+                                        core::mcp::McpProtocolMode mode =
+                                            core::mcp::McpProtocolMode::stateless) {
+    return dispatcher().dispatch(std::string(request), context, mode);
 }
 
 [[nodiscard]] simdjson::dom::element parse_json(const std::string& json) {
@@ -281,17 +283,17 @@ void write_file(const fs::path& path, std::string_view content) {
 
 void initialize_task_capable_session(const core::context::SessionContext& context) {
     const auto response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}},"id":100})",
+        R"({"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}}},"id":100})",
         context);
     const auto doc = parse_json(response);
-    REQUIRE(string_at(doc, {"result", "protocolVersion"}) == "2025-11-25");
+    REQUIRE(string_at(doc, {"result", "resultType"}) == "complete");
     simdjson::dom::element extension;
     REQUIRE(doc["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/tasks"].get(extension)
             == simdjson::SUCCESS);
 }
 
 [[nodiscard]] std::string task_client_meta() {
-    return R"("_meta":{"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}})";
+    return R"("_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}}})";
 }
 
 [[nodiscard]] std::string wait_for_terminal_task_response(
@@ -303,8 +305,9 @@ void initialize_task_capable_session(const core::context::SessionContext& contex
     for (int attempt = 0; attempt < 50; ++attempt) {
         response = dispatch_json(
             std::format(
-                R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"{}"}},"id":{}}})",
+                R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"{}",{}}},"id":{}}})",
                 task_id,
+                task_client_meta(),
                 id),
             context);
         const auto doc = parse_json(response);
@@ -341,7 +344,7 @@ struct TaskTestSandbox {
             core::workspace::Workspace::get_instance().initialize(project_dir, {}, true);
             return test_support::make_workspace_session_context(
                 core::context::SessionTransport::mcp_http,
-                std::string("mcp-task-session-") + std::string(tag));
+                std::string("modern-task-") + std::string(tag));
         }())
     {
         initialize_task_capable_session(context);
@@ -374,7 +377,7 @@ TEST_CASE("MCP tasks are advertised through the standard extension capability", 
             .enforce = true,
         },
         core::context::SessionTransport::mcp_http,
-        "mcp-task-tool-metadata");
+        "modern-task-tool-metadata");
     initialize_task_capable_session(context);
 
     const auto response = dispatch_json(
@@ -388,28 +391,33 @@ TEST_CASE("MCP tasks are advertised through the standard extension capability", 
 TEST_CASE("MCP task methods require the task-capable protocol",
           "[mcp][tasks]") {
     TaskTestSandbox sandbox("legacy_protocol_tasks");
+    sandbox.context.session_id = "legacy-task-protocol";
 
     const auto init_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}},"id":211})",
-        sandbox.context);
+        sandbox.context,
+        core::mcp::McpProtocolMode::legacy);
     REQUIRE_THAT(init_response, ContainsSubstring(R"("protocolVersion":"2024-11-05")"));
 
     const auto tools_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":212})",
-        sandbox.context);
+        sandbox.context,
+        core::mcp::McpProtocolMode::legacy);
     REQUIRE_THAT(tools_response, ContainsSubstring(R"("name":"delegate_task")"));
     REQUIRE(tools_response.find(R"("execution")") == std::string::npos);
 
     const auto task_method_response = dispatch_json(
         R"({"jsonrpc":"2.0","method":"tasks/get","params":{"taskId":"missing-task"},"id":213})",
-        sandbox.context);
+        sandbox.context,
+        core::mcp::McpProtocolMode::legacy);
     REQUIRE(int_at(parse_json(task_method_response), {"error", "code"}) == -32601);
 
     const auto task_call_response = dispatch_json(
         std::format(
             R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"list"}},{}}},"id":214}})",
             task_client_meta()),
-        sandbox.context);
+        sandbox.context,
+        core::mcp::McpProtocolMode::legacy);
     REQUIRE(string_at(parse_json(task_call_response), {"result", "structuredContent", "action"})
             == "list");
 }
@@ -525,18 +533,16 @@ TEST_CASE("MCP task-capable tools/call returns a CreateTaskResult and tasks/get 
     const auto create_doc = parse_json(create_response);
 
     REQUIRE(string_at(create_doc, {"result", "resultType"}) == "task");
-    const std::string task_id = string_at(create_doc, {"result", "task", "taskId"});
+    const std::string task_id = string_at(create_doc, {"result", "taskId"});
     REQUIRE_FALSE(task_id.empty());
-    REQUIRE(int_at(create_doc, {"result", "task", "ttlMs"}) > 0);
-    REQUIRE(int_at(create_doc, {"result", "task", "pollIntervalMs"}) > 0);
-    REQUIRE_THAT(
-        string_at(create_doc, {"result", "_meta", "io.modelcontextprotocol/model-immediate-response"}),
-        ContainsSubstring("Task accepted"));
+    REQUIRE(int_at(create_doc, {"result", "ttlMs"}) > 0);
+    REQUIRE(int_at(create_doc, {"result", "pollIntervalMs"}) > 0);
 
     const auto get_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"{}"}},"id":302}})",
-            task_id),
+            R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"{}",{}}},"id":302}})",
+            task_id,
+            task_client_meta()),
         sandbox.context);
     const auto get_doc = parse_json(get_response);
     const auto task_status = string_at(get_doc, {"result", "status"});
@@ -544,10 +550,11 @@ TEST_CASE("MCP task-capable tools/call returns a CreateTaskResult and tasks/get 
 
     const auto update_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/update","params":{{"taskId":"{}","inputResponses":{{}}}},"id":304}})",
-            task_id),
+            R"({{"jsonrpc":"2.0","method":"tasks/update","params":{{"taskId":"{}","inputResponses":{{}},{}}},"id":304}})",
+            task_id,
+            task_client_meta()),
         sandbox.context);
-    REQUIRE(update_response.find(R"("result":{})") != std::string::npos);
+    REQUIRE(string_at(parse_json(update_response), {"result", "resultType"}) == "complete");
 
     const auto result_response = wait_for_terminal_task_response(
         task_id,
@@ -596,15 +603,16 @@ TEST_CASE("MCP cancelled task results return promptly for non-cooperative tools"
             R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Cancelable","instructions":"Block until cancelled.","worker":"general"}},{}}},"id":351}})",
             task_client_meta()),
         sandbox.context);
-    const auto task_id = string_at(parse_json(create_response), {"result", "task", "taskId"});
+    const auto task_id = string_at(parse_json(create_response), {"result", "taskId"});
     REQUIRE(provider->wait_until_all_started(std::chrono::milliseconds(2000)));
 
     const auto cancel_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}"}},"id":352}})",
-            task_id),
+            R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}",{}}},"id":352}})",
+            task_id,
+            task_client_meta()),
         sandbox.context);
-    REQUIRE(cancel_response.find(R"("result":{})") != std::string::npos);
+    REQUIRE(string_at(parse_json(cancel_response), {"result", "resultType"}) == "complete");
 
     const auto start = std::chrono::steady_clock::now();
     const auto result_response = wait_for_terminal_task_response(task_id, sandbox.context, 353);
@@ -731,8 +739,8 @@ TEST_CASE("MCP delegate tasks can run concurrently", "[mcp][tasks]") {
     provider->release_all();
     REQUIRE(all_started);
 
-    const auto task_id_a = string_at(parse_json(create_response_a), {"result", "task", "taskId"});
-    const auto task_id_b = string_at(parse_json(create_response_b), {"result", "task", "taskId"});
+    const auto task_id_a = string_at(parse_json(create_response_a), {"result", "taskId"});
+    const auto task_id_b = string_at(parse_json(create_response_b), {"result", "taskId"});
 
     const auto result_response_a = wait_for_terminal_task_response(task_id_a, sandbox.context, 503);
     const auto result_response_b = wait_for_terminal_task_response(task_id_b, sandbox.context, 504);
@@ -876,7 +884,7 @@ TEST_CASE("MCP task operations use spec-compliant errors for invalid and termina
             R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delegate_task","arguments":{{"action":"start","title":"Task error codes","instructions":"Finish quickly.","worker":"general"}},{}}},"id":701}})",
             task_client_meta()),
         sandbox.context);
-    const auto task_id = string_at(parse_json(create_response), {"result", "task", "taskId"});
+    const auto task_id = string_at(parse_json(create_response), {"result", "taskId"});
 
     const auto result_response = wait_for_terminal_task_response(task_id, sandbox.context, 702);
     REQUIRE(string_at(parse_json(result_response), {"result", "result", "structuredContent", "status"})
@@ -884,13 +892,14 @@ TEST_CASE("MCP task operations use spec-compliant errors for invalid and termina
 
     const auto cancel_terminal_response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}"}},"id":703}})",
-            task_id),
+            R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"{}",{}}},"id":703}})",
+            task_id,
+            task_client_meta()),
         sandbox.context);
-    REQUIRE(cancel_terminal_response.find(R"("result":{})") != std::string::npos);
+    REQUIRE(string_at(parse_json(cancel_terminal_response), {"result", "resultType"}) == "complete");
 
     const auto missing_get_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tasks/get","params":{"taskId":"missing-task"},"id":704})",
+        std::format(R"({{"jsonrpc":"2.0","method":"tasks/get","params":{{"taskId":"missing-task",{}}},"id":704}})", task_client_meta()),
         sandbox.context);
     REQUIRE(int_at(parse_json(missing_get_response), {"error", "code"}) == -32602);
 
@@ -900,7 +909,7 @@ TEST_CASE("MCP task operations use spec-compliant errors for invalid and termina
     REQUIRE(int_at(parse_json(removed_result_response), {"error", "code"}) == -32601);
 
     const auto missing_cancel_response = dispatch_json(
-        R"({"jsonrpc":"2.0","method":"tasks/cancel","params":{"taskId":"missing-task"},"id":706})",
+        std::format(R"({{"jsonrpc":"2.0","method":"tasks/cancel","params":{{"taskId":"missing-task",{}}},"id":706}})", task_client_meta()),
         sandbox.context);
     REQUIRE(int_at(parse_json(missing_cancel_response), {"error", "code"}) == -32602);
 }
