@@ -34,6 +34,10 @@ public:
     explicit ContextBuilder(const SessionContext& session_context);
 
     ContextBuilder& with_mode(std::string_view mode);
+    // Pre-rendered semantic memory block from MemorySystem. ContextBuilder
+    // does not open a store: the composition root projects the prompt so the
+    // assembler stays independent of persistence.
+    ContextBuilder& with_memory_prompt(std::string prompt);
     ContextBuilder& include_project_context(bool include = true) noexcept;
     ContextBuilder& include_skill_catalog(bool include = true) noexcept;
     // Agents disable this and deliver snapshots as append-only synthetic messages.
@@ -45,6 +49,7 @@ public:
 
 private:
     const SessionContext& session_context_;
+    std::string memory_prompt_;
     std::string mode_ = "BUILD";
     bool include_project_context_ = true;
     bool include_skill_catalog_ = true;

@@ -1,7 +1,5 @@
 #pragma once
 
-#ifndef _WIN32
-
 #include "IShellExecutor.hpp"
 #include "ShellSession.hpp"
 #include "../shell/ShellUtils.hpp"
@@ -65,4 +63,3 @@ private:
 
 } // namespace core::tools::shell
 
-#endif // !_WIN32

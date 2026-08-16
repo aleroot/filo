@@ -1,5 +1,8 @@
 #include "DelegatedAgentRunner.hpp"
 
+#include "../config/ConfigManager.hpp"
+#include "../memory/MemorySystem.hpp"
+
 #include <atomic>
 #include <condition_variable>
 #include <thread>
@@ -74,7 +77,17 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
         request.session_context,
         ToolResultStore::default_root(),
         std::shared_ptr<core::power::SleepInhibitor>{},
-        request.session_stats_registry);
+        request.session_stats_registry,
+        nullptr,
+        // Prefer the parent's memory substrate so subagents learn into the
+        // same stores. Standalone callers (TaskService) get a fresh system
+        // from config; the file-backed ports are transactional, so they merge.
+        request.memory_system
+            ? request.memory_system
+            : core::memory::make_memory_system(core::memory::MemoryConfig{
+                  .tool_recovery = core::config::ConfigManager::get_instance()
+                                       .get_config()
+                                       .tool_recovery}));
     agent->set_active_provider_name(request.provider_name);
     agent->set_mode(request.mode);
     if (!request.model.empty()) {

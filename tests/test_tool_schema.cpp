@@ -78,6 +78,25 @@ TEST_CASE("tool arguments are normalized before validation", "[tools][schema]") 
     CHECK(*normalized == R"({"operation":{"append":"hello"},"path":"a.cpp"})");
 }
 
+TEST_CASE("optional nullable nulls are preserved during normalization",
+          "[tools][schema]") {
+    const core::tools::ToolDefinition definition{
+        .name = "annotate",
+        .input_schema =
+            R"({"type":"object","properties":{"note":{"type":["string","null"]},"label":{"type":"string"}},"additionalProperties":false})",
+    };
+
+    const auto kept = core::tools::schema::normalize_arguments(
+        definition, R"({"note":null,"label":"keep"})");
+    REQUIRE(kept.has_value());
+    CHECK(*kept == R"({"label":"keep","note":null})");
+
+    const auto dropped = core::tools::schema::normalize_arguments(
+        definition, R"({"label":null,"note":"text"})");
+    REQUIRE(dropped.has_value());
+    CHECK(*dropped == R"({"note":"text"})");
+}
+
 TEST_CASE("tool argument validation catches structural model mistakes",
           "[tools][schema]") {
     const auto definition = complex_tool();

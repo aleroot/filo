@@ -1,6 +1,7 @@
 #include "Prompter.hpp"
 
 #include "core/agent/Agent.hpp"
+#include "core/memory/MemorySystem.hpp"
 #include "core/budget/BudgetTracker.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
 #include "core/config/ConfigManager.hpp"
@@ -250,8 +251,10 @@ resolve_resume_request(const RunOptions& options,
     return resumed;
 }
 
-void register_default_tools(core::tools::ToolManager& tool_manager) {
+void register_default_tools(core::tools::ToolManager& tool_manager,
+                            const core::memory::MemoryStore& memory_store) {
     auto options = core::tools::agent_builtin_tool_options();
+    options.memory_store = memory_store;
     options.ask_user_question_callback = [](core::tools::QuestionRequest request) {
         if (request.promise) {
             request.promise->set_value(std::nullopt);
@@ -637,7 +640,12 @@ RunDiagnostics run_for_test(const RunOptions& options,
     }
 
     auto& tool_manager = core::tools::ToolManager::get_instance();
-    register_default_tools(tool_manager);
+    auto memory_system = core::memory::make_memory_system(
+        core::memory::MemoryConfig{
+            .tool_recovery = core::config::ConfigManager::get_instance()
+                                 .get_config()
+                                 .tool_recovery});
+    register_default_tools(tool_manager, memory_system->semantic());
 
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
@@ -651,7 +659,8 @@ RunDiagnostics run_for_test(const RunOptions& options,
         core::agent::ToolResultStore::default_root(),
         std::shared_ptr<core::power::SleepInhibitor>{},
         session_stats_registry,
-        &core::budget::BudgetTracker::get_instance());
+        &core::budget::BudgetTracker::get_instance(),
+        memory_system);
     agent->set_active_provider_name(runtime.provider_name);
     if (!runtime.default_mode.empty()) {
         agent->set_mode(runtime.default_mode);

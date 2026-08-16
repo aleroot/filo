@@ -270,6 +270,7 @@ set(FILO_CORE_SOURCES
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
+    src/core/agent/ToolRecovery.cpp
     src/core/agent/ToolResultStore.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/tools/ToolSchema.cpp
@@ -281,6 +282,8 @@ set(FILO_CORE_SOURCES
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
     src/core/memory/MemoryStore.cpp
+    src/core/memory/MemorySystem.cpp
+    src/core/memory/ToolRecoveryMemory.cpp
     src/core/power/SleepInhibitor.cpp
     src/core/power/linux/LinuxSleepInhibitor.cpp
     src/core/power/macos/MacOSSleepInhibitor.cpp
@@ -541,6 +544,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_interprocess_file.cpp
     tests/test_network_traffic.cpp
     tests/test_memory_store.cpp
+    tests/test_memory_system.cpp
     tests/test_agent_ignore.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
@@ -623,6 +627,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_tool_loop_efficiency.cpp
     tests/test_tool_output_history.cpp
     tests/test_tool_schema.cpp
+    tests/test_tool_recovery.cpp
     tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
@@ -730,6 +735,7 @@ source_group(
         tests/test_uri_utils.cpp
         tests/test_json_writer.cpp
         tests/test_memory_store.cpp
+        tests/test_memory_system.cpp
         tests/test_commands.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp
@@ -805,6 +811,7 @@ source_group(
         tests/test_agent_loop_control.cpp
         tests/test_tool_output_history.cpp
         tests/test_tool_schema.cpp
+        tests/test_tool_recovery.cpp
         tests/test_semantic_history_editor.cpp
         tests/test_mcp_resources.cpp
         tests/test_trust_flag_resolver.cpp

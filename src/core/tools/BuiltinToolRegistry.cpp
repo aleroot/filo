@@ -79,7 +79,8 @@ void register_builtin_tools(ToolManager& tool_manager,
     tool_manager.register_tool(std::make_shared<WebSearchTool>());
     tool_manager.register_tool(std::make_shared<WebFetchTool>());
     if (!core::landrun::LandrunSettings::instance().enabled()) {
-        tool_manager.register_tool(std::make_shared<MemoryTool>());
+        tool_manager.register_tool(std::make_shared<MemoryTool>(
+            options.memory_store.value_or(core::memory::MemoryStore{})));
     }
 
     if (options.include_workspace_config) {

@@ -5,6 +5,7 @@
 #include <format>
 #include "../core/config/ConfigManager.hpp"
 #include "../core/agent/Agent.hpp"
+#include "../core/memory/MemorySystem.hpp"
 #include "../core/llm/ProviderManager.hpp"
 #include "../core/llm/ProviderFactory.hpp"
 #include "../core/mcp/McpDispatcher.hpp"
@@ -1141,7 +1142,10 @@ void handle_mcp_post(const std::string& host,
     write_mcp_result(res, execution_result);
 }
 
-void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
+void handle_api_chat(
+    const httplib::Request& req,
+    httplib::Response& res,
+    const std::shared_ptr<core::memory::MemorySystem>& memory_system) {
     simdjson::ondemand::parser parser;
     simdjson::padded_string padded_body(req.body);
     simdjson::ondemand::document doc;
@@ -1182,7 +1186,12 @@ void handle_api_chat(const httplib::Request& req, httplib::Response& res) {
         core::context::make_session_context(
             core::workspace::Workspace::get_instance().snapshot(),
             core::context::SessionTransport::unspecified,
-            core::session::SessionStore::generate_id()));
+            core::session::SessionStore::generate_id()),
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        std::shared_ptr<core::session::SessionStatsRegistry>{},
+        nullptr,
+        memory_system);
     agent->set_active_provider_name(config.default_provider);
 
     std::string final_response;
@@ -1266,7 +1275,12 @@ void run_server(int port,
     }
 
     // Legacy local endpoint.
-    svr->Post("/api/chat", handle_api_chat);
+    auto memory_system = core::memory::make_memory_system(
+        core::memory::MemoryConfig{.tool_recovery = config.tool_recovery});
+    svr->Post("/api/chat", [memory_system](const httplib::Request& req,
+                                          httplib::Response& res) {
+        handle_api_chat(req, res, memory_system);
+    });
 
     if (!svr->bind_to_port(host, port)) {
         core::logging::error("Filo daemon failed to bind to {}:{}.", host, port);

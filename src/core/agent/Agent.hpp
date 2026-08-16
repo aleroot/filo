@@ -4,7 +4,7 @@
 #include "../context/ContextBuilder.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../llm/ProviderManager.hpp"
-#include "../memory/MemoryBackgroundService.hpp"
+#include "../memory/MemoryPolicy.hpp"
 #include "../power/SleepInhibitor.hpp"
 #include "../session/GoalManager.hpp"
 #include "../session/TodoManager.hpp"
@@ -31,6 +31,7 @@ class SessionStatsRegistry;
 
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include <string>
 #include <functional>
@@ -41,6 +42,10 @@ class SessionStatsRegistry;
 
 namespace core::config {
 struct AppConfig;
+}
+
+namespace core::memory {
+class MemorySystem;
 }
 
 namespace core::agent {
@@ -100,7 +105,8 @@ public:
           std::filesystem::path tool_result_root = ToolResultStore::default_root(),
           std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor = {},
           std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {},
-          core::budget::BudgetTracker* budget_tracker = nullptr);
+          core::budget::BudgetTracker* budget_tracker = nullptr,
+          std::shared_ptr<core::memory::MemorySystem> memory_system = {});
     ~Agent();
 
     // -----------------------------------------------------------------------
@@ -162,6 +168,7 @@ public:
     void set_memory_thread_policy(core::memory::MemoryThreadPolicy policy);
     [[nodiscard]] core::memory::MemoryThreadPolicy memory_thread_policy() const;
     void run_memory_review_async(std::function<void(std::string)> status_callback = {});
+    [[nodiscard]] std::shared_ptr<core::memory::MemorySystem> memory_system() const;
     void refresh_system_prompt();
 
     // Set the permission profile (Interactive, Standard, Autonomous).
@@ -298,6 +305,21 @@ public:
     }
 
 private:
+    // In-flight tool-recovery observation for one tool of the current turn.
+    struct PendingValidationRecovery {
+        core::tools::schema::ArgumentIssue issue;
+        std::string failed_arguments;
+        int step = 0;
+        bool ambiguous = false;
+    };
+    struct PendingRuntimeRecovery {
+        std::string failed_arguments;
+        int step = 0;
+        // Two same-step failures for one tool, or a same-step success, cannot
+        // identify which call a later correction belongs to.
+        bool ambiguous = false;
+    };
+
     struct TurnState {
         int steps_taken = 0;
         int max_steps = LoopLimits::kDefaultMaxStepsPerTurn;
@@ -305,6 +327,13 @@ private:
         std::string transport_turn_id;
         std::optional<core::context::PromptPlan> prompt_plan;
         ToolCallDeduplicator deduplicator;
+        // Tool-recovery observations, keyed by tool name. Guarded by
+        // recovery_mutex because outcomes are recorded from scheduler threads.
+        std::unordered_map<std::string, PendingValidationRecovery>
+            pending_validation_recoveries;
+        std::unordered_map<std::string, PendingRuntimeRecovery>
+            pending_runtime_recoveries;
+        std::mutex recovery_mutex;
         bool final_response_after_repeat_stop_requested = false;
         // Destructive history replacement invalidates callbacks from every
         // older turn. Ordinary appends and in-turn compaction keep this stable.
@@ -328,6 +357,25 @@ private:
     // and makes every older turn stale.
     [[nodiscard]] bool is_turn_current(
         const std::shared_ptr<TurnState>& turn_state) const;
+
+    // Tool-recovery hooks. note_argument_validation_failure runs on the agent
+    // thread while a batch is being gated; it recalls a proven lesson or
+    // derives deterministic guidance. apply_tool_recovery_outcome runs on
+    // scheduler threads once an executed call finished: failures record a
+    // pending runtime observation (and surface proven runtime hints),
+    // successes close the fail→success loop and persist any inferred lesson.
+    [[nodiscard]] std::optional<std::string> note_argument_validation_failure(
+        const std::string& tool_name,
+        const core::tools::ToolDefinition& definition,
+        const core::tools::schema::ArgumentIssue& issue,
+        const std::string& failed_arguments,
+        TurnState& turn_state);
+
+    void apply_tool_recovery_outcome(const core::llm::ToolCall& call,
+                                     const core::tools::ToolDefinition& definition,
+                                     TurnState& turn_state,
+                                     bool executed_ok,
+                                     std::string& result);
 
     // Freeze provider selection (and the conversation generation) into the turn
     // state so a live model switch applies to the next user turn, not halfway
@@ -408,6 +456,7 @@ private:
     core::tools::TodoTool todo_tool_;
     ToolResultStore tool_result_store_;
     core::tools::ReadToolResultTool read_tool_result_tool_;
+    std::shared_ptr<core::memory::MemorySystem> memory_system_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
     std::uint64_t history_revision_ = 0;

@@ -1,5 +1,6 @@
 #include "Agent.hpp"
 #include "PermissionGate.hpp"
+#include "ToolRecovery.hpp"
 #include "ToolCallPlanner.hpp"
 #include "ToolCallScheduler.hpp"
 #include "ToolOutputHistory.hpp"
@@ -9,6 +10,7 @@
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
+#include "../memory/MemorySystem.hpp"
 #include "../session/SessionStats.hpp"
 #include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
@@ -358,7 +360,8 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              std::filesystem::path tool_result_root,
              std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor,
              std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry,
-             core::budget::BudgetTracker* budget_tracker)
+             core::budget::BudgetTracker* budget_tracker,
+             std::shared_ptr<core::memory::MemorySystem> memory_system)
     : provider_(std::move(provider))
     , sleep_inhibitor_(sleep_inhibitor
           ? std::move(sleep_inhibitor)
@@ -379,7 +382,13 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     , todo_manager_(&core::session::SessionStore::now_iso8601)
     , todo_tool_(todo_manager_)
     , tool_result_store_(std::move(tool_result_root))
-    , read_tool_result_tool_(tool_result_store_) {
+    , read_tool_result_tool_(tool_result_store_)
+    // Memory is optional: execution roots inject the MemorySystem they own.
+    // Tests and embedders that omit it get a private inert system (null
+    // recovery, default semantic store) — never a process-global instance.
+    , memory_system_(memory_system
+          ? std::move(memory_system)
+          : std::make_shared<core::memory::MemorySystem>()) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
@@ -555,6 +564,10 @@ core::memory::MemoryThreadPolicy Agent::memory_thread_policy() const {
     return session_context_.memory_policy;
 }
 
+std::shared_ptr<core::memory::MemorySystem> Agent::memory_system() const {
+    return memory_system_;
+}
+
 void Agent::run_memory_review_async(std::function<void(std::string)> status_callback) {
     auto input = [&]() {
         std::lock_guard lock(history_mutex_);
@@ -573,7 +586,7 @@ void Agent::run_memory_review_async(std::function<void(std::string)> status_call
         input.rate_limit = provider_->get_last_rate_limit_info();
     }
     auto weak_self = weak_from_this();
-    core::memory::MemoryBackgroundService{}.review_async(
+    memory_system_->background().review_async(
         std::move(input),
         [weak_self, status_callback = std::move(status_callback)](
             core::memory::MemoryReviewResult result) {
@@ -607,7 +620,7 @@ void Agent::run_memory_background_review(
     }();
     input.rate_limit = std::move(rate_limit);
     auto weak_self = weak_from_this();
-    core::memory::MemoryBackgroundService{}.review_async(
+    memory_system_->background().review_async(
         std::move(input),
         [weak_self, status_log_callback = std::move(status_log_callback)](
             core::memory::MemoryReviewResult result) {
@@ -710,6 +723,8 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     }
     stable_prompt_plan_ = core::context::ContextBuilder(session_context_)
         .with_mode(current_mode_)
+        .with_memory_prompt(memory_system_->semantic_prompt_block(
+            24, session_context_.memory_policy.generate_memories))
         .include_project_facts(false)
         .build_plan();
     stable_prompt_prefix_ = stable_prompt_plan_.render();
@@ -1603,6 +1618,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::vector<DeniedReason> denied_reasons(tool_calls_accum->size(), DeniedReason::None);
             std::vector<std::string> hook_denial_reasons(tool_calls_accum->size());
             std::vector<std::string> argument_errors(tool_calls_accum->size());
+            // Structured argument-issue bookkeeping for recovery hints.
+            std::vector<std::string> argument_parameters(tool_calls_accum->size());
+            std::vector<std::string> argument_recovery_hints(tool_calls_accum->size());
+            // Resolved definitions reused by the scheduler pass for recovery
+            // bookkeeping (empty where the tool was never found).
+            std::vector<std::optional<core::tools::ToolDefinition>> resolved_definitions(
+                tool_calls_accum->size());
             std::string permission_mode;
             {
                 std::lock_guard lock(self->history_mutex_);
@@ -1674,6 +1696,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 } else {
                     definition = self->skill_manager_.get_tool_definition(tc.function.name);
                 }
+                resolved_definitions[i] = definition;
                 if (!definition.has_value()) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::InvalidArguments;
@@ -1681,16 +1704,25 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     tool_callback(tc.function.name, "[invalid tool call: tool not found]");
                     continue;
                 }
-                auto normalized = core::tools::schema::normalize_arguments(
+                auto normalized = core::tools::schema::validate_arguments(
                     *definition,
                     tc.function.arguments);
                 if (!normalized.has_value()) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::InvalidArguments;
-                    argument_errors[i] = normalized.error();
+                    argument_errors[i] = normalized.error().message;
+                    argument_parameters[i] = normalized.error().parameter;
+                    if (auto hint = self->note_argument_validation_failure(
+                            tc.function.name,
+                            *definition,
+                            normalized.error(),
+                            tc.function.arguments,
+                            *turn_state)) {
+                        argument_recovery_hints[i] = std::move(*hint);
+                    }
                     tool_callback(
                         tc.function.name,
-                        "[invalid tool arguments: " + normalized.error() + "]");
+                        "[invalid tool arguments: " + normalized.error().message + "]");
                     continue;
                 }
                 tc.function.arguments = std::move(*normalized);
@@ -1734,19 +1766,40 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         denied_reasons[i] == DeniedReason::BlockedByTurnAllowList;
                     const bool blocked_by_hook =
                         denied_reasons[i] == DeniedReason::BlockedByHook;
-                    const std::string error_payload = invalid_arguments
-                        ? std::format(
-                            R"({{"error":"Invalid tool arguments: {}"}})",
-                            core::utils::escape_json_string(argument_errors[i]))
-                        : skipped_after_denial
-                        ? R"({"error":"Tool call skipped after a previous denial in this step."})"
-                        : blocked_by_turn_allow_list
-                            ? R"({"error":"Tool call blocked by the turn tool allow-list."})"
-                            : blocked_by_hook
-                                ? std::format(
-                                    R"({{"error":"Tool call blocked by PreToolUse hook: {}"}})",
-                                    core::utils::escape_json_string(hook_denial_reasons[i]))
-                                : R"({"error":"Tool call denied by user."})";
+                    std::string error_payload;
+                    if (invalid_arguments) {
+                        // Structured rejection payload: the offending parameter
+                        // and a recovery hint give the model an immediate,
+                        // actionable correction path.
+                        core::utils::JsonWriter payload_writer(96);
+                        {
+                            auto payload = payload_writer.object();
+                            payload_writer.kv_str(
+                                "error",
+                                "Invalid tool arguments: " + argument_errors[i]);
+                            if (!argument_parameters[i].empty()) {
+                                payload_writer.comma().kv_str(
+                                    "parameter", argument_parameters[i]);
+                            }
+                            if (!argument_recovery_hints[i].empty()) {
+                                payload_writer.comma().kv_str(
+                                    "recovery_hint", argument_recovery_hints[i]);
+                            }
+                        }
+                        error_payload = std::move(payload_writer).take();
+                    } else if (skipped_after_denial) {
+                        error_payload =
+                            R"({"error":"Tool call skipped after a previous denial in this step."})";
+                    } else if (blocked_by_turn_allow_list) {
+                        error_payload =
+                            R"({"error":"Tool call blocked by the turn tool allow-list."})";
+                    } else if (blocked_by_hook) {
+                        error_payload = std::format(
+                            R"({{"error":"Tool call blocked by PreToolUse hook: {}"}})",
+                            core::utils::escape_json_string(hook_denial_reasons[i]));
+                    } else {
+                        error_payload = R"({"error":"Tool call denied by user."})";
+                    }
                     scheduled_tasks.push_back({
                         .accesses = no_tool_access(),
                         .run = [tc, error_payload]() {
@@ -1803,6 +1856,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                      dedup_index = dedup_decision.original_index,
                      deduplicator = &turn_state->deduplicator,
                      dedup_stop_requested,
+                     recovery_definition = resolved_definitions[i],
+                     recovery_turn_state = turn_state.get(),
                      session_context = step_session_context,
                      provider_for_task,
                      active_provider_name_for_task,
@@ -1829,6 +1884,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 .cancellation_requested = [self]() {
                                     return self->is_stop_requested();
                                 },
+                                .memory_system = self->memory_system_,
                             };
 
                             result = self->orchestrator_.execute_task(
@@ -1854,6 +1910,16 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     .model_name = active_model_for_task,
                                     .provider = provider_for_task,
                                 });
+                        }
+                        if (recovery_definition.has_value()) {
+                            const bool executed_ok =
+                                !recovery::result_indicates_error(result);
+                            self->apply_tool_recovery_outcome(
+                                tc,
+                                *recovery_definition,
+                                *recovery_turn_state,
+                                executed_ok,
+                                result);
                         }
                         if (core::tools::MemoryTool::committed_mutation(
                                 tc.function.name,
@@ -2225,6 +2291,138 @@ void Agent::run_efficiency_rotation_if_needed(double min_context_utilization_for
     if (efficiency_decision.action == core::session::SessionEfficiencyDecision::Action::Rotate
         && efficiency_fn) {
         efficiency_fn(efficiency_decision);
+    }
+}
+
+std::optional<std::string> Agent::note_argument_validation_failure(
+    const std::string& tool_name,
+    const core::tools::ToolDefinition& definition,
+    const core::tools::schema::ArgumentIssue& issue,
+    const std::string& failed_arguments,
+    TurnState& turn_state) {
+    // Bookkeeping first: a second distinct failure for the same tool within
+    // one step makes the correction ambiguous and suppresses learning.
+    {
+        std::lock_guard lock(turn_state.recovery_mutex);
+        auto& pending = turn_state.pending_validation_recoveries;
+        const auto it = pending.find(tool_name);
+        if (it != pending.end() && it->second.step == turn_state.steps_taken) {
+            it->second.ambiguous = true;
+        } else {
+            pending.insert_or_assign(tool_name, PendingValidationRecovery{
+                .issue = issue,
+                .failed_arguments = failed_arguments,
+                .step = turn_state.steps_taken,
+                .ambiguous = false,
+            });
+        }
+    }
+
+    // A proven cross-session lesson outranks on-the-spot deduction.
+    const auto key = recovery::make_key(tool_name, definition, issue);
+    if (auto remembered = memory_system_->tool_recovery().recall(key)) {
+        return remembered;
+    }
+    if (auto deduced = recovery::advise(issue, definition)) {
+        return deduced->instruction;
+    }
+    return std::nullopt;
+}
+
+void Agent::apply_tool_recovery_outcome(const core::llm::ToolCall& call,
+                                        const core::tools::ToolDefinition& definition,
+                                        TurnState& turn_state,
+                                        bool executed_ok,
+                                        std::string& result) {
+    if (!executed_ok) {
+        // Surface lessons already proven for this tool contract so the model
+        // gets them with the failing result itself.
+        const std::vector<std::string> hints =
+            memory_system_->tool_recovery().recall_runtime_hints(
+                call.function.name,
+                recovery::schema_fingerprint(definition));
+        if (!hints.empty()) {
+            std::string joined;
+            for (std::size_t i = 0; i < hints.size(); ++i) {
+                if (i > 0) joined += ' ';
+                joined += hints[i];
+            }
+            result = recovery::augment_error_payload(result, joined);
+        }
+        std::lock_guard lock(turn_state.recovery_mutex);
+        auto& pending = turn_state.pending_runtime_recoveries;
+        const auto it = pending.find(call.function.name);
+        if (it != pending.end() && it->second.step == turn_state.steps_taken) {
+            // Another call to this tool already failed in this model step.
+            // The last finisher is not a privileged candidate.
+            it->second.ambiguous = true;
+        } else {
+            pending.insert_or_assign(
+                call.function.name,
+                PendingRuntimeRecovery{
+                    .failed_arguments = call.function.arguments,
+                    .step = turn_state.steps_taken,
+                    .ambiguous = false,
+                });
+        }
+        return;
+    }
+
+    // Success closes the fail→success observation loop for this tool. An
+    // observation only counts while it is recent: pairing a failure with a
+    // success many steps later would attribute an unrelated call's arguments
+    // to the earlier mistake and manufacture a bogus lesson.
+    const int current_step = turn_state.steps_taken;
+    const auto is_fresh = [current_step](int observed_step) {
+        return current_step - observed_step
+            <= recovery::kMaxObservationStepDistance;
+    };
+
+    std::optional<PendingValidationRecovery> pending_validation;
+    std::optional<PendingRuntimeRecovery> pending_runtime;
+    {
+        std::lock_guard lock(turn_state.recovery_mutex);
+        if (const auto it =
+                turn_state.pending_validation_recoveries.find(call.function.name);
+            it != turn_state.pending_validation_recoveries.end()) {
+            if (is_fresh(it->second.step)) {
+                pending_validation = it->second;
+            }
+            turn_state.pending_validation_recoveries.erase(it);
+        }
+        if (const auto it =
+                turn_state.pending_runtime_recoveries.find(call.function.name);
+            it != turn_state.pending_runtime_recoveries.end()) {
+            // A same-step success is a sibling, not a correction. Leave the
+            // failure so a later model step can close the loop; drop only
+            // stale observations.
+            if (is_fresh(it->second.step) && current_step > it->second.step) {
+                pending_runtime = it->second;
+                turn_state.pending_runtime_recoveries.erase(it);
+            } else if (!is_fresh(it->second.step)) {
+                turn_state.pending_runtime_recoveries.erase(it);
+            }
+        }
+    }
+
+    if (pending_validation.has_value() && !pending_validation->ambiguous) {
+        if (auto lesson = recovery::derive_validation_lesson(
+                call.function.name,
+                definition,
+                pending_validation->issue,
+                pending_validation->failed_arguments,
+                call.function.arguments)) {
+            memory_system_->tool_recovery().record(*lesson);
+        }
+    }
+    if (pending_runtime.has_value() && !pending_runtime->ambiguous) {
+        if (auto lesson = recovery::derive_runtime_lesson(
+                call.function.name,
+                definition,
+                pending_runtime->failed_arguments,
+                call.function.arguments)) {
+            memory_system_->tool_recovery().record(*lesson);
+        }
     }
 }
 

@@ -532,6 +532,7 @@ AppConfig make_default_config() {
     config.ui_reasoning = "show";
     config.auto_compact_threshold = 25000;
     config.tool_output_token_limit = 3072;
+    config.tool_recovery = true;
     config.context_compression = "off";
     config.router = core::llm::routing::make_default_router_config();
 
@@ -618,6 +619,7 @@ std::string default_config_json() {
     "default_approval_mode": "prompt",
     "prompt_editor": "system",
     "tool_output_token_limit": 3072,
+    "tool_recovery": true,
     "context_compression": "off",
     "providers": {
         "grok":           { "model": "grok-code-fast-1" },
@@ -1111,6 +1113,11 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
         && tool_output_token_limit <= 32768) {
         parsed.tool_output_token_limit = static_cast<int>(tool_output_token_limit);
     }
+    bool tool_recovery = true;
+    if (!doc["tool_recovery"].get(tool_recovery)) {
+        parsed.tool_recovery = tool_recovery;
+        parsed.tool_recovery_explicit = true;
+    }
 
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
@@ -1416,6 +1423,10 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (overlay.tool_output_token_limit > 0) {
         base.tool_output_token_limit = overlay.tool_output_token_limit;
+    }
+    if (overlay.tool_recovery_explicit) {
+        base.tool_recovery = overlay.tool_recovery;
+        base.tool_recovery_explicit = true;
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;

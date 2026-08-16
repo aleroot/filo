@@ -19,6 +19,10 @@ namespace core::session {
 class SessionStatsRegistry;
 }
 
+namespace core::memory {
+class MemorySystem;
+}
+
 namespace core::agent {
 
 class DelegatedAgentRunner {
@@ -53,6 +57,9 @@ public:
         /// Shared metrics registry of the parent execution root; subagent
         /// accounting flows into it instead of a private registry.
         std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
+        /// Parent memory substrate. When empty the runner builds one from
+        /// config so standalone TaskService callers keep working.
+        std::shared_ptr<core::memory::MemorySystem> memory_system;
         std::chrono::milliseconds timeout = std::chrono::minutes(30);
         std::function<void(const std::shared_ptr<core::agent::Agent>&)> on_agent_ready = {};
         std::function<bool()> cancellation_requested = {};

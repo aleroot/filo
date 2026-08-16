@@ -233,6 +233,12 @@ struct AppConfig {
     int         auto_compact_threshold = 0;
     bool        auto_compact_threshold_explicit = false;
     int         tool_output_token_limit = 0;
+    // Learn from rejected/failed tool calls so a repeated argument mistake is
+    // answered with a concrete correction instead of the same opaque error.
+    bool        tool_recovery = true;
+    // Distinguishes "absent" from "explicitly set" so a profile overlay can
+    // re-enable the feature after the base configuration disabled it.
+    bool        tool_recovery_explicit = false;
     std::string context_compression;
     std::unordered_map<std::string, ProviderConfig> providers;
     std::unordered_map<std::string, SubagentConfig> subagents;

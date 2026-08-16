@@ -3,7 +3,6 @@
 
 #include "SteeringLoader.hpp"
 #include "../scm/ScmFactory.hpp"
-#include "../memory/MemoryStore.hpp"
 #include "../tools/SkillRegistry.hpp"
 #include "../utils/FileSystemUtils.hpp"
 
@@ -167,6 +166,11 @@ ContextBuilder& ContextBuilder::with_mode(std::string_view mode) {
     return *this;
 }
 
+ContextBuilder& ContextBuilder::with_memory_prompt(std::string prompt) {
+    memory_prompt_ = std::move(prompt);
+    return *this;
+}
+
 ContextBuilder& ContextBuilder::include_project_context(bool include) noexcept {
     include_project_context_ = include;
     return *this;
@@ -203,9 +207,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         if (session_context_.memory_policy.use_memories
             && !core::landrun::LandrunSettings::instance().enabled()) {
             append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
-                         "memory", core::memory::build_memory_prompt_block(
-                             core::memory::MemoryStore{}.load(), 24,
-                             session_context_.memory_policy.generate_memories));
+                         "memory", memory_prompt_);
         }
         return layers;
     }
@@ -245,9 +247,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
     if (session_context_.memory_policy.use_memories
         && !core::landrun::LandrunSettings::instance().enabled()) {
         append_layer(layers, ContextLayerKind::Memory, PromptStability::Session,
-                     "memory", core::memory::build_memory_prompt_block(
-                         core::memory::MemoryStore{}.load(), 24,
-                         session_context_.memory_policy.generate_memories));
+                     "memory", memory_prompt_);
     }
 
     if (include_project_facts_) {

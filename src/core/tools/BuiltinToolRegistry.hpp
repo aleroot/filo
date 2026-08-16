@@ -1,9 +1,11 @@
 #pragma once
 
 #include "AskUserQuestionTool.hpp"
+#include "../memory/MemoryStore.hpp"
 
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace core::tools {
 
@@ -20,6 +22,9 @@ struct BuiltinToolRegistrationOptions {
 
     std::function<void(QuestionRequest)> ask_user_question_callback = {};
     std::shared_ptr<AskUserQuestionTool>* ask_user_question_tool_out = nullptr;
+    /// Semantic store from the execution-root MemorySystem. When unset the
+    /// tool uses the default on-disk path handle (same file, separate owner).
+    std::optional<core::memory::MemoryStore> memory_store;
 };
 
 [[nodiscard]] BuiltinToolRegistrationOptions agent_builtin_tool_options();

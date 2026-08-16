@@ -77,6 +77,7 @@
 #include "core/landrun/LandrunSettings.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/memory/MemorySystem.hpp"
 #include "core/agent/PermissionGate.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/budget/BudgetTracker.hpp"
@@ -762,11 +763,17 @@ RunResult run(RunOptions opts) {
     bool ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
     bool tool_output_expanded = false;
 
+    // One MemorySystem for this TUI process: Agent, MemoryTool, /memory, and
+    // thread agents all share it. Not a singleton — owned here and passed down.
+    auto memory_system = core::memory::make_memory_system(
+        core::memory::MemoryConfig{.tool_recovery = config.tool_recovery});
+
     // ── Tool registration ───────────────────────────────────────────────────
     auto& tool_manager = core::tools::ToolManager::get_instance();
     std::shared_ptr<core::tools::AskUserQuestionTool> ask_user_tool;
     auto tool_options = core::tools::agent_builtin_tool_options();
     tool_options.ask_user_question_tool_out = &ask_user_tool;
+    tool_options.memory_store = memory_system->semantic();
     core::tools::register_builtin_tools(tool_manager, std::move(tool_options));
 
     // ── MCP client connections ───────────────────────────────────────────────
@@ -795,7 +802,8 @@ RunResult run(RunOptions opts) {
         core::agent::ToolResultStore::default_root(),
         std::shared_ptr<core::power::SleepInhibitor>{},
         session_stats_registry,
-        &core::budget::BudgetTracker::get_instance());
+        &core::budget::BudgetTracker::get_instance(),
+        memory_system);
     agent->set_active_provider_name(active_provider_name);
     agent->set_auto_compact_threshold(
         config.auto_compact_threshold,
@@ -1378,7 +1386,6 @@ RunResult run(RunOptions opts) {
     // ── Session management ────────────────────────────────────────────────────
     auto session_store = std::make_shared<core::session::SessionStore>(
         core::session::SessionStore::default_sessions_dir());
-    auto memory_store = std::make_shared<core::memory::MemoryStore>();
 
     const std::string project_thread_base_name = [] {
         try {
@@ -2209,7 +2216,8 @@ RunResult run(RunOptions opts) {
             core::agent::ToolResultStore::default_root(),
             std::shared_ptr<core::power::SleepInhibitor>{},
             session_stats_registry,
-            &core::budget::BudgetTracker::get_instance());
+            &core::budget::BudgetTracker::get_instance(),
+            memory_system);
         created->set_active_provider_name(
             data.provider.empty() ? active_provider_name : data.provider);
         created->set_auto_compact_threshold(
@@ -5462,8 +5470,8 @@ RunResult run(RunOptions opts) {
         return engine;
     };
 
-    auto memory_state = [memory_store]() {
-        return memory_store->load();
+    auto memory_state = [memory_system]() {
+        return memory_system->semantic().load();
     };
 
     auto memory_thread_policy = [agent]() {
@@ -5487,10 +5495,10 @@ RunResult run(RunOptions opts) {
     };
 
     auto set_memory_settings =
-        [memory_store](core::memory::MemorySettings settings)
+        [memory_system](core::memory::MemorySettings settings)
             -> core::commands::CommandOperationResult {
         std::string error;
-        if (!memory_store->save_settings(settings, &error)) {
+        if (!memory_system->semantic().save_settings(settings, &error)) {
             return {.ok = false, .message = error};
         }
         if (settings.auto_capture || settings.background_review) {
@@ -5502,37 +5510,37 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = "Memory disabled."};
     };
 
-    auto add_memory = [memory_store](std::string_view content)
+    auto add_memory = [memory_system](std::string_view content)
         -> core::commands::CommandOperationResult {
-        auto result = memory_store->remember(content, "global", {}, "manual");
+        auto result = memory_system->semantic().remember(content, "global", {}, "manual");
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto forget_memory = [memory_store](std::string_view selector)
+    auto forget_memory = [memory_system](std::string_view selector)
         -> core::commands::CommandOperationResult {
-        auto result = memory_store->forget(selector);
+        auto result = memory_system->semantic().forget(selector);
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto clean_memory = [memory_store]() -> core::commands::CommandOperationResult {
-        auto result = memory_store->clean();
+    auto clean_memory = [memory_system]() -> core::commands::CommandOperationResult {
+        auto result = memory_system->semantic().clean();
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto clear_memory = [memory_store]() -> core::commands::CommandOperationResult {
-        auto result = memory_store->clear();
+    auto clear_memory = [memory_system]() -> core::commands::CommandOperationResult {
+        auto result = memory_system->semantic().clear();
         return {.ok = result.ok, .message = result.message};
     };
 
     auto save_memory_markdown =
-        [memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
-        auto result = memory_store->save_markdown(path);
+        [memory_system](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = memory_system->semantic().save_markdown(path);
         return {.ok = result.ok, .message = result.message};
     };
 
     auto load_memory_markdown =
-        [memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
-        auto result = memory_store->load_markdown(path);
+        [memory_system](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = memory_system->semantic().load_markdown(path);
         return {.ok = result.ok, .message = result.message};
     };
 

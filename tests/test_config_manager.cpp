@@ -192,6 +192,43 @@ TEST_CASE("ConfigManager parses tool output history settings", "[config]") {
     fs::remove_all(sandbox);
 }
 
+TEST_CASE("ConfigManager parses the tool recovery switch", "[config]") {
+    const fs::path sandbox = make_temp_dir("filo_config_tool_recovery");
+    const fs::path xdg_home = sandbox / "xdg";
+    const fs::path project_dir = sandbox / "project";
+    const fs::path local_config = project_dir / ".filo" / "config.json";
+
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+    auto& manager = core::config::ConfigManager::get_instance();
+
+    SECTION("defaults to enabled when the key is absent") {
+        write_text(local_config, R"({"tool_output_token_limit": 4096})");
+        manager.load(project_dir);
+        CHECK(manager.get_config().tool_recovery);
+    }
+
+    SECTION("an explicit false disables the feature") {
+        write_text(local_config, R"({"tool_recovery": false})");
+        manager.load(project_dir);
+        CHECK_FALSE(manager.get_config().tool_recovery);
+        CHECK(manager.get_config().tool_recovery_explicit);
+    }
+
+    SECTION("a profile overlay can re-enable a globally disabled feature") {
+        write_text(local_config, R"({
+            "tool_recovery": false,
+            "active_profile": "debugging",
+            "profiles": {
+                "debugging": { "tool_recovery": true }
+            }
+        })");
+        manager.load(project_dir);
+        CHECK(manager.get_config().tool_recovery);
+    }
+
+    fs::remove_all(sandbox);
+}
+
 TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[config]") {
     const fs::path sandbox = make_temp_dir("filo_config_subagents");
     const fs::path xdg_home = sandbox / "xdg";
