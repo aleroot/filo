@@ -121,15 +121,16 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 |---|---|
 | Interactive TUI | `filo` |
 | Prompter (single-shot) | `filo --prompt "Summarize this diff"` |
-| MCP over stdio | `filo --mcp --headless` or `filo --mcp stdio --headless` |
-| MCP over TCP (HTTP `/mcp` endpoint) | `filo --mcp tcp --headless --port 8080` |
+| MCP over stdio | `filo --mcp stdio` or `filo --mcp stdio --headless` |
+| MCP over TCP (HTTP `/mcp` endpoint) | `filo --mcp --headless --port 8080` or `filo --mcp tcp --headless --port 8080` |
 | API gateway only | `filo --api --headless --port 8080` |
-| MCP + API gateway | `filo --mcp tcp --headless --api --port 8080` |
+| MCP + API gateway | `filo --mcp --headless --api --port 8080` |
 
 ### Daemon / transport
 
-- `--mcp` without a value defaults to `stdio`.
+- `--mcp` without a value defaults to `tcp`.
 - `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
+- `--mcp stdio` runs an MCP server over standard input/output (headless).
 - `--daemon` is still accepted as a deprecated alias for `--mcp tcp`.
 - Set `FILO_MCP_BEARER_TOKEN` to require `Authorization: Bearer <token>` on `/mcp`.
 - For LAN worker deployments, use `--host 0.0.0.0` only with a bearer token and network access controls.
@@ -138,7 +139,7 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
   - `GET /v1/models`
   - `POST /v1/chat/completions`
   - `POST /v1/messages`
-- Combine `--api` with `--mcp tcp` if you want both `/mcp` and `/v1/*` on one port.
+- Combine `--api` with `--mcp` if you want both `/mcp` and `/v1/*` on one port.
 - Model routing in API gateway endpoints:
   - `policy/<policy_name>` routes via Filo smart router policy.
   - `<provider>/<model>` routes directly to a configured provider/model.
@@ -147,7 +148,7 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 ### Useful CLI flags
 
 - `--version` print the Filo version and exit
-- `--mcp [stdio|tcp]` run as MCP server (default transport: `stdio`)
+- `--mcp [tcp|stdio]` run as MCP server (default transport: `tcp`)
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional chat API proxy mode
 - `filo --auth <provider> [login|logout]` authenticate or sign out and exit

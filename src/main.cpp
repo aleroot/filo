@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
         "--version",
         std::format("{} {}", core::version::product_name, core::version::value));
 
-    std::string mcp_transport = "stdio";
+    std::string mcp_transport = "tcp";
     bool        daemon_mode_legacy = false;
     bool        headless    = false;
     bool        prompter_mode = false;
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
     auto* mcp_opt = app.add_option(
         "--mcp",
         mcp_transport,
-        "Run as an MCP server. Optional transport: stdio (default) or tcp.");
+        "Run as an MCP server. Optional transport: tcp (default) or stdio.");
     mcp_opt->expected(0, 1);
     mcp_opt->capture_default_str();
     app.add_flag("--daemon",  daemon_mode_legacy,
@@ -280,13 +280,13 @@ int main(int argc, char** argv) {
     std::string normalized_mcp_transport = core::utils::str::to_lower_ascii_copy(mcp_transport);
     const bool mcp_option_provided = mcp_opt->count() > 0;
     if (mcp_option_provided && normalized_mcp_transport.empty()) {
-        normalized_mcp_transport = "stdio";
+        normalized_mcp_transport = "tcp";
     }
     if (mcp_option_provided
         && normalized_mcp_transport != "stdio"
         && normalized_mcp_transport != "tcp") {
         core::logging::error(
-            "Invalid --mcp transport '{}'. Supported transports: stdio, tcp.",
+            "Invalid --mcp transport '{}'. Supported transports: tcp, stdio.",
             mcp_transport);
         return 2;
     }
@@ -306,6 +306,11 @@ int main(int argc, char** argv) {
     const bool mcp_stdio_mode = mcp_mode && normalized_mcp_transport == "stdio";
     const bool mcp_tcp_mode = mcp_mode && normalized_mcp_transport == "tcp";
     const bool http_daemon_mode = mcp_tcp_mode || enable_api_gateway;
+
+    // MCP stdio uses stdin/stdout exclusively and is strictly headless.
+    if (mcp_stdio_mode) {
+        headless = true;
+    }
 
     if (!work_dirs.empty()) {
         std::error_code ec;
