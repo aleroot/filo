@@ -8,6 +8,7 @@
 #include "../../logging/Logger.hpp"
 #include "../../tools/ToolSchema.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "core/utils/TimeUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
@@ -1132,8 +1133,14 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
 
     info.requests_limit     = parse_int("x-ratelimit-limit-requests");
     info.requests_remaining = parse_int("x-ratelimit-remaining-requests");
+    if (const auto it = response.headers.find("x-ratelimit-reset-requests"); it != response.headers.end()) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(it->second);
+    }
     info.tokens_limit       = parse_int("x-ratelimit-limit-tokens");
     info.tokens_remaining   = parse_int("x-ratelimit-remaining-tokens");
+    if (const auto it = response.headers.find("x-ratelimit-reset-tokens"); it != response.headers.end()) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(it->second);
+    }
     info.retry_after        = parse_int("retry-after");
     info.is_rate_limited    = (response.status_code == 429 || info.retry_after > 0);
 

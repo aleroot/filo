@@ -5,6 +5,7 @@
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
+#include "../../utils/TimeUtils.hpp"
 #include "../../tools/ToolSchema.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -361,25 +362,9 @@ namespace {
         payload += ']';
     }
     
-    // Parse ISO 8601 timestamp to unix seconds (Anthropic format: "2025-01-15T12:00:30Z").
+    // Parse ISO 8601 timestamp or duration to unix epoch seconds.
     int64_t parse_iso8601_timestamp(std::string_view sv) {
-        if (sv.empty()) return 0;
-        int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
-        // Use a std::string to guarantee null-termination before passing to sscanf.
-        const std::string s(sv);
-        if (std::sscanf(s.c_str(), "%d-%d-%dT%d:%d:%dZ",
-                        &year, &month, &day, &hour, &min, &sec) == 6) {
-            std::tm t{};
-            t.tm_year = year - 1900;
-            t.tm_mon  = month - 1;
-            t.tm_mday = day;
-            t.tm_hour = hour;
-            t.tm_min  = min;
-            t.tm_sec  = sec;
-            return static_cast<int64_t>(timegm(&t));
-        }
-        // Fallback: some implementations send a plain unix timestamp integer.
-        return safe_stoi64(sv);
+        return core::utils::time::parse_timestamp_or_duration(sv);
     }
 
     // ── Response lifecycle hook implementations ──────────────────────────────
@@ -449,6 +434,9 @@ namespace {
             });
         if (existing != info.usage_windows.end()) {
             existing->utilization = incoming.utilization;
+            if (incoming.resets_at > 0) {
+                existing->resets_at = incoming.resets_at;
+            }
         } else {
             info.usage_windows.push_back(std::move(incoming));
         }
@@ -488,9 +476,16 @@ namespace {
             const auto utilization = parse_float_element(utilization_el);
             if (!utilization.has_value()) continue;
 
+            int64_t resets_at = 0;
+            std::string_view resets_at_str;
+            if (obj["resets_at"].get(resets_at_str) == simdjson::SUCCESS) {
+                resets_at = parse_iso8601_timestamp(resets_at_str);
+            }
+
             snapshot.windows.push_back(UsageWindow{
                 .label = std::string(w.label),
                 .utilization = normalize_utilization(*utilization, true),
+                .resets_at = resets_at,
             });
         }
 
@@ -500,9 +495,15 @@ namespace {
             if (extra_usage["utilization"].get(utilization_el) == simdjson::SUCCESS) {
                 if (const auto utilization = parse_float_element(utilization_el);
                     utilization.has_value()) {
+                    int64_t resets_at = 0;
+                    std::string_view resets_at_str;
+                    if (extra_usage["resets_at"].get(resets_at_str) == simdjson::SUCCESS) {
+                        resets_at = parse_iso8601_timestamp(resets_at_str);
+                    }
                     snapshot.windows.push_back(UsageWindow{
                         .label = "overage",
                         .utilization = normalize_utilization(*utilization, true),
+                        .resets_at = resets_at,
                     });
                 }
             }
@@ -595,9 +596,20 @@ namespace {
             if (auto value = find_header_case_insensitive(headers, header_name)) {
                 float val = 0.0f;
                 if (try_parse_float(*value, val) && val >= 0.0f) {
+                    int64_t window_reset = 0;
+                    const std::string reset_header_name =
+                        "anthropic-ratelimit-unified-" + std::string(window) + "-reset";
+                    if (auto rval = find_header_case_insensitive(headers, reset_header_name)) {
+                        window_reset = parse_iso8601_timestamp(*rval);
+                    } else if (auto rval2 = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-" + std::string(window) + "-resets-at")) {
+                        window_reset = parse_iso8601_timestamp(*rval2);
+                    } else if (auto rval3 = find_header_case_insensitive(headers, "anthropic-ratelimit-unified-" + std::string(window) + "-reset-time")) {
+                        window_reset = parse_iso8601_timestamp(*rval3);
+                    }
                     info.usage_windows.push_back({
                         std::string(label),
                         normalize_utilization(val, false),
+                        window_reset,
                     });
                 }
             }

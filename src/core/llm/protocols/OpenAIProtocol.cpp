@@ -5,7 +5,7 @@
 #include "../Models.hpp"
 #include "../OpenAIEndpointUtils.hpp"
 #include "../../logging/Logger.hpp"
-#include "../../utils/StringUtils.hpp"
+#include "core/utils/TimeUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
@@ -85,10 +85,16 @@ find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
         parse_int_header_case_insensitive(headers, "x-ratelimit-limit-requests");
     info.requests_remaining =
         parse_int_header_case_insensitive(headers, "x-ratelimit-remaining-requests");
+    if (auto r_reset = find_header_case_insensitive(headers, "x-ratelimit-reset-requests")) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(*r_reset);
+    }
     info.tokens_limit =
         parse_int_header_case_insensitive(headers, "x-ratelimit-limit-tokens");
     info.tokens_remaining =
         parse_int_header_case_insensitive(headers, "x-ratelimit-remaining-tokens");
+    if (auto t_reset = find_header_case_insensitive(headers, "x-ratelimit-reset-tokens")) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*t_reset);
+    }
     info.retry_after = parse_int_header_case_insensitive(headers, "retry-after");
     info.is_rate_limited = (response_status_code == 429 || info.retry_after > 0);
 

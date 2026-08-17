@@ -22,6 +22,7 @@
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
+#include "UsageDetailsPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/ThreadCatalog.hpp"
@@ -897,6 +898,8 @@ RunResult run(RunOptions opts) {
     };
     RemoteActivityPanelState remote_activity_panel_state;
     Box remote_activity_pill_box{0, -1, 0, -1};
+    bool usage_details_panel_active = false;
+    Box usage_status_box{0, -1, 0, -1};
     std::vector<Box> thread_tab_hitboxes;
     std::vector<std::string> thread_tab_session_ids;
     SelectionClipboardCopier selection_clipboard_copier;
@@ -6680,6 +6683,35 @@ RunResult run(RunOptions opts) {
             }
         }
 
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && usage_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                usage_details_panel_active = !usage_details_panel_active;
+            }
+            wake_ui();
+            return true;
+        }
+
+        bool usage_panel_was_active = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (usage_details_panel_active) {
+                if (event == Event::Escape
+                    || event == Event::Character('q')
+                    || event == Event::Character('Q')) {
+                    usage_details_panel_active = false;
+                    usage_panel_was_active = true;
+                }
+            }
+        }
+        if (usage_panel_was_active) {
+            wake_ui();
+            return true;
+        }
+
         if (opts.remote_mcp_server_enabled
             && event.is_mouse()
             && event.mouse().button == Mouse::Left
@@ -8356,6 +8388,7 @@ RunResult run(RunOptions opts) {
         std::vector<std::string>        stderr_panel_lines;
         bool                            remote_activity_panel_active = false;
         std::size_t                     remote_activity_panel_selected = 0;
+        bool                            usage_panel_visible = false;
         std::size_t                     queued_steering_count = 0;
         std::string                     external_editor_status;
         {
@@ -8447,6 +8480,7 @@ RunResult run(RunOptions opts) {
             stderr_panel_lines = stderr_panel_state.lines;
             remote_activity_panel_active = remote_activity_panel_state.active;
             remote_activity_panel_selected = remote_activity_panel_state.selected;
+            usage_panel_visible = usage_details_panel_active;
             queued_steering_count = current_runtime->queued_turn_count();
         }
         auto remote_activity_snapshot = opts.remote_mcp_server_enabled
@@ -8526,6 +8560,34 @@ RunResult run(RunOptions opts) {
             thread_tab_session_ids.clear();
         }
 
+        // ── Rate limit and context info for bottom panel & status bar ──
+        const std::string visible_session_id = current_runtime->session_id();
+        std::string budget_str =
+            core::budget::BudgetTracker::get_instance().status_string(
+                visible_session_id);
+        const auto context_window = agent->context_window_snapshot();
+        const int32_t ctx_pct = context_window.remaining_pct;
+
+        Color ctx_color = Color::Green;
+        if (ctx_pct >= 0 && ctx_pct < 25)       ctx_color = Color::Red;
+        else if (ctx_pct >= 0 && ctx_pct < 50)  ctx_color = ColorWarn;
+        
+        // Get rate limit info from the current provider (for Anthropic/OAuth users)
+        auto rate_limit_info = llm_provider->get_last_rate_limit_info();
+        
+        // Update our local rate limit state for quota notifications
+        {
+            std::lock_guard lock(ui_mutex);
+            rate_limit_state.latest = rate_limit_info;
+        }
+        // Check for quota notifications
+        check_and_notify_quota();
+
+        // Billing behavior belongs to the active provider. Usage windows remain
+        // a fallback for aggregate/router providers that expose subscription quota.
+        const bool is_subscription = !llm_provider->should_estimate_cost()
+            || !rate_limit_info.usage_windows.empty();
+
         // ── Permission overlay ───────────────────────────────────────────
         Element bottom_el;
         if (!external_editor_status.empty()) {
@@ -8535,6 +8597,20 @@ RunResult run(RunOptions opts) {
                     text("Esc to cancel") | color(Color::GrayDark),
                 }),
                 {});
+        } else if (usage_panel_visible) {
+            auto total = core::budget::BudgetTracker::get_instance().session_total(
+                visible_session_id);
+            double cost = core::budget::BudgetTracker::get_instance().session_cost_usd(
+                visible_session_id);
+            bottom_el = render_usage_details_panel(
+                rate_limit_info,
+                active_provider_name,
+                active_model_name,
+                session_effort_value,
+                is_subscription,
+                total,
+                cost,
+                ctx_pct);
         } else if (remote_activity_panel_active) {
             bottom_el = render_remote_activity_panel(
                 remote_activity_snapshot,
@@ -8695,32 +8771,6 @@ RunResult run(RunOptions opts) {
         // ── Status bar ───────────────────────────────────────────────────
         const std::size_t tick = animation_tick.load(std::memory_order_relaxed);
         const bool response_in_progress = current_runtime->turn_active();
-        const std::string visible_session_id = current_runtime->session_id();
-        std::string budget_str =
-            core::budget::BudgetTracker::get_instance().status_string(
-                visible_session_id);
-        const auto context_window = agent->context_window_snapshot();
-        const int32_t ctx_pct = context_window.remaining_pct;
-
-        Color ctx_color = Color::Green;
-        if (ctx_pct >= 0 && ctx_pct < 25)       ctx_color = Color::Red;
-        else if (ctx_pct >= 0 && ctx_pct < 50)  ctx_color = ColorWarn;
-        
-        // Get rate limit info from the current provider (for Anthropic/OAuth users)
-        auto rate_limit_info = llm_provider->get_last_rate_limit_info();
-        
-        // Update our local rate limit state for quota notifications
-        {
-            std::lock_guard lock(ui_mutex);
-            rate_limit_state.latest = rate_limit_info;
-        }
-        // Check for quota notifications
-        check_and_notify_quota();
-
-        // Billing behavior belongs to the active provider. Usage windows remain
-        // a fallback for aggregate/router providers that expose subscription quota.
-        const bool is_subscription = !llm_provider->should_estimate_cost()
-            || !rate_limit_info.usage_windows.empty();
 
         // Format current working directory for display
         auto format_cwd = []() -> std::string {
@@ -8850,6 +8900,12 @@ RunResult run(RunOptions opts) {
             rate_limit_el = text(label) | color(Color::Red);
         }
 
+        if (rate_limit_info.has_data()) {
+            rate_limit_el = std::move(rate_limit_el) | reflect(usage_status_box);
+        } else {
+            usage_status_box = {0, -1, 0, -1};
+        }
+
         Element guardrail_el = text("");
         const bool router_managed_mode =
             model_selection_mode == ModelSelectionMode::Router
@@ -8947,6 +9003,7 @@ RunResult run(RunOptions opts) {
         left_items.push_back(review_activity_el);
         const bool show_status_footer =
             ui_show_footer
+            || usage_panel_visible
             || response_in_progress
             || review_activity_active
             || opts.remote_mcp_server_enabled

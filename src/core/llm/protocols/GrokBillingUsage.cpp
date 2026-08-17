@@ -3,6 +3,7 @@
 #include "GrokBuildEndpoint.hpp"
 #include "core/llm/transport/HttpHeaderUtils.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "core/utils/TimeUtils.hpp"
 
 #include <simdjson.h>
 
@@ -152,6 +153,7 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
 
     std::string label = "usage";
     bool has_period = false;
+    int64_t period_reset = 0;
     simdjson::dom::object period;
     if (config["currentPeriod"].get(period) == simdjson::SUCCESS) {
         has_period = true;
@@ -159,6 +161,12 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
         if (period["type"].get(type) == simdjson::SUCCESS) {
             if (type.find("WEEKLY") != std::string_view::npos) label = "7d";
             else if (type.find("MONTHLY") != std::string_view::npos) label = "30d";
+        }
+        std::string_view end_time;
+        if (period["endTime"].get(end_time) == simdjson::SUCCESS
+            || period["resetTime"].get(end_time) == simdjson::SUCCESS
+            || period["resets_at"].get(end_time) == simdjson::SUCCESS) {
+            period_reset = core::utils::time::parse_timestamp_or_duration(end_time);
         }
     }
 
@@ -178,6 +186,7 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
         windows.push_back(UsageWindow{
             label,
             std::clamp(percentage.value_or(0.0f) / 100.0f, 0.0f, 1.5f),
+            period_reset,
         });
 
         // New responses normally expose exactly one typed period. If a

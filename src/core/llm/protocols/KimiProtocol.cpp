@@ -6,6 +6,7 @@
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
+#include "../../utils/TimeUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -192,6 +193,24 @@ parse_first_present_int_header(const cpr::Header& headers,
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::string>
+parse_optional_string_header(const cpr::Header& headers, std::string_view key) noexcept {
+    const auto value = find_header_case_insensitive(headers, key);
+    if (!value.has_value() || value->empty()) return std::nullopt;
+    return std::string(*value);
+}
+
+[[nodiscard]] std::optional<std::string>
+parse_first_present_string_header(const cpr::Header& headers,
+                                  std::initializer_list<std::string_view> keys) noexcept {
+    for (std::string_view key : keys) {
+        if (auto parsed = parse_optional_string_header(headers, key); parsed.has_value()) {
+            return parsed;
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::optional<float>
 parse_optional_float_header(const cpr::Header& headers, std::string_view key) noexcept {
     const auto value = find_header_case_insensitive(headers, key);
@@ -237,6 +256,13 @@ parse_optional_float_header(const cpr::Header& headers, std::string_view key) no
         info.requests_remaining = info.requests_limit;
     }
 
+    if (auto requests_reset = parse_first_present_string_header(
+            headers,
+            {"x-ratelimit-reset-requests", "x-msh-ratelimit-reset-requests", "x-ratelimit-reset"});
+        requests_reset.has_value()) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(*requests_reset);
+    }
+
     // Token-based limits.
     if (auto tokens_limit = parse_first_present_int_header(
             headers, {"x-ratelimit-limit-tokens", "x-msh-ratelimit-limit-tokens"});
@@ -253,25 +279,51 @@ parse_optional_float_header(const cpr::Header& headers, std::string_view key) no
         info.tokens_remaining = info.tokens_limit;
     }
 
+    if (auto tokens_reset = parse_first_present_string_header(
+            headers,
+            {"x-ratelimit-reset-tokens", "x-msh-ratelimit-reset-tokens"});
+        tokens_reset.has_value()) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*tokens_reset);
+    }
+
     // Retry / rate-limited signals.
     info.retry_after = parse_int_header(headers, "retry-after");
     info.is_rate_limited = (response_status_code == 429 || info.retry_after > 0);
 
     // Unified utilization headers (OAuth/subscription style).
-    // For each known window, try the standard header first then the Kimi-prefixed variant.
     // Table-driven: add a new row here if the server introduces a new window.
-    struct WindowDef { std::string_view label, standard_key, msh_key; };
+    struct WindowDef {
+        std::string_view label;
+        std::array<std::string_view, 4> util_keys;
+        std::array<std::string_view, 6> reset_keys;
+    };
     static constexpr std::array<WindowDef, 2> kWindows{{
-        {"5h", "x-ratelimit-unified-5h-utilization", "x-msh-ratelimit-unified-5h-utilization"},
-        {"7d", "x-ratelimit-unified-7d-utilization", "x-msh-ratelimit-unified-7d-utilization"},
+        {"5h",
+         {"x-ratelimit-unified-5h-utilization", "x-msh-ratelimit-unified-5h-utilization",
+          "x-ratelimit-5h-utilization", "x-msh-ratelimit-5h-utilization"},
+         {"x-ratelimit-unified-5h-reset", "x-msh-ratelimit-unified-5h-reset",
+          "x-ratelimit-unified-5h-resets-at", "x-msh-ratelimit-unified-5h-resets-at",
+          "x-ratelimit-5h-resets-at", "x-ratelimit-5h-reset"}},
+        {"7d",
+         {"x-ratelimit-unified-7d-utilization", "x-msh-ratelimit-unified-7d-utilization",
+          "x-ratelimit-7d-utilization", "x-msh-ratelimit-7d-utilization"},
+         {"x-ratelimit-unified-7d-reset", "x-msh-ratelimit-unified-7d-reset",
+          "x-ratelimit-unified-7d-resets-at", "x-msh-ratelimit-unified-7d-resets-at",
+          "x-ratelimit-7d-resets-at", "x-ratelimit-7d-reset"}},
     }};
     for (const auto& w : kWindows) {
-        auto val = parse_optional_float_header(headers, w.standard_key);
-        if (!val.has_value()) {
-            val = parse_optional_float_header(headers, w.msh_key);
+        std::optional<float> val;
+        for (const auto& key : w.util_keys) {
+            if (val = parse_optional_float_header(headers, key); val.has_value()) break;
         }
         if (val.has_value()) {
-            info.usage_windows.push_back({std::string(w.label), *val});
+            int64_t w_reset = 0;
+            for (const auto& rkey : w.reset_keys) {
+                if (auto rval = parse_optional_string_header(headers, rkey)) {
+                    if (w_reset = core::utils::time::parse_timestamp_or_duration(*rval); w_reset > 0) break;
+                }
+            }
+            info.usage_windows.push_back({std::string(w.label), *val, w_reset});
         }
     }
 
@@ -672,6 +724,31 @@ utilization_from_limit_detail(const simdjson::dom::object* detail) noexcept {
     return std::clamp(utilization, 0.0f, 1.5f);
 }
 
+[[nodiscard]] int64_t parse_kimi_reset_field(const simdjson::dom::object* obj) noexcept {
+    if (!obj) return 0;
+    static constexpr std::array<std::string_view, 6> kResetKeys{
+        "resetTime", "reset_time", "nextResetTime", "resets_at", "resetsAt", "expires_at"
+    };
+    for (const auto& key : kResetKeys) {
+        if (const auto sv = parse_string_field(obj, key); sv.has_value() && !sv->empty()) {
+            if (const int64_t parsed = core::utils::time::parse_timestamp_or_duration(*sv); parsed > 0) {
+                return parsed;
+            }
+        }
+        if (const auto num = parse_int_field(obj, key); num.has_value() && *num > 0) {
+            int64_t val = *num;
+            if (val > 100'000'000'000LL) val /= 1000LL;
+            return val;
+        }
+    }
+    if (const auto reset_in = parse_int_field(obj, "resetsInSeconds"); reset_in.has_value() && *reset_in > 0) {
+        const auto now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return now_sec + *reset_in;
+    }
+    return 0;
+}
+
 [[nodiscard]] std::optional<KimiUsageSnapshot>
 parse_kimi_usage_payload(std::string_view payload) {
     simdjson::dom::parser parser;
@@ -703,12 +780,14 @@ parse_kimi_usage_payload(std::string_view payload) {
             // Kimi Code's current /usages schema exposes the weekly
             // subscription quota in the root `usage` object. Rolling windows
             // such as 5h live in limits[]. Both counters may be JSON strings.
+            const int64_t usage_reset = parse_kimi_reset_field(&usage_obj);
             if (const auto utilization =
                     utilization_from_limit_detail(&usage_obj);
                 utilization.has_value()) {
                 snapshot.windows.push_back(UsageWindow{
                     .label = "7d",
                     .utilization = *utilization,
+                    .resets_at = usage_reset,
                 });
             }
         }
@@ -736,12 +815,17 @@ parse_kimi_usage_payload(std::string_view payload) {
                 window_ptr = &window_obj;
             }
 
+            int64_t item_reset = parse_kimi_reset_field(&detail_obj);
+            if (item_reset == 0) item_reset = parse_kimi_reset_field(&item_obj);
+            if (item_reset == 0 && window_ptr) item_reset = parse_kimi_reset_field(window_ptr);
+
             const auto utilization = utilization_from_limit_detail(&detail_obj);
             if (utilization.has_value()) {
                 snapshot.windows.push_back(UsageWindow{
                     .label = infer_kimi_window_label(
                         &item_obj, &detail_obj, window_ptr, index),
                     .utilization = *utilization,
+                    .resets_at = item_reset,
                 });
             }
             ++index;
@@ -850,6 +934,9 @@ void merge_kimi_usage_snapshot(RateLimitInfo& info, const KimiUsageSnapshot& sna
             });
         if (existing != info.usage_windows.end()) {
             existing->utilization = incoming.utilization;
+            if (incoming.resets_at > 0) {
+                existing->resets_at = incoming.resets_at;
+            }
         } else {
             info.usage_windows.push_back(incoming);
         }

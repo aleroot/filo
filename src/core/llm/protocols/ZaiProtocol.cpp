@@ -3,6 +3,7 @@
 #include "SseUtils.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../../utils/StringUtils.hpp"
+#include "../../utils/TimeUtils.hpp"
 
 #include <simdjson.h>
 
@@ -82,7 +83,15 @@ void merge_header_quota(RateLimitInfo& info, const cpr::Header& headers) {
     for (const auto& window : kWindows) {
         if (const auto value = parse_float_header(headers, window.name);
             value.has_value()) {
-            info.usage_windows.push_back({std::string(window.label), *value});
+            int64_t w_reset = 0;
+            const std::string reset_key = "x-ratelimit-unified-" + std::string(window.label) + "-reset";
+            const std::string resets_at_key = "x-ratelimit-unified-" + std::string(window.label) + "-resets-at";
+            if (const auto rval = transport::find_header(headers, reset_key); rval.has_value()) {
+                w_reset = core::utils::time::parse_timestamp_or_duration(*rval);
+            } else if (const auto rval2 = transport::find_header(headers, resets_at_key); rval2.has_value()) {
+                w_reset = core::utils::time::parse_timestamp_or_duration(*rval2);
+            }
+            info.usage_windows.push_back({std::string(window.label), *value, w_reset});
         }
     }
 
@@ -108,6 +117,9 @@ void merge_usage_window(RateLimitInfo& info, UsageWindow incoming) {
         });
     if (existing != info.usage_windows.end()) {
         existing->utilization = incoming.utilization;
+        if (incoming.resets_at > 0) {
+            existing->resets_at = incoming.resets_at;
+        }
     } else {
         info.usage_windows.push_back(std::move(incoming));
     }
@@ -247,9 +259,29 @@ void merge_usage_window(RateLimitInfo& info, UsageWindow incoming) {
             }
         }
         if (!percentage.has_value()) continue;
+        int64_t resets_at = 0;
+        static constexpr std::array<std::string_view, 5> kResetKeys{
+            "resetTime", "nextResetTime", "expiresAt", "expireTime", "resetsAt"
+        };
+        for (const auto& key : kResetKeys) {
+            std::string_view str_val;
+            if (limit[key].get(str_val) == simdjson::SUCCESS) {
+                if (const int64_t parsed = core::utils::time::parse_timestamp_or_duration(str_val); parsed > 0) {
+                    resets_at = parsed;
+                    break;
+                }
+            }
+            int64_t int_val = 0;
+            if (limit[key].get(int_val) == simdjson::SUCCESS && int_val > 0) {
+                if (int_val > 100'000'000'000LL) int_val /= 1000LL;
+                resets_at = int_val;
+                break;
+            }
+        }
         snapshot.windows.push_back({
             *label,
             std::clamp(*percentage / 100.0f, 0.0f, 1.5f),
+            resets_at,
         });
     }
 

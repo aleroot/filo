@@ -4,6 +4,7 @@
 #include "../QwenModelTraits.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
+#include "core/utils/TimeUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <simdjson.h>
@@ -41,6 +42,17 @@ namespace {
     }
 }
 
+[[nodiscard]] std::optional<std::string_view> find_header_case_insensitive(
+    const cpr::Header& headers,
+    std::string_view key) noexcept {
+    for (const auto& [header_name, header_val] : headers) {
+        if (core::utils::ascii::iequals(header_name, key)) {
+            return std::string_view{header_val};
+        }
+    }
+    return std::nullopt;
+}
+
 // DashScope uses its own header naming in addition to the OpenAI-standard names.
 // This helper tries primary first and falls through to fallback.
 [[nodiscard]] int32_t parse_first_int_header(const cpr::Header& headers,
@@ -59,12 +71,22 @@ namespace {
         headers, "x-ratelimit-requests-limit", "x-ratelimit-limit-requests");
     info.requests_remaining = parse_first_int_header(
         headers, "x-ratelimit-requests-remaining", "x-ratelimit-remaining-requests");
+    if (auto r_reset = find_header_case_insensitive(headers, "x-ratelimit-requests-reset")) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(*r_reset);
+    } else if (auto r_reset2 = find_header_case_insensitive(headers, "x-ratelimit-reset-requests")) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(*r_reset2);
+    }
 
     // Token-based limits.
     info.tokens_limit = parse_first_int_header(
         headers, "x-ratelimit-tokens-limit", "x-ratelimit-limit-tokens");
     info.tokens_remaining = parse_first_int_header(
         headers, "x-ratelimit-tokens-remaining", "x-ratelimit-remaining-tokens");
+    if (auto t_reset = find_header_case_insensitive(headers, "x-ratelimit-tokens-reset")) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*t_reset);
+    } else if (auto t_reset2 = find_header_case_insensitive(headers, "x-ratelimit-reset-tokens")) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*t_reset2);
+    }
 
     info.retry_after     = parse_int_header(headers, "retry-after");
     info.is_rate_limited = (status_code == 429 || info.retry_after > 0);

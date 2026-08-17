@@ -111,8 +111,9 @@ namespace core::llm::protocols {
  * parses the provider's headers or usage endpoint into another entry.
  */
 struct UsageWindow {
-    std::string label;       ///< Window identifier shown in the status bar, e.g. "5h", "7d"
-    float       utilization; ///< Consumed fraction: 0.0 = nothing used, 1.0+ = over limit
+    std::string label;            ///< Window identifier shown in the status bar, e.g. "5h", "7d"
+    float       utilization = 0.0f; ///< Consumed fraction: 0.0 = nothing used, 1.0+ = over limit
+    int64_t     resets_at   = 0;    ///< Unix timestamp in seconds when this window resets (0 = unknown)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
