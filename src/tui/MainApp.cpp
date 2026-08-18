@@ -23,6 +23,7 @@
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
 #include "UsageDetailsPanel.hpp"
+#include "AgentsVisualizerPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
 #include "core/session/ThreadCatalog.hpp"
@@ -792,9 +793,9 @@ RunResult run(RunOptions opts) {
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
-    const auto steering_context = core::context::load_project_steering_context(
+    auto steering_context = core::context::load_project_steering_context(
         agent_session_context.workspace_view().primary());
-    const std::string context_sources_label =
+    std::string context_sources_label =
         join_context_source_labels(steering_context.source_labels);
     auto agent = std::make_shared<core::agent::Agent>(
         llm_provider,
@@ -900,6 +901,11 @@ RunResult run(RunOptions opts) {
     Box remote_activity_pill_box{0, -1, 0, -1};
     bool usage_details_panel_active = false;
     Box usage_status_box{0, -1, 0, -1};
+    bool agents_visualizer_panel_active = false;
+    Box agents_status_box{0, -1, 0, -1};
+    std::vector<Box> agents_tab_hitboxes;
+    std::size_t agents_visualizer_selected_file = 0;
+    int agents_visualizer_scroll_offset = 0;
     std::vector<Box> thread_tab_hitboxes;
     std::vector<std::string> thread_tab_session_ids;
     SelectionClipboardCopier selection_clipboard_copier;
@@ -6712,6 +6718,105 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && agents_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                agents_visualizer_panel_active = !agents_visualizer_panel_active;
+                if (agents_visualizer_panel_active) {
+                    steering_context = core::context::load_project_steering_context(
+                        agent_session_context.workspace_view().primary());
+                    context_sources_label =
+                        join_context_source_labels(steering_context.source_labels);
+                    agents_visualizer_scroll_offset = 0;
+                }
+            }
+            wake_ui();
+            return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && agents_visualizer_panel_active) {
+            for (std::size_t i = 0; i < agents_tab_hitboxes.size(); ++i) {
+                if (agents_tab_hitboxes[i].Contain(event.mouse().x, event.mouse().y)) {
+                    {
+                        std::lock_guard lock(ui_mutex);
+                        agents_visualizer_selected_file = i;
+                        agents_visualizer_scroll_offset = 0;
+                    }
+                    wake_ui();
+                    return true;
+                }
+            }
+        }
+
+        if (agents_visualizer_panel_active && event.is_mouse()) {
+            if (event.mouse().button == Mouse::WheelUp) {
+                {
+                    std::lock_guard lock(ui_mutex);
+                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 3);
+                }
+                wake_ui();
+                return true;
+            }
+            if (event.mouse().button == Mouse::WheelDown) {
+                {
+                    std::lock_guard lock(ui_mutex);
+                    agents_visualizer_scroll_offset += 3;
+                }
+                wake_ui();
+                return true;
+            }
+        }
+
+        bool agents_panel_was_active = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (agents_visualizer_panel_active) {
+                if (event == Event::Escape
+                    || event == Event::Character('q')
+                    || event == Event::Character('Q')) {
+                    agents_visualizer_panel_active = false;
+                    agents_panel_was_active = true;
+                } else if (event == Event::ArrowUp || event == Event::Character('k') || event == Event::Character('K')) {
+                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 1);
+                    agents_panel_was_active = true;
+                } else if (event == Event::ArrowDown || event == Event::Character('j') || event == Event::Character('J')) {
+                    agents_visualizer_scroll_offset += 1;
+                    agents_panel_was_active = true;
+                } else if (event == Event::PageUp) {
+                    agents_visualizer_scroll_offset = std::max(0, agents_visualizer_scroll_offset - 10);
+                    agents_panel_was_active = true;
+                } else if (event == Event::PageDown) {
+                    agents_visualizer_scroll_offset += 10;
+                    agents_panel_was_active = true;
+                } else if (event == Event::Home) {
+                    agents_visualizer_scroll_offset = 0;
+                    agents_panel_was_active = true;
+                } else if (event == Event::ArrowLeft || event == Event::TabReverse) {
+                    if (!steering_context.files.empty()) {
+                        agents_visualizer_selected_file = (agents_visualizer_selected_file + steering_context.files.size() - 1) % steering_context.files.size();
+                        agents_visualizer_scroll_offset = 0;
+                    }
+                    agents_panel_was_active = true;
+                } else if (event == Event::ArrowRight || event == Event::Tab) {
+                    if (!steering_context.files.empty()) {
+                        agents_visualizer_selected_file = (agents_visualizer_selected_file + 1) % steering_context.files.size();
+                        agents_visualizer_scroll_offset = 0;
+                    }
+                    agents_panel_was_active = true;
+                }
+            }
+        }
+        if (agents_panel_was_active) {
+            wake_ui();
+            return true;
+        }
+
         if (opts.remote_mcp_server_enabled
             && event.is_mouse()
             && event.mouse().button == Mouse::Left
@@ -8389,6 +8494,9 @@ RunResult run(RunOptions opts) {
         bool                            remote_activity_panel_active = false;
         std::size_t                     remote_activity_panel_selected = 0;
         bool                            usage_panel_visible = false;
+        bool                            agents_visualizer_visible = false;
+        std::size_t                     agents_visualizer_selected = 0;
+        int                             agents_visualizer_scroll = 0;
         std::size_t                     queued_steering_count = 0;
         std::string                     external_editor_status;
         {
@@ -8481,6 +8589,9 @@ RunResult run(RunOptions opts) {
             remote_activity_panel_active = remote_activity_panel_state.active;
             remote_activity_panel_selected = remote_activity_panel_state.selected;
             usage_panel_visible = usage_details_panel_active;
+            agents_visualizer_visible = agents_visualizer_panel_active;
+            agents_visualizer_selected = agents_visualizer_selected_file;
+            agents_visualizer_scroll = agents_visualizer_scroll_offset;
             queued_steering_count = current_runtime->queued_turn_count();
         }
         auto remote_activity_snapshot = opts.remote_mcp_server_enabled
@@ -8554,8 +8665,10 @@ RunResult run(RunOptions opts) {
                 provider_setup_hint(active_provider_name),
                 current_time_str(),
                 thread_tabs,
-                &thread_tab_hitboxes);
+                &thread_tab_hitboxes,
+                &agents_status_box);
         } else {
+            agents_status_box = {0, -1, 0, -1};
             thread_tab_hitboxes.clear();
             thread_tab_session_ids.clear();
         }
@@ -8611,6 +8724,12 @@ RunResult run(RunOptions opts) {
                 total,
                 cost,
                 ctx_pct);
+        } else if (agents_visualizer_visible) {
+            bottom_el = render_agents_visualizer_panel(
+                steering_context.files,
+                agents_visualizer_selected,
+                agents_visualizer_scroll,
+                &agents_tab_hitboxes);
         } else if (remote_activity_panel_active) {
             bottom_el = render_remote_activity_panel(
                 remote_activity_snapshot,
@@ -9004,6 +9123,7 @@ RunResult run(RunOptions opts) {
         const bool show_status_footer =
             ui_show_footer
             || usage_panel_visible
+            || agents_visualizer_visible
             || response_in_progress
             || review_activity_active
             || opts.remote_mcp_server_enabled
@@ -9038,11 +9158,15 @@ RunResult run(RunOptions opts) {
         if (ui_show_banner) {
             window_rows.push_back(std::move(banner_el));
         }
-        window_rows.push_back(std::move(history_el));
-        if (stderr_panel_active) {
-            window_rows.push_back(render_stderr_panel(stderr_panel_lines));
+        if (agents_visualizer_visible) {
+            window_rows.push_back(std::move(bottom_el) | flex);
+        } else {
+            window_rows.push_back(std::move(history_el));
+            if (stderr_panel_active) {
+                window_rows.push_back(render_stderr_panel(stderr_panel_lines));
+            }
+            window_rows.push_back(std::move(bottom_el));
         }
-        window_rows.push_back(std::move(bottom_el));
         window_rows.push_back(std::move(status_el));
 
         return UiWindow(

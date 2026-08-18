@@ -6,9 +6,16 @@
 
 namespace core::context {
 
+struct SteeringFile {
+    std::filesystem::path path;
+    std::string label;
+    std::string content;
+};
+
 struct SteeringLoadResult {
     std::string block;
     std::vector<std::string> source_labels;
+    std::vector<SteeringFile> files;
 };
 
 [[nodiscard]] SteeringLoadResult load_project_steering_context(

@@ -680,7 +680,11 @@ Element render_startup_banner_panel(std::string_view provider_name,
                                     std::string_view provider_setup_hint,
                                     std::string_view clock_label,
                                     const std::vector<ThreadTab>& thread_tabs,
-                                    std::vector<Box>* thread_tab_hitboxes) {
+                                    std::vector<Box>* thread_tab_hitboxes,
+                                    Box* context_sources_hitbox) {
+    if (context_sources_hitbox) {
+        *context_sources_hitbox = {0, -1, 0, -1};
+    }
     static constexpr std::array<std::string_view, 6> kBannerLogoLines = {
         "  ███████╗██╗██╗      ██████╗",
         "  ██╔════╝██║██║     ██╔═══██╗",
@@ -738,10 +742,13 @@ Element render_startup_banner_panel(std::string_view provider_name,
     }
     Elements banner_right_column{std::move(clock)};
     if (show_thread_tabs && !context_sources_label.empty()) {
-        banner_right_column.push_back(
-            text(" " + std::string(context_sources_label) + " ")
-                | color(Color::GrayLight)
-                | ftxui::align_right);
+        auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
+            | color(Color::GrayLight)
+            | ftxui::align_right;
+        if (context_sources_hitbox) {
+            label_el = std::move(label_el) | reflect(*context_sources_hitbox);
+        }
+        banner_right_column.push_back(std::move(label_el));
     }
     rows.push_back(hbox({
         vbox(std::move(logo_rows)),
@@ -761,9 +768,12 @@ Element render_startup_banner_panel(std::string_view provider_name,
             filler(),
         };
         if (!show_thread_tabs && !context_sources_label.empty()) {
-            summary_row.push_back(
-                text(" " + std::string(context_sources_label) + " ")
-                    | color(Color::GrayLight));
+            auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
+                | color(Color::GrayLight);
+            if (context_sources_hitbox) {
+                label_el = std::move(label_el) | reflect(*context_sources_hitbox);
+            }
+            summary_row.push_back(std::move(label_el));
         }
         if (show_thread_tabs) {
             summary_row.push_back(std::move(rendered_thread_tabs));

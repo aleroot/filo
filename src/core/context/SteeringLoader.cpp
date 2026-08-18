@@ -203,6 +203,11 @@ SteeringLoadResult load_project_steering_context(const std::filesystem::path& pr
 
         const std::string label = relative_label(label_root, file);
         result.source_labels.push_back(label);
+        result.files.push_back(SteeringFile{
+            .path = file,
+            .label = label,
+            .content = content,
+        });
         block += "Source: " + label + "\n";
         block += content;
         if (!block.empty() && block.back() != '\n') {
