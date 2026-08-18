@@ -85,6 +85,11 @@ public:
     void client_initialized(std::string session_id,
                             std::string_view client_name,
                             std::string_view client_version);
+    /// Stateless (MCP 2026-07-28) identity refresh: every request carries
+    /// clientInfo in _meta and no initialized notification ever follows.
+    void client_identified(std::string session_id,
+                           std::string_view client_name,
+                           std::string_view client_version);
     void client_ready(std::string_view session_id);
     void client_seen(std::string_view session_id);
     void client_closed(std::string_view session_id);

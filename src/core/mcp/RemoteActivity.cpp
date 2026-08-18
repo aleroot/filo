@@ -160,6 +160,19 @@ void RemoteActivityHub::client_initialized(std::string session_id,
     notify();
 }
 
+void RemoteActivityHub::client_identified(std::string session_id,
+                                          std::string_view client_name,
+                                          std::string_view client_version) {
+    {
+        std::lock_guard lock(mutex_);
+        auto& client = touch_client_locked(session_id);
+        client.name = sanitize_remote_client_name(client_name);
+        client.version = sanitize_terminal_text(client_version, 32);
+        client.ready = true;
+    }
+    notify();
+}
+
 RemoteClientActivity& RemoteActivityHub::touch_client_locked(
     std::string_view session_id) {
     auto [it, inserted] = clients_.try_emplace(std::string(session_id));

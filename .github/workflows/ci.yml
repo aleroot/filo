@@ -19,19 +19,23 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -eu
+          packages="gcc-c++ cmake make pkg-config libopenssl-devel libicu-devel libcurl-devel python3 python3-devel git patch"
+
           zypper --non-interactive --gpg-auto-import-keys refresh
-          zypper --non-interactive install --no-recommends \
-            gcc-c++ \
-            cmake \
-            make \
-            pkg-config \
-            libopenssl-devel \
-            libicu-devel \
-            libcurl-devel \
-            python3 \
-            python3-devel \
-            git \
-            patch
+
+          # The tumbleweed:latest image often lags behind the repositories by one
+          # snapshot, which makes -devel packages unresolvable against the already
+          # installed runtime libraries (e.g. libpsl-devel vs libpsl5). Allow the
+          # solver to downgrade/change vendor, and fall back to a full dist-upgrade
+          # when the package set is still inconsistent.
+          if ! zypper --non-interactive install --no-recommends \
+                --allow-downgrade --allow-vendor-change --force-resolution $packages; then
+            echo "::warning::Package resolution failed, running zypper dup to sync the snapshot"
+            zypper --non-interactive --gpg-auto-import-keys dup \
+              --no-recommends --allow-downgrade --allow-vendor-change
+            zypper --non-interactive install --no-recommends $packages
+          fi
 
       - name: Configure
         run: cmake --preset linux-debug

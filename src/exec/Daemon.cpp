@@ -295,28 +295,48 @@ parse_jsonrpc_message(std::string_view json_body) {
 [[nodiscard]] ParsedMcpClientInfo
 extract_mcp_client_info(std::string_view json_body) {
     ParsedMcpClientInfo info;
-    simdjson::ondemand::parser parser;
-    simdjson::padded_string padded(json_body);
-    simdjson::ondemand::document doc;
-    if (parser.iterate(padded).get(doc) != simdjson::SUCCESS) return info;
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(json_body)};
+    simdjson::dom::element document;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS) return info;
 
-    simdjson::ondemand::object root;
-    if (doc.get_object().get(root) != simdjson::SUCCESS) return info;
-
-    simdjson::ondemand::object params;
-    if (root["params"].get_object().get(params) != simdjson::SUCCESS) return info;
-
-    simdjson::ondemand::object client_info;
-    if (params["clientInfo"].get_object().get(client_info) != simdjson::SUCCESS) {
+    simdjson::dom::element client_info;
+    if (document["params"]["clientInfo"].get(client_info) != simdjson::SUCCESS) {
         return info;
     }
 
     std::string_view name;
-    if (client_info["name"].get_string().get(name) == simdjson::SUCCESS) {
+    if (client_info["name"].get(name) == simdjson::SUCCESS) {
         info.name = std::string(name);
     }
     std::string_view version;
-    if (client_info["version"].get_string().get(version) == simdjson::SUCCESS) {
+    if (client_info["version"].get(version) == simdjson::SUCCESS) {
+        info.version = std::string(version);
+    }
+    return info;
+}
+
+[[nodiscard]] ParsedMcpClientInfo
+extract_modern_client_info(std::string_view json_body) {
+    ParsedMcpClientInfo info;
+    info.name.clear();
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded{std::string(json_body)};
+    simdjson::dom::element document;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS) return info;
+
+    simdjson::dom::element client_info;
+    if (document["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]
+            .get(client_info) != simdjson::SUCCESS) {
+        return info;
+    }
+
+    std::string_view name;
+    if (client_info["name"].get(name) == simdjson::SUCCESS) {
+        info.name = std::string(name);
+    }
+    std::string_view version;
+    if (client_info["version"].get(version) == simdjson::SUCCESS) {
         info.version = std::string(version);
     }
     return info;
@@ -877,6 +897,7 @@ void handle_mcp_post(const std::string& host,
 
     const auto parsed = parse_jsonrpc_message(req.body);
 
+
     if (!has_supported_protocol_header(req)) {
         res.status = 400;
         const ResponseId id = parsed.has_value() ? parsed->id : ResponseId{};
@@ -919,6 +940,16 @@ void handle_mcp_post(const std::string& host,
                 "Invalid params: missing io.modelcontextprotocol/clientCapabilities metadata."),
                 "application/json");
             return;
+        }
+
+        // Stateless requests carry identity per request; the activity hub
+        // keys them under the empty session id used by dispatch_mcp_payload.
+        // clientInfo is optional per request: a request without it must not
+        // erase the identity an earlier request reported.
+        const auto client_info = extract_modern_client_info(req.body);
+        if (!client_info.name.empty()) {
+            core::mcp::RemoteActivityHub::get_instance().client_identified(
+                {}, client_info.name, client_info.version);
         }
 
         auto result = dispatch_mcp_payload(

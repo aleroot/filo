@@ -89,6 +89,29 @@ TEST_CASE("remote activity hub tracks client identity and tool lifecycle",
     CHECK(hub.snapshot().activities.empty());
 }
 
+TEST_CASE("stateless MCP requests refresh identity without reset",
+          "[mcp][remote-activity]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+
+    hub.client_identified("", "Lampo", "1.0");
+    const auto activity_id = hub.tool_started("", "read_file", "{}");
+    hub.tool_finished(activity_id, R"({"content":"ok"})", false);
+
+    auto snapshot = hub.snapshot();
+    REQUIRE(snapshot.clients.size() == 1);
+    CHECK(snapshot.clients.front().name == "Lampo");
+    CHECK(snapshot.clients.front().version == "1.0");
+    CHECK(snapshot.clients.front().ready);
+
+    hub.client_identified("", "", "");
+    snapshot = hub.snapshot();
+    CHECK(snapshot.clients.front().name == "Client");
+    CHECK(snapshot.clients.front().ready);
+}
+
 TEST_CASE("remote footer uses protocol client name and generic fallback",
           "[tui][mcp][remote-activity]") {
     CHECK(tui::format_remote_footer_status({}).label.empty());

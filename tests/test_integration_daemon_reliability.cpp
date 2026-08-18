@@ -677,6 +677,81 @@ TEST_CASE("Daemon serves MCP 2026-07-28 without protocol sessions",
     REQUIRE_THAT(tools->body, Catch::Matchers::ContainsSubstring(R"("cacheScope":"private")"));
 }
 
+TEST_CASE("Daemon names stateless MCP 2026-07-28 clients from _meta clientInfo",
+          "[daemon][reliability][mcp-modern]") {
+    core::mcp::RemoteActivityHub::get_instance().reset_for_testing();
+    const int port = next_test_port();
+    DaemonRunner daemon(port);
+    if (!wait_for_ping(port)) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+
+    {
+        httplib::Headers headers{
+            {"Content-Type", "application/json"},
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "2026-07-28"},
+            {"Mcp-Method", "server/discover"},
+        };
+        auto response = post_mcp_request(
+            port,
+            R"({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"daemon-test","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}})",
+            std::move(headers));
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+    }
+    {
+        const auto activity = core::mcp::RemoteActivityHub::get_instance().snapshot();
+        REQUIRE(activity.clients.size() == 1);
+        CHECK(activity.clients.front().name == "daemon-test");
+        CHECK(activity.clients.front().version == "1.0");
+    }
+
+    // Later requests may omit clientInfo; the previously reported identity
+    // must survive instead of regressing to the generic fallback.
+    {
+        httplib::Headers headers{
+            {"Content-Type", "application/json"},
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "2026-07-28"},
+            {"Mcp-Method", "tools/list"},
+        };
+        auto response = post_mcp_request(
+            port,
+            R"({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})",
+            std::move(headers));
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+    }
+    {
+        const auto activity = core::mcp::RemoteActivityHub::get_instance().snapshot();
+        REQUIRE(activity.clients.size() == 1);
+        CHECK(activity.clients.front().name == "daemon-test");
+    }
+
+    // Out-of-order _meta keys (e.g. clientCapabilities before clientInfo) must be extracted correctly.
+    {
+        httplib::Headers headers{
+            {"Content-Type", "application/json"},
+            {"Accept", "application/json, text/event-stream"},
+            {"MCP-Protocol-Version", "2026-07-28"},
+            {"Mcp-Method", "server/discover"},
+        };
+        auto response = post_mcp_request(
+            port,
+            R"({"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{"extensions":{"io.modelcontextprotocol/tasks":{}}},"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"Lampo","version":"1.0"}}}})",
+            std::move(headers));
+        REQUIRE(response);
+        REQUIRE(response->status == 200);
+    }
+    {
+        const auto activity = core::mcp::RemoteActivityHub::get_instance().snapshot();
+        REQUIRE(activity.clients.size() == 1);
+        CHECK(activity.clients.front().name == "Lampo");
+        CHECK(activity.clients.front().version == "1.0");
+    }
+}
+
 TEST_CASE("Daemon validates MCP 2026-07-28 routing headers",
           "[daemon][reliability][mcp-modern]") {
     const int port = next_test_port();
