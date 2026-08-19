@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/mcp/McpDispatcher.hpp"
+#include "core/mcp/RemoteActivity.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/utils/JsonWriter.hpp"
@@ -1172,6 +1173,39 @@ TEST_CASE("MCP tools/call arguments must be an object", "[mcp]") {
 
     REQUIRE_THAT(resp, ContainsSubstring(R"("code":-32602)"));
     REQUIRE_THAT(resp, ContainsSubstring("'arguments' must be an object"));
+}
+
+TEST_CASE("MCP tools/call logs rejected nested argument wrappers",
+          "[mcp][remote-activity]") {
+    auto& activity_hub = core::mcp::RemoteActivityHub::get_instance();
+    activity_hub.reset_for_testing();
+    activity_hub.server_starting();
+    activity_hub.server_listening("127.0.0.1:8080");
+    activity_hub.client_initialized("mcp-test-session", "Lampo", "1.2");
+    activity_hub.client_ready("mcp-test-session");
+
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"file_search","arguments":{"arguments":"{pattern: \"delivery_manager\"}","name":"mcp_filo_10b07f39__file_search"}},"id":25})");
+
+    REQUIRE_THAT(resp, ContainsSubstring(R"("code":-32602)"));
+    REQUIRE_THAT(
+        resp,
+        ContainsSubstring("nested string at params.arguments.arguments"));
+    REQUIRE_THAT(resp, ContainsSubstring("pass 'pattern' directly"));
+
+    const auto snapshot = activity_hub.snapshot();
+    REQUIRE(snapshot.activities.size() == 1);
+    CHECK(snapshot.activities.front().tool_name == "file_search");
+    CHECK(snapshot.activities.front().status
+          == core::mcp::RemoteToolStatus::failed);
+    CHECK_THAT(
+        snapshot.activities.front().arguments,
+        ContainsSubstring("delivery_manager"));
+    CHECK_THAT(
+        snapshot.activities.front().result,
+        ContainsSubstring("nested string at params.arguments.arguments"));
+
+    activity_hub.reset_for_testing();
 }
 
 // ---------------------------------------------------------------------------

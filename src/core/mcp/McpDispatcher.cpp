@@ -286,6 +286,29 @@ struct InitializeInfo {
         const bool has_value = args[param.name].get(value) == simdjson::SUCCESS;
         if (!has_value) {
             if (param.required) {
+                // Some client adapters expose an MCP tool through a generic
+                // string-valued `arguments` field and then forward that field
+                // unchanged. On the MCP wire this becomes
+                // params.arguments.arguments instead of placing the declared
+                // tool fields directly in params.arguments. Do not guess at or
+                // execute JSON-like strings (the server also exposes mutating
+                // tools), but make this integration error unmistakable.
+                const bool tool_declares_arguments = std::ranges::any_of(
+                    def.parameters,
+                    [](const auto& candidate) {
+                        return candidate.name == "arguments";
+                    });
+                simdjson::dom::element nested_arguments;
+                if (!tool_declares_arguments
+                    && args["arguments"].get(nested_arguments) == simdjson::SUCCESS
+                    && nested_arguments.type()
+                        == simdjson::dom::element_type::STRING) {
+                    return std::format(
+                        "Invalid params: received a nested string at "
+                        "params.arguments.arguments; pass '{}' directly under "
+                        "params.arguments",
+                        param.name);
+                }
                 return std::format("Invalid params: missing required argument '{}'", param.name);
             }
             continue;
@@ -1255,6 +1278,15 @@ public:
         RemoteActivityHub::get_instance().tool_finished(activity_id_, result, failed);
     }
 
+    void fail(std::string_view message) {
+        core::utils::JsonWriter writer(message.size() + 32);
+        {
+            auto error = writer.object();
+            writer.kv_str("error", message);
+        }
+        finish(std::move(writer).take(), true);
+    }
+
 private:
     std::uint64_t activity_id_ = 0;
     bool reported_ = false;
@@ -1272,12 +1304,13 @@ private:
             RpcError{-32602, std::format("Unknown tool: {}", request.name)});
     }
 
+    RemoteToolCallReporter remote_reporter(
+        context, request.name, request.arguments_json);
     if (auto validation_error = validate_tool_arguments(*tool_def, request.arguments_json)) {
+        remote_reporter.fail(*validation_error);
         return std::unexpected(RpcError{-32602, *validation_error});
     }
 
-    RemoteToolCallReporter remote_reporter(
-        context, request.name, request.arguments_json);
     auto execution_context = context;
     const bool modern = mode == McpProtocolMode::stateless;
     if (modern) {
@@ -1528,6 +1561,9 @@ using MethodHandler = std::string (*)(
         && mode == McpProtocolMode::stateless
         && is_long_running_delegate_task_call(*request)) {
         if (auto validation_error = validate_tool_arguments(*tool_def, request->arguments_json)) {
+            RemoteToolCallReporter remote_reporter(
+                context, request->name, request->arguments_json);
+            remote_reporter.fail(*validation_error);
             return make_error(id, -32602, *validation_error);
         }
 

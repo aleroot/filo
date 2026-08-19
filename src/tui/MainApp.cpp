@@ -6822,10 +6822,17 @@ RunResult run(RunOptions opts) {
             && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed
             && remote_activity_pill_box.Contain(event.mouse().x, event.mouse().y)) {
+            bool closed = false;
             {
                 std::lock_guard lock(ui_mutex);
-                remote_activity_panel_state.active = true;
-                remote_activity_panel_state.selected = 0;
+                closed = remote_activity_panel_state.active;
+                remote_activity_panel_state.active = !closed;
+                if (!closed) {
+                    remote_activity_panel_state.selected = 0;
+                }
+            }
+            if (closed) {
+                remote_activity_hub.acknowledge_errors();
             }
             wake_ui();
             return true;

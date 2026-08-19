@@ -2,6 +2,7 @@
 
 #include "Conversation.hpp"
 #include "Text.hpp"
+#include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/tools/ToolNames.hpp"
 
@@ -81,7 +82,11 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
 [[nodiscard]] std::string activity_summary(const RemoteToolActivity& activity) {
     const std::string summary = summarize_tool_arguments(
         activity.tool_name, activity.arguments);
-    if (!summary.empty()) return compact_single_line(summary, 46);
+    // Keep the complete one-line summary here. The row renderer knows the
+    // terminal's actual remaining width and elides it there if necessary.
+    // Pre-truncating this to a fixed character count made wide terminals look
+    // artificially cramped and hid useful terminal paths and commands.
+    if (!summary.empty()) return compact_single_line(summary, summary.size());
     return compact_tool_name(activity.tool_name);
 }
 
@@ -370,13 +375,30 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
             | dim);
     } else {
         constexpr std::size_t kVisibleRows = 8;
+        constexpr std::size_t kScrollMargin = 3;
         const std::size_t selected =
             std::min(selected_activity, snapshot.activities.size() - 1);
-        const std::size_t start = selected >= kVisibleRows
-            ? selected - kVisibleRows + 1
+        const std::size_t max_start = snapshot.activities.size() > kVisibleRows
+            ? snapshot.activities.size() - kVisibleRows
             : 0;
+        const std::size_t start = std::min(
+            selected > kScrollMargin ? selected - kScrollMargin : 0,
+            max_start);
         const std::size_t end =
             std::min(snapshot.activities.size(), start + kVisibleRows);
+
+        if (start > 0) {
+            rows.push_back(
+                hbox({
+                    text("  ↑ ") | color(ColorYellowDark),
+                    text(std::format(
+                        "{} newer activit{}",
+                        start,
+                        start == 1 ? "y" : "ies"))
+                        | color(Color::GrayDark)
+                        | dim,
+                }));
+        }
 
         for (std::size_t i = start; i < end; ++i) {
             const auto& activity = snapshot.activities[i];
@@ -391,7 +413,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                     text(compact_tool_name(activity.tool_name))
                         | color(ColorYellowBright)
                         | bold,
-                    text("  " + activity_summary(activity))
+                    elided_text("  " + activity_summary(activity))
                         | color(Color::GrayLight)
                         | xflex,
                     text("  " + client_name_for(snapshot, activity.session_id))
@@ -400,6 +422,20 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                     text("  " + activity_duration(activity, now))
                         | color(status_color(activity.status)),
                 }) | xflex);
+        }
+
+        const std::size_t older = snapshot.activities.size() - end;
+        if (older > 0) {
+            rows.push_back(
+                hbox({
+                    text("  ↓ ") | color(ColorYellowDark),
+                    text(std::format(
+                        "{} older activit{}",
+                        older,
+                        older == 1 ? "y" : "ies"))
+                        | color(Color::GrayDark)
+                        | dim,
+                }));
         }
 
         const auto& selected_item = snapshot.activities[selected];
@@ -423,10 +459,24 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     }
 
     rows.push_back(text(""));
-    rows.push_back(
-        text("  ↑/↓ select   C clear completed   Esc close")
+    Elements footer;
+    footer.push_back(
+        elided_text("  ↑/↓ select   C clear completed   Esc close")
         | color(Color::GrayDark)
-        | dim);
+        | dim
+        | xflex);
+    if (!snapshot.activities.empty()) {
+        const std::size_t selected =
+            std::min(selected_activity, snapshot.activities.size() - 1);
+        footer.push_back(
+            text(std::format(
+                "  {} of {} · newest first  ",
+                selected + 1,
+                snapshot.activities.size()))
+            | color(Color::GrayDark)
+            | dim);
+    }
+    rows.push_back(hbox(std::move(footer)) | xflex);
 
     return UiWindow(
         text(" ⚡ Remote MCP activity ") | color(ColorYellowBright) | bold,

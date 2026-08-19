@@ -10,6 +10,8 @@
 #include <string>
 #include <string_view>
 
+#include <ftxui/dom/elements.hpp>
+
 namespace tui {
 
 /// Pad or truncate @p text to exactly @p width display cells, appending an
@@ -22,5 +24,11 @@ namespace tui {
 /// Fit a path into @p width, truncating from the *left*: the distinguishing
 /// part of a path is its tail, so `…/Projects/filo` beats `~/Documents/Deve…`.
 [[nodiscard]] std::string fit_path_column(std::string_view path, int width);
+
+/// A single-line text element that uses all of the width assigned by its
+/// parent and adds an ellipsis only when that actual width is insufficient.
+/// Unlike pre-truncating a string before layout, this remains responsive when
+/// the terminal is resized.
+[[nodiscard]] ftxui::Element elided_text(std::string text);
 
 } // namespace tui

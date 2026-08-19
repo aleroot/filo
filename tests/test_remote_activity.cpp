@@ -40,6 +40,22 @@ std::string strip_ansi(std::string_view input) {
     return output;
 }
 
+std::string_view line_containing(std::string_view input,
+                                 std::string_view needle) {
+    const std::size_t match = input.find(needle);
+    if (match == std::string_view::npos) return {};
+    const std::size_t line_start = input.rfind('\n', match);
+    const std::size_t line_end = input.find('\n', match);
+    const std::size_t start = line_start == std::string_view::npos
+        ? 0
+        : line_start + 1;
+    return input.substr(
+        start,
+        line_end == std::string_view::npos
+            ? std::string_view::npos
+            : line_end - start);
+}
+
 } // namespace
 
 TEST_CASE("remote MCP client names are safe and have a stable fallback",
@@ -179,6 +195,103 @@ TEST_CASE("remote footer pill has no embedded gap and uses foreground color only
                   == ftxui::Color::Default);
         }
     }
+}
+
+TEST_CASE("remote activity summaries use the available terminal width",
+          "[tui][mcp][remote-activity][rendering]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("session-a", "Lampo", "1.2");
+    hub.client_ready("session-a");
+
+    constexpr std::string_view kWorkingDir =
+        "/Users/alessiopollero/Develop/Projects/coreconnect-modulith";
+    const auto activity_id = hub.tool_started(
+        "session-a",
+        "run_terminal_command",
+        R"({"command":"git status --short","working_dir":"/Users/alessiopollero/Develop/Projects/coreconnect-modulith"})");
+    REQUIRE(activity_id != 0);
+
+    auto wide_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(180),
+        ftxui::Dimension::Fixed(22));
+    ftxui::Render(
+        wide_screen,
+        tui::render_remote_activity_panel(hub.snapshot(), 0));
+    const std::string wide = strip_ansi(wide_screen.ToString());
+    const std::string_view wide_row = line_containing(wide, "terminal");
+    REQUIRE_FALSE(wide_row.empty());
+    CHECK(wide_row.find(kWorkingDir) != std::string_view::npos);
+    CHECK(wide_row.find("cmd: git status --short") != std::string_view::npos);
+    CHECK(wide_row.find("Lampo") != std::string_view::npos);
+
+    auto narrow_screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(72),
+        ftxui::Dimension::Fixed(22));
+    ftxui::Render(
+        narrow_screen,
+        tui::render_remote_activity_panel(hub.snapshot(), 0));
+    const std::string narrow = strip_ansi(narrow_screen.ToString());
+    const std::string_view narrow_row = line_containing(narrow, "terminal");
+    REQUIRE_FALSE(narrow_row.empty());
+    CHECK(narrow_row.find("cwd: /Users/alessiopollero")
+          != std::string_view::npos);
+    CHECK(narrow_row.find("…") != std::string_view::npos);
+    CHECK(narrow_row.find("Lampo") != std::string_view::npos);
+
+    hub.reset_for_testing();
+}
+
+TEST_CASE("long remote activity histories expose and scroll their viewport",
+          "[tui][mcp][remote-activity][rendering]") {
+    auto& hub = RemoteActivityHub::get_instance();
+    hub.reset_for_testing();
+    hub.server_starting();
+    hub.server_listening("127.0.0.1:8080");
+    hub.client_initialized("session-a", "Lampo", "1.2");
+    hub.client_ready("session-a");
+
+    for (int i = 1; i <= 12; ++i) {
+        const auto activity_id = hub.tool_started(
+            "session-a",
+            "run_terminal_command",
+            std::format(R"({{"command":"command-{}"}})", i));
+        hub.tool_finished(activity_id, R"({"output":"ok"})", false);
+    }
+    const auto snapshot = hub.snapshot();
+
+    const auto render_at = [&](std::size_t selected) {
+        auto screen = ftxui::Screen::Create(
+            ftxui::Dimension::Fixed(100),
+            ftxui::Dimension::Fixed(28));
+        ftxui::Render(
+            screen,
+            tui::render_remote_activity_panel(snapshot, selected));
+        return strip_ansi(screen.ToString());
+    };
+
+    const std::string newest = render_at(0);
+    CHECK(newest.find("command-12") != std::string::npos);
+    CHECK(newest.find("command-5") != std::string::npos);
+    CHECK(newest.find("command-4") == std::string::npos);
+    CHECK(newest.find("↓ 4 older activities") != std::string::npos);
+    CHECK(newest.find("newer activit") == std::string::npos);
+    CHECK(newest.find("1 of 12 · newest first") != std::string::npos);
+
+    const std::string middle = render_at(6);
+    CHECK(middle.find("↑ 3 newer activities") != std::string::npos);
+    CHECK(middle.find("↓ 1 older activity") != std::string::npos);
+    CHECK(middle.find("7 of 12 · newest first") != std::string::npos);
+
+    const std::string oldest = render_at(11);
+    CHECK(oldest.find("↑ 4 newer activities") != std::string::npos);
+    CHECK(oldest.find("older activit") == std::string::npos);
+    CHECK(oldest.find("command-1") != std::string::npos);
+    CHECK(oldest.find("12 of 12 · newest first") != std::string::npos);
+
+    hub.reset_for_testing();
 }
 
 TEST_CASE("remote activity history stays bounded even when nothing finishes",
