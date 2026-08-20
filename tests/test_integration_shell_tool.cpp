@@ -4,15 +4,18 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/tools/ShellTool.hpp"
+#include "core/utils/JsonUtils.hpp"
 #include "TestSessionContext.hpp"
 
 #include <simdjson.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <future>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 
@@ -448,7 +451,7 @@ TEST_CASE("ShellTool stdin-reading command cannot swallow the completion sentine
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
-TEST_CASE("ShellTool brace wrapping preserves session state and exit codes",
+TEST_CASE("ShellTool finite eval preserves session state and exit codes",
           "[integration][tools][shell]") {
     ShellTool tool;
 
@@ -457,7 +460,8 @@ TEST_CASE("ShellTool brace wrapping preserves session state and exit codes",
     auto pwd_res = tool.execute(R"({"command":"pwd"})");
     REQUIRE_THAT(pwd_res, Catch::Matchers::ContainsSubstring("/tmp"));
 
-    // Commands ending with '&' still parse inside the brace group wrapper.
+    // Background commands still parse and report the final status through the
+    // finite eval boundary.
     auto bg_res = tool.execute(R"({"command":"sleep 0.1 & wait; echo bg_done"})");
     REQUIRE_THAT(bg_res, Catch::Matchers::ContainsSubstring("bg_done"));
     REQUIRE_THAT(bg_res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
@@ -606,15 +610,15 @@ TEST_CASE("ShellTool git credential lookup fails fast instead of prompting",
 }
 
 // ---------------------------------------------------------------------------
-// Brace-group wrapper: parsing edge cases
+// Finite eval boundary: parsing edge cases
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ShellTool heredoc content survives the command wrapper",
+TEST_CASE("ShellTool heredoc content survives the finite eval boundary",
           "[integration][tools][shell]") {
     ShellTool tool;
 
-    // Multi-line command: the heredoc body is read from bash's script input,
-    // not from the /dev/null redirect applied to the brace group.
+    // Multi-line syntax is parsed from eval's finite string while the commands
+    // inside it still see /dev/null as stdin.
     auto res = tool.execute(
         R"({"command":"cat <<EOF\nhello_heredoc\nEOF"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("hello_heredoc"));
@@ -694,9 +698,8 @@ TEST_CASE("ShellTool comment-only command is a harmless no-op",
     auto setup = tool.execute(R"({"command":"export FILO_STILL_HERE=yes"})");
     REQUIRE_THAT(setup, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 
-    // A comment-only command wrapped naively would leave an empty brace
-    // group — a syntax error that kills the session shell.  It must instead
-    // run as a no-op and keep the session (and its state) alive.
+    // A comment-only eval is a harmless no-op and must keep the session (and
+    // its state) alive.
     auto res = tool.execute(R"({"command":"# nothing to do"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("syntax error"));
@@ -706,13 +709,12 @@ TEST_CASE("ShellTool comment-only command is a harmless no-op",
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
-TEST_CASE("ShellTool parse error fails fast and the session recovers",
+TEST_CASE("ShellTool parse error fails fast and the session remains usable",
           "[integration][tools][shell]") {
     ShellTool tool;
 
-    // A syntax error detectable from the buffered line (stray `)`) makes
-    // bash exit immediately; the EXIT trap still emits the sentinel, so the
-    // call returns promptly with the error instead of hanging.
+    // eval receives a finite string, so a stray `)` is reported immediately
+    // without killing the persistent session or waiting for the timeout.
     const auto started = std::chrono::steady_clock::now();
     auto res = tool.execute(R"json({"command":"echo )","timeout_seconds":10})json");
     const auto elapsed = std::chrono::steady_clock::now() - started;
@@ -723,32 +725,121 @@ TEST_CASE("ShellTool parse error fails fast and the session recovers",
     REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
     REQUIRE(elapsed < std::chrono::seconds{8});
 
-    // The dead shell is transparently replaced on the next call.
+    // Completion detection remains aligned for the next call.
     auto next = tool.execute(R"({"command":"echo recovered_after_syntax_error"})");
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_syntax_error"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 }
 
-TEST_CASE("ShellTool incomplete construct times out and the session recovers",
+TEST_CASE("ShellTool incomplete construct fails immediately without losing session state",
           "[integration][tools][shell]") {
     ShellTool tool;
 
-    // An unterminated quote is different from a parse error: bash keeps
-    // reading the control pipe waiting for the closing quote, so no sentinel
-    // can arrive.  The timeout must fire, the stuck shell must be killed and
-    // the next command must get a fresh, working session.
+    auto setup = tool.execute(R"({"command":"export FILO_PARSE_STATE=preserved"})");
+    REQUIRE_THAT(setup, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+
+    // Raw model text must never be part of bash's persistent parser stream.
+    // The unmatched quote reaches the finite end of eval's string and fails
+    // immediately; the generous timeout proves completion did not depend on
+    // timeout teardown.
     const auto started = std::chrono::steady_clock::now();
     auto res = tool.execute(
-        R"({"command":"echo 'unterminated","timeout_seconds":2})");
+        R"({"command":"echo 'unterminated","timeout_seconds":10})");
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
-    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("TIMEOUT"));
-    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"exit_code\":-1"));
-    REQUIRE(elapsed < std::chrono::seconds{8});
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("unexpected EOF"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    REQUIRE(elapsed < std::chrono::seconds{2});
 
-    auto next = tool.execute(R"({"command":"echo recovered_after_incomplete"})");
-    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_incomplete"));
+    auto next = tool.execute(
+        R"({"command":"echo recovered_after_incomplete:$FILO_PARSE_STATE"})");
+    REQUIRE_THAT(
+        next,
+        Catch::Matchers::ContainsSubstring(
+            "recovered_after_incomplete:preserved"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool malformed commit heredoc cannot consume the completion protocol",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    // Regression for a real model-generated `git commit -m "$(cat <<EOF ...)"`
+    // freeze.  The delimiter's trailing space means it is not a valid heredoc
+    // terminator.  A persistent parser used to consume every following byte,
+    // including Filo's sentinel, then wait until the command timeout.  The
+    // eval string has a finite EOF, so even this exact shape returns at once.
+    const auto started = std::chrono::steady_clock::now();
+    auto res = tool.execute(
+        R"json({"command":"printf 'message=<%s>\\n' \"$(cat <<'EOF'\nsubject\n\nbody\nEOF \n)\"","timeout_seconds":10})json");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("message=<"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+    REQUIRE(elapsed < std::chrono::seconds{2});
+
+    auto next = tool.execute(R"({"command":"echo synchronized_after_bad_heredoc"})");
+    REQUIRE_THAT(
+        next,
+        Catch::Matchers::ContainsSubstring("synchronized_after_bad_heredoc"));
+    REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool incomplete command substitution fails without waiting for timeout",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    const auto started = std::chrono::steady_clock::now();
+    auto res = tool.execute(
+        R"json({"command":"echo \"$(printf unfinished","timeout_seconds":10})json");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("unexpected EOF"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+    REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    REQUIRE(elapsed < std::chrono::seconds{2});
+}
+
+TEST_CASE("ShellTool finite boundary contains representative unfinished shell grammar",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    // Cover each major parser state that can otherwise keep a streaming shell
+    // waiting for another line.  A missing heredoc delimiter is permitted by
+    // bash at EOF, while the other forms are syntax errors; the invariant here
+    // is that every finite command returns promptly and leaves the control
+    // channel synchronized.
+    const std::array<std::string_view, 7> incomplete_commands{
+        "echo \"unterminated",
+        "echo `printf unfinished",
+        "echo $(printf unfinished",
+        "if true; then echo unfinished",
+        "for item in one; do echo \"$item\"",
+        "{ echo unfinished",
+        "cat <<'MISSING'\nheredoc body",
+    };
+
+    for (const auto command : incomplete_commands) {
+        INFO("incomplete command: " << command);
+        std::string args = "{\"command\":\"";
+        args += core::utils::escape_json_string(command);
+        args += "\",\"timeout_seconds\":10}";
+
+        const auto started = std::chrono::steady_clock::now();
+        const auto res = tool.execute(args);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        REQUIRE_THAT(res, !Catch::Matchers::ContainsSubstring("TIMEOUT"));
+        REQUIRE(elapsed < std::chrono::seconds{2});
+
+        const auto probe = tool.execute(
+            R"({"command":"printf 'parser_boundary_synchronized\\n'"})");
+        REQUIRE_THAT(
+            probe,
+            Catch::Matchers::ContainsSubstring("parser_boundary_synchronized"));
+        REQUIRE_THAT(probe, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    }
 }
 
 TEST_CASE("ShellTool command output may contain braces and sentinel-like text",
@@ -814,7 +905,7 @@ TEST_CASE("ShellTool subshell cd does not leak while grouped cd persists",
     REQUIRE_THAT(sub, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
 
     // An explicit brace group in the user command shares the session shell,
-    // so its cd persists — confirming the wrapper uses brace semantics too.
+    // and eval itself also runs in that shell, so its cd persists.
     auto grp = tool.execute(R"({"command":"{ cd /var; }"})");
     REQUIRE_THAT(grp, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
     auto pwd = tool.execute(R"({"command":"pwd"})");

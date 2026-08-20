@@ -3,6 +3,7 @@
 #include "../../landrun/LandrunLaunch.hpp"
 #include "../../landrun/LandrunPolicy.hpp"
 #include "../../landrun/LandrunEnvironment.hpp"
+#include "ShellUtils.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -63,25 +64,6 @@ template <typename WriteFn>
     return result == WriteAllResult::failed_no_progress;
 }
 
-// True unless every line of the command is blank or a shell comment.
-// Wrapping a comment-only command in a brace group would leave the group
-// body empty (`{ # comment\n}`) — a syntax error that makes the
-// non-interactive session shell exit, losing all persisted state.
-[[nodiscard]] inline bool has_executable_content(std::string_view command) noexcept {
-    std::size_t pos = 0;
-    while (pos <= command.size()) {
-        const std::size_t end = command.find('\n', pos);
-        const std::string_view line = end == std::string_view::npos
-            ? command.substr(pos)
-            : command.substr(pos, end - pos);
-        const std::size_t first = line.find_first_not_of(" \t\r");
-        if (first != std::string_view::npos && line[first] != '#') return true;
-        if (end == std::string_view::npos) break;
-        pos = end + 1;
-    }
-    return false;
-}
-
 /**
  * @brief Persistent bash subprocess with pipe-based I/O.
  *
@@ -89,11 +71,18 @@ template <typename WriteFn>
  * working directory, shell functions, aliases) persists across run() calls.
  *
  * ### Completion detection
- * After each user command a @c printf sentinel is injected into bash's stdin.
- * bash prints the sentinel line containing the exit code once it reaches that
- * instruction.  An EXIT trap is installed at session start so that commands
- * like @c exit @c N also produce the sentinel before the process terminates,
- * allowing correct exit-code reporting even when the session dies.
+ * Model-authored text is first encoded as one shell string literal and passed
+ * to @c eval.  Only Filo-authored, syntactically complete control statements
+ * are written to bash's parser input.  After eval returns, a @c printf
+ * sentinel containing its exit code is emitted.  This boundary is essential:
+ * an unfinished quote, command substitution, heredoc, or compound statement
+ * in model output reaches the finite end of the eval string and fails
+ * immediately instead of consuming the sentinel and waiting for more bytes
+ * on the persistent control pipe.
+ *
+ * An EXIT trap is installed at session start so commands like @c exit @c N
+ * also produce the sentinel before the process terminates, allowing correct
+ * exit-code reporting even when the session dies.
  *
  * ### Timeout handling
  * When a command exceeds its timeout, the entire bash process group is
@@ -121,16 +110,13 @@ template <typename WriteFn>
  * of which tool might prompt.
  *
  * ### Non-interactive execution
- * Each user command is wrapped in a brace group whose stdin is redirected
- * from /dev/null:  `{ <command>\n} < /dev/null`.  bash keeps the control pipe
- * as its own stdin, so the sentinel line can never be swallowed by a command
- * that reads stdin (ssh, cat, read, hooks...), which previously caused the
- * session to wait for a sentinel that would never arrive — i.e. a hang until
- * the timeout.  A brace group (not a subshell) is used so that cd/export and
- * other state changes still persist across run() calls.  Together with the
- * missing controlling terminal (above), this makes every interactive prompt
- * fail fast — stdin reads hit EOF and /dev/tty opens fail — without any
- * tool-specific environment overrides.
+ * @c eval runs in the session shell, not a subshell, so cd/export and other
+ * state changes still persist across run() calls.  Its stdin is redirected
+ * from /dev/null, so a user command that reads stdin (ssh, cat, read, hooks...)
+ * cannot consume Filo's control protocol.  Together with the missing
+ * controlling terminal (above), this makes interactive prompts fail fast —
+ * stdin reads hit EOF and /dev/tty opens fail — without tool-specific
+ * environment overrides.
  *
  * ### Thread safety
  * NOT thread-safe.  Callers must serialize access with a mutex.
@@ -181,27 +167,19 @@ public:
             return {"[ShellSession] Failed to start bash process.\n", -1};
         }
 
-        // Inject the user command followed by our sentinel.
-        // printf is used (not echo) to avoid locale / -e flag variations.
-        //
-        // The command runs inside a brace group with stdin redirected from
-        // /dev/null (a brace group, NOT a subshell, so cd/export persist).
-        // bash reads script input line-by-line, which leaves the sentinel
-        // line sitting in the kernel pipe buffer while the command runs;
-        // without the redirect, any command that reads stdin (ssh, cat,
-        // read, hooks...) would swallow the sentinel line and the session
-        // would then wait forever for a sentinel that never comes.
-        std::string full;
-        if (has_executable_content(command)) {
-            full  = "{ ";
-            full += command;
-            full += "\n} < /dev/null\n";
-        } else {
-            // Blank / comment-only commands must not produce an empty brace
-            // group (syntax error) — run a harmless no-op instead.
-            full = ":\n";
-        }
-        full += "printf '\\n";
+        // Never concatenate raw model text with the control protocol.  It is
+        // encoded as a single, balanced shell literal and parsed only by eval,
+        // whose input has a real end-of-string.  Thus malformed syntax cannot
+        // absorb the sentinel or leave bash reading the persistent stdin pipe.
+        // eval is a builtin and executes in this shell, preserving cd/export,
+        // functions, aliases, and activated-environment state.
+        std::string full = "command eval '";
+        full += shell_single_quote(command);
+        full += "' < /dev/null\n";
+
+        // Keep the status expansion immediately after eval.  printf is used
+        // instead of echo to avoid locale and option-dependent behaviour.
+        full += "command printf '\\n";
         full += sentinel_;
         full += ":%d\\n' $?\n";
 

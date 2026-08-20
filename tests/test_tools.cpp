@@ -1366,28 +1366,6 @@ TEST_CASE("ShellSession retries only when stdin write made no progress", "[tools
     REQUIRE_FALSE(should_retry_stdin_write(WriteAllResult::success));
 }
 
-TEST_CASE("ShellSession has_executable_content detects effective commands", "[tools][shell]") {
-    using core::tools::detail::has_executable_content;
-
-    // Blank input — must take the no-op path (empty brace group is a syntax
-    // error that would kill the session shell).
-    REQUIRE_FALSE(has_executable_content(""));
-    REQUIRE_FALSE(has_executable_content("   \t\r\n  "));
-    REQUIRE_FALSE(has_executable_content("\n\n\n"));
-
-    // Comment-only input — an empty brace group would be a syntax error.
-    REQUIRE_FALSE(has_executable_content("# just a comment"));
-    REQUIRE_FALSE(has_executable_content("   # indented comment"));
-    REQUIRE_FALSE(has_executable_content("# one\n\n  # two\n"));
-
-    // Real commands, including ones containing comment characters.
-    REQUIRE(has_executable_content("echo hi"));
-    REQUIRE(has_executable_content("echo hi # trailing comment"));
-    REQUIRE(has_executable_content("  ls  "));
-    REQUIRE(has_executable_content("echo '# not a comment'"));
-    REQUIRE(has_executable_content("# leading comment\necho hi"));
-}
-
 // ---------------------------------------------------------------------------
 // FileSearchTool
 // ---------------------------------------------------------------------------
