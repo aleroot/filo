@@ -3,6 +3,7 @@
 #include "SseUtils.hpp"
 #include "core/auth/XaiGrokClientIdentity.hpp"
 #include "core/utils/AsciiUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 #include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
@@ -160,9 +161,10 @@ bool grok_supports_reasoning_effort(std::string_view model) noexcept {
 bool grok_responses_supports_effort(std::string_view model) noexcept {
     using core::utils::ascii::istarts_with;
     // The Responses-API `reasoning:{effort:...}` object is supported by the
-    // Grok 4.5 and 4.3 families and by the Grok Build coding model (which is
-    // built on Grok 4.5). Grok 4 / 4.1 and the non-reasoning variants are
-    // always-on or always-off and reject the control.
+    // Grok 4.6, 4.5, and 4.3 families and by the Grok Build coding model.
+    // Grok 4 / 4.1 and the non-reasoning variants are always-on or always-off
+    // and reject the control.
+    if (istarts_with(model, "grok-4.6") || istarts_with(model, "grok-4-6")) return true;
     if (istarts_with(model, "grok-4.5") || istarts_with(model, "grok-4-5")) return true;
     if (istarts_with(model, "grok-4.3") || istarts_with(model, "grok-4-3")) return true;
     if (istarts_with(model, "grok-build")) return true;
@@ -170,6 +172,35 @@ bool grok_responses_supports_effort(std::string_view model) noexcept {
     if (istarts_with(model, "grok-composer")) return true;
     return false;
 }
+
+bool grok_responses_supports_xhigh_effort(std::string_view model) noexcept {
+    using core::utils::ascii::istarts_with;
+    return istarts_with(model, "grok-4.6")
+        || istarts_with(model, "grok-4-6");
+}
+
+namespace {
+
+[[nodiscard]] std::string normalize_grok_responses_effort(
+    std::string_view raw_effort,
+    std::string_view model) {
+    std::string effort = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(raw_effort));
+    std::erase_if(effort, [](unsigned char ch) {
+        return std::isspace(ch);
+    });
+    if (effort == "low" || effort == "medium" || effort == "high") {
+        return effort;
+    }
+    if (effort == "max" || effort == "xhigh" || effort == "ultra") {
+        return grok_responses_supports_xhigh_effort(model)
+            ? "xhigh"
+            : "high";
+    }
+    return {};
+}
+
+} // namespace
 
 GrokResponsesProtocol::GrokResponsesProtocol(
     std::string service_tier,
@@ -249,16 +280,17 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
                 || tool.function.name == "x_search";
         });
     }
-    // Apply a provider-configured effort default only when the session left
-    // effort unset AND the model actually exposes the Responses effort knob.
-    // A non-empty request.effort (session override) always wins via the base
-    // serializer, which normalizes it because supports_effort() is true.
-    if (request.effort.empty()
-        && !default_effort_.empty()
-        && default_effort_ != "none"
-        && default_effort_ != "auto"
-        && grok_responses_supports_effort(request.model)) {
-        options.reasoning_effort_override = default_effort_;
+    // A session override wins over the provider default. Normalize it here so
+    // Filo's provider-neutral "max" setting maps to Grok 4.6's wire-level
+    // "xhigh", while older effort-capable Grok models safely fall back high.
+    std::string normalized_effort;
+    if (grok_responses_supports_effort(request.model)) {
+        normalized_effort = normalize_grok_responses_effort(
+            request.effort.empty() ? default_effort_ : request.effort,
+            request.model);
+        if (!normalized_effort.empty()) {
+            options.reasoning_effort_override = normalized_effort;
+        }
     }
     return serialize_with_options(effective, options);
 }

@@ -154,7 +154,7 @@ TEST_CASE("xAI OAuth credentials include Grok session transport markers",
     CHECK(auth.headers.at("x-grok-client-mode") == "interactive");
     CHECK(auth.headers.at("User-Agent")
         == core::auth::xai_grok::user_agent());
-    CHECK_THAT(auth.headers.at("User-Agent"), ContainsSubstring("grok-shell/1.0.1"));
+    CHECK_THAT(auth.headers.at("User-Agent"), ContainsSubstring("grok-shell/1.0.6"));
     CHECK(auth.properties.at("oauth_issuer") == core::auth::XaiOAuthFlow::kIssuer);
     CHECK(auth.properties.at("user_id") == "user-123");
 }
@@ -184,7 +184,7 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
         response_headers, request, "https://cli-chat-proxy.grok.com/v1");
     CHECK(response_headers.at("X-XAI-Token-Auth") == "xai-grok-cli");
     CHECK(response_headers.at("x-grok-client-identifier") == "grok-shell");
-    CHECK(response_headers.at("x-grok-client-version") == "1.0.1");
+    CHECK(response_headers.at("x-grok-client-version") == "1.0.6");
     CHECK(response_headers.at("x-grok-client-mode") == "interactive");
     CHECK(response_headers.at("x-grok-user-id") == "user-123");
     CHECK(response_headers.at("User-Agent")

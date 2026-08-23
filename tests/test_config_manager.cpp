@@ -723,7 +723,9 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE_FALSE(config.auto_compact_threshold_explicit);
     REQUIRE(config.tool_output_token_limit == 3072);
     REQUIRE(config.providers.contains("grok"));
-    REQUIRE(config.providers.at("grok").model == "grok-code-fast-1");
+    REQUIRE(config.providers.at("grok").model == "grok-4.6");
+    REQUIRE(config.providers.at("grok").wire_api == "responses");
+    REQUIRE(config.providers.at("grok").reasoning_effort == "high");
     REQUIRE(config.providers.contains("grok-4-5"));
     REQUIRE(config.providers.at("grok-4-5").model == "grok-4.5");
     REQUIRE(config.providers.at("grok-4-5").wire_api == "responses");
@@ -1004,7 +1006,7 @@ TEST_CASE("ConfigManager persists login profiles and selects the authenticated p
     REQUIRE(error.empty());
     REQUIRE(manager.get_config().default_provider == "grok");
     REQUIRE(manager.get_config().providers.at("grok").auth_type == "oauth_xai");
-    REQUIRE(manager.get_config().providers.at("grok").model == "grok-build");
+    REQUIRE(manager.get_config().providers.at("grok").model == "grok-4.6");
 
     write_text(auth_overlay, R"({
         "default_provider": "zai",

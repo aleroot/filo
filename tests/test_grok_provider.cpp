@@ -348,6 +348,8 @@ TEST_CASE("GrokSerializer - all known Grok model names are preserved verbatim", 
     const std::vector<std::string> models = {
         // Code-focused
         "grok-code-fast-1",
+        // Grok 4.6 frontier
+        "grok-4.6",
         // Grok 4.5 flagship
         "grok-4.5",
         // Grok 4.20 variants
@@ -885,8 +887,10 @@ TEST_CASE("parse_openai_sse_chunk - handles unicode in content", "[grok][parser]
 
 // ── Gap #1/#3/#4: GrokResponsesProtocol (Responses API) behaviour ────────────
 
-TEST_CASE("grok_responses_supports_effort flags 4.5/4.3/build only",
+TEST_CASE("grok_responses_supports_effort flags current reasoning families",
           "[grok][reasoning]") {
+    CHECK(grok_responses_supports_effort("grok-4.6"));
+    CHECK(grok_responses_supports_effort("grok-4-6"));
     CHECK(grok_responses_supports_effort("grok-4.5"));
     CHECK(grok_responses_supports_effort("grok-4-5"));
     CHECK(grok_responses_supports_effort("grok-4.3"));
@@ -901,6 +905,11 @@ TEST_CASE("grok_responses_supports_effort flags 4.5/4.3/build only",
 TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
           "[grok][reasoning][responses]") {
     GrokResponsesProtocol proto;
+    const auto grok46 = proto.reasoning_capabilities("grok-4.6");
+    CHECK(grok46.supports_effort());
+    CHECK(grok46.supports(ReasoningCapability::XHighEffort));
+    CHECK_FALSE(proto.reasoning_capabilities("grok-4.5").supports(
+        ReasoningCapability::XHighEffort));
     CHECK(proto.reasoning_capabilities("grok-4.5").supports_effort());
     CHECK(proto.reasoning_capabilities("grok-build").supports_effort());
     CHECK_FALSE(proto.reasoning_capabilities("grok-4").supports_effort());
@@ -991,6 +1000,32 @@ TEST_CASE("GrokResponsesProtocol serializes session reasoning effort",
     req.effort = "low";
     const auto payload = proto.serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"low"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol maps maximum effort to Grok 4.6 xhigh",
+          "[grok][serializer][responses][reasoning]") {
+    auto req = make_simple_request("grok-4.6");
+    req.effort = "max";
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"xhigh"})"));
+
+    req.model = "grok-4.5";
+    const auto legacy_payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(legacy_payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"high"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol normalizes configured xhigh by model",
+          "[grok][serializer][responses][reasoning]") {
+    GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "xhigh"};
+    const auto grok46 = proto.serialize(make_simple_request("grok-4.6"));
+    REQUIRE_THAT(grok46, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"xhigh"})"));
+
+    const auto grok45 = proto.serialize(make_simple_request("grok-4.5"));
+    REQUIRE_THAT(grok45, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"high"})"));
 }
 
 TEST_CASE("GrokResponsesProtocol applies default effort when session leaves it unset",

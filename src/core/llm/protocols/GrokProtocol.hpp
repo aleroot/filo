@@ -80,11 +80,13 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
  *        `reasoning:{effort:...}` control.
  *
  * Unlike the Chat Completions `reasoning_effort` top-level field (which Grok 4
- * rejects), the nested Responses-API object is supported by the Grok 4.5 and
- * Grok 4.3 model families, and by the Grok Build coding model (built on Grok
- * 4.5). Other Grok reasoning models are always-on and do not expose a knob.
+ * rejects), the nested Responses-API object is supported by Grok 4.6, 4.5,
+ * 4.3, and the Grok Build coding model. Other Grok reasoning models are
+ * always-on and do not expose a knob.
  */
 [[nodiscard]] bool grok_responses_supports_effort(std::string_view model) noexcept;
+[[nodiscard]] bool grok_responses_supports_xhigh_effort(
+    std::string_view model) noexcept;
 
 /**
  * @brief xAI Grok protocol — OpenAI format + xAI-specific enhancements.
@@ -200,9 +202,8 @@ private:
  *
  * Extends the base OpenAI Responses protocol with:
  *  - Grok Build session proxy headers (`x-grok-*`)
- *  - Reasoning-effort control (`reasoning:{effort:...}`) for Grok 4.5 / 4.3 /
- *    Grok Build, so callers can select low/medium/high (the model otherwise
- *    defaults to high; "fast mode" is low effort)
+ *  - Reasoning-effort control (`reasoning:{effort:...}`) for Grok 4.6 / 4.5 /
+ *    4.3 / Grok Build. Grok 4.6 additionally exposes the `xhigh` tier.
  *  - Encrypted reasoning replay (`include:["reasoning.encrypted_content"]`) so
  *    prior reasoning can be carried across turns
  *  - Optional xAI hosted server-side tools (real-time `web_search` and
@@ -240,12 +241,17 @@ public:
         return cloned;
     }
 
-    /// Reports Effort support for Grok models that expose it on the
-    /// Responses API (4.5, 4.3, grok-build), enabling low/medium/high control.
+    /// Reports effort support for Grok models that expose it on the Responses
+    /// API. Grok 4.6 also advertises its extra-high effort tier.
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override {
         if (grok_responses_supports_effort(model)) {
-            return ReasoningCapabilities{ReasoningCapability::Effort};
+            ReasoningCapabilities capabilities{ReasoningCapability::Effort};
+            if (grok_responses_supports_xhigh_effort(model)) {
+                capabilities = capabilities
+                    | ReasoningCapability::XHighEffort;
+            }
+            return capabilities;
         }
         return {};
     }

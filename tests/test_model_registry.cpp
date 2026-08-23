@@ -57,6 +57,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("gemini-1.5-pro") == 2097152);
     
     // Grok (via legacy fallback)
+    REQUIRE(get_max_context_size("grok-4.6") == 500000);
     REQUIRE(get_max_context_size("grok-4.5") == 500000);
     REQUIRE(get_max_context_size("grok-1") == 128000);
 
@@ -108,6 +109,7 @@ TEST_CASE("ModelRegistry::instance - auto-loads defaults", "[llm][registry]") {
     REQUIRE(registry.has_model("kimi-k2.6"));
     REQUIRE(registry.has_model("kimi-k2.5"));
     REQUIRE(registry.has_model("kimi-for-coding"));
+    REQUIRE(registry.has_model("grok-4.6"));
     REQUIRE(registry.has_model("grok-4.5"));
     REQUIRE(registry.has_model("gemini-2.5-pro"));
     REQUIRE(registry.has_model("gemini-3.1-pro-preview"));
@@ -189,11 +191,28 @@ TEST_CASE("ModelRegistry::lookup - knows Grok 4.5 model metadata", "[llm][regist
     CHECK(info->provider == "grok");
     CHECK(info->context_window == 500'000);
     CHECK(info->pricing.input_per_mtok == Catch::Approx(2.0));
-    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.50));
+    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.30));
     CHECK(info->pricing.output_per_mtok == Catch::Approx(6.0));
     CHECK(info->supports(ModelCapability::Reasoning));
     CHECK(info->supports(ModelCapability::PromptCaching));
     CHECK(info->supports(ModelCapability::FunctionCalling));
+}
+
+TEST_CASE("ModelRegistry::lookup - knows Grok 4.6 model metadata", "[llm][registry][grok]") {
+    const auto info = ModelRegistry::instance().get_info("grok-4.6");
+    REQUIRE(info.has_value());
+    CHECK(info->display_name == "Grok 4.6");
+    CHECK(info->provider == "grok");
+    CHECK(info->context_window == 500'000);
+    CHECK(info->knowledge_cutoff == "2026-02-01");
+    CHECK(info->pricing.input_per_mtok == Catch::Approx(2.0));
+    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.50));
+    CHECK(info->pricing.output_per_mtok == Catch::Approx(6.0));
+    CHECK(info->supports(ModelCapability::Reasoning));
+    CHECK(info->supports(ModelCapability::PromptCaching));
+    CHECK(info->reasoning.effort.supports_effort());
+    CHECK(info->reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
 }
 
 TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {

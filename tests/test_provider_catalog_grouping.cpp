@@ -77,13 +77,34 @@ TEST_CASE("Provider catalog grouping collapses Grok presets under Grok",
 
     REQUIRE(groups.size() == 1);
     REQUIRE(groups[0].provider_name == "grok");
-    REQUIRE(groups[0].sources.size() == providers.size());
+    REQUIRE(groups[0].sources.size() == 1);
+    CHECK(groups[0].sources.front().provider_name == "grok");
+    CHECK(groups[0].sources.front().service_id == "grok");
     for (const auto& provider : providers) {
         REQUIRE(groups[0].contains_source_provider(provider));
     }
 
     const auto alias_group = core::llm::provider_catalog_group_for("grok-mini", providers);
     REQUIRE(alias_group.provider_name == "grok");
+}
+
+TEST_CASE("Provider catalog grouping falls back to one configured Grok alias",
+          "[llm][provider-catalog]") {
+    const std::vector<std::string> providers{
+        "grok-fast",
+        "grok-mini",
+        "grok-mini-fast",
+    };
+
+    const auto group =
+        core::llm::provider_catalog_group_for("grok-mini", providers);
+
+    REQUIRE(group.provider_name == "grok");
+    REQUIRE(group.sources.size() == 1);
+    CHECK(group.sources.front().provider_name == "grok-fast");
+    for (const auto& provider : providers) {
+        CHECK(group.contains_source_provider(provider));
+    }
 }
 
 TEST_CASE("Provider catalog grouping exposes only Kimi API and Kimi Code",

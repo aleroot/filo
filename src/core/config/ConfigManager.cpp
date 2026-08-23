@@ -330,7 +330,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "grok",
             .auth_type = "oauth_xai",
-            .default_model = "grok-build",
+            .default_model = "grok-4.6",
         };
     }
     if (normalized == "openai-pkce"
@@ -555,7 +555,7 @@ AppConfig make_default_config() {
 
     add_provider("openai",         "gpt-5.6-sol");
     add_provider("mistral",        "mistral-vibe-cli-latest", "high");
-    add_provider("grok",           "grok-code-fast-1");
+    add_provider("grok",           "grok-4.6", "high", {}, {}, "responses");
     add_provider("grok-4-5",       "grok-4.5", {}, {}, {}, "responses");
     add_provider("grok-4",         "grok-4");
     add_provider("grok-4-fast",    "grok-4-fast-non-reasoning");
@@ -622,7 +622,7 @@ std::string default_config_json() {
     "tool_recovery": true,
     "context_compression": "off",
     "providers": {
-        "grok":           { "model": "grok-code-fast-1" },
+        "grok":           { "model": "grok-4.6", "reasoning_effort": "high", "wire_api": "responses" },
         "grok-4-5":       { "model": "grok-4.5", "wire_api": "responses" },
         "grok-4":         { "model": "grok-4" },
         "grok-4-fast":    { "model": "grok-4-fast-non-reasoning" },
@@ -682,7 +682,7 @@ std::string default_config_json() {
                 "description": "Embedded smart routing inspired by Requesty policy composition.",
                 "strategy": "smart",
                 "defaults": [
-                    { "provider": "grok", "model": "grok-code-fast-1", "weight": 5 },
+                    { "provider": "grok", "model": "grok-4.6", "weight": 5 },
                     { "provider": "grok-mini-fast", "model": "grok-3-mini-fast", "weight": 3 },
                     { "provider": "openai", "model": "gpt-5.6-sol", "weight": 2 }
                 ],
@@ -697,7 +697,7 @@ std::string default_config_json() {
                         },
                         "candidates": [
                             { "provider": "claude", "model": "claude-sonnet-5", "retries": 1 },
-                            { "provider": "grok-4-5", "model": "grok-4.5", "retries": 1 },
+                            { "provider": "grok", "model": "grok-4.6", "retries": 1 },
                             { "provider": "openai", "model": "gpt-5.6-sol", "retries": 1 }
                         ]
                     },
@@ -707,7 +707,7 @@ std::string default_config_json() {
                         "strategy": "latency",
                         "when": { "needs_tool_history": true },
                         "candidates": [
-                            { "provider": "grok", "model": "grok-code-fast-1", "latency_bias_ms": 15 },
+                            { "provider": "grok", "model": "grok-4.6", "latency_bias_ms": 15 },
                             { "provider": "gemini", "model": "gemini-2.5-flash", "latency_bias_ms": 10 },
                             { "provider": "openai", "model": "gpt-5.6-sol", "latency_bias_ms": 20 }
                         ]
@@ -720,7 +720,7 @@ std::string default_config_json() {
                         "candidates": [
                             { "provider": "grok-mini-fast", "model": "grok-3-mini-fast", "weight": 6 },
                             { "provider": "gemini", "model": "gemini-2.5-flash", "weight": 3 },
-                            { "provider": "grok", "model": "grok-code-fast-1", "weight": 1 }
+                            { "provider": "grok", "model": "grok-4.6", "weight": 1 }
                         ]
                     }
                 ]

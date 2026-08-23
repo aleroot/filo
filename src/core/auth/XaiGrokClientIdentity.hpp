@@ -9,7 +9,7 @@
 namespace core::auth::xai_grok {
 
 inline constexpr std::string_view kClientIdentifier = "grok-shell";
-inline constexpr std::string_view kClientVersion = "1.0.1";
+inline constexpr std::string_view kClientVersion = "1.0.6";
 inline constexpr std::string_view kClientMode = "interactive";
 
 [[nodiscard]] inline constexpr std::string_view platform_os() noexcept {

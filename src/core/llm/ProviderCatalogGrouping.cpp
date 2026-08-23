@@ -176,7 +176,7 @@ bool ProviderCatalogGroup::contains_source_provider(std::string_view provider) c
     // A family may deliberately hide compatibility presets from the picker.
     // They still belong to the visible group for active-selection highlighting.
     return find_source(provider) != nullptr
-        || (provider_name == "kimi"
+        || ((provider_name == "grok" || provider_name == "kimi")
             && provider_catalog_group_name(provider) == provider_name);
 }
 
@@ -225,6 +225,28 @@ ProviderCatalogGroup provider_catalog_group_for(
         .provider_name = group_name,
         .sources = {},
     };
+
+    if (group_name == "grok") {
+        // Every built-in Grok preset is a routing alias for the same xAI
+        // service and returns the same authenticated model catalog. Querying
+        // and rendering every preset repeats that catalog once per alias.
+        // Prefer the canonical provider so model selections retain the active
+        // credentials/profile; fall back to the first configured Grok alias
+        // for custom configurations that omit it.
+        if (contains_name(configured_provider_names, group_name)) {
+            group.sources.push_back(source_for_provider(group_name, group_name));
+            return group;
+        }
+        const auto it = std::ranges::find_if(
+            configured_provider_names,
+            [&](const std::string& configured) {
+                return provider_catalog_group_name(configured) == group_name;
+            });
+        if (it != configured_provider_names.end()) {
+            group.sources.push_back(source_for_provider(*it, group_name));
+        }
+        return group;
+    }
 
     if (group_name == "kimi") {
         // Filo keeps several Kimi presets for direct selectors and backwards

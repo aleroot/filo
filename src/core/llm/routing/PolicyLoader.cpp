@@ -508,7 +508,7 @@ RouterConfig make_default_router_config() {
     policy.strategy = Strategy::Smart;
 
     policy.defaults = {
-        RouteCandidate{.provider = "grok", .model = "grok-code-fast-1", .weight = 5},
+        RouteCandidate{.provider = "grok", .model = "grok-4.6", .weight = 5},
         RouteCandidate{.provider = "grok-mini-fast", .model = "grok-3-mini-fast", .weight = 3},
         RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 2},
     };
@@ -523,7 +523,7 @@ RouterConfig make_default_router_config() {
     };
     deep_reasoning.candidates = {
         RouteCandidate{.provider = "claude", .model = "claude-sonnet-5", .weight = 1, .retries = 1},
-        RouteCandidate{.provider = "grok-4-5", .model = "grok-4.5", .weight = 1, .retries = 1},
+        RouteCandidate{.provider = "grok", .model = "grok-4.6", .weight = 1, .retries = 1},
         RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 1, .retries = 1},
     };
 
@@ -535,7 +535,7 @@ RouterConfig make_default_router_config() {
     quick_iteration.candidates = {
         RouteCandidate{.provider = "grok-mini-fast", .model = "grok-3-mini-fast", .weight = 6},
         RouteCandidate{.provider = "gemini", .model = "gemini-2.5-flash", .weight = 3},
-        RouteCandidate{.provider = "grok", .model = "grok-code-fast-1", .weight = 1},
+        RouteCandidate{.provider = "grok", .model = "grok-4.6", .weight = 1},
     };
 
     RouteRule tool_heavy;
@@ -544,7 +544,7 @@ RouterConfig make_default_router_config() {
     tool_heavy.strategy = Strategy::Latency;
     tool_heavy.when.needs_tool_history = true;
     tool_heavy.candidates = {
-        RouteCandidate{.provider = "grok", .model = "grok-code-fast-1", .weight = 1, .latency_bias_ms = 15},
+        RouteCandidate{.provider = "grok", .model = "grok-4.6", .weight = 1, .latency_bias_ms = 15},
         RouteCandidate{.provider = "gemini", .model = "gemini-2.5-flash", .weight = 1, .latency_bias_ms = 10},
         RouteCandidate{.provider = "openai", .model = "gpt-5.6-sol", .weight = 1, .latency_bias_ms = 20},
     };
