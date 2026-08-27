@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "core/context/SteeringLoader.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
 
 namespace tui {
@@ -27,6 +28,8 @@ struct RunOptions {
     /// Explicit process sandbox mode; supplied by the application composition root.
     core::landrun::LandrunMode landrun_mode{core::landrun::LandrunMode::off};
     core::landrun::LandrunPolicyEnvironment landrun_environment;
+    /// Startup steering policy (e.g. from --steering flag)
+    core::context::SteeringPolicy steering_policy;
     /// True only when the inbound Streamable-HTTP MCP server was requested.
     /// Drives the isolated remote-activity affordance; outbound MCP clients do
     /// not make it visible.

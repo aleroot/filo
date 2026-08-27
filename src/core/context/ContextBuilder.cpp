@@ -220,18 +220,18 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
     }
 
     try {
-        if (project_root.empty()) {
-            return layers;
+        if (!project_root.empty()
+            || session_context_.steering_policy.mode == SteeringMode::CustomFile
+            || session_context_.steering_policy.mode == SteeringMode::CustomDir) {
+            append_layer(
+                layers,
+                ContextLayerKind::ProjectSteering,
+                PromptStability::Workspace,
+                "project_steering",
+                load_project_steering_block(project_root, session_context_.steering_policy));
         }
 
-        append_layer(
-            layers,
-            ContextLayerKind::ProjectSteering,
-            PromptStability::Workspace,
-            "project_steering",
-            load_project_steering_block(project_root));
-
-        if (include_skill_catalog_) {
+        if (include_skill_catalog_ && !project_root.empty()) {
             append_layer(
                 layers,
                 ContextLayerKind::SkillCatalog,

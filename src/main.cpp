@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
     bool sandbox_status = false;
     std::vector<std::filesystem::path> sandbox_excluded_paths;
     std::unique_ptr<core::landrun::LandrunRuntime> landrun_runtime;
+    std::string steering_spec = "default";
 
     auto* mcp_opt = app.add_option(
         "--mcp",
@@ -180,8 +181,19 @@ int main(int argc, char** argv) {
         "--sandbox-status",
         sandbox_status,
         "Verify and print the effective sandbox guarantees, then exit.");
+    app.add_option(
+        "--steering",
+        steering_spec,
+        "Steering files mode: default, none, or custom file/folder path (e.g. /tmp/AGENTS.md or ~/data/)")
+        ->capture_default_str();
+    app.add_flag_callback(
+        "--no-steering",
+        [&steering_spec]() { steering_spec = "none"; },
+        "Disable loading project steering files (alias for --steering none)");
 
     CLI11_PARSE(app, argc, argv);
+
+    const auto startup_steering_policy = core::context::parse_steering_policy(steering_spec);
 
     if (sandbox_opt->count() > 0) {
         sandbox_mode = requested_sandbox_mode.has_value()
@@ -501,6 +513,7 @@ int main(int argc, char** argv) {
         if (resume_opt->count() > 0) {
             opts.resume_session = resume_session;
         }
+        opts.steering_policy = startup_steering_policy;
         return exec::prompter::run(opts);
     }
 
@@ -548,6 +561,7 @@ int main(int argc, char** argv) {
             .host_tmpdir = landrun_settings.host_tmpdir(),
         };
         run_opts.remote_mcp_server_enabled = mcp_tcp_mode;
+        run_opts.steering_policy = startup_steering_policy;
         if (model_opt->count() > 0) {
             run_opts.startup_model = startup_model;
         }

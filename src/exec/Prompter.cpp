@@ -650,6 +650,7 @@ RunDiagnostics run_for_test(const RunOptions& options,
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
+    agent_session_context.steering_policy = options.steering_policy;
     auto session_stats_registry =
         core::session::SessionStatsRegistry::shared_instance();
     auto agent = std::make_shared<core::agent::Agent>(

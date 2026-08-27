@@ -1981,3 +1981,57 @@ TEST_CASE("Command completion helpers detect and replace the active slash comman
         REQUIRE(completed.cursor == 5);
     }
 }
+
+TEST_CASE("SteeringCommand and /workspace steering execution", "[commands][steering]") {
+    CommandExecutor executor;
+    core::context::SteeringPolicy policy;
+    std::string last_history;
+
+    CommandContext ctx{
+        .append_history_fn = [&](const std::string& text) {
+            last_history = text;
+        },
+        .steering_policy_fn = [&]() {
+            return policy;
+        },
+        .set_steering_policy_fn = [&](core::context::SteeringPolicy new_pol) -> CommandOperationResult {
+            policy = std::move(new_pol);
+            return {.ok = true, .message = std::format("Steering policy set to {}.", policy.format())};
+        },
+    };
+
+    SECTION("/steering none disables steering") {
+        ctx.text = "/steering none";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(policy.mode == core::context::SteeringMode::None);
+        CHECK_THAT(last_history, Catch::Matchers::ContainsSubstring("Steering policy set to none (disabled)"));
+    }
+
+    SECTION("/steering default enables default steering") {
+        policy.mode = core::context::SteeringMode::None;
+        ctx.text = "/steering default";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(policy.mode == core::context::SteeringMode::Default);
+        CHECK_THAT(last_history, Catch::Matchers::ContainsSubstring("Steering policy set to default (project root)"));
+    }
+
+    SECTION("/steering unload and load specific file") {
+        ctx.text = "/steering unload AGENTS.md";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(policy.is_disabled("/path/AGENTS.md", "AGENTS.md"));
+
+        ctx.text = "/steering load AGENTS.md";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK_FALSE(policy.is_disabled("/path/AGENTS.md", "AGENTS.md"));
+    }
+
+    SECTION("/workspace steering delegates cleanly") {
+        ctx.text = "/workspace steering none";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(policy.mode == core::context::SteeringMode::None);
+
+        ctx.text = "/workspace steering default";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(policy.mode == core::context::SteeringMode::Default);
+    }
+}

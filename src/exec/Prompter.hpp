@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/llm/LLMProvider.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include <filesystem>
 #include <optional>
 #include <ostream>
@@ -24,6 +25,7 @@ struct RunOptions {
     bool yolo = false;
     std::vector<std::string> trusted_tools;
     std::optional<std::string> startup_model;
+    core::context::SteeringPolicy steering_policy;
 
     // When present and empty, resume the most recent session.
     std::optional<std::string> resume_session;

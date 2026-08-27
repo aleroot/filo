@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SteeringLoader.hpp"
 #include "../memory/MemoryPolicy.hpp"
 #include "../workspace/SessionWorkspace.hpp"
 
@@ -39,6 +40,7 @@ struct SessionContext {
     SessionTransport transport;
     std::shared_ptr<const core::workspace::PathVisibility> path_visibility;
     core::memory::MemoryThreadPolicy memory_policy;
+    SteeringPolicy steering_policy;
 
     [[nodiscard]] const core::workspace::SessionWorkspace& workspace_view() const noexcept;
     [[nodiscard]] const core::workspace::WorkspaceSnapshot& effective_workspace() const noexcept;

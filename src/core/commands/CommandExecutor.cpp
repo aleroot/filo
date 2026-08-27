@@ -1785,17 +1785,156 @@ public:
 // additional dirs after): /workspace add <path> is the runtime equivalent
 // of an extra CLI directory argument, and /workspace change <path> is the
 // runtime equivalent of the first one.
+class SteeringCommand : public Command {
+public:
+    std::string get_name() const override { return "/steering"; }
+    std::vector<std::string> get_aliases() const override { return {"/agents", "/steer"}; }
+    std::string get_description() const override {
+        return "Inspect, switch mode, load, or unload AGENTS.md and steering instruction files";
+    }
+    bool accepts_arguments() const override { return true; }
+
+    void execute(const CommandContext& ctx) override {
+        if (ctx.clear_input_fn) {
+            ctx.clear_input_fn();
+        }
+        execute_args(ctx, trailing_arguments(ctx.text));
+    }
+
+    static void execute_args(const CommandContext& ctx, std::string_view trailing) {
+        const auto parsed = split_shell_like_tokens(trailing);
+        if (!parsed.error.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", parsed.error));
+            return;
+        }
+        const auto& tokens = parsed.tokens;
+
+        if (tokens.empty()) {
+            if (ctx.open_steering_picker_fn && ctx.open_steering_picker_fn()) {
+                return;
+            }
+            emit_info_lines(ctx, describe_steering(ctx), "No steering information is available.");
+            return;
+        }
+
+        const std::string action = to_lower_ascii(tokens.front());
+        if (action == "status" || action == "list" || action == "info") {
+            emit_info_lines(ctx, describe_steering(ctx), "No steering information is available.");
+            return;
+        }
+
+        if (action == "default" || action == "on" || action == "enable") {
+            apply_policy(ctx, core::context::SteeringPolicy{.mode = core::context::SteeringMode::Default},
+                         "Steering reset to default workspace discovery.");
+            return;
+        }
+
+        if (action == "none" || action == "off" || action == "disable" || action == "disabled") {
+            apply_policy(ctx, core::context::SteeringPolicy{.mode = core::context::SteeringMode::None},
+                         "Project steering disabled.");
+            return;
+        }
+
+        if (action == "unload" || action == "load") {
+            handle_toggle(ctx, tokens, action == "load");
+            return;
+        }
+
+        const std::string path_spec = (action == "set" && tokens.size() >= 2)
+            ? std::string(tokens[1])
+            : std::string(tokens.front());
+        const auto policy = core::context::parse_steering_policy(path_spec);
+        apply_policy(ctx, policy, std::format("Steering set to {}.", policy.format()));
+    }
+
+private:
+    static core::context::SteeringPolicy get_current_policy(const CommandContext& ctx) {
+        if (ctx.steering_policy_fn) {
+            return ctx.steering_policy_fn();
+        }
+        if (ctx.agent) {
+            return ctx.agent->session_context_snapshot().steering_policy;
+        }
+        return {};
+    }
+
+    static void apply_policy(const CommandContext& ctx, core::context::SteeringPolicy policy, std::string_view success_msg) {
+        if (ctx.set_steering_policy_fn) {
+            const auto res = ctx.set_steering_policy_fn(policy);
+            ctx.append_history_fn(std::format("\n{}\n", res.ok ? "✓  " + res.message : "✗  " + res.message));
+        } else if (ctx.agent) {
+            ctx.agent->update_session_context([&](core::context::SessionContext& sctx) {
+                sctx.steering_policy = policy;
+            });
+            ctx.append_history_fn(std::format("\n✓  {}\n", success_msg));
+        } else {
+            ctx.append_history_fn("\n✗  No agent available to configure steering.\n");
+        }
+    }
+
+    static void handle_toggle(const CommandContext& ctx, const std::vector<std::string>& tokens, bool enable) {
+        if (tokens.size() < 2) {
+            ctx.append_history_fn(std::format("\n✗  Usage: /steering {} <file|all>\n", enable ? "load" : "unload"));
+            return;
+        }
+        const std::string target = tokens[1];
+        auto policy = get_current_policy(ctx);
+
+        if (to_lower_ascii(target) == "all") {
+            if (enable) {
+                if (policy.mode == core::context::SteeringMode::None) {
+                    policy.mode = core::context::SteeringMode::Default;
+                }
+                policy.clear_disabled();
+                apply_policy(ctx, policy, "Loaded all steering files.");
+            } else {
+                policy.mode = core::context::SteeringMode::None;
+                apply_policy(ctx, policy, "Unloaded all steering files.");
+            }
+            return;
+        }
+
+        if (enable) {
+            policy.enable_source(target);
+        } else {
+            policy.disable_source(target);
+        }
+        apply_policy(ctx, policy, std::format("{} steering file '{}'.", enable ? "Loaded" : "Unloaded", target));
+    }
+
+    static std::string describe_steering(const CommandContext& ctx) {
+        const auto policy = get_current_policy(ctx);
+        const auto primary = ctx.agent ? ctx.agent->workspace_snapshot().primary() : std::filesystem::path{};
+        const auto snapshot = core::context::load_project_steering_context(primary, policy);
+
+        std::string body = std::format("Mode: {}", policy.format());
+        if (snapshot.files.empty()) {
+            body += "\n        Active files: <none>";
+        } else {
+            body += "\n        Steering files:";
+            for (const auto& file : snapshot.files) {
+                const std::string status = file.enabled ? "[LOADED]" : "[UNLOADED]";
+                body += std::format("\n          - {:<10} {} ({})", status, file.label, file.path.string());
+            }
+        }
+        body += "\n        Use /steering [default|none|<path>|load <file>|unload <file>].";
+        return body;
+    }
+};
+
 class WorkspaceCommand : public Command {
 public:
     std::string get_name() const override { return "/workspace"; }
     std::vector<std::string> get_aliases() const override { return {"/dir", "/dirs"}; }
     std::string get_description() const override {
-        return "Show workspace roots, or add/change a working directory";
+        return "Show workspace roots and steering status, or add/change a working directory";
     }
     bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
-        ctx.clear_input_fn();
+        if (ctx.clear_input_fn) {
+            ctx.clear_input_fn();
+        }
 
         const auto parsed = split_shell_like_tokens(trailing_arguments(ctx.text));
         if (!parsed.error.empty()) {
@@ -1807,9 +1946,10 @@ public:
         auto usage = [&]() {
             ctx.append_history_fn(
                 "\nℹ  Usage:\n"
-                "   /workspace                 Show the current workspace roots\n"
+                "   /workspace                 Show current workspace roots and steering status\n"
                 "   /workspace add [path]      Grant this session access to another directory\n"
                 "   /workspace change [path]   Switch the primary working directory\n"
+                "   /workspace steering [opt]  Inspect, switch mode, load, or unload steering files\n"
                 "   Omit the path to browse for a folder instead of typing one.\n");
         };
 
@@ -1823,6 +1963,10 @@ public:
         }
 
         const std::string action = to_lower_ascii(tokens.front());
+        if (action == "steering" || action == "agents" || action == "steer") {
+            SteeringCommand::execute_args(ctx, trailing_arguments(trailing_arguments(ctx.text)));
+            return;
+        }
         if (action == "status" || action == "list") {
             emit_info_lines(ctx, describe_workspace(ctx), "No workspace information is available.");
             return;
@@ -1832,8 +1976,6 @@ public:
             return;
         }
         if (tokens.size() < 2) {
-            // No path given: browsing beats guessing. Only fall back to the
-            // usage text when this front-end has no picker (e.g. headless).
             if (ctx.open_directory_picker_fn && ctx.open_directory_picker_fn(action)) {
                 return;
             }
@@ -1891,7 +2033,9 @@ private:
                 body += "\n          - " + dir.string();
             }
         }
-        body += "\n        Use /workspace add <path> or /workspace change <path>.";
+        const auto steering = ctx.agent->session_context_snapshot().steering_policy;
+        body += std::format("\n        Steering: {}", steering.format());
+        body += "\n        Use /workspace add <path>, /workspace change <path>, or /workspace steering.";
         return body;
     }
 };
@@ -3721,6 +3865,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<EffortCommand>());
     register_command(std::make_unique<SettingsCommand>());
     register_command(std::make_unique<WorkspaceCommand>());
+    register_command(std::make_unique<SteeringCommand>());
     register_command(std::make_unique<YoloCommand>());
     register_command(std::make_unique<ToolsCommand>());
     register_command(std::make_unique<UsageCommand>());

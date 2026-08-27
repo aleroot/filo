@@ -2483,4 +2483,13 @@ void Agent::check_auto_compact(std::function<void(const std::string&)> status_lo
         std::move(status_log_callback));
 }
 
+void Agent::update_session_context(std::function<void(core::context::SessionContext&)> modifier) {
+    if (!modifier) {
+        return;
+    }
+    std::lock_guard lock(history_mutex_);
+    modifier(session_context_);
+    mark_stable_prompt_prefix_dirty();
+}
+
 } // namespace core::agent

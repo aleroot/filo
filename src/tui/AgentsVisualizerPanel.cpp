@@ -72,9 +72,12 @@ Element render_agents_visualizer_panel(
         for (std::size_t i = 0; i < files.size(); ++i) {
             const auto& file = files[i];
             const bool is_active = (i == active_index);
-            auto tab_el = text(std::format(" {} ", file.label))
-                | (is_active ? (bgcolor(ColorYellowDark) | color(Color::Black) | bold)
-                             : (color(ColorYellowBright)));
+            const std::string mark = file.enabled ? "" : "[OFF] ";
+            auto tab_el = text(std::format(" {}{} ", mark, file.label))
+                | (is_active ? (file.enabled ? (bgcolor(ColorYellowDark) | color(Color::Black) | bold)
+                                             : (bgcolor(Color::Red) | color(Color::White) | bold))
+                             : (file.enabled ? color(ColorYellowBright)
+                                             : (color(Color::Red) | dim)));
             if (tab_hitboxes) {
                 tab_el = std::move(tab_el) | reflect((*tab_hitboxes)[i]);
             }
@@ -103,7 +106,7 @@ Element render_agents_visualizer_panel(
     if (max_visible_lines <= 0) {
         const auto term_size = Terminal::Size();
         // Dynamically use all remaining height between banner and status bar
-        const int reserved_lines = (files.size() > 1 ? 19 : 17);
+        const int reserved_lines = (files.size() > 1 ? 21 : 19);
         max_visible_lines = std::max(12, term_size.dimy - reserved_lines);
     }
 
@@ -116,6 +119,13 @@ Element render_agents_visualizer_panel(
     rows.push_back(hbox({
         text("  Source: ") | color(Color::GrayLight),
         text(cur_file.path.string()) | bold | color(Color::White) | xflex,
+    }));
+
+    rows.push_back(hbox({
+        text("  Status: ") | color(Color::GrayLight),
+        cur_file.enabled
+            ? (text("LOADED (active in prompt context)") | bold | color(Color::Green))
+            : (text("UNLOADED (excluded from prompt context)") | bold | color(Color::Red)),
     }));
 
     Elements stats_elements = {
@@ -171,9 +181,9 @@ Element render_agents_visualizer_panel(
 
     // ── Footer Navigation Hints ──────────────────────────────────────────────
     rows.push_back(text(""));
-    std::string help_str = "  Esc, q, or click header to close   ↑/↓/Wheel to scroll";
+    std::string help_str = "  Esc, q: close   u/Space: toggle load/unload   ↑/↓/Wheel: scroll";
     if (files.size() > 1) {
-        help_str += "   ←/→/Tab to switch file";
+        help_str += "   ←/→/Tab: switch file";
     }
     rows.push_back(text(std::move(help_str)) | color(Color::GrayDark) | dim);
 

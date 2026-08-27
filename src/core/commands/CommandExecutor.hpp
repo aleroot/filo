@@ -154,6 +154,9 @@ struct CommandContext {
     // *additional* directory needs no such coordination and goes straight
     // through ctx.agent->grant_workspace_paths.
     std::function<CommandOperationResult(std::string_view)> change_workspace_root_fn = {};
+    std::function<core::context::SteeringPolicy()> steering_policy_fn = {};
+    std::function<CommandOperationResult(core::context::SteeringPolicy)> set_steering_policy_fn = {};
+    std::function<bool()> open_steering_picker_fn = {};
 };
 
 struct CommandDescriptor {

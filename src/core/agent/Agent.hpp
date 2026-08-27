@@ -171,6 +171,9 @@ public:
     [[nodiscard]] std::shared_ptr<core::memory::MemorySystem> memory_system() const;
     void refresh_system_prompt();
 
+    [[nodiscard]] core::context::SessionContext session_context_snapshot() const;
+    void update_session_context(std::function<void(core::context::SessionContext&)> modifier);
+
     // Set the permission profile (Interactive, Standard, Autonomous).
     void set_permission_profile(PermissionProfile profile) {
         std::lock_guard lock(history_mutex_);
@@ -441,7 +444,6 @@ private:
     void run_efficiency_rotation_if_needed(double min_context_utilization_for_rotation);
 
     [[nodiscard]] static int sanitize_max_steps_per_turn(int value) noexcept;
-    [[nodiscard]] core::context::SessionContext session_context_snapshot() const;
 
     std::shared_ptr<core::llm::LLMProvider> provider_;
     std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor_;

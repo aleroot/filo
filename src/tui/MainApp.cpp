@@ -793,8 +793,10 @@ RunResult run(RunOptions opts) {
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
+    agent_session_context.steering_policy = opts.steering_policy;
     auto steering_context = core::context::load_project_steering_context(
-        agent_session_context.workspace_view().primary());
+        agent_session_context.workspace_view().primary(),
+        agent_session_context.steering_policy);
     std::string context_sources_label =
         join_context_source_labels(steering_context.source_labels);
     auto agent = std::make_shared<core::agent::Agent>(
@@ -2218,6 +2220,7 @@ RunResult run(RunOptions opts) {
             core::workspace::Workspace::get_instance().snapshot(),
             core::context::SessionTransport::cli,
             data.session_id);
+        context.steering_policy = agent ? agent->session_context_snapshot().steering_policy : opts.steering_policy;
         auto created = std::make_shared<core::agent::Agent>(
             std::move(isolated_provider),
             tool_manager,
@@ -4393,6 +4396,9 @@ RunResult run(RunOptions opts) {
         // report success regardless of whether the session-level root moved.
         if (agent) {
             agent->change_workspace_root(resolved);
+            steering_context = core::context::load_project_steering_context(
+                resolved, agent->session_context_snapshot().steering_policy);
+            context_sources_label = join_context_source_labels(steering_context.source_labels);
         }
 
         return {
@@ -4535,6 +4541,8 @@ RunResult run(RunOptions opts) {
             });
     };
 
+    std::function<bool()> open_steering_picker;
+
     auto open_command_option_picker = [&](std::string_view command_name) -> bool {
         CommandOptionPickerState next;
         next.active = true;
@@ -4568,22 +4576,122 @@ RunResult run(RunOptions opts) {
             next.on_select = switch_compression;
         } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
             next.title = "WORKSPACE";
-            next.help_text = "Enter opens a folder browser. Esc closes this panel.";
+            next.help_text = "Enter opens selection. Esc closes this panel.";
+            const auto policy = agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
             next.options = {
                 {.value = "add", .label = "Add directory",
                  .description = "Grant this session read/write access to another directory."},
                 {.value = "change", .label = "Change directory",
                  .description = "Switch the primary working directory (like restarting in a new folder)."},
+                {.value = "steering", .label = "Steering files...",
+                 .description = std::format("Inspect mode, switch to custom folder/file, or load/unload files (Current: {}).",
+                                            core::context::format_steering_policy(policy))},
             };
-            // Hands straight over to the folder browser; an empty result tells
-            // the picker plumbing that this selection reports its own outcome.
             next.on_select = [&](std::string_view value) -> std::string {
+                if (value == "steering") {
+                    if (open_steering_picker) {
+                        open_steering_picker();
+                    }
+                    return {};
+                }
                 open_workspace_directory_picker(value);
                 return {};
             };
+        } else if (command_name == "/steering" || command_name == "/agents" || command_name == "/steer") {
+            if (open_steering_picker) {
+                return open_steering_picker();
+            }
+            return false;
         } else {
             return false;
         }
+
+        for (std::size_t i = 0; i < next.options.size(); ++i) {
+            next.options[i].active = next.options[i].value == next.current_value;
+            if (next.options[i].active) {
+                next.selected = static_cast<int>(i);
+            }
+        }
+
+        {
+            std::lock_guard lock(ui_mutex);
+            command_option_picker_state = std::move(next);
+        }
+        wake_ui();
+        return true;
+    };
+
+    open_steering_picker = [&]() -> bool {
+        const auto policy = agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
+        const auto primary = agent_session_context.workspace_view().primary();
+        steering_context = core::context::load_project_steering_context(primary, policy);
+
+        CommandOptionPickerState next;
+        next.active = true;
+        next.command_name = "/steering";
+        next.title = "STEERING FILES";
+        next.current_value = policy.format();
+        next.help_text = "Enter: toggle/apply  Esc: close";
+
+        if (policy.mode == core::context::SteeringMode::None) {
+            next.options.push_back({
+                .value = "mode:default",
+                .label = "Enable all steering",
+                .description = "Switch back to default workspace steering discovery.",
+            });
+        } else {
+            next.options.push_back({
+                .value = "mode:none",
+                .label = "Disable all steering",
+                .description = "Unload and disable all project steering files (safe mode).",
+            });
+        }
+
+        for (const auto& file : steering_context.files) {
+            const std::string action_val = (file.enabled ? "unload:" : "load:") + file.label;
+            const std::string status_label = file.enabled ? "[✓] " + file.label : "[✗] " + file.label + " (unloaded)";
+            const std::string desc = file.enabled
+                ? "Currently loaded in prompt context. Select to UNLOAD."
+                : "Currently excluded from prompt context. Select to LOAD.";
+            next.options.push_back({
+                .value = action_val,
+                .label = status_label,
+                .description = desc,
+                .active = file.enabled,
+            });
+        }
+
+        next.options.push_back({
+            .value = "view",
+            .label = "View instruction contents...",
+            .description = "Open the Agent Instructions viewer to inspect file contents.",
+        });
+
+        next.on_select = [&](std::string_view value) -> std::string {
+            auto cur_policy = agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
+            if (value == "mode:default") {
+                cur_policy.mode = core::context::SteeringMode::Default;
+            } else if (value == "mode:none") {
+                cur_policy.mode = core::context::SteeringMode::None;
+            } else if (value.starts_with("unload:")) {
+                cur_policy.disable_source(value.substr(7));
+            } else if (value.starts_with("load:")) {
+                cur_policy.enable_source(value.substr(5));
+            } else if (value == "view") {
+                std::lock_guard lock(ui_mutex);
+                agents_visualizer_panel_active = true;
+                agents_visualizer_scroll_offset = 0;
+                return {};
+            }
+            if (agent) {
+                agent->update_session_context([&](core::context::SessionContext& sctx) {
+                    sctx.steering_policy = cur_policy;
+                });
+                steering_context = core::context::load_project_steering_context(primary, cur_policy);
+                context_sources_label = join_context_source_labels(steering_context.source_labels);
+            }
+            return {};
+        };
 
         for (std::size_t i = 0; i < next.options.size(); ++i) {
             next.options[i].active = next.options[i].value == next.current_value;
@@ -6501,6 +6609,22 @@ RunResult run(RunOptions opts) {
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
             .change_workspace_root_fn = change_workspace_root,
+            .steering_policy_fn = [&]() {
+                return agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
+            },
+            .set_steering_policy_fn = [&](core::context::SteeringPolicy pol) -> core::commands::CommandOperationResult {
+                if (!agent) {
+                    return {.ok = false, .message = "No active agent session."};
+                }
+                agent->update_session_context([&](core::context::SessionContext& sctx) {
+                    sctx.steering_policy = pol;
+                });
+                steering_context = core::context::load_project_steering_context(
+                    agent_session_context.workspace_view().primary(), pol);
+                context_sources_label = join_context_source_labels(steering_context.source_labels);
+                return {.ok = true, .message = std::format("Steering policy set to {}.", pol.format())};
+            },
+            .open_steering_picker_fn = open_steering_picker,
         };
 
         if (cmd_executor.try_execute(text, ctx)) return;
@@ -6726,8 +6850,10 @@ RunResult run(RunOptions opts) {
                 std::lock_guard lock(ui_mutex);
                 agents_visualizer_panel_active = !agents_visualizer_panel_active;
                 if (agents_visualizer_panel_active) {
+                    const auto pol = agent ? agent->session_context_snapshot().steering_policy : agent_session_context.steering_policy;
                     steering_context = core::context::load_project_steering_context(
-                        agent_session_context.workspace_view().primary());
+                        agent_session_context.workspace_view().primary(),
+                        pol);
                     context_sources_label =
                         join_context_source_labels(steering_context.source_labels);
                     agents_visualizer_scroll_offset = 0;
@@ -6807,6 +6933,26 @@ RunResult run(RunOptions opts) {
                     if (!steering_context.files.empty()) {
                         agents_visualizer_selected_file = (agents_visualizer_selected_file + 1) % steering_context.files.size();
                         agents_visualizer_scroll_offset = 0;
+                    }
+                    agents_panel_was_active = true;
+                } else if (event == Event::Character('u')
+                           || event == Event::Character('U')
+                           || event == Event::Character(' ')) {
+                    if (!steering_context.files.empty() && agent) {
+                        const auto& cur = steering_context.files[agents_visualizer_selected_file];
+                        auto pol = agent->session_context_snapshot().steering_policy;
+                        if (cur.enabled) {
+                            pol.disable_source(cur.label);
+                        } else {
+                            pol.enable_source(cur.label);
+                        }
+                        agent->update_session_context([&](core::context::SessionContext& sctx) {
+                            sctx.steering_policy = pol;
+                        });
+                        steering_context = core::context::load_project_steering_context(
+                            agent_session_context.workspace_view().primary(), pol);
+                        context_sources_label =
+                            join_context_source_labels(steering_context.source_labels);
                     }
                     agents_panel_was_active = true;
                 }
