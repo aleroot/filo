@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -558,11 +559,71 @@ static int heading_level(std::string_view s)
     return 0;
 }
 
-static bool is_fenced_code_start(std::string_view s)
+struct CodeFence {
+    char marker = '`';
+    std::size_t length = 0;
+    std::size_t indentation = 0;
+    std::string_view info;
+};
+
+static std::size_t leading_spaces(std::string_view line, std::size_t limit)
 {
-    return s.size() >= 3 &&
-           ((s[0] == '`' && s[1] == '`' && s[2] == '`') ||
-            (s[0] == '~' && s[1] == '~' && s[2] == '~'));
+    std::size_t count = 0;
+    while (count < line.size() && count < limit && line[count] == ' ') ++count;
+    return count;
+}
+
+// CommonMark 0.31.2 section 4.5: an opening fence has at least three matching
+// markers and at most three leading spaces. Backtick info strings cannot
+// themselves contain a backtick.
+static std::optional<CodeFence> parse_opening_fence(std::string_view line)
+{
+    const std::size_t indentation = leading_spaces(line, 4);
+    if (indentation == 4 || indentation == line.size()) return std::nullopt;
+
+    const char marker = line[indentation];
+    if (marker != '`' && marker != '~') return std::nullopt;
+
+    std::size_t end = indentation;
+    while (end < line.size() && line[end] == marker) ++end;
+    const std::size_t length = end - indentation;
+    if (length < 3) return std::nullopt;
+
+    auto info = line.substr(end);
+    if (marker == '`' && info.find('`') != std::string_view::npos)
+        return std::nullopt;
+
+    while (!info.empty() && (info.front() == ' ' || info.front() == '\t'))
+        info.remove_prefix(1);
+    while (!info.empty() && (info.back() == ' ' || info.back() == '\t'))
+        info.remove_suffix(1);
+
+    return CodeFence{
+        .marker = marker,
+        .length = length,
+        .indentation = indentation,
+        .info = info,
+    };
+}
+
+// A closing fence must use the same marker, be at least as long as the opener,
+// and contain nothing after the marker run except spaces or tabs. In
+// particular, "```swift" is another opening fence, never a closing one.
+static bool is_closing_fence(std::string_view line, const CodeFence& opening)
+{
+    const std::size_t indentation = leading_spaces(line, 4);
+    if (indentation == 4 || indentation == line.size() ||
+        line[indentation] != opening.marker)
+        return false;
+
+    std::size_t end = indentation;
+    while (end < line.size() && line[end] == opening.marker) ++end;
+    if (end - indentation < opening.length) return false;
+
+    for (; end < line.size(); ++end) {
+        if (line[end] != ' ' && line[end] != '\t') return false;
+    }
+    return true;
 }
 
 static bool is_indented_code(std::string_view s)
@@ -654,7 +715,7 @@ static bool is_block_start(std::string_view s)
 {
     return is_blank(s)       ||
            heading_level(s)  ||
-           is_fenced_code_start(s) ||
+           parse_opening_fence(s).has_value() ||
            is_hr(s)          ||
            is_ul(s)          ||
            is_ol(s)          ||
@@ -715,33 +776,19 @@ static std::vector<Block> parse_blocks(std::string_view text)
         }
 
         // ── Fenced code block ─────────────────────────────────────────────────
-        if (is_fenced_code_start(line)) {
-            const char fc = line[0];
-            std::size_t fence_len = 0;
-            while (fence_len < line.size() && line[fence_len] == fc) ++fence_len;
-
+        if (const auto fence = parse_opening_fence(line)) {
             Block b;
             b.kind     = BlockKind::FencedCode;
-            b.language = std::string(line.substr(fence_len));
-            // Trim language tag
-            {
-                auto& lang = b.language;
-                while (!lang.empty() && std::isspace(static_cast<unsigned char>(lang.front())))
-                    lang.erase(lang.begin());
-                while (!lang.empty() && std::isspace(static_cast<unsigned char>(lang.back())))
-                    lang.pop_back();
-            }
+            b.language = std::string(fence->info);
             ++i;
             while (i < total) {
                 const auto cl = lines[i];
-                if (cl.size() >= fence_len) {
-                    bool closing = true;
-                    for (std::size_t k = 0; k < fence_len; ++k) {
-                        if (cl[k] != fc) { closing = false; break; }
-                    }
-                    if (closing) { ++i; break; }
-                }
-                b.lines.emplace_back(cl);
+                if (is_closing_fence(cl, *fence)) { ++i; break; }
+
+                // Up to the opener's indentation is removed from content.
+                const std::size_t content_indent =
+                    leading_spaces(cl, fence->indentation);
+                b.lines.emplace_back(cl.substr(content_indent));
                 ++i;
             }
             blocks.push_back(std::move(b));

@@ -65,6 +65,15 @@ static std::string render_text(std::string_view md, int width)
     return strip_ansi(screen.ToString());
 }
 
+static std::string render_document(std::string_view md, int width, int height)
+{
+    auto el = render_markdown(md);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(height));
+    ftxui::Render(screen, el);
+    return strip_ansi(screen.ToString());
+}
+
 // ============================================================================
 // Empty / trivial input
 // ============================================================================
@@ -187,6 +196,62 @@ TEST_CASE("render_markdown — fenced code unclosed (eof)", "[md][code]")
 {
     // Unclosed fence: renderer must not crash
     smoke("```cpp\nvoid foo();");
+}
+
+TEST_CASE("render_markdown — info string cannot close an enclosing fence",
+          "[md][code][regression]")
+{
+    const auto output = render_document(
+        "```markdown\n"
+        "## Proposed changes\n\n"
+        "```swift\n"
+        "let value = 42\n"
+        "```\n\n"
+        "After the example.\n"
+        "```",
+        60,
+        16);
+
+    // The bug treated ```swift as the outer fence's closer and dropped it.
+    // CommonMark requires a closer to have whitespace only after its markers.
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("```swift"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("let value = 42"));
+}
+
+TEST_CASE("render_markdown — closing fence follows CommonMark shape",
+          "[md][code][commonmark]")
+{
+    const auto output = render_document(
+        "  ````cpp\n"
+        "  first\n"
+        "``` trailing text\n"
+        "```\n"
+        "   ````\t\n"
+        "after",
+        60,
+        12);
+
+    // A shorter run and a run with non-whitespace trailing content are code.
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("``` trailing text"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("```"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("after"));
+}
+
+TEST_CASE("render_markdown — invalid backtick info string stays literal",
+          "[md][code][commonmark]")
+{
+    auto element = render_markdown(
+        "```lang`invalid\n"
+        "plain paragraph");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(60),
+                                        ftxui::Dimension::Fixed(6));
+    ftxui::Render(screen, element);
+    const auto output = strip_ansi(screen.ToString());
+
+    // A valid fenced block would render a window border in the first cell.
+    // This invalid opener remains ordinary inline text instead.
+    REQUIRE(screen.CellAt(0, 0).character == "`");
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("plain paragraph"));
 }
 
 // ============================================================================
