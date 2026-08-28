@@ -1,5 +1,6 @@
 #include "RemoteActivityPanel.hpp"
 
+#include "ActivityTimer.hpp"
 #include "Conversation.hpp"
 #include "Text.hpp"
 #include "TextLayout.hpp"
@@ -57,9 +58,8 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
         return std::format("{}ms", std::max<int64_t>(
             duration_cast<milliseconds>(duration).count(), 0));
     }
-    const auto total_seconds = duration_cast<seconds>(duration).count();
-    if (total_seconds < 60) return std::format("{}s", total_seconds);
-    return std::format("{}m {:02}s", total_seconds / 60, total_seconds % 60);
+    return format_elapsed_compact(
+        duration_cast<seconds>(duration), ElapsedFormat::humanized);
 }
 
 [[nodiscard]] std::string elapsed_label(

@@ -30,4 +30,23 @@ TEST_CASE("format_elapsed_compact renders concise human-friendly durations",
     REQUIRE(format_elapsed_compact(std::chrono::seconds(59)) == "59s");
     REQUIRE(format_elapsed_compact(std::chrono::seconds(76)) == "1m 16s");
     REQUIRE(format_elapsed_compact(std::chrono::seconds(3661)) == "1h 01m 01s");
+    REQUIRE(format_elapsed_compact(std::chrono::hours(49))
+            == "2d 01h 00m 00s");
+}
+
+TEST_CASE("format_elapsed_compact can reduce precision for relative times",
+          "[tui][timer]") {
+    REQUIRE(format_elapsed_compact(
+                std::chrono::minutes(1), ElapsedFormat::humanized)
+            == "1m");
+    REQUIRE(format_elapsed_compact(
+                std::chrono::hours(1), ElapsedFormat::humanized)
+            == "1h");
+    REQUIRE(format_elapsed_compact(
+                std::chrono::minutes(253) + std::chrono::seconds(49),
+                ElapsedFormat::humanized)
+            == "4h 13m");
+    REQUIRE(format_elapsed_compact(
+                std::chrono::hours(49), ElapsedFormat::humanized)
+            == "2d 1h");
 }

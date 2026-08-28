@@ -49,18 +49,44 @@ std::optional<std::chrono::seconds> ActivityTimerRegistry::elapsed(
     return delta;
 }
 
-std::string format_elapsed_compact(std::chrono::seconds elapsed) {
+std::string format_elapsed_compact(std::chrono::seconds elapsed,
+                                   ElapsedFormat format) {
     if (elapsed < std::chrono::seconds::zero()) {
         elapsed = std::chrono::seconds::zero();
     }
 
     const auto total_seconds = elapsed.count();
-    const auto hours = total_seconds / 3600;
+    const auto total_hours = total_seconds / 3600;
+    const auto days = total_hours / 24;
+    const auto hours = total_hours % 24;
     const auto minutes = (total_seconds % 3600) / 60;
     const auto seconds = total_seconds % 60;
 
-    if (hours > 0) {
-        return std::format("{}h {:02}m {:02}s", hours, minutes, seconds);
+    if (format == ElapsedFormat::humanized) {
+        if (days > 0) {
+            return hours == 0
+                ? std::format("{}d", days)
+                : std::format("{}d {}h", days, hours);
+        }
+        if (total_hours > 0) {
+            return minutes == 0
+                ? std::format("{}h", total_hours)
+                : std::format("{}h {}m", total_hours, minutes);
+        }
+        if (minutes > 0) {
+            return seconds == 0
+                ? std::format("{}m", minutes)
+                : std::format("{}m {:02}s", minutes, seconds);
+        }
+        return std::format("{}s", seconds);
+    }
+
+    if (days > 0) {
+        return std::format(
+            "{}d {:02}h {:02}m {:02}s", days, hours, minutes, seconds);
+    }
+    if (total_hours > 0) {
+        return std::format("{}h {:02}m {:02}s", total_hours, minutes, seconds);
     }
     if (minutes > 0) {
         return std::format("{}m {:02}s", minutes, seconds);

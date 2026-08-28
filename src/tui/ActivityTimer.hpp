@@ -30,6 +30,15 @@ private:
     std::unordered_map<std::string, Clock::time_point>        starts_;
 };
 
-[[nodiscard]] std::string format_elapsed_compact(std::chrono::seconds elapsed);
+enum class ElapsedFormat {
+    /// Timer-style output retains seconds and zero-pads subordinate units.
+    precise,
+    /// Relative-time output keeps at most the two most useful units.
+    humanized,
+};
+
+[[nodiscard]] std::string format_elapsed_compact(
+    std::chrono::seconds elapsed,
+    ElapsedFormat format = ElapsedFormat::precise);
 
 } // namespace tui

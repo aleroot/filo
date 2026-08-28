@@ -153,6 +153,32 @@ TEST_CASE("remote footer uses protocol client name and generic fallback",
     CHECK(status.label.find("Lampo") == std::string::npos);
 }
 
+TEST_CASE("remote footer humanizes long elapsed times",
+          "[tui][mcp][remote-activity]") {
+    using namespace std::chrono;
+
+    const auto now = steady_clock::time_point{hours{1000}};
+    core::mcp::RemoteActivitySnapshot snapshot;
+    snapshot.server_state = RemoteServerState::listening;
+    snapshot.clients.push_back({
+        .session_id = "session-a",
+        .name = "Lampo",
+        .ready = true,
+    });
+
+    const auto footer_after = [&](steady_clock::duration elapsed) {
+        snapshot.clients.front().last_seen = now - elapsed;
+        return tui::format_remote_footer_status(snapshot, now).label;
+    };
+
+    CHECK(footer_after(minutes{59} + seconds{59})
+          == "Lampo · seen 59m 59s ago");
+    CHECK(footer_after(hours{1}) == "Lampo · seen 1h ago");
+    CHECK(footer_after(minutes{253} + seconds{49})
+          == "Lampo · seen 4h 13m ago");
+    CHECK(footer_after(hours{49}) == "Lampo · seen 2d 1h ago");
+}
+
 TEST_CASE("remote footer pill has no embedded gap and uses foreground color only",
           "[tui][mcp][remote-activity][rendering]") {
     const tui::RemoteFooterStatus status{
