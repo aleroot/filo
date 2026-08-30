@@ -6,11 +6,17 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace core::auth {
+
+class OAuthLoopbackBindError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 struct OAuthLoopbackResult {
     std::string code;
@@ -31,9 +37,15 @@ struct OAuthLoopbackOptions {
     std::string redirect_host;
     int port_start = 17890;
     int port_end = 17920;
+    /// A value of zero requests an ephemeral OS-assigned port.
     std::optional<int> fixed_port;
+    /// Exact registered callback ports to try, in order. When non-empty this
+    /// takes precedence over the inclusive port range.
+    std::vector<int> candidate_ports;
     std::string callback_path = "/callback";
     std::vector<std::string> extra_paths;
+    /// When set, reject mismatched callbacks before displaying success.
+    std::optional<std::string> expected_state;
     std::chrono::seconds timeout{std::chrono::minutes(5)};
     std::string success_html =
         "<html><body style=\"font-family:system-ui;padding:2rem\">"
@@ -46,7 +58,7 @@ struct OAuthLoopbackOptions {
  * Local HTTP callback server for OAuth authorization-code redirects.
  *
  * Lifecycle:
- *   1. construct  -> binds a free (or fixed) port
+ *   1. construct  -> registers handlers and binds a free (or fixed) port
  *   2. redirect_uri() for authorize URL / DCR
  *   3. start()     -> background listen
  *   4. wait()      -> blocks until code/error/timeout

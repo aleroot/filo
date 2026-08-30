@@ -216,19 +216,20 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
 }
 
 TEST_CASE("Grok OAuth catalogs retain session-only models", "[xai][grok][models]") {
-    constexpr std::string_view body = R"JSON({"models":[
+    constexpr std::string_view session_body = R"JSON({"models":[
       {"slug":"grok-4.5","display_name":"Grok 4.5","supported_in_api":false},
       {"slug":"grok-api","display_name":"Grok API","supported_in_api":true}
     ]})JSON";
 
-    core::llm::OpenAICompatibleModelCatalogProvider public_catalog("grok", false);
-    const auto public_models = public_catalog.parse_models_response(body);
+    core::llm::XaiModelCatalogProvider public_catalog("grok", false);
+    const auto public_models = public_catalog.parse_models_response(
+        R"JSON({"data":[{"id":"grok-api","completion_text_token_price":0}]})JSON");
     REQUIRE(public_models.ok());
     REQUIRE(public_models.models.size() == 1);
     CHECK(public_models.models.front().canonical_id == "grok-api");
 
-    core::llm::OpenAICompatibleModelCatalogProvider session_catalog("grok", true);
-    const auto session_models = session_catalog.parse_models_response(body);
+    core::llm::XaiModelCatalogProvider session_catalog("grok", true);
+    const auto session_models = session_catalog.parse_models_response(session_body);
     REQUIRE(session_models.ok());
     CHECK(session_models.models.size() == 2);
 

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
@@ -75,6 +76,26 @@ TEST_CASE("OpenAIResponsesProtocol - GPT-5.6 preserves max reasoning effort",
     const std::string payload = protocol.serialize(req);
     REQUIRE_THAT(payload,
                  Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+}
+
+TEST_CASE("OpenAIResponsesProtocol - clamps private Codex effort tiers",
+          "[openai][responses][serializer][effort]") {
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-5.6-sol";
+    req.effort = "ultra";
+    req.messages.push_back(Message{.role = "user", .content = "Solve this."});
+    CHECK_THAT(protocol.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+
+    req.model = "gpt-5.6-luna";
+    CHECK_THAT(protocol.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"max"})"));
+
+    CodexResponsesProtocol codex;
+    req.model = "gpt-5.6-sol";
+    CHECK_THAT(codex.serialize(req),
+               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"ultra"})"));
 }
 
 TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
@@ -246,6 +267,8 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("OpenAI-Beta") == "responses_websockets=2026-02-06");
     REQUIRE(headers.at("x-client-request-id") == "thread-123");
     REQUIRE(headers.at("x-codex-window-id") == "thread-123:0");
+    REQUIRE(headers.at("originator") == "filo");
+    REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::StartsWith("filo/"));
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
@@ -262,6 +285,125 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
             == protocol.websocket_connection_key(ws_url, reconnect_headers, req));
     REQUIRE(protocol.websocket_connection_key(ws_url, reconnect_headers, req)
             == initial_connection_key);
+}
+
+TEST_CASE("CodexResponsesProtocol - HTTP replay includes system context and encrypted reasoning",
+          "[openai][responses][codex][continuity]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-5.6-sol";
+    req.previous_response_id = "stale-http-response";
+    req.messages = {
+        {.role = "system", .content = "Preserve this policy."},
+        {.role = "user", .content = "Continue safely."},
+    };
+
+    const std::string payload = protocol.serialize(req);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("instructions":"Preserve this policy.")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Preserve this policy."));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"system")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("include":["reasoning.encrypted_content"])"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("previous_response_id"));
+}
+
+TEST_CASE("CodexResponsesProtocol - parses subscription quota headers",
+          "[openai][responses][codex][rate-limit]") {
+    CodexResponsesProtocol protocol;
+    cpr::Header headers{
+        {"X-Codex-Primary-Used-Percent", "42.5"},
+        {"x-codex-primary-window-minutes", "300"},
+        {"x-codex-primary-reset-at", "2000000100"},
+        {"x-codex-secondary-used-percent", "7"},
+        {"x-codex-secondary-window-minutes", "10080"},
+        {"x-codex-other-primary-used-percent", "12"},
+        {"x-codex-other-primary-window-minutes", "60"},
+        {"x-codex-credits-has-credits", "true"},
+        {"x-codex-credits-unlimited", "false"},
+        {"x-codex-credits-balance", "25.50"},
+        {"x-codex-active-limit", "codex_other"},
+        {"x-codex-promo-message", "Extra capacity is available"},
+        {"x-codex-rate-limit-reached-type", "rate_limit_reached"},
+    };
+
+    protocol.on_response(HttpResponse{200, "", headers});
+    const auto info = protocol.last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 3);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.usage_windows[0].utilization == Catch::Approx(0.425f));
+    CHECK(info.usage_windows[0].resets_at == 2'000'000'100);
+    CHECK(info.usage_windows[1].label == "7d");
+    CHECK(info.usage_windows[2].label == "codex_other 1h");
+    REQUIRE(info.subscription.supplemental_credits.has_value());
+    CHECK(info.subscription.supplemental_credits->available);
+    CHECK_FALSE(info.subscription.supplemental_credits->unlimited);
+    CHECK(info.subscription.supplemental_credits->balance == "25.50");
+    CHECK(info.subscription.notice == "Extra capacity is available");
+    CHECK(info.subscription.limit_reached_reason == "rate_limit_reached");
+
+    cpr::Header clearing_headers{
+        {"x-codex-promo-message", ""},
+        {"x-codex-rate-limit-reached-type", ""},
+    };
+    protocol.on_response(HttpResponse{200, "", clearing_headers});
+    const auto cleared = protocol.last_rate_limit();
+    CHECK(cleared.subscription.notice.empty());
+    CHECK(cleared.subscription.limit_reached_reason.empty());
+    REQUIRE(cleared.usage_windows.size() == 3);
+}
+
+TEST_CASE("CodexResponsesProtocol - merges sparse websocket quota updates",
+          "[openai][responses][codex][rate-limit][websocket]") {
+    CodexResponsesProtocol protocol;
+    const auto parsed = protocol.parse_event(
+        "event: codex.rate_limits\n"
+        "data: {\"type\":\"codex.rate_limits\",\"plan_type\":\"pro\","
+        "\"rate_limits\":{\"primary\":{\"used_percent\":18.5,\"window_minutes\":300,\"reset_at\":2000000200}},"
+        "\"credits\":{\"has_credits\":true,\"unlimited\":false,\"balance\":\"12.00\"}}"
+    );
+    CHECK_FALSE(parsed.done);
+    auto info = protocol.last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 1);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.subscription.tier_label == "ChatGPT pro");
+    REQUIRE(info.subscription.supplemental_credits.has_value());
+    CHECK(info.subscription.supplemental_credits->balance == "12.00");
+
+    (void)protocol.parse_event(
+        "event: codex.rate_limits\n"
+        "data: {\"type\":\"codex.rate_limits\",\"metered_limit_name\":\"codex_other\","
+        "\"rate_limits\":{\"primary\":{\"used_percent\":8,\"window_minutes\":60}}}"
+    );
+    info = protocol.last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.usage_windows[0].label == "5h");
+    CHECK(info.usage_windows[1].label == "codex_other 1h");
+    CHECK(info.subscription.tier_label == "ChatGPT pro");
+    REQUIRE(info.subscription.supplemental_credits.has_value());
+    CHECK(info.subscription.supplemental_credits->balance == "12.00");
+
+    // The HTTP completion often has no Codex quota headers. It must not erase
+    // the event-delivered subscription snapshot.
+    protocol.on_response(HttpResponse{200, "", {}});
+    info = protocol.last_rate_limit();
+    REQUIRE(info.usage_windows.size() == 2);
+    CHECK(info.subscription.tier_label == "ChatGPT pro");
+    REQUIRE(info.subscription.supplemental_credits.has_value());
+    CHECK(info.subscription.supplemental_credits->balance == "12.00");
+}
+
+TEST_CASE("OpenAIResponsesProtocol ignores private Codex quota headers",
+          "[openai][responses][rate-limit][boundary]") {
+    OpenAIResponsesProtocol protocol;
+    cpr::Header headers{
+        {"x-codex-primary-used-percent", "50"},
+        {"x-codex-promo-message", "private"},
+    };
+
+    protocol.on_response(HttpResponse{200, "", headers});
+    const auto info = protocol.last_rate_limit();
+    CHECK(info.usage_windows.empty());
+    CHECK_FALSE(info.subscription.has_data());
 }
 
 TEST_CASE("CodexResponsesProtocol - compresses incremental websocket input",

@@ -3446,7 +3446,16 @@ RunResult run(RunOptions opts) {
             const std::string_view category_label =
                 effective_source->category_label;
 
-            auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+            const std::string catalog_id = source_llm_provider
+                ? source_llm_provider->metadata()
+                      .transform([&](const auto& metadata) {
+                          return metadata.service_id.empty()
+                              ? source_provider
+                              : metadata.service_id;
+                      })
+                      .value_or(source_provider)
+                : source_provider;
+            auto snapshot = core::llm::ModelCatalogAvailability::instance().snapshot(catalog_id);
             if (!core::llm::is_local_provider(
                     registered_providers, source_provider)) {
                 try {
@@ -3549,8 +3558,17 @@ RunResult run(RunOptions opts) {
                     default_models.push_back(provider_it->second.model);
                 }
 
+                std::string catalog_id = source_provider;
+                try {
+                    const auto provider = provider_manager.get_provider(source_provider);
+                    if (const auto metadata = provider->metadata();
+                        metadata && !metadata->service_id.empty()) {
+                        catalog_id = metadata->service_id;
+                    }
+                } catch (const std::exception&) {
+                }
                 const auto snapshot =
-                    core::llm::ModelCatalogAvailability::instance().snapshot(source_provider);
+                    core::llm::ModelCatalogAvailability::instance().snapshot(catalog_id);
                 const std::string registry_key =
                     core::llm::model_registry_provider_key(
                         source_provider, provider_it->second.api_type);
@@ -3622,6 +3640,16 @@ RunResult run(RunOptions opts) {
             && !capabilities.supports(core::llm::ReasoningCapability::MaxEffort)) {
             return "high (max unsupported on current model)";
         }
+        if (configured == "xhigh"
+            && !capabilities.supports(core::llm::ReasoningCapability::XHighEffort)) {
+            return "high (xhigh unsupported on current model)";
+        }
+        if (configured == "ultra"
+            && !capabilities.supports(core::llm::ReasoningCapability::UltraEffort)) {
+            return capabilities.supports(core::llm::ReasoningCapability::MaxEffort)
+                ? "max (ultra unsupported on current model)"
+                : "high (ultra unsupported on current model)";
+        }
         return std::string(configured);
     };
 
@@ -3660,7 +3688,7 @@ RunResult run(RunOptions opts) {
             "        Active provider: {}\n"
             "        Active model: {}\n"
             "        {}\n"
-            "        Levels: auto, off, low, medium, high, max",
+            "        Levels: auto, off, low, medium, high, xhigh, max, ultra",
             configured,
             effective,
             provider_for_status,
@@ -3678,7 +3706,7 @@ RunResult run(RunOptions opts) {
 
         const std::string_view trimmed = trim_ascii(requested);
         if (trimmed.empty()) {
-            return "Usage: /effort auto|off|low|medium|high|max";
+            return "Usage: /effort auto|off|low|medium|high|xhigh|max|ultra";
         }
 
         std::string normalized;
@@ -3703,8 +3731,9 @@ RunResult run(RunOptions opts) {
         }
 
         if (normalized != "low" && normalized != "medium"
-            && normalized != "high" && normalized != "max") {
-            return "Unknown effort level. Use one of: auto, low, medium, high, max.";
+            && normalized != "high" && normalized != "xhigh"
+            && normalized != "max" && normalized != "ultra") {
+            return "Unknown effort level. Use one of: auto, low, medium, high, xhigh, max, ultra.";
         }
 
         session_effort_value = normalized;
@@ -3712,6 +3741,12 @@ RunResult run(RunOptions opts) {
 
         if (normalized == "max") {
             return "Set effort to max. Models without max support will automatically use high.";
+        }
+        if (normalized == "xhigh") {
+            return "Set effort to xhigh. Unsupported models will automatically use high.";
+        }
+        if (normalized == "ultra") {
+            return "Set effort to ultra. Unsupported models will use max or high.";
         }
         return std::format("Set effort to {}.", normalized);
     };
@@ -4572,7 +4607,9 @@ RunResult run(RunOptions opts) {
                 {.value = "low", .label = "Low", .description = "Prefer faster, lighter reasoning when supported."},
                 {.value = "medium", .label = "Medium", .description = "Use balanced reasoning effort when supported."},
                 {.value = "high", .label = "High", .description = "Use deeper reasoning effort when supported."},
+                {.value = "xhigh", .label = "XHigh", .description = "Use extra-high reasoning effort when supported."},
                 {.value = "max", .label = "Max", .description = "Request maximum effort; unsupported models fall back to high."},
+                {.value = "ultra", .label = "Ultra", .description = "Request maximum reasoning with automatic delegation when supported."},
             };
             next.on_select = switch_effort;
         } else if (command_name == "/compression" || command_name == "/compress") {

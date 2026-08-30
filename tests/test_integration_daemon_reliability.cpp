@@ -1191,7 +1191,6 @@ TEST_CASE("API gateway /v1/models deduplicates configured models discovered live
     core::llm::ModelCatalogDiscoveryResult discovery;
     discovery.attempted = true;
     discovery.fetched = 1;
-    discovery.updated = 1;
 
     core::llm::ModelInfo live_model;
     live_model.canonical_id = std::string(kModel);

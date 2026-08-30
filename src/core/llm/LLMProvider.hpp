@@ -199,7 +199,8 @@ protected:
                 merged.subscription_ends_at = previous->subscription_ends_at;
             }
 
-            auto snapshot = std::make_shared<const protocols::RateLimitInfo>(merged);
+            auto snapshot = std::make_shared<const protocols::RateLimitInfo>(
+                std::move(merged));
             store_last_rate_limit_snapshot(std::move(snapshot));
         } catch (...) {
             // OOM: silently retain the previous snapshot.

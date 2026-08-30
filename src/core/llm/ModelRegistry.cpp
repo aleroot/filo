@@ -141,7 +141,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     { "gpt-5.6",          1050000 },
     { "gpt-5.4",           200000 },
-    { "gpt-5",             200000 },
+    { "gpt-5",             400000 },
     { "gpt-4o",            128000 },
     { "gpt-4-turbo",       128000 },
     { "gpt-4-32k",         32000 },
@@ -349,6 +349,10 @@ std::vector<ModelInfo> build_anthropic_catalog() {
     std::vector<std::string> aliases,
     std::string display_name,
     ModelPricing pricing) {
+    const ReasoningCapabilities efforts = ReasoningCapability::Effort
+        | ReasoningCapability::XHighEffort
+        | ReasoningCapability::MaxEffort
+        | ReasoningCapability::Disable;
     return ModelInfo{
         .canonical_id = std::move(canonical_id),
         .aliases = std::move(aliases),
@@ -360,6 +364,10 @@ std::vector<ModelInfo> build_anthropic_catalog() {
         .capabilities = CAP_FULL |
             static_cast<uint32_t>(ModelCapability::Reasoning) |
             static_cast<uint32_t>(ModelCapability::PromptCaching),
+        .reasoning = ModelReasoningProfile{
+            .effort = efforts,
+            .complete = true,
+        },
         .tier = ModelTier::Reasoning,
         .pricing = pricing,
         .knowledge_cutoff = "2026-02-16",

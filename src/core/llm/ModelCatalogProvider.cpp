@@ -13,7 +13,7 @@ std::unique_ptr<ModelCatalogProvider>
 make_model_catalog_provider(
     config::ApiType api_type,
     std::string_view provider_name,
-    bool include_session_only_models) {
+    bool subscription_session) {
     const std::string name(provider_name);
     switch (api_type) {
         case config::ApiType::Gemini:
@@ -23,21 +23,22 @@ make_model_catalog_provider(
         case config::ApiType::Kimi:
             return std::make_unique<KimiModelCatalogProvider>(name);
         case config::ApiType::OpenAI:
+            if (provider_name == "openai-codex") {
+                return std::make_unique<CodexModelCatalogProvider>(name);
+            }
             if (provider_name.starts_with("grok")) {
                 return std::make_unique<XaiModelCatalogProvider>(
                     name,
-                    include_session_only_models);
+                    subscription_session);
             }
             if (provider_name.starts_with("mistral")) {
                 return std::make_unique<MistralModelCatalogProvider>(name);
             }
             return std::make_unique<OpenAICompatibleModelCatalogProvider>(
-                name,
-                include_session_only_models);
+                name);
         case config::ApiType::DashScope:
             return std::make_unique<OpenAICompatibleModelCatalogProvider>(
-                name,
-                include_session_only_models);
+                name);
         case config::ApiType::Ollama:
             return std::make_unique<OllamaModelCatalogProvider>(name);
         case config::ApiType::Unknown:

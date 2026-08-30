@@ -58,8 +58,6 @@ struct ModelCatalogDiscoveryResult {
     bool permanent_skip = false;
     int retry_after_seconds = 0;
     int fetched = 0;
-    int inserted = 0;
-    int updated = 0;
     std::string error;
 
     [[nodiscard]] bool ok() const noexcept { return error.empty(); }
@@ -80,8 +78,6 @@ struct ProviderModelCatalogSnapshot {
     bool attempted = false;
     int consecutive_failures = 0;
     int fetched = 0;
-    int inserted = 0;
-    int updated = 0;
     std::string error;
     std::chrono::steady_clock::time_point last_attempt{};
     std::chrono::steady_clock::time_point next_retry_at{};

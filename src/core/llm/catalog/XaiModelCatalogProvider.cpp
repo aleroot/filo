@@ -1,5 +1,7 @@
 #include "../ModelCatalogProvider.hpp"
 
+#include "CodexModelCatalog.hpp"
+
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
 
@@ -50,9 +52,7 @@ std::string XaiModelCatalogProvider::model_list_path(
 ModelCatalogResult XaiModelCatalogProvider::parse_models_response(
     std::string_view body) const {
     if (use_session_catalog_) {
-        return OpenAICompatibleModelCatalogProvider(
-            provider_name_,
-            true).parse_models_response(body);
+        return catalog::parse_codex_style_model_catalog(body, provider_name_);
     }
 
     simdjson::dom::parser parser;

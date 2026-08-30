@@ -91,8 +91,10 @@
 #include <cpr/cpr.h>
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace core::llm::protocols {
@@ -114,6 +116,27 @@ struct UsageWindow {
     std::string label;            ///< Window identifier shown in the status bar, e.g. "5h", "7d"
     float       utilization = 0.0f; ///< Consumed fraction: 0.0 = nothing used, 1.0+ = over limit
     int64_t     resets_at   = 0;    ///< Unix timestamp in seconds when this window resets (0 = unknown)
+};
+
+struct SupplementalCredits {
+    bool available = false;
+    bool unlimited = false;
+    std::string balance;
+};
+
+/** Provider-neutral subscription details suitable for status presentation. */
+struct SubscriptionUsage {
+    std::string tier_label;
+    std::optional<SupplementalCredits> supplemental_credits;
+    std::string notice;
+    std::string limit_reached_reason;
+
+    [[nodiscard]] bool has_data() const noexcept {
+        return !tier_label.empty()
+            || supplemental_credits.has_value()
+            || !notice.empty()
+            || !limit_reached_reason.empty();
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -174,6 +197,8 @@ struct RateLimitInfo {
     /// (currentPeriod.endTime) and Z.ai via its subscription endpoint.
     int64_t subscription_ends_at = 0;
 
+    SubscriptionUsage subscription;
+
     /// Returns the highest utilization across all subscription windows, or 0 if none.
     [[nodiscard]] float max_window_utilization() const noexcept {
         float best = 0.0f;
@@ -191,7 +216,8 @@ struct RateLimitInfo {
             || unified_overage_reset > 0
             || !unified_overage_disabled_reason.empty()
             || unified_fallback_available
-            || subscription_ends_at > 0;
+            || subscription_ends_at > 0
+            || subscription.has_data();
     }
 
     /// Returns true if quota is below 10% remaining

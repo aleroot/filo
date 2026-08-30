@@ -346,16 +346,20 @@ TEST_CASE("MCP OAuth DCR + token exchange + resource/PKCE requirements",
 TEST_CASE("OAuthLoopbackServer accepts real callback with code+state",
           "[mcp][oauth][loopback][integration]") {
     core::auth::OAuthLoopbackOptions opts;
-    opts.port_start = 18100;
-    opts.port_end = 18200;
+    opts.fixed_port = 0;
     opts.callback_path = "/callback";
     opts.timeout = std::chrono::seconds(3);
 
-    core::auth::OAuthLoopbackServer loopback(std::move(opts));
-    const auto redirect = loopback.redirect_uri();
+    std::unique_ptr<core::auth::OAuthLoopbackServer> loopback;
+    try {
+        loopback = std::make_unique<core::auth::OAuthLoopbackServer>(std::move(opts));
+    } catch (const core::auth::OAuthLoopbackBindError&) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    const auto redirect = loopback->redirect_uri();
     REQUIRE(redirect.starts_with("http://127.0.0.1:"));
 
-    loopback.start();
+    loopback->start();
 
     std::thread hit([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -365,7 +369,7 @@ TEST_CASE("OAuthLoopbackServer accepts real callback with code+state",
             cpr::Timeout{2000});
     });
 
-    const auto result = loopback.wait();
+    const auto result = loopback->wait();
     hit.join();
 
     CHECK_FALSE(result.timed_out);

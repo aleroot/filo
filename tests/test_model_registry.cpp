@@ -42,6 +42,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("gpt-5.6") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-terra") == 1050000);
     REQUIRE(get_max_context_size("gpt-5.6-luna") == 1050000);
+    REQUIRE(get_max_context_size("gpt-5") == 400000);
     REQUIRE(get_max_context_size("gpt-5.4") == 200000);
     REQUIRE(get_max_context_size("gpt-4o") == 128000);
     REQUIRE(get_max_context_size("gpt-4o-mini") == 128000);

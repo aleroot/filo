@@ -179,6 +179,11 @@ HttpLLMProvider::HttpLLMProvider(std::string                                    
 
 HttpLLMProvider::~HttpLLMProvider() = default;
 
+std::string_view HttpLLMProvider::catalog_id() const noexcept {
+    return service_id_.empty() ? std::string_view{provider_name_}
+                               : std::string_view{service_id_};
+}
+
 void HttpLLMProvider::cancel() {
     cancel_requested_.store(true, std::memory_order_release);
 }
@@ -227,7 +232,7 @@ void HttpLLMProvider::discover_models(
     }
 
     discover_and_register_models_in_background(
-        provider_name_,
+        std::string(catalog_id()),
         api_type_,
         base_url_,
         cred_source_,
@@ -240,13 +245,13 @@ std::string HttpLLMProvider::resolve_default_model() const {
         return default_model_;
     }
 
-    auto snapshot = ModelCatalogAvailability::instance().snapshot(provider_name_);
+    auto snapshot = ModelCatalogAvailability::instance().snapshot(catalog_id());
     if (snapshot.models.empty() && snapshot.refresh_due()) {
         discover_models({.timeout_ms = 2500});
     }
     if (snapshot.models.empty()) {
         snapshot = ModelCatalogAvailability::instance().wait_for_snapshot(
-            provider_name_, std::chrono::milliseconds{3000});
+            catalog_id(), std::chrono::milliseconds{3000});
     }
 
     const std::string registry_provider = model_registry_provider_key(
@@ -276,7 +281,7 @@ void HttpLLMProvider::ensure_model_metadata(std::string_view model) const {
     }
 
     auto snapshot =
-        ModelCatalogAvailability::instance().snapshot(provider_name_);
+        ModelCatalogAvailability::instance().snapshot(catalog_id());
     const bool provider_knows_model = static_cast<bool>(
         resolve_model_metadata(model, snapshot.models, nullptr));
     const bool registry_knows_model =
@@ -298,14 +303,14 @@ void HttpLLMProvider::ensure_model_metadata(std::string_view model) const {
                 || snapshot.state == ModelCatalogDiscoveryState::Succeeded,
         });
         snapshot =
-            ModelCatalogAvailability::instance().snapshot(provider_name_);
+            ModelCatalogAvailability::instance().snapshot(catalog_id());
     }
     if (snapshot.state != ModelCatalogDiscoveryState::PermanentSkip
         && (targeted_refresh
             || (snapshot.models.empty()
                 && (snapshot.refresh_in_progress || !snapshot.checked)))) {
         snapshot = ModelCatalogAvailability::instance().wait_for_snapshot(
-            provider_name_,
+            catalog_id(),
             std::chrono::milliseconds{3000});
     }
 }
@@ -313,7 +318,7 @@ void HttpLLMProvider::ensure_model_metadata(std::string_view model) const {
 std::optional<ModelInfo> HttpLLMProvider::resolved_model_info(
     std::string_view model) const {
     const auto snapshot =
-        ModelCatalogAvailability::instance().snapshot(provider_name_);
+        ModelCatalogAvailability::instance().snapshot(catalog_id());
     const ResolvedModelMetadata resolved = resolve_model_metadata(
         model,
         snapshot.models,

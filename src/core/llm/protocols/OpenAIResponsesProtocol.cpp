@@ -9,13 +9,16 @@
 #include "../../tools/ToolSchema.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
+#include "core/version/Version.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <climits>
 #include <cstdint>
 #include <format>
 #include <random>
+#include <set>
 
 namespace core::llm::protocols {
 
@@ -302,23 +305,239 @@ void append_input_items(std::string& payload, const std::vector<std::string>& in
     return lowered;
 }
 
-[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort,
-                                                  std::string_view model) {
-    std::string effort = lower_ascii(raw_effort);
-    std::erase_if(effort, [](unsigned char ch) {
-        return std::isspace(ch);
+[[nodiscard]] std::optional<int64_t> parse_i64_header(
+    const cpr::Header& headers,
+    std::string_view name) {
+    const auto value = transport::find_header(headers, name);
+    if (!value.has_value()) return std::nullopt;
+    try {
+        std::size_t consumed = 0;
+        const int64_t parsed = std::stoll(*value, &consumed);
+        if (consumed != value->size()) return std::nullopt;
+        return parsed;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<double> parse_f64_header(
+    const cpr::Header& headers,
+    std::string_view name) {
+    const auto value = transport::find_header(headers, name);
+    if (!value.has_value()) return std::nullopt;
+    try {
+        std::size_t consumed = 0;
+        const double parsed = std::stod(*value, &consumed);
+        if (consumed != value->size() || !std::isfinite(parsed)) return std::nullopt;
+        return parsed;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<bool> parse_bool_header(
+    const cpr::Header& headers,
+    std::string_view name) {
+    const auto value = transport::find_header(headers, name);
+    if (!value.has_value()) return std::nullopt;
+    const std::string lowered = lower_ascii(*value);
+    if (lowered == "true" || lowered == "1") return true;
+    if (lowered == "false" || lowered == "0") return false;
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string codex_window_label(
+    std::optional<int64_t> window_minutes,
+    std::string_view limit_id,
+    std::string_view position) {
+    std::string duration;
+    if (window_minutes.has_value() && *window_minutes > 0) {
+        const int64_t minutes = *window_minutes;
+        if (minutes % (24 * 60) == 0) {
+            duration = std::to_string(minutes / (24 * 60)) + "d";
+        } else if (minutes % 60 == 0) {
+            duration = std::to_string(minutes / 60) + "h";
+        } else {
+            duration = std::to_string(minutes) + "m";
+        }
+    } else {
+        duration = std::string(position);
+    }
+
+    if (limit_id.empty() || limit_id == "codex") return duration;
+    return std::string(limit_id) + " " + duration;
+}
+
+[[nodiscard]] std::string normalize_codex_limit_id(std::string_view value) {
+    std::string normalized = lower_ascii(value);
+    std::ranges::replace(normalized, '-', '_');
+    return normalized;
+}
+
+void append_codex_header_window(RateLimitInfo& info,
+                                const cpr::Header& headers,
+                                std::string_view limit_id,
+                                std::string_view position) {
+    std::string normalized(limit_id.empty() ? "codex" : limit_id);
+    std::ranges::replace(normalized, '_', '-');
+    const std::string prefix = "x-" + normalized + "-" + std::string(position);
+    const auto used_percent = parse_f64_header(headers, prefix + "-used-percent");
+    if (!used_percent.has_value()) return;
+
+    const auto window_minutes = parse_i64_header(headers, prefix + "-window-minutes");
+    const auto resets_at = parse_i64_header(headers, prefix + "-reset-at");
+    if (*used_percent == 0.0
+        && (!window_minutes.has_value() || *window_minutes == 0)
+        && !resets_at.has_value()) {
+        return;
+    }
+
+    info.usage_windows.push_back(UsageWindow{
+        .label = codex_window_label(window_minutes, limit_id, position),
+        .utilization = static_cast<float>(*used_percent / 100.0),
+        .resets_at = resets_at.value_or(0),
     });
-    if (effort == "auto" || effort == "unset" || effort == "default") {
-        return {};
+}
+
+struct CodexRateLimitUpdate {
+    std::vector<UsageWindow> usage_windows;
+    std::string limit_id = "codex";
+    bool updates_windows = false;
+    bool replaces_all_windows = false;
+    std::optional<std::string> tier_label;
+    std::optional<SupplementalCredits> supplemental_credits;
+    std::optional<std::string> notice;
+    std::optional<std::string> limit_reached_reason;
+};
+
+[[nodiscard]] CodexRateLimitUpdate parse_codex_rate_limit_headers(
+    const cpr::Header& headers) {
+    CodexRateLimitUpdate update;
+    std::set<std::string> limit_ids{"codex"};
+    constexpr std::string_view suffix = "-primary-used-percent";
+    for (const auto& [raw_name, unused] : headers) {
+        (void)unused;
+        const std::string name = lower_ascii(raw_name);
+        if (!name.starts_with("x-") || !name.ends_with(suffix)) continue;
+        std::string id = normalize_codex_limit_id(
+            name.substr(2, name.size() - 2 - suffix.size()));
+        if (!id.empty()) limit_ids.insert(std::move(id));
     }
-    if (effort == "low" || effort == "medium" || effort == "high") {
-        return effort;
+
+    for (const auto& limit_id : limit_ids) {
+        RateLimitInfo parsed;
+        append_codex_header_window(parsed, headers, limit_id, "primary");
+        append_codex_header_window(parsed, headers, limit_id, "secondary");
+        if (!parsed.usage_windows.empty()) {
+            update.updates_windows = true;
+            update.replaces_all_windows = true;
+            update.usage_windows.insert(
+                update.usage_windows.end(),
+                std::make_move_iterator(parsed.usage_windows.begin()),
+                std::make_move_iterator(parsed.usage_windows.end()));
+        }
     }
-    if (effort == "max") {
-        return openai_reasoning_capabilities(model).supports(
-            ReasoningCapability::MaxEffort) ? "max" : "high";
+
+    const auto has_credits = parse_bool_header(headers, "x-codex-credits-has-credits");
+    const auto unlimited = parse_bool_header(headers, "x-codex-credits-unlimited");
+    if (has_credits.has_value() && unlimited.has_value()) {
+        SupplementalCredits credits{
+            .available = *has_credits,
+            .unlimited = *unlimited,
+        };
+        if (const auto balance = transport::find_header(headers, "x-codex-credits-balance");
+            balance.has_value()) {
+            credits.balance = *balance;
+        }
+        update.supplemental_credits = std::move(credits);
     }
-    return {};
+    if (const auto promo = transport::find_header(headers, "x-codex-promo-message");
+        promo.has_value()) {
+        update.notice = *promo;
+    }
+    if (const auto active = transport::find_header(headers, "x-codex-active-limit");
+        active.has_value()) {
+        update.limit_id = normalize_codex_limit_id(*active);
+    }
+    if (const auto reached = transport::find_header(
+            headers, "x-codex-rate-limit-reached-type"); reached.has_value()) {
+        update.limit_reached_reason = *reached;
+    }
+    return update;
+}
+
+[[nodiscard]] std::optional<CodexRateLimitUpdate> parse_codex_rate_limit_event(
+    simdjson::dom::element doc) {
+    std::string_view event_type;
+    if (doc["type"].get_string().get(event_type) != simdjson::SUCCESS
+        || event_type != "codex.rate_limits") {
+        return std::nullopt;
+    }
+
+    CodexRateLimitUpdate update;
+    std::string limit_id = "codex";
+    std::string_view value;
+    if (doc["metered_limit_name"].get_string().get(value) == simdjson::SUCCESS
+        && !value.empty()) {
+        limit_id = std::string(value);
+    } else if (doc["limit_name"].get_string().get(value) == simdjson::SUCCESS
+               && !value.empty()) {
+        limit_id = std::string(value);
+    }
+    limit_id = normalize_codex_limit_id(limit_id);
+
+    update.limit_id = limit_id;
+    if (doc["plan_type"].get_string().get(value) == simdjson::SUCCESS) {
+        update.tier_label = value.empty()
+            ? std::string{}
+            : "ChatGPT " + std::string(value);
+    }
+
+    simdjson::dom::object details;
+    if (doc["rate_limits"].get_object().get(details) == simdjson::SUCCESS) {
+        update.updates_windows = true;
+        const auto parse_window = [&](std::string_view position) {
+            simdjson::dom::object window;
+            if (details[position].get_object().get(window) != simdjson::SUCCESS) return;
+            double used_percent = 0.0;
+            if (window["used_percent"].get_double().get(used_percent) != simdjson::SUCCESS
+                || !std::isfinite(used_percent)) {
+                return;
+            }
+            int64_t minutes = 0;
+            int64_t resets_at = 0;
+            const bool has_minutes = window["window_minutes"].get_int64().get(minutes)
+                == simdjson::SUCCESS;
+            (void)window["reset_at"].get_int64().get(resets_at);
+            update.usage_windows.push_back(UsageWindow{
+                .label = codex_window_label(
+                    has_minutes ? std::optional<int64_t>{minutes} : std::nullopt,
+                    limit_id,
+                    position),
+                .utilization = static_cast<float>(used_percent / 100.0),
+                .resets_at = resets_at,
+            });
+        };
+        parse_window("primary");
+        parse_window("secondary");
+    }
+
+    simdjson::dom::object credits;
+    if (doc["credits"].get_object().get(credits) == simdjson::SUCCESS) {
+        SupplementalCredits parsed_credits;
+        bool has_credits = false;
+        bool unlimited = false;
+        if (credits["has_credits"].get_bool().get(has_credits) == simdjson::SUCCESS
+            && credits["unlimited"].get_bool().get(unlimited) == simdjson::SUCCESS) {
+            parsed_credits.available = has_credits;
+            parsed_credits.unlimited = unlimited;
+        }
+        if (credits["balance"].get_string().get(value) == simdjson::SUCCESS) {
+            parsed_credits.balance = std::string(value);
+        }
+        update.supplemental_credits = std::move(parsed_credits);
+    }
+    return update;
 }
 
 void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& result) {
@@ -416,6 +635,67 @@ void extract_usage_from_completed(simdjson::dom::element doc, ParseResult& resul
 
 } // namespace
 
+class CodexResponsesProtocol::RateLimitState {
+public:
+    void apply_http(RateLimitInfo transport_limits,
+                    const CodexRateLimitUpdate& update) {
+        std::lock_guard lock(mutex_);
+        auto windows = std::move(snapshot_.usage_windows);
+        auto subscription = std::move(snapshot_.subscription);
+        snapshot_ = std::move(transport_limits);
+        snapshot_.usage_windows = std::move(windows);
+        snapshot_.subscription = std::move(subscription);
+        apply_update(update);
+    }
+
+    void apply_event(const CodexRateLimitUpdate& update) {
+        std::lock_guard lock(mutex_);
+        apply_update(update);
+    }
+
+    [[nodiscard]] RateLimitInfo snapshot() const {
+        std::lock_guard lock(mutex_);
+        return snapshot_;
+    }
+
+private:
+    void apply_update(const CodexRateLimitUpdate& update) {
+        if (update.updates_windows) {
+            if (update.replaces_all_windows) {
+                snapshot_.usage_windows = update.usage_windows;
+            } else {
+                const std::string prefix = update.limit_id + " ";
+                std::erase_if(snapshot_.usage_windows, [&](const UsageWindow& window) {
+                    return update.limit_id == "codex"
+                        ? window.label.find(' ') == std::string::npos
+                        : window.label.starts_with(prefix);
+                });
+                snapshot_.usage_windows.insert(
+                    snapshot_.usage_windows.end(),
+                    update.usage_windows.begin(),
+                    update.usage_windows.end());
+            }
+        }
+        if (update.tier_label.has_value()) {
+            snapshot_.subscription.tier_label = *update.tier_label;
+        }
+        if (update.supplemental_credits.has_value()) {
+            snapshot_.subscription.supplemental_credits =
+                *update.supplemental_credits;
+        }
+        if (update.notice.has_value()) {
+            snapshot_.subscription.notice = *update.notice;
+        }
+        if (update.limit_reached_reason.has_value()) {
+            snapshot_.subscription.limit_reached_reason =
+                *update.limit_reached_reason;
+        }
+    }
+
+    mutable std::mutex mutex_;
+    RateLimitInfo snapshot_;
+};
+
 void OpenAIResponsesProtocol::prepare_request(ChatRequest& req) {
     std::scoped_lock lock(shared_state_->mutex);
 
@@ -469,7 +749,7 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     payload += '"';
     const bool replay_input = conversation_context_strategy()
         == ConversationContextStrategy::ReplayInput;
-    if (!replay_input) {
+    if (!replay_input || !replay_system_messages_in_input()) {
         payload += R"(,"instructions":")";
         payload += core::utils::escape_json_string(collect_instructions(req));
         payload += '"';
@@ -480,7 +760,7 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += R"(,"store":false)";
     }
 
-    if (!replay_input) {
+    if (!replay_input || previous_response_id_override.has_value()) {
         const std::string_view previous_response_id = previous_response_id_override.has_value()
             ? *previous_response_id_override
             : std::string_view{req.previous_response_id};
@@ -503,7 +783,8 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         || reasoning_capabilities(req.model).supports_effort()) {
         const std::string effort = options.reasoning_effort_override.has_value()
             ? std::string(*options.reasoning_effort_override)
-            : normalize_openai_effort(req.effort, req.model);
+            : normalize_openai_reasoning_effort(
+                  req.effort, reasoning_capabilities(req.model));
         if (!effort.empty()) {
             payload += R"(,"reasoning":{"effort":")";
             payload += core::utils::escape_json_string(effort);
@@ -568,8 +849,8 @@ std::string OpenAIResponsesProtocol::serialize_with_options(
         req,
         build_input_items(
             req.messages,
-            conversation_context_strategy()
-                == ConversationContextStrategy::ReplayInput),
+            conversation_context_strategy() == ConversationContextStrategy::ReplayInput
+                && replay_system_messages_in_input()),
         std::nullopt,
         options);
 }
@@ -581,13 +862,6 @@ cpr::Header OpenAIResponsesProtocol::build_headers(const core::auth::AuthInfo& a
     };
     for (const auto& [k, v] : auth.headers) {
         headers[k] = v;
-    }
-
-    // OpenAI Codex backend account-scoped tokens require this header.
-    if (auto it = auth.properties.find("account_id");
-        it != auth.properties.end() && !it->second.empty()
-        && headers.count("chatgpt-account-id") == 0) {
-        headers["chatgpt-account-id"] = it->second;
     }
 
     return headers;
@@ -608,7 +882,29 @@ CodexResponsesProtocol::CodexResponsesProtocol(bool include_reasoning_encrypted,
                                                std::shared_ptr<IProviderClientIdentitySource>
                                                    client_identity_source)
     : OpenAIResponsesProtocol(include_reasoning_encrypted, std::move(default_service_tier))
-    , client_identity_source_(std::move(client_identity_source)) {}
+    , client_identity_source_(std::move(client_identity_source))
+    , rate_limit_state_(std::make_shared<RateLimitState>()) {}
+
+ReasoningCapabilities CodexResponsesProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    auto capabilities = OpenAIResponsesProtocol::reasoning_capabilities(model);
+    if (core::utils::ascii::istarts_with(model, "gpt-5.6")
+        && !core::utils::ascii::istarts_with(model, "gpt-5.6-luna")) {
+        capabilities = capabilities | ReasoningCapability::UltraEffort;
+    }
+    return capabilities;
+}
+
+cpr::Header CodexResponsesProtocol::build_headers(
+    const core::auth::AuthInfo& auth) const {
+    cpr::Header headers = OpenAIResponsesProtocol::build_headers(auth);
+    if (const auto account = auth.properties.find("account_id");
+        account != auth.properties.end() && !account->second.empty()
+        && !headers.contains("chatgpt-account-id")) {
+        headers["chatgpt-account-id"] = account->second;
+    }
+    return headers;
+}
 
 std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const {
     return serialize_codex_with_input_items(request, build_input_items(request.messages));
@@ -652,6 +948,8 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-codex-installation-id"] = installation_id();
     headers["x-codex-window-id"] = thread_id + ":0";
     headers["x-responsesapi-include-timing-metrics"] = "true";
+    headers["originator"] = "filo";
+    headers["User-Agent"] = std::string(core::version::user_agent);
     if (!turn_state.empty()) {
         headers["x-codex-turn-state"] = turn_state;
     } else {
@@ -729,7 +1027,9 @@ std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     signature_request.messages = system_messages_only(request.messages);
     signature_request.previous_response_id.clear();
     const std::string request_signature = serialize_codex_with_input_items(
-        signature_request, build_input_items(signature_request.messages), std::string_view{});
+        signature_request,
+        build_input_items(signature_request.messages),
+        std::string_view{});
 
     std::string incremental_previous_response_id;
     std::vector<std::string> incremental_input_items;
@@ -801,6 +1101,7 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
     std::string data_scratch;
     std::string event_type;
     std::string serialized_output_item;
+    std::optional<CodexRateLimitUpdate> rate_limit_update;
 
     if (sse::parse_event_payload(raw_event, parsed, data_scratch)) {
         event_type = std::string(parsed.event);
@@ -821,12 +1122,19 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
                     if (doc["item"].get(item) == simdjson::SUCCESS) {
                         serialized_output_item = serialize_assistant_output_item(item);
                     }
+                } else if (event_type == "codex.rate_limits") {
+                    rate_limit_update = parse_codex_rate_limit_event(doc);
                 }
             }
         }
     }
 
     ParseResult result = OpenAIResponsesProtocol::parse_event(raw_event);
+
+    if (rate_limit_update.has_value()) {
+        rate_limit_state_->apply_event(*rate_limit_update);
+        result.rate_limit = last_rate_limit();
+    }
 
     if (!serialized_output_item.empty()) {
         active_response_items_.push_back(std::move(serialized_output_item));
@@ -927,6 +1235,7 @@ std::unique_ptr<ApiProtocolBase> CodexResponsesProtocol::clone() const {
         client_identity_source_);
     share_continuity_state_with(*cloned);
     cloned->transport_state_ = transport_state_;
+    cloned->rate_limit_state_ = rate_limit_state_;
     return cloned;
 }
 
@@ -1123,9 +1432,10 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
     RateLimitInfo info;
 
     const auto parse_int = [&](std::string_view key) -> int32_t {
-        if (const auto it = response.headers.find(std::string(key)); it != response.headers.end()) {
+        if (const auto value = transport::find_header(response.headers, key);
+            value.has_value()) {
             try {
-                return static_cast<int32_t>(std::stoi(it->second));
+                return static_cast<int32_t>(std::stoi(*value));
             } catch (...) {}
         }
         return 0;
@@ -1133,13 +1443,15 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
 
     info.requests_limit     = parse_int("x-ratelimit-limit-requests");
     info.requests_remaining = parse_int("x-ratelimit-remaining-requests");
-    if (const auto it = response.headers.find("x-ratelimit-reset-requests"); it != response.headers.end()) {
-        info.requests_reset = core::utils::time::parse_timestamp_or_duration(it->second);
+    if (const auto value = transport::find_header(
+            response.headers, "x-ratelimit-reset-requests"); value.has_value()) {
+        info.requests_reset = core::utils::time::parse_timestamp_or_duration(*value);
     }
     info.tokens_limit       = parse_int("x-ratelimit-limit-tokens");
     info.tokens_remaining   = parse_int("x-ratelimit-remaining-tokens");
-    if (const auto it = response.headers.find("x-ratelimit-reset-tokens"); it != response.headers.end()) {
-        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(it->second);
+    if (const auto value = transport::find_header(
+            response.headers, "x-ratelimit-reset-tokens"); value.has_value()) {
+        info.tokens_reset = core::utils::time::parse_timestamp_or_duration(*value);
     }
     info.retry_after        = parse_int("retry-after");
     info.is_rate_limited    = (response.status_code == 429 || info.retry_after > 0);
@@ -1151,7 +1463,7 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
         info.tokens_remaining = info.tokens_limit;
     }
 
-    last_rate_limit_ = info;
+    last_rate_limit_ = std::move(info);
 
     if (conversation_context_strategy()
             == ConversationContextStrategy::StatefulPreviousResponse
@@ -1159,6 +1471,21 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
         && !last_response_id_.empty()) {
         std::scoped_lock lock(shared_state_->mutex);
         shared_state_->sessions[active_session_id_].previous_response_id = last_response_id_;
+    }
+}
+
+void CodexResponsesProtocol::on_response(const HttpResponse& response) {
+    OpenAIResponsesProtocol::on_response(response);
+    rate_limit_state_->apply_http(
+        OpenAIResponsesProtocol::last_rate_limit(),
+        parse_codex_rate_limit_headers(response.headers));
+}
+
+RateLimitInfo CodexResponsesProtocol::last_rate_limit() const noexcept {
+    try {
+        return rate_limit_state_->snapshot();
+    } catch (...) {
+        return {};
     }
 }
 

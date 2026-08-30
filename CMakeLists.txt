@@ -211,6 +211,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelMetadata.cpp
     src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
     src/core/llm/catalog/CompatibleModelMetadata.cpp
+    src/core/llm/catalog/CodexModelCatalogProvider.cpp
     src/core/llm/catalog/GeminiModelCatalogProvider.cpp
     src/core/llm/catalog/KimiModelCatalogProvider.cpp
     src/core/llm/catalog/MistralModelCatalogProvider.cpp

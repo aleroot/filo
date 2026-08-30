@@ -262,6 +262,13 @@ TEST_CASE("FileTokenStore — save and load round-trips all fields", "[FileToken
     original.team_id = "team_123";
     store.save("google", original);
 
+    std::ifstream persisted(tmp.path + "/oauth_google.json");
+    const std::string persisted_json{
+        std::istreambuf_iterator<char>{persisted},
+        std::istreambuf_iterator<char>{}};
+    CHECK(persisted_json.find("id_token") == std::string::npos);
+    CHECK(persisted_json.find("plan_type") == std::string::npos);
+
     auto loaded = store.load("google");
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->access_token  == "access456");
@@ -1193,7 +1200,7 @@ TEST_CASE("OpenAIOAuthFlow::build_auth_url — contains PKCE parameters", "[Open
         {"openid", "email"},
         "state123",
         "challenge456",
-        "https://auth.openai.com/authorize"
+        "https://auth.openai.com/oauth/authorize"
     );
     REQUIRE(url.find("my-client-id")          != std::string::npos);
     REQUIRE(url.find("challenge456")           != std::string::npos);
@@ -1203,6 +1210,7 @@ TEST_CASE("OpenAIOAuthFlow::build_auth_url — contains PKCE parameters", "[Open
     REQUIRE(url.find("response_type=code")     != std::string::npos);
     REQUIRE(url.find("id_token_add_organizations=true") != std::string::npos);
     REQUIRE(url.find("codex_cli_simplified_flow=true")  != std::string::npos);
+    REQUIRE(url.find("originator=filo")                  != std::string::npos);
 }
 
 TEST_CASE("OpenAIOAuthFlow::build_auth_url — redirect_uri is percent-encoded", "[OpenAIOAuthFlow]") {
@@ -1241,6 +1249,32 @@ TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts account_id from id
 
     const auto token = OpenAIOAuthFlow::parse_token_response(json, now_unix());
     REQUIRE(token.account_id == "acct_claim");
+}
+
+TEST_CASE("OpenAIOAuthFlow::parse_token_response — preserves required ChatGPT identity claims",
+          "[OpenAIOAuthFlow]") {
+    const std::string id_token =
+        "eyJhbGciOiJub25lIn0."
+        "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF9uZXN0ZWQiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InBybyIsImNoYXRncHRfdXNlcl9pZCI6InVzZXJfbmVzdGVkIn0sImh0dHBzOi8vYXBpLm9wZW5haS5jb20vcHJvZmlsZSI6eyJlbWFpbCI6InByb0BleGFtcGxlLmNvbSJ9LCJpc3MiOiJodHRwczovL2F1dGgub3BlbmFpLmNvbSIsImV4cCI6MjAwMDAwMDAwMH0."
+        "sig";
+    const std::string json = std::string(R"({"access_token":"opaque","id_token":")")
+        + id_token + R"("})";
+
+    const auto token = OpenAIOAuthFlow::parse_token_response(json, 1'900'000'000);
+    CHECK(token.account_id == "acct_nested");
+    CHECK(token.user_id == "user_nested");
+    CHECK(token.email == "pro@example.com");
+    CHECK(token.issuer == "https://auth.openai.com");
+    CHECK(token.expires_at == 2'000'000'000);
+}
+
+TEST_CASE("OpenAIOAuthFlow uses JSON refresh and revocation payloads",
+          "[OpenAIOAuthFlow]") {
+    CHECK(OpenAIOAuthFlow::build_refresh_request_body("client", "refresh\"token")
+          == R"({"client_id":"client","grant_type":"refresh_token","refresh_token":"refresh\"token"})");
+    CHECK(OpenAIOAuthFlow::build_revoke_request_body(
+              "client", "refresh-token", "refresh_token")
+          == R"({"token":"refresh-token","token_type_hint":"refresh_token","client_id":"client"})");
 }
 
 TEST_CASE("OpenAIOAuthFlow::parse_token_response — extracts account_id from access token JWT", "[OpenAIOAuthFlow]") {
@@ -1491,12 +1525,15 @@ TEST_CASE("parse_oauth_manual_auth_input — code and URL", "[OAuthLoopback]") {
 TEST_CASE("OAuthLoopbackServer binds and exposes redirect_uri", "[OAuthLoopback]") {
     using namespace core::auth;
     OAuthLoopbackOptions opts;
-    opts.port_start = 18000;
-    opts.port_end = 18050;
+    opts.fixed_port = 0;
     opts.callback_path = "/callback";
-    OAuthLoopbackServer server(opts);
-    CHECK(server.port() >= 18000);
-    CHECK(server.port() <= 18050);
-    CHECK(server.redirect_uri().starts_with("http://127.0.0.1:"));
-    CHECK(server.redirect_uri().ends_with("/callback"));
+    std::unique_ptr<OAuthLoopbackServer> server;
+    try {
+        server = std::make_unique<OAuthLoopbackServer>(opts);
+    } catch (const OAuthLoopbackBindError&) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    CHECK(server->port() > 0);
+    CHECK(server->redirect_uri().starts_with("http://127.0.0.1:"));
+    CHECK(server->redirect_uri().ends_with("/callback"));
 }

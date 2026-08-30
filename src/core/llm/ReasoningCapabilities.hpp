@@ -11,6 +11,8 @@ enum class ReasoningCapability : std::uint16_t {
     Disable = 1U << 3,
     Required = 1U << 4,
     FixedMax = 1U << 5,
+    UltraEffort = 1U << 6,
+    MinimalEffort = 1U << 7,
 };
 
 class ReasoningCapabilities {

@@ -282,6 +282,27 @@ TEST_CASE("OpenAIProtocol - GPT-5.6 preserves max effort", "[openai][serializer]
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
 }
 
+TEST_CASE("OpenAIProtocol - normalizes the public API's lowest reasoning tiers",
+          "[openai][serializer][effort]") {
+    OpenAIProtocol protocol;
+    auto req = make_simple_request("gpt-5");
+
+    req.effort = "off";
+    CHECK_THAT(
+        protocol.serialize(req),
+        Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"minimal")"));
+
+    req.model = "gpt-5.6-sol";
+    CHECK_THAT(
+        protocol.serialize(req),
+        Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"none")"));
+
+    req.effort = "minimal";
+    CHECK_THAT(
+        protocol.serialize(req),
+        Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+}
+
 TEST_CASE("OpenAIProtocol - effort omitted on unsupported models", "[openai][serializer][effort]") {
     auto req = make_simple_request("gpt-4o");
     req.effort = "low";
@@ -674,20 +695,19 @@ TEST_CASE("OpenAIProtocol::build_url preserves explicit Azure deployments base",
     REQUIRE(url == "https://my-resource.services.ai.azure.com/openai/deployments/my-deployment/chat/completions?api-version=2024-12-01-preview");
 }
 
-TEST_CASE("OpenAIProtocol::build_headers injects chatgpt-account-id from auth account_id",
+TEST_CASE("OpenAIProtocol::build_headers ignores private Codex account metadata",
           "[openai][headers]") {
     OpenAIProtocol protocol;
     core::auth::AuthInfo auth;
     auth.properties["account_id"] = "acct_123";
 
     const auto headers = protocol.build_headers(auth);
-    REQUIRE(headers.count("chatgpt-account-id") == 1);
-    REQUIRE(headers.at("chatgpt-account-id") == "acct_123");
+    REQUIRE(headers.count("chatgpt-account-id") == 0);
 }
 
-TEST_CASE("OpenAIResponsesProtocol::build_headers injects chatgpt-account-id from auth account_id",
+TEST_CASE("CodexResponsesProtocol::build_headers injects account routing metadata",
           "[openai][responses][headers]") {
-    OpenAIResponsesProtocol protocol;
+    CodexResponsesProtocol protocol;
     core::auth::AuthInfo auth;
     auth.properties["account_id"] = "acct_456";
 
@@ -716,4 +736,20 @@ TEST_CASE("ProviderFactory - creates OpenAI provider", "[openai][factory]") {
     config.model = "gpt-4o";
     auto provider = core::llm::ProviderFactory::create_provider("openai", config);
     REQUIRE(provider != nullptr);
+}
+
+TEST_CASE("ProviderFactory - ChatGPT OAuth cannot send tokens to a custom host",
+          "[openai][factory][oauth][security]") {
+    core::config::ProviderConfig config;
+    config.model = "gpt-5.6-sol";
+    config.base_url = "https://untrusted.example/v1";
+    config.auth_type = "oauth_openai_pkce";
+    config.wire_api = "chat_completions";
+
+    auto provider = core::llm::ProviderFactory::create_provider("openai", config);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://chatgpt.com/backend-api/codex");
+    CHECK(metadata->service_id == "openai-codex");
 }

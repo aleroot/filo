@@ -1675,7 +1675,7 @@ class EffortCommand : public Command {
 public:
     std::string get_name() const override { return "/effort"; }
     std::string get_description() const override {
-        return "Open, show, or set model effort level (auto|low|medium|high|max)";
+        return "Open, show, or set model effort level (auto|low|medium|high|xhigh|max|ultra)";
     }
     bool accepts_arguments() const override { return true; }
 
@@ -1691,7 +1691,7 @@ public:
             }
             const std::string body = ctx.effort_status_fn
                 ? ctx.effort_status_fn()
-                : "Use /effort auto|low|medium|high|max, or /effort status.";
+                : "Use /effort auto|low|medium|high|xhigh|max|ultra, or /effort status.";
             emit_info_lines(ctx, body, "No effort information is available.");
             return;
         }
@@ -1700,7 +1700,7 @@ public:
         if (lowered == "status" || lowered == "current") {
             const std::string body = ctx.effort_status_fn
                 ? ctx.effort_status_fn()
-                : "Use /effort auto|low|medium|high|max.";
+                : "Use /effort auto|low|medium|high|xhigh|max|ultra.";
             emit_info_lines(ctx, body, "No effort information is available.");
             return;
         }

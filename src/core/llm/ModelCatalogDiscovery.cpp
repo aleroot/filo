@@ -170,8 +170,6 @@ void ModelCatalogAvailability::record_result(
     snapshot.checked = true;
     snapshot.attempted = result.attempted;
     snapshot.fetched = result.fetched;
-    snapshot.inserted = result.inserted;
-    snapshot.updated = result.updated;
     snapshot.error = result.error;
     snapshot.last_attempt =
         existing != providers_.end() ? existing->second.last_attempt : now;
@@ -237,19 +235,27 @@ ProviderModelCatalogSnapshot request_model_catalog_snapshot(
     std::string_view provider_name,
     const ModelCatalogDiscoveryOptions& options,
     std::chrono::milliseconds wait_timeout) {
+    std::string catalog_id(provider_name);
+    if (provider) {
+        if (const auto metadata = provider->metadata();
+            metadata && !metadata->service_id.empty()) {
+            catalog_id = metadata->service_id;
+        }
+    }
+
     auto& availability = ModelCatalogAvailability::instance();
-    auto snapshot = availability.snapshot(provider_name);
+    auto snapshot = availability.snapshot(catalog_id);
 
     if (snapshot.refresh_due()) {
         request_model_catalog_discovery(provider, options);
-        snapshot = availability.snapshot(provider_name);
+        snapshot = availability.snapshot(catalog_id);
     }
 
     if (snapshot.models.empty()
         && snapshot.refresh_in_progress
         && wait_timeout > std::chrono::milliseconds::zero()) {
         snapshot = availability.wait_for_snapshot(
-            provider_name,
+            catalog_id,
             wait_timeout);
     }
     return snapshot;
@@ -297,10 +303,11 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     if (cred_source) {
         auth = cred_source->get_auth();
     }
-    const bool include_session_only_models = provider_name.starts_with("grok")
-        && auth.properties.contains("oauth");
+    const bool oauth_session = auth.properties.contains("oauth");
+    const bool subscription_session = oauth_session
+        && provider_name.starts_with("grok");
     auto catalog_provider = make_model_catalog_provider(
-        api_type, provider_name, include_session_only_models);
+        api_type, provider_name, subscription_session);
     if (!catalog_provider) {
         discovery.permanent_skip = true;
         return discovery;
@@ -352,12 +359,7 @@ ModelCatalogDiscoveryResult discover_and_register_models(
         discovery.fetched += static_cast<int>(parsed.models.size());
         for (auto& model : parsed.models) {
             model.provider = provider_key;
-            available_models.push_back(model);
-            if (ModelRegistry::instance().merge_model(std::move(model))) {
-                ++discovery.inserted;
-            } else {
-                ++discovery.updated;
-            }
+            available_models.push_back(std::move(model));
         }
 
         if (parsed.next_page_token.empty() || parsed.next_page_token == page_token) {
@@ -378,11 +380,9 @@ ModelCatalogDiscoveryResult discover_and_register_models(
             discovery.error);
     } else if (discovery.fetched > 0) {
         core::logging::debug(
-            "Model discovery for provider '{}': fetched {}, inserted {}, updated {}",
+            "Model discovery for provider '{}': fetched {}",
             provider_name,
-            discovery.fetched,
-            discovery.inserted,
-            discovery.updated);
+            discovery.fetched);
     }
 
     return discovery;

@@ -49,8 +49,7 @@ private:
 class OpenAICompatibleModelCatalogProvider final : public ModelCatalogProvider {
 public:
     explicit OpenAICompatibleModelCatalogProvider(
-        std::string provider_name = "openai",
-        bool include_session_only_models = false);
+        std::string provider_name = "openai");
 
     [[nodiscard]] std::string_view provider_name() const noexcept override;
     [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
@@ -58,7 +57,20 @@ public:
 
 private:
     std::string provider_name_;
-    bool include_session_only_models_ = false;
+};
+
+/** Private ChatGPT Codex subscription catalog adapter. */
+class CodexModelCatalogProvider final : public ModelCatalogProvider {
+public:
+    explicit CodexModelCatalogProvider(
+        std::string provider_name = "openai-codex");
+
+    [[nodiscard]] std::string_view provider_name() const noexcept override;
+    [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
+
+private:
+    std::string provider_name_;
 };
 
 class XaiModelCatalogProvider final : public ModelCatalogProvider {
@@ -132,6 +144,6 @@ make_model_catalog_provider(config::ApiType api_type, std::string_view provider_
 [[nodiscard]] std::unique_ptr<ModelCatalogProvider>
 make_model_catalog_provider(config::ApiType api_type,
                             std::string_view provider_name,
-                            bool include_session_only_models);
+                            bool subscription_session);
 
 } // namespace core::llm

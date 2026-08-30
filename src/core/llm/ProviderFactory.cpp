@@ -187,11 +187,20 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         core::logging::debug("Using Kimi Code endpoint for model '{}': {}", config.model, base_url);
     }
 
-    // For OpenAI ChatGPT PKCE auth, route to the ChatGPT Codex backend by default.
+    // ChatGPT OAuth credentials are valid only for the managed Codex backend.
+    // Always force that host: preserving a user-supplied OpenAI-compatible URL
+    // here would disclose the ChatGPT bearer token to an arbitrary server.
     if (cred && canonical_type == "openai"
-        && normalized_auth_type == "oauth_openai_pkce"
-        && base_url == "https://api.openai.com/v1") {
-        base_url = "https://chatgpt.com/backend-api/codex";
+        && normalized_auth_type == "oauth_openai_pkce") {
+        const std::string normalized_base = core::utils::str::trim_trailing_slashes(base_url);
+        if (normalized_base != openai_endpoint::kPublicApiBaseUrl
+            && normalized_base != openai_endpoint::kChatGptCodexBaseUrl) {
+            core::logging::warn(
+                "Ignoring a custom OpenAI base URL because ChatGPT OAuth tokens "
+                "may only be sent to the managed Codex backend.");
+        }
+        base_url = std::string(openai_endpoint::kChatGptCodexBaseUrl);
+        wire_api = "responses";
         core::logging::debug("Using OpenAI PKCE endpoint: {}", base_url);
     }
 
@@ -270,10 +279,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     config.service_tier,
                     /*enable_hosted_tools=*/true,
                     config.reasoning_effort);
-            } else if (base_url == "https://chatgpt.com/backend-api/codex") {
+            } else if (base_url == openai_endpoint::kChatGptCodexBaseUrl) {
                 client_identity_source = make_codex_client_identity_source(config_dir);
                 protocol = std::make_unique<protocols::CodexResponsesProtocol>(
-                    /*include_reasoning_encrypted=*/false,
+                    /*include_reasoning_encrypted=*/true,
                     config.service_tier,
                     client_identity_source);
             } else {
@@ -375,7 +384,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     }
 
     std::string service_id(name);
-    if (canonical_type == "kimi") {
+    if (base_url == openai_endpoint::kChatGptCodexBaseUrl) {
+        service_id = "openai-codex";
+    } else if (canonical_type == "kimi") {
         if (const std::string_view resolved =
                 kimi_service_id(kimi_service_for_endpoint(base_url));
             !resolved.empty()) {

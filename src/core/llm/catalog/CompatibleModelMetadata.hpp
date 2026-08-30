@@ -14,4 +14,8 @@ namespace core::llm::catalog {
     std::string_view model_id,
     const JsonObjectView& model);
 
+/** Decode optional reasoning levels advertised by compatible catalogs. */
+[[nodiscard]] ModelReasoningProfile compatible_reasoning_profile(
+    const JsonObjectView& model);
+
 } // namespace core::llm::catalog

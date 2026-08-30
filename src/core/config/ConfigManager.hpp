@@ -165,7 +165,7 @@ struct ProviderConfig {
     std::string auth_type{};        ///< "" / "oauth_google" / "oauth_claude" / etc.
 
     // Protocol extensions (flat; applied per api_type by ProviderFactory)
-    std::string reasoning_effort{}; ///< "low" / "high" — OpenAI reasoning models
+    std::string reasoning_effort{}; ///< Provider effort, e.g. low/high/xhigh/max/ultra
     std::string wire_api{};         ///< "chat_completions" / "responses" for OpenAI APIs
     std::string service_tier{};     ///< Responses API service_tier (e.g. "priority", "flex")
     int         thinking_budget   = 0;     ///< >0 enables extended thinking (Anthropic)

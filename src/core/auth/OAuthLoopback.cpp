@@ -83,6 +83,20 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
     const std::string path = normalize_callback_path(impl_->options.callback_path);
 
     const auto handler = [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string state = req.get_param_value("state");
+        if (impl_->options.expected_state.has_value()
+            && state != *impl_->options.expected_state) {
+            res.status = 400;
+            res.set_content(
+                "Login failed: OAuth state mismatch - possible CSRF attempt",
+                "text/plain");
+            std::lock_guard lock(impl_->mutex);
+            impl_->result.error = "OAuth state mismatch - possible CSRF attempt";
+            impl_->done = true;
+            impl_->cv.notify_one();
+            return;
+        }
+
         const std::string err = req.get_param_value("error");
         if (!err.empty()) {
             const std::string desc = req.get_param_value("error_description");
@@ -94,10 +108,26 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
             return;
         }
 
+        const std::string code = req.get_param_value("code");
+        std::string validation_error;
+        if (code.empty()) {
+            validation_error = "authorization callback did not include a code";
+        }
+
+        if (!validation_error.empty()) {
+            res.status = 400;
+            res.set_content("Login failed: " + validation_error, "text/plain");
+            std::lock_guard lock(impl_->mutex);
+            impl_->result.error = std::move(validation_error);
+            impl_->done = true;
+            impl_->cv.notify_one();
+            return;
+        }
+
         res.set_content(impl_->options.success_html, "text/html");
         std::lock_guard lock(impl_->mutex);
-        impl_->result.code = req.get_param_value("code");
-        impl_->result.state = req.get_param_value("state");
+        impl_->result.code = code;
+        impl_->result.state = state;
         impl_->done = true;
         impl_->cv.notify_one();
     };
@@ -109,12 +139,23 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
 
     if (impl_->options.fixed_port.has_value()) {
         const int candidate = *impl_->options.fixed_port;
-        if (!impl_->server.bind_to_port(impl_->options.bind_host, candidate)) {
-            throw std::runtime_error(
+        if (candidate == 0) {
+            impl_->port = impl_->server.bind_to_any_port(impl_->options.bind_host);
+        } else if (impl_->server.bind_to_port(impl_->options.bind_host, candidate)) {
+            impl_->port = candidate;
+        } else {
+            throw OAuthLoopbackBindError(
                 "OAuth loopback: could not bind "
                 + impl_->options.bind_host + ":" + std::to_string(candidate));
         }
-        impl_->port = candidate;
+    } else if (!impl_->options.candidate_ports.empty()) {
+        for (const int candidate : impl_->options.candidate_ports) {
+            if (candidate <= 0 || candidate > 65535) continue;
+            if (impl_->server.bind_to_port(impl_->options.bind_host, candidate)) {
+                impl_->port = candidate;
+                break;
+            }
+        }
     } else {
         for (int candidate = impl_->options.port_start;
              candidate <= impl_->options.port_end;
@@ -127,7 +168,7 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
     }
 
     if (impl_->port < 0) {
-        throw std::runtime_error("OAuth loopback: no free port available");
+        throw OAuthLoopbackBindError("OAuth loopback: no free port available");
     }
 
     const std::string host =

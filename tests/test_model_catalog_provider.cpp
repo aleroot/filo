@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
@@ -240,6 +241,16 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses data array and preserves 
     CHECK(embedding.supports(ModelCapability::Embeddings));
 }
 
+TEST_CASE("OpenAI OAuth model catalog sends the client version",
+          "[llm][model-catalog][openai]") {
+    CodexModelCatalogProvider codex_provider;
+    CHECK_THAT(codex_provider.model_list_path(),
+               Catch::Matchers::StartsWith("/models?client_version="));
+
+    OpenAICompatibleModelCatalogProvider api_key_provider("openai");
+    CHECK(api_key_provider.model_list_path() == "/models");
+}
+
 TEST_CASE("OpenAI-compatible catalogs consume optional limits and advertised capabilities",
           "[llm][model-catalog][openai]") {
     OpenAICompatibleModelCatalogProvider provider("compatible");
@@ -288,8 +299,8 @@ TEST_CASE("OpenAI-compatible catalogs consume optional limits and advertised cap
     CHECK(model.supports(ModelCapability::PdfInput));
 }
 
-TEST_CASE("OpenAICompatibleModelCatalogProvider parses Codex remote model catalog", "[llm][model-catalog][openai]") {
-    OpenAICompatibleModelCatalogProvider provider("openai");
+TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[llm][model-catalog][openai]") {
+    CodexModelCatalogProvider provider;
 
     const auto result = provider.parse_models_response(R"JSON({
       "models": [
@@ -321,12 +332,12 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses Codex remote model catalo
     })JSON");
 
     REQUIRE(result.ok());
-    REQUIRE(result.models.size() == 1);
+    REQUIRE(result.models.size() == 2);
 
     const auto& codex = result.models[0];
     CHECK(codex.canonical_id == "gpt-5.5-codex");
     CHECK(codex.display_name == "GPT-5.5 Codex");
-    CHECK(codex.provider == "openai");
+    CHECK(codex.provider == "openai-codex");
     CHECK(codex.context_window == 272000);
     CHECK(codex.max_output_tokens == 100000);
     CHECK(codex.max_reasoning_tokens == 25000);
@@ -336,6 +347,8 @@ TEST_CASE("OpenAICompatibleModelCatalogProvider parses Codex remote model catalo
     CHECK(codex.supports(ModelCapability::JsonMode));
     CHECK(codex.supports(ModelCapability::Reasoning));
     CHECK(codex.supports(ModelCapability::Vision));
+
+    CHECK(result.models[1].canonical_id == "internal-chatgpt-only");
 }
 
 TEST_CASE("xAI catalog loads callable language models, limits, aliases, and pricing",
@@ -854,6 +867,11 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     REQUIRE(grok != nullptr);
     CHECK(grok->provider_name() == "grok");
     CHECK(grok->model_list_path() == "/models");
+
+    auto codex = make_model_catalog_provider(
+        core::config::ApiType::OpenAI, "openai-codex");
+    REQUIRE(codex != nullptr);
+    CHECK(dynamic_cast<CodexModelCatalogProvider*>(codex.get()) != nullptr);
 
     auto mistral = make_model_catalog_provider(
         core::config::ApiType::OpenAI,
@@ -1392,7 +1410,6 @@ TEST_CASE("ModelCatalogAvailability stores provider-scoped live models",
     ModelCatalogDiscoveryResult result;
     result.attempted = true;
     result.fetched = 1;
-    result.inserted = 1;
 
     ModelInfo model;
     model.canonical_id = "live-provider-model";
@@ -1451,7 +1468,6 @@ TEST_CASE("ModelCatalogAvailability keeps stale models and schedules transient r
     ModelCatalogDiscoveryResult success;
     success.attempted = true;
     success.fetched = 1;
-    success.inserted = 1;
 
     ModelInfo model;
     model.canonical_id = "retry-provider-model";

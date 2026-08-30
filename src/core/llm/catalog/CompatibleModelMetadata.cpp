@@ -109,4 +109,40 @@ ModelCapabilities compatible_advertised_capabilities(
     return capabilities;
 }
 
+ModelReasoningProfile compatible_reasoning_profile(
+    const JsonObjectView& model) {
+    ModelReasoningProfile profile;
+    const bool has_effort =
+        model.capability_supported("effort")
+        || model.capability_supported("reasoning")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "minimal")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "low")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "medium")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "high")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "xhigh")
+        || model.object_array_contains(
+            "supported_reasoning_levels", "effort", "ultra");
+    if (has_effort) {
+        profile.effort = ReasoningCapabilities{ReasoningCapability::Effort};
+    }
+    if (model.object_array_contains(
+            "supported_reasoning_levels", "effort", "max")) {
+        profile.effort = profile.effort | ReasoningCapability::MaxEffort;
+    }
+    if (model.object_array_contains(
+            "supported_reasoning_levels", "effort", "xhigh")) {
+        profile.effort = profile.effort | ReasoningCapability::XHighEffort;
+    }
+    if (model.object_array_contains(
+            "supported_reasoning_levels", "effort", "ultra")) {
+        profile.effort = profile.effort | ReasoningCapability::UltraEffort;
+    }
+    return profile;
+}
+
 } // namespace core::llm::catalog

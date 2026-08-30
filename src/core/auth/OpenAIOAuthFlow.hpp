@@ -13,7 +13,7 @@ namespace core::auth {
  * Mirrors the Codex CLI authentication approach:
  * - PKCE with SHA-256 code challenge — no client secret is required for
  *   installed-application flows (RFC 6749 §4.1 + RFC 7636)
- * - Loopback redirect on a dynamically-chosen port in [54321, 54400]
+ * - Bind-first loopback redirect on the Codex ports (1455, with fallbacks)
  * - Random state token for CSRF protection
  *
  * login() opens the user's browser, starts a local HTTP server to capture
@@ -37,11 +37,13 @@ public:
     OpenAIOAuthFlow();
 
     OpenAIOAuthFlow(std::string client_id,
-                    std::string auth_url  = "https://auth.openai.com/authorize",
+                    std::string auth_url  = "https://auth.openai.com/oauth/authorize",
                     std::string token_url = "https://auth.openai.com/oauth/token",
-                    std::vector<std::string> scopes = {"openid", "email", "profile", "offline_access"},
+                    std::vector<std::string> scopes = {
+                        "openid", "profile", "email", "offline_access",
+                        "api.connectors.read", "api.connectors.invoke"},
                     int port_start = 1455,
-                    int port_end   = 1455);
+                    int port_end   = 1457);
 
     OAuthToken login() override;
     OAuthToken refresh(std::string_view refresh_token) override;
@@ -67,10 +69,18 @@ public:
     static OAuthToken parse_token_response(std::string_view json,
                                            int64_t request_time_unix);
 
+    /// JSON request bodies used by the current ChatGPT refresh/revoke contract.
+    static std::string build_refresh_request_body(std::string_view client_id,
+                                                  std::string_view refresh_token);
+    static std::string build_revoke_request_body(std::string_view client_id,
+                                                 std::string_view token,
+                                                 std::string_view token_type_hint);
+
 private:
     OAuthToken exchange_code(const std::string& code,
                              const std::string& redirect_uri,
                              const std::string& code_verifier);
+    OAuthToken device_code_login();
 
     std::string              client_id_;
     std::string              auth_url_;

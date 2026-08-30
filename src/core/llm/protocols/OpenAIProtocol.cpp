@@ -24,8 +24,21 @@ ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noex
     }
 
     ReasoningCapabilities features{ReasoningCapability::Effort};
+    if (istarts_with(model, "gpt-5")
+        && !istarts_with(model, "gpt-5.")) {
+        features = features | ReasoningCapability::MinimalEffort;
+    }
+    // The original GPT-5 family tops out at high. Newer versioned families
+    // advertise their additional effort levels explicitly below.
+    if (istarts_with(model, "gpt-5.")
+        && !istarts_with(model, "gpt-5-mini")
+        && !istarts_with(model, "gpt-5-nano")) {
+        features = features | ReasoningCapability::XHighEffort;
+    }
     if (istarts_with(model, "gpt-5.6")) {
-        features = features | ReasoningCapability::MaxEffort;
+        features = features
+            | ReasoningCapability::MaxEffort
+            | ReasoningCapability::Disable;
     }
     return features;
 }
@@ -108,26 +121,49 @@ find_header_case_insensitive(const cpr::Header& headers, std::string_view key) {
     return info;
 }
 
-[[nodiscard]] std::string normalize_openai_effort(std::string_view raw_effort,
-                                                  std::string_view model) {
-    std::string effort = lower_ascii(raw_effort);
+} // namespace
+
+std::string normalize_openai_reasoning_effort(
+    std::string_view requested,
+    ReasoningCapabilities capabilities) {
+    std::string effort = lower_ascii(requested);
     std::erase_if(effort, [](unsigned char ch) {
         return std::isspace(ch);
     });
     if (effort == "auto" || effort == "unset" || effort == "default") {
         return {};
     }
+    if (effort == "off" || effort == "none" || effort == "disabled") {
+        if (capabilities.supports(ReasoningCapability::Disable)) return "none";
+        if (capabilities.supports(ReasoningCapability::MinimalEffort)) return "minimal";
+        return {};
+    }
+    if (effort == "minimal") {
+        return capabilities.supports(ReasoningCapability::MinimalEffort)
+            ? "minimal"
+            : "low";
+    }
     if (effort == "low" || effort == "medium" || effort == "high") {
         return effort;
     }
+    if (effort == "xhigh") {
+        return capabilities.supports(ReasoningCapability::XHighEffort)
+            ? "xhigh"
+            : "high";
+    }
     if (effort == "max") {
-        return openai_reasoning_capabilities(model).supports(
-            ReasoningCapability::MaxEffort) ? "max" : "high";
+        if (capabilities.supports(ReasoningCapability::MaxEffort)) return "max";
+        if (capabilities.supports(ReasoningCapability::XHighEffort)) return "xhigh";
+        return "high";
+    }
+    if (effort == "ultra") {
+        if (capabilities.supports(ReasoningCapability::UltraEffort)) return "ultra";
+        if (capabilities.supports(ReasoningCapability::MaxEffort)) return "max";
+        if (capabilities.supports(ReasoningCapability::XHighEffort)) return "xhigh";
+        return "high";
     }
     return {};
 }
-
-} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // parse_openai_sse_chunk — shared pure parser for any OpenAI-compatible stream
@@ -213,8 +249,10 @@ std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
 
     if (payload.ends_with('}')) {
         payload.pop_back();
-        if (openai_reasoning_capabilities(req.model).supports_effort()) {
-            const std::string effort = normalize_openai_effort(req.effort, req.model);
+        const auto capabilities = reasoning_capabilities(req.model);
+        if (capabilities.supports_effort()) {
+            const std::string effort = normalize_openai_reasoning_effort(
+                req.effort, capabilities);
             if (!effort.empty()) {
                 payload += R"(,"reasoning_effort":")";
                 payload += core::utils::escape_json_string(effort);
@@ -238,13 +276,6 @@ cpr::Header OpenAIProtocol::build_headers(const core::auth::AuthInfo& auth) cons
     };
     for (const auto& [k, v] : auth.headers) {
         headers[k] = v;
-    }
-
-    // OpenAI Codex backend account-scoped tokens require this header.
-    if (auto it = auth.properties.find("account_id");
-        it != auth.properties.end() && !it->second.empty()
-        && headers.count("chatgpt-account-id") == 0) {
-        headers["chatgpt-account-id"] = it->second;
     }
 
     return headers;

@@ -1,15 +1,17 @@
 #include "OpenAIOAuthFlow.hpp"
 #include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
+#include "OAuthLoopback.hpp"
 #include "OAuthPkce.hpp"
 #include "core/utils/Base64.hpp"
+#include "core/utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <cpr/cpr.h>
-#include <httplib.h>
 #include <simdjson.h>
+#include <algorithm>
 #include <chrono>
-#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -23,48 +25,130 @@ static int64_t now_unix_seconds() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-std::optional<std::string> parse_openai_account_id_claim(std::string_view jwt_token) {
+struct OpenAIClaims {
+    std::string account_id;
+    std::string user_id;
+    std::string email;
+    std::string issuer;
+    int64_t expires_at = 0;
+};
+
+[[nodiscard]] OpenAIClaims parse_openai_claims(std::string_view jwt_token) {
+    OpenAIClaims claims;
     const std::size_t first_dot = jwt_token.find('.');
-    if (first_dot == std::string_view::npos) return std::nullopt;
+    if (first_dot == std::string_view::npos) return claims;
     const std::size_t second_dot = jwt_token.find('.', first_dot + 1);
     if (second_dot == std::string_view::npos || second_dot <= first_dot + 1) {
-        return std::nullopt;
+        return claims;
     }
 
     const std::string_view payload_b64url =
         jwt_token.substr(first_dot + 1, second_dot - first_dot - 1);
 
     const auto payload_json = core::utils::Base64::decode_url(payload_b64url);
-    if (!payload_json.has_value()) return std::nullopt;
+    if (!payload_json.has_value()) return claims;
 
     simdjson::dom::parser parser;
     simdjson::padded_string padded(payload_json->data(), payload_json->size());
     simdjson::dom::element doc;
-    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return std::nullopt;
+    if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return claims;
+
+    const auto copy_string = [&](std::string_view key, std::string& out) {
+        std::string_view value;
+        if (doc[key].get_string().get(value) == simdjson::SUCCESS && !value.empty()) {
+            out = std::string(value);
+        }
+    };
+
+    copy_string("email", claims.email);
+    copy_string("iss", claims.issuer);
+    copy_string("sub", claims.user_id);
+    int64_t expiration = 0;
+    if (doc["exp"].get_int64().get(expiration) == simdjson::SUCCESS) {
+        claims.expires_at = expiration;
+    }
 
     std::string_view account_id;
     if (doc["https://api.openai.com/auth.chatgpt_account_id"]
             .get_string()
             .get(account_id) == simdjson::SUCCESS
         && !account_id.empty()) {
-        return std::string(account_id);
+        claims.account_id = std::string(account_id);
+    } else {
+        copy_string("chatgpt_account_id", claims.account_id);
+        if (claims.account_id.empty()) copy_string("account_id", claims.account_id);
     }
 
-    if (doc["chatgpt_account_id"].get_string().get(account_id) == simdjson::SUCCESS
-        && !account_id.empty()) {
-        return std::string(account_id);
+    simdjson::dom::object auth;
+    if (doc["https://api.openai.com/auth"].get_object().get(auth) == simdjson::SUCCESS) {
+        const auto copy_auth_string = [&](std::string_view key, std::string& out) {
+            std::string_view value;
+            if (auth[key].get_string().get(value) == simdjson::SUCCESS && !value.empty()) {
+                out = std::string(value);
+            }
+        };
+        copy_auth_string("chatgpt_account_id", claims.account_id);
+        copy_auth_string("chatgpt_user_id", claims.user_id);
+        if (claims.user_id.empty()) copy_auth_string("user_id", claims.user_id);
     }
 
-    if (doc["account_id"].get_string().get(account_id) == simdjson::SUCCESS
-        && !account_id.empty()) {
-        return std::string(account_id);
+    if (claims.email.empty()) {
+        simdjson::dom::object profile;
+        if (doc["https://api.openai.com/profile"].get_object().get(profile)
+            == simdjson::SUCCESS) {
+            std::string_view email;
+            if (profile["email"].get_string().get(email) == simdjson::SUCCESS) {
+                claims.email = std::string(email);
+            }
+        }
     }
-
-    return std::nullopt;
+    return claims;
 }
 
 // Public OAuth client id used by the official Codex login flow.
 constexpr std::string_view kCodexDefaultClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
+constexpr std::string_view kFiloOriginator = "filo";
+
+[[nodiscard]] bool env_truthy(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return false;
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(value);
+    return lowered != "0" && lowered != "false" && lowered != "no";
+}
+
+[[nodiscard]] std::string oauth_error_detail(std::string_view body) {
+    try {
+        simdjson::dom::parser parser;
+        simdjson::padded_string padded(body.data(), body.size());
+        simdjson::dom::element doc = parser.parse(padded);
+        std::string_view error;
+        std::string_view description;
+        (void)doc["error"].get_string().get(error);
+        (void)doc["error_description"].get_string().get(description);
+        if (!error.empty() && !description.empty()) {
+            return std::string(error) + ": " + std::string(description);
+        }
+        if (!error.empty()) return std::string(error);
+    } catch (...) {
+    }
+    return "request rejected";
+}
+
+[[nodiscard]] std::string issuer_from_token_url(std::string_view token_url) {
+    std::string issuer = core::utils::str::trim_trailing_slashes(token_url);
+    for (const std::string_view suffix : {std::string_view{"/oauth/token"},
+                                          std::string_view{"/token"}}) {
+        if (issuer.ends_with(suffix)) {
+            issuer.resize(issuer.size() - suffix.size());
+            break;
+        }
+    }
+    return issuer;
+}
+
+[[nodiscard]] std::string json_string(std::string_view value) {
+    return "\"" + core::utils::escape_json_string(value) + "\"";
+}
 
 std::string resolve_client_id() {
     if (const char* env = std::getenv("OPENAI_OAUTH_CLIENT_ID"); env && env[0] != '\0') {
@@ -80,11 +164,12 @@ std::string resolve_client_id() {
 OpenAIOAuthFlow::OpenAIOAuthFlow()
     : OpenAIOAuthFlow(
         resolve_client_id(),
-        "https://auth.openai.com/authorize",
+        "https://auth.openai.com/oauth/authorize",
         "https://auth.openai.com/oauth/token",
-        {"openid", "email", "profile", "offline_access"},
+        {"openid", "profile", "email", "offline_access",
+         "api.connectors.read", "api.connectors.invoke"},
         1455,
-        1455)
+        1457)
 {}
 
 OpenAIOAuthFlow::OpenAIOAuthFlow(std::string client_id,
@@ -133,7 +218,8 @@ std::string OpenAIOAuthFlow::build_auth_url(std::string_view client_id,
         + "&code_challenge="        + std::string(code_challenge)
         + "&code_challenge_method=S256"
         + "&id_token_add_organizations=true"
-        + "&codex_cli_simplified_flow=true";
+        + "&codex_cli_simplified_flow=true"
+        + "&originator="            + oauth_pkce::url_encode(kFiloOriginator);
 }
 
 // static
@@ -167,16 +253,26 @@ OAuthToken OpenAIOAuthFlow::parse_token_response(std::string_view json,
     }
 
     if (token.access_token.empty())
-        throw std::runtime_error("No access_token in response: " + std::string(json));
+        throw std::runtime_error("OpenAI token response did not include an access token");
 
-    if (token.account_id.empty()) {
-        if (const auto claim = parse_openai_account_id_claim(id_token);
-            claim.has_value()) {
-            token.account_id = *claim;
-        } else if (const auto claim = parse_openai_account_id_claim(token.access_token);
-                   claim.has_value()) {
-            token.account_id = *claim;
-        }
+    OpenAIClaims claims = parse_openai_claims(id_token);
+    const OpenAIClaims access_claims = parse_openai_claims(token.access_token);
+    if (claims.account_id.empty()) claims.account_id = access_claims.account_id;
+    if (claims.user_id.empty()) claims.user_id = access_claims.user_id;
+    if (claims.email.empty()) claims.email = access_claims.email;
+    if (claims.issuer.empty()) claims.issuer = access_claims.issuer;
+
+    if (token.account_id.empty()) token.account_id = std::move(claims.account_id);
+    token.user_id = std::move(claims.user_id);
+    token.email = std::move(claims.email);
+    token.issuer = std::move(claims.issuer);
+    if (token.expires_at <= 0) {
+        token.expires_at = access_claims.expires_at > 0
+            ? access_claims.expires_at
+            : claims.expires_at > 0
+                ? claims.expires_at
+            : request_time_unix + std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::hours(1)).count();
     }
 
     return token;
@@ -195,39 +291,152 @@ OAuthToken OpenAIOAuthFlow::exchange_code(const std::string& code,
             {"redirect_uri",  redirect_uri},
             {"grant_type",    "authorization_code"},
             {"code_verifier", code_verifier},
-        }
+        },
+        cpr::Timeout{15000}
     );
 
     if (r.status_code != 200)
         throw std::runtime_error("Token exchange failed ("
-                                 + std::to_string(r.status_code) + "): " + r.text);
+                                 + std::to_string(r.status_code) + "): "
+                                 + oauth_error_detail(r.text));
 
     return parse_token_response(r.text, req_time);
 }
 
-OAuthToken OpenAIOAuthFlow::login() {
-    // Find a free port for the loopback callback
-    int port = -1;
-    for (int p = port_start_; p <= port_end_; ++p) {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) continue;
-        int opt = 1;
-        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(static_cast<uint16_t>(p));
-        bool free_port = (bind(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
-        close(sock);
-        if (free_port) { port = p; break; }
-    }
-    if (port < 0)
-        throw std::runtime_error("No free port available for OpenAI OAuth callback");
+OAuthToken OpenAIOAuthFlow::device_code_login() {
+    const std::string issuer = issuer_from_token_url(token_url_);
+    const std::string device_api = issuer + "/api/accounts/deviceauth";
+    const cpr::Header json_headers{{"Content-Type", "application/json"}};
 
-    const std::string redirect_uri = "http://localhost:" + std::to_string(port) + "/auth/callback";
+    const cpr::Response code_response = cpr::Post(
+        cpr::Url{device_api + "/usercode"},
+        json_headers,
+        cpr::Body{"{\"client_id\":" + json_string(client_id_) + "}"},
+        cpr::Timeout{15000});
+    if (code_response.status_code < 200 || code_response.status_code >= 300) {
+        const std::string unavailable = code_response.status_code == 404
+            ? "device-code login is unavailable; free callback port 1455 or 1457 and retry browser login"
+            : oauth_error_detail(code_response.text);
+        throw std::runtime_error(
+            "OpenAI device-code request failed ("
+            + std::to_string(code_response.status_code) + "): " + unavailable);
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(code_response.text);
+    simdjson::dom::element doc = parser.parse(padded);
+    std::string_view device_auth_id;
+    std::string_view user_code;
+    if (doc["device_auth_id"].get_string().get(device_auth_id) != simdjson::SUCCESS
+        || device_auth_id.empty()) {
+        throw std::runtime_error("OpenAI device-code response did not include device_auth_id");
+    }
+    if (doc["user_code"].get_string().get(user_code) != simdjson::SUCCESS) {
+        (void)doc["usercode"].get_string().get(user_code);
+    }
+    if (user_code.empty()) {
+        throw std::runtime_error("OpenAI device-code response did not include user_code");
+    }
+
+    int64_t interval_seconds = 5;
+    if (doc["interval"].get_int64().get(interval_seconds) != simdjson::SUCCESS) {
+        std::string_view interval_text;
+        if (doc["interval"].get_string().get(interval_text) == simdjson::SUCCESS) {
+            try {
+                interval_seconds = std::stoll(std::string(interval_text));
+            } catch (...) {
+                interval_seconds = 5;
+            }
+        }
+    }
+    interval_seconds = std::clamp<int64_t>(interval_seconds, 1, 60);
+
+    const std::string verification_url = issuer + "/codex/device";
+    std::fprintf(
+        stdout,
+        "\nOpenAI device login\n"
+        "1. Open: %s\n"
+        "2. Enter this one-time code (expires in 15 minutes): %.*s\n\n"
+        "Continue only if you started this login in Filo.\n\n",
+        verification_url.c_str(),
+        static_cast<int>(user_code.size()), user_code.data());
+    std::fflush(stdout);
+    if (!env_truthy("NO_BROWSER")) open_browser(verification_url);
+
+    const std::string poll_body = "{\"device_auth_id\":" + json_string(device_auth_id)
+        + ",\"user_code\":" + json_string(user_code) + "}";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(15);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const cpr::Response poll_response = cpr::Post(
+            cpr::Url{device_api + "/token"},
+            json_headers,
+            cpr::Body{poll_body},
+            cpr::Timeout{15000});
+
+        if (poll_response.status_code >= 200 && poll_response.status_code < 300) {
+            simdjson::dom::parser poll_parser;
+            simdjson::padded_string poll_padded(poll_response.text);
+            simdjson::dom::element poll_doc = poll_parser.parse(poll_padded);
+            std::string_view authorization_code;
+            std::string_view code_verifier;
+            if (poll_doc["authorization_code"].get_string().get(authorization_code)
+                    != simdjson::SUCCESS
+                || poll_doc["code_verifier"].get_string().get(code_verifier)
+                    != simdjson::SUCCESS
+                || authorization_code.empty() || code_verifier.empty()) {
+                throw std::runtime_error(
+                    "OpenAI device-code completion response was incomplete");
+            }
+            return exchange_code(
+                std::string(authorization_code),
+                issuer + "/deviceauth/callback",
+                std::string(code_verifier));
+        }
+
+        if (poll_response.status_code != 403 && poll_response.status_code != 404) {
+            throw std::runtime_error(
+                "OpenAI device-code polling failed ("
+                + std::to_string(poll_response.status_code) + "): "
+                + oauth_error_detail(poll_response.text));
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(interval_seconds));
+    }
+    throw std::runtime_error("OpenAI device login timed out after 15 minutes");
+}
+
+OAuthToken OpenAIOAuthFlow::login() {
+    if (env_truthy("OPENAI_DEVICE_AUTH")) return device_code_login();
+
     const std::string state         = oauth_pkce::generate_correlation_token();
     const std::string code_verifier = generate_code_verifier();
     const std::string challenge      = compute_code_challenge(code_verifier);
+
+    OAuthLoopbackOptions loopback_options;
+    loopback_options.redirect_host = "localhost";
+    loopback_options.port_start = port_start_;
+    loopback_options.port_end = port_end_;
+    // These are the callback ports registered for the public Codex client.
+    // Do not improvise an intermediate port that the authorization server may
+    // reject even when it is locally available.
+    loopback_options.candidate_ports = {port_start_, port_end_};
+    loopback_options.callback_path = "/auth/callback";
+    loopback_options.extra_paths = {"/callback"};
+    loopback_options.expected_state = state;
+    loopback_options.success_html =
+        "<html><body><h2>OpenAI login successful!</h2>"
+        "<p>You can close this tab and return to Filo.</p></body></html>";
+
+    std::optional<OAuthLoopbackServer> loopback;
+    try {
+        loopback.emplace(std::move(loopback_options));
+        loopback->start();
+    } catch (const std::exception&) {
+        // Headless systems and machines with occupied callback ports still have
+        // a supported authentication path.
+        return device_code_login();
+    }
+
+    const std::string redirect_uri = loopback->redirect_uri();
     const std::string auth_url       = build_auth_url(
         client_id_, redirect_uri, scopes_, state, challenge, auth_url_);
 
@@ -238,69 +447,32 @@ OAuthToken OpenAIOAuthFlow::login() {
             auth_url.c_str());
     fflush(stdout);
 
-    open_browser(auth_url);
+    if (!env_truthy("NO_BROWSER")) open_browser(auth_url);
 
-    std::mutex              cv_mtx;
-    std::condition_variable cv;
-    bool                    done = false;
-    std::string             received_code;
-    std::string             received_state;
-    std::string             error_msg;
-
-    httplib::Server svr;
-
-    const auto callback_handler = [&](const httplib::Request& req, httplib::Response& res) {
-        std::string code  = req.get_param_value("code");
-        std::string st    = req.get_param_value("state");
-        std::string err   = req.get_param_value("error");
-
-        if (!err.empty()) {
-            std::string desc = req.get_param_value("error_description");
-            res.set_content("Login failed: " + err + " — " + desc, "text/plain");
-            std::unique_lock lk(cv_mtx);
-            error_msg = err + ": " + desc;
-            done = true;
-            cv.notify_one();
-            return;
-        }
-
-        res.set_content(
-            "<html><body><h2>OpenAI login successful!</h2>"
-            "<p>You can close this tab and return to filo.</p></body></html>",
-            "text/html");
-
-        std::unique_lock lk(cv_mtx);
-        received_code  = std::move(code);
-        received_state = std::move(st);
-        done = true;
-        cv.notify_one();
-    };
-    // Keep legacy /callback for backward compatibility with older redirects.
-    svr.Get("/callback", callback_handler);
-    svr.Get("/auth/callback", callback_handler);
-
-    std::thread server_thread([&svr, port]() {
-        svr.listen("127.0.0.1", port);
-    });
-
-    {
-        std::unique_lock lk(cv_mtx);
-        bool ok = cv.wait_for(lk, std::chrono::minutes(5), [&] { return done; });
-        svr.stop();
-        if (server_thread.joinable()) server_thread.join();
-
-        if (!ok)
-            throw std::runtime_error("OpenAI login timed out after 5 minutes");
-        if (!error_msg.empty())
-            throw std::runtime_error("OpenAI login failed: " + error_msg);
+    OAuthLoopbackResult result = loopback->wait();
+    if (result.timed_out) {
+        throw std::runtime_error("OpenAI login timed out after 5 minutes");
     }
+    if (!result.error.empty()) {
+        throw std::runtime_error("OpenAI login failed: " + result.error);
+    }
+    return exchange_code(result.code, redirect_uri, code_verifier);
+}
 
-    if (received_state != state)
-        throw std::runtime_error("OAuth state mismatch — possible CSRF attempt");
-    if (received_code.empty())
-        throw std::runtime_error("No authorisation code received from OpenAI");
+std::string OpenAIOAuthFlow::build_refresh_request_body(
+    std::string_view client_id, std::string_view refresh_token) {
+    return "{\"client_id\":" + json_string(client_id)
+        + ",\"grant_type\":\"refresh_token\",\"refresh_token\":"
+        + json_string(refresh_token) + "}";
+}
 
-    return exchange_code(received_code, redirect_uri, code_verifier);
+std::string OpenAIOAuthFlow::build_revoke_request_body(
+    std::string_view client_id,
+    std::string_view token,
+    std::string_view token_type_hint) {
+    return "{\"token\":" + json_string(token)
+        + ",\"token_type_hint\":" + json_string(token_type_hint)
+        + ",\"client_id\":" + json_string(client_id) + "}";
 }
 
 OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
@@ -308,11 +480,9 @@ OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
 
     cpr::Response r = cpr::Post(
         cpr::Url{token_url_},
-        cpr::Payload{
-            {"client_id",     client_id_},
-            {"refresh_token", std::string(refresh_token)},
-            {"grant_type",    "refresh_token"},
-        }
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{build_refresh_request_body(client_id_, refresh_token)},
+        cpr::Timeout{15000}
     );
 
     if (r.status_code != 200) {
@@ -320,7 +490,8 @@ OAuthToken OpenAIOAuthFlow::refresh(std::string_view refresh_token) {
             throw OAuthRefreshRejected::by_provider("OpenAI");
         }
         throw std::runtime_error("Token refresh failed ("
-                                 + std::to_string(r.status_code) + "): " + r.text);
+                                 + std::to_string(r.status_code) + "): "
+                                 + oauth_error_detail(r.text));
     }
 
     OAuthToken token = parse_token_response(r.text, req_time);
@@ -350,16 +521,15 @@ void OpenAIOAuthFlow::revoke(const OAuthToken& token) {
 
     cpr::Response r = cpr::Post(
         cpr::Url{revoke_url},
-        cpr::Payload{
-            {"token",           target},
-            {"token_type_hint", use_refresh ? "refresh_token" : "access_token"},
-            {"client_id",       client_id_},
-        },
+        cpr::Header{{"Content-Type", "application/json"}},
+        cpr::Body{build_revoke_request_body(
+            client_id_, target, use_refresh ? "refresh_token" : "access_token")},
         cpr::Timeout{10000});
 
     if (r.status_code < 200 || r.status_code >= 300)
         throw std::runtime_error("OpenAI token revocation failed ("
-                                 + std::to_string(r.status_code) + "): " + r.text);
+                                 + std::to_string(r.status_code) + "): "
+                                 + oauth_error_detail(r.text));
 }
 
 } // namespace core::auth

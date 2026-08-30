@@ -29,11 +29,23 @@ TEST_CASE("OpenAI protocols own their reasoning capability policy", "[llm][effor
         CHECK(supports(*protocol, "o1-preview", ReasoningCapability::Effort));
         CHECK(supports(*protocol, "o4-mini", ReasoningCapability::Effort));
         CHECK(supports(*protocol, "GPT-5", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "gpt-5.6-sol", ReasoningCapability::XHighEffort));
         CHECK(supports(*protocol, "gpt-5.6-sol", ReasoningCapability::MaxEffort));
+        CHECK(supports(*protocol, "gpt-5.6-sol", ReasoningCapability::Disable));
+        CHECK(supports(*protocol, "gpt-5", ReasoningCapability::MinimalEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-5", ReasoningCapability::XHighEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-5", ReasoningCapability::Disable));
+        CHECK_FALSE(supports(*protocol, "gpt-5.6-sol", ReasoningCapability::MinimalEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-5.6-sol", ReasoningCapability::UltraEffort));
         CHECK_FALSE(supports(*protocol, "gpt-5.5", ReasoningCapability::MaxEffort));
         CHECK_FALSE(supports(*protocol, "gpt-4o", ReasoningCapability::Effort));
         CHECK_FALSE(supports(*protocol, "glm-5.2", ReasoningCapability::Effort));
     }
+
+    CodexResponsesProtocol codex;
+    CHECK(supports(codex, "gpt-5.6-sol", ReasoningCapability::UltraEffort));
+    CHECK(supports(codex, "gpt-5.6-terra", ReasoningCapability::UltraEffort));
+    CHECK_FALSE(supports(codex, "gpt-5.6-luna", ReasoningCapability::UltraEffort));
 }
 
 TEST_CASE("Mistral protocol owns its reasoning model allow-list",

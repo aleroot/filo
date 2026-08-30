@@ -122,6 +122,9 @@ Element render_usage_details_panel(
 
     // ── Header & Active Model Badge ──────────────────────────────────────────
     std::string tier_label = is_subscription ? "Subscription (OAuth / Plan)" : "API Key / Metered";
+    if (!rate_limit_info.subscription.tier_label.empty()) {
+        tier_label = rate_limit_info.subscription.tier_label;
+    }
     if (!rate_limit_info.unified_status.empty()) {
         tier_label += " · " + rate_limit_info.unified_status;
     }
@@ -208,6 +211,31 @@ Element render_usage_details_panel(
         }
     }
 
+    if (rate_limit_info.subscription.supplemental_credits.has_value()) {
+        const auto& credits = *rate_limit_info.subscription.supplemental_credits;
+        std::string credits_text = "  Extra Credits: ";
+        if (credits.unlimited) {
+            credits_text += "unlimited";
+        } else if (!credits.balance.empty()) {
+            credits_text += credits.balance;
+        } else {
+            credits_text += credits.available ? "available" : "none available";
+        }
+        rows.push_back(text(std::move(credits_text))
+                       | ftxui::color(credits.available
+                           || credits.unlimited
+                               ? ftxui::Color::Green
+                               : ftxui::Color(ColorWarn)));
+    }
+    if (!rate_limit_info.subscription.notice.empty()) {
+        rows.push_back(text("  " + rate_limit_info.subscription.notice)
+                       | ftxui::color(ColorYellowBright));
+    }
+    if (rate_limit_info.subscription.supplemental_credits.has_value()
+        || !rate_limit_info.subscription.notice.empty()) {
+        rows.push_back(text(""));
+    }
+
     // ── Request & Token Limits (RPM / TPM) ───────────────────────────────────
     if (rate_limit_info.requests_limit > 0 || rate_limit_info.tokens_limit > 0
         || rate_limit_info.requests_remaining > 0 || rate_limit_info.tokens_remaining > 0
@@ -236,6 +264,9 @@ Element render_usage_details_panel(
 
         if (rate_limit_info.is_rate_limited) {
             std::string block_msg = "    ⛔ Provider Rate Limited (429)";
+            if (!rate_limit_info.subscription.limit_reached_reason.empty()) {
+                block_msg += " · " + rate_limit_info.subscription.limit_reached_reason;
+            }
             if (rate_limit_info.retry_after > 0) {
                 block_msg += std::format(" · Retry allowed in {}s", rate_limit_info.retry_after);
             }

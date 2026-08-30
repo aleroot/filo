@@ -156,6 +156,8 @@ public:
         const ModelCatalogDiscoveryOptions& options = {}) const override;
 
 private:
+    [[nodiscard]] std::string_view catalog_id() const noexcept;
+
     [[nodiscard]] std::string resolve_default_model() const;
     void ensure_model_metadata(std::string_view model) const;
     [[nodiscard]] std::optional<ModelInfo> resolved_model_info(

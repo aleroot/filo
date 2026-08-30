@@ -55,6 +55,11 @@ struct OpenAIChatChunk {
 [[nodiscard]] ReasoningCapabilities openai_reasoning_capabilities(
     std::string_view model) noexcept;
 
+/** Normalize a requested effort against an explicit provider/model policy. */
+[[nodiscard]] std::string normalize_openai_reasoning_effort(
+    std::string_view requested,
+    ReasoningCapabilities capabilities);
+
 /**
  * @brief OpenAI Chat Completions wire protocol.
  *

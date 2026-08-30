@@ -76,6 +76,13 @@ protected:
         return ConversationContextStrategy::StatefulPreviousResponse;
     }
 
+    /// Replay-only APIs normally carry system messages inside input. Codex
+    /// keeps them in the dedicated instructions field so PromptPlan content is
+    /// preserved without duplicating system messages.
+    [[nodiscard]] virtual bool replay_system_messages_in_input() const noexcept {
+        return true;
+    }
+
     struct SerializationOptions {
         bool include_store = true;
         bool include_prompt_cache_key = true;
@@ -111,7 +118,6 @@ protected:
     [[nodiscard]] std::string serialize_with_options(
         const ChatRequest& request,
         const SerializationOptions& options) const;
-
     bool include_reasoning_encrypted_ = false;
     std::string default_service_tier_;
     std::shared_ptr<SharedState> shared_state_ = std::make_shared<SharedState>();
@@ -126,10 +132,17 @@ private:
 
 class CodexResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
-    explicit CodexResponsesProtocol(bool include_reasoning_encrypted = false,
+    explicit CodexResponsesProtocol(bool include_reasoning_encrypted = true,
                                     std::string default_service_tier = {},
                                     std::shared_ptr<IProviderClientIdentitySource>
                                         client_identity_source = {});
+
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
+    [[nodiscard]] cpr::Header build_headers(
+        const core::auth::AuthInfo& auth) const override;
+    void on_response(const HttpResponse& response) override;
+    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override;
 
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
     void prepare_headers(cpr::Header& headers,
@@ -160,7 +173,21 @@ public:
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override;
 
+protected:
+    [[nodiscard]] ConversationContextStrategy conversation_context_strategy()
+        const noexcept override {
+        // HTTP responses on the ChatGPT backend are not guaranteed to remain
+        // addressable by previous_response_id. Replay is the durable fallback;
+        // the WebSocket path explicitly opts into incremental continuation.
+        return ConversationContextStrategy::ReplayInput;
+    }
+    [[nodiscard]] bool replay_system_messages_in_input() const noexcept override {
+        return false;
+    }
+
 private:
+    class RateLimitState;
+
     struct TransportState {
         struct LastWebSocketRequest {
             std::string response_id;
@@ -196,6 +223,7 @@ private:
 
     std::shared_ptr<IProviderClientIdentitySource> client_identity_source_;
     std::shared_ptr<TransportState> transport_state_ = std::make_shared<TransportState>();
+    std::shared_ptr<RateLimitState> rate_limit_state_;
     mutable std::vector<std::string> active_response_items_;
     mutable std::string active_transport_turn_id_;
 };

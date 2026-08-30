@@ -7,6 +7,10 @@
 
 namespace core::llm::openai_endpoint {
 
+inline constexpr std::string_view kPublicApiBaseUrl = "https://api.openai.com/v1";
+inline constexpr std::string_view kChatGptCodexBaseUrl =
+    "https://chatgpt.com/backend-api/codex";
+
 [[nodiscard]] inline std::string extract_host_lower(std::string_view url) {
     std::size_t start = url.find("://");
     start = (start == std::string_view::npos) ? 0 : start + 3;
@@ -42,8 +46,8 @@ namespace core::llm::openai_endpoint {
 [[nodiscard]] inline bool is_native_openai_responses_base_url(std::string_view base_url) {
     const std::string normalized = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_trailing_slashes(base_url));
-    return normalized == "https://api.openai.com/v1"
-        || normalized == "https://chatgpt.com/backend-api/codex";
+    return normalized == kPublicApiBaseUrl
+        || normalized == kChatGptCodexBaseUrl;
 }
 
 [[nodiscard]] inline std::string build_azure_chat_completions_url(std::string_view base_url,
