@@ -1398,10 +1398,17 @@ RunResult run(RunOptions opts) {
     auto session_store = std::make_shared<core::session::SessionStore>(
         core::session::SessionStore::default_sessions_dir());
 
-    const std::string project_thread_base_name = [] {
+    // Base for auto-generated thread tab names: the primary workspace's leaf
+    // directory. Mutable because /workspace change rebases it and retitles
+    // auto-named threads (see ThreadRuntimeRegistry::retitle_auto_named);
+    // user-renamed threads are never touched.
+    const auto project_base_name_for = [](const std::filesystem::path& root) {
+        const auto leaf = root.filename().string();
+        return leaf.empty() ? std::string{"thread"} : leaf;
+    };
+    std::string project_thread_base_name = [&] {
         try {
-            const auto leaf = std::filesystem::current_path().filename().string();
-            return leaf.empty() ? std::string{"thread"} : leaf;
+            return project_base_name_for(std::filesystem::current_path());
         } catch (...) {
             return std::string{"thread"};
         }
@@ -2311,6 +2318,7 @@ RunResult run(RunOptions opts) {
                 ThreadRuntimeMetadata{
                     .session_id = data.session_id,
                     .thread_name = allocate_project_thread_name(),
+                    .auto_thread_name = true,
                     .session_name = data.name,
                     .created_at = data.created_at,
                     .file_path = session_store->compute_path(data).string(),
@@ -4401,6 +4409,11 @@ RunResult run(RunOptions opts) {
             context_sources_label = join_context_source_labels(steering_context.source_labels);
         }
 
+        // Auto-generated tab names follow the new primary workspace.
+        project_thread_base_name = project_base_name_for(resolved);
+        thread_runtimes.retitle_auto_named(project_thread_base_name,
+                                           main_runtime->session_id());
+
         return {
             .ok = true,
             .message = std::format("Switched the working directory to '{}'.", resolved.string()),
@@ -5190,6 +5203,7 @@ RunResult run(RunOptions opts) {
             ThreadRuntimeMetadata{
                 .session_id = new_session_id,
                 .thread_name = next_thread_name,
+                .auto_thread_name = true,
                 .session_name = {},
                 .created_at = new_created_at,
                 .file_path = session_store->compute_path(fresh).string(),
@@ -7741,6 +7755,7 @@ RunResult run(RunOptions opts) {
                     if (auto runtime = thread_runtimes.find(sid)) {
                         runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
                             metadata.thread_name = session_picker_result.rename_name;
+                            metadata.auto_thread_name = false;
                         });
                         static_cast<void>(open_threads_picker());
                         return true;
@@ -8763,7 +8778,8 @@ RunResult run(RunOptions opts) {
 
         std::vector<ThreadTab> thread_tabs;
         thread_tab_session_ids.clear();
-        if (auto runtimes = thread_runtimes.snapshot(); runtimes.size() > 1) {
+        if (auto runtimes = thread_runtimes.ordered_snapshot(main_runtime->session_id());
+            runtimes.size() > 1) {
             struct RuntimeTabSnapshot {
                 ThreadRuntime::Ptr runtime;
                 ThreadRuntimeMetadata metadata;
@@ -8773,17 +8789,6 @@ RunResult run(RunOptions opts) {
             for (auto& runtime : runtimes) {
                 snapshots.push_back({runtime, runtime->metadata()});
             }
-            std::ranges::sort(snapshots, [&main_runtime](const auto& lhs, const auto& rhs) {
-                const bool lhs_is_main = lhs.runtime == main_runtime;
-                const bool rhs_is_main = rhs.runtime == main_runtime;
-                if (lhs_is_main != rhs_is_main) {
-                    return lhs_is_main;
-                }
-                if (lhs.metadata.created_at != rhs.metadata.created_at) {
-                    return lhs.metadata.created_at < rhs.metadata.created_at;
-                }
-                return lhs.metadata.session_id < rhs.metadata.session_id;
-            });
             const auto selected_runtime = thread_runtimes.current();
             thread_tabs.reserve(snapshots.size());
             thread_tab_session_ids.reserve(snapshots.size());

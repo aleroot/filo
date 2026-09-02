@@ -1,5 +1,7 @@
 #include "ThreadRuntime.hpp"
 
+#include <algorithm>
+#include <format>
 #include <utility>
 
 namespace tui {
@@ -296,6 +298,52 @@ bool ThreadRuntimeRegistry::erase(std::string_view session_id) {
     }
     runtimes_.erase(it);
     return true;
+}
+
+std::vector<ThreadRuntime::Ptr> ThreadRuntimeRegistry::ordered_snapshot(
+    std::string_view main_session_id) const {
+    auto runtimes = snapshot();
+    std::ranges::sort(runtimes, [&](const auto& lhs, const auto& rhs) {
+        const bool lhs_is_main = lhs->session_id() == main_session_id;
+        const bool rhs_is_main = rhs->session_id() == main_session_id;
+        if (lhs_is_main != rhs_is_main) {
+            return lhs_is_main;
+        }
+        const auto lhs_meta = lhs->metadata();
+        const auto rhs_meta = rhs->metadata();
+        if (lhs_meta.created_at != rhs_meta.created_at) {
+            return lhs_meta.created_at < rhs_meta.created_at;
+        }
+        return lhs_meta.session_id < rhs_meta.session_id;
+    });
+    return runtimes;
+}
+
+void ThreadRuntimeRegistry::retitle_auto_named(std::string_view base_name,
+                                               std::string_view main_session_id) {
+    const auto runtimes = ordered_snapshot(main_session_id);
+
+    std::unordered_set<std::string> used_names;
+    for (const auto& runtime : runtimes) {
+        if (const auto metadata = runtime->metadata();
+            !metadata.auto_thread_name && !metadata.thread_name.empty()) {
+            used_names.insert(metadata.thread_name);
+        }
+    }
+
+    for (const auto& runtime : runtimes) {
+        if (!runtime->metadata().auto_thread_name) {
+            continue;
+        }
+        std::string next_name{base_name};
+        for (std::size_t ordinal = 2; used_names.contains(next_name); ++ordinal) {
+            next_name = std::format("{} {}", base_name, ordinal);
+        }
+        used_names.insert(next_name);
+        runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+            metadata.thread_name = next_name;
+        });
+    }
 }
 
 void ThreadRuntimeRegistry::request_stop_all() {

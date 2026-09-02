@@ -202,3 +202,77 @@ TEST_CASE("ThreadRuntime save generations are scoped per thread",
     CHECK(first->is_latest_save(first_new));
     CHECK(second->is_latest_save(second_only));
 }
+
+TEST_CASE("ThreadRuntimeRegistry ordered_snapshot puts the main thread first",
+          "[tui][thread_runtime][ordering]") {
+    tui::ThreadRuntimeRegistry registry;
+    auto middle = make_runtime("bbbb2222");
+    auto newest = make_runtime("cccc3333");
+    auto main = make_runtime("aaaa1111");
+    middle->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.created_at = "2026-08-08T12:00:00Z";
+    });
+    newest->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.created_at = "2026-08-08T13:00:00Z";
+    });
+    main->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.created_at = "2026-08-08T14:00:00Z";
+    });
+    REQUIRE(registry.insert(middle));
+    REQUIRE(registry.insert(newest));
+    REQUIRE(registry.insert(main));
+
+    const auto ordered = registry.ordered_snapshot(main->session_id());
+    REQUIRE(ordered.size() == 3);
+    CHECK(ordered[0] == main);
+    CHECK(ordered[1] == middle);
+    CHECK(ordered[2] == newest);
+}
+
+TEST_CASE("ThreadRuntimeRegistry retitle_auto_named follows the workspace",
+          "[tui][thread_runtime][workspace]") {
+    tui::ThreadRuntimeRegistry registry;
+
+    auto main = make_runtime("aaaa1111");
+    main->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "main";
+        metadata.created_at = "2026-08-08T12:00:00Z";
+    });
+    auto first_auto = make_runtime("bbbb2222");
+    first_auto->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "oldproj";
+        metadata.auto_thread_name = true;
+        metadata.created_at = "2026-08-08T13:00:00Z";
+    });
+    auto second_auto = make_runtime("cccc3333");
+    second_auto->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "oldproj 2";
+        metadata.auto_thread_name = true;
+        metadata.created_at = "2026-08-08T14:00:00Z";
+    });
+    // A user-renamed thread already holds the new base name: auto titles must
+    // neither take it nor overwrite it.
+    auto user_named = make_runtime("dddd4444");
+    user_named->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "newproj";
+        metadata.created_at = "2026-08-08T15:00:00Z";
+    });
+    REQUIRE(registry.insert(main));
+    REQUIRE(registry.insert(first_auto));
+    REQUIRE(registry.insert(second_auto));
+    REQUIRE(registry.insert(user_named));
+
+    registry.retitle_auto_named("newproj", main->session_id());
+
+    CHECK(main->metadata().thread_name == "main");
+    CHECK(user_named->metadata().thread_name == "newproj");
+    CHECK(first_auto->metadata().thread_name == "newproj 2");
+    CHECK(second_auto->metadata().thread_name == "newproj 3");
+    CHECK(first_auto->metadata().auto_thread_name);
+    CHECK_FALSE(user_named->metadata().auto_thread_name);
+
+    // Retitling is idempotent when the workspace has not actually changed.
+    registry.retitle_auto_named("newproj", main->session_id());
+    CHECK(first_auto->metadata().thread_name == "newproj 2");
+    CHECK(second_auto->metadata().thread_name == "newproj 3");
+}
