@@ -1,6 +1,8 @@
 #include "GoalExecutor.hpp"
 
 #include "core/goal/GoalVerifier.hpp"
+#include "core/llm/OneShotCompletion.hpp"
+#include "core/verification/Verification.hpp"
 
 #include <atomic>
 #include <format>
@@ -71,60 +73,18 @@ constexpr std::string_view kStoppedMarker = "[Generation stopped by user]";
 // Hook construction
 // ---------------------------------------------------------------------------
 
-core::goal::CompletionFn GoalExecutor::make_completion_fn(const CommandContext& ctx) {
-    auto agent = ctx.agent;
-    if (!agent) {
-        return {};
-    }
+core::goal::CompletionFn
+GoalExecutor::make_completion_fn(const CommandContext &ctx) {
+  auto agent = ctx.agent;
+  if (!agent) {
+    return {};
+  }
 
-    return [agent](std::string_view prompt) -> std::expected<std::string, std::string> {
-        auto provider = agent->get_provider();
-        if (!provider) {
-            return std::unexpected(std::string("no active provider"));
-        }
-
-        // One-shot, history-free request: planning, judging, and reflection
-        // must never contaminate (or be contaminated by) the conversation.
-        core::llm::ChatRequest request;
-        request.model = agent->get_active_model_name();
-        request.messages.push_back({"user", std::string(prompt), "", "", {}});
-
-        auto answer = std::make_shared<std::string>();
-        auto completed = std::make_shared<std::atomic<bool>>(false);
-        auto failed = std::make_shared<std::atomic<bool>>(false);
-        try {
-            provider->stream_response(
-                request,
-                [answer, completed, failed](const core::llm::StreamChunk& chunk) {
-                    if (!chunk.content.empty()) {
-                        *answer += chunk.content;
-                    }
-                    if (!chunk.is_final) {
-                        return;
-                    }
-                    if (chunk.is_error) {
-                        failed->store(true, std::memory_order_release);
-                    }
-                    completed->store(true, std::memory_order_release);
-                });
-        } catch (const std::exception& e) {
-            return std::unexpected(std::string(e.what()));
-        } catch (...) {
-            return std::unexpected(std::string("unknown provider error"));
-        }
-
-        if (failed->load(std::memory_order_acquire)) {
-            return std::unexpected(std::string("provider returned an error"));
-        }
-        if (!completed->load(std::memory_order_acquire)) {
-            return std::unexpected(std::string("stream ended without a final response"));
-        }
-        std::string text(trim(*answer));
-        if (text.empty()) {
-            return std::unexpected(std::string("empty model response"));
-        }
-        return text;
-    };
+  return [agent](std::string_view prompt) {
+    return core::llm::complete_once(
+        agent->get_provider(), agent->get_active_model_name(), prompt,
+        [agent] { return agent->is_stop_requested(); });
+  };
 }
 
 std::function<WorkOutcome(const Node&, std::string_view)>
@@ -135,7 +95,6 @@ GoalExecutor::make_work_fn(const CommandContext& ctx) {
     }
 
     return [agent](const Node& node, std::string_view retry_context) -> WorkOutcome {
-        // A work node is one full agent turn with tools: act, don't just think.
         std::string prompt = node.directive.empty() ? node.name : node.directive;
         if (!node.acceptance.empty()) {
             prompt += "\n\nAcceptance criteria:\n" + node.acceptance;
@@ -144,9 +103,19 @@ GoalExecutor::make_work_fn(const CommandContext& ctx) {
             prompt += std::string(retry_context);
         }
 
+        if (node.workspace_access == core::goal::WorkspaceAccess::SharedRead) {
+          const auto evidence =
+              agent->run_read_only_goal_task(node.name, prompt);
+          return evidence.has_value()
+                     ? WorkOutcome{.ok = true, .output = *evidence}
+                     : WorkOutcome{.ok = false, .output = evidence.error()};
+        }
+
         auto output = std::make_shared<std::string>();
         auto interrupted = std::make_shared<std::atomic<bool>>(false);
 
+        // Exclusive work is one full parent turn with tools: act, don't just
+        // think. It is serialized by the graph scheduler.
         agent->clear_stop_request();
         agent->send_message(
             prompt,
@@ -181,6 +150,28 @@ GoalExecutor::make_work_fn(const CommandContext& ctx) {
 GoalExecutor::Handle GoalExecutor::make_engine(const CommandContext& ctx) {
     GoalEngine::Hooks hooks;
     hooks.complete = make_completion_fn(ctx);
+    auto verification_agent = ctx.agent;
+    hooks.run_recipe = [verification_agent](std::string_view recipe_id) {
+      core::goal::RecipeResult result;
+      if (!verification_agent) {
+        result.error = "goal agent is unavailable";
+        return result;
+      }
+      const auto receipt =
+          verification_agent->run_verification_recipe(recipe_id);
+      if (!receipt.has_value()) {
+        result.error = receipt.error();
+        return result;
+      }
+      result.passed = receipt->passed();
+      result.command = receipt->command;
+      result.evidence = receipt->evidence;
+      if (!result.passed) {
+        result.error =
+            std::format("{} exited {}", receipt->command, receipt->exit_code);
+      }
+      return result;
+    };
     hooks.run_command = core::goal::make_popen_command_runner();
     hooks.run_work = make_work_fn(ctx);
 
@@ -215,7 +206,20 @@ void GoalExecutor::plan(const CommandContext& ctx, Handle engine,
     }
 
     ctx.append_history_fn(std::format("\n»  Planning goal graph: {}…\n", objective));
-    const auto planned = engine->create_plan(objective);
+    std::string repository_context;
+    std::vector<std::string> verification_recipe_ids;
+    if (ctx.agent) {
+        const auto discovery = core::verification::Catalog{}.discover(
+            ctx.agent->workspace_snapshot().primary());
+      repository_context =
+          core::verification::Catalog::render_for_prompt(discovery.recipes);
+        repository_context +=
+            core::verification::Catalog::render_warnings(discovery.warnings);
+        verification_recipe_ids =
+            core::verification::Catalog::default_quality_gate(discovery.recipes);
+    }
+    const auto planned = engine->create_plan(
+        objective, repository_context, verification_recipe_ids);
     if (!planned.has_value()) {
         ctx.append_history_fn(std::format("\n✗  Planning failed: {}\n", planned.error()));
         return;

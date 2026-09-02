@@ -10,9 +10,8 @@ namespace core::goal {
 
 GoalEngine::GoalEngine(Hooks hooks)
     : hooks_(std::move(hooks)),
-      verifier_(hooks_.run_command, hooks_.complete),
-      reflector_(hooks_.complete),
-      planner_(hooks_.complete) {}
+      verifier_(hooks_.run_recipe, hooks_.run_command, hooks_.complete),
+      reflector_(hooks_.complete), planner_(hooks_.complete) {}
 
 SchedulerDelegates GoalEngine::make_delegates() {
     SchedulerDelegates delegates;
@@ -46,7 +45,9 @@ void GoalEngine::handle_event(const GoalEvent& event) {
 }
 
 std::expected<void, std::string> GoalEngine::create_plan(std::string_view objective,
-                                                         std::string_view context) {
+                                                         std::string_view context,
+                                                         std::span<const std::string>
+                                                             verification_recipe_ids) {
     // Planning issues a model call; hold only the execution lock across it.
     std::unique_lock run_lock(run_mutex_, std::try_to_lock);
     if (!run_lock.owns_lock()) {
@@ -58,7 +59,8 @@ std::expected<void, std::string> GoalEngine::create_plan(std::string_view object
         run_state_ = RunState::Planning;
     }
 
-    auto planned = planner_.plan(objective, context);
+    auto planned = planner_.plan(objective, context, PlanProfile::FullGoal,
+                                 verification_recipe_ids);
 
     std::lock_guard lock(mutex_);
     if (!planned.has_value()) {
@@ -67,6 +69,9 @@ std::expected<void, std::string> GoalEngine::create_plan(std::string_view object
     }
 
     graph_ = std::move(*planned);
+    planning_context_ = std::string(context);
+    planning_verification_recipe_ids_.assign(verification_recipe_ids.begin(),
+                                             verification_recipe_ids.end());
     waves_executed_ = 0;
     latest_reason_.clear();
     pause_requested_.store(false, std::memory_order_release);
@@ -143,6 +148,7 @@ std::expected<void, std::string> GoalEngine::replan(std::string_view reason) {
     int previous_version = 0;
     std::string objective;
     std::string context;
+    std::vector<std::string> verification_recipe_ids;
     {
         std::lock_guard lock(mutex_);
         if (!graph_.has_value()) {
@@ -150,13 +156,18 @@ std::expected<void, std::string> GoalEngine::replan(std::string_view reason) {
         }
         previous_version = graph_->plan_version();
         objective = std::string(graph_->objective());
+        verification_recipe_ids = planning_verification_recipe_ids_;
 
         // Seed the planner with everything the failed plan learned: this is
         // what makes a replan smarter than a retry.
-        context = std::format("The previous plan (v{}) failed or blocked. Reason: {}\n"
-                              "Lessons accumulated so far:\n",
-                              previous_version,
-                              reason.empty() ? "unspecified" : reason);
+        context = planning_context_;
+        if (!context.empty() && !context.ends_with('\n')) {
+            context += '\n';
+        }
+        context += std::format("The previous plan (v{}) failed or blocked. Reason: {}\n"
+                               "Lessons accumulated so far:\n",
+                               previous_version,
+                               reason.empty() ? "unspecified" : reason);
         for (const Node& node : graph_->nodes()) {
             for (const std::string& lesson : node.lessons) {
                 context += std::format("- [{}] {}\n", node.name, lesson);
@@ -164,7 +175,8 @@ std::expected<void, std::string> GoalEngine::replan(std::string_view reason) {
         }
     }
 
-    auto planned = planner_.plan(objective, context);
+    auto planned = planner_.plan(objective, context, PlanProfile::FullGoal,
+                                 verification_recipe_ids);
     if (!planned.has_value()) {
         return std::unexpected(planned.error());
     }
@@ -172,6 +184,7 @@ std::expected<void, std::string> GoalEngine::replan(std::string_view reason) {
 
     std::lock_guard lock(mutex_);
     graph_ = std::move(*planned);
+    planning_context_ = std::move(context);
     waves_executed_ = 0;
     latest_reason_.clear();
     pause_requested_.store(false, std::memory_order_release);
@@ -182,6 +195,8 @@ std::expected<void, std::string> GoalEngine::replan(std::string_view reason) {
 void GoalEngine::clear() {
     std::lock_guard lock(mutex_);
     graph_.reset();
+    planning_context_.clear();
+    planning_verification_recipe_ids_.clear();
     run_state_ = RunState::Idle;
     latest_reason_.clear();
     waves_executed_ = 0;
@@ -310,6 +325,8 @@ std::expected<void, std::string> GoalEngine::restore_snapshot(std::string_view j
     }
 
     graph_.reset();
+    planning_context_.clear();
+    planning_verification_recipe_ids_.clear();
     simdjson::dom::element graph_element;
     if (doc["graph"].get(graph_element) == simdjson::SUCCESS) {
         // Re-serialize the embedded graph object for GoalGraph::from_json.
@@ -319,6 +336,14 @@ std::expected<void, std::string> GoalEngine::restore_snapshot(std::string_view j
             return std::unexpected(restored.error());
         }
         graph_ = std::move(*restored);
+        for (const Node& node : graph_->nodes()) {
+            for (const std::string& recipe_id : node.verification_recipe_ids) {
+                if (std::ranges::find(planning_verification_recipe_ids_, recipe_id) ==
+                    planning_verification_recipe_ids_.end()) {
+                    planning_verification_recipe_ids_.push_back(recipe_id);
+                }
+            }
+        }
     } else if (restored_state != RunState::Idle) {
         restored_state = RunState::Idle;
     }

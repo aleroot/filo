@@ -10,8 +10,10 @@
 #include <expected>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::goal {
 
@@ -43,6 +45,7 @@ class GoalEngine {
 public:
     struct Hooks {
         CompletionFn complete;
+        RecipeRunner run_recipe;
         CommandRunner run_command;
         std::function<WorkOutcome(const Node&, std::string_view)> run_work;
         std::function<bool(const Node&)> await_gate;
@@ -57,7 +60,8 @@ public:
     /// existing plan. Not allowed while a run is in progress.
     [[nodiscard]] std::expected<void, std::string> create_plan(
         std::string_view objective,
-        std::string_view context = {});
+        std::string_view context = {},
+        std::span<const std::string> verification_recipe_ids = {});
 
     /// Cooperative execution: run exactly one wave. Safe to call from a UI
     /// pump or a background worker; returns the engine run state afterwards.
@@ -113,6 +117,8 @@ private:
     std::optional<GoalGraph> graph_;
     RunState run_state_ = RunState::Idle;
     std::string latest_reason_;
+    std::string planning_context_;
+    std::vector<std::string> planning_verification_recipe_ids_;
     std::uint64_t waves_executed_ = 0;
     std::atomic<bool> pause_requested_{false};
 };

@@ -124,6 +124,21 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
             "Primary: " + context.workspace_view().primary().string()));
 }
 
+TEST_CASE("ContextBuilder gives AUTO a controller-owned execution contract",
+          "[context][builder][auto]") {
+  auto workspace = make_temp_workspace("filo_context_builder_auto");
+  const auto context = make_context(workspace.path());
+  const std::string prompt = build_prompt(context, "AUTO");
+
+  CHECK_THAT(prompt,
+             Catch::Matchers::ContainsSubstring("running in AUTO mode"));
+  CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("AUTO controller"));
+  CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring(
+                         "fan out independent read-only"));
+  CHECK_THAT(prompt,
+             Catch::Matchers::ContainsSubstring("fresh verification evidence"));
+}
+
 TEST_CASE("ContextBuilder renders ordered additional workspace directories",
           "[context][builder][workspace]") {
     auto primary = make_temp_workspace("filo_context_builder_primary");

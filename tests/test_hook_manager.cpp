@@ -91,6 +91,26 @@ core::hooks::HookDecision run_pre_tool_use_with_config(
     return decision;
 }
 
+core::hooks::StopDecision run_stop_with_config(
+    const std::string& label,
+    std::string hook_config,
+    std::string payload_json = R"({"mutation_observed":true})") {
+    const auto sandbox = make_temp_dir(label);
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
+    const auto project_dir = sandbox / "project";
+    write_text(
+        project_dir / ".filo" / "config.json",
+        R"({"hooks":{"stop":[)" + std::move(hook_config) + R"(]}})");
+    core::config::ConfigManager::get_instance().load(project_dir);
+
+    const auto decision = core::hooks::run_stop(
+        std::move(payload_json), make_hook_test_context(project_dir));
+
+    reset_config(sandbox);
+    fs::remove_all(sandbox);
+    return decision;
+}
+
 } // namespace
 
 TEST_CASE("PreToolUse hook can deny via Claude-style JSON", "[hooks]") {
@@ -122,4 +142,105 @@ TEST_CASE("PreToolUse hook exit code 2 blocks tool execution", "[hooks]") {
 
     REQUIRE_FALSE(decision.allowed);
     REQUIRE_THAT(decision.reason, Catch::Matchers::ContainsSubstring("blocked"));
+}
+
+TEST_CASE("A broken advisory PreToolUse hook stays permissive", "[hooks]") {
+    const auto decision = run_pre_tool_use_with_config(
+        "filo_hook_broken_advisory",
+        R"("filo-hook-binary-that-does-not-exist")",
+        R"({"tool_name":"run_terminal_command","arguments":"{}"})");
+
+    REQUIRE(decision.allowed);
+    REQUIRE_FALSE(decision.approved);
+}
+
+TEST_CASE("A fail-closed PreToolUse hook denies when it cannot run", "[hooks]") {
+    // A policy hook whose interpreter is missing must not silently authorize
+    // every tool call; that would turn a security control into a no-op.
+    const auto decision = run_pre_tool_use_with_config(
+        "filo_hook_failclosed_missing",
+        R"({"name":"policy","command":"filo-hook-binary-that-does-not-exist","fail_closed":true})",
+        R"({"tool_name":"run_terminal_command","arguments":"{}"})");
+
+    REQUIRE_FALSE(decision.allowed);
+    REQUIRE_FALSE(decision.approved);
+    REQUIRE_THAT(decision.reason,
+                 Catch::Matchers::ContainsSubstring("policy"));
+}
+
+TEST_CASE("A fail-closed PreToolUse hook denies on a non-zero exit", "[hooks]") {
+    const auto decision = run_pre_tool_use_with_config(
+        "filo_hook_failclosed_exit",
+        R"({"name":"policy","command":"printf crashed; exit 9","fail_closed":true})",
+        R"({"tool_name":"run_terminal_command","arguments":"{}"})");
+
+    REQUIRE_FALSE(decision.allowed);
+    REQUIRE_THAT(decision.reason, Catch::Matchers::ContainsSubstring("9"));
+}
+
+TEST_CASE("Stop hook can request another turn with structured output", "[hooks]") {
+    const auto decision = run_stop_with_config(
+        "filo_hook_stop_followup",
+        R"("printf '{\"decision\":\"block\",\"reason\":\"run the integration suite\"}'")");
+
+    REQUIRE_FALSE(decision.complete);
+    REQUIRE(decision.followup_message == "run the integration suite");
+    REQUIRE_FALSE(decision.quality_gate_configured);
+}
+
+TEST_CASE("Successful quality stop hook provides authoritative evidence", "[hooks]") {
+    const auto decision = run_stop_with_config(
+        "filo_hook_quality_pass",
+        R"({"name":"project-tests","command":"exit 0","quality_gate":true})");
+
+    REQUIRE(decision.complete);
+    REQUIRE(decision.quality_gate_configured);
+    REQUIRE(decision.quality_gate_passed);
+}
+
+TEST_CASE("Quality stop hooks fail closed", "[hooks]") {
+    const auto decision = run_stop_with_config(
+        "filo_hook_quality_failure",
+        R"({"name":"project-tests","command":"printf failed; exit 7","quality_gate":true})");
+
+    REQUIRE_FALSE(decision.complete);
+    REQUIRE(decision.quality_gate_configured);
+    REQUIRE_FALSE(decision.quality_gate_passed);
+    REQUIRE_THAT(decision.reason, Catch::Matchers::ContainsSubstring("status 7"));
+}
+
+TEST_CASE("Hook matcher limits lifecycle execution", "[hooks]") {
+    const auto decision = run_stop_with_config(
+        "filo_hook_matcher",
+        R"({"command":"exit 9","quality_gate":true,"matcher":"mutation_observed\\\":false"})");
+
+    REQUIRE(decision.complete);
+    REQUIRE_FALSE(decision.quality_gate_configured);
+}
+
+TEST_CASE("Completion hook gate bounds repeated feedback", "[hooks]") {
+    const auto sandbox = make_temp_dir("filo_hook_completion_gate");
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
+    const auto project_dir = sandbox / "project";
+    write_text(
+        project_dir / ".filo" / "config.json",
+        R"({"hooks":{"stop":["printf retry; exit 2"]}})");
+    core::config::ConfigManager::get_instance().load(project_dir);
+    const auto context = make_hook_test_context(project_dir);
+    core::hooks::CompletionGateState state;
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const auto result = core::hooks::evaluate_completion("{}", context, state);
+        REQUIRE(result.action ==
+                core::session::TurnCompletionAction::Continue);
+        REQUIRE(result.message == "retry");
+    }
+    const auto exhausted = core::hooks::evaluate_completion("{}", context, state);
+    REQUIRE(exhausted.action ==
+            core::session::TurnCompletionAction::Fail);
+    REQUIRE_THAT(exhausted.message,
+                 Catch::Matchers::ContainsSubstring("loop limit"));
+
+    reset_config(sandbox);
+    fs::remove_all(sandbox);
 }

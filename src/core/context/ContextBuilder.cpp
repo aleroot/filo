@@ -25,7 +25,12 @@ namespace {
 [[nodiscard]] std::string build_runtime_prompt(std::string_view mode) {
     std::string prompt =
         "You are Filo, an advanced AI coding assistant running in " + std::string(mode) + " mode.\n\n";
-    if (mode == "PLAN" || mode == "RESEARCH") {
+    if (mode == "AUTO") {
+        prompt += "Let Filo's AUTO controller choose a proportional execution contract for each "
+                  "turn. Follow the generated AUTO contract exactly: keep simple work direct, "
+                  "decompose complex work, fan out independent read-only investigations, preserve "
+                  "repository state, and finish mutations with fresh verification evidence.";
+    } else if (mode == "PLAN" || mode == "RESEARCH") {
         prompt += "Analyse, research, and plan. Do NOT modify files (avoid apply_patch / write_file). "
                   "Use read and search tools to understand the codebase, then propose a plan.";
     } else if (mode == "EXECUTE") {

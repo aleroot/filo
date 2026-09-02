@@ -1,19 +1,24 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/context/SessionContext.hpp"
+#include "core/scm/GitWorkspaceCoordinator.hpp"
 #include "core/scm/ScmFactory.hpp"
+#include "core/workspace/FileAccessScope.hpp"
 #include "core/workspace/PathVisibility.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
-#include "core/workspace/FileAccessScope.hpp"
 #include "core/workspace/Workspace.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
-#include <fstream>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <future>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 TEST_CASE("Workspace bounds logic", "[Workspace]") {
     using core::workspace::Workspace;
@@ -263,6 +268,130 @@ TEST_CASE("SourceControlProvider lists branch refs through abstraction", "[Works
 
     fs::current_path(guard.old, ec);
     fs::remove_all(temp_dir, ec);
+}
+
+TEST_CASE("GitWorkspaceCoordinator serializes writers behind shared readers",
+          "[Workspace][SCM][coordinator]") {
+  const auto root = std::filesystem::temp_directory_path() /
+                    std::format("filo-workspace-lease-{}", std::rand());
+  std::error_code error;
+  std::filesystem::create_directories(root / ".git", error);
+  std::filesystem::create_directories(root / "nested", error);
+  REQUIRE_FALSE(error);
+
+  auto registry =
+      std::make_shared<core::scm::WorkspaceLeaseRegistry>();
+  core::scm::GitWorkspaceCoordinator reader_coordinator(registry);
+  core::scm::GitWorkspaceCoordinator writer_coordinator(registry);
+  auto first_reader =
+      reader_coordinator.acquire(root, core::goal::WorkspaceAccess::SharedRead);
+  auto second_reader = reader_coordinator.acquire(
+      root / "nested", core::goal::WorkspaceAccess::SharedRead);
+  REQUIRE(first_reader.owns_lock());
+  REQUIRE(second_reader.owns_lock());
+  REQUIRE(first_reader.execution_root() == second_reader.execution_root());
+
+  // A separately owned registry is intentionally isolated. This proves that
+  // coordination is dependency-injected rather than process-global.
+  core::scm::GitWorkspaceCoordinator isolated_coordinator;
+  auto isolated_writer = isolated_coordinator.acquire(
+      root, core::goal::WorkspaceAccess::ExclusiveWrite);
+  REQUIRE(isolated_writer.owns_lock());
+
+  std::promise<void> started;
+  auto started_future = started.get_future();
+  auto writer = std::async(std::launch::async, [&] {
+    started.set_value();
+    return writer_coordinator.acquire(
+        root, core::goal::WorkspaceAccess::ExclusiveWrite);
+  });
+  started_future.wait();
+  REQUIRE(writer.wait_for(std::chrono::milliseconds(50)) ==
+          std::future_status::timeout);
+
+  first_reader = {};
+  second_reader = {};
+  REQUIRE(writer.wait_for(std::chrono::seconds(2)) ==
+          std::future_status::ready);
+  REQUIRE(writer.get().owns_lock());
+  std::filesystem::remove_all(root, error);
+}
+
+TEST_CASE(
+    "GitWorkspaceCoordinator audits repository transitions and dirty work",
+    "[Workspace][SCM][coordinator]") {
+  if (std::system("git --version >/dev/null 2>&1") != 0) {
+    SKIP("git is not available in this environment");
+  }
+
+  namespace fs = std::filesystem;
+  struct CwdGuard {
+    fs::path old;
+    ~CwdGuard() {
+      std::error_code error;
+      fs::current_path(old, error);
+    }
+  } guard{fs::current_path()};
+
+  std::error_code error;
+  const fs::path root = fs::temp_directory_path() /
+                        std::format("filo-workspace-audit-{}", std::rand());
+  fs::remove_all(root, error);
+  fs::create_directories(root, error);
+  REQUIRE_FALSE(error);
+  fs::current_path(root);
+  REQUIRE(std::system("git init -q") == 0);
+  {
+    std::ofstream file("tracked.txt");
+    file << "base\n";
+  }
+  REQUIRE(std::system("git add tracked.txt") == 0);
+  REQUIRE(std::system("git -c user.name=Filo -c "
+                      "user.email=filo@example.invalid commit -qm base") == 0);
+  {
+    std::ofstream file("tracked.txt", std::ios::app);
+    file << "pre-existing work\n";
+  }
+
+  core::scm::GitWorkspaceCoordinator coordinator;
+  const auto baseline = coordinator.capture(root);
+  REQUIRE(baseline.has_value());
+  REQUIRE(baseline->changes.size() == 1);
+  REQUIRE(baseline->changes.front().path == "tracked.txt");
+
+  REQUIRE(std::system("git add tracked.txt") == 0);
+  REQUIRE(
+      std::system("git -c user.name=Filo -c user.email=filo@example.invalid "
+                  "commit -qm transition") == 0);
+  const core::scm::WorkspaceAudit audit = coordinator.audit(*baseline);
+  REQUIRE(audit.repository_available);
+  REQUIRE(audit.revision_changed);
+  REQUIRE(audit.requires_reconciliation());
+  REQUIRE(audit.preexisting_changes_removed ==
+          std::vector<std::string>{"tracked.txt"});
+  REQUIRE_THAT(
+      core::scm::GitWorkspaceCoordinator::reconciliation_follow_up(audit),
+      Catch::Matchers::ContainsSubstring("Repository reconciliation:"));
+
+  fs::current_path(guard.old, error);
+  fs::remove_all(root, error);
+}
+
+TEST_CASE("GitWorkspaceCoordinator fails closed when a baseline cannot be re-read",
+          "[Workspace][SCM][coordinator]") {
+  core::scm::RepositorySnapshot baseline{
+      .root = std::filesystem::temp_directory_path() /
+              std::format("filo-missing-repository-{}", std::rand()),
+      .branch = "main",
+      .revision = "abc123",
+  };
+  std::error_code error;
+  std::filesystem::remove_all(baseline.root, error);
+
+  core::scm::GitWorkspaceCoordinator coordinator;
+  const auto audit = coordinator.audit(baseline);
+  REQUIRE_FALSE(audit.repository_available);
+  REQUIRE(audit.requires_reconciliation());
 }
 
 TEST_CASE("Scratch scope widens workspace bounds without touching project roots",

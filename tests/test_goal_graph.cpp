@@ -217,6 +217,8 @@ TEST_CASE("GoalGraph JSON round-trip preserves state", "[goal][graph][json]") {
     REQUIRE(graph.transition(work, NodeState::Running).has_value());
     graph.node(work)->lessons.push_back("lesson one");
     graph.node(work)->attempts = 1;
+    graph.node(*graph.find("verify"))->verification_recipe_ids = {
+        "cmake:test", "cmake:build"};
     // Running must survive a snapshot as Ready, never as phantom work.
     const std::string json = graph.to_json();
 
@@ -230,8 +232,22 @@ TEST_CASE("GoalGraph JSON round-trip preserves state", "[goal][graph][json]") {
     REQUIRE(restored_work->state == NodeState::Ready);
     REQUIRE(restored_work->attempts == 1);
     REQUIRE(restored_work->lessons.size() == 1);
-    REQUIRE(restored->node(*restored->find("verify"))->retry_target == work);
+    const Node *restored_verify = restored->node(*restored->find("verify"));
+    REQUIRE(restored_verify->retry_target == work);
+    REQUIRE(restored_verify->verification_recipe_ids ==
+            std::vector<std::string>{"cmake:test", "cmake:build"});
     REQUIRE(restored->validate().has_value());
+}
+
+TEST_CASE("GoalGraph rejects parallel writers", "[goal][graph][capability]") {
+  GoalGraph graph;
+  Node writer = make_work("writer");
+  writer.parallelizable = true;
+  writer.workspace_access = WorkspaceAccess::ExclusiveWrite;
+  REQUIRE(graph.add_node(std::move(writer)).has_value());
+  const auto valid = graph.validate();
+  REQUIRE_FALSE(valid.has_value());
+  REQUIRE_THAT(valid.error(), ContainsSubstring("shared-read"));
 }
 
 TEST_CASE("GoalGraph from_json rejects garbage", "[goal][graph][json]") {
@@ -305,6 +321,42 @@ TEST_CASE("GoalVerifier prefers deterministic checks over the judge model", "[go
     const Node without_check = make_verify("v2");
     REQUIRE_FALSE(verifier.verify(without_check, VerifyContext{}).passed);
     REQUIRE(model_called);
+}
+
+TEST_CASE(
+    "GoalVerifier executes trusted recipes without invoking shell strings",
+    "[goal][verifier][recipe]") {
+  std::vector<std::string> executed;
+  bool legacy_shell_called = false;
+  bool model_called = false;
+  GoalVerifier verifier(
+      [&](std::string_view recipe_id) {
+        executed.emplace_back(recipe_id);
+        return RecipeResult{
+            .passed = recipe_id != "lint",
+            .command = std::string(recipe_id),
+            .evidence = recipe_id == "lint" ? "lint failed" : "passed",
+            .error = recipe_id == "lint" ? "exit 1" : "",
+        };
+      },
+      [&](std::string_view) {
+        legacy_shell_called = true;
+        return CommandResult{.exit_code = 0};
+      },
+      [&](std::string_view) -> std::expected<std::string, std::string> {
+        model_called = true;
+        return std::string("PASS\nnot consulted");
+      });
+
+  Node node = make_verify("trusted", "model supplied shell command");
+  node.verification_recipe_ids = {"build", "lint", "test"};
+  const Verdict verdict = verifier.verify(node, VerifyContext{});
+  REQUIRE_FALSE(verdict.passed);
+  REQUIRE(verdict.deterministic);
+  REQUIRE(executed == std::vector<std::string>{"build", "lint"});
+  REQUIRE_FALSE(legacy_shell_called);
+  REQUIRE_FALSE(model_called);
+  REQUIRE_THAT(verdict.evidence, ContainsSubstring("lint failed"));
 }
 
 TEST_CASE("popen command runner executes real commands", "[goal][verifier][popen]") {
@@ -408,15 +460,52 @@ TEST_CASE("GoalPlanner rejects cycles and reserved kinds", "[goal][planner]") {
         R"({"nodes":[{"name":"r","kind":"replan"}]})", "x").has_value());
 }
 
+TEST_CASE("GoalPlanner rejects parallel write capability conflicts",
+          "[goal][planner][capability]") {
+  REQUIRE_FALSE(GoalPlanner::parse_plan_json(
+                    R"({"nodes":[{"name":"writer","kind":"work","parallel":true,
+             "workspace_access":"exclusive_write"}]})",
+                    "x")
+                    .has_value());
+}
+
+TEST_CASE(
+    "AUTO planner falls back when the writer does not depend on exploration",
+    "[goal][planner][auto]") {
+  GoalPlanner planner(
+      [](std::string_view) -> std::expected<std::string, std::string> {
+        return std::string(R"({
+            "nodes":[
+              {"name":"explore","kind":"work","parallel":true,
+               "workspace_access":"shared_read"},
+              {"name":"write","kind":"work",
+               "workspace_access":"exclusive_write"}
+            ],
+            "edges":[]
+        })");
+      });
+  const auto planned =
+      planner.plan("implement safely", {}, PlanProfile::AutoExecution);
+  REQUIRE(planned.has_value());
+  REQUIRE(planned->size() == 1);
+  REQUIRE(planned->find("goal").has_value());
+  REQUIRE(planned->node(*planned->find("goal"))->workspace_access ==
+          WorkspaceAccess::ExclusiveWrite);
+}
+
 TEST_CASE("GoalPlanner falls back to a linear plan on garbage", "[goal][planner]") {
     GoalPlanner planner([](std::string_view) -> std::expected<std::string, std::string> {
         return std::string("total garbage with no json");
     });
-    auto planned = planner.plan("do something");
+    const std::vector<std::string> recipe_ids{"cmake:build", "cmake:test"};
+    auto planned = planner.plan("do something", {}, PlanProfile::FullGoal,
+                                recipe_ids);
     REQUIRE(planned.has_value());
     REQUIRE(planned->size() == 2); // work + verify fallback
     REQUIRE(planned->node(*planned->find("verify"))->retry_target
             == *planned->find("goal"));
+    REQUIRE(planned->node(*planned->find("verify"))->verification_recipe_ids ==
+            recipe_ids);
     REQUIRE(planned->validate().has_value());
 }
 
@@ -512,6 +601,7 @@ TEST_CASE("GoalScheduler runs parallelizable work concurrently", "[goal][schedul
     for (int i = 0; i < 3; ++i) {
         Node explorer = make_work(std::format("explore-{}", i));
         explorer.parallelizable = true;
+        explorer.workspace_access = WorkspaceAccess::SharedRead;
         explorers.push_back(*graph.add_node(std::move(explorer)));
     }
     Node fan_in;

@@ -1,5 +1,6 @@
 #include "DelegatedAgentRunner.hpp"
 
+#include "AgentMode.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../memory/MemorySystem.hpp"
 
@@ -87,9 +88,14 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
             : core::memory::make_memory_system(core::memory::MemoryConfig{
                   .tool_recovery = core::config::ConfigManager::get_instance()
                                        .get_config()
-                                       .tool_recovery}));
+                                       .tool_recovery}),
+        request.workspace_leases);
     agent->set_active_provider_name(request.provider_name);
-    agent->set_mode(request.mode);
+    // Last line of defence: AUTO is a parent-transaction mode. If a caller
+    // still forwards it, coerce to BUILD so the child cannot re-enter leases.
+    agent->set_mode(is_auto_mode(agent_mode_from_string(request.mode))
+                        ? std::string(to_string(AgentMode::Build))
+                        : request.mode);
     if (!request.model.empty()) {
         agent->set_active_model(request.model);
     }

@@ -270,4 +270,71 @@ std::vector<BranchRef> GitProvider::list_branch_refs() const {
   return refs;
 }
 
+std::optional<RepositorySnapshot> GitProvider::repository_snapshot() const {
+  const auto revision =
+      exec_cmd(git_command(root_dir_, "rev-parse --verify HEAD"), 256);
+  if (revision.exit_code != 0) {
+    return std::nullopt;
+  }
+  const auto branch = exec_cmd(
+      git_command(root_dir_, "symbolic-ref --quiet --short HEAD"), 512);
+  const auto status = exec_cmd(
+      git_command(root_dir_, "--no-optional-locks status --porcelain=v1 -z "
+                             "--untracked-files=normal"),
+      1024 * 1024);
+  if (status.exit_code != 0 || status.truncated) {
+    return std::nullopt;
+  }
+
+  RepositorySnapshot snapshot{
+      .root = root_dir_,
+      .branch = branch.exit_code == 0 ? branch.output : std::string{},
+      .revision = revision.output,
+      .status_fingerprint = status.fingerprint,
+  };
+  while (!snapshot.branch.empty() &&
+         std::isspace(static_cast<unsigned char>(snapshot.branch.back()))) {
+    snapshot.branch.pop_back();
+  }
+  while (!snapshot.revision.empty() &&
+         std::isspace(static_cast<unsigned char>(snapshot.revision.back()))) {
+    snapshot.revision.pop_back();
+  }
+
+  std::size_t cursor = 0;
+  while (cursor < status.output.size()) {
+    const auto end = status.output.find('\0', cursor);
+    if (end == std::string::npos) {
+      break;
+    }
+    const std::string_view entry(status.output.data() + cursor, end - cursor);
+    cursor = end + 1;
+    if (entry.size() < 4) {
+      continue;
+    }
+    const char index_status = entry[0];
+    const char worktree_status = entry[1];
+    snapshot.changes.push_back(StatusItem{
+        .path = std::string(entry.substr(3)),
+        .status_code = worktree_status != ' ' ? worktree_status : index_status,
+    });
+
+    // Porcelain v1 emits a second NUL-delimited path after rename/copy entries.
+    if (index_status == 'R' || index_status == 'C' || worktree_status == 'R' ||
+        worktree_status == 'C') {
+      const auto original_end = status.output.find('\0', cursor);
+      if (original_end == std::string::npos) {
+        break;
+      }
+      snapshot.changes.push_back(StatusItem{
+          .path = status.output.substr(cursor, original_end - cursor),
+          .status_code =
+              index_status == 'C' || worktree_status == 'C' ? 'C' : 'R',
+      });
+      cursor = original_end + 1;
+    }
+  }
+  return snapshot;
+}
+
 } // namespace core::scm

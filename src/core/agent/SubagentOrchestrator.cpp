@@ -1,5 +1,6 @@
 #include "SubagentOrchestrator.hpp"
 
+#include "AgentMode.hpp"
 #include "DelegatedAgentRunner.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderFactory.hpp"
@@ -107,9 +108,11 @@ std::vector<std::string> SubagentOrchestrator::ExecutionPlan::allowed_tool_names
 SubagentOrchestrator::SubagentOrchestrator(
     core::tools::ToolManager& tool_manager,
     const core::config::AppConfig* app_config,
-    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry)
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry,
+    std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases)
     : tool_manager_(tool_manager)
     , session_stats_registry_(std::move(session_stats_registry))
+    , workspace_leases_(std::move(workspace_leases))
     , profiles_(make_default_profiles())
     , app_config_(app_config) {
     if (app_config != nullptr) {
@@ -308,7 +311,7 @@ std::string SubagentOrchestrator::execute_task(
             resume_state = DelegatedAgentRunner::ResumeState{
                 .messages = session->history,
                 .context_summary = session->context_summary,
-                .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
+                .mode = delegated_mode_name(context.parent_mode, plan->read_only),
             };
         }
     }
@@ -318,7 +321,7 @@ std::string SubagentOrchestrator::execute_task(
         .provider_name = plan->provider_name,
         .tool_manager = tool_manager_,
         .session_context = context.session_context,
-        .mode = context.parent_mode.empty() ? "BUILD" : std::string(context.parent_mode),
+        .mode = delegated_mode_name(context.parent_mode, plan->read_only),
         .model = plan->model_name,
         .response_format = plan->response_format,
         .allowed_tools = plan->allowed_tool_names(),
@@ -332,6 +335,7 @@ std::string SubagentOrchestrator::execute_task(
         .parent_tool_call_id = context.parent_tool_call_id,
         .resume_state = std::move(resume_state),
         .session_stats_registry = session_stats_registry_,
+        .workspace_leases = workspace_leases_,
         .memory_system = context.memory_system,
         .timeout = std::chrono::minutes(30),
         .cancellation_requested = context.cancellation_requested,

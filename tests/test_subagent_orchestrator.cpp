@@ -495,3 +495,52 @@ TEST_CASE("SubagentOrchestrator fails clearly when provider override is unavaila
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("\"error\""));
     REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("provider-that-does-not-exist"));
 }
+
+TEST_CASE("AUTO parent mode is not inherited by delegated workers",
+          "[agent][orchestration][auto]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+
+    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ReadFileTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+
+    core::agent::SubagentOrchestrator orchestrator(tool_manager);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto explore = orchestrator.execute_task(
+        R"({"description":"scan repo","prompt":"find the scheduler","subagent_type":"explore"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "AUTO",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+    REQUIRE_FALSE(explore.contains("\"error\""));
+
+    const auto general = orchestrator.execute_task(
+        R"({"description":"implement fix","prompt":"apply the fix","subagent_type":"general"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "AUTO",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+    REQUIRE_FALSE(general.contains("\"error\""));
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() >= 2);
+    const auto system_text = [](const core::llm::ChatRequest& request) {
+        if (request.messages.empty()) return std::string{};
+        return request.messages.front().content;
+    };
+    CHECK_THAT(system_text(requests[0]), Catch::Matchers::ContainsSubstring("RESEARCH"));
+    CHECK_THAT(system_text(requests[0]), !Catch::Matchers::ContainsSubstring("AUTO"));
+    CHECK_THAT(system_text(requests[1]), Catch::Matchers::ContainsSubstring("BUILD"));
+    CHECK_THAT(system_text(requests[1]), !Catch::Matchers::ContainsSubstring("AUTO"));
+}

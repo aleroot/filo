@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -9,12 +10,20 @@ namespace core::scm {
 
 struct StatusItem {
   std::string path;
-  char status_code; // 'M'odified, 'A'dded, 'D'eleted, '?'Untracked, etc.
+  char status_code = '?'; // 'M'odified, 'A'dded, 'D'eleted, '?'Untracked, etc.
 };
 
 struct BranchRef {
   std::string name;
   std::string description;
+};
+
+struct RepositorySnapshot {
+  std::filesystem::path root;
+  std::string branch;
+  std::string revision;
+  std::vector<StatusItem> changes;
+  std::uint64_t status_fingerprint = 0;
 };
 
 /**
@@ -61,6 +70,13 @@ public:
    */
   [[nodiscard]] virtual std::vector<BranchRef> list_branch_refs() const {
     return {};
+  }
+
+  /// Stable Git-like repository identity and working-tree inventory used by
+  /// AUTO's transaction coordinator. Unsupported SCMs return nullopt.
+  [[nodiscard]] virtual std::optional<RepositorySnapshot>
+  repository_snapshot() const {
+    return std::nullopt;
   }
 
   /**

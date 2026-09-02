@@ -1,16 +1,20 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "TestSessionContext.hpp"
 #include "core/agent/Agent.hpp"
 #include "core/agent/RepositoryContextMessage.hpp"
+#include "core/scm/GitWorkspaceCoordinator.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/tools/ShellTool.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/ToolNames.hpp"
-#include "TestSessionContext.hpp"
+#include "core/tools/VerificationTool.hpp"
+#include "core/tools/WriteFileTool.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -238,6 +242,136 @@ public:
 private:
     mutable std::mutex mutex_;
     std::vector<core::llm::ChatRequest> requests_;
+};
+
+class AutoQualityProvider final : public core::llm::LLMProvider {
+public:
+  void stream_response(
+      const core::llm::ChatRequest &request,
+      std::function<void(const core::llm::StreamChunk &)> callback) override {
+    {
+      std::lock_guard lock(mutex_);
+      requests_.push_back(request);
+    }
+
+    if (std::ranges::any_of(
+            request.messages, [](const core::llm::Message &message) {
+              return message.content.contains(
+                  "You are the planning module of an autonomous coding agent");
+            })) {
+      callback(core::llm::StreamChunk::make_content(
+          R"({"nodes":[{"name":"implement","kind":"work","directive":"Implement the requested change","workspace_access":"exclusive_write"}],"edges":[]})"));
+      callback(core::llm::StreamChunk::make_final());
+      return;
+    }
+
+    const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (call == 1) {
+      emit_tool(callback, "auto-write", core::tools::names::kWriteFile,
+                R"({"file_path":"auto-quality.txt","content":"verified\n"})");
+      return;
+    }
+    if (call == 2) {
+      callback(
+          core::llm::StreamChunk::make_content("Implementation complete."));
+      callback(core::llm::StreamChunk::make_final());
+      return;
+    }
+    callback(core::llm::StreamChunk::make_content("Unexpected extra turn."));
+    callback(core::llm::StreamChunk::make_final());
+  }
+
+  [[nodiscard]] int call_count() const noexcept {
+    return calls_.load(std::memory_order_acquire);
+  }
+
+  [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+    std::lock_guard lock(mutex_);
+    return requests_;
+  }
+
+private:
+  static void
+  emit_tool(const std::function<void(const core::llm::StreamChunk &)> &callback,
+            std::string id, std::string_view name, std::string arguments) {
+    core::llm::ToolCall tool_call;
+    tool_call.index = 0;
+    tool_call.id = std::move(id);
+    tool_call.type = "function";
+    tool_call.function.name = std::string(name);
+    tool_call.function.arguments = std::move(arguments);
+
+    core::llm::StreamChunk chunk;
+    chunk.tools = {std::move(tool_call)};
+    chunk.is_final = true;
+    callback(chunk);
+  }
+
+  mutable std::mutex mutex_;
+  std::vector<core::llm::ChatRequest> requests_;
+  std::atomic<int> calls_{0};
+};
+
+class AutoExploreProvider final : public core::llm::LLMProvider {
+public:
+  void stream_response(
+      const core::llm::ChatRequest &request,
+      std::function<void(const core::llm::StreamChunk &)> callback) override {
+    {
+      std::lock_guard lock(mutex_);
+      requests_.push_back(request);
+    }
+
+    const bool planning = std::ranges::any_of(
+        request.messages, [](const core::llm::Message &message) {
+          return message.content.contains(
+              "You are the planning module of an autonomous coding agent");
+        });
+    if (planning) {
+      callback(core::llm::StreamChunk::make_content(
+          R"({"nodes":[
+                {"name":"inspect-api","kind":"work","directive":"inspect api","workspace_access":"shared_read","parallel":true},
+                {"name":"inspect-tests","kind":"work","directive":"inspect tests","workspace_access":"shared_read","parallel":true},
+                {"name":"implement","kind":"work","directive":"implement the fix","workspace_access":"exclusive_write"}
+              ],
+              "edges":[
+                {"from":"inspect-api","to":"implement","condition":"always"},
+                {"from":"inspect-tests","to":"implement","condition":"always"}
+              ]})"));
+      callback(core::llm::StreamChunk::make_final());
+      return;
+    }
+
+    const bool delegated = std::ranges::any_of(
+        request.messages, [](const core::llm::Message &message) {
+          return message.role == "system" &&
+                 message.content.contains("running in RESEARCH mode");
+        });
+    if (delegated) {
+      explores_.fetch_add(1, std::memory_order_acq_rel);
+      callback(core::llm::StreamChunk::make_content("Found the scheduler."));
+      callback(core::llm::StreamChunk::make_final());
+      return;
+    }
+
+    callback(core::llm::StreamChunk::make_content(
+        "Used the preflight findings; no further edits."));
+    callback(core::llm::StreamChunk::make_final());
+  }
+
+  [[nodiscard]] int explore_count() const noexcept {
+    return explores_.load(std::memory_order_acquire);
+  }
+
+  [[nodiscard]] std::vector<core::llm::ChatRequest> requests_snapshot() const {
+    std::lock_guard lock(mutex_);
+    return requests_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::vector<core::llm::ChatRequest> requests_;
+  std::atomic<int> explores_{0};
 };
 
 class RecoveringMaxOutputProvider final : public core::llm::LLMProvider {
@@ -1631,4 +1765,120 @@ TEST_CASE("Agent can gate efficiency rotation by minimum context utilization",
     CHECK(rotations == 0);
     CHECK(provider->reset_count() == 0);
     CHECK(provider->call_count() == 11);
+}
+
+TEST_CASE("AUTO enforces fresh verification after a successful mutation",
+          "[agent][auto][loop][quality]") {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() /
+      std::format("filo_auto_quality_{}",
+                  std::chrono::steady_clock::now().time_since_epoch().count());
+  TempDir temp(temp_path);
+  ScopedCurrentPath cwd(temp.path());
+  std::filesystem::create_directories(temp.path() / ".filo");
+  {
+    std::ofstream config(temp.path() / ".filo" / "verification.json");
+    config << R"({"version":1,"recipes":[{"id":"quality","name":"Project quality","kind":"test","executable":"test","arguments":["-f","auto-quality.txt"],"required":true}]})";
+  }
+
+  auto &tool_manager = core::tools::ToolManager::get_instance();
+  tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+  tool_manager.register_tool(std::make_shared<core::tools::ShellTool>());
+  tool_manager.register_tool(std::make_shared<core::tools::VerificationTool>());
+
+  auto provider = std::make_shared<AutoQualityProvider>();
+  auto agent = std::make_shared<core::agent::Agent>(
+      provider, tool_manager,
+      test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+          .primary = temp.path(),
+          .enforce = true,
+          .version = 1,
+      }));
+  agent->set_mode("AUTO");
+  agent->set_permission_fn(
+      [](std::string_view, std::string_view) { return true; });
+
+  std::string statuses;
+  send_and_wait(agent, "Implement the file change and verify it.",
+                core::agent::Agent::TurnCallbacks{
+                    .on_status_log =
+                        [&](const std::string &status) { statuses += status; },
+                });
+
+  CHECK(provider->call_count() == 2);
+  CHECK(std::filesystem::exists(temp.path() / "auto-quality.txt"));
+  CHECK_FALSE(agent->last_turn_failed());
+  CHECK_THAT(statuses,
+             Catch::Matchers::ContainsSubstring("AUTO · orchestrated path"));
+  CHECK_THAT(statuses, Catch::Matchers::ContainsSubstring(
+                           "AUTO · completion quality gate passed"));
+
+  const auto requests = provider->requests_snapshot();
+  REQUIRE(requests.size() == 3);
+  CHECK_THAT(requests[1].prompt_plan.render(),
+             Catch::Matchers::ContainsSubstring("AUTO execution contract"));
+  CHECK_THAT(
+      requests[1].prompt_plan.render(),
+      Catch::Matchers::ContainsSubstring("Repository verification recipes"));
+  CHECK_FALSE(std::ranges::any_of(
+      requests.back().messages, [](const core::llm::Message &message) {
+        return message.synthetic && message.content.contains("AUTO quality gate");
+      }));
+}
+
+TEST_CASE("AUTO explore subagents complete under a parent writer transaction",
+          "[agent][auto][loop][lease]") {
+  const auto temp_path =
+      std::filesystem::temp_directory_path() /
+      std::format("filo_auto_explore_{}",
+                  std::chrono::steady_clock::now().time_since_epoch().count());
+  TempDir temp(temp_path);
+  ScopedCurrentPath cwd(temp.path());
+
+  auto &tool_manager = core::tools::ToolManager::get_instance();
+  auto provider = std::make_shared<AutoExploreProvider>();
+  auto leases = std::make_shared<core::scm::WorkspaceLeaseRegistry>();
+  auto agent = std::make_shared<core::agent::Agent>(
+      provider, tool_manager,
+      test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+          .primary = temp.path(),
+          .enforce = true,
+          .version = 1,
+      }),
+      core::agent::ToolResultStore::default_root(),
+      std::shared_ptr<core::power::SleepInhibitor>{},
+      std::shared_ptr<core::session::SessionStatsRegistry>{},
+      nullptr,
+      std::shared_ptr<core::memory::MemorySystem>{},
+      leases);
+  agent->set_mode("AUTO");
+  agent->set_permission_fn(
+      [](std::string_view, std::string_view) { return true; });
+
+  send_and_wait(
+      agent,
+      "Debug the deadlock in the task scheduler, fix it, and add regression tests.");
+
+  CHECK_FALSE(agent->last_turn_failed());
+  CHECK(provider->explore_count() == 2);
+  const auto requests = provider->requests_snapshot();
+  CHECK(std::ranges::any_of(requests, [](const core::llm::ChatRequest &request) {
+    return std::ranges::any_of(request.messages, [](const auto &message) {
+      return message.role == "system" &&
+             message.content.contains("running in RESEARCH mode");
+    });
+  }));
+  CHECK_FALSE(std::ranges::any_of(
+      requests, [](const core::llm::ChatRequest &request) {
+        const bool delegated = std::ranges::any_of(
+            request.messages, [](const auto &message) {
+              return message.content.contains("[Delegated worker]");
+            });
+        const bool auto_system = std::ranges::any_of(
+            request.messages, [](const auto &message) {
+              return message.role == "system" &&
+                     message.content.contains("running in AUTO mode");
+            });
+        return delegated && auto_system;
+      }));
 }

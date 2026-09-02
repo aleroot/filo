@@ -29,7 +29,15 @@ struct CommandResult {
     std::string output; ///< combined stdout+stderr, clamped
 };
 
+struct RecipeResult {
+  bool passed = false;
+  std::string command;
+  std::string evidence;
+  std::string error;
+};
+
 using CommandRunner = std::function<CommandResult(std::string_view command)>;
+using RecipeRunner = std::function<RecipeResult(std::string_view recipe_id)>;
 using CompletionFn =
     std::function<std::expected<std::string, std::string>(std::string_view prompt)>;
 
@@ -91,14 +99,17 @@ private:
 class GoalVerifier final : public IVerifier {
 public:
     GoalVerifier(CommandRunner runner, CompletionFn complete);
+    GoalVerifier(RecipeRunner recipe_runner, CommandRunner legacy_runner,
+                 CompletionFn complete);
 
     [[nodiscard]] Verdict verify(const Node& node,
                                  const VerifyContext& context) const override;
     [[nodiscard]] std::string_view name() const noexcept override { return "chained"; }
 
 private:
-    ShellCheckVerifier shell_;
-    ModelCheckVerifier model_;
+  RecipeRunner recipe_runner_;
+  ShellCheckVerifier shell_;
+  ModelCheckVerifier model_;
 };
 
 /// Default POSIX command runner (popen/pclose, combined output, exit status).

@@ -6,6 +6,7 @@
 namespace core::tools::names {
 
 inline constexpr std::string_view kRunTerminalCommand = "run_terminal_command";
+inline constexpr std::string_view kRunVerification = "run_verification";
 inline constexpr std::string_view kReadFile = "read_file";
 inline constexpr std::string_view kWriteFile = "write_file";
 inline constexpr std::string_view kListDirectory = "list_directory";
@@ -57,6 +58,11 @@ inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
     return tool_name == kRunTerminalCommand;
 }
 
+[[nodiscard]] constexpr bool
+is_verification_tool(std::string_view tool_name) noexcept {
+  return tool_name == kRunVerification;
+}
+
 [[nodiscard]] constexpr bool is_file_modification_tool(std::string_view tool_name) noexcept {
     return tool_name == kWriteFile
         || tool_name == kApplyPatch
@@ -68,13 +74,10 @@ inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
 }
 
 [[nodiscard]] constexpr bool is_write_destructive_tool(std::string_view tool_name) noexcept {
-    return tool_name == kApplyPatch
-        || tool_name == kWriteFile
-        || tool_name == kSearchReplace
-        || is_replace_tool(tool_name)
-        || tool_name == kDeleteFile
-        || tool_name == kMoveFile
-        || tool_name == kMemory;
+  return tool_name == kApplyPatch || tool_name == kWriteFile ||
+         tool_name == kSearchReplace || is_replace_tool(tool_name) ||
+         tool_name == kDeleteFile || tool_name == kMoveFile ||
+         tool_name == kMemory || is_verification_tool(tool_name);
 }
 
 [[nodiscard]] constexpr bool is_read_search_list_tool(std::string_view tool_name) noexcept {

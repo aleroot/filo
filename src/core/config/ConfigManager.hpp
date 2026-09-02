@@ -199,21 +199,35 @@ struct ToolPolicyConfig {
 struct HookCommandConfig {
     std::string name;
     std::string command;
+    // Optional regular expression evaluated against the event payload. This
+    // keeps hooks narrowly scoped without coupling configuration to tool names.
+    std::string matcher;
     std::string working_dir;
     std::vector<std::string> env;
     int timeout_seconds = 15;
     bool enabled = true;
+    // A failing hook is normally advisory. Policy and quality hooks can opt
+    // into fail-closed semantics so an execution error cannot silently bypass
+    // the gate.
+    bool fail_closed = false;
+    // Stop hooks marked as quality gates provide authoritative project-owned
+    // verification evidence when they complete successfully.
+    bool quality_gate = false;
 };
 
 struct HookConfig {
     std::vector<HookCommandConfig> user_prompt_submit;
     std::vector<HookCommandConfig> pre_tool_use;
     std::vector<HookCommandConfig> post_tool_use;
+    std::vector<HookCommandConfig> post_tool_batch;
+    std::vector<HookCommandConfig> stop;
 
     [[nodiscard]] bool empty() const {
         return user_prompt_submit.empty()
             && pre_tool_use.empty()
-            && post_tool_use.empty();
+            && post_tool_use.empty()
+            && post_tool_batch.empty()
+            && stop.empty();
     }
 };
 

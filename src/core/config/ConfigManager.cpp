@@ -947,6 +947,9 @@ HookCommandConfig parse_hook_command(simdjson::dom::element hook_el) {
     if (!object["command"].get(scalar)) {
         hook.command = std::string(scalar);
     }
+    if (!object["matcher"].get(scalar)) {
+        hook.matcher = std::string(scalar);
+    }
     if (!object["working_dir"].get(scalar)) {
         hook.working_dir = std::string(scalar);
     }
@@ -959,6 +962,19 @@ HookCommandConfig parse_hook_command(simdjson::dom::element hook_el) {
     bool enabled = hook.enabled;
     if (!object["enabled"].get(enabled)) {
         hook.enabled = enabled;
+    }
+
+    bool fail_closed = hook.fail_closed;
+    if (!object["fail_closed"].get(fail_closed)) {
+        hook.fail_closed = fail_closed;
+    }
+
+    bool quality_gate = hook.quality_gate;
+    if (!object["quality_gate"].get(quality_gate)) {
+        hook.quality_gate = quality_gate;
+        // Quality evidence must never be accepted from a hook whose failure
+        // would otherwise be ignored.
+        hook.fail_closed = hook.fail_closed || quality_gate;
     }
 
     if (auto env = parse_string_array(object, {"env"}); env.has_value()) {
@@ -1001,6 +1017,14 @@ HookConfig parse_hook_config(simdjson::dom::object hooks_obj) {
         hooks_obj,
         {"post_tool_use", "post-tool-use"},
         hooks.post_tool_use);
+    parse_hook_list(
+        hooks_obj,
+        {"post_tool_batch", "post-tool-batch"},
+        hooks.post_tool_batch);
+    parse_hook_list(
+        hooks_obj,
+        {"stop", "before_complete", "before-complete"},
+        hooks.stop);
     return hooks;
 }
 
@@ -1463,6 +1487,8 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     append_hook_overlays(base.hooks.user_prompt_submit, overlay.hooks.user_prompt_submit);
     append_hook_overlays(base.hooks.pre_tool_use, overlay.hooks.pre_tool_use);
     append_hook_overlays(base.hooks.post_tool_use, overlay.hooks.post_tool_use);
+    append_hook_overlays(base.hooks.post_tool_batch, overlay.hooks.post_tool_batch);
+    append_hook_overlays(base.hooks.stop, overlay.hooks.stop);
 
     for (const auto& server : overlay.mcp_servers) {
         auto it = std::find_if(

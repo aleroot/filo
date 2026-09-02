@@ -2,6 +2,7 @@
 #include "../agent/PermissionGate.hpp"
 #include "../agent/SafetyPolicy.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
 #include <algorithm>
 #include <array>
@@ -14,7 +15,8 @@ namespace {
 
 enum class AllowKeyStrategy {
     ToolName,
-    ShellProgram
+    ShellProgram,
+    VerificationInvocation,
 };
 
 struct AllowRule {
@@ -23,8 +25,9 @@ struct AllowRule {
     AllowKeyStrategy key_strategy;
 };
 
-constexpr std::array<AllowRule, 9> kAllowRules{{
+constexpr std::array<AllowRule, 10> kAllowRules{{
     {core::tools::names::kRunTerminalCommand, "terminal commands", AllowKeyStrategy::ShellProgram},
+    {core::tools::names::kRunVerification,    "verification checks", AllowKeyStrategy::VerificationInvocation},
     {core::tools::names::kWriteFile,          "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kApplyPatch,         "file modifications", AllowKeyStrategy::ToolName},
     {core::tools::names::kReplace,            "file modifications", AllowKeyStrategy::ToolName},
@@ -110,6 +113,20 @@ std::string extract_shell_program(std::string_view tool_args) {
         return {};
     }
     return strip_path_prefix(token);
+}
+
+std::string extract_verification_scope(std::string_view tool_args) {
+    if (const auto recipe =
+            core::utils::json::first_string_field(tool_args, {"recipe_id"});
+        recipe.has_value() && !recipe->empty()) {
+        return std::format("recipe={}", *recipe);
+    }
+    if (const auto executable =
+            core::utils::json::first_string_field(tool_args, {"executable"});
+        executable.has_value() && !executable->empty()) {
+        return std::format("program={}", strip_path_prefix(*executable));
+    }
+    return {};
 }
 
 bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
@@ -335,6 +352,12 @@ std::string make_allow_key_from_rule(const AllowRule& rule, std::string_view too
             return std::format("{}:{}", rule.tool_name, program);
         }
     }
+    if (rule.key_strategy == AllowKeyStrategy::VerificationInvocation) {
+        const auto scope = extract_verification_scope(tool_args);
+        if (!scope.empty()) {
+            return std::format("{}:{}", rule.tool_name, scope);
+        }
+    }
     return std::string(rule.tool_name);
 }
 
@@ -344,6 +367,15 @@ std::string make_allow_label_from_rule(const AllowRule& rule, std::string_view t
         if (!program.empty()) {
             return std::format("'{}' commands", program);
         }
+    }
+    if (rule.key_strategy == AllowKeyStrategy::VerificationInvocation) {
+      const auto scope = extract_verification_scope(tool_args);
+      if (scope.starts_with("recipe=")) {
+        return std::format("verification recipe '{}'", scope.substr(7));
+      }
+      if (scope.starts_with("program=")) {
+        return std::format("'{}' verification checks", scope.substr(8));
+      }
     }
     return std::string(rule.allow_label);
 }
@@ -586,6 +618,12 @@ std::string make_session_allow_rule(std::string_view tool_name,
         // program, preserve the historical exact allow-key behavior instead of
         // broadening to shell:*.
         return make_allow_key(tool_name, tool_args);
+    }
+
+    if (tool_name == core::tools::names::kRunVerification) {
+      // Remember only this immutable recipe or custom executable. A generic
+      // tool grant would silently authorize every future verification process.
+      return make_allow_key(tool_name, tool_args);
     }
 
     if (tool_name == core::tools::names::kDeleteFile) {

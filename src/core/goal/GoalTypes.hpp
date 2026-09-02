@@ -156,6 +156,37 @@ enum class RunState : std::uint8_t {
     return "idle";
 }
 
+// Workspace access is an execution capability, not a suggestion to the model.
+// SharedRead nodes may be scheduled concurrently. ExclusiveWrite nodes require
+// the repository's single-writer lease and are always serialized.
+enum class WorkspaceAccess : std::uint8_t {
+  SharedRead,
+  ExclusiveWrite,
+};
+
+[[nodiscard]] inline std::string_view
+to_string(WorkspaceAccess access) noexcept {
+  switch (access) {
+  case WorkspaceAccess::SharedRead:
+    return "shared_read";
+  case WorkspaceAccess::ExclusiveWrite:
+    return "exclusive_write";
+  }
+  return "exclusive_write";
+}
+
+[[nodiscard]] inline std::optional<WorkspaceAccess>
+workspace_access_from_string(std::string_view access) noexcept {
+  if (access == "shared_read" || access == "read_only" || access == "read") {
+    return WorkspaceAccess::SharedRead;
+  }
+  if (access == "exclusive_write" || access == "workspace_write" ||
+      access == "write") {
+    return WorkspaceAccess::ExclusiveWrite;
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] inline RunState run_state_from_string(std::string_view state) noexcept {
     if (state == "planning") return RunState::Planning;
     if (state == "running") return RunState::Running;
@@ -175,28 +206,37 @@ enum class RunState : std::uint8_t {
 // Node — one typed unit of work with a verifiable contract.
 // ---------------------------------------------------------------------------
 struct Node {
-    static constexpr std::size_t kMaxNameChars = 128;
-    static constexpr std::size_t kMaxDirectiveChars = 4096;
-    static constexpr std::size_t kMaxCheckChars = 1024;
-    static constexpr std::size_t kMaxAcceptanceChars = 2048;
-    static constexpr std::size_t kMaxResultChars = 2048;
-    static constexpr std::size_t kMaxLessonChars = 512;
-    static constexpr std::size_t kMaxLessons = 8;
-    static constexpr int kMaxAttempts = 8;
+  static constexpr std::size_t kMaxNameChars = 128;
+  static constexpr std::size_t kMaxDirectiveChars = 4096;
+  static constexpr std::size_t kMaxCheckChars = 1024;
+  static constexpr std::size_t kMaxAcceptanceChars = 2048;
+  static constexpr std::size_t kMaxResultChars = 2048;
+  static constexpr std::size_t kMaxLessonChars = 512;
+  static constexpr std::size_t kMaxLessons = 8;
+  static constexpr std::size_t kMaxVerificationRecipes = 16;
+  static constexpr int kMaxAttempts = 8;
 
-    NodeId id = kInvalidNodeId;
-    NodeKind kind = NodeKind::Work;
-    std::string name;         ///< short unique label, e.g. "migrate-net"
-    std::string directive;    ///< what to do (work) / what was decomposed (plan)
-    std::string check_command;///< verify: deterministic shell check, empty = model-judged
-    std::string acceptance;   ///< contract text for the model verifier / reflector
-    int max_attempts = 2;     ///< retry budget for the scheduler (clamped to kMaxAttempts)
-    int attempts = 0;
-    NodeState state = NodeState::Pending;
-    bool parallelizable = false; ///< read-only node, safe for concurrent wave execution
-    NodeId retry_target = kInvalidNodeId; ///< verify/reflect: work node requeued on failure
-    std::string result_summary;           ///< filled on completion (clamped)
-    std::vector<std::string> lessons;     ///< accumulated reflections (Reflexion memory)
+  NodeId id = kInvalidNodeId;
+  NodeKind kind = NodeKind::Work;
+  std::string name;          ///< short unique label, e.g. "migrate-net"
+  std::string directive;     ///< what to do (work) / what was decomposed (plan)
+  std::string check_command; ///< verify: deterministic shell check, empty =
+                             ///< model-judged
+  std::string acceptance; ///< contract text for the model verifier / reflector
+  int max_attempts =
+      2; ///< retry budget for the scheduler (clamped to kMaxAttempts)
+  int attempts = 0;
+  NodeState state = NodeState::Pending;
+  WorkspaceAccess workspace_access = WorkspaceAccess::ExclusiveWrite;
+  bool parallelizable = false; ///< only valid with SharedRead access
+  NodeId retry_target =
+      kInvalidNodeId; ///< verify/reflect: work node requeued on failure
+  /// Trusted recipe ids resolved by the verification catalog. The graph
+  /// never stores caller-provided shell strings for new plans.
+  std::vector<std::string> verification_recipe_ids;
+  std::string result_summary; ///< filled on completion (clamped)
+  std::vector<std::string>
+      lessons; ///< accumulated reflections (Reflexion memory)
 };
 
 struct Edge {

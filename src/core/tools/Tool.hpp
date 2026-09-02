@@ -110,6 +110,9 @@ struct ToolDefinition {
     std::string input_schema = {}; ///< Optional raw JSON Schema object overriding parameter-derived inputSchema
     std::string output_schema = {}; ///< Optional raw JSON Schema object for successful structuredContent
     ToolAnnotations annotations = {};            ///< Behavioral hints for MCP clients (all default to @c false)
+    /// Internal trust marker. It is never populated from remote MCP metadata;
+    /// only built-in tools may mint receipts accepted by AUTO's quality gate.
+    bool trusted_verification_receipts = false;
 };
 
 /**

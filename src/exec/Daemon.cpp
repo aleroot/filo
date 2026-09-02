@@ -1349,7 +1349,9 @@ void handle_mcp_post(const std::string& host,
 void handle_api_chat(
     const httplib::Request& req,
     httplib::Response& res,
-    const std::shared_ptr<core::memory::MemorySystem>& memory_system) {
+    const std::shared_ptr<core::memory::MemorySystem>& memory_system,
+    const std::shared_ptr<core::scm::WorkspaceLeaseRegistry>&
+        workspace_leases) {
     simdjson::ondemand::parser parser;
     simdjson::padded_string padded_body(req.body);
     simdjson::ondemand::document doc;
@@ -1395,7 +1397,8 @@ void handle_api_chat(
         std::shared_ptr<core::power::SleepInhibitor>{},
         std::shared_ptr<core::session::SessionStatsRegistry>{},
         nullptr,
-        memory_system);
+        memory_system,
+        workspace_leases);
     agent->set_active_provider_name(config.default_provider);
 
     std::string final_response;
@@ -1481,9 +1484,12 @@ void run_server(int port,
     // Legacy local endpoint.
     auto memory_system = core::memory::make_memory_system(
         core::memory::MemoryConfig{.tool_recovery = config.tool_recovery});
-    svr->Post("/api/chat", [memory_system](const httplib::Request& req,
-                                          httplib::Response& res) {
-        handle_api_chat(req, res, memory_system);
+    auto workspace_leases =
+        std::make_shared<core::scm::WorkspaceLeaseRegistry>();
+    svr->Post("/api/chat", [memory_system, workspace_leases](
+                               const httplib::Request& req,
+                               httplib::Response& res) {
+        handle_api_chat(req, res, memory_system, workspace_leases);
     });
 
     if (!svr->bind_to_port(host, port)) {

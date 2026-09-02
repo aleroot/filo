@@ -12,6 +12,9 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <format>
+#include <optional>
+#include <regex>
 #include <string>
 #include <thread>
 
@@ -31,8 +34,37 @@ using core::tools::detail::shell_single_quote;
             return hooks.pre_tool_use;
         case HookEvent::PostToolUse:
             return hooks.post_tool_use;
+        case HookEvent::PostToolBatch:
+            return hooks.post_tool_batch;
+        case HookEvent::Stop:
+            return hooks.stop;
     }
     return hooks.user_prompt_submit;
+}
+
+[[nodiscard]] std::string hook_name(
+    const core::config::HookCommandConfig& hook,
+    HookEvent event) {
+    return hook.name.empty() ? std::string(to_string(event)) : hook.name;
+}
+
+[[nodiscard]] std::optional<bool> hook_matches(
+    const core::config::HookCommandConfig& hook,
+    std::string_view payload_json) noexcept {
+    if (hook.matcher.empty()) {
+        return true;
+    }
+    try {
+        return std::regex_search(
+            payload_json.begin(), payload_json.end(), std::regex(hook.matcher));
+    } catch (const std::regex_error& error) {
+        core::logging::warn(
+            "[hooks] '{}' has an invalid matcher '{}': {}",
+            hook.name.empty() ? "unnamed" : hook.name,
+            hook.matcher,
+            error.what());
+        return std::nullopt;
+    }
 }
 
 [[nodiscard]] std::string transport_name(core::context::SessionTransport transport) {
@@ -91,6 +123,20 @@ using core::tools::detail::shell_single_quote;
     return "printf '%s' '" + shell_single_quote(payload_json) + "' | ";
 }
 
+// A PreToolUse hook that could not produce a decision has decided nothing.
+// Advisory hooks stay permissive, but a fail-closed policy hook must deny:
+// otherwise a missing interpreter, a timeout kill, or a crashed matcher script
+// silently downgrades a security control into a no-op.
+[[nodiscard]] HookDecision pre_tool_use_failure(
+    const core::config::HookCommandConfig& hook,
+    std::string reason) {
+    if (!hook.fail_closed) {
+        core::logging::warn("[hooks] {}", reason);
+        return {};
+    }
+    return {.allowed = false, .approved = false, .reason = std::move(reason)};
+}
+
 [[nodiscard]] HookDecision interpret_pre_tool_use_result(
     const core::config::HookCommandConfig& hook,
     const core::tools::shell::IShellExecutor::Result& result) {
@@ -105,12 +151,14 @@ using core::tools::detail::shell_single_quote;
     }
 
     if (result.exit_code != 0) {
-        core::logging::warn(
-            "[hooks] '{}' exited with status {}: {}",
-            hook.name.empty() ? "pre_tool_use" : hook.name,
-            result.exit_code,
-            result.output);
-        return {};
+        return pre_tool_use_failure(
+            hook,
+            std::format(
+                "PreToolUse hook '{}' exited with status {}{}{}",
+                hook_name(hook, HookEvent::PreToolUse),
+                result.exit_code,
+                result.output.empty() ? "" : ": ",
+                result.output));
     }
 
     simdjson::dom::parser parser;
@@ -158,6 +206,87 @@ using core::tools::detail::shell_single_quote;
     return {};
 }
 
+[[nodiscard]] std::string json_string(
+    simdjson::dom::element document,
+    std::string_view key) {
+    std::string_view value;
+    if (document[key].get(value) == simdjson::SUCCESS) {
+        return std::string(value);
+    }
+    return {};
+}
+
+[[nodiscard]] StopDecision interpret_stop_result(
+    const core::config::HookCommandConfig& hook,
+    const core::tools::shell::IShellExecutor::Result& result) {
+    StopDecision decision{
+        .quality_gate_configured = hook.quality_gate,
+        .quality_gate_passed = hook.quality_gate,
+    };
+    const auto block = [&](std::string reason) {
+        decision.complete = false;
+        decision.quality_gate_passed = false;
+        decision.reason = std::move(reason);
+        decision.followup_message = decision.reason;
+    };
+
+    if (result.exit_code == 2) {
+        block(result.output.empty()
+            ? std::format("Stop hook '{}' requested another agent turn.",
+                          hook_name(hook, HookEvent::Stop))
+            : result.output);
+        return decision;
+    }
+    if (result.exit_code != 0) {
+        const std::string failure = std::format(
+            "Stop hook '{}' exited with status {}{}{}",
+            hook_name(hook, HookEvent::Stop),
+            result.exit_code,
+            result.output.empty() ? "" : ": ",
+            result.output);
+        decision.quality_gate_passed = false;
+        if (hook.fail_closed) {
+            block(failure);
+        } else {
+            core::logging::warn("[hooks] {}", failure);
+        }
+        return decision;
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(result.output);
+    simdjson::dom::element document;
+    if (parser.parse(padded).get(document) != simdjson::SUCCESS) {
+        // Empty/plain stdout is allowed: exit status remains the portable hook
+        // contract. Structured output is only needed for control flow.
+        return decision;
+    }
+
+    std::string followup = json_string(document, "followup_message");
+    std::string reason = json_string(document, "reason");
+    if (reason.empty()) {
+        reason = json_string(document, "stopReason");
+    }
+    std::string action = json_string(document, "decision");
+    bool continue_session = true;
+    const bool has_continue =
+        document["continue"].get(continue_session) == simdjson::SUCCESS;
+    if (action == "block" || !followup.empty()
+        || (has_continue && !continue_session)) {
+        if (reason.empty()) {
+            reason = followup.empty()
+                ? std::format("Stop hook '{}' requested another agent turn.",
+                              hook_name(hook, HookEvent::Stop))
+                : followup;
+        }
+        block(std::move(reason));
+        if (!followup.empty()) {
+            decision.followup_message = std::move(followup);
+        }
+    }
+    return decision;
+}
+
 [[nodiscard]] core::tools::shell::IShellExecutor::Result run_hook_command(
     const core::config::HookCommandConfig& hook,
     HookEvent event,
@@ -165,7 +294,7 @@ using core::tools::detail::shell_single_quote;
     const core::context::SessionContext& session_context,
     const std::vector<std::pair<std::string, std::string>>& extra_env) {
     const auto working_dir = hook.working_dir.empty()
-        ? std::string{}
+        ? session_context.workspace_view().primary().string()
         : session_context.resolve_path(hook.working_dir).string();
     const std::string command = build_stdin_prefix(payload_json)
         + build_env_prefix(event, payload_json, session_context, hook, extra_env)
@@ -192,6 +321,10 @@ std::string_view to_string(HookEvent event) noexcept {
             return "pre_tool_use";
         case HookEvent::PostToolUse:
             return "post_tool_use";
+        case HookEvent::PostToolBatch:
+            return "post_tool_batch";
+        case HookEvent::Stop:
+            return "stop";
     }
     return "unknown";
 }
@@ -209,6 +342,9 @@ void dispatch(HookEvent event,
 
     for (const auto& hook : hooks) {
         if (!hook.enabled || hook.command.empty()) {
+            continue;
+        }
+        if (!hook_matches(hook, payload_json).value_or(false)) {
             continue;
         }
 
@@ -253,33 +389,172 @@ HookDecision run_pre_tool_use(
         if (!hook.enabled || hook.command.empty()) {
             continue;
         }
+        const auto matches = hook_matches(hook, payload_json);
+        if (!matches.has_value() && hook.fail_closed) {
+            return {
+                .allowed = false,
+                .approved = false,
+                .reason = std::format(
+                    "PreToolUse hook '{}' has an invalid matcher.",
+                    hook_name(hook, HookEvent::PreToolUse)),
+            };
+        }
+        if (!matches.value_or(false)) {
+            continue;
+        }
 
+        HookDecision current;
         try {
-            const auto result = run_hook_command(
+            current = interpret_pre_tool_use_result(
                 hook,
-                HookEvent::PreToolUse,
-                payload_json,
-                session_context,
-                extra_env);
-            const auto current = interpret_pre_tool_use_result(hook, result);
-            if (!current.allowed) {
-                return current;
-            }
-            if (current.approved) {
-                decision.approved = true;
-            }
-        } catch (const std::exception& e) {
-            core::logging::warn(
-                "[hooks] '{}' failed: {}",
-                hook.name.empty() ? "pre_tool_use" : hook.name,
-                e.what());
+                run_hook_command(
+                    hook, HookEvent::PreToolUse, payload_json,
+                    session_context, extra_env));
+        } catch (const std::exception& error) {
+            current = pre_tool_use_failure(
+                hook,
+                std::format(
+                    "PreToolUse hook '{}' failed: {}",
+                    hook_name(hook, HookEvent::PreToolUse), error.what()));
         } catch (...) {
-            core::logging::warn(
-                "[hooks] '{}' failed: unknown exception",
-                hook.name.empty() ? "pre_tool_use" : hook.name);
+            current = pre_tool_use_failure(
+                hook,
+                std::format(
+                    "PreToolUse hook '{}' failed with an unknown error.",
+                    hook_name(hook, HookEvent::PreToolUse)));
+        }
+
+        if (!current.allowed) {
+            return current;
+        }
+        if (current.approved) {
+            decision.approved = true;
         }
     }
     return decision;
+}
+
+StopDecision run_stop(
+    std::string payload_json,
+    const core::context::SessionContext& session_context,
+    std::vector<std::pair<std::string, std::string>> extra_env) {
+    const auto hooks = hooks_for_event(
+        core::config::ConfigManager::get_instance().get_config().hooks,
+        HookEvent::Stop);
+    StopDecision aggregate;
+    bool every_quality_gate_passed = true;
+
+    for (const auto& hook : hooks) {
+        if (!hook.enabled || hook.command.empty()) {
+            continue;
+        }
+        const auto matches = hook_matches(hook, payload_json);
+        if (!matches.has_value() && hook.fail_closed) {
+            const std::string failure = std::format(
+                "Stop hook '{}' has an invalid matcher.",
+                hook_name(hook, HookEvent::Stop));
+            return {
+                .complete = false,
+                .quality_gate_configured = hook.quality_gate,
+                .quality_gate_passed = false,
+                .reason = failure,
+                .followup_message = failure,
+            };
+        }
+        if (!matches.value_or(false)) {
+            continue;
+        }
+        if (hook.quality_gate) {
+            aggregate.quality_gate_configured = true;
+        }
+
+        StopDecision current;
+        try {
+            current = interpret_stop_result(
+                hook,
+                run_hook_command(
+                    hook, HookEvent::Stop, payload_json,
+                    session_context, extra_env));
+        } catch (const std::exception& error) {
+            const std::string failure = std::format(
+                "Stop hook '{}' failed: {}",
+                hook_name(hook, HookEvent::Stop), error.what());
+            current = {
+                .complete = !hook.fail_closed,
+                .quality_gate_configured = hook.quality_gate,
+                .quality_gate_passed = false,
+                .reason = failure,
+                .followup_message = hook.fail_closed ? failure : std::string{},
+            };
+            core::logging::warn("[hooks] {}", failure);
+        } catch (...) {
+            const std::string failure = std::format(
+                "Stop hook '{}' failed with an unknown error.",
+                hook_name(hook, HookEvent::Stop));
+            current = {
+                .complete = !hook.fail_closed,
+                .quality_gate_configured = hook.quality_gate,
+                .quality_gate_passed = false,
+                .reason = failure,
+                .followup_message = hook.fail_closed ? failure : std::string{},
+            };
+            core::logging::warn("[hooks] {}", failure);
+        }
+
+        if (hook.quality_gate) {
+            every_quality_gate_passed =
+                every_quality_gate_passed && current.quality_gate_passed;
+        }
+        if (!current.complete) {
+            aggregate.complete = false;
+            aggregate.reason = std::move(current.reason);
+            aggregate.followup_message = std::move(current.followup_message);
+            aggregate.quality_gate_passed = false;
+            return aggregate;
+        }
+    }
+
+    aggregate.quality_gate_passed =
+        aggregate.quality_gate_configured && every_quality_gate_passed;
+    return aggregate;
+}
+
+core::session::TurnCompletionResult evaluate_completion(
+    std::string payload_json,
+    const core::context::SessionContext& session_context,
+    CompletionGateState& state,
+    std::vector<std::pair<std::string, std::string>> extra_env) {
+    const auto decision = run_stop(
+        std::move(payload_json), session_context, std::move(extra_env));
+    if (decision.complete) {
+        return {
+            .quality_gate_satisfied =
+                decision.quality_gate_configured && decision.quality_gate_passed,
+        };
+    }
+
+    constexpr int kMaxBlockedAttempts = 3;
+    if (state.blocked_attempts++ < kMaxBlockedAttempts) {
+        std::string followup = decision.followup_message.empty()
+            ? decision.reason
+            : decision.followup_message;
+        if (followup.empty()) {
+            followup = "A completion hook requested another turn.";
+        }
+        return {
+            .action = core::session::TurnCompletionAction::Continue,
+            .status = "hook · completion blocked",
+            .message = std::move(followup),
+        };
+    }
+    return {
+        .action = core::session::TurnCompletionAction::Fail,
+        .message = std::format(
+            "Completion hook loop limit reached: {}",
+            decision.reason.empty()
+                ? "the hook continued to block completion"
+                : decision.reason),
+    };
 }
 
 } // namespace core::hooks

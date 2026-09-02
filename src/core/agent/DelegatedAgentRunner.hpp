@@ -23,6 +23,10 @@ namespace core::memory {
 class MemorySystem;
 }
 
+namespace core::scm {
+class WorkspaceLeaseRegistry;
+}
+
 namespace core::agent {
 
 class DelegatedAgentRunner {
@@ -57,6 +61,8 @@ public:
         /// Shared metrics registry of the parent execution root; subagent
         /// accounting flows into it instead of a private registry.
         std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
+        /// Repository lease scope shared with the parent agent.
+        std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases;
         /// Parent memory substrate. When empty the runner builds one from
         /// config so standalone TaskService callers keep working.
         std::shared_ptr<core::memory::MemorySystem> memory_system;

@@ -790,6 +790,8 @@ RunResult run(RunOptions opts) {
     // process composition root also reads it for the exit report.
     auto session_stats_registry =
         core::session::SessionStatsRegistry::shared_instance();
+    auto workspace_leases =
+        std::make_shared<core::scm::WorkspaceLeaseRegistry>();
     auto agent_session_context = core::context::make_session_context(
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
@@ -807,7 +809,8 @@ RunResult run(RunOptions opts) {
         std::shared_ptr<core::power::SleepInhibitor>{},
         session_stats_registry,
         &core::budget::BudgetTracker::get_instance(),
-        memory_system);
+        memory_system,
+        workspace_leases);
     agent->set_active_provider_name(active_provider_name);
     agent->set_auto_compact_threshold(
         config.auto_compact_threshold,
@@ -1242,17 +1245,29 @@ RunResult run(RunOptions opts) {
     SettingsPanelState settings_panel_state;
 
     int current_mode_idx = 0;
-    std::vector<std::pair<std::string, Color>> modes = {
-        {"BUILD",    Color::Blue},
-        {"DEBUG",    ColorWarn},
-        {"RESEARCH", Color::Green},
-        {"EXECUTE",  Color::Red}
-    };
+    std::vector<std::pair<std::string, Color>> modes;
+    modes.reserve(core::agent::kAgentModes.size());
+    for (const auto &descriptor : core::agent::kAgentModes) {
+      const Color mode_color = [&]() -> Color {
+        switch (descriptor.mode) {
+        case core::agent::AgentMode::Auto:
+          return Color::Magenta;
+        case core::agent::AgentMode::Build:
+          return Color::Blue;
+        case core::agent::AgentMode::Debug:
+          return ColorWarn;
+        case core::agent::AgentMode::Research:
+          return Color::Green;
+        case core::agent::AgentMode::Execute:
+          return Color::Red;
+        }
+        return Color::Blue;
+      }();
+      modes.emplace_back(descriptor.name, mode_color);
+    }
     auto normalize_mode = [](std::string mode) {
-        std::erase_if(mode, [](unsigned char c) { return !std::isalpha(c); });
-        if (mode.empty()) mode = "BUILD";
-        std::ranges::transform(mode, mode.begin(), ::toupper);
-        return mode;
+      return std::string(
+          core::agent::to_string(core::agent::agent_mode_from_string(mode)));
     };
     {
         const std::string desired_mode = normalize_mode(config.default_mode);
@@ -2236,7 +2251,8 @@ RunResult run(RunOptions opts) {
             std::shared_ptr<core::power::SleepInhibitor>{},
             session_stats_registry,
             &core::budget::BudgetTracker::get_instance(),
-            memory_system);
+            memory_system,
+            workspace_leases);
         created->set_active_provider_name(
             data.provider.empty() ? active_provider_name : data.provider);
         created->set_auto_compact_threshold(

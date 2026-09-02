@@ -1611,6 +1611,15 @@ TEST_CASE("ConfigManager parses tool policies and hooks", "[config][tools][hooks
             ],
             "pre_tool_use": [
                 "printf pre-tool"
+            ],
+            "stop": [
+                {
+                    "name": "quality",
+                    "command": "./scripts/quality-gate",
+                    "matcher": "mutation_observed",
+                    "quality_gate": true,
+                    "timeout_seconds": 120
+                }
             ]
         }
     })");
@@ -1631,7 +1640,15 @@ TEST_CASE("ConfigManager parses tool policies and hooks", "[config][tools][hooks
     REQUIRE(config.hooks.user_prompt_submit.front().name == "log-submit");
     REQUIRE(config.hooks.pre_tool_use.size() == 1);
     REQUIRE(config.hooks.pre_tool_use.front().command == "printf pre-tool");
+    REQUIRE(config.hooks.stop.size() == 1);
+    REQUIRE(config.hooks.stop.front().name == "quality");
+    REQUIRE(config.hooks.stop.front().matcher == "mutation_observed");
+    REQUIRE(config.hooks.stop.front().quality_gate);
+    REQUIRE(config.hooks.stop.front().fail_closed);
 
+    // Stop hooks are synchronous process-wide gates; do not leak this fixture
+    // into later agent-loop tests that share the ConfigManager singleton.
+    manager.load(sandbox / "empty_project");
     fs::remove_all(sandbox);
 }
 

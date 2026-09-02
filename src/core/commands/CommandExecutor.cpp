@@ -1479,7 +1479,7 @@ public:
             "  Ctrl+B   Browse the filesystem and attach a file as an @mention\n"
             "  Ctrl+G   Open the current input in the configured prompt editor\n"
             "  Ctrl+R   Inspect and run fenced code from the latest response\n"
-            "  F2       Cycle agent mode (BUILD → DEBUG → RESEARCH → EXECUTE)\n"
+            "  F2       Cycle agent mode (AUTO → BUILD → DEBUG → RESEARCH → EXECUTE)\n"
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
             "  Ctrl+O   Toggle verbose output view (compact/full)\n"
             "  Ctrl+X   Open the prompt editor (Gemini CLI-compatible alias)\n"

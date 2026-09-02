@@ -266,6 +266,11 @@ set(FILO_CORE_SOURCES
     src/core/auth/AuthLogin.cpp
     src/core/auth/ui/ConsoleAuthUI.cpp
     src/core/agent/Agent.cpp
+    src/core/agent/AgentCapabilities.cpp
+    src/core/agent/AutoGraphOrchestrator.cpp
+    src/core/agent/AutoModePolicy.cpp
+    src/core/agent/AutoQualityLedger.cpp
+    src/core/agent/AutoTurnCoordinator.cpp
     src/core/agent/DelegatedAgentRunner.cpp
     src/core/agent/HistoryCompactor.cpp
     src/core/agent/HistoryCompactionPlanner.cpp
@@ -273,11 +278,13 @@ set(FILO_CORE_SOURCES
     src/core/agent/ToolCallDeduplicator.cpp
     src/core/agent/ToolCallPlanner.cpp
     src/core/agent/ToolOutputHistory.cpp
+    src/core/verification/Verification.cpp
     src/core/agent/ToolRecovery.cpp
     src/core/agent/ToolResultStore.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/tools/ToolSchema.cpp
     src/core/scm/GitProvider.cpp
+    src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
     src/core/utils/InterprocessFile.cpp
@@ -316,6 +323,7 @@ set(FILO_CORE_SOURCES
     src/core/landrun/linux/LinuxSeccompHardening.cpp
     src/core/landrun/macos/MacOSSeatbeltDriver.cpp
     src/core/tools/ShellTool.cpp
+    src/core/tools/VerificationTool.cpp
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/PathVisibilityToolDecorator.cpp
     src/core/tools/FileSearchTool.cpp
@@ -347,6 +355,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/WebSearchTool.cpp
     src/core/tools/SkillRegistry.cpp
     src/core/utils/JsonUtils.cpp
+    src/core/llm/OneShotCompletion.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp
     src/core/commands/GoalExecutor.cpp
@@ -536,6 +545,8 @@ set(CMAKE_FOLDER "${_filo_saved_folder}")
 unset(_filo_saved_folder)
 
 set(FILO_UNIT_TEST_SOURCES
+    tests/test_auto_mode.cpp
+    tests/test_verification.cpp
     tests/test_reasoning_capabilities.cpp
     tests/test_goal_graph.cpp
     tests/test_tools.cpp

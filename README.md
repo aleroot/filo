@@ -113,6 +113,55 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 - MCP dispatcher shared across stdio and HTTP transports
 - OAuth and API-key credentials
 
+### Agent execution modes
+
+| Mode | Behaviour |
+|---|---|
+| `AUTO` | Classifies each request and picks a proportional direct turn or an orchestrated workflow |
+| `BUILD` | General-purpose single-agent software workflow |
+| `DEBUG` | Enforces a reproduce → inspect → fix → verify loop |
+| `RESEARCH` | Read-only analysis and planning |
+| `EXECUTE` | Applies instructions directly, keeping permission checks |
+
+For orchestrated turns AUTO plans a small typed DAG and runs only its independent read-only
+frontier through subagents, while the parent stays the single writer. It records the starting
+branch, revision, and dirty paths, then audits the final state so branch/HEAD transitions or lost
+pre-existing changes cannot pass silently.
+
+A turn that changed the workspace must end with fresh verification evidence. On `stop` Filo runs
+project completion hooks; a successful hook marked `quality_gate` is authoritative. Otherwise AUTO
+runs the smallest deterministic gate from the repository recipe catalog, discovered from CMake
+presets, package scripts, Cargo, Go, Swift, Maven, and Gradle metadata. The `run_verification`
+tool executes recipes as argv arrays — never a model-authored shell string — and returns typed
+receipts; evidence is bound to the latest mutation, so a later edit invalidates it.
+
+Teams can declare portable, shell-free recipes in `.filo/verification.json`:
+
+```json
+{
+  "version": 1,
+  "recipes": [
+    {
+      "id": "quality",
+      "kind": "test",
+      "executable": "ctest",
+      "arguments": ["--preset", "linux-debug", "--output-on-failure"],
+      "required": true
+    }
+  ]
+}
+```
+
+Kinds are `build`, `test`, `lint`, `typecheck`, `format`, `workflow`, and `custom`. Recipes remain
+subject to workspace confinement, tool policy, timeouts, and permission prompts, and a remembered
+permission is scoped to that recipe rather than every future verification.
+
+Hook events are `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `post_tool_batch`, and
+`stop`, each accepting an optional `matcher` regex over the JSON payload plus `fail_closed` and
+`quality_gate` flags. Payloads arrive on stdin and in `FILO_HOOK_PAYLOAD_B64`. A `stop` hook passes
+on exit `0` and can request another turn with exit `2` or `{"decision":"block","reason":"…"}`;
+repeated feedback is capped at three turns so a broken hook cannot loop forever.
+
 ---
 
 ## Runtime Modes
@@ -291,7 +340,7 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 
 | Setting | Key | Options |
 |---|---|---|
-| Start Mode | `default_mode` | `BUILD`, `DEBUG`, `RESEARCH`, `EXECUTE` |
+| Start Mode | `default_mode` | `AUTO`, `BUILD`, `DEBUG`, `RESEARCH`, `EXECUTE` |
 | Approval Mode | `default_approval_mode` | `prompt`, `yolo` |
 | Default Router Policy | `default_router_policy` | configured policy names |
 | Prompt Editor | `prompt_editor` | `system` (uses `$VISUAL` / `$EDITOR`), `lampo` (macOS), or an editor command |

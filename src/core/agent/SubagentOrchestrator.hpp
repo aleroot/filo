@@ -28,6 +28,10 @@ namespace core::session {
 class SessionStatsRegistry;
 }
 
+namespace core::scm {
+class WorkspaceLeaseRegistry;
+}
+
 namespace core::memory {
 class MemorySystem;
 }
@@ -87,7 +91,8 @@ public:
     explicit SubagentOrchestrator(
         core::tools::ToolManager& tool_manager,
         const core::config::AppConfig* app_config = nullptr,
-        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {});
+        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {},
+        std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases = {});
 
     [[nodiscard]] core::llm::Tool task_tool_definition() const;
     [[nodiscard]] std::expected<ExecutionPlan, std::string> build_execution_plan(
@@ -161,6 +166,7 @@ private:
 
     core::tools::ToolManager& tool_manager_;
     std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry_;
+    std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases_;
     std::vector<Profile> profiles_;
     mutable std::mutex profiles_mutex_;
     const core::config::AppConfig* app_config_ = nullptr;

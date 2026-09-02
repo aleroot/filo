@@ -1,15 +1,12 @@
 #include "Agent.hpp"
-#include "PermissionGate.hpp"
-#include "ToolRecovery.hpp"
-#include "ToolCallPlanner.hpp"
-#include "ToolCallScheduler.hpp"
-#include "ToolOutputHistory.hpp"
-#include "RepositoryContextMessage.hpp"
-#include "SemanticHistoryEditor.hpp"
+#include "AgentCapabilities.hpp"
 #include "../budget/BudgetTracker.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
+#include "../llm/ModelRegistry.hpp"
+#include "../llm/OneShotCompletion.hpp"
+#include "../logging/Logger.hpp"
 #include "../memory/MemorySystem.hpp"
 #include "../session/SessionStats.hpp"
 #include "../session/SessionStore.hpp"
@@ -20,18 +17,23 @@
 #include "../tools/ToolSchema.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
-#include "../logging/Logger.hpp"
-#include "../llm/ModelRegistry.hpp"
-#include <iostream>
-#include <thread>
-#include <mutex>
+#include "PermissionGate.hpp"
+#include "RepositoryContextMessage.hpp"
+#include "SemanticHistoryEditor.hpp"
+#include "ToolCallPlanner.hpp"
+#include "ToolCallScheduler.hpp"
+#include "ToolOutputHistory.hpp"
+#include "ToolRecovery.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <future>
 #include <format>
+#include <future>
+#include <iostream>
 #include <iterator>
+#include <mutex>
 #include <ranges>
+#include <thread>
 #include <utility>
 
 namespace core::agent {
@@ -227,6 +229,52 @@ struct HookFieldPayload {
     return std::move(writer).take();
 }
 
+[[nodiscard]] std::string build_tool_batch_hook_payload(
+    std::span<const core::llm::ToolCall> tool_calls,
+    std::span<const core::llm::Message> results) {
+    std::string tool_names;
+    for (const auto& tool_call : tool_calls) {
+        if (!tool_names.empty()) {
+            tool_names += ',';
+        }
+        tool_names += tool_call.function.name;
+    }
+    const auto names = clamp_hook_field(tool_names);
+    const auto failed = std::ranges::count_if(results, [](const auto& result) {
+        return is_tool_error(result.content);
+    });
+    core::utils::JsonWriter writer(512);
+    {
+        auto object = writer.object();
+        writer.kv_num("tool_count", tool_calls.size()).comma()
+              .kv_num("failure_count", failed).comma()
+              .kv_str("tool_names", names.value);
+        if (names.truncated) {
+            writer.comma().kv_bool("tool_names_truncated", true);
+        }
+    }
+    return std::move(writer).take();
+}
+
+[[nodiscard]] std::string build_stop_hook_payload(
+    const core::llm::Message& assistant_message,
+    std::string_view mode,
+    bool mutation_observed) {
+    const auto response =
+        clamp_hook_field(core::llm::message_text_for_display(assistant_message));
+    core::utils::JsonWriter writer(1024);
+    {
+        auto object = writer.object();
+        writer.kv_str("mode", mode).comma()
+              .kv_str("response", response.value).comma()
+              .kv_bool("mutation_observed", mutation_observed);
+        if (response.truncated) {
+            writer.comma().kv_bool("response_truncated", true);
+        }
+    }
+    return std::move(writer).take();
+}
+
 [[nodiscard]] bool tool_is_allowed_for_turn(std::string_view tool_name,
                                             const Agent::TurnCallbacks& turn_callbacks) {
     if (turn_callbacks.allowed_tools.empty()) {
@@ -361,7 +409,9 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor,
              std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry,
              core::budget::BudgetTracker* budget_tracker,
-             std::shared_ptr<core::memory::MemorySystem> memory_system)
+             std::shared_ptr<core::memory::MemorySystem> memory_system,
+             std::shared_ptr<core::scm::WorkspaceLeaseRegistry>
+                 workspace_leases)
     : provider_(std::move(provider))
     , sleep_inhibitor_(sleep_inhibitor
           ? std::move(sleep_inhibitor)
@@ -373,12 +423,16 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     , session_stats_registry_(session_stats_registry
           ? std::move(session_stats_registry)
           : core::session::SessionStatsRegistry::shared_instance())
+    , workspace_leases_(workspace_leases
+          ? std::move(workspace_leases)
+          : std::make_shared<core::scm::WorkspaceLeaseRegistry>())
     , budget_tracker_(budget_tracker
           ? budget_tracker
           : &core::budget::BudgetTracker::get_instance())
     , orchestrator_(skill_manager_,
                     &core::config::ConfigManager::get_instance().get_config(),
-                    session_stats_registry_)
+                    session_stats_registry_,
+                    workspace_leases_)
     , todo_manager_(&core::session::SessionStore::now_iso8601)
     , todo_tool_(todo_manager_)
     , tool_result_store_(std::move(tool_result_root))
@@ -388,7 +442,8 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     // recovery, default semantic store) — never a process-global instance.
     , memory_system_(memory_system
           ? std::move(memory_system)
-          : std::make_shared<core::memory::MemorySystem>()) {
+          : std::make_shared<core::memory::MemorySystem>())
+    , auto_turn_coordinator_(workspace_leases_) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
     refresh_context_window_snapshot_unlocked();
@@ -436,6 +491,74 @@ std::string Agent::session_id() const {
     return session_context_snapshot().session_id;
 }
 
+std::expected<core::verification::Receipt, std::string>
+Agent::run_verification_recipe(std::string_view recipe_id) {
+  std::shared_ptr<core::llm::LLMProvider> provider;
+  std::string provider_name;
+  std::string model_name;
+  {
+    std::lock_guard lock(history_mutex_);
+    provider = provider_;
+    provider_name = active_provider_name_;
+    model_name = active_model_;
+  }
+  return capabilities::execute_verification(
+      skill_manager_,
+      capabilities::VerificationRequest{
+          .recipe_id = std::string(recipe_id),
+          .session_context = session_context_snapshot(),
+          .tool_call_id = std::format(
+              "goal-verification-{}",
+              next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed)),
+          .provider_name = std::move(provider_name),
+          .model_name = std::move(model_name),
+          .provider = std::move(provider),
+          .permission_check =
+              [this](const std::string &tool,
+                     const std::string &arguments) {
+                return check_permission(tool, arguments);
+              },
+      });
+}
+
+std::expected<std::string, std::string>
+Agent::run_read_only_goal_task(std::string_view description,
+                               std::string_view prompt) {
+  std::shared_ptr<core::llm::LLMProvider> provider;
+  std::shared_ptr<core::memory::MemorySystem> memory_system;
+  std::string provider_name;
+  std::string model_name;
+  std::string parent_mode;
+  {
+    std::lock_guard lock(history_mutex_);
+    provider = provider_;
+    memory_system = memory_system_;
+    provider_name = active_provider_name_;
+    model_name = active_model_;
+    parent_mode = std::string(to_string(current_mode_));
+  }
+  return capabilities::execute_exploration(
+      orchestrator_,
+      capabilities::ExplorationRequest{
+          .description = std::string(description),
+          .prompt = std::string(prompt),
+          .provider = std::move(provider),
+          .provider_name = std::move(provider_name),
+          .model_name = std::move(model_name),
+          .parent_mode = std::move(parent_mode),
+          .session_context = session_context_snapshot(),
+          .tool_call_id = std::format(
+              "goal-explore-{}",
+              next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed)),
+          .permission_check =
+              [this](const std::string &tool, const std::string &arguments) {
+                return check_permission(tool, arguments);
+              },
+          .cancellation_requested = [this] { return is_stop_requested(); },
+          .memory_system = std::move(memory_system),
+      });
+}
+
 bool Agent::is_turn_current(const std::shared_ptr<TurnState>& turn_state) const {
     std::lock_guard lock(history_mutex_);
     return turn_state->conversation_generation == conversation_generation_;
@@ -455,25 +578,86 @@ void Agent::capture_turn_provider_snapshot_unlocked(
         : turn_callbacks.model_override;
 }
 
+AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
+    std::shared_ptr<core::llm::LLMProvider> provider,
+    std::string provider_name,
+    std::string model,
+    core::context::SessionContext session_context,
+    std::function<void(const SubagentEvent&)> on_subagent_event) {
+  AutoGraphOrchestrator::Hooks hooks;
+  hooks.cancellation_requested = [this] { return is_stop_requested(); };
+  if (!provider) {
+    return hooks;
+  }
+
+  hooks.complete = [provider, model, this](std::string_view prompt) {
+    return core::llm::complete_once(
+        provider, model, prompt,
+        [this] { return is_stop_requested(); });
+  };
+  auto memory_system = memory_system_;
+  hooks.explore =
+      [this, provider = std::move(provider),
+       provider_name = std::move(provider_name), model = std::move(model),
+       session_context = std::move(session_context),
+       memory_system = std::move(memory_system),
+       on_subagent_event = std::move(on_subagent_event)](
+          const core::goal::Node &node,
+          std::string_view retry_context) {
+        std::string prompt =
+            node.directive.empty() ? node.name : node.directive;
+        prompt += retry_context;
+        const auto evidence = capabilities::execute_exploration(
+            orchestrator_,
+            capabilities::ExplorationRequest{
+                .description = node.name,
+                .prompt = std::move(prompt),
+                .provider = provider,
+                .provider_name = provider_name,
+                .model_name = model,
+                .parent_mode = std::string(to_string(AgentMode::Research)),
+                .session_context = session_context,
+                .tool_call_id = std::format("auto-graph:{}", node.name),
+                .permission_check =
+                    [this](const std::string &tool,
+                           const std::string &arguments) {
+                      return check_permission(tool, arguments);
+                    },
+                .on_subagent_event = on_subagent_event,
+                .cancellation_requested =
+                    [this] { return is_stop_requested(); },
+                .memory_system = memory_system,
+            });
+        if (!evidence.has_value()) {
+          return core::goal::WorkOutcome{
+              .ok = false,
+              .output = evidence.error(),
+          };
+        }
+        return core::goal::WorkOutcome{
+            .ok = true,
+            .output = *evidence,
+        };
+      };
+  return hooks;
+}
+
 // ---------------------------------------------------------------------------
 // Mode management
 // ---------------------------------------------------------------------------
 
-void Agent::set_mode(const std::string& mode) {
-    std::string clean = mode;
-    std::erase_if(clean, [](unsigned char c){ return !std::isalpha(c); });
-    if (clean.empty()) clean = "BUILD";
-    std::ranges::transform(clean, clean.begin(), ::toupper);
+void Agent::set_mode(const std::string &mode) {
+  const AgentMode parsed = agent_mode_from_string(mode);
 
-    std::lock_guard lock(history_mutex_);
-    if (current_mode_ != clean) {
-        current_mode_ = clean;
+  std::lock_guard lock(history_mutex_);
+  if (current_mode_ != parsed) {
+    current_mode_ = parsed;
 
-        if (!history_.empty() && history_[0].role == "system") {
-            history_.erase(history_.begin());
-        }
-        refresh_stable_prompt_state_unlocked();
+    if (!history_.empty() && history_[0].role == "system") {
+      history_.erase(history_.begin());
     }
+    refresh_stable_prompt_state_unlocked();
+  }
 }
 
 void Agent::set_session_id(std::string session_id) {
@@ -721,12 +905,13 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     if (!stable_prompt_prefix_dirty_ && !stable_prompt_prefix_.empty()) {
         return;
     }
-    stable_prompt_plan_ = core::context::ContextBuilder(session_context_)
-        .with_mode(current_mode_)
-        .with_memory_prompt(memory_system_->semantic_prompt_block(
-            24, session_context_.memory_policy.generate_memories))
-        .include_project_facts(false)
-        .build_plan();
+    stable_prompt_plan_ =
+        core::context::ContextBuilder(session_context_)
+            .with_mode(to_string(current_mode_))
+            .with_memory_prompt(memory_system_->semantic_prompt_block(
+                24, session_context_.memory_policy.generate_memories))
+            .include_project_facts(false)
+            .build_plan();
     stable_prompt_prefix_ = stable_prompt_plan_.render();
     stable_prompt_prefix_tokens_ = stable_prompt_prefix_.empty()
         ? 0
@@ -1103,21 +1288,82 @@ void Agent::send_message(core::llm::Message user_message,
     std::string mode_snapshot;
     const auto session_context = session_context_snapshot();
     auto project_facts = core::context::capture_project_facts(session_context);
+    const std::string auto_repository_context =
+        project_facts.has_value()
+            ? core::context::render_project_facts(*project_facts)
+            : std::string{};
+    std::optional<AutoModeContext> auto_context;
     {
         std::lock_guard lock(history_mutex_);
         ensure_system_prompt();
         append_project_facts_update_unlocked(std::move(project_facts));
-        mode_snapshot = current_mode_;
+        mode_snapshot = std::string(to_string(current_mode_));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
+        if (is_auto_mode(current_mode_)) {
+          const auto user_count = std::ranges::count_if(
+              history_, [](const core::llm::Message &message) {
+                return message.role == "user" && !message.synthetic;
+              });
+          const bool has_tool_history = std::ranges::any_of(
+              history_, [](const core::llm::Message &message) {
+                return message.role == "tool";
+              });
+          auto_context = AutoModeContext{
+              .history_tokens = context_window_snapshot_.estimated_context_tokens,
+              .turn_count = static_cast<int>(user_count),
+              .has_tool_history = has_tool_history,
+          };
+        }
         history_.push_back(std::move(user_message));
         refresh_context_window_snapshot_unlocked();
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
         turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     }
+    if (auto_context.has_value()) {
+      turn_state->auto_turn = auto_turn_coordinator_.start(
+          core::llm::message_text_for_display(hook_message),
+          *auto_context,
+          session_context.workspace_view().primary());
+    }
     core::hooks::dispatch(
         core::hooks::HookEvent::UserPromptSubmit,
         build_user_prompt_hook_payload(hook_message, mode_snapshot),
         session_context);
+    if (turn_state->auto_turn &&
+        turn_callbacks.on_status_log) {
+      turn_callbacks.on_status_log(std::format(
+          "\n[AUTO · {}]\n",
+          auto_turn_coordinator_.decision(*turn_state->auto_turn).reason));
+    }
+    if (turn_state->auto_turn) {
+      const bool orchestrated =
+          auto_turn_coordinator_.decision(*turn_state->auto_turn).path ==
+          AutoExecutionPath::Orchestrated;
+      if (orchestrated && turn_state->provider &&
+          turn_callbacks.on_status_log) {
+        turn_callbacks.on_status_log(
+            "\n[AUTO · compiling goal graph and running read-only frontier]\n");
+      }
+      auto provider = turn_state->provider;
+      const std::string provider_name = turn_state->provider_name;
+      const std::string model = turn_state->model;
+      const std::string objective =
+          core::llm::message_text_for_display(hook_message);
+      const auto findings = auto_turn_coordinator_.prepare(
+          *turn_state->auto_turn,
+          objective,
+          auto_repository_context,
+          session_context.workspace_view().primary(),
+          make_auto_graph_hooks(
+              std::move(provider), provider_name, model, session_context,
+              turn_callbacks.on_subagent_event));
+      if (orchestrated && turn_state->provider &&
+          turn_callbacks.on_status_log) {
+        turn_callbacks.on_status_log(std::format(
+            "\n[AUTO · graph ready; {} read-only node(s) completed]\n",
+            findings));
+      }
+    }
     step(
         std::move(text_callback),
         std::move(tool_callback),
@@ -1199,8 +1445,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.session_id = step_session_context.session_id;
             request.transport_turn_id = turn_state->transport_turn_id;
             provider = turn_state->provider;
-            mode_snapshot = current_mode_;
+            mode_snapshot = std::string(to_string(current_mode_));
             dynamic_prompt_suffix = build_dynamic_prompt_suffix();
+            if (turn_state->auto_turn) {
+              dynamic_prompt_suffix +=
+                  self->auto_turn_coordinator_.prompt_suffix(
+                      *turn_state->auto_turn);
+            }
             if (!turn_state->prompt_plan.has_value()) {
                 auto plan = stable_prompt_plan_;
                 plan.append(core::context::ContextLayer{
@@ -1275,10 +1526,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     }
 
     // In PLAN/RESEARCH mode strip write-destructive tools
-    if (mode_snapshot == "PLAN" || mode_snapshot == "RESEARCH") {
-        std::erase_if(request.tools, [](const core::llm::Tool& t) {
-            return core::tools::names::is_write_destructive_tool(t.function.name);
-        });
+    if (is_read_only_mode(agent_mode_from_string(mode_snapshot))) {
+      std::erase_if(request.tools, [](const core::llm::Tool &t) {
+        return core::tools::names::is_write_destructive_tool(t.function.name);
+      });
     }
 
     auto assistant_response   = std::make_shared<std::string>();
@@ -1581,20 +1832,97 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
 
         if (tool_calls_accum->empty()) {
-            // Pure text response — we're done
-            if (turn_callbacks.allow_efficiency_rotation) {
-                self->run_efficiency_rotation_if_needed(
-                    turn_callbacks.min_context_utilization_for_rotation);
+          const auto continue_with = [&](std::string_view status,
+                                         std::string message) {
+            const std::string rendered_status =
+                std::format("\n[{}]\n", status);
+            if (turn_callbacks.on_status_log) {
+              turn_callbacks.on_status_log(rendered_status);
+            } else {
+              text_callback(rendered_status);
             }
-            self->run_memory_background_review(
-                provider ? provider->get_last_rate_limit_info()
-                         : core::llm::protocols::RateLimitInfo{},
-                turn_callbacks.on_status_log);
-            self->check_auto_compact(turn_callbacks.on_status_log
-                                          ? turn_callbacks.on_status_log
-                                          : text_callback);
+            if (!self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message> &history) {
+                      history.push_back(core::llm::Message{
+                          .role = "user",
+                          .content = std::move(message),
+                          .synthetic = true,
+                      });
+                    })) {
+              done_callback();
+              return;
+            }
+            self->step(text_callback, tool_callback, done_callback,
+                       turn_callbacks, turn_state);
+          };
+          const auto fail_with = [&](std::string message) {
+            const std::string warning = std::format("\n\n[{}]", message);
+            self->turn_failed_.store(true, std::memory_order_release);
+            text_callback(warning);
+            static_cast<void>(self->apply_to_history_if_turn_current(
+                turn_state, [&](std::vector<core::llm::Message> &history) {
+                  history.push_back(core::llm::Message{
+                      .role = "assistant",
+                      .content = warning,
+                      .synthetic = true,
+                  });
+                }));
+          };
+
+          const bool mutation_observed = turn_state->auto_turn &&
+              self->auto_turn_coordinator_.mutation_observed(
+                  *turn_state->auto_turn);
+          const auto context = self->session_context_snapshot();
+          const auto run_completion_hooks = [&]() {
+            return core::hooks::evaluate_completion(
+                build_stop_hook_payload(
+                    asst_msg, self->get_mode(), mutation_observed),
+                context, turn_state->completion_hooks);
+          };
+
+          const auto completion = turn_state->auto_turn
+              ? self->auto_turn_coordinator_.evaluate_completion(
+                    *turn_state->auto_turn,
+                    asst_msg.content,
+                    context.workspace_view().primary(),
+                    run_completion_hooks,
+                    [self](std::string_view recipe_id) {
+                      return self->run_verification_recipe(recipe_id);
+                    })
+              : run_completion_hooks();
+          if (!completion.status.empty() &&
+              completion.action ==
+                  core::session::TurnCompletionAction::Complete &&
+              turn_callbacks.on_status_log) {
+            turn_callbacks.on_status_log(
+                std::format("\n[{}]\n", completion.status));
+          }
+          if (completion.action ==
+              core::session::TurnCompletionAction::Continue) {
+            continue_with(completion.status, completion.message);
+            return;
+          }
+          if (completion.action ==
+              core::session::TurnCompletionAction::Fail) {
+            fail_with(completion.message);
             done_callback();
             return;
+          }
+          // Pure text response — we're done
+          if (turn_callbacks.allow_efficiency_rotation) {
+            self->run_efficiency_rotation_if_needed(
+                turn_callbacks.min_context_utilization_for_rotation);
+          }
+          self->run_memory_background_review(
+              provider ? provider->get_last_rate_limit_info()
+                       : core::llm::protocols::RateLimitInfo{},
+              turn_callbacks.on_status_log);
+          self->check_auto_compact(turn_callbacks.on_status_log
+                                       ? turn_callbacks.on_status_log
+                                       : text_callback);
+          done_callback();
+          return;
         }
 
         // ── Execute tool calls ───────────────────────────────────────────
@@ -1628,7 +1956,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             std::string permission_mode;
             {
                 std::lock_guard lock(self->history_mutex_);
-                permission_mode = self->current_mode_;
+                permission_mode = std::string(to_string(self->current_mode_));
             }
             bool denied_any = false;
             for (size_t i = 0; i < tool_calls_accum->size(); ++i) {
@@ -1733,6 +2061,48 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 return;
             }
 
+            if (turn_state->auto_turn) {
+              std::vector<AutoToolIntent> intents;
+              intents.reserve(tool_calls_accum->size());
+              for (std::size_t i = 0; i < tool_calls_accum->size(); ++i) {
+                const auto &call = (*tool_calls_accum)[i];
+                intents.push_back(AutoToolIntent{
+                    .name = call.function.name,
+                    .arguments = call.function.arguments,
+                    .approved = approved[i],
+                    .read_only_subagent = read_only_tasks[i],
+                    .destructive_hint =
+                        resolved_definitions[i].has_value() &&
+                        resolved_definitions[i]->annotations.destructive_hint,
+                });
+              }
+              const auto writer =
+                  self->auto_turn_coordinator_.prepare_tool_batch(
+                      *turn_state->auto_turn,
+                      step_session_context.workspace_view().primary(),
+                      intents,
+                      [self] { return self->is_stop_requested(); });
+              if (turn_callbacks.on_status_log) {
+                switch (writer) {
+                case WorkspaceWriterState::Acquired:
+                  turn_callbacks.on_status_log(
+                      "\n[AUTO · exclusive repository writer lease "
+                      "acquired]\n");
+                  break;
+                case WorkspaceWriterState::Unavailable:
+                  // The batch still runs — the lease is a coordination aid,
+                  // not an authorization check — but the user must never be
+                  // told exclusion was held when it was not.
+                  turn_callbacks.on_status_log(
+                      "\n[AUTO · warning: mutating step is running without an "
+                      "exclusive repository lease]\n");
+                  break;
+                case WorkspaceWriterState::NotRequired:
+                  break;
+                }
+              }
+            }
+
             // 2. Execute approved calls through a resource-aware scheduler.
             std::shared_ptr<core::llm::LLMProvider> provider_for_task;
             std::string active_provider_name_for_task;
@@ -1746,7 +2116,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     active_provider_name_for_task = provider_name_snapshot;
                 }
                 active_model_for_task = turn_state->model;
-                parent_mode_for_task = self->current_mode_;
+                parent_mode_for_task =
+                    std::string(to_string(self->current_mode_));
             }
 
             turn_state->deduplicator.begin_step();
@@ -1911,15 +2282,30 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     .provider = provider_for_task,
                                 });
                         }
+                        const bool raw_tool_ok =
+                            !recovery::result_indicates_error(result);
+                        if (recovery_turn_state->auto_turn) {
+                          self->auto_turn_coordinator_.observe_tool(
+                              *recovery_turn_state->auto_turn,
+                              AutoToolObservation{
+                                  .name = tc.function.name,
+                                  .arguments = tc.function.arguments,
+                                  .result = result,
+                                  .succeeded = raw_tool_ok,
+                                  .mutation_hint =
+                                      recovery_definition.has_value() &&
+                                      recovery_definition->annotations
+                                          .destructive_hint,
+                                  .trusted_verification_receipts =
+                                      recovery_definition.has_value() &&
+                                      recovery_definition
+                                          ->trusted_verification_receipts,
+                              });
+                        }
                         if (recovery_definition.has_value()) {
-                            const bool executed_ok =
-                                !recovery::result_indicates_error(result);
-                            self->apply_tool_recovery_outcome(
-                                tc,
-                                *recovery_definition,
-                                *recovery_turn_state,
-                                executed_ok,
-                                result);
+                          self->apply_tool_recovery_outcome(
+                              tc, *recovery_definition, *recovery_turn_state,
+                              raw_tool_ok, result);
                         }
                         if (core::tools::MemoryTool::committed_mutation(
                                 tc.function.name,
@@ -1989,6 +2375,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             ToolCallScheduler<core::llm::Message> scheduler;
             auto tool_messages = scheduler.run(std::move(scheduled_tasks));
             turn_state->deduplicator.end_step();
+            core::hooks::dispatch(
+                core::hooks::HookEvent::PostToolBatch,
+                build_tool_batch_hook_payload(*tool_calls_accum, tool_messages),
+                step_session_context);
 
             const bool stop_requested_after_tools = self->is_stop_requested();
             if (!self->is_turn_current(turn_state)) {
@@ -2188,52 +2578,49 @@ void Agent::append_history_message(core::llm::Message message) {
 }
 
 void Agent::load_history(std::vector<core::llm::Message> messages,
-                          const std::string& context_summary,
-                          const std::string& mode) {
-    std::lock_guard lock(history_mutex_);
-    ++conversation_generation_;
-    std::string clean_mode = mode;
-    std::erase_if(clean_mode, [](unsigned char c){ return !std::isalpha(c); });
-    if (clean_mode.empty()) clean_mode = "BUILD";
-    std::ranges::transform(clean_mode, clean_mode.begin(), ::toupper);
+                         const std::string &context_summary,
+                         const std::string &mode) {
+  std::lock_guard lock(history_mutex_);
+  ++conversation_generation_;
+  current_mode_ = agent_mode_from_string(mode);
+  context_summary_ = context_summary;
+  project_facts_snapshot_.reset();
+  for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+    if (!is_repository_context_message(*it))
+      continue;
+    if (const auto state = decode_repository_context_state(it->input_text)) {
+      project_facts_snapshot_ = core::context::ProjectFactsSnapshot{
+          .status = state->first,
+          .tree = state->second,
+      };
+    }
+    break;
+  }
+  consecutive_failure_rounds_ = 0;
+  orchestrator_.clear_sessions();
+  reset_efficiency_tracking_unlocked();
+  if (provider_) {
+    provider_->reset_conversation_state();
+  }
 
-    current_mode_ = clean_mode;
-    context_summary_ = context_summary;
-    project_facts_snapshot_.reset();
-    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        if (!is_repository_context_message(*it)) continue;
-        if (const auto state = decode_repository_context_state(it->input_text)) {
-            project_facts_snapshot_ = core::context::ProjectFactsSnapshot{
-                .status = state->first,
-                .tree = state->second,
-            };
-        }
-        break;
-    }
-    consecutive_failure_rounds_ = 0;
-    orchestrator_.clear_sessions();
-    reset_efficiency_tracking_unlocked();
-    if (provider_) {
-        provider_->reset_conversation_state();
-    }
-
-    // Remove any stale system message — ensure_system_prompt() inserts a fresh one.
-    std::erase_if(messages, [](const core::llm::Message& m){ return m.role == "system"; });
-    if (const auto invalid = invalid_tool_history(messages);
-        invalid.has_value()) {
-        core::logging::warn(
-            "Truncated malformed saved tool transcript at history index {}: {}",
-            invalid->index,
-            invalid->reason);
-        messages.resize(invalid->index);
-    }
-    history_ = std::move(messages);
-    refresh_stable_prompt_state_unlocked();
+  // Remove any stale system message — ensure_system_prompt() inserts a fresh
+  // one.
+  std::erase_if(messages,
+                [](const core::llm::Message &m) { return m.role == "system"; });
+  if (const auto invalid = invalid_tool_history(messages);
+      invalid.has_value()) {
+    core::logging::warn(
+        "Truncated malformed saved tool transcript at history index {}: {}",
+        invalid->index, invalid->reason);
+    messages.resize(invalid->index);
+  }
+  history_ = std::move(messages);
+  refresh_stable_prompt_state_unlocked();
 }
 
 std::string Agent::get_mode() const {
     std::lock_guard lock(history_mutex_);
-    return current_mode_;
+    return std::string(to_string(current_mode_));
 }
 
 std::string Agent::get_context_summary() const {

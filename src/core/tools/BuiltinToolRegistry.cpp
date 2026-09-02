@@ -1,5 +1,7 @@
 #include "BuiltinToolRegistry.hpp"
 
+#include "../landrun/LandrunSettings.hpp"
+#include "../logging/Logger.hpp"
 #include "ActivateSkillTool.hpp"
 #include "ApplyPatchTool.hpp"
 #include "CreateDirectoryTool.hpp"
@@ -19,11 +21,10 @@
 #include "SkillRegistry.hpp"
 #include "TaskTool.hpp"
 #include "ToolManager.hpp"
+#include "VerificationTool.hpp"
 #include "WebFetchTool.hpp"
 #include "WebSearchTool.hpp"
 #include "WriteFileTool.hpp"
-#include "../landrun/LandrunSettings.hpp"
-#include "../logging/Logger.hpp"
 
 #ifdef FILO_ENABLE_PYTHON
 #include "PythonInterpreterTool.hpp"
@@ -63,6 +64,7 @@ void register_builtin_tools(ToolManager& tool_manager,
     }
 
     tool_manager.register_tool(std::make_shared<ShellTool>());
+    tool_manager.register_tool(std::make_shared<VerificationTool>());
     tool_manager.register_tool(with_path_visibility(std::make_shared<ApplyPatchTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<FileSearchTool>()));
     tool_manager.register_tool(

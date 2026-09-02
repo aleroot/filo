@@ -17,6 +17,8 @@ public:
   ignored_paths(const std::vector<std::filesystem::path> &paths) const override;
   [[nodiscard]] std::string get_status_summary() const override;
   [[nodiscard]] std::vector<BranchRef> list_branch_refs() const override;
+  [[nodiscard]] std::optional<RepositorySnapshot>
+  repository_snapshot() const override;
   [[nodiscard]] std::filesystem::path get_root_dir() const override {
     return root_dir_;
   }

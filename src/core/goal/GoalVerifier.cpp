@@ -191,21 +191,64 @@ Verdict ModelCheckVerifier::verify(const Node& node, const VerifyContext& contex
 // ---------------------------------------------------------------------------
 
 GoalVerifier::GoalVerifier(CommandRunner runner, CompletionFn complete)
-    : shell_(std::move(runner)), model_(std::move(complete)) {}
+    : GoalVerifier({}, std::move(runner), std::move(complete)) {}
 
-Verdict GoalVerifier::verify(const Node& node, const VerifyContext& context) const {
-    if (!node.check_command.empty() && shell_.available()) {
-        return shell_.verify(node, context);
-    }
-    if (model_.available()) {
-        return model_.verify(node, context);
-    }
-    if (shell_.available()) {
-        return shell_.verify(node, context);
-    }
+GoalVerifier::GoalVerifier(RecipeRunner recipe_runner,
+                           CommandRunner legacy_runner, CompletionFn complete)
+    : recipe_runner_(std::move(recipe_runner)),
+      shell_(std::move(legacy_runner)), model_(std::move(complete)) {}
+
+Verdict GoalVerifier::verify(const Node &node,
+                             const VerifyContext &context) const {
+  if (!node.verification_recipe_ids.empty()) {
     Verdict verdict;
-    verdict.reason = "no verifier available (neither command runner nor judge model)";
+    if (!recipe_runner_) {
+      // Fail closed, but never as `deterministic`: no command ran, so this is
+      // a configuration error, not tool-grounded evidence that the work is
+      // wrong. Reflection and the UI treat deterministic verdicts as proof.
+      verdict.reason = "no trusted verification recipe runner configured";
+      return verdict;
+    }
+    verdict.deterministic = true;
+
+    std::string evidence;
+    for (const auto &recipe_id : node.verification_recipe_ids) {
+      const RecipeResult result = recipe_runner_(recipe_id);
+      if (!evidence.empty()) {
+        evidence += '\n';
+      }
+      evidence +=
+          std::format("[{}] {}", recipe_id,
+                      result.evidence.empty() ? result.error : result.evidence);
+      if (!result.passed) {
+        verdict.reason =
+            result.error.empty()
+                ? std::format("verification recipe '{}' failed", recipe_id)
+                : std::format("verification recipe '{}' failed: {}", recipe_id,
+                              result.error);
+        verdict.evidence = clamp_evidence(evidence);
+        return verdict;
+      }
+    }
+    verdict.passed = true;
+    verdict.reason = std::format("{} trusted verification recipe(s) passed",
+                                 node.verification_recipe_ids.size());
+    verdict.evidence = clamp_evidence(evidence);
     return verdict;
+  }
+  if (!node.check_command.empty() && shell_.available()) {
+    return shell_.verify(node, context);
+  }
+  if (model_.available()) {
+    return model_.verify(node, context);
+  }
+  if (shell_.available()) {
+    return shell_.verify(node, context);
+  }
+  Verdict verdict;
+  verdict.reason =
+      "no verifier available (neither command runner nor judge model)";
+  return verdict;
 }
 
 // ---------------------------------------------------------------------------

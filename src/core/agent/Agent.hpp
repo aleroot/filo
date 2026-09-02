@@ -1,23 +1,27 @@
 #pragma once
 
-#include "../context/SessionContext.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../context/ContextWindowTracker.hpp"
+#include "../context/SessionContext.hpp"
+#include "../hooks/HookManager.hpp"
 #include "../llm/ProviderManager.hpp"
 #include "../memory/MemoryPolicy.hpp"
 #include "../power/SleepInhibitor.hpp"
 #include "../session/GoalManager.hpp"
-#include "../session/TodoManager.hpp"
 #include "../session/SessionData.hpp"
 #include "../session/SessionEfficiencyController.hpp"
-#include "../tools/ToolManager.hpp"
+#include "../session/TodoManager.hpp"
 #include "../tools/ReadToolResultTool.hpp"
 #include "../tools/TodoTool.hpp"
-#include "HistoryCompactor.hpp"
+#include "../tools/ToolManager.hpp"
+#include "../verification/Verification.hpp"
+#include "AgentMode.hpp"
+#include "AutoTurnCoordinator.hpp"
 #include "HistoryCompactionPlanner.hpp"
-#include "SubagentOrchestrator.hpp"
-#include "SubagentEvents.hpp"
+#include "HistoryCompactor.hpp"
 #include "PermissionGate.hpp"
+#include "SubagentEvents.hpp"
+#include "SubagentOrchestrator.hpp"
 #include "ToolCallDeduplicator.hpp"
 #include "ToolResultStore.hpp"
 
@@ -106,7 +110,9 @@ public:
           std::shared_ptr<core::power::SleepInhibitor> sleep_inhibitor = {},
           std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {},
           core::budget::BudgetTracker* budget_tracker = nullptr,
-          std::shared_ptr<core::memory::MemorySystem> memory_system = {});
+          std::shared_ptr<core::memory::MemorySystem> memory_system = {},
+          std::shared_ptr<core::scm::WorkspaceLeaseRegistry>
+              workspace_leases = {});
     ~Agent();
 
     // -----------------------------------------------------------------------
@@ -235,6 +241,19 @@ public:
     void set_effort_level(std::string effort);
     [[nodiscard]] std::string get_effort_level() const;
 
+    /// Execute one repository-owned verification recipe outside the normal
+    /// conversation loop. Used by the goal engine so it shares AUTO's trusted
+    /// receipt path instead of executing model-authored shell strings.
+    [[nodiscard]] std::expected<core::verification::Receipt, std::string>
+    run_verification_recipe(std::string_view recipe_id);
+
+    /// Execute a graph exploration node in an isolated read-only subagent.
+    /// This bypasses the parent conversation loop, so a scheduler may safely
+    /// run independent exploration nodes concurrently.
+    [[nodiscard]] std::expected<std::string, std::string>
+    run_read_only_goal_task(std::string_view description,
+                            std::string_view prompt);
+
     // -----------------------------------------------------------------------
     // Permission gate — set by the TUI to approve/deny dangerous tool calls.
     // When null, all tool calls are executed without approval (headless mode).
@@ -347,6 +366,8 @@ private:
         std::shared_ptr<core::llm::LLMProvider> provider;
         std::string provider_name;
         std::string model;
+        std::unique_ptr<AutoTurnState> auto_turn;
+        core::hooks::CompletionGateState completion_hooks;
     };
 
     void step(std::function<void(const std::string&)> text_callback,
@@ -385,6 +406,13 @@ private:
     // through a tool-use/result exchange. Caller must hold history_mutex_.
     void capture_turn_provider_snapshot_unlocked(
         TurnState& turn_state, const TurnCallbacks& turn_callbacks);
+
+    [[nodiscard]] AutoGraphOrchestrator::Hooks make_auto_graph_hooks(
+        std::shared_ptr<core::llm::LLMProvider> provider,
+        std::string provider_name,
+        std::string model,
+        core::context::SessionContext session_context,
+        std::function<void(const SubagentEvent&)> on_subagent_event);
 
     // Run `mutator` against the live history under history_mutex_, but only if
     // the turn's conversation generation is still current. Returns false (doing
@@ -452,6 +480,8 @@ private:
     /// Injected/shared session metrics registry; declared before the
     /// orchestrator so subagents can share it.
     std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry_;
+    /// Explicit execution-root synchronization scope shared with subagents.
+    std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases_;
     core::budget::BudgetTracker* budget_tracker_ = nullptr;
     SubagentOrchestrator orchestrator_;
     core::session::TodoManager todo_manager_;
@@ -464,7 +494,8 @@ private:
     std::uint64_t history_revision_ = 0;
     std::uint64_t conversation_generation_ = 0;
     bool compaction_in_progress_ = false;
-    std::string current_mode_ = "BUILD";
+    AgentMode current_mode_ = AgentMode::Build;
+    AutoTurnCoordinator auto_turn_coordinator_;
     PermissionProfile permission_profile_ = PermissionProfile::Interactive;
 
     // Loop-breaker state

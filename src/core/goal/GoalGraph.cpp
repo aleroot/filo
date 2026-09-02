@@ -70,6 +70,12 @@ std::expected<NodeId, std::string> GoalGraph::add_node(Node node) {
     node.acceptance = clamp_copy(node.acceptance, Node::kMaxAcceptanceChars);
     node.result_summary = clamp_copy(node.result_summary, Node::kMaxResultChars);
     node.max_attempts = clamp_attempts(node.max_attempts);
+    if (node.verification_recipe_ids.size() > Node::kMaxVerificationRecipes) {
+      node.verification_recipe_ids.resize(Node::kMaxVerificationRecipes);
+    }
+    for (auto &recipe_id : node.verification_recipe_ids) {
+      recipe_id = clamp_copy(recipe_id, Node::kMaxNameChars);
+    }
     if (node.lessons.size() > Node::kMaxLessons) {
         node.lessons.resize(Node::kMaxLessons);
     }
@@ -185,6 +191,25 @@ std::expected<void, std::string> GoalGraph::validate() const {
                     "goal node '{}' retry target '{}' must be a work node",
                     node.name, target->name));
             }
+        }
+        if (node.parallelizable &&
+            node.workspace_access != WorkspaceAccess::SharedRead) {
+          return std::unexpected(std::format(
+              "goal node '{}' cannot be parallel without shared-read access",
+              node.name));
+        }
+        std::unordered_set<std::string_view> recipe_ids;
+        for (const auto &recipe_id : node.verification_recipe_ids) {
+          if (recipe_id.empty()) {
+            return std::unexpected(std::format(
+                "goal node '{}' contains an empty verification recipe id",
+                node.name));
+          }
+          if (!recipe_ids.insert(recipe_id).second) {
+            return std::unexpected(
+                std::format("goal node '{}' repeats verification recipe '{}'",
+                            node.name, recipe_id));
+          }
         }
     }
 
@@ -421,9 +446,17 @@ std::string GoalGraph::render_ascii() const {
             if (node.parallelizable) {
                 out += ", parallel";
             }
+            out += std::format(", {}", to_string(node.workspace_access));
             out += ")\n";
             if (node.kind == NodeKind::Verify && !node.check_command.empty()) {
                 out += std::format("      check: {}\n", node.check_command);
+            }
+            if (!node.verification_recipe_ids.empty()) {
+              out += "      verification:";
+              for (const auto &recipe_id : node.verification_recipe_ids) {
+                out += std::format(" {}", recipe_id);
+              }
+              out += '\n';
             }
             if (!node.lessons.empty()) {
                 out += std::format("      lessons: {}\n", node.lessons.size());
@@ -453,7 +486,7 @@ std::string GoalGraph::render_ascii() const {
 std::string GoalGraph::to_json() const {
     std::string out;
     out.reserve(1024 + nodes_.size() * 256);
-    out += "{\"version\":1,\"plan_version\":";
+    out += "{\"version\":2,\"plan_version\":";
     out += std::to_string(plan_version_);
     out += ",\"objective\":\"";
     core::utils::append_escaped(out, objective_);
@@ -483,6 +516,19 @@ std::string GoalGraph::to_json() const {
         out += to_string(node.state);
         out += "\",\"parallel\":";
         out += node.parallelizable ? "true" : "false";
+        out += ",\"workspace_access\":\"";
+        out += to_string(node.workspace_access);
+        out += "\",\"verification_recipes\":[";
+        bool first_recipe = true;
+        for (const auto &recipe_id : node.verification_recipe_ids) {
+          if (!std::exchange(first_recipe, false)) {
+            out += ',';
+          }
+          out += '\"';
+          core::utils::append_escaped(out, recipe_id);
+          out += '\"';
+        }
+        out += ']';
         out += ",\"retry_target\":";
         out += std::to_string(node.retry_target);
         out += ",\"result\":\"";
@@ -518,105 +564,139 @@ std::string GoalGraph::to_json() const {
 }
 
 std::expected<GoalGraph, std::string> GoalGraph::from_json(std::string_view json) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    const simdjson::padded_string padded(json);
-    if (parser.parse(padded).get(doc) != simdjson::SUCCESS || !doc.is_object()) {
-        return std::unexpected("goal graph snapshot is not valid JSON");
-    }
+  simdjson::dom::parser parser;
+  simdjson::dom::element doc;
+  const simdjson::padded_string padded(json);
+  if (parser.parse(padded).get(doc) != simdjson::SUCCESS || !doc.is_object()) {
+    return std::unexpected("goal graph snapshot is not valid JSON");
+  }
 
-    GoalGraph graph;
-    int64_t plan_version = 0;
-    if (doc["plan_version"].get(plan_version) == simdjson::SUCCESS && plan_version > 0) {
-        graph.plan_version_ = static_cast<int>(plan_version);
-    }
-    std::string_view sv;
-    if (doc["objective"].get(sv) == simdjson::SUCCESS) {
-        graph.set_objective(sv);
-    }
+  GoalGraph graph;
+  int64_t plan_version = 0;
+  if (doc["plan_version"].get(plan_version) == simdjson::SUCCESS &&
+      plan_version > 0) {
+    graph.plan_version_ = static_cast<int>(plan_version);
+  }
+  std::string_view sv;
+  if (doc["objective"].get(sv) == simdjson::SUCCESS) {
+    graph.set_objective(sv);
+  }
 
-    simdjson::dom::array nodes;
-    if (doc["nodes"].get(nodes) != simdjson::SUCCESS) {
-        return std::unexpected("goal graph snapshot is missing nodes");
+  simdjson::dom::array nodes;
+  if (doc["nodes"].get(nodes) != simdjson::SUCCESS) {
+    return std::unexpected("goal graph snapshot is missing nodes");
+  }
+  for (simdjson::dom::element element : nodes) {
+    Node node;
+    if (element["kind"].get(sv) == simdjson::SUCCESS) {
+      const auto kind = node_kind_from_string(sv);
+      if (!kind.has_value()) {
+        return std::unexpected(
+            std::format("goal graph snapshot has unknown node kind '{}'", sv));
+      }
+      node.kind = *kind;
     }
-    for (simdjson::dom::element element : nodes) {
-        Node node;
-        if (element["kind"].get(sv) == simdjson::SUCCESS) {
-            const auto kind = node_kind_from_string(sv);
-            if (!kind.has_value()) {
-                return std::unexpected(
-                    std::format("goal graph snapshot has unknown node kind '{}'", sv));
-            }
-            node.kind = *kind;
-        }
-        if (element["name"].get(sv) == simdjson::SUCCESS) node.name = std::string(sv);
-        if (element["directive"].get(sv) == simdjson::SUCCESS) node.directive = std::string(sv);
-        if (element["check"].get(sv) == simdjson::SUCCESS) node.check_command = std::string(sv);
-        if (element["acceptance"].get(sv) == simdjson::SUCCESS) node.acceptance = std::string(sv);
-        int64_t number = 0;
-        if (element["max_attempts"].get(number) == simdjson::SUCCESS) {
-            node.max_attempts = static_cast<int>(number);
-        }
-        if (element["attempts"].get(number) == simdjson::SUCCESS) {
-            node.attempts = static_cast<int>(number);
-        }
-        if (element["state"].get(sv) == simdjson::SUCCESS) {
-            node.state = node_state_from_string(sv);
-            // A snapshot taken mid-run must not resurrect phantom work.
-            if (node.state == NodeState::Running) {
-                node.state = NodeState::Ready;
-            }
-        }
-        bool flag = false;
-        if (element["parallel"].get(flag) == simdjson::SUCCESS) node.parallelizable = flag;
-        if (element["retry_target"].get(number) == simdjson::SUCCESS) {
-            node.retry_target = static_cast<NodeId>(number);
-        }
-        if (element["result"].get(sv) == simdjson::SUCCESS) node.result_summary = std::string(sv);
-        simdjson::dom::array lessons;
-        if (element["lessons"].get(lessons) == simdjson::SUCCESS) {
-            for (simdjson::dom::element lesson : lessons) {
-                if (lesson.get(sv) == simdjson::SUCCESS) {
-                    node.lessons.emplace_back(sv);
-                }
-            }
-        }
-        const auto added = graph.add_node(std::move(node));
-        if (!added.has_value()) {
-            return std::unexpected(added.error());
-        }
+    if (element["name"].get(sv) == simdjson::SUCCESS)
+      node.name = std::string(sv);
+    if (element["directive"].get(sv) == simdjson::SUCCESS)
+      node.directive = std::string(sv);
+    if (element["check"].get(sv) == simdjson::SUCCESS)
+      node.check_command = std::string(sv);
+    if (element["acceptance"].get(sv) == simdjson::SUCCESS)
+      node.acceptance = std::string(sv);
+    int64_t number = 0;
+    if (element["max_attempts"].get(number) == simdjson::SUCCESS) {
+      node.max_attempts = static_cast<int>(number);
     }
+    if (element["attempts"].get(number) == simdjson::SUCCESS) {
+      node.attempts = static_cast<int>(number);
+    }
+    if (element["state"].get(sv) == simdjson::SUCCESS) {
+      node.state = node_state_from_string(sv);
+      // A snapshot taken mid-run must not resurrect phantom work.
+      if (node.state == NodeState::Running) {
+        node.state = NodeState::Ready;
+      }
+    }
+    bool flag = false;
+    if (element["parallel"].get(flag) == simdjson::SUCCESS)
+      node.parallelizable = flag;
+    bool has_workspace_access = false;
+    if (element["workspace_access"].get(sv) == simdjson::SUCCESS) {
+      const auto access = workspace_access_from_string(sv);
+      if (!access.has_value()) {
+        return std::unexpected(std::format(
+            "goal graph snapshot has unknown workspace access '{}'", sv));
+      }
+      node.workspace_access = *access;
+      has_workspace_access = true;
+    }
+    // Version 1 snapshots predate explicit access capabilities and used the
+    // parallel bit as their read-only marker.
+    if (!has_workspace_access && node.parallelizable) {
+      node.workspace_access = WorkspaceAccess::SharedRead;
+    }
+    simdjson::dom::array verification_recipes;
+    if (element["verification_recipes"].get(verification_recipes) ==
+        simdjson::SUCCESS) {
+      for (simdjson::dom::element recipe : verification_recipes) {
+        if (recipe.get(sv) != simdjson::SUCCESS) {
+          return std::unexpected(
+              "goal graph verification recipes must be strings");
+        }
+        node.verification_recipe_ids.emplace_back(sv);
+      }
+    }
+    if (element["retry_target"].get(number) == simdjson::SUCCESS) {
+      node.retry_target = static_cast<NodeId>(number);
+    }
+    if (element["result"].get(sv) == simdjson::SUCCESS)
+      node.result_summary = std::string(sv);
+    simdjson::dom::array lessons;
+    if (element["lessons"].get(lessons) == simdjson::SUCCESS) {
+      for (simdjson::dom::element lesson : lessons) {
+        if (lesson.get(sv) == simdjson::SUCCESS) {
+          node.lessons.emplace_back(sv);
+        }
+      }
+    }
+    const auto added = graph.add_node(std::move(node));
+    if (!added.has_value()) {
+      return std::unexpected(added.error());
+    }
+  }
 
-    simdjson::dom::array edges;
-    if (doc["edges"].get(edges) == simdjson::SUCCESS) {
-        for (simdjson::dom::element element : edges) {
-            int64_t from = 0;
-            int64_t to = 0;
-            if (element["from"].get(from) != simdjson::SUCCESS
-                || element["to"].get(to) != simdjson::SUCCESS) {
-                return std::unexpected("goal graph snapshot has a malformed edge");
-            }
-            EdgeCondition condition = EdgeCondition::Always;
-            if (element["condition"].get(sv) == simdjson::SUCCESS) {
-                const auto parsed = edge_condition_from_string(sv);
-                if (!parsed.has_value()) {
-                    return std::unexpected(std::format(
-                        "goal graph snapshot has unknown edge condition '{}'", sv));
-                }
-                condition = *parsed;
-            }
-            const auto added = graph.add_edge(static_cast<NodeId>(from),
-                                              static_cast<NodeId>(to), condition);
-            if (!added.has_value()) {
-                return std::unexpected(added.error());
-            }
+  simdjson::dom::array edges;
+  if (doc["edges"].get(edges) == simdjson::SUCCESS) {
+    for (simdjson::dom::element element : edges) {
+      int64_t from = 0;
+      int64_t to = 0;
+      if (element["from"].get(from) != simdjson::SUCCESS ||
+          element["to"].get(to) != simdjson::SUCCESS) {
+        return std::unexpected("goal graph snapshot has a malformed edge");
+      }
+      EdgeCondition condition = EdgeCondition::Always;
+      if (element["condition"].get(sv) == simdjson::SUCCESS) {
+        const auto parsed = edge_condition_from_string(sv);
+        if (!parsed.has_value()) {
+          return std::unexpected(std::format(
+              "goal graph snapshot has unknown edge condition '{}'", sv));
         }
+        condition = *parsed;
+      }
+      const auto added = graph.add_edge(static_cast<NodeId>(from),
+                                        static_cast<NodeId>(to), condition);
+      if (!added.has_value()) {
+        return std::unexpected(added.error());
+      }
     }
+  }
 
-    if (const auto valid = graph.validate(); !valid.has_value()) {
-        return std::unexpected(std::format("goal graph snapshot is invalid: {}", valid.error()));
-    }
-    return graph;
+  if (const auto valid = graph.validate(); !valid.has_value()) {
+    return std::unexpected(
+        std::format("goal graph snapshot is invalid: {}", valid.error()));
+  }
+  return graph;
 }
 
 } // namespace core::goal

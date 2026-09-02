@@ -432,7 +432,17 @@ TEST_CASE("make_allow_key generates correct keys", "[permissions]") {
         auto key = make_allow_key("run_terminal_command", R"({"working_dir":"/tmp"})");
         REQUIRE(key == "run_terminal_command");
     }
-    
+
+    SECTION("run_verification scopes grants to one recipe or executable") {
+      REQUIRE(make_allow_key("run_verification",
+                             R"({"recipe_id":"cmake:test:debug"})") ==
+              "run_verification:recipe=cmake:test:debug");
+      REQUIRE(
+          make_allow_key("run_verification",
+                         R"({"kind":"test","executable":"/usr/bin/ctest"})") ==
+          "run_verification:program=ctest");
+    }
+
     SECTION("other tools use just the name") {
         auto key = make_allow_key("write_file", R"({"file_path":"test.txt"})");
         REQUIRE(key == "write_file");
@@ -455,6 +465,12 @@ TEST_CASE("make_allow_label generates correct labels", "[permissions]") {
         auto label = make_allow_label("delete_file", "{}");
         REQUIRE(label == "file deletions");
     }
+
+    SECTION("run_verification identifies the approved recipe") {
+      REQUIRE(make_allow_label("run_verification",
+                               R"({"recipe_id":"cmake:test:debug"})") ==
+              "verification recipe 'cmake:test:debug'");
+    }
 }
 
 TEST_CASE("Session trust-rule helpers", "[permissions]") {
@@ -465,6 +481,10 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
         REQUIRE(make_session_allow_rule("run_terminal_command",
                                         R"({"working_dir":"/tmp"})")
                 == "run_terminal_command");
+        REQUIRE(
+            make_session_allow_rule("run_verification",
+                                    R"({"recipe_id":"cmake:test:debug"})") ==
+            "run_verification:recipe=cmake:test:debug");
         REQUIRE(make_session_allow_rule("write_file", R"({"file_path":"x"})")
                 == "files:write");
         REQUIRE(make_session_allow_rule("delete_file", R"({"path":"x"})")
@@ -500,6 +520,12 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
         REQUIRE(session_allow_rule_matches("run_terminal_command",
                                            "run_terminal_command",
                                            R"({"working_dir":"/tmp"})"));
+        REQUIRE(session_allow_rule_matches(
+            "run_verification:recipe=cmake:test:debug", "run_verification",
+            R"({"recipe_id":"cmake:test:debug"})"));
+        REQUIRE_FALSE(session_allow_rule_matches(
+            "run_verification:recipe=cmake:test:debug", "run_verification",
+            R"({"recipe_id":"cmake:test:release"})"));
 
         REQUIRE(session_allow_rule_matches("files:write",
                                            "apply_patch",

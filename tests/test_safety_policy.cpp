@@ -380,6 +380,19 @@ TEST_CASE("needs_permission gates Python in prompting profiles",
     REQUIRE(needs_permission("python", PermissionProfile::Restricted, args));
 }
 
+TEST_CASE("needs_permission gates verification processes in prompting profiles",
+          "[safety_policy][integration][verification]") {
+  const auto args = R"({"recipe_id":"cmake:test:debug"})";
+  REQUIRE(needs_permission("run_verification", PermissionProfile::Interactive,
+                           args));
+  REQUIRE(
+      needs_permission("run_verification", PermissionProfile::Standard, args));
+  REQUIRE(needs_permission("run_verification", PermissionProfile::Restricted,
+                           args));
+  REQUIRE_FALSE(needs_permission("run_verification",
+                                 PermissionProfile::Autonomous, args));
+}
+
 TEST_CASE("needs_permission without args falls back to tool-based gating",
           "[safety_policy][integration]") {
     // No args → can't classify the command → default to asking.
