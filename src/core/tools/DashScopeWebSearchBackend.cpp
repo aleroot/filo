@@ -168,10 +168,8 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
             }
         }
 
-        // qwen3.8-max (and similar) reject requests without a reasoning control.
-        // Low effort keeps the side-channel cheap while remaining valid.
-        if (core::llm::qwen_model_requires_thinking(model)
-            || core::llm::qwen_model_supports_tiered_effort(model)
+        // Low effort keeps the search side-channel's reasoning budget bounded.
+        if (core::llm::qwen_model_supports_tiered_effort(model)
             || core::llm::qwen_model_supports_token_plan_hosted_tools(model)) {
             writer.comma().key("reasoning");
             {

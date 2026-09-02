@@ -994,6 +994,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         }
                         message += "]";
                     }
+                    self->set_last_rate_limit_info(rate_limit_info);
                     callback(StreamChunk::make_error(std::move(message)));
                     break;
                 }

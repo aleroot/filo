@@ -216,7 +216,7 @@ TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fal
     REQUIRE(public_api != nullptr);
     REQUIRE(token_plan != nullptr);
     REQUIRE(token_plan->category_label == "Token Plan endpoint.");
-    for (const auto model : {"qwen3.8-max", "qwen3.7-max",
+    for (const auto model : {"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max",
                              "qwen3.7-plus", "qwen3.6-flash"}) {
         CHECK(token_plan->includes_registry_model(model));
         CHECK(public_api->includes_registry_model(model));

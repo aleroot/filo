@@ -114,16 +114,8 @@ public:
 
     // ── Response lifecycle ───────────────────────────────────────────────────
 
-    /**
-     * @brief Parse SSE event, extracting both content and reasoning_content.
-     *
-     * Qwen3 thinking models emit `delta.reasoning_content` chunks during the
-     * thinking phase, followed by regular `delta.content` chunks.  This
-     * override calls the base parser for standard fields, then makes a second
-     * pass to capture any `reasoning_content` and append it as a reasoning
-     * chunk to the result.
-     */
-    [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
+    // OpenAIProtocol owns SSE parsing, including reasoning_content. Reusing
+    // it preserves DashScope provenance without emitting reasoning twice.
 
     /**
      * @brief Extract DashScope rate-limit headers from the HTTP response.
@@ -273,6 +265,7 @@ private:
     // quota notifications can surface the blocked state honestly.
     RateLimitInfo rate_limit_override_;
     bool has_rate_limit_override_ = false;
+    bool stream_rate_limit_seen_ = false;
 };
 
 } // namespace core::llm::protocols

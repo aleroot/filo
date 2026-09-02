@@ -100,9 +100,17 @@ namespace {
     return info;
 }
 
-[[nodiscard]] std::string normalize_qwen_effort(std::string_view configured) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(configured);
+[[nodiscard]] std::string normalize_qwen_effort(std::string_view configured,
+                                                std::string_view model) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(configured));
     if (lowered == "off" || lowered == "none" || lowered == "disabled") return "none";
+    if (qwen_model_supports_tiered_effort(model)) {
+        // Use QwenCloud's documented low/medium/xhigh ladder. In particular,
+        // forwarding Filo's max/minimal verbatim can produce a persistent 400.
+        if (lowered == "minimal") return "low";
+        if (lowered == "high" || lowered == "max" || lowered == "ultra") return "xhigh";
+    }
     if (lowered == "minimal" || lowered == "low" || lowered == "medium"
         || lowered == "high" || lowered == "xhigh" || lowered == "max") {
         return lowered;
@@ -148,7 +156,14 @@ struct DashScopeErrorDetails {
         || normalized_message.find("allocated quota exceeded")
             != std::string::npos
         || normalized_message.find("exceeded your current quota")
-            != std::string::npos) {
+            != std::string::npos
+        // Qwen Code also recognizes the weekly-quota message carrying a
+        // reset time, even when its error code is only "429".
+        || (normalized_message.find("quota") != std::string::npos
+            && (normalized_message.find("exhausted") != std::string::npos
+                || normalized_message.find("exceeded") != std::string::npos)
+            && (normalized_message.find("will reset") != std::string::npos
+                || normalized_message.find("reset at") != std::string::npos))) {
         return TokenPlanLimitKind::PlanQuota;
     }
 
@@ -176,7 +191,11 @@ struct DashScopeErrorDetails {
     thread_local simdjson::dom::parser parser;
     simdjson::padded_string ps(body);
     simdjson::dom::element doc;
-    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return details;
+    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
+        details.message = body;
+        details.token_plan_limit = classify_token_plan_limit({}, body);
+        return details;
+    }
 
     std::string_view value;
     if (doc["code"].get(value) == simdjson::SUCCESS) {
@@ -318,6 +337,7 @@ cpr::Header DashScopeProtocol::build_headers(const core::auth::AuthInfo& auth) c
     headers["X-DashScope-CacheControl"] = "enable";
     // Client identification used by DashScope for debugging and telemetry.
     headers["X-DashScope-UserAgent"]    = "filo/0.1 (compatible-mode)";
+    headers["X-DashScope-AuthType"]     = "openai";
     return headers;
 }
 
@@ -375,20 +395,30 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
     }
 
     const std::string effort = normalize_qwen_effort(
-        req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort));
+        req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort),
+        req.model);
 
     if (qwen_model_supports_tiered_effort(req.model)) {
         std::string tier = effort;
-        if (tier.empty() && thinking_budget_ > 0) tier = "high";
-        if (tier == "none" && qwen_model_requires_thinking(req.model)) {
-            tier = normalize_qwen_effort(default_effort_);
-            if (tier.empty() || tier == "none") tier = "high";
+        if (req.effort.empty() && thinking_budget_ > 0 && tier != "none") tier.clear();
+        if (tier.empty() && thinking_budget_ > 0) {
+            // A configured budget must not silently become unlimited thinking.
+            // Budget and effort are mutually exclusive on Qwen 3.8.
+            payload += R"(,"enable_thinking":true,"thinking_budget":)";
+            payload += std::to_string(thinking_budget_);
+        } else {
+            if (tier.empty()) return;
+            if (tier == "none"
+                && core::utils::ascii::istarts_with(req.model, "qwen3.8-flash")) {
+                payload += R"(,"enable_thinking":false)";
+                return;
+            }
+            // The max family's canonical disable is reasoning_effort:none,
+            // also used by Qwen Code's DashScope request builder.
+            payload += R"(,"reasoning_effort":")";
+            payload += core::utils::escape_json_string(tier);
+            payload += '"';
         }
-        if (tier.empty()) return;
-
-        payload += R"(,"reasoning_effort":")";
-        payload += core::utils::escape_json_string(tier);
-        payload += '"';
         if (qwen_model_supports_preserve_thinking(req.model)) {
             payload += R"(,"preserve_thinking":true)";
         }
@@ -448,7 +478,8 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
     const std::string effort = normalize_qwen_effort(
         req.effort.empty()
             ? std::string_view(options_.default_effort)
-            : std::string_view(req.effort));
+            : std::string_view(req.effort),
+        req.model);
     const std::string effective_effort = effort.empty() ? "xhigh" : effort;
     const auto model_reasoning =
         qwen_reasoning_capabilities(req.model);
@@ -558,6 +589,14 @@ ParseResult DashScopeTokenPlanProtocol::parse_event(
             simdjson::padded_string json(parsed.data);
             simdjson::dom::element doc;
             if (parser.parse(json).get(doc) == simdjson::SUCCESS) {
+                simdjson::dom::object error_object;
+                if (doc["error"].get(error_object) == simdjson::SUCCESS) {
+                    // OpenAI SDK streams throw on data:{"error":{...}} even
+                    // without an `event: error` envelope.
+                    is_error = true;
+                    error = parse_dashscope_error(parsed.data);
+                    error_type = error.code.empty() ? "error" : error.code;
+                }
                 simdjson::dom::array choices;
                 if (doc["choices"].get(choices) == simdjson::SUCCESS) {
                     for (const auto choice : choices) {
@@ -601,6 +640,7 @@ ParseResult DashScopeTokenPlanProtocol::parse_event(
                 }
                 rate_limit_override_ = std::move(info);
                 has_rate_limit_override_ = true;
+                stream_rate_limit_seen_ = true;
             }
 
             ParseResult result;
@@ -632,6 +672,13 @@ void DashScopeTokenPlanProtocol::on_response(
     const HttpResponse& response) {
     // Keep the inner protocol's behaviour (usage parsing, header-based limits).
     delegate_->on_response(response);
+
+    // A stream can start with HTTP 200 and fail with a quota error later.
+    // Its parsed signal must survive the response lifecycle hook.
+    const bool preserve_stream_limit = stream_rate_limit_seen_
+        && response.status_code == 200;
+    stream_rate_limit_seen_ = false;
+    if (preserve_stream_limit) return;
 
     // The Token Plan inference endpoints expose no rate-limit/usage headers, so
     // on a successful response there is nothing additional to capture. The only
@@ -688,47 +735,8 @@ RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
 void DashScopeTokenPlanProtocol::reset_state() {
     delegate_->reset_state();
     has_rate_limit_override_ = false;
+    stream_rate_limit_seen_ = false;
     rate_limit_override_ = {};
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SSE parsing — reasoning_content support for Qwen3 thinking models
-// ─────────────────────────────────────────────────────────────────────────────
-
-ParseResult DashScopeProtocol::parse_event(std::string_view raw_event) {
-    // Base parser handles: content, tool_calls, usage, [DONE].
-    ParseResult result = OpenAIProtocol::parse_event(raw_event);
-    if (result.done) return result;
-
-    sse::ParsedEventView parsed;
-    if (!sse::parse_event_payload(raw_event, parsed)) return result;
-    if (parsed.is_done) return result;
-    const std::string_view json_sv = parsed.data;
-
-    // Second pass: scan for delta.reasoning_content (Qwen3 thinking tokens).
-    // Thinking tokens arrive in separate chunks before regular content chunks.
-    thread_local simdjson::dom::parser parser;
-    simdjson::padded_string ps(json_sv);
-    simdjson::dom::element  doc;
-    if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return result;
-
-    simdjson::dom::array choices;
-    if (doc["choices"].get(choices) != simdjson::SUCCESS) return result;
-
-    for (simdjson::dom::element choice : choices) {
-        simdjson::dom::object delta;
-        if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
-
-        std::string_view rc;
-        if (delta["reasoning_content"].get(rc) != simdjson::SUCCESS || rc.empty()) continue;
-
-        StreamChunk thinking;
-        thinking.reasoning_content = std::string(rc);
-        thinking.reasoning_protocol = std::string(name());
-        result.chunks.push_back(std::move(thinking));
-    }
-
-    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

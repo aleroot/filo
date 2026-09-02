@@ -91,6 +91,7 @@ TEST_CASE("Token Plan - 200 response leaves rate-limit snapshot empty",
     REQUIRE(info.usage_windows.empty());
     REQUIRE(info.requests_limit == 0);
     REQUIRE(info.tokens_limit == 0);
+    REQUIRE(info.subscription_ends_at == 0);
 }
 
 TEST_CASE("Token Plan - quota 429 surfaces rate-limited snapshot",
@@ -448,12 +449,12 @@ TEST_CASE("DashScopeProtocol - qwen3.8 sends the native effort tier alone",
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("reasoning_effort":"max")"));
+        R"("reasoning_effort":"xhigh")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
-TEST_CASE("DashScopeProtocol - qwen3.8 mandatory thinking rejects disable on the wire",
+TEST_CASE("DashScopeProtocol - qwen3.8 honors explicit thinking disable",
           "[qwen][serializer][thinking][effort]") {
     auto req = make_simple_request("qwen3.8-max");
     req.effort = "none";
@@ -461,8 +462,47 @@ TEST_CASE("DashScopeProtocol - qwen3.8 mandatory thinking rejects disable on the
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("reasoning_effort":"high")"));
+        R"("reasoning_effort":"none")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+}
+
+TEST_CASE("Token Plan normalizes Qwen 3.8 effort for aliases and Flash",
+          "[qwen][serializer][thinking][effort]") {
+    for (const auto model : {"qwen3.8-max", "qwen3.8-max-preview",
+                             "qwen3.8-max-0902", "qwen3.8-flash"}) {
+        for (const auto& [configured, expected] :
+             {std::pair{"minimal", "low"}, {"low", "low"}, {"medium", "medium"},
+              {"high", "xhigh"}, {"xhigh", "xhigh"}, {"max", "xhigh"},
+              {" MAX ", "xhigh"}}) {
+            CAPTURE(model, configured);
+            auto request = make_simple_request(model);
+            request.effort = configured;
+            const auto payload = DashScopeTokenPlanProtocol{}.serialize(request);
+            REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+                std::string(R"("reasoning_effort":")") + expected + '"'));
+            CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+            CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+        }
+    }
+    auto flash = make_simple_request("qwen3.8-flash");
+    flash.effort = "none";
+    const auto payload = DashScopeTokenPlanProtocol{}.serialize(flash);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":false)"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+}
+
+TEST_CASE("Token Plan preserves a Qwen 3.8 budget without competing effort",
+          "[qwen][serializer][thinking][effort]") {
+    DashScopeTokenPlanProtocol protocol({.thinking_budget = 4096});
+    auto request = make_simple_request("qwen3.8-max");
+    const auto payload = protocol.serialize(request);
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking_budget":4096)"));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+    request.effort = "low";
+    const auto override_payload = protocol.serialize(request);
+    CHECK_THAT(override_payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"low")"));
+    CHECK_THAT(override_payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
 TEST_CASE("DashScopeProtocol - streaming requests carry cache anchors and metadata",
@@ -544,7 +584,7 @@ TEST_CASE("DashScope Responses - Token Plan payload enables native features",
     }).serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("reasoning":{"effort":"max"})"));
+        R"("reasoning":{"effort":"xhigh"})"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"web_search"})"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"code_interpreter"})"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"({"type":"web_extractor"})"));
@@ -776,7 +816,7 @@ TEST_CASE("DashScopeProtocol - parse_event extracts reasoning_content chunk",
         R"(data: {"choices":[{"delta":{"reasoning_content":"Let me think..."},"index":0}]})";
     auto result = proto.parse_event(event);
     REQUIRE(!result.done);
-    // At least one chunk must contain reasoning_content.
+    REQUIRE(result.chunks.size() == 1);
     bool found_reasoning = false;
     for (const auto& c : result.chunks) {
         if (!c.reasoning_content.empty()) {
@@ -985,6 +1025,49 @@ TEST_CASE("Token Plan - allocation quota HTTP failures are not retried",
 
     CHECK_FALSE(protocol.is_retryable(quota.view()));
     CHECK(protocol.is_retryable(transient.view()));
+}
+
+TEST_CASE("Token Plan recognizes weekly quota resets without an allocation code",
+          "[qwen][retry][ratelimit][sse]") {
+    const std::string message = "Your token-plan 1-week quota has been exhausted. "
+        "The quota will reset at 09-09 09:25:00 UTC.";
+    const std::string json = R"({"error":{"code":"429","message":")" + message + R"("}})";
+    for (const auto& body : {message, json}) {
+        DashScopeTokenPlanProtocol protocol;
+        const auto response = make_response(429, body);
+        CHECK_FALSE(protocol.is_retryable(response.view()));
+        protocol.on_response(response.view());
+        CHECK(protocol.last_rate_limit().unified_overage_status == "rejected");
+        CHECK(protocol.last_rate_limit().subscription_ends_at == 0);
+        CHECK_THAT(protocol.format_error_message(response.view()),
+                   Catch::Matchers::ContainsSubstring("09-09 09:25:00 UTC"));
+    }
+    for (const auto& event : {"data: " + json, "event: error\ndata: " + json,
+         R"(data: {"choices":[{"finish_reason":"error_finish","delta":{"content":")"
+             + message + R"("}}]})"}) {
+        DashScopeTokenPlanProtocol protocol;
+        const auto result = protocol.parse_event(event);
+        CHECK(result.stream_error);
+        CHECK_FALSE(result.retryable_stream_error);
+        CHECK(result.stream_error_message == message);
+        CHECK(protocol.last_rate_limit().unified_overage_status == "rejected");
+        protocol.on_response(make_response(200).view());
+        CHECK(protocol.last_rate_limit().unified_overage_status == "rejected");
+        protocol.reset_state();
+        protocol.on_response(make_response(200).view());
+        CHECK_FALSE(protocol.last_rate_limit().is_rate_limited);
+    }
+}
+
+TEST_CASE("Token Plan surfaces bare SSE API errors instead of an empty success",
+          "[qwen][sse][errors]") {
+    DashScopeTokenPlanProtocol protocol;
+    const auto result = protocol.parse_event(
+        R"(data: {"error":{"code":"InvalidApiKey","message":"Invalid API-key provided."}})");
+    CHECK(result.stream_error);
+    CHECK_FALSE(result.retryable_stream_error);
+    CHECK(result.stream_error_type == "InvalidApiKey");
+    CHECK(result.chunks.empty());
 }
 
 TEST_CASE("DashScopeProtocol - 500/502/503/504 are retryable", "[qwen][retry]") {

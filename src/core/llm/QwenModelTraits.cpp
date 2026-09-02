@@ -65,13 +65,8 @@ bool qwen_model_supports_token_plan_hosted_tools(
 bool qwen_model_supports_tiered_effort(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(model_id));
-    return lowered.starts_with("qwen3.8-max");
-}
-
-bool qwen_model_requires_thinking(std::string_view model_id) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(
-        core::utils::str::trim_ascii_view(model_id));
-    return lowered == "qwen3.8-max";
+    return lowered.starts_with("qwen3.8-max")
+        || lowered.starts_with("qwen3.8-flash");
 }
 
 } // namespace core::llm

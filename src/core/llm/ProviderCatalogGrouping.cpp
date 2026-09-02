@@ -19,8 +19,9 @@ constexpr std::array<std::string_view, 5> kZaiCodingModels{{
     "glm-4.5-air",
 }};
 
-constexpr std::array<std::string_view, 5> kQwenTokenPlanTextModels{{
+constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.8-max",
+    "qwen3.8-flash",
     "qwen3.7-max",
     "qwen3.7-plus",
     "qwen3.6-plus",

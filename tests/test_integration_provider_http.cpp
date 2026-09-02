@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <httplib.h>
+#include <simdjson.h>
 
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
@@ -11,6 +12,8 @@
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
+#include "core/llm/ProviderFactory.hpp"
+#include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
@@ -107,6 +110,150 @@ int bind_to_first_available_port(httplib::Server& server, int begin, int end) {
 }
 
 } // namespace
+
+TEST_CASE("Qwen Token Plan completes a streamed HTTP tool round trip",
+          "[integration][http][qwen][tools]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex received_mutex;
+    server.Post("/compatible-mode/v1/chat/completions",
+                [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(received_mutex);
+        received.push_back(request);
+        const std::string body = received.size() == 1
+            ? "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect the file.\"}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_read\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\r\n\r\n"
+              "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":24,\"prompt_tokens_details\":{\"cached_tokens\":100},\"completion_tokens_details\":{\"reasoning_tokens\":8}}}\r\n\r\n"
+              "data: [DONE]\r\n\r\n"
+            : "data: {\"choices\":[{\"delta\":{\"content\":\"Verified.\"},\"finish_reason\":\"stop\"}]}\n\n"
+              "data: [DONE]\n\n";
+        // Fragment SSE envelopes and tool argument JSON across network writes.
+        response.set_chunked_content_provider("text/event-stream",
+            [body](std::size_t offset, httplib::DataSink& sink) {
+                const auto size = std::min(std::size_t{17}, body.size() - offset);
+                if (!sink.write(body.data() + offset, size)) return false;
+                if (offset + size == body.size()) sink.done();
+                return true;
+            });
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    core::config::ProviderConfig config;
+    config.api_key = "test-token-plan-key";
+    config.base_url = std::format("http://127.0.0.1:{}/compatible-mode/v1", port);
+    config.model = "qwen3.8-max";
+    auto provider = ProviderFactory::create_provider("qwen-token-plan", config);
+    REQUIRE(provider);
+    CHECK_FALSE(provider->should_estimate_cost());
+    ChatRequest request;
+    request.model = config.model;
+    request.stream = true;
+    request.effort = "max";
+    request.session_id = "qwen-parity-session";
+    request.transport_turn_id = "qwen-parity-turn";
+    request.messages = {Message{.role = "system", .content = "Inspect requested files."},
+                        Message{.role = "user", .content = "Read README.md"}};
+    Tool tool;
+    tool.function.name = "read_file";
+    tool.function.description = "Read a file";
+    tool.function.input_schema = R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})";
+    request.tools.push_back(tool);
+
+    Message assistant;
+    assistant.role = "assistant";
+    ToolCall call;
+    bool had_error = false;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        had_error |= chunk.is_error;
+        assistant.reasoning_content += chunk.reasoning_content;
+        if (!chunk.reasoning_protocol.empty()) assistant.reasoning_protocol = chunk.reasoning_protocol;
+        for (const auto& delta : chunk.tools) {
+            if (!delta.id.empty()) call.id = delta.id;
+            call.function.name += delta.function.name;
+            call.function.arguments += delta.function.arguments;
+        }
+    });
+    REQUIRE_FALSE(had_error);
+    REQUIRE(call.id == "call_read");
+    REQUIRE(call.function.name == "read_file");
+    REQUIRE(call.function.arguments == R"({"path":"README.md"})");
+    REQUIRE(assistant.reasoning_content == "Inspect the file.");
+    CHECK(assistant.reasoning_protocol == "dashscope");
+    const auto usage = provider->get_last_usage();
+    CHECK(usage.prompt_tokens == 120);
+    CHECK(usage.completion_tokens == 24);
+    CHECK(usage.cached_prompt_tokens == 100);
+    CHECK(usage.reasoning_tokens == 8);
+    assistant.tool_calls.push_back(call);
+    request.messages.push_back(assistant);
+    request.messages.push_back(Message{
+        .role = "tool", .content = "# Filo", .tool_call_id = call.id});
+    std::string answer;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        had_error |= chunk.is_error;
+        answer += chunk.content;
+    });
+    CHECK_FALSE(had_error);
+    CHECK(answer == "Verified.");
+
+    std::lock_guard lock(received_mutex);
+    REQUIRE(received.size() == 2);
+    for (const auto& wire : received) {
+        CHECK(wire.get_header_value("Authorization") == "Bearer test-token-plan-key");
+        CHECK(wire.get_header_value("X-DashScope-CacheControl") == "enable");
+        CHECK(wire.get_header_value("X-DashScope-AuthType") == "openai");
+        simdjson::dom::parser parser;
+        const auto body = parser.parse(wire.body);
+        CHECK(std::string_view(body["reasoning_effort"]) == "xhigh");
+        CHECK(bool(body["stream_options"]["include_usage"]));
+        CHECK(std::string_view(body["metadata"]["sessionId"]) == request.session_id);
+        CHECK(std::string_view(body["tools"].at(0)["cache_control"]["type"]) == "ephemeral");
+    }
+    CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"Inspect the file.")"));
+    CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(
+        R"("tool_call_id":"call_read")"));
+}
+
+TEST_CASE("Qwen Token Plan stops HTTP retries when the weekly quota is exhausted",
+          "[integration][http][qwen][retry]") {
+    bool stream_error = false;
+    SECTION("HTTP 429") {}
+    SECTION("Quota error inside HTTP 200 SSE") { stream_error = true; }
+    httplib::Server server;
+    std::atomic<int> attempts{0};
+    server.Post("/v1/chat/completions",
+                [&](const httplib::Request&, httplib::Response& response) {
+        ++attempts;
+        const std::string body = R"({"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 09-09 09:25:00 UTC."}})";
+        response.status = stream_error ? 200 : 429;
+        response.set_content(stream_error ? "data: " + body + "\n\n" : body,
+                             stream_error ? "text/event-stream" : "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+    auto provider = std::make_shared<HttpLLMProvider>(std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token-plan-key"),
+        "qwen3.8-max", std::make_unique<DashScopeTokenPlanProtocol>());
+    ChatRequest request;
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::string error;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        if (chunk.is_error) error += chunk.content;
+    });
+    CHECK(attempts.load() == 1);
+    CHECK_THAT(error, Catch::Matchers::ContainsSubstring("09-09 09:25:00 UTC"));
+    CHECK(provider->get_last_rate_limit_info().unified_overage_status == "rejected");
+    CHECK(provider->get_last_rate_limit_info().subscription_ends_at == 0);
+}
 
 TEST_CASE("HttpLLMProvider preserves streamed non-2xx JSON error bodies",
           "[integration][http][errors]") {
