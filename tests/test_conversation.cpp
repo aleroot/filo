@@ -111,6 +111,22 @@ TEST_CASE("make_user_message — basic creation", "[tui][conversation][factory]"
     REQUIRE(!msg.id.empty());
 }
 
+TEST_CASE("stamp_user_turn_elapsed records duration on the matching question",
+          "[tui][conversation][factory]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_user_message("first", "12:00:00"));
+    messages.push_back(make_assistant_message("working", "", true));
+    messages.push_back(make_user_message("second", "12:01:00"));
+
+    stamp_user_turn_elapsed(messages, messages[0].id, "2m 15s");
+    CHECK(messages[0].activity_elapsed == "2m 15s");
+    CHECK(messages[2].activity_elapsed.empty());
+
+    stamp_user_turn_elapsed(messages, "missing-id", "9s");
+    CHECK(messages[0].activity_elapsed == "2m 15s");
+    CHECK(messages[2].activity_elapsed.empty());
+}
+
 TEST_CASE("make_shell_command_message — pending direct command", "[tui][conversation][factory]") {
     auto msg = make_shell_command_message("pwd", "12:00:01", true);
     REQUIRE(msg.type == MessageType::ShellCommand);
@@ -1552,6 +1568,60 @@ TEST_CASE("render_history_panel — timestamps hidden", "[tui][conversation][ren
     messages.push_back(make_user_message("Hello", "12:00:00"));
     REQUIRE_NOTHROW(render_history_panel(
         messages, 0, ConversationRenderOptions{.show_timestamps = false}));
+}
+
+TEST_CASE("render — user question shows start time on the yellow box",
+          "[tui][conversation][render][time]") {
+    std::vector<UiMessage> messages;
+    messages.push_back(make_user_message("Hello, filo!", "12:00:00"));
+
+    const auto shown = render_panel_text(messages);
+    REQUIRE_THAT(shown, ContainsSubstring("Hello, filo!"));
+    REQUIRE_THAT(shown, ContainsSubstring("12:00:00"));
+
+    const auto hidden = render_panel_text(
+        messages, ConversationRenderOptions{.show_timestamps = false});
+    REQUIRE_THAT(hidden, ContainsSubstring("Hello, filo!"));
+    REQUIRE_THAT(hidden, !ContainsSubstring("12:00:00"));
+}
+
+TEST_CASE("render — completed turn elapsed joins the question timestamp",
+          "[tui][conversation][render][time]") {
+    std::vector<UiMessage> messages;
+    auto question = make_user_message("Ship it", "12:00:00");
+    question.activity_elapsed = "2m 15s";
+    messages.push_back(std::move(question));
+
+    const auto shown = render_panel_text(messages);
+    REQUIRE_THAT(shown, ContainsSubstring("12:00:00 · 2m 15s"));
+    REQUIRE_THAT(shown, ContainsSubstring("Ship it"));
+
+    const auto hidden_clock = render_panel_text(
+        messages, ConversationRenderOptions{.show_timestamps = false});
+    REQUIRE_THAT(hidden_clock, ContainsSubstring("2m 15s"));
+    REQUIRE_THAT(hidden_clock, !ContainsSubstring("12:00:00"));
+}
+
+TEST_CASE("render — completed answer shows timestamp and elapsed at the end",
+          "[tui][conversation][render][time]") {
+    std::vector<UiMessage> messages;
+    auto answer = make_assistant_message("Done.", "12:02:15", false);
+    answer.activity_elapsed = "2m 15s";
+    messages.push_back(std::move(answer));
+
+    const auto shown = render_panel_text(messages);
+    REQUIRE_THAT(shown, ContainsSubstring("Done."));
+    REQUIRE_THAT(shown, ContainsSubstring("12:02:15 · 2m 15s"));
+
+    const auto hidden_clock = render_panel_text(
+        messages, ConversationRenderOptions{.show_timestamps = false});
+    REQUIRE_THAT(hidden_clock, ContainsSubstring("2m 15s"));
+    REQUIRE_THAT(hidden_clock, !ContainsSubstring("12:02:15"));
+
+    auto pending = make_assistant_message("Streaming", "12:02:15", true);
+    pending.activity_elapsed = "2m 15s";
+    const auto live = render_panel_text({pending});
+    REQUIRE_THAT(live, !ContainsSubstring("12:02:15 · 2m 15s"));
 }
 
 TEST_CASE("render_history_panel — spinner hidden", "[tui][conversation][render]") {

@@ -134,7 +134,7 @@ struct UiMessage {
     bool thinking = false;               // Show thinking indicator
     bool show_activity_status = false;   // Show a neutral working-status prefix
     bool stopped = false;                // Generation was stopped by user
-    std::string activity_elapsed;        // Elapsed timer for active thinking/analyzing state
+    std::string activity_elapsed;        // Live thinking timer, or completed turn duration
 
     // Activity disclosure (display-only; never part of the visible answer body).
     //
@@ -323,6 +323,12 @@ struct ConversationRenderOptions {
 
 // User message
 UiMessage make_user_message(std::string text, std::string timestamp = {});
+
+/// Records the completed-turn duration on the user question identified by
+/// `message_id`, so the yellow prompt bubble can pair start time with elapsed.
+void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
+                             std::string_view message_id,
+                             std::string elapsed);
 
 // Direct shell command submitted with !cmd
 UiMessage make_shell_command_message(std::string command,

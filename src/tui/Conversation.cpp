@@ -933,17 +933,34 @@ Element render_lightbulb_prefix(bool show) {
     });
 }
 
-Element user_message_bubble(std::string_view content, std::string_view timestamp) {
-    auto bubble = render_text_lines_preserving_newlines(content, Color::White)
-                | UiBorder(ColorYellowBright);
-
-    if (timestamp.empty()) {
-        return bubble;
+std::string format_message_time_label(std::string_view timestamp,
+                                      std::string_view elapsed) {
+    if (!timestamp.empty() && !elapsed.empty()) {
+        return std::format("{} · {}", timestamp, elapsed);
     }
+    if (!timestamp.empty()) {
+        return std::string(timestamp);
+    }
+    if (!elapsed.empty()) {
+        return std::string(elapsed);
+    }
+    return {};
+}
+
+Element user_message_bubble(std::string_view content,
+                            std::string_view timestamp,
+                            std::string_view elapsed) {
+    auto body = render_text_lines_preserving_newlines(content, Color::White);
+    auto time_label = format_message_time_label(timestamp, elapsed);
+    if (time_label.empty()) {
+        return body | UiBorder(ColorYellowBright);
+    }
+    // Keep the clock/elapsed row inside the yellow question box so start time
+    // and completed-turn duration share the same chrome as the prompt itself.
     return vbox({
-        hbox({ filler(), ftxui::text(std::string(timestamp)) | ftxui::color(Color::GrayDark) }),
-        std::move(bubble)
-    });
+        hbox({ filler(), ftxui::text(std::move(time_label)) | ftxui::color(Color::GrayDark) }),
+        std::move(body),
+    }) | UiBorder(ColorYellowBright);
 }
 
 // ============================================================================
@@ -1841,6 +1858,20 @@ UiMessage make_user_message(std::string text, std::string timestamp) {
     return msg;
 }
 
+void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
+                             std::string_view message_id,
+                             std::string elapsed) {
+    if (message_id.empty() || elapsed.empty()) {
+        return;
+    }
+    for (auto& msg : messages) {
+        if (msg.type == MessageType::User && msg.id == message_id) {
+            msg.activity_elapsed = std::move(elapsed);
+            return;
+        }
+    }
+}
+
 UiMessage make_shell_command_message(std::string command,
                                      std::string timestamp,
                                      bool pending) {
@@ -2129,7 +2160,7 @@ Element render_user_message(const UiMessage& msg, const ConversationRenderOption
         ? std::string_view{msg.timestamp}
         : std::string_view{};
     return vbox({
-        user_message_bubble(msg.text, timestamp),
+        user_message_bubble(msg.text, timestamp, msg.activity_elapsed),
         ftxui::text("")
     });
 }
@@ -2425,6 +2456,23 @@ Element render_assistant_message(const UiMessage& msg,
                 ftxui::text("⏹ ") | ftxui::color(Color::Red),
                 ftxui::text("Stopped") | ftxui::color(Color::Red) | dim
             }));
+    }
+
+    // Bottom-left bookend for the completed turn: same gray clock/elapsed
+    // language as the yellow question box, opposite corner so a long answer
+    // still shows when the turn finished without scrolling back up.
+    if (msg.finalized) {
+        const std::string_view timestamp = options.show_timestamps
+            ? std::string_view{msg.timestamp}
+            : std::string_view{};
+        auto time_label = format_message_time_label(timestamp, msg.activity_elapsed);
+        if (!time_label.empty()) {
+            elements.push_back(
+                hbox({
+                    ftxui::text(std::move(time_label)) | ftxui::color(Color::GrayDark),
+                    filler(),
+                }));
+        }
     }
 
     return vbox(std::move(elements));

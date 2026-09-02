@@ -1369,7 +1369,7 @@ RunResult run(RunOptions opts) {
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiTimestamps,
             .label = "UI · Message Timestamps",
-            .description = "Show or hide timestamps above user messages.",
+            .description = "Show or hide timestamps on user messages.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
@@ -6174,10 +6174,12 @@ RunResult run(RunOptions opts) {
         }
         std::string timestamp = current_time_str();
         std::string assistant_message_id;
+        std::string user_message_id;
         {
             std::lock_guard lock(ui_mutex);
             auto messages = runtime->messages();
             append_ui_message(*messages, make_user_message(text, timestamp));
+            user_message_id = messages->back().id;
             append_ui_message(*messages, make_assistant_message("", "", true));
             assistant_message_id = messages->back().id;
         }
@@ -6187,6 +6189,7 @@ RunResult run(RunOptions opts) {
             reset_history_view();
         }
         runtime->activity_timers().start(assistant_message_id);
+        runtime->activity_timers().start(user_message_id);
         animation_cv.notify_one();
         wake_ui();
 
@@ -6250,6 +6253,7 @@ RunResult run(RunOptions opts) {
                      runtime,
                      effective_callbacks = std::move(effective_callbacks),
                      live_timeline,
+                     user_message_id,
                      &update_live_assistant_message,
                      &submit_agent_turn,
                      &ui_mutex,
@@ -6302,7 +6306,7 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                [runtime, live_timeline, agent,
+                [runtime, live_timeline, agent, user_message_id,
                  &submit_agent_turn,
                  &ui_mutex,
                  &animation_cv,
@@ -6321,6 +6325,23 @@ RunResult run(RunOptions opts) {
                                 runtime->activity_timers().elapsed(current_id)
                                     .value_or(std::chrono::seconds{0}));
                         runtime->activity_timers().stop(current_id);
+                        std::string turn_elapsed;
+                        if (const auto elapsed =
+                                runtime->activity_timers().elapsed(user_message_id)) {
+                            turn_elapsed = format_elapsed_compact(*elapsed);
+                            stamp_user_turn_elapsed(
+                                *runtime->messages(),
+                                user_message_id,
+                                turn_elapsed);
+                        }
+                        runtime->activity_timers().stop(user_message_id);
+                        if (auto* assistant =
+                                live_timeline->current(*runtime->messages())) {
+                            assistant->timestamp = current_time_str();
+                            if (!turn_elapsed.empty()) {
+                                assistant->activity_elapsed = turn_elapsed;
+                            }
+                        }
                         live_timeline->finish(
                             *runtime->messages(),
                             reasoning_elapsed,
@@ -6342,6 +6363,23 @@ RunResult run(RunOptions opts) {
             runtime->finish_worker();
             {
                 std::lock_guard lock(ui_mutex);
+                std::string turn_elapsed;
+                if (const auto elapsed =
+                        runtime->activity_timers().elapsed(user_message_id)) {
+                    turn_elapsed = format_elapsed_compact(*elapsed);
+                    stamp_user_turn_elapsed(
+                        *runtime->messages(),
+                        user_message_id,
+                        turn_elapsed);
+                }
+                runtime->activity_timers().stop(user_message_id);
+                if (auto* assistant =
+                        live_timeline->current(*runtime->messages())) {
+                    assistant->timestamp = current_time_str();
+                    if (!turn_elapsed.empty()) {
+                        assistant->activity_elapsed = turn_elapsed;
+                    }
+                }
                 live_timeline->finish(
                     *runtime->messages(),
                     {},
