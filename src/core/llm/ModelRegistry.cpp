@@ -240,10 +240,28 @@ const ParameterConstraints kClaudeConstraints = [] {
 // Anthropic models
 std::vector<ModelInfo> build_anthropic_catalog() {
     return {
+        {
+            .canonical_id = "claude-fable-5-1",
+            .aliases = {"fable", "best", "claude-fable", "fable-5-1"},
+            .display_name = "Claude Fable 5.1",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .tier = ModelTier::Powerful,
+            .pricing = {10.0, 50.0, 0.25, 12.5},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
         // Claude Fable 5
         {
             .canonical_id = "claude-fable-5",
-            .aliases = {"fable", "claude-fable", "fable-5"},
+            .aliases = {"fable-5"},
             .display_name = "Claude Fable 5",
             .provider = "anthropic",
             .context_window = 1'000'000,
@@ -1971,7 +1989,7 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
         return "claude-sonnet-5";
     }
     if (lowered == "fable" || lowered == "best") {
-        return "claude-fable-5";
+        return "claude-fable-5-1";
     }
     if (lowered == "haiku") {
         return "claude-haiku-4-5";

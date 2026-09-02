@@ -2,6 +2,8 @@
 #include "SseUtils.hpp"
 #include "../Models.hpp"
 #include "../ModelRegistry.hpp"
+#include "../AnthropicCompatibility.hpp"
+#include "../../logging/Logger.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
@@ -27,10 +29,10 @@ namespace {
     constexpr std::string_view ANTHROPIC_BETA_THINKING = "interleaved-thinking-2025-05-14";
     constexpr std::string_view ANTHROPIC_BETA_CONTEXT_1M = "context-1m-2025-08-07";
     constexpr std::string_view ANTHROPIC_BETA_OAUTH    = "oauth-2025-04-20";
-    constexpr std::string_view ANTHROPIC_BILLING_HEADER = "cc_version=2.1.78.13b; cc_entrypoint=cli; cch=0;";
+    constexpr std::string_view ANTHROPIC_BILLING_HEADER = anthropic::kBillingHeader;
 
     constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-5";
-    constexpr std::string_view CLAUDE_DEFAULT_FABLE  = "claude-fable-5";
+    constexpr std::string_view CLAUDE_DEFAULT_FABLE  = anthropic::kDefaultFable;
     constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-5";
     constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
     
@@ -294,14 +296,12 @@ namespace {
         const std::string lowered = core::utils::str::to_lower_ascii_copy(out.model);
         if (lowered == "sonnet") {
             out.model = std::string(CLAUDE_DEFAULT_SONNET);
-        } else if (lowered == "fable") {
+        } else if (anthropic::is_fable_alias(lowered)) {
             out.model = std::string(CLAUDE_DEFAULT_FABLE);
         } else if (lowered == "opus") {
             out.model = std::string(CLAUDE_DEFAULT_OPUS);
         } else if (lowered == "haiku") {
             out.model = std::string(CLAUDE_DEFAULT_HAIKU);
-        } else if (lowered == "best") {
-            out.model = std::string(CLAUDE_DEFAULT_FABLE);
         } else if (lowered == "opusplan") {
             out.model = std::string(CLAUDE_DEFAULT_SONNET);
         }
@@ -646,8 +646,19 @@ namespace {
                                           std::string_view body,
                                           std::string_view) {
         switch (status_code) {
-            case 400:
+            case 400: {
+                simdjson::dom::parser parser;
+                simdjson::padded_string padded(body);
+                simdjson::dom::element doc;
+                std::string_view message;
+                if (parser.parse(padded).get(doc) == simdjson::SUCCESS
+                    && doc["error"]["message"].get(message) == simdjson::SUCCESS
+                    && !message.empty()) {
+                    return "[Anthropic API Error 400: Invalid request. "
+                        + std::string(message.substr(0, 2000)) + "]";
+                }
                 return "[Anthropic API Error 400: Invalid request. The request body is malformed or contains invalid parameters.]";
+            }
             case 401:
                 return "[Anthropic API Error 401: Authentication failed. Please check your API key or session token.]";
             case 403:
@@ -777,7 +788,12 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
     }
 
     // Extended thinking block (must come before messages).
-    if (use_manual_thinking) {
+    if (anthropic::uses_bound_thinking(req.model)) {
+        // Filo intentionally changes tools/context during a session. Let the
+        // API discard only invalidated reasoning instead of rejecting a turn.
+        // This also applies to /effort off: Fable thinking is always on.
+        payload += R"(,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}})";
+    } else if (use_manual_thinking) {
         payload += R"(,"thinking":{"type":"enabled","budget_tokens":)";
         payload += std::to_string(thinking.budget_tokens);
         payload += '}';
@@ -961,6 +977,18 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 
     if (event_type == "message_start") {
         result.stream_started = true;
+        simdjson::dom::array transformations;
+        if (doc["input_transformations"].get(transformations) == simdjson::SUCCESS) {
+            for (const auto item : transformations) {
+                std::string_view type;
+                std::string_view reason;
+                if (item["type"].get(type) != simdjson::SUCCESS
+                    || type != "thinking_dropped"
+                    || item["reason"].get(reason) != simdjson::SUCCESS) continue;
+                if (reason == "prefix_binding_mismatch") ++result.prefix_binding_mismatches;
+                if (reason == "model_binding_mismatch") ++result.model_binding_mismatches;
+            }
+        }
         simdjson::dom::object msg_obj;
         if (doc["message"].get(msg_obj) == simdjson::SUCCESS) {
             simdjson::dom::object usage_obj;
@@ -1182,6 +1210,9 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
     };
 
     append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
+    if (anthropic::uses_bound_thinking(last_requested_model_)) {
+        append_beta_unique(anthropic::kThinkingBindingBeta);
+    }
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
     const auto reasoning_policy =
         anthropic_reasoning_policy(last_requested_model_);
@@ -1247,6 +1278,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     if (r.input_tokens  > 0) accumulated_input_  = r.input_tokens;
     if (r.output_tokens > 0) accumulated_output_ = r.output_tokens;
     if (!r.stop_reason.empty()) last_stop_reason_ = r.stop_reason;
+    if (r.prefix_binding_mismatches > 0 || r.model_binding_mismatches > 0) {
+        core::logging::debug(
+            "[Anthropic] Dropped thinking blocks: {} after context edits, {} after model switches",
+            r.prefix_binding_mismatches, r.model_binding_mismatches);
+    }
 
     if (!r.text.empty())           result.chunks.push_back(StreamChunk::make_content(r.text));
     if (!r.reasoning_delta.empty()) {

@@ -102,6 +102,8 @@ public:
         std::string error_type;
         std::string error_message;
         std::string stop_reason;               ///< From `message_delta.delta.stop_reason`.
+        std::size_t prefix_binding_mismatches = 0; ///< Reasoning dropped after context edits.
+        std::size_t model_binding_mismatches = 0;  ///< Reasoning dropped after a model switch.
         bool incomplete_tool_call = false;      ///< True if message_stop arrives before content_block_stop for tool_use.
     };
 

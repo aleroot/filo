@@ -2,6 +2,8 @@
 
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
+#include "../llm/AnthropicCompatibility.hpp"
+#include "../llm/protocols/AnthropicProtocol.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <cpr/cpr.h>
@@ -9,6 +11,7 @@
 
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,23 +24,14 @@ namespace {
 constexpr int kSearchTimeoutMs = 60000;
 constexpr int kMaxSearchUses = 8;
 
-constexpr std::string_view kAnthropicVersion = "2023-06-01";
-constexpr std::string_view kClaudeCodeBeta = "claude-code-20250219";
-constexpr std::string_view kOAuthBeta = "oauth-2025-04-20";
 constexpr std::string_view kWebSearchBeta = "web-search-2025-03-05";
 constexpr std::string_view kBillingHeader =
-    "cc_version=2.1.78.13b; cc_entrypoint=cli; cch=0;";
+    core::llm::anthropic::kBillingHeader;
 
 [[nodiscard]] bool is_anthropic_endpoint(
     const core::llm::ProviderMetadata& metadata) {
     return metadata.api_type == core::config::ApiType::Anthropic
         && !metadata.base_url.empty();
-}
-
-void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
-    for (const auto& [key, value] : auth.headers) {
-        headers[key] = value;
-    }
 }
 
 void write_string_array(core::utils::JsonWriter& writer,
@@ -75,7 +69,9 @@ void write_string_array(core::utils::JsonWriter& writer,
             {
                 auto _message = writer.object();
                 writer.kv_str("role", "user").comma()
-                      .kv_str("content", "Perform a web search for the query: " + request.query);
+                      .kv_str("content", "Call the web_search tool to search for the following query. "
+                          "Base your answer on the search results and cite source URLs. Query: "
+                          + request.query);
             }
         }
         writer.comma().key("tools");
@@ -99,29 +95,28 @@ void write_string_array(core::utils::JsonWriter& writer,
         writer.comma().key("tool_choice");
         {
             auto _choice = writer.object();
-            writer.kv_str("type", "tool").comma()
-                  .kv_str("name", "web_search");
+            if (core::llm::anthropic::rejects_forced_tool_choice(model)) {
+                writer.kv_str("type", "auto");
+            } else {
+                writer.kv_str("type", "tool").comma()
+                      .kv_str("name", "web_search");
+            }
         }
     }
     return std::move(writer).take();
 }
 
-[[nodiscard]] cpr::Header anthropic_headers(const core::auth::AuthInfo& auth) {
-    cpr::Header headers{
-        {"Content-Type", "application/json"},
-        {"Accept", "application/json"},
-        {"anthropic-version", std::string(kAnthropicVersion)},
-        {"x-anthropic-billing-header", std::string(kBillingHeader)},
-    };
-
-    std::string beta = std::string(kClaudeCodeBeta)
-        + "," + std::string(kWebSearchBeta);
+[[nodiscard]] cpr::Header anthropic_headers(
+    core::auth::AuthInfo auth,
+    const core::llm::protocols::AnthropicProtocol& protocol) {
+    auto& beta = auth.headers["anthropic-beta"];
+    if (!beta.empty()) beta += ',';
+    beta += kWebSearchBeta;
     if (auth.headers.contains("Authorization")) {
-        beta += ",";
-        beta += kOAuthBeta;
+        auth.properties["oauth"] = "1";
     }
-    headers["anthropic-beta"] = beta;
-    add_auth_headers(headers, auth);
+    auto headers = protocol.build_headers(auth);
+    headers["Accept"] = "application/json";
     return headers;
 }
 
@@ -159,10 +154,14 @@ void parse_web_result_block(SearchResponse& response,
     }
 }
 
-void parse_results(SearchResponse& response, simdjson::dom::element doc) {
+[[nodiscard]] std::optional<std::string> parse_results(
+    SearchResponse& response, simdjson::dom::element doc) {
     simdjson::dom::array content;
-    if (doc["content"].get_array().get(content) != simdjson::SUCCESS) return;
+    if (doc["content"].get_array().get(content) != simdjson::SUCCESS) {
+        return "Claude web search response is missing content.";
+    }
 
+    bool searched = false;
     for (auto element : content) {
         simdjson::dom::object block;
         if (element.get_object().get(block) != simdjson::SUCCESS) continue;
@@ -171,9 +170,23 @@ void parse_results(SearchResponse& response, simdjson::dom::element doc) {
         if (type == "text") {
             parse_text_block(response, block);
         } else if (type == "web_search_tool_result") {
+            simdjson::dom::array results;
+            if (block["content"].get_array().get(results) != simdjson::SUCCESS) {
+                simdjson::dom::object error;
+                if (block["content"].get_object().get(error) == simdjson::SUCCESS) {
+                    return "Claude web search failed: "
+                        + core::utils::json::first_string_field_or_empty(error, {"error_code", "type"});
+                }
+                return "Claude web search returned an invalid tool result.";
+            }
+            searched = true;
             parse_web_result_block(response, block);
         }
     }
+    // With automatic tool choice the model can answer without searching.
+    // Never present that answer as retrieved evidence.
+    if (!searched) return "Claude did not complete a web search. Please retry the search.";
+    return std::nullopt;
 }
 
 class AnthropicWebSearchBackend final : public IWebSearchBackend {
@@ -198,17 +211,23 @@ public:
                 "Claude web search requires an active Anthropic provider with credentials.");
         }
 
-        const std::string model = !context.model_name.empty()
+        std::string model = !context.model_name.empty()
             ? context.model_name
             : metadata->default_model;
         if (model.empty()) {
             return std::unexpected("Claude web search requires an active model.");
         }
 
+        core::llm::ChatRequest normalized;
+        normalized.model = std::move(model);
+        core::llm::protocols::AnthropicProtocol protocol;
+        protocol.prepare_request(normalized);
+        model = std::move(normalized.model);
+
         const auto auth = metadata->credential_source->get_auth();
         const cpr::Response response = cpr::Post(
             cpr::Url{detail::append_path(metadata->base_url, "/v1/messages")},
-            anthropic_headers(auth),
+            anthropic_headers(auth, protocol),
             cpr::Body{search_payload(request, model)},
             cpr::Timeout{kSearchTimeoutMs});
 
@@ -230,7 +249,9 @@ public:
         }
 
         SearchResponse out{.backend = std::string(name())};
-        parse_results(out, doc);
+        if (const auto error = parse_results(out, doc)) {
+            return std::unexpected(*error);
+        }
         return out;
     }
 };

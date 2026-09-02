@@ -808,6 +808,95 @@ TEST_CASE("HttpLLMProvider - Codex Responses transport headers are scoped to Cod
     CHECK(regular_installation_id.empty());
 }
 
+TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
+          "[integration][http][claude][fable51]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex mutex;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(mutex);
+        received.push_back(request);
+        const std::string body = received.size() == 1
+            ? "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n\n"
+              "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
+              "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-first-turn\"}}\n\n"
+              "event: content_block_stop\ndata: {\"index\":0}\n\n"
+              "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"read-1\",\"name\":\"read_file\",\"input\":{}}}\n\n"
+              "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
+              "event: content_block_stop\ndata: {\"index\":1}\n\n"
+              "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":20}}\n\n"
+              "event: message_stop\ndata: {}\n\n"
+            : "event: message_start\ndata: {\"type\":\"message_start\",\"input_transformations\":[{\"type\":\"thinking_dropped\",\"reason\":\"prefix_binding_mismatch\",\"path\":\"messages.1.content.0\"}],\"message\":{\"usage\":{\"input_tokens\":30}}}\n\n"
+              "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Verified.\"}}\n\n"
+              "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n"
+              "event: message_stop\ndata: {}\n\n";
+        response.set_chunked_content_provider("text/event-stream",
+            [body](std::size_t offset, httplib::DataSink& sink) {
+                const auto size = std::min(std::size_t{13}, body.size() - offset);
+                if (!sink.write(body.data() + offset, size)) return false;
+                if (offset + size == body.size()) sink.done();
+                return true;
+            });
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        "fable", std::make_unique<AnthropicProtocol>());
+
+    auto request = make_claude_request("fable");
+    request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Read the file."});
+    core::tools::ToolDefinition definition;
+    definition.name = "read_file";
+    definition.description = "Read a file";
+    request.tools.push_back(Tool{.type = "function", .function = std::move(definition)});
+    Message assistant{.role = "assistant"};
+    std::vector<StreamChunk> first;
+    provider->stream_response(request, [&](const StreamChunk& chunk) { first.push_back(chunk); });
+    REQUIRE_FALSE(first.empty());
+    for (const auto& chunk : first) {
+        REQUIRE_FALSE(chunk.is_error);
+        assistant.content += chunk.content;
+        assistant.tool_calls.insert(assistant.tool_calls.end(), chunk.tools.begin(), chunk.tools.end());
+        assistant.continuation_items.insert(assistant.continuation_items.end(),
+            chunk.continuation_items.begin(), chunk.continuation_items.end());
+    }
+    REQUIRE(first.back().is_final);
+    REQUIRE(assistant.tool_calls.size() == 1);
+    REQUIRE(assistant.continuation_items.size() == 1);
+    request.messages.push_back(std::move(assistant));
+    request.messages.push_back(Message{.role = "tool", .content = "File contents", .tool_call_id = "read-1"});
+    request.messages[0].content = "Read the file. The user updated the goal.";
+    std::vector<StreamChunk> second;
+    provider->stream_response(request, [&](const StreamChunk& chunk) { second.push_back(chunk); });
+    REQUIRE_FALSE(second.empty());
+    REQUIRE(second.back().is_final);
+    std::string text;
+    for (const auto& chunk : second) {
+        REQUIRE_FALSE(chunk.is_error);
+        text += chunk.content;
+    }
+    CHECK(text == "Verified.");
+    std::lock_guard lock(mutex);
+    REQUIRE(received.size() == 2);
+    for (const auto& actual : received) {
+        simdjson::dom::parser parser;
+        const auto doc = parser.parse(actual.body);
+        CHECK(doc["model"].get_string().value() == "claude-fable-5-1");
+        CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
+        CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
+        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.255"));
+    }
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(received.back().body);
+    CHECK(doc["messages"].at(1)["content"].at(0)["signature"].get_string().value() == "signed-first-turn");
+    CHECK(doc["messages"].at(2)["content"].at(0)["tool_use_id"].get_string().value() == "read-1");
+}
+
 TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
           "[integration][claude][sse][error][http]") {
     httplib::Server server;

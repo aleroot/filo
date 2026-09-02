@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/AnthropicCompatibility.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/Models.hpp"
@@ -55,6 +56,106 @@ static ChatRequest make_simple_request(std::string model    = "claude-sonnet-4-6
     req.stream = true;
     req.messages.push_back(Message{.role = "user", .content = std::move(user_text)});
     return req;
+}
+
+TEST_CASE("Fable 5.1 requests pair binding controls with current client headers",
+          "[claude][fable51][serializer][headers]") {
+    for (const auto* model : {"claude-fable-5-1", "fable", "best", "claude-fable",
+                              "fable-5-1", "fable[1m]"}) {
+        for (const auto* effort : {"", "low", "medium", "high", "xhigh", "max", "off"}) {
+            CAPTURE(model, effort);
+            AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+            auto request = make_simple_request(model);
+            request.effort = effort;
+            protocol.prepare_request(request);
+            REQUIRE(request.model == "claude-fable-5-1");
+            const auto payload = protocol.serialize(request);
+            simdjson::dom::parser parser;
+            const auto doc = parser.parse(payload);
+            REQUIRE(doc["max_tokens"].get_int64().value() == 128000);
+            REQUIRE(doc["thinking"]["type"].get_string().value() == "adaptive");
+            REQUIRE(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value()
+                    == "drop_block");
+            REQUIRE(doc["thinking"]["budget_tokens"].error() == simdjson::NO_SUCH_FIELD);
+            REQUIRE(doc["tool_choice"].error() == simdjson::NO_SUCH_FIELD);
+
+            core::auth::AuthInfo auth;
+            auth.properties["oauth"] = "1";
+            auth.headers["Authorization"] = "Bearer test-token";
+            auth.headers["anthropic-beta"] = "custom-beta,thinking-binding-controls-2026-08-01";
+            const auto headers = protocol.build_headers(auth);
+            CHECK_THAT(headers.at("x-anthropic-billing-header"),
+                       Catch::Matchers::StartsWith("cc_version=2.1.255"));
+            CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(headers.at("x-anthropic-billing-header")));
+            CHECK(headers.at("Authorization") == "Bearer test-token");
+            const auto& beta = headers.at("anthropic-beta");
+            const auto binding = std::string(anthropic::kThinkingBindingBeta);
+            REQUIRE(beta.find(binding) != std::string::npos);
+            CHECK(beta.find(binding, beta.find(binding) + binding.size()) == std::string::npos);
+            CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
+            CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("custom-beta"));
+            CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+        }
+    }
+}
+
+TEST_CASE("Fable 5.1 binding controls do not leak to other models",
+          "[claude][fable51][headers][serializer]") {
+    AnthropicProtocol protocol;
+    auto request = make_simple_request("fable");
+    protocol.prepare_request(request);
+    for (const auto* model : {"claude-fable-5", "claude-sonnet-4-6", "claude-opus-5",
+                              "claude-mythos-5-1", "claude-fable-5-10", "custom-model"}) {
+        CAPTURE(model);
+        request.model = model;
+        protocol.prepare_request(request);
+        CHECK(request.model == model);
+        CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring("block_binding"));
+        CHECK_THAT(protocol.build_headers({}).at("anthropic-beta"),
+                   !Catch::Matchers::ContainsSubstring(std::string(anthropic::kThinkingBindingBeta)));
+    }
+}
+
+TEST_CASE("Fable 5.1 preserves empty signed thinking when history is edited",
+          "[claude][fable51][serializer][sse]") {
+    AnthropicSSEParser parser;
+    parser.process_event("content_block_start",
+        R"({"index":0,"content_block":{"type":"thinking","thinking":""}})");
+    parser.process_event("content_block_delta",
+        R"({"index":0,"delta":{"type":"signature_delta","signature":"opaque-signature"}})");
+    auto block = parser.process_event("content_block_stop", R"({"index":0})");
+    REQUIRE(block.continuation_items.size() == 1);
+
+    auto request = make_simple_request("claude-fable-5-1");
+    request.messages.push_back(Message{.role = "assistant", .content = "Ready.",
+                                      .continuation_items = block.continuation_items});
+    request.messages.push_back(Message{.role = "user", .content = "Continue."});
+    // A new goal/system prompt or a semantic edit must not cause Filo to forge
+    // or discard signed blocks. The server validates them with drop_block.
+    request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Updated goal."});
+    request.messages[1].content = "Edited earlier turn.";
+    const auto payload = AnthropicSerializer::serialize(request);
+    simdjson::dom::parser json;
+    const auto doc = json.parse(payload);
+    CHECK(doc["messages"].at(1)["content"].at(0)["thinking"].get_string().value().empty());
+    CHECK(doc["messages"].at(1)["content"].at(0)["signature"].get_string().value() == "opaque-signature");
+    CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
+}
+
+TEST_CASE("Anthropic reports dropped reasoning without losing streamed usage",
+          "[claude][fable51][sse]") {
+    AnthropicSSEParser parser;
+    const auto result = parser.process_event("message_start", R"({
+        "input_transformations":[
+            {"type":"thinking_dropped","reason":"prefix_binding_mismatch","path":"messages.1.content.0"},
+            {"type":"thinking_dropped","reason":"model_binding_mismatch","path":"messages.3.content.0"},
+            {"type":"future_transform","reason":"prefix_binding_mismatch"}],
+        "message":{"usage":{"input_tokens":12,"cache_read_input_tokens":20}}})");
+    CHECK(result.stream_started);
+    CHECK(result.prefix_binding_mismatches == 1);
+    CHECK(result.model_binding_mismatches == 1);
+    CHECK(result.input_tokens == 32);
+    CHECK_FALSE(result.stream_error);
 }
 
 static core::tools::ToolParameter make_param(std::string name,
@@ -827,12 +928,12 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Opus alias to current Opu
     REQUIRE(req.model == "claude-opus-5");
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5", "[claude][headers]") {
+TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5.1", "[claude][headers]") {
     AnthropicProtocol protocol;
     ChatRequest req = make_simple_request("fable");
     protocol.prepare_request(req);
 
-    REQUIRE(req.model == "claude-fable-5");
+    REQUIRE(req.model == "claude-fable-5-1");
 }
 
 TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 4.5",
@@ -847,7 +948,7 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 4.5"
 TEST_CASE("AnthropicProtocol::build_headers omits legacy thinking beta for Fable 5",
           "[claude][headers][thinking]") {
     AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
-    ChatRequest req = make_simple_request("fable");
+    ChatRequest req = make_simple_request("claude-fable-5");
     protocol.prepare_request(req);
 
     core::auth::AuthInfo auth;

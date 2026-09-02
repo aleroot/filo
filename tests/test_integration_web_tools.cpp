@@ -6,6 +6,10 @@
 #include "core/config/ConfigManager.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/tools/WebAccess.hpp"
+#include "core/tools/WebBackendAdapters.hpp"
+#include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/llm/HttpLLMProvider.hpp"
+#include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
@@ -14,6 +18,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -59,6 +64,107 @@ public:
 }
 
 } // namespace
+
+TEST_CASE("Claude web search uses compatible tool choice and shared client headers",
+          "[integration][web][claude][fable51]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex mutex;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(mutex);
+        received.push_back(request);
+        response.set_content(R"({"content":[
+            {"type":"web_search_tool_result","content":[{"type":"web_search_result","title":"Reference","url":"https://example.com/reference"}]},
+            {"type":"text","text":"Found a reference."}]})", "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+
+    const auto backend = web::make_anthropic_web_search_backend();
+    const std::vector<std::string> models{
+        "fable", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "sonnet[1m]"};
+    for (const auto& model : models) {
+        auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+            std::format("http://127.0.0.1:{}", port),
+            core::auth::ApiKeyCredentialSource::as_bearer("test-oauth-token", true),
+            model, std::make_unique<core::llm::protocols::AnthropicProtocol>(),
+            core::config::ApiType::Anthropic, "claude");
+        const auto response = backend->search(web::SearchRequest{.query = "reference \"quoted\""},
+            ToolInvocationContext{.session_context = test_support::make_workspace_session_context(),
+                                  .model_name = model, .provider = std::move(provider)});
+        INFO((response ? "success" : response.error()));
+        REQUIRE(response.has_value());
+        REQUIRE(response->results.size() == 1);
+        CHECK(response->results[0].url == "https://example.com/reference");
+    }
+    std::lock_guard lock(mutex);
+    REQUIRE(received.size() == models.size());
+    for (std::size_t i = 0; i < received.size(); ++i) {
+        CAPTURE(models[i]);
+        const auto& actual = received[i];
+        simdjson::dom::parser parser;
+        const auto doc = parser.parse(actual.body);
+        const auto choice = doc["tool_choice"]["type"].get_string().value();
+        CHECK(choice == (i < 3 ? "auto" : "tool"));
+        if (i < 3) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
+        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.255"));
+        CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring(actual.get_header_value("x-anthropic-billing-header")));
+        CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("web-search-2025-03-05"));
+        CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));
+        CHECK(actual.get_header_value("Authorization") == "Bearer test-oauth-token");
+        CHECK(actual.get_header_value("Accept") == "application/json");
+        CHECK_THAT(std::string(doc["messages"].at(0)["content"].get_string().value()),
+                   Catch::Matchers::ContainsSubstring("Call the web_search tool"));
+        if (i == 0) CHECK(doc["model"].get_string().value() == "claude-fable-5-1");
+        if (i == 4) {
+            CHECK(doc["model"].get_string().value() == "claude-sonnet-5");
+            CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("context-1m-2025-08-07"));
+        }
+    }
+}
+
+TEST_CASE("Claude web search distinguishes missing search and tool errors from empty results",
+          "[integration][web][claude][fable51]") {
+    std::string response_body;
+    std::string expected_error;
+    SECTION("Model answered without invoking search") {
+        response_body = R"({"content":[{"type":"text","text":"An answer from memory."}]})";
+        expected_error = "did not complete a web search";
+    }
+    SECTION("Search tool returned an API error") {
+        response_body = R"({"content":[{"type":"web_search_tool_result","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}]})";
+        expected_error = "max_uses_exceeded";
+    }
+    SECTION("A completed search found no matches") {
+        response_body = R"({"content":[{"type":"web_search_tool_result","content":[]}]})";
+    }
+    httplib::Server server;
+    server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& response) {
+        response.set_content(response_body, "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    auto provider = std::make_shared<core::llm::HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        "claude-fable-5-1", std::make_unique<core::llm::protocols::AnthropicProtocol>(),
+        core::config::ApiType::Anthropic, "claude");
+    const auto response = web::make_anthropic_web_search_backend()->search(
+        web::SearchRequest{.query = "a test query"},
+        ToolInvocationContext{.session_context = test_support::make_workspace_session_context(),
+                              .model_name = "claude-fable-5-1", .provider = std::move(provider)});
+    if (expected_error.empty()) {
+        REQUIRE(response.has_value());
+        CHECK(response->results.empty());
+    } else {
+        REQUIRE_FALSE(response.has_value());
+        CHECK_THAT(response.error(), Catch::Matchers::ContainsSubstring(expected_error));
+    }
+}
 
 TEST_CASE("WebFetchTool validates redirected URLs against trusted URL policy",
           "[integration][tools][web]") {

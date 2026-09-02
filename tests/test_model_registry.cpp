@@ -172,7 +172,7 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
 
     const auto fable = registry.lookup("fable");
     REQUIRE(fable != nullptr);
-    REQUIRE(fable->canonical_id == "claude-fable-5");
+    REQUIRE(fable->canonical_id == "claude-fable-5-1");
 
     const auto haiku = registry.lookup("haiku");
     REQUIRE(haiku != nullptr);
@@ -214,6 +214,27 @@ TEST_CASE("ModelRegistry::lookup - knows Grok 4.6 model metadata", "[llm][regist
     CHECK(info->reasoning.effort.supports_effort());
     CHECK(info->reasoning.effort.supports(
         ReasoningCapability::XHighEffort));
+}
+
+TEST_CASE("ModelRegistry::lookup - Fable 5.1 aliases and cache pricing preserve pinned Fable 5", "[llm][registry][fable51]") {
+    auto& registry = ModelRegistry::instance();
+    const auto info = registry.get_info("claude-fable-5-1");
+    REQUIRE(info.has_value());
+    CHECK(info->display_name == "Claude Fable 5.1");
+    CHECK(info->context_window == 1'000'000);
+    CHECK(info->max_output_tokens == 128'000);
+    CHECK(info->pricing.input_per_mtok == Catch::Approx(10.0));
+    CHECK(info->pricing.output_per_mtok == Catch::Approx(50.0));
+    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.25));
+    for (const auto* alias : {"fable", "best", "claude-fable", "fable-5-1"}) {
+        const auto found = registry.lookup(alias);
+        REQUIRE(found);
+        CHECK(found->canonical_id == "claude-fable-5-1");
+    }
+    const auto pinned = registry.lookup("fable-5");
+    REQUIRE(pinned);
+    CHECK(pinned->canonical_id == "claude-fable-5");
+    CHECK(pinned->pricing.cached_input_per_mtok == Catch::Approx(1.0));
 }
 
 TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {
