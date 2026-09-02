@@ -46,13 +46,13 @@ constexpr auto kBillingCacheTtl = std::chrono::seconds(60);
 }
 
 struct CachedUsage {
-    std::vector<UsageWindow> value;
+    GrokBillingUsage value;
     std::chrono::steady_clock::time_point expires_at;
 };
 
 class GrokBillingUsageSource final : public IGrokBillingUsageSource {
 public:
-    [[nodiscard]] std::vector<UsageWindow> fetch(
+    [[nodiscard]] GrokBillingUsage fetch(
         std::string_view base_url,
         const cpr::Header& request_headers) override {
         // Never forward an OAuth credential to a custom/OpenAI-compatible URL.
@@ -100,9 +100,9 @@ public:
             return {};
         }
 
-        auto windows = parse_grok_billing_usage(response.text);
-        if (!windows.empty()) store_cached(std::move(cache_key), windows);
-        return windows;
+        auto usage = parse_grok_billing_usage(response.text);
+        if (!usage.empty()) store_cached(std::move(cache_key), usage);
+        return usage;
     }
 
 private:
@@ -115,7 +115,7 @@ private:
         }
     }
 
-    [[nodiscard]] std::optional<std::vector<UsageWindow>> load_cached(
+    [[nodiscard]] std::optional<GrokBillingUsage> load_cached(
         const std::string& key) {
         const auto now = std::chrono::steady_clock::now();
         std::scoped_lock lock(cache_mutex_);
@@ -128,10 +128,10 @@ private:
         return it->second.value;
     }
 
-    void store_cached(std::string key, std::vector<UsageWindow> windows) {
+    void store_cached(std::string key, GrokBillingUsage usage) {
         std::scoped_lock lock(cache_mutex_);
         cache_[std::move(key)] = CachedUsage{
-            std::move(windows),
+            std::move(usage),
             std::chrono::steady_clock::now() + kBillingCacheTtl,
         };
     }
@@ -142,7 +142,7 @@ private:
 
 } // namespace
 
-std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
+GrokBillingUsage parse_grok_billing_usage(std::string_view payload) {
     simdjson::dom::parser parser;
     simdjson::padded_string padded(payload);
     simdjson::dom::element doc;
@@ -179,7 +179,9 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
         ? std::optional<float>{monthly_used / monthly_limit * 100.0f}
         : std::nullopt;
 
-    std::vector<UsageWindow> windows;
+    GrokBillingUsage result;
+    result.period_ends_at = period_reset;
+    auto& windows = result.windows;
     if (has_period) {
         // Proto3 JSON omits zero-valued scalars. Grok Build treats a missing
         // percentage for a typed current period as zero usage.
@@ -199,7 +201,7 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
                 std::clamp(*monthly_percentage / 100.0f, 0.0f, 1.5f),
             });
         }
-        return windows;
+        return result;
     }
 
     if (percentage.has_value()) {
@@ -213,7 +215,7 @@ std::vector<UsageWindow> parse_grok_billing_usage(std::string_view payload) {
             std::clamp(*monthly_percentage / 100.0f, 0.0f, 1.5f),
         });
     }
-    return windows;
+    return result;
 }
 
 std::shared_ptr<IGrokBillingUsageSource> make_grok_billing_usage_source() {

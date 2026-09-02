@@ -168,6 +168,12 @@ struct RateLimitInfo {
     std::string unified_overage_disabled_reason; ///< Overage disable reason from provider
     bool        unified_fallback_available = false; ///< Provider fallback availability flag
 
+    /// Unix timestamp (seconds) when the current subscription/billing period
+    /// ends or renews, as reported by the provider's API (0 = unknown).
+    /// Only some providers expose this: Grok Build via its billing endpoint
+    /// (currentPeriod.endTime) and Z.ai via its subscription endpoint.
+    int64_t subscription_ends_at = 0;
+
     /// Returns the highest utilization across all subscription windows, or 0 if none.
     [[nodiscard]] float max_window_utilization() const noexcept {
         float best = 0.0f;
@@ -184,7 +190,8 @@ struct RateLimitInfo {
             || !unified_overage_status.empty()
             || unified_overage_reset > 0
             || !unified_overage_disabled_reason.empty()
-            || unified_fallback_available;
+            || unified_fallback_available
+            || subscription_ends_at > 0;
     }
 
     /// Returns true if quota is below 10% remaining

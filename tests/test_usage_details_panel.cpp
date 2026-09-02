@@ -7,6 +7,7 @@
 #include "tui/UsageDetailsPanel.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <ftxui/dom/node.hpp>
+#include <ftxui/screen/screen.hpp>
 #include <chrono>
 
 TEST_CASE("TimeUtils: parse_timestamp_or_duration", "[time_utils]") {
@@ -117,6 +118,34 @@ TEST_CASE("UsageDetailsPanel: helpers", "[usage_details_panel]") {
             75);
         CHECK(element != nullptr);
     }
+
+    SECTION("subscription end date is shown only when reported") {
+        core::llm::TokenUsage session_tokens{};
+
+        const auto render_to_string = [&](int64_t subscription_ends_at) {
+            core::llm::protocols::RateLimitInfo info;
+            info.usage_windows.push_back(core::llm::protocols::UsageWindow{
+                .label = "7d",
+                .utilization = 0.5f,
+                .resets_at = 1750500000LL,
+            });
+            info.subscription_ends_at = subscription_ends_at;
+
+            auto element = tui::render_usage_details_panel(
+                info, "Z.ai", "glm-4.6", "", true, session_tokens, 0.0, 80);
+            auto screen = ftxui::Screen::Create(
+                ftxui::Dimension::Fixed(100), ftxui::Dimension::Fit(element));
+            ftxui::Render(screen, element);
+            return screen.ToString();
+        };
+
+        const int64_t future = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count() + 20 * 86400;
+        CHECK(render_to_string(future).find("Subscription period ends")
+              != std::string::npos);
+        CHECK(render_to_string(0).find("Subscription period ends")
+              == std::string::npos);
+    }
 }
 
 TEST_CASE("Protocol reset parsing: Anthropic, Kimi, Grok, Zai, OpenAI", "[protocol_resets]") {
@@ -174,6 +203,7 @@ TEST_CASE("Protocol reset parsing: Anthropic, Kimi, Grok, Zai, OpenAI", "[protoc
         REQUIRE(!windows.empty());
         CHECK(windows[0].label == "7d");
         CHECK(windows[0].resets_at > 0);
+        CHECK(windows.period_ends_at == windows[0].resets_at);
     }
 
     SECTION("Zai on_response parses rate limit headers") {

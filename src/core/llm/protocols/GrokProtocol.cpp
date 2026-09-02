@@ -252,9 +252,13 @@ void GrokResponsesProtocol::enrich_rate_limit(
     const cpr::Header& request_headers,
     const HttpResponse& response) {
     if (response.status_code != 200 || !billing_usage_source_) return;
-    if (auto windows = billing_usage_source_->fetch(base_url, request_headers);
-        !windows.empty()) {
-        grok_rate_limit_.usage_windows = std::move(windows);
+    if (auto usage = billing_usage_source_->fetch(base_url, request_headers);
+        !usage.empty()) {
+        grok_rate_limit_.usage_windows = std::move(usage.windows);
+        // currentPeriod.endTime is the subscription's renewal boundary.
+        if (usage.period_ends_at > 0) {
+            grok_rate_limit_.subscription_ends_at = usage.period_ends_at;
+        }
     }
 }
 

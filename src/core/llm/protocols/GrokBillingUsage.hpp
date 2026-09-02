@@ -9,6 +9,25 @@
 namespace core::llm::protocols {
 
 /**
+ * Parsed result of Grok Build's billing API.
+ *
+ * Besides the utilization windows, the API reports the current billing
+ * period's endTime — effectively the subscription renewal boundary — which
+ * is surfaced separately so the UI can show a subscription end date.
+ */
+struct GrokBillingUsage {
+    std::vector<UsageWindow> windows;
+    int64_t period_ends_at = 0; ///< Unix seconds when the current billing period ends (0 = unknown)
+
+    // Vector-like accessors so existing call sites keep working unchanged.
+    [[nodiscard]] bool empty() const noexcept { return windows.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return windows.size(); }
+    [[nodiscard]] const UsageWindow& operator[](std::size_t index) const {
+        return windows[index];
+    }
+};
+
+/**
  * Parse the coding-credit windows returned by Grok Build's billing API.
  *
  * The current API normally reports one period (weekly or monthly), unlike
@@ -16,7 +35,7 @@ namespace core::llm::protocols {
  * additionally carry a legacy monthly allowance. An omitted percentage
  * represents zero usage in the protobuf JSON response.
  */
-[[nodiscard]] std::vector<UsageWindow> parse_grok_billing_usage(
+[[nodiscard]] GrokBillingUsage parse_grok_billing_usage(
     std::string_view payload);
 
 /**
@@ -29,7 +48,7 @@ class IGrokBillingUsageSource {
 public:
     virtual ~IGrokBillingUsageSource() = default;
 
-    [[nodiscard]] virtual std::vector<UsageWindow> fetch(
+    [[nodiscard]] virtual GrokBillingUsage fetch(
         std::string_view base_url,
         const cpr::Header& request_headers) = 0;
 };

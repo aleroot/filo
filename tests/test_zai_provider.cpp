@@ -304,3 +304,43 @@ TEST_CASE("Z.ai Coding Plan protocol accepts future GLM models and rejects other
         protocol.prepare_request(invalid),
         Catch::Matchers::ContainsSubstring("requires a GLM model"));
 }
+
+TEST_CASE("Z.ai subscription list payload exposes the subscription end date",
+          "[zai][subscription][rate_limit]") {
+    SECTION("ISO 8601 valid-until string") {
+        CHECK(parse_zai_subscription_end(R"JSON({
+          "data": [{
+            "productName": "GLM Coding Max",
+            "status": "active",
+            "purchaseTime": "2026-08-01T10:00:00Z",
+            "valid": "2026-08-17T23:59:59Z"
+          }]
+        })JSON") == 1787011199LL);
+    }
+
+    SECTION("Space-separated datetime is tolerated") {
+        CHECK(parse_zai_subscription_end(R"JSON({
+          "data": [{"valid": "2026-08-17 23:59:59"}]
+        })JSON") == 1787011199LL);
+    }
+
+    SECTION("Epoch milliseconds are converted to seconds") {
+        CHECK(parse_zai_subscription_end(R"JSON({
+          "data": [{"valid": 1787011199000}]
+        })JSON") == 1787011199LL);
+    }
+
+    SECTION("Alternative expiry keys") {
+        CHECK(parse_zai_subscription_end(R"JSON({
+          "data": [{"expireTime": "2026-09-30T23:59:59Z"}]
+        })JSON") == 1790812799LL);
+    }
+
+    SECTION("No parseable end date yields zero") {
+        CHECK(parse_zai_subscription_end("not-json") == 0);
+        CHECK(parse_zai_subscription_end(R"({"data": []})") == 0);
+        CHECK(parse_zai_subscription_end(
+            R"({"data": [{"productName": "GLM Coding Max", "status": "active"}]})") == 0);
+        CHECK(parse_zai_subscription_end(R"({"data": [{"valid": "true"}]})") == 0);
+    }
+}

@@ -15,6 +15,22 @@
 
 namespace core::llm::protocols {
 
+/**
+ * @brief Parse the subscription end/renewal date from the Z.ai Coding Plan
+ *        `GET /api/biz/subscription/list` response.
+ *
+ * The response carries an array of subscriptions under `data`, each with
+ * fields such as `productName`, `status`, `purchaseTime` and `valid`
+ * (the date the current term is valid until). The first parseable expiry
+ * timestamp of the first entry is returned.
+ *
+ * @return Unix timestamp in seconds, or 0 when the payload carries no
+ *         parseable end date.
+ *
+ * Exposed for unit tests.
+ */
+[[nodiscard]] int64_t parse_zai_subscription_end(std::string_view payload) noexcept;
+
 class ZaiProtocol : public OpenAIProtocol {
 public:
     explicit ZaiProtocol(bool stream_usage = false)

@@ -194,6 +194,20 @@ Element render_usage_details_panel(
         rows.push_back(text(""));
     }
 
+    // ── Subscription End Date (only when the provider API reports it) ───────
+    if (rate_limit_info.subscription_ends_at > 0) {
+        const std::string sub_end_str =
+            format_quota_reset_display(rate_limit_info.subscription_ends_at);
+        if (!sub_end_str.empty()) {
+            rows.push_back(hbox({
+                text("  🗓 Subscription period ends: ")
+                    | ftxui::color(ftxui::Color::GrayLight),
+                text(sub_end_str) | ftxui::bold | ftxui::color(ColorYellowBright),
+            }));
+            rows.push_back(text(""));
+        }
+    }
+
     // ── Request & Token Limits (RPM / TPM) ───────────────────────────────────
     if (rate_limit_info.requests_limit > 0 || rate_limit_info.tokens_limit > 0
         || rate_limit_info.requests_remaining > 0 || rate_limit_info.tokens_remaining > 0

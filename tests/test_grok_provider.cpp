@@ -1133,8 +1133,45 @@ TEST_CASE("Grok billing payload exposes the provider's real usage period",
         CHECK(windows[1].utilization == Catch::Approx(0.25f));
     }
 
+    SECTION("period endTime is surfaced as the subscription period end") {
+        const auto usage = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "creditUsagePercent": 42.5,
+            "currentPeriod": {
+              "type": "USAGE_PERIOD_TYPE_WEEKLY",
+              "endTime": "2026-08-17T23:59:59Z"
+            }
+          }
+        })JSON");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage.period_ends_at == 1787011199LL);
+        CHECK(usage[0].resets_at == usage.period_ends_at);
+    }
+
+    SECTION("period endTime falls back to resetTime") {
+        const auto usage = parse_grok_billing_usage(R"JSON({
+          "config": {
+            "currentPeriod": {
+              "type": "USAGE_PERIOD_TYPE_MONTHLY",
+              "resetTime": "2026-09-30T23:59:59Z"
+            }
+          }
+        })JSON");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage.period_ends_at == 1790812799LL);
+    }
+
+    SECTION("no period means no subscription end date") {
+        const auto usage = parse_grok_billing_usage(R"JSON({
+          "config": {"monthlyLimit": {"val": 10000}, "used": {"val": 2500}}
+        })JSON");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage.period_ends_at == 0);
+    }
+
     CHECK(parse_grok_billing_usage("not-json").empty());
     CHECK(parse_grok_billing_usage(R"({"config":{}})").empty());
+    CHECK(parse_grok_billing_usage(R"({"config":{}})").period_ends_at == 0);
 }
 
 TEST_CASE("Grok billing source rejects non-Grok endpoints before network I/O",
@@ -1165,14 +1202,17 @@ namespace {
 
 class FixedGrokBillingUsageSource final : public IGrokBillingUsageSource {
 public:
-    std::vector<UsageWindow> result = {
-        UsageWindow{"7d", 0.33f},
-        UsageWindow{"30d", 0.21f},
+    GrokBillingUsage result{
+        .windows = {
+            UsageWindow{"7d", 0.33f},
+            UsageWindow{"30d", 0.21f},
+        },
+        .period_ends_at = 1787011199LL,
     };
     int calls = 0;
     std::string observed_base_url;
 
-    std::vector<UsageWindow> fetch(
+    GrokBillingUsage fetch(
         std::string_view base_url,
         const cpr::Header&) override {
         ++calls;
@@ -1216,6 +1256,8 @@ TEST_CASE("Grok Responses enriches only its own rate-limit state",
     CHECK(info.usage_windows[0].utilization == Catch::Approx(0.33f));
     CHECK(info.usage_windows[1].label == "30d");
     CHECK(info.usage_windows[1].utilization == Catch::Approx(0.21f));
+    // The billing period end is propagated as the subscription end date.
+    CHECK(info.subscription_ends_at == 1787011199LL);
 
     // A failed primary response never triggers a billing side request.
     protocol.enrich_rate_limit(

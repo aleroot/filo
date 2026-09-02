@@ -187,11 +187,16 @@ protected:
     void set_last_rate_limit_info(const protocols::RateLimitInfo& info) noexcept {
         try {
             protocols::RateLimitInfo merged = info;
-            if (merged.usage_windows.empty()) {
-                auto previous = load_last_rate_limit_snapshot();
-                if (previous && !previous->usage_windows.empty()) {
-                    merged.usage_windows = previous->usage_windows;
-                }
+            const auto previous = load_last_rate_limit_snapshot();
+            if (merged.usage_windows.empty()
+                && previous && !previous->usage_windows.empty()) {
+                merged.usage_windows = previous->usage_windows;
+            }
+            // The subscription end date changes rarely and is not reported by
+            // every response; retain the last known value when this update
+            // carries none.
+            if (merged.subscription_ends_at <= 0 && previous) {
+                merged.subscription_ends_at = previous->subscription_ends_at;
             }
 
             auto snapshot = std::make_shared<const protocols::RateLimitInfo>(merged);

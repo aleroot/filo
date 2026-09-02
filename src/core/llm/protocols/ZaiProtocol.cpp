@@ -385,6 +385,102 @@ void merge_usage(RateLimitInfo& info, const UsageSnapshot& snapshot) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Subscription end date (GET /api/biz/subscription/list)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// The subscription end date changes rarely, so cache it longer than the quota
+// windows. Failed/absent lookups are cached too (value 0) so accounts without
+// a Coding Plan subscription are not hammered on every response.
+constexpr auto kSubscriptionCacheTtl = std::chrono::minutes{5};
+
+struct CachedSubscriptionEnd {
+    int64_t value = 0; ///< Unix seconds; 0 = provider reported no end date
+    std::chrono::steady_clock::time_point expires_at;
+};
+
+[[nodiscard]] std::unordered_map<std::string, CachedSubscriptionEnd>&
+subscription_end_cache() {
+    static std::unordered_map<std::string, CachedSubscriptionEnd> cache;
+    return cache;
+}
+
+[[nodiscard]] std::mutex& subscription_end_cache_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+/// Parse a timestamp string, additionally tolerating the "YYYY-MM-DD HH:MM:SS"
+/// and bare "YYYY-MM-DD" shapes used by Z.ai's business APIs (treated as UTC).
+[[nodiscard]] int64_t parse_subscription_timestamp(std::string_view raw) noexcept {
+    // Try the Z.ai business-API shapes first: their leading year digits would
+    // otherwise be misread as an epoch by the generic numeric fallback.
+    std::string normalized(raw);
+    if (const auto space = normalized.find(' '); space != std::string::npos) {
+        normalized[space] = 'T';
+        if (const int64_t parsed =
+                core::utils::time::parse_timestamp_or_duration(normalized);
+            parsed > 0) {
+            return parsed;
+        }
+    } else if (normalized.size() == 10
+               && normalized[4] == '-' && normalized[7] == '-') {
+        normalized += "T00:00:00";
+        if (const int64_t parsed =
+                core::utils::time::parse_timestamp_or_duration(normalized);
+            parsed > 0) {
+            return parsed;
+        }
+    }
+    return core::utils::time::parse_timestamp_or_duration(raw);
+}
+
+[[nodiscard]] int64_t fetch_subscription_end(
+    std::string_view base_url,
+    const cpr::Header& request_headers) {
+    const std::string url = management_api_base_url(base_url)
+        + "/biz/subscription/list";
+    cpr::Header headers = request_headers;
+    headers["Accept"] = "application/json";
+    if (!transport::find_header(headers, "Accept-Language").has_value()) {
+        headers["Accept-Language"] = "en";
+    }
+
+    const cpr::Response response = cpr::Get(
+        cpr::Url{url}, headers, cpr::Timeout{1500});
+    if (response.error.code != cpr::ErrorCode::OK
+        || response.status_code != 200
+        || response.text.empty()) {
+        return 0;
+    }
+    return parse_zai_subscription_end(response.text);
+}
+
+[[nodiscard]] int64_t cached_or_fetch_subscription_end(
+    std::string_view base_url,
+    const cpr::Header& request_headers) {
+    const std::string key = usage_cache_key(base_url, request_headers)
+        + "|subscription";
+    {
+        const auto now = std::chrono::steady_clock::now();
+        std::scoped_lock lock(subscription_end_cache_mutex());
+        auto& cache = subscription_end_cache();
+        const auto it = cache.find(key);
+        if (it != cache.end()) {
+            if (it->second.expires_at > now) return it->second.value;
+            cache.erase(it);
+        }
+    }
+
+    const int64_t end = fetch_subscription_end(base_url, request_headers);
+    std::scoped_lock lock(subscription_end_cache_mutex());
+    subscription_end_cache()[std::move(key)] = CachedSubscriptionEnd{
+        end,
+        std::chrono::steady_clock::now() + kSubscriptionCacheTtl,
+    };
+    return end;
+}
+
 [[nodiscard]] bool has_usage_window(
     const RateLimitInfo& info,
     std::string_view label) {
@@ -575,6 +671,52 @@ std::string ZaiProtocol::format_error_message(const HttpResponse& response) cons
     return message;
 }
 
+int64_t parse_zai_subscription_end(std::string_view payload) noexcept {
+    try {
+        simdjson::dom::parser parser;
+        simdjson::dom::element document;
+        if (parser.parse(payload).get(document) != simdjson::SUCCESS) return 0;
+
+        simdjson::dom::array data;
+        if (document["data"].get(data) != simdjson::SUCCESS) return 0;
+
+        // Candidate keys ordered by likelihood. Z.ai's subscription objects
+        // expose `valid` (current-term expiry) plus, depending on rollout,
+        // explicit expiry/renewal timestamps.
+        static constexpr std::array<std::string_view, 9> kExpiryKeys{
+            "valid", "validUntil", "valid_until",
+            "expireTime", "expiredTime", "expiresAt",
+            "endTime", "renewTime", "nextRenewTime",
+        };
+
+        for (simdjson::dom::element element : data) {
+            simdjson::dom::object subscription;
+            if (element.get(subscription) != simdjson::SUCCESS) continue;
+
+            for (const auto key : kExpiryKeys) {
+                if (const auto text = read_json_string(subscription, key);
+                    text.has_value() && !text->empty()) {
+                    if (const int64_t parsed = parse_subscription_timestamp(*text);
+                        parsed > 0) {
+                        return parsed;
+                    }
+                }
+                if (const auto numeric = read_json_int(subscription, key);
+                    numeric.has_value() && *numeric > 0) {
+                    int64_t value = *numeric;
+                    if (value > 100'000'000'000LL) value /= 1000LL; // ms -> s
+                    return value;
+                }
+            }
+            // Only the first subscription entry is considered.
+            return 0;
+        }
+        return 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 void ZaiProtocol::enrich_rate_limit(
     std::string_view base_url,
     const cpr::Header& request_headers,
@@ -584,6 +726,17 @@ void ZaiProtocol::enrich_rate_limit(
         || response.status_code == 403) {
         return;
     }
+
+    // Plan-level metadata lives on a separate endpoint from the quota
+    // windows; fetch it independently (long-lived, negatively cached).
+    if (last_rate_limit_.subscription_ends_at <= 0) {
+        if (const int64_t end = cached_or_fetch_subscription_end(
+                base_url, request_headers);
+            end > 0) {
+            last_rate_limit_.subscription_ends_at = end;
+        }
+    }
+
     if (has_usage_window(last_rate_limit_, "5h")
         && has_usage_window(last_rate_limit_, "7d")) {
         return;
