@@ -36,7 +36,7 @@ constexpr std::size_t kMaxFindingChars = 4096;
 AutoGraphPreparation
 AutoGraphOrchestrator::prepare(std::string_view objective,
                                std::string_view repository_context,
-                               Hooks hooks) const noexcept {
+                               Hooks hooks, bool boost) const noexcept {
   AutoGraphPreparation preparation;
   try {
     if (hooks.cancellation_requested && hooks.cancellation_requested()) {
@@ -44,7 +44,12 @@ AutoGraphOrchestrator::prepare(std::string_view objective,
       return preparation;
     }
     core::goal::GoalPlanner planner(std::move(hooks.complete));
-    auto planned = planner.plan(objective, repository_context,
+    std::string context(repository_context);
+    if (boost)
+      context += "\nBOOST: identify acceptance criteria, competing hypotheses or "
+                 "implementation strategies, and adversarial verification gaps. "
+                 "Use independent investigations before the final writer.";
+    auto planned = planner.plan(objective, context,
                                 core::goal::PlanProfile::AutoExecution);
     if (!planned.has_value()) {
       preparation.warnings.push_back(planned.error());
@@ -79,6 +84,25 @@ AutoGraphOrchestrator::prepare(std::string_view objective,
             "AUTO could not construct the exploration wave");
         return preparation;
       }
+      ++selected;
+    }
+    // A planner fallback must not silently reduce Boost to a single agent.
+    // Fill missing independent perspectives; the total remains capped at four.
+    while (boost && selected < 2) {
+      core::goal::Node perspective;
+      perspective.name = selected == 0 ? "BOOST strategy investigation"
+                                       : "BOOST adversarial investigation";
+      perspective.workspace_access = core::goal::WorkspaceAccess::SharedRead;
+      perspective.parallelizable = true;
+      perspective.directive = selected == 0
+          ? "Inspect source and dependencies. Define acceptance criteria, rank "
+            "root-cause hypotheses or implementation strategies, and recommend "
+            "a concrete approach supported by files/lines. Do not edit.\nTask:\n"
+          : "Independently inspect edge cases, failure modes and test coverage. "
+            "Propose falsifiable checks and counterexamples for the task. "
+            "Do not edit.\nTask:\n";
+      perspective.directive += objective;
+      static_cast<void>(exploration.add_node(std::move(perspective)));
       ++selected;
     }
     if (selected == 0 || !hooks.explore) {

@@ -337,4 +337,27 @@ std::optional<RepositorySnapshot> GitProvider::repository_snapshot() const {
   return snapshot;
 }
 
+std::optional<std::string> GitProvider::review_patch() const {
+  constexpr std::size_t limit = 64 * 1024;
+  // Disable repo-configured diff helpers and textconv: gathering evidence
+  // must not execute code from the repository.
+  auto patch = exec_cmd(git_command(root_dir_,
+      "--no-pager diff --no-ext-diff --no-textconv --no-color HEAD --"), limit);
+  if (patch.exit_code != 0) {
+    // An unborn repository has no HEAD but can already have staged files.
+    patch = exec_cmd(git_command(root_dir_,
+        "--no-pager diff --no-ext-diff --no-textconv --no-color --cached --"), limit);
+    auto unstaged = exec_cmd(git_command(root_dir_,
+        "--no-pager diff --no-ext-diff --no-textconv --no-color --"), limit);
+    if (patch.exit_code != 0 || unstaged.exit_code != 0)
+      return std::nullopt;
+    patch.output += unstaged.output;
+    patch.truncated = patch.truncated || unstaged.truncated || patch.output.size() > limit;
+    patch.output.resize(std::min(patch.output.size(), limit));
+  }
+  if (patch.truncated)
+    patch.output += "\n[Patch truncated: inspect the affected files before accepting coverage.]\n";
+  return patch.output;
+}
+
 } // namespace core::scm

@@ -268,6 +268,8 @@ set(FILO_CORE_SOURCES
     src/core/agent/Agent.cpp
     src/core/agent/AgentCapabilities.cpp
     src/core/agent/AutoGraphOrchestrator.cpp
+    src/core/agent/BoostPipeline.cpp
+    src/core/scm/EphemeralWorktree.cpp
     src/core/agent/AutoModePolicy.cpp
     src/core/agent/AutoQualityLedger.cpp
     src/core/agent/AutoTurnCoordinator.cpp
@@ -545,6 +547,7 @@ set(CMAKE_FOLDER "${_filo_saved_folder}")
 unset(_filo_saved_folder)
 
 set(FILO_UNIT_TEST_SOURCES
+    tests/test_boost.cpp
     tests/test_auto_mode.cpp
     tests/test_verification.cpp
     tests/test_reasoning_capabilities.cpp

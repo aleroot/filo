@@ -1,4 +1,5 @@
 #include "AutoModePolicy.hpp"
+#include "BoostPipeline.hpp"
 
 #include <format>
 #include <utility>
@@ -41,11 +42,15 @@ AutoModePolicy::decide(std::string_view prompt,
   AutoModeDecision decision;
   decision.path = orchestrated ? AutoExecutionPath::Orchestrated
                                : AutoExecutionPath::Direct;
+  const auto activation = BoostPipeline::should_activate(prompt, classified);
+  decision.boost = context.boost_requested || activation.active;
+  if (decision.boost)
+    decision.path = AutoExecutionPath::Orchestrated;
   decision.task_type = classified.task_type;
   decision.complexity = classified.complexity;
-  decision.parallel_exploration = orchestrated &&
+  decision.parallel_exploration = decision.boost || (orchestrated &&
                                   classified.task_type != TaskType::Trivial &&
-                                  classified.task_type != TaskType::Simple;
+                                  classified.task_type != TaskType::Simple);
   // The condition is mutation, not the classifier's guess. A turn that stays
   // conversational pays no cost; any turn that actually writes must close
   // the evidence loop even when its original wording looked trivial.
@@ -54,6 +59,10 @@ AutoModePolicy::decide(std::string_view prompt,
       "{} path selected for {} work at {:.2f} complexity",
       to_string(decision.path),
       core::llm::routing::to_string(decision.task_type), decision.complexity);
+  if (decision.boost)
+    decision.reason = context.boost_requested
+        ? "BOOST selected by /boost for this turn"
+        : "BOOST automatically selected: " + activation.reason;
   return decision;
 }
 
@@ -98,6 +107,8 @@ AutoModePolicy::execution_contract(const AutoModeDecision &decision) const {
                 "exception: <specific reason>` in the final answer.\n";
   }
   contract += "[/AUTO execution contract]";
+  if (decision.boost)
+    contract += BoostPipeline::execution_contract();
   return contract;
 }
 

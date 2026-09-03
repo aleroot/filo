@@ -1448,6 +1448,7 @@ public:
             "  /compress [mode]    Open/set tool output compression (off|light|full|ultra)\n"
             "  /undo               Remove the last user message from history\n"
             "  /retry              Re-send the last user message\n"
+            "  /boost <task>       Deep reasoning with independent verification for this turn\n"
             "  /model [selector]   Open model picker or switch manual/router/provider/model target\n"
             "  /profile [name]     Show/list/switch named configuration profiles\n"
             "  /effort [level]     Open/show/set model effort (auto|low|medium|high|max)\n"
@@ -3837,11 +3838,34 @@ public:
     }
 };
 
+class BoostCommand final : public Command {
+public:
+    std::string get_name() const override { return "/boost"; }
+    std::string get_description() const override {
+        return "Deep reasoning, execution and independent verification for one task";
+    }
+    bool accepts_arguments() const override { return true; }
+    void execute(const CommandContext& ctx) override {
+        const auto task = trailing_arguments(ctx.text);
+        if (task.empty()) {
+            ctx.append_history_fn("\nUsage: /boost <task> — applies to this turn only. AUTO can also activate Boost automatically.\n");
+            return;
+        }
+        if (!ctx.send_user_message_fn) {
+            ctx.append_history_fn("\nBoost is unavailable in this command context.\n");
+            return;
+        }
+        ctx.clear_input_fn();
+        ctx.send_user_message_fn("/boost " + task);
+    }
+};
+
 // ---------------------------------------------------------
 // Executor Implementation
 // ---------------------------------------------------------
 
 CommandExecutor::CommandExecutor() {
+    register_command(std::make_unique<BoostCommand>());
     register_command(std::make_unique<AuthCommand>());
     register_command(std::make_unique<LogoutCommand>());
     register_command(std::make_unique<QuitCommand>());
@@ -3943,7 +3967,7 @@ bool CommandExecutor::try_execute(const std::string& raw_input, const CommandCon
     if (sv.empty()) return false;
 
     // Extract the command verb (up to the first space).
-    auto space = sv.find(' ');
+    auto space = sv.find_first_of(" \t\r\n");
     std::string_view verb = (space == std::string_view::npos) ? sv : sv.substr(0, space);
 
     for (auto& cmd : commands_) {

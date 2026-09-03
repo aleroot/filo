@@ -59,7 +59,7 @@ execute_exploration(SubagentOrchestrator &orchestrator,
                                             : request.description)
         .comma();
     writer.kv_str("prompt", request.prompt).comma();
-    writer.kv_str("subagent_type", "explore");
+    writer.kv_str("subagent_type", request.read_only ? "explore" : "general");
   }
   const std::string raw = orchestrator.execute_task(
       std::move(writer).take(), request.provider,
@@ -67,7 +67,7 @@ execute_exploration(SubagentOrchestrator &orchestrator,
           .active_provider_name = std::move(request.provider_name),
           .active_model = std::move(request.model_name),
           .parent_mode =
-              delegated_mode_name(request.parent_mode, /*read_only=*/true),
+              delegated_mode_name(request.parent_mode, request.read_only),
           .session_context = std::move(request.session_context),
           .permission_check = std::move(request.permission_check),
           .parent_tool_call_id = std::move(request.tool_call_id),
@@ -75,6 +75,7 @@ execute_exploration(SubagentOrchestrator &orchestrator,
           .cancellation_requested =
               std::move(request.cancellation_requested),
           .memory_system = std::move(request.memory_system),
+          .effort = std::move(request.effort),
       });
   if (const auto error =
           core::utils::json::first_string_field(raw, {"error"});

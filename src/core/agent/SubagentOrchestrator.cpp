@@ -341,6 +341,7 @@ std::string SubagentOrchestrator::execute_task(
         .cancellation_requested = context.cancellation_requested,
         .permission_check = adapt_permission_check(context),
         .on_event = context.on_subagent_event,
+        .effort = context.effort,
     });
     if (result.timed_out) {
         return render_error_json("Delegated task timed out while waiting for the worker response.");

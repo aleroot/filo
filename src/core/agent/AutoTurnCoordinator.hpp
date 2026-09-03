@@ -3,6 +3,8 @@
 #include "AutoGraphOrchestrator.hpp"
 #include "AutoModePolicy.hpp"
 #include "AutoQualityLedger.hpp"
+#include "BoostPipeline.hpp"
+#include "../scm/EphemeralWorktree.hpp"
 #include "../scm/GitWorkspaceCoordinator.hpp"
 #include "../session/TurnCompletion.hpp"
 #include "../verification/Verification.hpp"
@@ -42,6 +44,18 @@ private:
   bool verification_config_invalid = false;
   AutoQualityLedger quality;
   int quality_followups = 0;
+  std::string objective;
+  std::string verification_evidence;
+  std::string candidate_prompt_context;
+  std::vector<BoostCandidate> candidates;
+  // Recipes that were already failing when the turn started. They are stated,
+  // not corrected: burning Boost rounds on a build the user broke before the
+  // request is both useless and dishonest.
+  std::vector<std::string> preexisting_failures;
+  // Pristine turn-start copy, kept only to attribute a failing check.
+  std::optional<core::scm::EphemeralWorktree> baseline_worktree;
+  AutoGraphOrchestrator::Hooks hooks;
+  BoostPipeline boost_pipeline;
 };
 
 struct AutoToolIntent {
@@ -76,8 +90,12 @@ struct AutoToolObservation {
 // narrow façade; it does not own an Agent, history, UI callbacks or tools.
 class AutoTurnCoordinator final {
 public:
+  /// Runs one recipe. An empty root means the session workspace; a non-empty
+  /// root runs the same recipe inside an isolated copy so a failure can be
+  /// attributed to the turn rather than to pre-existing repository state.
   using VerificationRunner = std::function<
-      std::expected<core::verification::Receipt, std::string>(std::string_view)>;
+      std::expected<core::verification::Receipt, std::string>(
+          std::string_view, const std::filesystem::path &)>;
   using CompletionGate =
       std::function<core::session::TurnCompletionResult()>;
 
@@ -100,6 +118,9 @@ public:
   [[nodiscard]] const AutoModeDecision &decision(
       const AutoTurnState &turn) const noexcept;
   [[nodiscard]] bool mutation_observed(
+      const AutoTurnState &turn) const noexcept;
+  /// Isolated Boost implementation candidates produced during preparation.
+  [[nodiscard]] std::size_t candidate_count(
       const AutoTurnState &turn) const noexcept;
 
   [[nodiscard]] WorkspaceWriterState prepare_tool_batch(
@@ -124,6 +145,11 @@ public:
       const VerificationRunner &run_verification) const;
 
 private:
+  /// Phase 3 → Phase 2 feedback: re-run the investigation wave against concrete
+  /// failure evidence so a correction round does not repeat the same reasoning
+  /// over the same inputs.
+  void reinvestigate(AutoTurnState &turn, std::string_view diagnostics) const;
+
   AutoModePolicy policy_;
   AutoGraphOrchestrator graph_;
   core::scm::GitWorkspaceCoordinator workspace_;

@@ -413,7 +413,7 @@ TEST_CASE("AUTO coordinator runs completion quality policy through a delegate",
   const auto completion = coordinator.evaluate_completion(
       *turn, "Implementation complete.", root,
       [] { return core::session::TurnCompletionResult{}; },
-      [&](std::string_view recipe_id)
+      [&](std::string_view recipe_id, const std::filesystem::path &)
           -> std::expected<core::verification::Receipt, std::string> {
         ++runs;
         return core::verification::Receipt{
@@ -451,7 +451,7 @@ TEST_CASE("AUTO coordinator runs completion quality policy through a delegate",
       *bypass_attempt,
       "Verification exception: I would prefer not to run it.", root,
       [] { return core::session::TurnCompletionResult{}; },
-      [](std::string_view)
+      [](std::string_view, const std::filesystem::path &)
           -> std::expected<core::verification::Receipt, std::string> {
         return std::unexpected("deliberate test failure");
       });

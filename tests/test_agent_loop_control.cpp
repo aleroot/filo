@@ -342,6 +342,15 @@ public:
       return;
     }
 
+    if (std::ranges::any_of(request.messages, [](const auto &message) {
+          return message.content.contains("You are Filo's independent BOOST reviewer");
+        })) {
+      callback(core::llm::StreamChunk::make_content(
+          R"({"verdict":"pass","evidence":"Scheduler inspection covers the requested diagnosis; no changes to verify."})"));
+      callback(core::llm::StreamChunk::make_final());
+      return;
+    }
+
     const bool delegated = std::ranges::any_of(
         request.messages, [](const core::llm::Message &message) {
           return message.role == "system" &&

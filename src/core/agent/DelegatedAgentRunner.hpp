@@ -71,6 +71,7 @@ public:
         std::function<bool()> cancellation_requested = {};
         PermissionCheck permission_check = {};
         EventCallback on_event = {};
+        std::string effort;
     };
 
     struct Result {

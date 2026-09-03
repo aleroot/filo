@@ -79,6 +79,13 @@ public:
     return std::nullopt;
   }
 
+  /// Bounded read-only patch evidence for independent review. Includes staged
+  /// and unstaged tracked changes; callers also supply the status inventory
+  /// so reviewers can inspect untracked files using their normal read tools.
+  [[nodiscard]] virtual std::optional<std::string> review_patch() const {
+    return std::nullopt;
+  }
+
   /**
    * @brief Returns the root directory of the repository.
    */

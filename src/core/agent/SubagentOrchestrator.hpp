@@ -57,6 +57,7 @@ public:
         /// Shared memory substrate of the parent agent. Subagents learn into
         /// the same stores rather than constructing a second copy.
         std::shared_ptr<core::memory::MemorySystem> memory_system;
+        std::string effort;
     };
 
     struct ExecutionRequest {

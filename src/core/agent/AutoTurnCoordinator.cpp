@@ -3,8 +3,11 @@
 #include "PermissionGate.hpp"
 #include "../logging/Logger.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../scm/ScmFactory.hpp"
 
 #include <algorithm>
+#include <exception>
+#include <format>
 #include <ranges>
 #include <utility>
 
@@ -46,6 +49,7 @@ std::unique_ptr<AutoTurnState> AutoTurnCoordinator::start(
     const std::filesystem::path &workspace_root) const {
   auto turn = std::unique_ptr<AutoTurnState>(new AutoTurnState);
   turn->decision = policy_.decide(prompt, context);
+  turn->objective = prompt;
   auto discovery = verification_.discover(workspace_root);
   turn->verification_recipes = std::move(discovery.recipes);
   turn->verification_warnings = std::move(discovery.warnings);
@@ -60,6 +64,7 @@ std::size_t AutoTurnCoordinator::prepare(
     std::string_view repository_context,
     const std::filesystem::path &workspace_root,
     AutoGraphOrchestrator::Hooks hooks) const {
+  turn.hooks = hooks;
   const core::scm::GitWorkspaceCoordinator::AcquireOptions options{
       .cancellation_requested = hooks.cancellation_requested,
   };
@@ -74,16 +79,39 @@ std::size_t AutoTurnCoordinator::prepare(
         workspace_root.string());
   }
 
+  // Boost keeps a pristine copy of the turn's starting state so a failing
+  // check can later be attributed to this turn rather than to a build the
+  // user had already broken. Creating it is a cheap `git worktree add`; it is
+  // only ever *run* when something actually fails.
+  if (turn.decision.boost && !turn.verification_recipes.empty()) {
+    turn.baseline_worktree =
+        core::scm::EphemeralWorktree::create(workspace_root, "baseline");
+  }
+
   std::size_t findings = 0;
   if (turn.decision.path == AutoExecutionPath::Orchestrated && hooks.complete) {
     std::string planning_context(repository_context);
     planning_context += core::verification::Catalog::render_for_prompt(
         turn.verification_recipes);
     const auto preparation = graph_.prepare(
-        objective, planning_context, std::move(hooks));
+        objective, planning_context, hooks, turn.decision.boost);
     findings = preparation.findings.size();
     turn.graph_prompt_context =
         AutoGraphOrchestrator::render_for_prompt(preparation);
+
+    // Phase 2 implementation workstreams: bounded parallel candidates, each
+    // built and checked in its own throwaway worktree. Their diffs come back
+    // as evidence only — the parent stays the single writer in this checkout.
+    // Gated on the same predicate as the writer lease: a pure analysis turn
+    // should not pay for two candidate builds it will never adopt.
+    if (turn.decision.boost && hooks.implement &&
+        writer_expected(turn.decision.task_type)) {
+      turn.candidates = BoostPipeline::implement(
+          objective, turn.graph_prompt_context, turn.verification_recipes,
+          hooks);
+      turn.candidate_prompt_context =
+          BoostPipeline::render_candidates(turn.candidates);
+    }
   }
 
   if (writer_expected(turn.decision.task_type) &&
@@ -112,6 +140,7 @@ std::string AutoTurnCoordinator::prompt_suffix(
     const AutoTurnState &turn) const {
   std::string result = policy_.execution_contract(turn.decision);
   result += turn.graph_prompt_context;
+  result += turn.candidate_prompt_context;
   result += turn.repository_prompt_context;
   result += core::verification::Catalog::render_for_prompt(
       turn.verification_recipes);
@@ -128,6 +157,11 @@ const AutoModeDecision &AutoTurnCoordinator::decision(
 bool AutoTurnCoordinator::mutation_observed(
     const AutoTurnState &turn) const noexcept {
   return turn.quality.mutation_observed();
+}
+
+std::size_t AutoTurnCoordinator::candidate_count(
+    const AutoTurnState &turn) const noexcept {
+  return turn.candidates.size();
 }
 
 WorkspaceWriterState AutoTurnCoordinator::prepare_tool_batch(
@@ -187,6 +221,25 @@ void AutoTurnCoordinator::observe_tool(
       observation.trusted_verification_receipts);
 }
 
+// Re-runs the read-only investigation wave against concrete failure evidence.
+// Bounded by the Boost round counter, so it cannot loop.
+void AutoTurnCoordinator::reinvestigate(AutoTurnState &turn,
+                                        std::string_view diagnostics) const {
+  if (!turn.hooks.explore || !turn.hooks.complete)
+    return;
+  if (turn.hooks.cancellation_requested && turn.hooks.cancellation_requested())
+    return;
+  std::string context =
+      "The previous attempt did not satisfy verification or independent review. "
+      "Investigate this specific evidence; do not restate the original plan.\n";
+  context += std::string(diagnostics.substr(0, 8192));
+  const auto preparation =
+      graph_.prepare(turn.objective, context, turn.hooks, true);
+  auto refreshed = AutoGraphOrchestrator::render_for_prompt(preparation);
+  if (!refreshed.empty())
+    turn.graph_prompt_context = std::move(refreshed);
+}
+
 core::session::TurnCompletionResult AutoTurnCoordinator::evaluate_completion(
     AutoTurnState &turn,
     std::string_view response,
@@ -229,54 +282,164 @@ core::session::TurnCompletionResult AutoTurnCoordinator::evaluate_completion(
       ? run_completion_gate()
       : core::session::TurnCompletionResult{};
   if (external.action != core::session::TurnCompletionAction::Complete) {
+    if (turn.decision.boost && external.action == core::session::TurnCompletionAction::Continue)
+      return turn.boost_pipeline.retry(external.message);
     return external;
   }
 
   const bool verification_exception_allowed =
       turn.verification_config_invalid || turn.verification_recipes.empty();
-  if (!turn.decision.verification_required_after_mutation ||
-      !turn.quality.mutation_observed() ||
-      external.quality_gate_satisfied ||
-      (verification_exception_allowed &&
-       AutoQualityLedger::has_explicit_exception(response))) {
-    return {};
-  }
+  bool quality_satisfied = !turn.decision.verification_required_after_mutation ||
+      !turn.quality.mutation_observed() || external.quality_gate_satisfied;
+  const bool exception = verification_exception_allowed &&
+      AutoQualityLedger::has_explicit_exception(response);
+  turn.verification_evidence = external.quality_gate_satisfied
+      ? "A trusted completion quality hook passed after the latest mutations.\n"
+      : "";
+  if (!turn.quality.mutation_observed())
+    turn.verification_evidence += "No workspace mutations observed; independently verify the investigation.\n";
+  if (exception)
+    turn.verification_evidence += "Verification exception claimed; independently assess the limitation.\n";
 
-  if (run_verification && !turn.verification_config_invalid &&
+  // Attribution. A check that was already red on the pristine turn-start copy
+  // is not this turn's defect, and must not consume its correction rounds.
+  const auto already_failing = [&](std::string_view recipe_id) {
+    if (!turn.baseline_worktree.has_value() ||
+        !turn.baseline_worktree->valid() || !run_verification)
+      return false;
+    const std::string id(recipe_id);
+    if (std::ranges::find(turn.preexisting_failures, id) !=
+        turn.preexisting_failures.end())
+      return true;
+    const auto baseline =
+        run_verification(recipe_id, turn.baseline_worktree->root());
+    if (!baseline.has_value() || baseline->passed())
+      return false;
+    turn.preexisting_failures.push_back(id);
+    return true;
+  };
+
+  // Scope the reviewer's diff. Without this it credits the turn for edits the
+  // user had already made, or blames it for them.
+  const auto preexisting_change_note = [&]() -> std::string {
+    if (!turn.repository_baseline.has_value())
+      return {};
+    if (turn.repository_baseline->changes.empty())
+      return "\nThe workspace was clean when this turn started, so the whole "
+             "patch above is this turn's work.\n";
+    std::string note =
+        "\nThese paths were ALREADY modified before this turn started. Do not "
+        "credit or blame this turn for them, and do not require them to be "
+        "justified by the objective:\n";
+    for (const auto &change : turn.repository_baseline->changes)
+      note += std::format("  {} {}\n", change.status_code, change.path);
+    return note;
+  };
+
+  bool failed_verification = false;
+  if (!quality_satisfied && !exception && run_verification &&
+      !turn.verification_config_invalid &&
       turn.quality.needs_verification(turn.verification_recipes)) {
     for (const auto &recipe_id :
-         core::verification::Catalog::default_quality_gate(
-             turn.verification_recipes)) {
-      const auto receipt = run_verification(recipe_id);
+         core::verification::Catalog::default_quality_gate(turn.verification_recipes)) {
+      if (turn.hooks.cancellation_requested && turn.hooks.cancellation_requested())
+        return {.action = core::session::TurnCompletionAction::Fail,
+                .message = "Verification cancelled."};
+      const auto receipt = run_verification(recipe_id, {});
       if (receipt.has_value()) {
         turn.quality.observe_verification_receipt(*receipt);
+        const bool preexisting =
+            !receipt->passed() && already_failing(recipe_id);
+        failed_verification =
+            failed_verification || (!receipt->passed() && !preexisting);
+        turn.verification_evidence += receipt->recipe_id + " (exit " +
+            std::to_string(receipt->exit_code) + "): " + receipt->command +
+            "\n" + receipt->evidence.substr(0, 4096) + "\n";
+        if (preexisting)
+          turn.verification_evidence +=
+              "^ This check already failed on the unmodified turn-start state: "
+              "it is pre-existing, not caused by this turn. State it; do not "
+              "silently absorb unrelated repair work into this request.\n";
       } else {
-        core::logging::warn(
-            "[AUTO] completion quality recipe '{}' could not run: {}",
-            recipe_id, receipt.error());
+        failed_verification = true;
+        turn.verification_evidence += recipe_id + ": " + receipt.error().substr(0, 4096) + "\n";
       }
     }
   }
-
-  if (!turn.verification_config_invalid &&
-      !turn.quality.needs_verification(turn.verification_recipes)) {
-    return {
-        .status = "AUTO · completion quality gate passed",
-    };
+  // A gate that was already red before the turn must not consume correction
+  // rounds: the turn is answerable, the repository merely is not green.
+  const bool only_preexisting_failures =
+      !failed_verification && !turn.preexisting_failures.empty();
+  quality_satisfied = quality_satisfied || exception ||
+      only_preexisting_failures ||
+      (!turn.verification_config_invalid &&
+       !turn.quality.needs_verification(turn.verification_recipes));
+  if (quality_satisfied) {
+    if (turn.decision.boost) {
+      if (turn.quality.mutation_observed() && !exception && !external.quality_gate_satisfied)
+        turn.verification_evidence += "Trusted recipe requirements are satisfied for the latest mutation.\n";
+      try {
+        if (auto scm = core::scm::ScmFactory::create(workspace_root)) {
+          turn.verification_evidence += "\nCurrent repository status:\n" + scm->get_status_summary();
+          if (const auto patch = scm->review_patch()) {
+            turn.verification_evidence += "\nCurrent tracked patch:\n" + *patch;
+            // Without this, a reviewer credits the turn for edits the user had
+            // already made, or blames it for them.
+            turn.verification_evidence += preexisting_change_note();
+          } else {
+            turn.verification_evidence += "\nSCM patch unavailable; inspect source files directly.\n";
+          }
+        }
+      } catch (const std::exception &error) {
+        turn.verification_evidence += "\nRepository evidence unavailable: " + std::string(error.what());
+      }
+      auto verdict = turn.boost_pipeline.review(
+          {.objective = turn.objective,
+           .candidate = response,
+           .evidence = turn.repository_prompt_context +
+                       turn.verification_evidence +
+                       turn.quality.verification_summary(),
+           .mutated = turn.quality.mutation_observed()},
+          turn.hooks);
+      if (verdict.action == core::session::TurnCompletionAction::Continue) {
+        // Phase 3 feeds diagnostics back into Phase 2 rather than only into the
+        // parent's prompt: a round that repeats the same reasoning over the same
+        // evidence tends to repeat the same mistake.
+        reinvestigate(turn, verdict.message);
+        verdict.message += prompt_suffix(turn);
+      }
+      return verdict;
+    }
+    return {.status = turn.quality.mutation_observed() && !exception &&
+                            !external.quality_gate_satisfied
+                        ? "AUTO · completion quality gate passed" : ""};
   }
 
+  // Escalate a failed AUTO quality gate into the same Boost pipeline. This
+  // decision is harness-owned and is limited to this turn.
+  if (!turn.decision.boost && failed_verification && turn.hooks.explore) {
+    turn.decision.boost = true;
+    turn.decision.path = AutoExecutionPath::Orchestrated;
+    turn.decision.parallel_exploration = true;
+    turn.decision.reason = "BOOST automatically activated after failed verification";
+    reinvestigate(turn, turn.verification_evidence);
+  }
+  if (turn.decision.boost) {
+    auto retry = turn.boost_pipeline.retry(
+        AutoQualityLedger::verification_follow_up() + "\n" + turn.verification_evidence);
+    if (retry.action == core::session::TurnCompletionAction::Continue)
+      retry.message += prompt_suffix(turn);
+    return retry;
+  }
   if (turn.quality_followups++ == 0) {
-    return {
-        .action = core::session::TurnCompletionAction::Continue,
-        .status = "AUTO · verification required",
-        .message = AutoQualityLedger::verification_follow_up(),
-    };
+    return {.action = core::session::TurnCompletionAction::Continue,
+            .status = "AUTO · verification required",
+            .message = AutoQualityLedger::verification_follow_up() + "\n" +
+                       turn.verification_evidence};
   }
-  return {
-      .action = core::session::TurnCompletionAction::Fail,
-      .message = "AUTO quality gate failed: workspace changes have no "
-                 "successful fresh verification evidence.",
-  };
+  return {.action = core::session::TurnCompletionAction::Fail,
+          .message = "AUTO quality gate failed: workspace changes have no "
+                     "successful fresh verification evidence."};
 }
 
 } // namespace core::agent

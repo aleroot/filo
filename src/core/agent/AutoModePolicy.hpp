@@ -19,6 +19,7 @@ struct AutoModeContext {
   std::size_t history_tokens = 0;
   int turn_count = 0;
   bool has_tool_history = false;
+  bool boost_requested = false;
 };
 
 struct AutoModeDecision {
@@ -26,6 +27,7 @@ struct AutoModeDecision {
   core::llm::routing::TaskType task_type = core::llm::routing::TaskType::Simple;
   double complexity = 0.0;
   bool parallel_exploration = false;
+  bool boost = false;
   bool verification_required_after_mutation = false;
   std::string reason;
 };

@@ -58,6 +58,8 @@ public:
     return mutation_observed() && !requirements_met(recipes);
   }
 
+  [[nodiscard]] std::string verification_summary() const;
+
   [[nodiscard]] static bool
   has_explicit_exception(std::string_view response) noexcept;
   [[nodiscard]] static std::string verification_follow_up();

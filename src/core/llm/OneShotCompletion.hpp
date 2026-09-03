@@ -25,6 +25,7 @@ is_cancelled_error(std::string_view error) noexcept {
 [[nodiscard]] std::expected<std::string, std::string>
 complete_once(const std::shared_ptr<LLMProvider> &provider,
               std::string_view model, std::string_view prompt,
-              std::function<bool()> cancellation_requested = {});
+              std::function<bool()> cancellation_requested = {},
+              std::string_view effort = {});
 
 } // namespace core::llm

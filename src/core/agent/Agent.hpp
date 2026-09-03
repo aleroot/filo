@@ -245,7 +245,8 @@ public:
     /// conversation loop. Used by the goal engine so it shares AUTO's trusted
     /// receipt path instead of executing model-authored shell strings.
     [[nodiscard]] std::expected<core::verification::Receipt, std::string>
-    run_verification_recipe(std::string_view recipe_id);
+    run_verification_recipe(std::string_view recipe_id,
+                            const std::filesystem::path& root = {});
 
     /// Execute a graph exploration node in an isolated read-only subagent.
     /// This bypasses the parent conversation loop, so a scheduler may safely
@@ -412,7 +413,8 @@ private:
         std::string provider_name,
         std::string model,
         core::context::SessionContext session_context,
-        std::function<void(const SubagentEvent&)> on_subagent_event);
+        std::function<void(const SubagentEvent&)> on_subagent_event,
+        bool boost, std::vector<std::string> allowed_tools, std::string effort);
 
     // Run `mutator` against the live history under history_mutex_, but only if
     // the turn's conversation generation is still current. Returns false (doing

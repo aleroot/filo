@@ -19,6 +19,7 @@ public:
   [[nodiscard]] std::vector<BranchRef> list_branch_refs() const override;
   [[nodiscard]] std::optional<RepositorySnapshot>
   repository_snapshot() const override;
+  [[nodiscard]] std::optional<std::string> review_patch() const override;
   [[nodiscard]] std::filesystem::path get_root_dir() const override {
     return root_dir_;
   }

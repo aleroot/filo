@@ -147,6 +147,18 @@ bool AutoQualityLedger::requirements_met(
   });
 }
 
+std::string AutoQualityLedger::verification_summary() const {
+  std::lock_guard lock(receipts_mutex_);
+  const auto generation = mutation_generation_.load(std::memory_order_acquire);
+  std::string summary;
+  for (const auto &[id, receipt] : passed_recipes_) {
+    if (receipt.mutation_generation == generation)
+      summary += id + " (passed, " + std::string(core::verification::to_string(receipt.source)) +
+          "): " + receipt.command + "\n";
+  }
+  return summary;
+}
+
 bool AutoQualityLedger::has_explicit_exception(
     std::string_view response) noexcept {
   const std::string lower = ascii_lower(response);

@@ -8,6 +8,7 @@
 #include "../llm/OneShotCompletion.hpp"
 #include "../logging/Logger.hpp"
 #include "../memory/MemorySystem.hpp"
+#include "../scm/EphemeralWorktree.hpp"
 #include "../session/SessionStats.hpp"
 #include "../session/SessionStore.hpp"
 #include "../tools/MemoryTool.hpp"
@@ -492,7 +493,8 @@ std::string Agent::session_id() const {
 }
 
 std::expected<core::verification::Receipt, std::string>
-Agent::run_verification_recipe(std::string_view recipe_id) {
+Agent::run_verification_recipe(std::string_view recipe_id,
+                               const std::filesystem::path &root) {
   std::shared_ptr<core::llm::LLMProvider> provider;
   std::string provider_name;
   std::string model_name;
@@ -502,11 +504,19 @@ Agent::run_verification_recipe(std::string_view recipe_id) {
     provider_name = active_provider_name_;
     model_name = active_model_;
   }
+  // An explicit root runs the same recipe inside an isolated copy of the
+  // workspace (Boost baseline attribution). Rebinding the primary keeps every
+  // path check and tool resolution scoped to that copy.
+  auto context = session_context_snapshot();
+  if (!root.empty() && !context.set_workspace_primary(root)) {
+    return std::unexpected(
+        "Could not scope verification to " + root.string());
+  }
   return capabilities::execute_verification(
       skill_manager_,
       capabilities::VerificationRequest{
           .recipe_id = std::string(recipe_id),
-          .session_context = session_context_snapshot(),
+          .session_context = std::move(context),
           .tool_call_id = std::format(
               "goal-verification-{}",
               next_transport_turn_id_.fetch_add(1, std::memory_order_relaxed)),
@@ -583,25 +593,37 @@ AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
     std::string provider_name,
     std::string model,
     core::context::SessionContext session_context,
-    std::function<void(const SubagentEvent&)> on_subagent_event) {
+    std::function<void(const SubagentEvent&)> on_subagent_event,
+    bool boost, std::vector<std::string> allowed_tools, std::string effort) {
   AutoGraphOrchestrator::Hooks hooks;
   hooks.cancellation_requested = [this] { return is_stop_requested(); };
   if (!provider) {
     return hooks;
   }
 
-  hooks.complete = [provider, model, this](std::string_view prompt) {
+  const std::string boost_effort(BoostPipeline::reasoning_effort(effort));
+  hooks.complete = [provider, model, boost, boost_effort, this](std::string_view prompt) {
     return core::llm::complete_once(
         provider, model, prompt,
-        [this] { return is_stop_requested(); });
+        [this] { return is_stop_requested(); }, boost ? boost_effort : "");
   };
+  if (!provider->capabilities().supports_tool_calls ||
+      (!allowed_tools.empty() && !core::tools::policy::is_tool_allowed(
+          SubagentOrchestrator::kTaskToolName, allowed_tools)))
+    return hooks;
   auto memory_system = memory_system_;
+  // Implementation workstreams inherit the user's selected mode; they are only
+  // enabled when that mode permits writes at all, and when the workspace has
+  // opted in (they cost two cold gate runs, which large compiled projects
+  // should not pay by surprise).
+  std::string worker_mode = get_mode();
+  const bool writable_workers =
+      boost && !is_read_only_mode(agent_mode_from_string(worker_mode)) &&
+      BoostPipeline::candidates_enabled(
+          session_context.workspace_view().primary());
   hooks.explore =
-      [this, provider = std::move(provider),
-       provider_name = std::move(provider_name), model = std::move(model),
-       session_context = std::move(session_context),
-       memory_system = std::move(memory_system),
-       on_subagent_event = std::move(on_subagent_event)](
+      [this, provider, provider_name, model, session_context, memory_system,
+       on_subagent_event, boost, boost_effort, allowed_tools](
           const core::goal::Node &node,
           std::string_view retry_context) {
         std::string prompt =
@@ -619,14 +641,16 @@ AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
                 .session_context = session_context,
                 .tool_call_id = std::format("auto-graph:{}", node.name),
                 .permission_check =
-                    [this](const std::string &tool,
+                    [this, allowed_tools](const std::string &tool,
                            const std::string &arguments) {
-                      return check_permission(tool, arguments);
+                      return (allowed_tools.empty() || core::tools::policy::is_tool_allowed(tool, allowed_tools)) &&
+                             check_permission(tool, arguments);
                     },
                 .on_subagent_event = on_subagent_event,
                 .cancellation_requested =
                     [this] { return is_stop_requested(); },
                 .memory_system = memory_system,
+                .effort = boost || node.name.starts_with("BOOST") ? boost_effort : "",
             });
         if (!evidence.has_value()) {
           return core::goal::WorkOutcome{
@@ -639,6 +663,103 @@ AutoGraphOrchestrator::Hooks Agent::make_auto_graph_hooks(
             .output = *evidence,
         };
       };
+
+  // Phase 2 implementation workstreams. Each candidate gets its own throwaway
+  // Git worktree and is a writer only *there*; the user's checkout keeps a
+  // single writer. Without Git, or in a read-only mode, Boost simply runs with
+  // investigations alone rather than degrading the isolation guarantee.
+  if (writable_workers) {
+    hooks.implement =
+        [this, provider = std::move(provider),
+         provider_name = std::move(provider_name), model = std::move(model),
+         session_context = std::move(session_context),
+         memory_system = std::move(memory_system),
+         on_subagent_event = std::move(on_subagent_event), boost_effort,
+         worker_mode = std::move(worker_mode),
+         allowed_tools = std::move(allowed_tools)](
+            const core::goal::Node &node,
+            std::string_view label) -> std::optional<BoostCandidate> {
+          if (is_stop_requested()) {
+            return std::nullopt;
+          }
+          auto worktree = core::scm::EphemeralWorktree::create(
+              session_context.workspace_view().primary(), label);
+          if (!worktree.has_value()) {
+            return std::nullopt;
+          }
+          auto isolated = session_context;
+          if (!isolated.set_workspace_primary(worktree->root())) {
+            return std::nullopt;
+          }
+
+          BoostCandidate candidate;
+          candidate.name = node.name;
+          const auto evidence = capabilities::execute_exploration(
+              orchestrator_,
+              capabilities::ExplorationRequest{
+                  .description = node.name,
+                  .prompt = node.directive,
+                  .provider = provider,
+                  .provider_name = provider_name,
+                  .model_name = model,
+                  .parent_mode = worker_mode,
+                  .session_context = isolated,
+                  .tool_call_id = std::format("boost-candidate:{}", node.name),
+                  .permission_check =
+                      [this, allowed_tools](const std::string &tool,
+                                            const std::string &arguments) {
+                        return (allowed_tools.empty() ||
+                                core::tools::policy::is_tool_allowed(
+                                    tool, allowed_tools)) &&
+                               check_permission(tool, arguments);
+                      },
+                  .on_subagent_event = on_subagent_event,
+                  .cancellation_requested =
+                      [this] { return is_stop_requested(); },
+                  .memory_system = memory_system,
+                  .effort = boost_effort,
+                  .read_only = false,
+              });
+          candidate.ok = evidence.has_value();
+          candidate.evidence =
+              candidate.ok ? *evidence : "Worker failed: " + evidence.error();
+          if (const auto patch = worktree->patch()) {
+            candidate.patch = *patch;
+          }
+
+          // The harness re-runs the repository gate inside the candidate's own
+          // worktree. A candidate is "verified" only on receipts Filo produced
+          // itself: a worker asserting success in prose proves nothing.
+          if (candidate.ok && !candidate.patch.empty() && !is_stop_requested()) {
+            const core::verification::Catalog catalog;
+            const auto discovered = catalog.discover(worktree->root());
+            const auto gate = core::verification::Catalog::default_quality_gate(
+                discovered.recipes);
+            bool all_passed = !gate.empty();
+            for (const auto &recipe_id : gate) {
+              if (is_stop_requested()) {
+                all_passed = false;
+                break;
+              }
+              const auto receipt =
+                  run_verification_recipe(recipe_id, worktree->root());
+              if (!receipt.has_value()) {
+                all_passed = false;
+                candidate.evidence += std::format(
+                    "\n[candidate check] {}: {}", recipe_id, receipt.error());
+                continue;
+              }
+              all_passed = all_passed && receipt->passed();
+              candidate.evidence += std::format(
+                  "\n[candidate check] {} (exit {}): {}\n{}", receipt->recipe_id,
+                  receipt->exit_code, receipt->command,
+                  receipt->evidence.substr(0, 2048));
+            }
+            candidate.verified = all_passed;
+          }
+          return candidate;
+        };
+  }
   return hooks;
 }
 
@@ -1285,6 +1406,16 @@ void Agent::send_message(core::llm::Message user_message,
         user_message.role = "user";
     }
     const core::llm::Message hook_message = user_message;
+    const std::string submitted_text = !user_message.input_text.empty()
+        ? user_message.input_text : core::llm::message_text_for_display(user_message);
+    const auto boost_task = BoostPipeline::command_task(submitted_text);
+    if (boost_task && boost_task->empty()) {
+      text_callback("Usage: /boost <task> — deep reasoning and independent verification for one turn.");
+      finish_turn();
+      return;
+    }
+    const std::string objective = boost_task ? std::string(*boost_task)
+        : core::llm::message_text_for_display(user_message);
     std::string mode_snapshot;
     const auto session_context = session_context_snapshot();
     auto project_facts = core::context::capture_project_facts(session_context);
@@ -1299,7 +1430,7 @@ void Agent::send_message(core::llm::Message user_message,
         append_project_facts_update_unlocked(std::move(project_facts));
         mode_snapshot = std::string(to_string(current_mode_));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
-        if (is_auto_mode(current_mode_)) {
+        if (is_auto_mode(current_mode_) || boost_task.has_value()) {
           const auto user_count = std::ranges::count_if(
               history_, [](const core::llm::Message &message) {
                 return message.role == "user" && !message.synthetic;
@@ -1312,6 +1443,7 @@ void Agent::send_message(core::llm::Message user_message,
               .history_tokens = context_window_snapshot_.estimated_context_tokens,
               .turn_count = static_cast<int>(user_count),
               .has_tool_history = has_tool_history,
+              .boost_requested = boost_task.has_value(),
           };
         }
         history_.push_back(std::move(user_message));
@@ -1321,7 +1453,7 @@ void Agent::send_message(core::llm::Message user_message,
     }
     if (auto_context.has_value()) {
       turn_state->auto_turn = auto_turn_coordinator_.start(
-          core::llm::message_text_for_display(hook_message),
+          objective,
           *auto_context,
           session_context.workspace_view().primary());
     }
@@ -1347,8 +1479,7 @@ void Agent::send_message(core::llm::Message user_message,
       auto provider = turn_state->provider;
       const std::string provider_name = turn_state->provider_name;
       const std::string model = turn_state->model;
-      const std::string objective =
-          core::llm::message_text_for_display(hook_message);
+
       const auto findings = auto_turn_coordinator_.prepare(
           *turn_state->auto_turn,
           objective,
@@ -1356,12 +1487,24 @@ void Agent::send_message(core::llm::Message user_message,
           session_context.workspace_view().primary(),
           make_auto_graph_hooks(
               std::move(provider), provider_name, model, session_context,
-              turn_callbacks.on_subagent_event));
+              turn_callbacks.on_subagent_event,
+              auto_turn_coordinator_.decision(*turn_state->auto_turn).boost,
+              turn_callbacks.allowed_tools,
+              turn_callbacks.effort_override.empty() ? get_effort_level() : turn_callbacks.effort_override));
       if (orchestrated && turn_state->provider &&
           turn_callbacks.on_status_log) {
-        turn_callbacks.on_status_log(std::format(
-            "\n[AUTO · graph ready; {} read-only node(s) completed]\n",
-            findings));
+        const auto &decision =
+            auto_turn_coordinator_.decision(*turn_state->auto_turn);
+        turn_callbacks.on_status_log(
+            decision.boost
+                ? std::format("\n[BOOST · {} · {} investigation(s) and {} isolated "
+                              "candidate(s) completed]\n",
+                              decision.reason, findings,
+                              auto_turn_coordinator_.candidate_count(
+                                  *turn_state->auto_turn))
+                : std::format(
+                      "\n[AUTO · graph ready; {} read-only node(s) completed]\n",
+                      findings));
       }
     }
     step(
@@ -1389,7 +1532,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
     }
 
-    if (!is_turn_current(turn_state)) {
+    if (!is_turn_current(turn_state) || is_stop_requested()) {
         done_callback();
         return;
     }
@@ -1399,7 +1542,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         turn_state->transport_turn_id = std::format("{}:{}", session_context_snapshot().session_id, sequence);
     }
 
+    if (turn_state->auto_turn &&
+        auto_turn_coordinator_.decision(*turn_state->auto_turn).boost) {
+      turn_state->max_steps = turn_state->max_steps > 0
+          ? std::min(turn_state->max_steps, BoostPipeline::kMaxSteps)
+          : BoostPipeline::kMaxSteps;
+    }
     if (turn_state->max_steps > 0 && turn_state->steps_taken >= turn_state->max_steps) {
+        turn_failed_.store(true, std::memory_order_release);
         const std::string message = std::format(
             "Stopped after reaching the per-turn step limit ({} model steps) without a final response.",
             turn_state->max_steps);
@@ -1435,6 +1585,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             request.effort = effort_level_;
             if (!turn_callbacks.effort_override.empty()) {
                 request.effort = turn_callbacks.effort_override;
+            }
+            if (turn_state->auto_turn &&
+                auto_turn_coordinator_.decision(*turn_state->auto_turn).boost) {
+              // Copy first: the returned view can reference request.effort's
+              // own buffer when the selected effort already exceeds "high".
+              request.effort =
+                  std::string(BoostPipeline::reasoning_effort(request.effort));
             }
             if (turn_callbacks.max_tokens_override.has_value()) {
                 request.max_tokens = turn_callbacks.max_tokens_override;
@@ -1881,14 +2038,22 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 context, turn_state->completion_hooks);
           };
 
+          if (turn_state->auto_turn &&
+              self->auto_turn_coordinator_.decision(*turn_state->auto_turn).boost &&
+              turn_callbacks.on_status_log)
+            turn_callbacks.on_status_log("\n[BOOST · checking evidence and independent verification]\n");
           const auto completion = turn_state->auto_turn
               ? self->auto_turn_coordinator_.evaluate_completion(
                     *turn_state->auto_turn,
                     asst_msg.content,
                     context.workspace_view().primary(),
                     run_completion_hooks,
-                    [self](std::string_view recipe_id) {
-                      return self->run_verification_recipe(recipe_id);
+                    [self, turn_callbacks](std::string_view recipe_id,
+                                           const std::filesystem::path &root)
+                        -> std::expected<core::verification::Receipt, std::string> {
+                      if (!tool_is_allowed_for_turn(core::tools::names::kRunVerification, turn_callbacks))
+                        return std::unexpected("Verification is excluded by this turn's tool allowlist.");
+                      return self->run_verification_recipe(recipe_id, root);
                     })
               : run_completion_hooks();
           if (!completion.status.empty() &&
@@ -1900,6 +2065,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
           }
           if (completion.action ==
               core::session::TurnCompletionAction::Continue) {
+            turn_state->prompt_plan.reset();
             continue_with(completion.status, completion.message);
             return;
           }

@@ -58,6 +58,11 @@ struct ExplorationRequest {
   std::function<void(const SubagentEvent &)> on_subagent_event;
   std::function<bool()> cancellation_requested;
   std::shared_ptr<core::memory::MemorySystem> memory_system;
+  std::string effort;
+  /// A Boost implementation workstream needs to edit and build. It is only
+  /// ever pointed at a throwaway worktree, never at the user's checkout, so
+  /// the write capability cannot damage the session workspace.
+  bool read_only = true;
 };
 
 [[nodiscard]] std::expected<std::string, std::string>

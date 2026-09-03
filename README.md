@@ -117,7 +117,7 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 
 | Mode | Behaviour |
 |---|---|
-| `AUTO` | Classifies each request and picks a proportional direct turn or an orchestrated workflow |
+| `AUTO` | Routes each request to direct execution, orchestration, or Boost; escalates failed verification automatically |
 | `BUILD` | General-purpose single-agent software workflow |
 | `DEBUG` | Enforces a reproduce → inspect → fix → verify loop |
 | `RESEARCH` | Read-only analysis and planning |

@@ -29,7 +29,7 @@ cancelled(const std::function<bool()> &cancellation_requested) {
 std::expected<std::string, std::string>
 complete_once(const std::shared_ptr<LLMProvider> &provider,
               std::string_view model, std::string_view prompt,
-              std::function<bool()> cancellation_requested) {
+              std::function<bool()> cancellation_requested, std::string_view effort) {
   if (!provider) {
     return std::unexpected("no active provider");
   }
@@ -44,6 +44,7 @@ complete_once(const std::shared_ptr<LLMProvider> &provider,
 
   ChatRequest request;
   request.model = std::string(model);
+  request.effort = effort;
   request.messages.push_back({"user", std::string(prompt), "", "", {}});
 
   std::mutex output_mutex;

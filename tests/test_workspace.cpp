@@ -554,3 +554,38 @@ TEST_CASE("An empty scratch scope restores strict project-root bounds",
 
     std::filesystem::remove_all(project, ec);
 }
+
+TEST_CASE("SCM review patch includes staged and unstaged changes without diff helpers", "[Workspace][SCM][boost]") {
+  namespace fs = std::filesystem;
+  struct WorkspaceGuard {
+    fs::path old = fs::current_path();
+    fs::path root = fs::temp_directory_path() /
+        std::format("filo-review-patch-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    ~WorkspaceGuard() {
+      std::error_code ec;
+      fs::current_path(old, ec);
+      fs::remove_all(root, ec);
+    }
+  } guard;
+  fs::create_directories(guard.root);
+  fs::current_path(guard.root);
+  REQUIRE(std::system("git init -q") == 0);
+  std::ofstream("tracked.txt") << "base\n";
+  REQUIRE(std::system("git add tracked.txt") == 0);
+  auto scm = core::scm::ScmFactory::create(guard.root);
+  auto unborn = scm->review_patch();
+  REQUIRE(unborn.has_value());
+  CHECK_THAT(*unborn, Catch::Matchers::ContainsSubstring("+base"));
+  REQUIRE(std::system("git -c user.name=Filo -c user.email=filo@example.invalid commit -qm base") == 0);
+  std::ofstream("tracked.txt") << "staged\n";
+  REQUIRE(std::system("git add tracked.txt") == 0);
+  std::ofstream("second.txt") << "second staged file\n";
+  REQUIRE(std::system("git add second.txt") == 0);
+  std::ofstream("tracked.txt") << "unstaged\n";
+  REQUIRE(std::system("git config diff.external 'touch diff-helper-ran'") == 0);
+  const auto patch = scm->review_patch();
+  REQUIRE(patch.has_value());
+  CHECK_THAT(*patch, Catch::Matchers::ContainsSubstring("+unstaged"));
+  CHECK_THAT(*patch, Catch::Matchers::ContainsSubstring("+second staged file"));
+  CHECK_FALSE(fs::exists("diff-helper-ran"));
+}
