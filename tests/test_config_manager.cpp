@@ -33,6 +33,13 @@ struct ScopedEnvVar {
         } else {
             unsetenv(name.c_str());
         }
+        // ConfigManager is a process-wide singleton, so a sandboxed load leaks
+        // into every later test in the binary — one of these fixtures disables
+        // the `explore` subagent entirely. Reload from the restored environment
+        // so suites that depend on real subagents cannot fail by run order.
+        if (name == "XDG_CONFIG_HOME") {
+            core::config::ConfigManager::get_instance().load();
+        }
     }
 };
 

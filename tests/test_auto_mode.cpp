@@ -536,6 +536,10 @@ TEST_CASE("timed repository acquire fails closed instead of deadlocking",
       root, core::goal::WorkspaceAccess::ExclusiveWrite);
   REQUIRE(exclusive.owns_lock());
 
+  // Re-acquiring from the thread that already owns the lease must fail closed
+  // immediately. Waiting could never succeed, and re-locking a
+  // shared_timed_mutex from an owning thread is undefined behaviour that
+  // libstdc++ 16 turns into an abort rather than a timeout.
   const auto started = std::chrono::steady_clock::now();
   core::scm::GitWorkspaceCoordinator child(registry);
   auto shared = child.acquire(
@@ -543,7 +547,31 @@ TEST_CASE("timed repository acquire fails closed instead of deadlocking",
       {.timeout = std::chrono::milliseconds(250)});
   const auto elapsed = std::chrono::steady_clock::now() - started;
   CHECK_FALSE(shared.owns_lock());
-  CHECK(elapsed < std::chrono::seconds(2));
+  CHECK(elapsed < std::chrono::milliseconds(100));
+
+  // Genuine cross-thread contention must still wait and then time out, so the
+  // re-entrancy guard cannot be mistaken for "never block".
+  std::chrono::steady_clock::duration contended{};
+  bool contended_owns = true;
+  std::thread other([&] {
+    const auto begin = std::chrono::steady_clock::now();
+    auto blocked = child.acquire(
+        root, core::goal::WorkspaceAccess::SharedRead,
+        {.timeout = std::chrono::milliseconds(250)});
+    contended = std::chrono::steady_clock::now() - begin;
+    contended_owns = blocked.owns_lock();
+  });
+  other.join();
+  CHECK_FALSE(contended_owns);
+  CHECK(contended >= std::chrono::milliseconds(150));
+  CHECK(contended < std::chrono::seconds(2));
+
+  // Releasing the writer must deregister ownership, so the same thread can
+  // acquire again afterwards.
+  exclusive = {};
+  auto reacquired = child.acquire(root, core::goal::WorkspaceAccess::SharedRead,
+                                  {.timeout = std::chrono::milliseconds(250)});
+  CHECK(reacquired.owns_lock());
   std::filesystem::remove_all(root);
 }
 

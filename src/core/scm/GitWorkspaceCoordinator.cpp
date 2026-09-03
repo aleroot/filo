@@ -8,6 +8,7 @@
 #include <format>
 #include <mutex>
 #include <ranges>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -16,6 +17,20 @@ namespace core::scm {
 struct WorkspaceLeaseState {
   std::shared_timed_mutex mutex;
   std::filesystem::path execution_root;
+  // Re-locking from a thread that already owns the mutex is only safe in one
+  // direction. Nested SharedRead leases are a deliberate pattern here (a
+  // subtree resolves to the same execution root) and map onto a recursive
+  // POSIX read lock, which libstdc++ handles. Anything involving an exclusive
+  // lock on the same thread deadlocks instead: glibc reports EDEADLK, and
+  // libstdc++ 16 turns that into an assert and aborts the process rather than
+  // reporting a timeout. Ownership is tracked per mode so those cases fail
+  // closed before they can reach the mutex.
+  struct ThreadOwnership {
+    int shared = 0;
+    int exclusive = 0;
+  };
+  std::mutex owners_mutex;
+  std::unordered_map<std::thread::id, ThreadOwnership> owners;
 };
 
 namespace {
@@ -69,6 +84,42 @@ coordination_root(const std::filesystem::path &workspace_root) {
     // repository discovery is temporarily unavailable.
   }
   return workspace_root;
+}
+
+// True when taking `access` on this thread would deadlock against a lease the
+// same thread already holds. Shared-on-shared is the one safe re-entry.
+[[nodiscard]] bool would_self_deadlock(WorkspaceLeaseState &state,
+                                       core::goal::WorkspaceAccess access) {
+  std::lock_guard lock(state.owners_mutex);
+  const auto found = state.owners.find(std::this_thread::get_id());
+  if (found == state.owners.end())
+    return false;
+  return found->second.exclusive > 0 ||
+         access == core::goal::WorkspaceAccess::ExclusiveWrite;
+}
+
+void add_owner(WorkspaceLeaseState &state,
+               core::goal::WorkspaceAccess access) {
+  std::lock_guard lock(state.owners_mutex);
+  auto &entry = state.owners[std::this_thread::get_id()];
+  if (access == core::goal::WorkspaceAccess::ExclusiveWrite)
+    ++entry.exclusive;
+  else
+    ++entry.shared;
+}
+
+void remove_owner(WorkspaceLeaseState &state,
+                  core::goal::WorkspaceAccess access) {
+  std::lock_guard lock(state.owners_mutex);
+  const auto found = state.owners.find(std::this_thread::get_id());
+  if (found == state.owners.end())
+    return;
+  if (access == core::goal::WorkspaceAccess::ExclusiveWrite)
+    found->second.exclusive = std::max(0, found->second.exclusive - 1);
+  else
+    found->second.shared = std::max(0, found->second.shared - 1);
+  if (found->second.shared <= 0 && found->second.exclusive <= 0)
+    state.owners.erase(found);
 }
 
 [[nodiscard]] std::unordered_set<std::string>
@@ -129,8 +180,7 @@ GitWorkspaceCoordinator::Lease &GitWorkspaceCoordinator::Lease::operator=(
   }
   // Drop the lock before releasing the mutex owner. Defaulted move-assign
   // would reset state_ first and unlock a destroyed shared_timed_mutex.
-  lock_.emplace<std::monostate>();
-  state_.reset();
+  release();
   access_ = other.access_;
   lock_ = std::move(other.lock_);
   state_ = std::move(other.state_);
@@ -139,9 +189,23 @@ GitWorkspaceCoordinator::Lease &GitWorkspaceCoordinator::Lease::operator=(
   return *this;
 }
 
-GitWorkspaceCoordinator::Lease::~Lease() {
+GitWorkspaceCoordinator::Lease::~Lease() { release(); }
+
+void GitWorkspaceCoordinator::Lease::release() noexcept {
+  // Deregister before dropping the lock: owns_lock() reads the live lock.
+  if (state_ && owns_lock()) {
+    remove_owner(*state_, access_);
+  }
   lock_.emplace<std::monostate>();
   state_.reset();
+}
+
+bool GitWorkspaceCoordinator::Lease::reentrant_on_this_thread() const noexcept {
+  try {
+    return state_ && !owns_lock() && would_self_deadlock(*state_, access_);
+  } catch (...) {
+    return false;
+  }
 }
 
 bool GitWorkspaceCoordinator::Lease::owns_lock() const noexcept {
@@ -160,12 +224,18 @@ bool GitWorkspaceCoordinator::Lease::try_lock_for(
     return owns_lock();
   }
   try {
+    // Waiting here could never succeed, and the wait itself is the operation
+    // that aborts on a standard library which checks for self-deadlock.
+    if (would_self_deadlock(*state_, access_)) {
+      return false;
+    }
     if (access_ == core::goal::WorkspaceAccess::SharedRead) {
       ReadLock lock(state_->mutex, std::defer_lock);
       if (!lock.try_lock_for(timeout)) {
         return false;
       }
       lock_.emplace<ReadLock>(std::move(lock));
+      add_owner(*state_, access_);
       return true;
     }
     WriteLock lock(state_->mutex, std::defer_lock);
@@ -173,6 +243,7 @@ bool GitWorkspaceCoordinator::Lease::try_lock_for(
       return false;
     }
     lock_.emplace<WriteLock>(std::move(lock));
+    add_owner(*state_, access_);
     return true;
   } catch (...) {
     return false;
@@ -198,6 +269,11 @@ GitWorkspaceCoordinator::Lease GitWorkspaceCoordinator::acquire(
     return {};
   }
   Lease lease(registry_->state_for(workspace_root), access);
+  // A thread that already holds this lease cannot take it again; spinning to
+  // the deadline would only delay the same answer.
+  if (lease.reentrant_on_this_thread()) {
+    return {};
+  }
   const auto deadline = std::chrono::steady_clock::now() + options.timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (options.cancellation_requested && options.cancellation_requested()) {

@@ -97,6 +97,12 @@ public:
           core::goal::WorkspaceAccess access);
     [[nodiscard]] bool
     try_lock_for(std::chrono::milliseconds timeout) noexcept;
+    /// True when this thread already holds the lease. Re-locking a
+    /// shared_timed_mutex from an owning thread is undefined behaviour, so
+    /// callers must fail closed rather than wait.
+    [[nodiscard]] bool reentrant_on_this_thread() const noexcept;
+    /// Drop the lock and deregister this thread's ownership.
+    void release() noexcept;
 
     std::shared_ptr<WorkspaceLeaseState> state_;
     core::goal::WorkspaceAccess access_ =
