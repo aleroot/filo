@@ -9227,6 +9227,11 @@ RunResult run(RunOptions opts) {
                 }
                 util_str += std::format(" {}:{}%", w.label, pct_str);
             }
+            if (rate_limit_info.is_rate_limited
+                || rate_limit_info.unified_status == "rate_limited") {
+                util_str += " · Rate limited";
+                util_color = Color::Red;
+            }
             rate_limit_el = text(util_str) | color(util_color);
         } else if (rate_limit_info.requests_limit > 0 || rate_limit_info.tokens_limit > 0
                    || rate_limit_info.requests_remaining > 0 || rate_limit_info.tokens_remaining > 0) {

@@ -189,8 +189,8 @@ Element render_usage_details_panel(
                 }
             } else {
                 rows.push_back(hbox({
-                    text("      ⏳ Rolling window: ") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
-                    text("updates continuously with sliding usage") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
+                    text("      ⏳ Reset time: ") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
+                    text("not reported by provider") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
                 }));
             }
         }

@@ -1456,10 +1456,12 @@ void OpenAIResponsesProtocol::on_response(const HttpResponse& response) {
     info.retry_after        = parse_int("retry-after");
     info.is_rate_limited    = (response.status_code == 429 || info.retry_after > 0);
 
-    if (info.requests_limit > 0 && info.requests_remaining == 0 && !info.is_rate_limited) {
+    if (info.requests_limit > 0 && !info.is_rate_limited
+        && !transport::find_header(response.headers, "x-ratelimit-remaining-requests")) {
         info.requests_remaining = info.requests_limit;
     }
-    if (info.tokens_limit > 0 && info.tokens_remaining == 0 && !info.is_rate_limited) {
+    if (info.tokens_limit > 0 && !info.is_rate_limited
+        && !transport::find_header(response.headers, "x-ratelimit-remaining-tokens")) {
         info.tokens_remaining = info.tokens_limit;
     }
 

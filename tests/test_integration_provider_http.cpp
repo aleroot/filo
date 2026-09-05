@@ -398,6 +398,45 @@ TEST_CASE("HttpLLMProvider retries a Grok Responses generation failure before ou
     }));
 }
 
+TEST_CASE("HttpLLMProvider does not retry terminal Grok stream failures",
+          "[integration][http][retry][grok][responses]") {
+    bool server_veto = false;
+    SECTION("server retry veto on an HTTP 200 stream") { server_veto = true; }
+    SECTION("context overflow with opaque message") {}
+
+    httplib::Server server;
+    std::atomic<int> attempts{0};
+    server.Post("/v1/responses",
+                [&](const httplib::Request&, httplib::Response& res) {
+        ++attempts;
+        if (server_veto) res.set_header("x-should-retry", "false");
+        const std::string code = server_veto ? "server_error" : "context_length_exceeded";
+        res.set_content("event: response.failed\ndata: {\"type\":\"response.failed\","
+                        "\"response\":{\"error\":{\"code\":\"" + code
+                        + "\",\"message\":\"Request rejected\"}}}\n\n",
+                        "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}/v1", port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "grok-4.6", std::make_unique<GrokResponsesProtocol>());
+    ChatRequest request;
+    request.model = "grok-4.6";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    CHECK(attempts.load() == 1);
+    CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
+        return chunk.is_error && chunk.content.find("Request rejected") != std::string::npos;
+    }));
+}
+
 TEST_CASE("HttpLLMProvider aborts a request whose response never starts",
           "[integration][http][timeout]") {
     httplib::Server server;

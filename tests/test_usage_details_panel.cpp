@@ -246,3 +246,18 @@ TEST_CASE("Protocol reset parsing: Anthropic, Kimi, Grok, Zai, OpenAI", "[protoc
         CHECK(info.tokens_reset > 0);
     }
 }
+
+
+TEST_CASE("UsageDetailsPanel does not invent rolling resets for Grok billing",
+          "[usage_details_panel][grok]") {
+    core::llm::protocols::RateLimitInfo info;
+    info.usage_windows.push_back({"7d", 0.5f});
+    auto element = tui::render_usage_details_panel(
+        info, "Grok", "grok-4.6", "", true, {}, 0.0, 80);
+    auto screen = ftxui::Screen::Create(
+        ftxui::Dimension::Fixed(120), ftxui::Dimension::Fit(element));
+    ftxui::Render(screen, element);
+    const auto rendered = screen.ToString();
+    CHECK(rendered.find("not reported by provider") != std::string::npos);
+    CHECK(rendered.find("sliding usage") == std::string::npos);
+}

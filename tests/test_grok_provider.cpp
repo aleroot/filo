@@ -1117,7 +1117,7 @@ TEST_CASE("Grok billing payload exposes the provider's real usage period",
         CHECK(windows[0].utilization == Catch::Approx(0.25f));
     }
 
-    SECTION("weekly and independent legacy monthly windows are both retained") {
+    SECTION("current period supersedes deprecated monthly fields") {
         const auto windows = parse_grok_billing_usage(R"JSON({
           "config": {
             "creditUsagePercent": 42.5,
@@ -1126,11 +1126,9 @@ TEST_CASE("Grok billing payload exposes the provider's real usage period",
             "used": {"val": 2500}
           }
         })JSON");
-        REQUIRE(windows.size() == 2);
+        REQUIRE(windows.size() == 1);
         CHECK(windows[0].label == "7d");
         CHECK(windows[0].utilization == Catch::Approx(0.425f));
-        CHECK(windows[1].label == "30d");
-        CHECK(windows[1].utilization == Catch::Approx(0.25f));
     }
 
     SECTION("period endTime is surfaced as the subscription period end") {
@@ -1270,4 +1268,115 @@ TEST_CASE("Grok Responses enriches only its own rate-limit state",
     OpenAIResponsesProtocol generic;
     generic.on_response(HttpResponse{200, "{}", {}});
     CHECK(generic.last_rate_limit().usage_windows.empty());
+}
+
+
+TEST_CASE("Grok billing follows current and legacy reset and usage precedence",
+          "[grok][billing][rate_limit]") {
+    SECTION("current end takes precedence over legacy dates") {
+        const auto usage = parse_grok_billing_usage(R"({"config":{
+            "creditUsagePercent":42.5,
+            "currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-17T23:59:59Z"},
+            "billingPeriodEnd":"2026-09-30T23:59:59Z"
+        }})");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage.period_ends_at == 1787011199LL);
+        CHECK(usage[0].resets_at == usage.period_ends_at);
+    }
+    SECTION("legacy billingPeriodEnd remains supported") {
+        const auto usage = parse_grok_billing_usage(R"({"config":{
+            "monthlyLimit":{"val":10000},"used":{"val":2500},
+            "billingPeriodEnd":"2026-09-30T23:59:59Z"
+        }})");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage[0].resets_at == 1790812799LL);
+        CHECK(usage.period_ends_at == usage[0].resets_at);
+    }
+    SECTION("missing percentage falls back to legacy usage within the current period") {
+        const auto usage = parse_grok_billing_usage(R"({"config":{
+            "currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"},
+            "monthlyLimit":{"val":10000},"used":{"val":2500}
+        }})");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage[0].label == "7d");
+        CHECK(usage[0].utilization == Catch::Approx(0.25f));
+    }
+    SECTION("explicit zero overrides stale legacy usage") {
+        const auto usage = parse_grok_billing_usage(R"({"config":{
+            "creditUsagePercent":0,
+            "currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"},
+            "monthlyLimit":{"val":10000},"used":{"val":2500}
+        }})");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage[0].utilization == 0.0f);
+    }
+    SECTION("included allowance is capped at 100 percent as in Grok Build") {
+        const auto usage = parse_grok_billing_usage(R"({"config":{
+            "creditUsagePercent":150,
+            "currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"}
+        }})");
+        REQUIRE(usage.size() == 1);
+        CHECK(usage[0].utilization == 1.0f);
+    }
+}
+
+TEST_CASE("Grok Responses respects stream retry vetoes and resets them per attempt",
+          "[grok][responses][retry]") {
+    GrokResponsesProtocol protocol;
+    const std::string event = R"({"type":"response.failed","response":{"error":{"code":"server_error","message":"temporary failure"}}})";
+    protocol.observe_response_headers({{"X-Should-Retry", " FALSE "}}, {});
+    auto result = protocol.parse_event(event);
+    CHECK(result.stream_error);
+    CHECK_FALSE(result.retryable_stream_error);
+    protocol.reset_state();
+    CHECK(protocol.parse_event(event).retryable_stream_error);
+
+    for (const std::string code : {"context_length_exceeded", "exceed_context_size_error"}) {
+        result = protocol.parse_event("{\"type\":\"error\",\"code\":\"" + code
+                                      + "\",\"message\":\"request rejected\"}");
+        CHECK(result.stream_error);
+        CHECK_FALSE(result.retryable_stream_error);
+        const std::string body = "{\"code\":\"" + code + "\",\"error\":\"request rejected\"}";
+        CHECK_FALSE(protocol.is_retryable(HttpResponse{500, body, {}}));
+        CHECK_FALSE(GrokProtocol{}.is_retryable(HttpResponse{500, body, {}}));
+    }
+}
+
+TEST_CASE("Grok Responses errors preserve proxy details with actionable guidance",
+          "[grok][responses][errors]") {
+    using Catch::Matchers::ContainsSubstring;
+    GrokResponsesProtocol protocol;
+    CHECK_THAT(protocol.format_error_message(HttpResponse{403,
+        R"({"code":"access_denied","error":"Model unavailable for this account"})", {}}),
+        ContainsSubstring("Model unavailable for this account"));
+    CHECK_THAT(protocol.format_error_message(HttpResponse{400,
+        R"({"error":{"code":"context_length_exceeded","message":"Too many tokens"}})", {}}),
+        ContainsSubstring("Reduce or compact"));
+    CHECK_THAT(protocol.format_error_message(HttpResponse{401, "", {}}),
+        ContainsSubstring("filo --auth grok"));
+    protocol.on_response(HttpResponse{429, "", {{"Retry-After", "30"}}});
+    CHECK_THAT(protocol.format_error_message(HttpResponse{429,
+        R"({"error":"Weekly credits exhausted"})", {}}),
+        ContainsSubstring("Retry after 30 seconds"));
+    CHECK_THAT(protocol.format_error_message(HttpResponse{502, "<html>gateway</html>", {}}),
+        ContainsSubstring("502"));
+}
+
+TEST_CASE("Responses rate limits preserve explicitly exhausted counters",
+          "[grok][responses][rate_limit]") {
+    GrokResponsesProtocol protocol;
+    protocol.on_response(HttpResponse{200, "", {
+        {"x-ratelimit-limit-requests", "100"},
+        {"x-ratelimit-limit-tokens", "1000"},
+        {"X-Ratelimit-Remaining-Requests", "0"},
+        {"X-Ratelimit-Remaining-Tokens", "0"}
+    }});
+    CHECK(protocol.last_rate_limit().requests_remaining == 0);
+    CHECK(protocol.last_rate_limit().tokens_remaining == 0);
+    protocol.on_response(HttpResponse{200, "", {
+        {"x-ratelimit-limit-requests", "100"},
+        {"x-ratelimit-limit-tokens", "1000"}
+    }});
+    CHECK(protocol.last_rate_limit().requests_remaining == 100);
+    CHECK(protocol.last_rate_limit().tokens_remaining == 1000);
 }

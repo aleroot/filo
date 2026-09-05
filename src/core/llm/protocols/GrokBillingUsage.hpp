@@ -12,8 +12,7 @@ namespace core::llm::protocols {
  * Parsed result of Grok Build's billing API.
  *
  * Besides the utilization windows, the API reports the current billing
- * period's endTime — effectively the subscription renewal boundary — which
- * is surfaced separately so the UI can show a subscription end date.
+ * period's end (with billingPeriodEnd as a legacy fallback).
  */
 struct GrokBillingUsage {
     std::vector<UsageWindow> windows;
@@ -31,9 +30,9 @@ struct GrokBillingUsage {
  * Parse the coding-credit windows returned by Grok Build's billing API.
  *
  * The current API normally reports one period (weekly or monthly), unlike
- * Claude's independent 5-hour and 7-day limits. Transitional responses may
- * additionally carry a legacy monthly allowance. An omitted percentage
- * represents zero usage in the protobuf JSON response.
+ * Claude's independent 5-hour and 7-day limits. Deprecated monthly fields
+ * are fallback values for that same allowance. An omitted percentage falls
+ * back to those values, or zero for a reported protobuf usage period.
  */
 [[nodiscard]] GrokBillingUsage parse_grok_billing_usage(
     std::string_view payload);

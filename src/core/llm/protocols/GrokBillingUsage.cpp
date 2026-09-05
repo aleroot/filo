@@ -163,9 +163,16 @@ GrokBillingUsage parse_grok_billing_usage(std::string_view payload) {
             else if (type.find("MONTHLY") != std::string_view::npos) label = "30d";
         }
         std::string_view end_time;
-        if (period["endTime"].get(end_time) == simdjson::SUCCESS
+        if (period["end"].get(end_time) == simdjson::SUCCESS
+            || period["endTime"].get(end_time) == simdjson::SUCCESS
             || period["resetTime"].get(end_time) == simdjson::SUCCESS
             || period["resets_at"].get(end_time) == simdjson::SUCCESS) {
+            period_reset = core::utils::time::parse_timestamp_or_duration(end_time);
+        }
+    }
+    if (period_reset <= 0) {
+        std::string_view end_time;
+        if (config["billingPeriodEnd"].get(end_time) == simdjson::SUCCESS) {
             period_reset = core::utils::time::parse_timestamp_or_duration(end_time);
         }
     }
@@ -183,36 +190,28 @@ GrokBillingUsage parse_grok_billing_usage(std::string_view payload) {
     result.period_ends_at = period_reset;
     auto& windows = result.windows;
     if (has_period) {
-        // Proto3 JSON omits zero-valued scalars. Grok Build treats a missing
-        // percentage for a typed current period as zero usage.
+        // The legacy fields describe the same allowance. Match Grok Build's
+        // fallback order instead of inventing a second monthly quota.
         windows.push_back(UsageWindow{
             label,
-            std::clamp(percentage.value_or(0.0f) / 100.0f, 0.0f, 1.5f),
+            std::clamp(percentage.value_or(monthly_percentage.value_or(0.0f))
+                           / 100.0f, 0.0f, 1.0f),
             period_reset,
         });
-
-        // New responses normally expose exactly one typed period. If a
-        // transitional response also contains an independent legacy monthly
-        // allowance, retain both real windows instead of discarding the 30d
-        // data. Never synthesize 30d from the weekly percentage.
-        if (label != "30d" && monthly_percentage.has_value()) {
-            windows.push_back(UsageWindow{
-                "30d",
-                std::clamp(*monthly_percentage / 100.0f, 0.0f, 1.5f),
-            });
-        }
         return result;
     }
 
     if (percentage.has_value()) {
         windows.push_back(UsageWindow{
             monthly_percentage.has_value() ? "30d" : "usage",
-            std::clamp(*percentage / 100.0f, 0.0f, 1.5f),
+            std::clamp(*percentage / 100.0f, 0.0f, 1.0f),
+            period_reset,
         });
     } else if (monthly_percentage.has_value()) {
         windows.push_back(UsageWindow{
             "30d",
-            std::clamp(*monthly_percentage / 100.0f, 0.0f, 1.5f),
+            std::clamp(*monthly_percentage / 100.0f, 0.0f, 1.0f),
+            period_reset,
         });
     }
     return result;

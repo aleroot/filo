@@ -88,22 +88,59 @@ parse_grok_responses_stream_error(std::string_view raw_event) {
     return result;
 }
 
-[[nodiscard]] bool grok_retry_vetoed(const HttpResponse& response) noexcept {
-    for (const auto& [name, value] : response.headers) {
+[[nodiscard]] bool grok_retry_vetoed(const cpr::Header& headers) noexcept {
+    for (const auto& [name, value] : headers) {
         if (core::utils::ascii::iequals(name, "x-should-retry")
-            && core::utils::ascii::iequals(value, "false")) {
+            && core::utils::ascii::iequals(
+                core::utils::str::trim_ascii_view(value), "false")) {
             return true;
         }
     }
     return false;
 }
 
+[[nodiscard]] bool grok_context_error(std::string_view code,
+                                      std::string_view message) {
+    using core::utils::ascii::iequals;
+    if (iequals(code, "context_length_exceeded")
+        || iequals(code, "exceed_context_size_error")) return true;
+    const auto lower = core::utils::str::to_lower_ascii_copy(message);
+    return lower.find("maximum context length") != std::string::npos
+        || lower.find("context length exceeded") != std::string::npos
+        || lower.find("exceeds the context window") != std::string::npos;
+}
+
+[[nodiscard]] GrokResponsesStreamError parse_grok_http_error(std::string_view body) {
+    simdjson::dom::parser parser;
+    simdjson::dom::object doc;
+    if (parser.parse(simdjson::padded_string(body)).get(doc) != simdjson::SUCCESS) {
+        return {};
+    }
+    simdjson::dom::object error;
+    if (doc["error"].get(error) == simdjson::SUCCESS) {
+        auto code = read_string_field(error, "code");
+        if (code.empty()) code = read_string_field(error, "type");
+        return {std::move(code), read_string_field(error, "message")};
+    }
+    auto message = read_string_field(doc, "error");
+    if (message.empty()) message = read_string_field(doc, "message");
+    return {read_string_field(doc, "code"), std::move(message)};
+}
+
 [[nodiscard]] bool is_grok_retryable_response(
     const HttpResponse& response) noexcept {
-    if (grok_retry_vetoed(response)) return false;
+    if (grok_retry_vetoed(response.headers)) return false;
     const int status = response.status_code;
-    return status == 408 || status == 409 || status == 429
-        || (status >= 500 && status <= 599 && status != 525 && status != 526);
+    if (!(status == 408 || status == 409 || status == 429
+          || (status >= 500 && status <= 599 && status != 525 && status != 526))) {
+        return false;
+    }
+    try {
+        const auto error = parse_grok_http_error(response.body);
+        return !grok_context_error(error.type, error.message);
+    } catch (...) {
+        return false;
+    }
 }
 
 [[nodiscard]] bool is_xai_oauth_request(const ChatRequest& request) {
@@ -247,6 +284,16 @@ void GrokResponsesProtocol::on_response(const HttpResponse& response) {
     grok_rate_limit_ = OpenAIResponsesProtocol::last_rate_limit();
 }
 
+void GrokResponsesProtocol::reset_state() {
+    OpenAIResponsesProtocol::reset_state();
+    stream_retry_vetoed_ = false;
+}
+
+void GrokResponsesProtocol::observe_response_headers(
+    const cpr::Header& headers, const ChatRequest&) {
+    stream_retry_vetoed_ = grok_retry_vetoed(headers);
+}
+
 void GrokResponsesProtocol::enrich_rate_limit(
     std::string_view base_url,
     const cpr::Header& request_headers,
@@ -255,7 +302,7 @@ void GrokResponsesProtocol::enrich_rate_limit(
     if (auto usage = billing_usage_source_->fetch(base_url, request_headers);
         !usage.empty()) {
         grok_rate_limit_.usage_windows = std::move(usage.windows);
-        // currentPeriod.endTime is the subscription's renewal boundary.
+        // currentPeriod.end is the current billing period's boundary.
         if (usage.period_ends_at > 0) {
             grok_rate_limit_.subscription_ends_at = usage.period_ends_at;
         }
@@ -303,12 +350,35 @@ ParseResult GrokResponsesProtocol::parse_event(std::string_view raw_event) {
     if (auto error = parse_grok_responses_stream_error(raw_event)) {
         ParseResult result;
         result.stream_error = true;
-        result.retryable_stream_error = true;
+        result.retryable_stream_error = !stream_retry_vetoed_
+            && !grok_context_error(error->type, error->message);
         result.stream_error_type = std::move(error->type);
         result.stream_error_message = std::move(error->message);
         return result;
     }
     return OpenAIResponsesProtocol::parse_event(raw_event);
+}
+
+std::string GrokResponsesProtocol::format_error_message(
+    const HttpResponse& response) const {
+    const auto error = parse_grok_http_error(response.body);
+    std::string message = "[xAI API Error " + std::to_string(response.status_code) + ": ";
+    if (!error.message.empty()) message += error.message + " ";
+    if (grok_context_error(error.type, error.message)) {
+        message += "Reduce or compact the conversation before retrying.";
+    } else if (response.status_code == 401) {
+        message += "For a Grok account session, run 'filo --auth grok' again. "
+                   "For API access, check XAI_API_KEY.";
+    } else if (response.status_code == 429) {
+        message += "Grok usage or rate limit reached.";
+        if (grok_rate_limit_.retry_after > 0) {
+            message += " Retry after " + std::to_string(grok_rate_limit_.retry_after)
+                + " seconds.";
+        }
+    } else if (error.message.empty()) {
+        message += "Grok request failed.";
+    }
+    return message + "]";
 }
 
 std::string GrokProtocol::format_error_message(const HttpResponse& response) const {

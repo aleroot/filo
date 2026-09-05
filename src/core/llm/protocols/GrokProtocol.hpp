@@ -260,9 +260,15 @@ public:
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
 
     /// xAI reports model-generation failures inside otherwise-successful SSE
-    /// responses. Classify those frames as transient stream failures so the
-    /// transport can safely retry attempts that emitted no output.
+    /// responses. Retry transient failures only before output, honoring the
+    /// server retry veto and failing fast on deterministic context overflow.
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
+
+    void reset_state() override;
+    void observe_response_headers(const cpr::Header& headers,
+                                  const ChatRequest& request) override;
+    [[nodiscard]] std::string format_error_message(
+        const HttpResponse& response) const override;
 
     void prepare_headers(cpr::Header& headers,
                          const ChatRequest& request,
@@ -288,6 +294,7 @@ private:
     std::string default_effort_;
     std::shared_ptr<IGrokBillingUsageSource> billing_usage_source_;
     RateLimitInfo grok_rate_limit_;
+    bool stream_retry_vetoed_ = false;
 };
 
 } // namespace core::llm::protocols
