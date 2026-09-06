@@ -492,6 +492,13 @@ Element render_search_snippet(std::string_view snippet,
     });
 }
 
+std::pair<int, int> picker_visible_range(int total, int selected, int maximum) {
+    const int window = std::max(1, maximum);
+    const int offset = std::clamp(window / 2, 0, 3);
+    const int first = std::clamp(selected - offset, 0, std::max(0, total - window));
+    return {first, std::min(total, first + window)};
+}
+
 // Shared picker panel: renders a scrollable suggestion list above the prompt box.
 // Uses manual viewport slicing — FTXUI's yframe+focus+size(LESS_THAN) pattern
 // does not scroll because size() caps requirement_.min_y before yframe can
@@ -509,16 +516,7 @@ Element render_picker_panel(std::string_view tag,
                             int max_visible_items = kPickerMaxDisplayRows,
                             std::string_view helper_prefix = "↑↓ navigate  ↵/Tab complete") {
     const int total = static_cast<int>(rows.size());
-    const int window = std::max(1, max_visible_items);
-    // How far from the top of the visible window the selected item sits.
-    // With smaller windows, ease this down so tall rows still feel balanced.
-    const int kScrollOffset = std::clamp(window / 2, 0, 3);
-
-    // view_start: first item index in the viewport.
-    // clamp keeps us within [0, total-window] so we never show empty rows.
-    int view_start = std::clamp(selected_index - kScrollOffset, 0,
-                                std::max(0, total - window));
-    const int view_end = std::min(total, view_start + window);
+    const auto [view_start, view_end] = picker_visible_range(total, selected_index, max_visible_items);
     const int above = view_start;
     const int below = total - view_end;
 
@@ -1072,7 +1070,11 @@ Element render_option_selection_panel(std::string_view title,
     const std::string current = current_value.empty()
         ? std::string("<unset>")
         : std::string(current_value);
-    for (std::size_t i = 0; i < options.size(); ++i) {
+    const auto [first, last] = picker_visible_range(
+        static_cast<int>(options.size()), selected_index, kCommandPickerMaxDisplayRows);
+    if (first > 0) rows.push_back(text(std::format("↑ {} more above", first)) | dim);
+    for (int index = first; index < last; ++index) {
+        const auto i = static_cast<std::size_t>(index);
         const auto& option = options[i];
         std::string label = std::format("[{}] {}", i + 1, option.label);
         if (option.active) {
@@ -1083,6 +1085,9 @@ Element render_option_selection_panel(std::string_view title,
             option.description,
             selected_index == static_cast<int>(i),
             ColorYellowDark));
+    }
+    if (last < static_cast<int>(options.size())) {
+        rows.push_back(text(std::format("↓ {} more below", options.size() - last)) | dim);
     }
 
     return vbox({
@@ -1101,7 +1106,7 @@ Element render_option_selection_panel(std::string_view title,
         filler(),
         help_text.empty()
             ? (text("Esc closes this panel.") | dim)
-            : (text(std::string(help_text)) | dim),
+            : (paragraph(std::string(help_text)) | dim),
     }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 14);
 }
 

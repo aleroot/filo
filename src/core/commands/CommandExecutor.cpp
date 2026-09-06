@@ -1466,7 +1466,7 @@ public:
             "  /init [provider] [options]  Scaffold .filo/config.json (and optional FILO.md)\n"
             "  /goal [action]      Set or manage the session goal (plan/run/graph)\n"
             "  /todo [action]      Manage session-backed todo items\n"
-            "  /memory [action]    Manage opt-in durable memory and auto capture\n"
+            "  /memory [action]    Manage durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  /run [block]        Inspect and run a fenced block from the latest response\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
@@ -3203,7 +3203,7 @@ class MemoryCommand : public Command {
 public:
     std::string get_name() const override { return "/memory"; }
     std::string get_description() const override {
-        return "Manage opt-in durable memory and auto capture";
+        return "Manage durable memory and auto capture";
     }
     bool accepts_arguments() const override { return true; }
 
@@ -3243,6 +3243,10 @@ public:
             return false;
         };
 
+        if (tokens.empty() && ctx.open_command_option_picker_fn
+            && ctx.open_command_option_picker_fn(get_name())) {
+            return;
+        }
         if (tokens.empty() || to_lower_ascii(tokens.front()) == "status"
             || to_lower_ascii(tokens.front()) == "list") {
             show_memory();

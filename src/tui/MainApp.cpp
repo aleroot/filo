@@ -10,6 +10,7 @@
 #include "FileSystemPicker.hpp"
 #include "FileSystemPickerView.hpp"
 #include "KeyInput.hpp"
+#include "MemoryMenu.hpp"
 #include "SessionReplay.hpp"
 #include "SessionPicker.hpp"
 #include "ThreadRuntime.hpp"
@@ -4606,6 +4607,7 @@ RunResult run(RunOptions opts) {
     };
 
     std::function<bool()> open_steering_picker;
+    std::function<bool(tui::MemoryMenuPage, std::string_view)> open_memory_picker;
 
     auto open_command_option_picker = [&](std::string_view command_name) -> bool {
         CommandOptionPickerState next;
@@ -4640,6 +4642,8 @@ RunResult run(RunOptions opts) {
                 {.value = "ultra", .label = "Ultra", .description = "Use the tightest built-in budgets for high token pressure."},
             };
             next.on_select = switch_compression;
+        } else if (command_name == "/memory") {
+            return open_memory_picker && open_memory_picker(tui::MemoryMenuPage::Overview, {});
         } else if (command_name == "/workspace" || command_name == "/dir" || command_name == "/dirs") {
             next.title = "WORKSPACE";
             next.help_text = "Enter opens selection. Esc closes this panel.";
@@ -5654,22 +5658,25 @@ RunResult run(RunOptions opts) {
         return engine;
     };
 
-    auto memory_state = [memory_system]() {
-        return memory_system->semantic().load();
+    auto current_memory_store = [memory_system, &agent]() {
+        return memory_system->semantic(agent->session_context_snapshot());
+    };
+    auto memory_state = [current_memory_store]() {
+        return current_memory_store().load();
     };
 
-    auto memory_thread_policy = [agent]() {
+    auto memory_thread_policy = [&agent]() {
         return agent->memory_thread_policy();
     };
 
     auto set_memory_thread_policy =
-        [agent](core::memory::MemoryThreadPolicy policy)
+        [&agent](core::memory::MemoryThreadPolicy policy)
             -> core::commands::CommandOperationResult {
         agent->set_memory_thread_policy(policy);
         return {.ok = true, .message = "Thread memory policy updated."};
     };
 
-    auto run_memory_review = [agent, append_history]() -> core::commands::CommandOperationResult {
+    auto run_memory_review = [&agent, append_history]() -> core::commands::CommandOperationResult {
         agent->run_memory_review_async([append_history](std::string message) {
             if (!message.empty()) {
                 append_history("\n[" + message + "]\n");
@@ -5694,38 +5701,122 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = "Memory disabled."};
     };
 
-    auto add_memory = [memory_system](std::string_view content)
+    auto add_memory = [current_memory_store](std::string_view content)
         -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().remember(content, "global", {}, "manual");
+        auto result = current_memory_store().remember(content, "project", {}, "manual");
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto forget_memory = [memory_system](std::string_view selector)
+    auto forget_memory = [current_memory_store](std::string_view selector)
         -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().forget(selector);
+        auto result = current_memory_store().forget(selector);
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto clean_memory = [memory_system]() -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().clean();
+    auto clean_memory = [current_memory_store]() -> core::commands::CommandOperationResult {
+        auto result = current_memory_store().clean();
         return {.ok = result.ok, .message = result.message};
     };
 
-    auto clear_memory = [memory_system]() -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().clear();
+    auto clear_memory = [current_memory_store]() -> core::commands::CommandOperationResult {
+        auto result = current_memory_store().clear();
         return {.ok = result.ok, .message = result.message};
     };
 
     auto save_memory_markdown =
-        [memory_system](std::filesystem::path path) -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().save_markdown(path);
+        [current_memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = current_memory_store().save_markdown(path);
         return {.ok = result.ok, .message = result.message};
     };
 
     auto load_memory_markdown =
-        [memory_system](std::filesystem::path path) -> core::commands::CommandOperationResult {
-        auto result = memory_system->semantic().load_markdown(path);
+        [current_memory_store](std::filesystem::path path) -> core::commands::CommandOperationResult {
+        auto result = current_memory_store().load_markdown(path);
         return {.ok = result.ok, .message = result.message};
+    };
+
+    auto bind_memory_commands = [&](core::commands::CommandContext& ctx) {
+        ctx.memory_state_fn = memory_state;
+        ctx.set_memory_settings_fn = set_memory_settings;
+        ctx.memory_thread_policy_fn = memory_thread_policy;
+        ctx.set_memory_thread_policy_fn = set_memory_thread_policy;
+        ctx.run_memory_review_fn = run_memory_review;
+        ctx.add_memory_fn = add_memory;
+        ctx.forget_memory_fn = forget_memory;
+        ctx.clean_memory_fn = clean_memory;
+        ctx.clear_memory_fn = clear_memory;
+        ctx.save_memory_markdown_fn = save_memory_markdown;
+        ctx.load_memory_markdown_fn = load_memory_markdown;
+    };
+    auto execute_memory_command = [&](std::string command) {
+        core::commands::CommandContext ctx{
+            .text = std::move(command),
+            .clear_input_fn = [] {},
+            .append_history_fn = append_history,
+            .agent = agent,
+        };
+        bind_memory_commands(ctx);
+        cmd_executor.try_execute(ctx.text, ctx);
+    };
+
+    open_memory_picker = [&](tui::MemoryMenuPage page, std::string_view entry_id) -> bool {
+        const auto context = agent->session_context_snapshot();
+        std::string error;
+        const auto state = memory_system->semantic(context).load(&error);
+        if (!error.empty()) {
+            append_history(std::format("\n✗  {}\n", error));
+            return true;
+        }
+        auto menu = tui::build_memory_menu(page, state, context.memory_policy,
+                                          context.workspace_view().primary().string(), entry_id);
+        CommandOptionPickerState next{
+            .active = true,
+            .command_name = "/memory",
+            .title = std::move(menu.title),
+            .current_value = std::move(menu.current),
+            .help_text = menu.help.empty() ? "↑/↓ select · Enter apply/open · Esc close" : std::move(menu.help),
+            .options = std::move(menu.options),
+        };
+        next.on_select = [&, page](std::string_view value) -> std::string {
+            if (value == "page:overview") open_memory_picker(tui::MemoryMenuPage::Overview, {});
+            else if (value == "page:entries") open_memory_picker(tui::MemoryMenuPage::Entries, {});
+            else if (value == "page:settings") open_memory_picker(tui::MemoryMenuPage::Settings, {});
+            else if (value == "page:session") open_memory_picker(tui::MemoryMenuPage::Session, {});
+            else if (value.starts_with("entry:")) open_memory_picker(tui::MemoryMenuPage::Entry, value.substr(6));
+            else if (value.starts_with("input:")) {
+                std::lock_guard lock(ui_mutex);
+                input_text = std::string(value.substr(6));
+                input_cursor_position = static_cast<int>(input_text.size());
+            } else if (value == "import") {
+                open_file_picker({
+                    .title = "IMPORT MEMORY",
+                    .hint = "Import reviewed Markdown memories into the current project.",
+                    .target = FileSystemPickerTarget::File,
+                    .start_directory = agent->workspace_snapshot().primary(),
+                    .extensions = {".md", ".markdown"},
+                }, [&](const std::filesystem::path& path) {
+                    execute_memory_command("/memory load " + path.string());
+                    open_memory_picker(tui::MemoryMenuPage::Entries, {});
+                });
+            } else if (value.starts_with("/memory ")) {
+                execute_memory_command(std::string(value));
+                if (value != "/memory status") {
+                    open_memory_picker(page == tui::MemoryMenuPage::Entry
+                        ? tui::MemoryMenuPage::Entries : page, {});
+                }
+            }
+            return {};
+        };
+        {
+            std::lock_guard lock(ui_mutex);
+            if (command_option_picker_state.title == next.title && !next.options.empty()) {
+                next.selected = std::min(command_option_picker_state.selected,
+                                         static_cast<int>(next.options.size()) - 1);
+            }
+            command_option_picker_state = std::move(next);
+        }
+        wake_ui();
+        return true;
     };
 
     auto add_mcp_server = [&](const core::config::McpServerConfig& server,
@@ -6693,17 +6784,6 @@ RunResult run(RunOptions opts) {
             .clear_goal_fn = clear_goal,
             .goal_engine_fn = goal_engine_accessor,
             .save_goal_graph_fn = save_session_snapshot,
-            .memory_state_fn = memory_state,
-            .set_memory_settings_fn = set_memory_settings,
-            .memory_thread_policy_fn = memory_thread_policy,
-            .set_memory_thread_policy_fn = set_memory_thread_policy,
-            .run_memory_review_fn = run_memory_review,
-            .add_memory_fn = add_memory,
-            .forget_memory_fn = forget_memory,
-            .clean_memory_fn = clean_memory,
-            .clear_memory_fn = clear_memory,
-            .save_memory_markdown_fn = save_memory_markdown,
-            .load_memory_markdown_fn = load_memory_markdown,
             .list_mcp_servers_fn = list_mcp_servers,
             .add_mcp_server_fn = add_mcp_server,
             .remove_mcp_server_fn = remove_mcp_server,
@@ -6732,6 +6812,7 @@ RunResult run(RunOptions opts) {
             .open_steering_picker_fn = open_steering_picker,
         };
 
+        bind_memory_commands(ctx);
         if (cmd_executor.try_execute(text, ctx)) return;
 
         submit_or_queue_agent_turn(std::move(text), {});

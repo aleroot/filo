@@ -1030,7 +1030,7 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
             .with_memory_prompt(memory_system_->semantic_prompt_block(
-                24, session_context_.memory_policy.generate_memories))
+                session_context_))
             .include_project_facts(false)
             .build_plan();
     stable_prompt_prefix_ = stable_prompt_plan_.render();

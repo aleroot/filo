@@ -375,6 +375,21 @@ Useful slash commands:
 
 Skills without an `entry_point` also appear as slash commands: `/<skill-name> [arguments]`.
 
+Durable memory and automatic capture are enabled by default. Models can save stable
+preferences and project facts in `~/.config/filo/memory.json` (or
+`$XDG_CONFIG_HOME/filo/memory.json`). Entries are bound to the current project's
+canonical checkout root; subdirectories share that root, while separate Git
+worktrees remain isolated. Session-scoped entries also require the same session.
+Recall, tool calls, `/memory` entry commands, and background capture use this same
+boundary. Old entries without project identity are preserved but excluded from
+recall; explicitly import a reviewed Markdown export into the intended project
+with `/memory load` to adopt them. Saved settings remain shared and are respected.
+Use `/memory auto off` to stop automatic capture, `/memory off` to disable memory,
+and `/memory auto on` to re-enable saving. Background review, consolidation, and
+skill curation remain off by default.
+Run `/memory` to open the interactive menu for project entries, capture settings,
+session controls, and Markdown import/export. `/memory status` prints the text summary.
+
 ---
 
 ## Enable Embedded `llama.cpp`

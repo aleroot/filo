@@ -18,9 +18,15 @@ MemorySystem::MemorySystem(MemoryStore store,
           : std::make_shared<NullToolRecoveryMemory>()) {}
 
 std::string MemorySystem::semantic_prompt_block(
+    const core::context::SessionContext& context,
     std::size_t max_entries,
     bool allow_auto_capture) const {
-    return build_memory_prompt_block(store_.load(), max_entries, allow_auto_capture);
+    if (!context.memory_policy.use_memories) return {};
+    std::string error;
+    const auto state = semantic(context).load(&error);
+    if (!error.empty()) return {};
+    return build_memory_prompt_block(state, max_entries,
+        allow_auto_capture && context.memory_policy.generate_memories);
 }
 
 std::shared_ptr<MemorySystem> make_memory_system(MemoryConfig config) {

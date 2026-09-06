@@ -179,6 +179,7 @@ set(FILO_CORE_SOURCES
     src/tui/TranscriptViewport.cpp
     src/tui/MarkdownRenderer.cpp
     src/tui/MainApp.cpp
+    src/tui/MemoryMenu.cpp
     src/tui/KeyInput.cpp
     src/tui/SessionPicker.cpp
     src/tui/ThreadRuntime.cpp

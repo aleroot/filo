@@ -17,15 +17,64 @@
 #include "tui/Constants.hpp"
 #include "tui/PickerState.hpp"
 #include "tui/SessionPicker.hpp"
+#include "tui/MemoryMenu.hpp"
 
 #include <ftxui/screen/screen.hpp>
 
 #include <filesystem>
+#include <algorithm>
 #include <stop_token>
 #include <string>
 #include <vector>
 
 using namespace tui;
+
+TEST_CASE("Memory menu exposes current settings and project actions", "[memory][tui]") {
+    core::memory::MemoryState state;
+    state.entries = {{.id = "m1", .content = "Use project tools.", .scope = "project"},
+                     {.id = "m2", .content = "Archived note.", .archived = true}};
+    const auto overview = build_memory_menu(MemoryMenuPage::Overview, state, {}, "/work/project");
+    CHECK(overview.current == "/work/project · 1 memory");
+    CHECK(std::ranges::any_of(overview.options,
+        [](const auto& row) { return row.value == "page:settings"; }));
+    const auto settings = build_memory_menu(MemoryMenuPage::Settings, state, {}, "/work/project");
+    CHECK(settings.options[1].value == "/memory auto off");
+    state.settings.auto_capture = false;
+    CHECK(build_memory_menu(MemoryMenuPage::Settings, state, {}, "/work/project")
+              .options[1].value == "/memory auto on");
+
+    const auto entries = build_memory_menu(MemoryMenuPage::Entries, state, {}, "/work/project");
+    CHECK(entries.options.front().value == "entry:m1");
+    const auto detail = build_memory_menu(MemoryMenuPage::Entry, state, {}, "/work/project", "m1");
+    CHECK(detail.help == "Use project tools.");
+    CHECK(detail.options.front().value == "/memory forget m1");
+    CHECK(std::ranges::none_of(entries.options,
+        [](const auto& row) { return row.label.find("Archived note") != std::string::npos; }));
+    const auto session = build_memory_menu(MemoryMenuPage::Session, state,
+        {.use_memories = false, .generate_memories = true}, "/work/project");
+    CHECK(session.options[0].value == "/memory thread use on");
+    CHECK(session.options[1].value == "/memory thread generate off");
+    for (const auto& menu : {overview, settings, entries, session, detail}) {
+        auto panel = render_option_selection_panel(menu.title, menu.options, 0, menu.current, "Enter to select");
+        auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100), ftxui::Dimension::Fit(panel));
+        ftxui::Render(screen, panel);
+        CHECK_THAT(screen.ToString(), Catch::Matchers::ContainsSubstring(menu.title));
+    }
+}
+
+TEST_CASE("Memory menus keep the selected entry visible in long lists", "[memory][tui][picker]") {
+    core::memory::MemoryState state;
+    for (int i = 0; i < 80; ++i) {
+        state.entries.push_back({.id = "m" + std::to_string(i), .content = "Fixture note " + std::to_string(i)});
+    }
+    const auto menu = build_memory_menu(MemoryMenuPage::Entries, state, {}, "/work/project");
+    auto panel = render_option_selection_panel(menu.title, menu.options, 70, menu.current, "Enter to inspect");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100), ftxui::Dimension::Fixed(24));
+    ftxui::Render(screen, panel);
+    CHECK_THAT(screen.ToString(), Catch::Matchers::ContainsSubstring("Fixture note 70"));
+    CHECK_THAT(screen.ToString(), Catch::Matchers::ContainsSubstring("more above"));
+    CHECK_THAT(screen.ToString(), Catch::Matchers::ContainsSubstring("more below"));
+}
 
 // ============================================================================
 // Helpers

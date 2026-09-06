@@ -60,6 +60,9 @@ public:
 
     [[nodiscard]] MemoryStore& semantic() noexcept { return store_; }
     [[nodiscard]] const MemoryStore& semantic() const noexcept { return store_; }
+    [[nodiscard]] MemoryStore semantic(const core::context::SessionContext& context) const {
+        return store_.for_context(context);
+    }
 
     [[nodiscard]] MemoryBackgroundService& background() noexcept {
         return background_;
@@ -75,6 +78,7 @@ public:
     /// Prompt projection of semantic memories. ContextBuilder (and any other
     /// prompt assembler) should call this rather than constructing a store.
     [[nodiscard]] std::string semantic_prompt_block(
+        const core::context::SessionContext& context,
         std::size_t max_entries = 24,
         bool allow_auto_capture = true) const;
 

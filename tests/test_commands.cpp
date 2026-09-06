@@ -330,6 +330,31 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Stop requested"));
     }
 
+    SECTION("/memory opens the interactive picker") {
+        ctx.open_command_option_picker_fn = [option_picker_command](std::string_view name) {
+            *option_picker_command = name;
+            return true;
+        };
+        ctx.text = "/memory";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*option_picker_command == "/memory");
+        CHECK(mock_history->empty());
+    }
+
+    SECTION("/memory status bypasses the picker") {
+        ctx.text = "/memory status";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(option_picker_command->empty());
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Filo Memory"));
+    }
+
+    SECTION("/memory falls back to text when a picker is unavailable") {
+        ctx.open_command_option_picker_fn = {};
+        ctx.text = "/memory";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Filo Memory"));
+    }
+
     SECTION("/memory off disables all background memory features") {
         memory_state->settings.enabled = true;
         memory_state->settings.auto_capture = true;

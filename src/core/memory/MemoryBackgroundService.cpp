@@ -184,7 +184,8 @@ std::vector<std::string> MemoryBackgroundService::extract_candidate_memories(
 }
 
 MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& input) const {
-    auto state = store_.load();
+    const auto store = store_.for_context(input.session_context);
+    auto state = store.load();
     if (!state.settings.enabled
         || !input.thread_policy.generate_memories
         || (!state.settings.background_review && !state.settings.consolidation && !state.settings.skill_curation)) {
@@ -199,13 +200,13 @@ MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& inpu
 
     if (state.settings.background_review) {
         for (const auto& candidate : extract_candidate_memories(input.history)) {
-            auto stored = store_.remember(candidate, "global", {"background"}, "background_review");
+            auto stored = store.remember(candidate, "project", {"background"}, "background_review");
             if (stored.ok) ++result.memories_stored;
         }
     }
 
     if (state.settings.consolidation) {
-        const auto cleaned = store_.clean();
+        const auto cleaned = store.clean();
         if (cleaned.ok && cleaned.message.find("Archived ") != std::string::npos) {
             result.memories_cleaned = 1;
         }
@@ -213,7 +214,7 @@ MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& inpu
 
     if (state.settings.skill_curation && input.thread_policy.curate_skills) {
         result.skill_drafts_written =
-            curate_skill_drafts(store_.load(), input.session_context.workspace_view().primary())
+            curate_skill_drafts(store.load(), input.session_context.workspace_view().primary())
                 .skill_drafts_written;
     }
 

@@ -45,6 +45,7 @@ namespace {
                       .kv_str("content", entry.content).comma()
                       .kv_str("scope", entry.scope).comma()
                       .kv_str("source", entry.source).comma()
+                      .kv_str("project_root", entry.project_root).comma()
                       .kv_bool("archived", entry.archived)
                       .raw("}");
             }
@@ -98,9 +99,11 @@ ToolDefinition MemoryTool::get_definition() const {
         .name = std::string(names::kMemory),
         .title = "Memory",
         .description =
-            "Manage durable Filo memories for stable preferences, workflows, and project facts.",
+            "Manage durable Filo memories for the current project. Memories never cross project boundaries. "
+            "Memory and automatic capture are enabled by default. Use status to check availability. "
+            "If disabled, the user can re-enable saving with /memory auto on.",
         .input_schema =
-            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Content for remember."},"id":{"type":"string","description":"Memory id for forget."},"scope":{"type":"string","description":"global, project, or session; defaults to global."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Content for remember."},"id":{"type":"string","description":"Memory id for forget."},"scope":{"type":"string","enum":["project","session"],"description":"Defaults to project. Session memories are visible only in this session."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint = false,
             .destructive_hint = true,
@@ -124,8 +127,13 @@ std::string MemoryTool::execute(const std::string& json_args,
 
     const std::string action = core::utils::str::trim_ascii_copy(
         core::utils::json::string_field(object, "action"));
+    const auto store = store_.for_context(context);
+    std::string settings_error;
+    const auto settings = store.settings(&settings_error);
+    if (!settings_error.empty()) {
+        return mutation_json({.ok = false, .message = settings_error});
+    }
     if (action == "status") {
-        const auto settings = store_.settings();
         return std::format(
             R"({{"ok":true,"enabled":{},"auto_capture":{},"path":"{}"}})",
             settings.enabled ? "true" : "false",
@@ -133,25 +141,27 @@ std::string MemoryTool::execute(const std::string& json_args,
             core::utils::escape_json_string(store_.path().string()));
     }
 
-    const auto settings = store_.settings();
     if (!settings.enabled) {
-        return R"({"error":"Filo memory is disabled. Ask the user to run /memory on first."})";
+        return R"({"error":"Filo memory is disabled. Ask the user to run /memory auto on to enable saving memories, or /memory on for recall only."})";
     }
 
     if (action == "list") {
-        return entries_json(store_.list(false));
+        if (!context.memory_policy.use_memories) {
+            return R"({"error":"Thread memory use is disabled."})";
+        }
+        return entries_json(store.list(false));
     }
     if (action == "clean") {
         if (!context.memory_policy.generate_memories) {
             return R"({"error":"Thread memory generation is disabled."})";
         }
-        return mutation_json(store_.clean());
+        return mutation_json(store.clean());
     }
     if (action == "forget") {
         if (!context.memory_policy.generate_memories) {
             return R"({"error":"Thread memory generation is disabled."})";
         }
-        return mutation_json(store_.forget(core::utils::json::string_field(object, "id")));
+        return mutation_json(store.forget(core::utils::json::string_field(object, "id")));
     }
     if (action == "remember") {
         if (!context.memory_policy.generate_memories) {
@@ -161,9 +171,9 @@ std::string MemoryTool::execute(const std::string& json_args,
             return R"({"error":"Automatic memory capture is disabled. Ask the user to run /memory auto on or use /memory add."})";
         }
         const std::string scope = core::utils::json::string_field(object, "scope");
-        return mutation_json(store_.remember(
+        return mutation_json(store.remember(
             core::utils::json::string_field(object, "content"),
-            scope.empty() ? "global" : scope,
+            scope,
             json_tags(object),
             "agent"));
     }

@@ -6,11 +6,13 @@
 #include <string_view>
 #include <vector>
 
+namespace core::context { struct SessionContext; }
+
 namespace core::memory {
 
 struct MemorySettings {
-    bool enabled = false;
-    bool auto_capture = false;
+    bool enabled = true;
+    bool auto_capture = true;
     bool background_review = false;
     bool consolidation = false;
     bool skill_curation = false;
@@ -29,6 +31,8 @@ struct MemoryEntry {
     std::string last_used_at;
     int use_count = 0;
     bool archived = false;
+    std::string project_root;
+    std::string session_id;
 };
 
 struct MemoryState {
@@ -58,6 +62,10 @@ public:
     [[nodiscard]] static std::filesystem::path default_path();
     [[nodiscard]] static std::string now_iso8601();
 
+    // A session-bound view of the same file. All entry reads and mutations are
+    // restricted to this checkout; settings remain shared across projects.
+    [[nodiscard]] MemoryStore for_context(const core::context::SessionContext& context) const;
+
     [[nodiscard]] MemoryState load(std::string* error = nullptr) const;
     [[nodiscard]] bool save(const MemoryState& state, std::string* error = nullptr) const;
 
@@ -68,7 +76,7 @@ public:
                                                 std::string* error = nullptr) const;
 
     [[nodiscard]] MemoryMutationResult remember(std::string_view content,
-                                                std::string_view scope = "global",
+                                                std::string_view scope = {},
                                                 std::vector<std::string> tags = {},
                                                 std::string_view source = "manual") const;
     [[nodiscard]] MemoryMutationResult forget(std::string_view selector) const;
@@ -86,8 +94,12 @@ private:
 
     [[nodiscard]] static std::string normalize_for_match(std::string_view value);
     [[nodiscard]] static std::string next_id(const std::vector<MemoryEntry>& entries);
+    [[nodiscard]] bool visible(const MemoryEntry& entry) const;
 
     std::filesystem::path path_;
+    bool context_bound_ = false;
+    std::string project_root_;
+    std::string session_id_;
 };
 
 [[nodiscard]] std::string build_memory_prompt_block(const MemoryState& state,

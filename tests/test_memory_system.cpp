@@ -117,19 +117,28 @@ TEST_CASE("MemorySystem semantic prompt is projected from the owned store",
     settings.enabled = true;
     settings.auto_capture = true;
     REQUIRE(store.save_settings(settings));
-    REQUIRE(store.remember("Prefer concise engineering summaries.").ok);
+    const auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    REQUIRE(store.for_context(context).remember("Prefer concise engineering summaries.").ok);
 
     core::memory::MemorySystem system{
         store, std::make_shared<core::memory::NullToolRecoveryMemory>()};
-    const auto with_capture = system.semantic_prompt_block();
+    const auto with_capture = system.semantic_prompt_block(context);
     CHECK_THAT(with_capture, ContainsSubstring("[Memory]"));
     CHECK_THAT(with_capture,
                ContainsSubstring("Prefer concise engineering summaries."));
     CHECK_THAT(with_capture, ContainsSubstring("[Memory Capture]"));
 
-    const auto without_capture = system.semantic_prompt_block(24, false);
+    const auto without_capture = system.semantic_prompt_block(context, 24, false);
     CHECK_THAT(without_capture, ContainsSubstring("[Memory]"));
     CHECK(without_capture.find("[Memory Capture]") == std::string::npos);
+
+    auto other_context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path / "other-project"});
+    const auto other_prompt = system.semantic_prompt_block(other_context);
+    CHECK(other_prompt.find("Prefer concise engineering summaries.") == std::string::npos);
+    other_context.memory_policy.use_memories = false;
+    CHECK(system.semantic_prompt_block(other_context).empty());
 }
 
 TEST_CASE("ContextBuilder uses an injected memory prompt and never opens a store",
