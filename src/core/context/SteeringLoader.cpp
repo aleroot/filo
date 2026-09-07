@@ -36,6 +36,14 @@ constexpr std::string_view kAgentsFilename = "AGENTS.md";
 }
 
 [[nodiscard]] std::string relative_label(const std::filesystem::path& root, const std::filesystem::path& path) {
+    // Prefer a purely lexical relative path so that symlinked steering files keep
+    // their own name instead of being relabelled with their resolved target
+    // (std::filesystem::relative canonicalizes both operands, which follows links).
+    const auto lexical = path.lexically_normal().lexically_relative(root.lexically_normal());
+    if (!lexical.empty() && *lexical.begin() != "..") {
+        return lexical.string();
+    }
+
     std::error_code ec;
     const auto relative = std::filesystem::relative(path, root, ec);
     if (!ec && !relative.empty()) {
@@ -145,6 +153,38 @@ void append_hierarchical_agents_files(const std::filesystem::path& start_dir,
     return {};
 }
 
+// Fully resolves symlinks so that two discovered entries pointing at the same
+// on-disk file (e.g. the common `CLAUDE.md -> AGENTS.md` symlink) share an identity.
+[[nodiscard]] std::filesystem::path steering_identity(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto resolved = std::filesystem::canonical(path, ec);
+    if (!ec && !resolved.empty()) {
+        return resolved;
+    }
+    return normalize_path(path);
+}
+
+// Drops entries that resolve to the same file, keeping the first occurrence so
+// that discovery order (and therefore the canonical label) is preserved.
+void dedupe_steering_files(std::vector<std::filesystem::path>& files) {
+    std::vector<std::filesystem::path> unique_identities;
+    unique_identities.reserve(files.size());
+
+    std::vector<std::filesystem::path> deduped;
+    deduped.reserve(files.size());
+
+    for (const auto& file : files) {
+        const auto identity = steering_identity(file);
+        if (std::ranges::find(unique_identities, identity) != unique_identities.end()) {
+            continue;
+        }
+        unique_identities.push_back(identity);
+        deduped.push_back(file);
+    }
+
+    files = std::move(deduped);
+}
+
 std::vector<std::filesystem::path> discover_directory_steering_files(const std::filesystem::path& dir) {
     std::vector<std::filesystem::path> files;
     if (dir.empty() || !std::filesystem::exists(dir)) {
@@ -178,6 +218,7 @@ std::vector<std::filesystem::path> discover_directory_steering_files(const std::
         files.insert(files.end(), steering_files.begin(), steering_files.end());
     }
 
+    dedupe_steering_files(files);
     return files;
 }
 

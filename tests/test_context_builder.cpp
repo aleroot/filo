@@ -343,6 +343,44 @@ TEST_CASE("SteeringLoader reports loaded project steering source labels",
     CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Source: .filo/steering/backend.md"));
 }
 
+TEST_CASE("SteeringLoader deduplicates steering files that symlink to the same file",
+          "[context][steering][symlink]") {
+    auto workspace = make_temp_workspace("filo_steering_symlink");
+    write_text(workspace.path() / "AGENTS.md", "Root instructions\n");
+
+    std::error_code ec;
+    std::filesystem::create_symlink("AGENTS.md", workspace.path() / "CLAUDE.md", ec);
+    if (ec) {
+        SKIP("symlink creation unsupported on this platform: " + ec.message());
+    }
+
+    const auto result = core::context::load_project_steering_context(workspace.path());
+
+    REQUIRE(result.source_labels.size() == 1);
+    CHECK(result.source_labels[0] == "AGENTS.md");
+    REQUIRE(result.files.size() == 1);
+    CHECK(result.files[0].label == "AGENTS.md");
+    CHECK(result.block.find("Source: CLAUDE.md") == std::string::npos);
+}
+
+TEST_CASE("SteeringLoader keeps a symlinked steering file under its own label",
+          "[context][steering][symlink]") {
+    auto workspace = make_temp_workspace("filo_steering_symlink_label");
+    write_text(workspace.path() / "docs" / "shared.md", "Shared instructions\n");
+
+    std::error_code ec;
+    std::filesystem::create_symlink("docs/shared.md", workspace.path() / "AGENTS.md", ec);
+    if (ec) {
+        SKIP("symlink creation unsupported on this platform: " + ec.message());
+    }
+
+    const auto result = core::context::load_project_steering_context(workspace.path());
+
+    REQUIRE(result.source_labels.size() == 1);
+    CHECK(result.source_labels[0] == "AGENTS.md");
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Shared instructions"));
+}
+
 TEST_CASE("SteeringLoader finds GEMINI.MD case-insensitively",
           "[context][steering]") {
     auto workspace = make_temp_workspace("filo_steering_gemini");

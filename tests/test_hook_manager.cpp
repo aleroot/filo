@@ -134,6 +134,46 @@ TEST_CASE("PreToolUse hook can approve via Claude-style JSON", "[hooks]") {
     REQUIRE(decision.approved);
 }
 
+// A hook command that never reads stdin leaves the payload writer without a
+// reader. When the payload exceeds the pipe capacity the writer cannot buffer it
+// and is guaranteed to hit EPIPE, at which point bash reports
+// "printf: write error: Broken pipe" on stderr. Because the shell session merges
+// stderr into stdout, that diagnostic used to be appended to the hook's output.
+namespace {
+
+// Comfortably above the 64 KiB pipe capacity on Linux and macOS, while keeping
+// the base64 payload env var below the per-string execve limit.
+[[nodiscard]] std::string oversized_payload(const std::string& fields) {
+    return "{" + fields + R"("filler":")" + std::string(80 * 1024, 'x') + "\"}";
+}
+
+} // namespace
+
+TEST_CASE("PreToolUse JSON decisions survive a payload the hook never reads",
+          "[hooks]") {
+    const auto decision = run_pre_tool_use_with_config(
+        "filo_hook_json_allow_large",
+        R"("printf '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}'")",
+        oversized_payload(R"("tool_name":"run_terminal_command","arguments":"{}",)"));
+
+    // Broken-pipe noise on stdout would make this JSON unparseable, silently
+    // degrading an explicit "allow" into "no decision".
+    REQUIRE(decision.allowed);
+    REQUIRE(decision.approved);
+}
+
+TEST_CASE("Stop hook output stays clean when the hook never reads the payload",
+          "[hooks]") {
+    const auto decision = run_stop_with_config(
+        "filo_hook_stop_large",
+        R"("printf retry; exit 2")",
+        oversized_payload(R"("mutation_observed":true,)"));
+
+    REQUIRE_FALSE(decision.complete);
+    REQUIRE(decision.reason == "retry");
+    REQUIRE(decision.followup_message == "retry");
+}
+
 TEST_CASE("PreToolUse hook exit code 2 blocks tool execution", "[hooks]") {
     const auto decision = run_pre_tool_use_with_config(
         "filo_hook_exit_2",

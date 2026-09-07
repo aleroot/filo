@@ -119,8 +119,19 @@ using core::tools::detail::shell_single_quote;
     return command_prefix;
 }
 
+// Hooks receive the event payload on stdin, but plenty of legitimate hook
+// commands never read it (`exit 0`, a linter invocation, a static JSON
+// decision). Once the reader exits, the payload writer's pipe has no read end
+// left and the write fails with EPIPE, at which point bash reports
+// "printf: write error: Broken pipe" on *stderr*. ShellSession merges stderr
+// into stdout, so that diagnostic would be appended to the hook's captured
+// output -- corrupting plain-text reasons and, worse, making structured JSON
+// decisions unparseable so an explicit "allow"/"deny" silently degrades to "no
+// decision". Silence just the writer: the payload also always reaches hooks via
+// FILO_HOOK_PAYLOAD_B64, and EPIPE is the only error this printf can hit.
 [[nodiscard]] std::string build_stdin_prefix(std::string_view payload_json) {
-    return "printf '%s' '" + shell_single_quote(payload_json) + "' | ";
+    return "{ printf '%s' '" + shell_single_quote(payload_json)
+        + "' 2>/dev/null; } | ";
 }
 
 // A PreToolUse hook that could not produce a decision has decided nothing.
