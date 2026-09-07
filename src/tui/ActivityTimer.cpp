@@ -1,8 +1,90 @@
 #include "ActivityTimer.hpp"
 
+#include <array>
+#include <cstdint>
 #include <format>
+#include <string_view>
 
 namespace tui {
+
+namespace {
+
+/// One field of a decomposed duration.
+struct DurationField {
+    int64_t          value;
+    std::string_view suffix;
+};
+
+using DurationFields = std::array<DurationField, 4>;
+
+/// Days carried in 64 bits. std::chrono::days is only required to hold 25
+/// bits and is a 32-bit int in practice, so casting a 64-bit seconds count
+/// straight into it truncates silently at the extreme; the finer fields are
+/// each bounded by their parent's carry and need no such widening.
+using Days64 = std::chrono::duration<int64_t, std::chrono::days::period>;
+
+/// Splits a duration into days/hours/minutes/seconds. Each field takes only
+/// the remainder left by the coarser one, so no field can hold a value that
+/// belongs in its parent: a "200m" span is not representable here. The
+/// arithmetic is delegated to std::chrono rather than written out with 3600
+/// and 86400 literals, which is where unit bugs come from in the first place.
+[[nodiscard]] DurationFields decompose(std::chrono::seconds elapsed) {
+    using namespace std::chrono;
+    const auto d = duration_cast<Days64>(elapsed);
+    const auto h = duration_cast<hours>(elapsed - d);
+    const auto m = duration_cast<minutes>(elapsed - d - h);
+    const auto s = elapsed - d - h - m;
+    return DurationFields{{
+        {d.count(), "d"},
+        {h.count(), "h"},
+        {m.count(), "m"},
+        {s.count(), "s"},
+    }};
+}
+
+/// Index of the coarsest non-zero field, or seconds for a sub-minute span.
+[[nodiscard]] std::size_t leading_field(const DurationFields& fields) {
+    for (std::size_t i = 0; i + 1 < fields.size(); ++i) {
+        if (fields[i].value > 0) return i;
+    }
+    return fields.size() - 1;
+}
+
+/// Timer style: the leading unit, then every finer unit zero-padded.
+[[nodiscard]] std::string render_precise(const DurationFields& fields,
+                                         std::size_t lead) {
+    std::string out = std::format("{}{}", fields[lead].value, fields[lead].suffix);
+    for (std::size_t i = lead + 1; i < fields.size(); ++i) {
+        out += std::format(" {:02}{}", fields[i].value, fields[i].suffix);
+    }
+    return out;
+}
+
+/// Human style: the leading unit plus, at most, the one immediately below it.
+/// Because the pair is always adjacent, hours are followed by minutes and
+/// never by seconds; the "drop the seconds past an hour" rule is a
+/// consequence of the structure instead of a case that can be forgotten.
+[[nodiscard]] std::string render_humanized(const DurationFields& fields,
+                                           std::size_t lead) {
+    const DurationField& head = fields[lead];
+    if (lead + 1 == fields.size()) {
+        return std::format("{}{}", head.value, head.suffix);
+    }
+    const DurationField& tail = fields[lead + 1];
+    if (tail.value == 0) {
+        return std::format("{}{}", head.value, head.suffix);
+    }
+    // Seconds are the one tail worth zero-padding: they change every frame,
+    // so a fixed width keeps the surrounding layout from shifting, and "6m 6s"
+    // reads like a truncation where "6m 06s" reads like a clock.
+    return tail.suffix == "s"
+        ? std::format("{}{} {:02}{}", head.value, head.suffix,
+                      tail.value, tail.suffix)
+        : std::format("{}{} {}{}", head.value, head.suffix,
+                      tail.value, tail.suffix);
+}
+
+} // namespace
 
 void ActivityTimerRegistry::start(std::string_view operation_id) {
     start_at(operation_id, Clock::now());
@@ -55,43 +137,11 @@ std::string format_elapsed_compact(std::chrono::seconds elapsed,
         elapsed = std::chrono::seconds::zero();
     }
 
-    const auto total_seconds = elapsed.count();
-    const auto total_hours = total_seconds / 3600;
-    const auto days = total_hours / 24;
-    const auto hours = total_hours % 24;
-    const auto minutes = (total_seconds % 3600) / 60;
-    const auto seconds = total_seconds % 60;
-
-    if (format == ElapsedFormat::humanized) {
-        if (days > 0) {
-            return hours == 0
-                ? std::format("{}d", days)
-                : std::format("{}d {}h", days, hours);
-        }
-        if (total_hours > 0) {
-            return minutes == 0
-                ? std::format("{}h", total_hours)
-                : std::format("{}h {}m", total_hours, minutes);
-        }
-        if (minutes > 0) {
-            return seconds == 0
-                ? std::format("{}m", minutes)
-                : std::format("{}m {:02}s", minutes, seconds);
-        }
-        return std::format("{}s", seconds);
-    }
-
-    if (days > 0) {
-        return std::format(
-            "{}d {:02}h {:02}m {:02}s", days, hours, minutes, seconds);
-    }
-    if (total_hours > 0) {
-        return std::format("{}h {:02}m {:02}s", total_hours, minutes, seconds);
-    }
-    if (minutes > 0) {
-        return std::format("{}m {:02}s", minutes, seconds);
-    }
-    return std::format("{}s", seconds);
+    const DurationFields fields = decompose(elapsed);
+    const std::size_t    lead   = leading_field(fields);
+    return format == ElapsedFormat::humanized
+        ? render_humanized(fields, lead)
+        : render_precise(fields, lead);
 }
 
 } // namespace tui

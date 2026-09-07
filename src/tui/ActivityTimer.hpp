@@ -33,7 +33,10 @@ private:
 enum class ElapsedFormat {
     /// Timer-style output retains seconds and zero-pads subordinate units.
     precise,
-    /// Relative-time output keeps at most the two most useful units.
+    /// Human-readable output keeps at most the two most significant units.
+    /// Below the hour seconds still carry information ("6m 16s"); from the
+    /// first hour on they are dropped in favour of the coarser unit ("1h",
+    /// "4h 13m", "2d 1h"). Used for both durations and "... ago" ages.
     humanized,
 };
 

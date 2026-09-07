@@ -62,6 +62,9 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
         duration_cast<seconds>(duration), ElapsedFormat::humanized);
 }
 
+/// Age of a past event, rendered as "<span> ago". Deliberately reuses the
+/// duration formatter so a span reads the same everywhere in the UI: seconds
+/// while it is short, coarser units once hours or days are on the clock.
 [[nodiscard]] std::string elapsed_label(
     std::chrono::steady_clock::time_point timestamp,
     std::chrono::steady_clock::time_point now) {

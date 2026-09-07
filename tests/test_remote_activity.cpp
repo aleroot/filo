@@ -171,12 +171,23 @@ TEST_CASE("remote footer humanizes long elapsed times",
         return tui::format_remote_footer_status(snapshot, now).label;
     };
 
+    CHECK(footer_after(seconds{45}) == "Lampo · seen 45s ago");
+    // Under the hour the seconds still say something useful.
+    CHECK(footer_after(minutes{6} + seconds{16}) == "Lampo · seen 6m 16s ago");
     CHECK(footer_after(minutes{59} + seconds{59})
           == "Lampo · seen 59m 59s ago");
+    // Past the hour they are dropped instead of piling minutes up forever.
     CHECK(footer_after(hours{1}) == "Lampo · seen 1h ago");
     CHECK(footer_after(minutes{253} + seconds{49})
           == "Lampo · seen 4h 13m ago");
     CHECK(footer_after(hours{49}) == "Lampo · seen 2d 1h ago");
+
+    // The historical regression: the footer used to divide the whole age into
+    // minutes with no carry into hours, so a client last seen at lunch read
+    // "seen 200m 15s ago". Any minutes count of 60 or more is a bug.
+    CHECK(footer_after(minutes{200} + seconds{15})
+          == "Lampo · seen 3h 20m ago");
+    CHECK(footer_after(minutes{1000}) == "Lampo · seen 16h 40m ago");
 }
 
 TEST_CASE("remote footer pill has no embedded gap and uses foreground color only",
