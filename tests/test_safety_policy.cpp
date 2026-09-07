@@ -337,6 +337,27 @@ TEST_CASE("needs_permission auto-approves safe shell commands in Interactive mod
     REQUIRE_FALSE(needs_permission("run_terminal_command", PermissionProfile::Interactive, args_gitst));
 }
 
+TEST_CASE("needs_permission classifies call aliases like their canonical tool",
+          "[safety][permission][alias]") {
+    const std::string destructive = R"({"command":"rm -rf build"})";
+    const std::string harmless = R"({"command":"ls -la"})";
+
+    // ToolManager dispatches `shell` to run_terminal_command, so the gate must
+    // not read an alias as an unknown — and therefore safe — tool.
+    REQUIRE(needs_permission("shell", PermissionProfile::Interactive, destructive));
+    REQUIRE(needs_permission("terminal", PermissionProfile::Standard, destructive));
+    REQUIRE(needs_permission("run_shell", PermissionProfile::Restricted, harmless));
+    REQUIRE_FALSE(needs_permission("shell", PermissionProfile::Interactive, harmless));
+
+    // Standard mode intentionally auto-approves file edits under either name.
+    REQUIRE_FALSE(needs_permission("write", PermissionProfile::Standard, R"({"path":"a.txt"})"));
+    REQUIRE(needs_permission("write", PermissionProfile::Interactive, R"({"path":"a.txt"})"));
+
+    // Plain reads stay auto-approved under the legacy name.
+    REQUIRE_FALSE(needs_permission("read_file", PermissionProfile::Interactive, R"({"path":"a.txt"})"));
+    REQUIRE_FALSE(needs_permission("read", PermissionProfile::Interactive, R"({"path":"a.txt"})"));
+}
+
 TEST_CASE("needs_permission gates dangerous shell commands in Interactive mode",
           "[safety_policy][integration]") {
     const auto args_rm    = R"({"command":"rm -rf /tmp/build"})";

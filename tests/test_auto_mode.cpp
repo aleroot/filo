@@ -87,7 +87,7 @@ TEST_CASE(
   using namespace core::tools::names;
 
   AutoQualityLedger ledger;
-  ledger.observe_tool(kReadFile, R"({"path":"src/main.cpp"})", R"({"ok":true})",
+  ledger.observe_tool(kRead, R"({"path":"src/main.cpp"})", R"({"ok":true})",
                       true);
   CHECK_FALSE(ledger.needs_verification());
 
@@ -308,7 +308,7 @@ TEST_CASE("AUTO coordinator owns repository lease upgrades",
         core::goal::WorkspaceAccess::ExclusiveWrite);
 
   const core::agent::AutoToolIntent read_only{
-      .name = core::tools::names::kReadFile,
+      .name = core::tools::names::kRead,
       .arguments = R"({"path":"src/main.cpp"})",
       .approved = true,
   };

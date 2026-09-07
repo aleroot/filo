@@ -23,7 +23,7 @@ struct LandrunPolicyEnvironment {
  * it to populate the kernel policy, and the composition root uses it to build
  * the session's FileAccessScope. Because both read the same function, the
  * shell's view and the native tools' view cannot drift apart -- a divergence
- * here previously let the shell create /tmp/output while `read_file` denied it.
+ * here previously let the shell create /tmp/output while `read` denied it.
  */
 [[nodiscard]] core::workspace::FileAccessScope landrun_temp_scope(
     const LandrunPolicyEnvironment& environment,

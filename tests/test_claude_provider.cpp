@@ -250,7 +250,7 @@ TEST_CASE("ClaudeSerializer - automatic prompt caching enabled for tool-capable 
           "[claude][serializer][cache]") {
     ChatRequest req = make_simple_request();
     Tool t;
-    t.function.name = "read_file";
+    t.function.name = "read";
     req.tools.push_back(t);
 
     const auto payload = AnthropicSerializer::serialize(req);
@@ -312,7 +312,7 @@ TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
           "[claude][serializer][cache]") {
     ChatRequest req = make_simple_request();
     Tool first;
-    first.function.name = "read_file";
+    first.function.name = "read";
     Tool last;
     last.function.name = "write_file";
     req.tools = {first, last};
@@ -325,7 +325,7 @@ TEST_CASE("ClaudeSerializer - caches the deterministic tool prefix explicitly",
     REQUIRE(messages_begin != std::string::npos);
     const auto tools = payload.substr(tools_begin, messages_begin - tools_begin);
 
-    const auto first_tool = tools.find(R"("name":"read_file")");
+    const auto first_tool = tools.find(R"("name":"read")");
     const auto last_tool = tools.find(R"("name":"write_file")");
     const auto cache = tools.find(R"("cache_control":{"type":"ephemeral"})");
     REQUIRE(first_tool != std::string::npos);
@@ -573,11 +573,11 @@ TEST_CASE("ClaudeSerializer - tool uses input_schema not parameters", "[claude][
 TEST_CASE("ClaudeSerializer - tool name and description appear", "[claude][serializer][tools]") {
     ChatRequest req = make_simple_request();
     Tool t;
-    t.function.name        = "read_file";
+    t.function.name        = "read";
     t.function.description = "Read a file from disk";
     req.tools.push_back(t);
     auto payload = AnthropicSerializer::serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read_file")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("description":"Read a file from disk")"));
 }
 
@@ -1410,7 +1410,7 @@ TEST_CASE("AnthropicProtocol - final event reports incomplete tool call",
         "event: content_block_start\n"
         "data: {\"type\":\"content_block_start\",\"index\":0,"
         "\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\","
-        "\"name\":\"read_file\",\"input\":{}}}\n");
+        "\"name\":\"read\",\"input\":{}}}\n");
     [[maybe_unused]] auto delta = protocol.parse_event(
         "event: content_block_delta\n"
         "data: {\"type\":\"content_block_delta\",\"index\":0,"

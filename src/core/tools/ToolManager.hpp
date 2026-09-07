@@ -2,6 +2,7 @@
 
 #include "Tool.hpp"
 #include "LandrunToolPolicy.hpp"
+#include "ToolPolicy.hpp"
 #include "ToolSchema.hpp"
 #include "../context/SessionContext.hpp"
 #include "../landrun/LandrunSettings.hpp"
@@ -93,10 +94,9 @@ public:
         ToolDefinition definition;
         {
             std::lock_guard lock(mutex_);
-            auto it = tools_.find(name);
-            if (it == tools_.end())
+            tool = find_tool_unlocked(name);
+            if (!tool)
                 return "{\"error\": \"Tool not found: " + name + "\"}";
-            tool = it->second;
             definition = tool->get_definition();
         }
         const auto sandbox_mode =
@@ -129,26 +129,26 @@ public:
         ToolDefinition definition;
         {
             std::lock_guard lock(mutex_);
-            auto it = tools_.find(name);
-            if (it == tools_.end()) {
+            auto tool = find_tool_unlocked(name);
+            if (!tool) {
                 return std::unexpected("tool not found");
             }
-            definition = it->second->get_definition();
+            definition = tool->get_definition();
         }
         return schema::normalize_arguments(definition, json_args);
     }
 
     [[nodiscard]] bool has_tool(const std::string& name) const {
         std::lock_guard lock(mutex_);
-        return tools_.contains(name);
+        return static_cast<bool>(find_tool_unlocked(name));
     }
 
     [[nodiscard]] std::optional<ToolDefinition>
     get_tool_definition(const std::string& name) const {
         std::lock_guard lock(mutex_);
-        auto it = tools_.find(name);
-        if (it == tools_.end()) return std::nullopt;
-        return it->second->get_definition();
+        auto tool = find_tool_unlocked(name);
+        if (!tool) return std::nullopt;
+        return tool->get_definition();
     }
 
     void clear_session_state(std::string_view session_id) {
@@ -167,6 +167,16 @@ public:
 
 private:
     ToolManager() = default;
+
+    [[nodiscard]] std::shared_ptr<Tool> find_tool_unlocked(std::string_view name) const {
+        const std::string key{name};
+        if (auto it = tools_.find(key); it != tools_.end()) return it->second;
+        const auto canonical = policy::canonical_tool_name(name);
+        if (canonical == key) return {};
+        if (auto it = tools_.find(canonical); it != tools_.end()) return it->second;
+        return {};
+    }
+
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::shared_ptr<Tool>> tools_;
 };

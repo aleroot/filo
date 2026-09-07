@@ -42,8 +42,8 @@ TEST_CASE("resolve_trust_flags supports wildcard trust tools",
 
     REQUIRE(resolved.trust_all_tools);
     REQUIRE(resolved.trusted_tool_names
-            == std::vector<std::string>{"read_file", "grep_search"});
+            == std::vector<std::string>{"read", "grep_search"});
     REQUIRE(resolved.session_allow_rules
-            == std::vector<std::string>{"tool:read_file", "tool:grep_search"});
+            == std::vector<std::string>{"tool:read", "tool:grep_search"});
 }
 

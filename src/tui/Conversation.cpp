@@ -5,6 +5,7 @@
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/tools/read/ReadTypes.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
 
@@ -16,10 +17,12 @@
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <format>
+#include <system_error>
 #include <memory>
 #include <optional>
 #include <random>
@@ -534,7 +537,7 @@ struct ToolPresentation {
 ToolPresentation tool_presentation(std::string_view name) {
     using namespace core::tools::names;
     using Kind = ToolPresentationKind;
-    if (name == kReadFile)                          return {Kind::Read,      "Read"};
+    if (is_read_tool(name))                          return {Kind::Read,      "Read"};
     if (name == kWriteFile)                         return {Kind::Write,     "Write"};
     if (name == kApplyPatch)                        return {Kind::Edit,      "Patch"};
     if (name == kSearchReplace || is_replace_tool(name)) return {Kind::Edit, "Edit"};
@@ -766,7 +769,7 @@ bool parse_fetch_metadata(std::string_view payload, FetchMetadata& out) {
     return out.parsed;
 }
 
-/// First line requested by a `read_file` call, so the transcript's gutter
+/// First line requested by a `read` call, so the transcript's gutter
 /// matches the file's real line numbers. Defaults to 1.
 std::int64_t read_start_line(std::string_view tool_args) {
     std::int64_t start_line = 1;
@@ -780,6 +783,44 @@ std::int64_t read_start_line(std::string_view tool_args) {
         }
     });
     return start_line;
+}
+
+/// Reads the decimal run that starts at `text`, or 0 when there is none.
+std::size_t leading_count(std::string_view text) {
+    std::size_t value = 0;
+    const auto* first = text.data();
+    const auto* last = first + std::min<std::size_t>(text.size(), 16);
+    const auto [ptr, ec] = std::from_chars(first, last, value);
+    return ec == std::errc{} && ptr != first ? value : 0;
+}
+
+/// Line count for a read card. Compressed and cached summaries state the size
+/// of the source they replaced; counting their own text made
+/// `Chat.swift:2820+220` look like a 120-line file and an unchanged re-read
+/// look like a one-line file.
+std::size_t read_result_line_count(std::string_view summary) {
+    constexpr std::string_view kOriginalMarker = "Original lines: ";
+    if (summary.starts_with("[full read summary]")
+        || summary.starts_with("[light read summary]")) {
+        const auto pos = summary.find(kOriginalMarker);
+        if (pos != std::string_view::npos && pos < 96) {
+            if (const auto value = leading_count(summary.substr(pos + kOriginalMarker.size()))) {
+                return value;
+            }
+        }
+    }
+    // `[cached read] <path> unchanged (221 lines, 12081 chars, read 2x, ...)`.
+    // The path is unbounded, so the marker is searched across the whole line.
+    if (summary.starts_with("[cached read]")) {
+        constexpr std::string_view kCachedMarker = " unchanged (";
+        const auto pos = summary.find(kCachedMarker);
+        if (pos != std::string_view::npos) {
+            if (const auto value = leading_count(summary.substr(pos + kCachedMarker.size()))) {
+                return value;
+            }
+        }
+    }
+    return visible_line_count(summary);
 }
 
 /// Everything a tool's header and body need, parsed exactly once per frame.
@@ -807,7 +848,7 @@ ToolResultView build_tool_result_view(const ToolActivity& tool) {
 
     switch (view.presentation.kind) {
         case ToolPresentationKind::Read:
-            view.read_line_count = visible_line_count(tool.result.summary);
+            view.read_line_count = read_result_line_count(tool.result.summary);
             view.read_start_line = read_start_line(tool.args);
             break;
         case ToolPresentationKind::Write:
@@ -2855,7 +2896,41 @@ bool conversation_uses_animation(const std::vector<UiMessage>& messages, bool sh
 // Tool Summary Functions
 // ============================================================================
 
+namespace {
+std::string summarize_read_arguments(const core::tools::read::Options& options) {
+    std::string paths;
+    for (std::size_t i = 0; i < options.paths.size(); ++i) {
+        if (i) paths += ", ";
+        paths += options.paths[i];
+    }
+    std::string range;
+    if (options.sliced) {
+        range = std::format(":{}", options.offset_line);
+        if (options.limit_lines) range += std::format("+{}", options.limit_lines);
+    }
+    std::string rest;
+    if (!options.cell.empty()) rest += " cell=" + options.cell;
+    if (options.view != "exact" && options.question.empty()) rest += " view=" + options.view;
+    if (!options.question.empty()) rest += " ? " + options.question;
+    // Keep `:offset+limit` visible when the path is long; truncate the path
+    // first so `Chat.swift:2820+220` cannot collapse to `Chat.swif...`.
+    if (!range.empty() && paths.size() + range.size() > kToolPreviewMaxLen) {
+        const auto keep = kToolPreviewMaxLen > range.size() + 3
+            ? kToolPreviewMaxLen - range.size() - 3 : 1;
+        // Cut on a codepoint boundary; a path is bytes, not glyphs.
+        return core::tools::read::bounded_prefix(paths, keep) + "..." + range;
+    }
+    return truncate_preview(paths + range + rest);
+}
+} // namespace
+
 std::string summarize_tool_arguments(std::string_view tool_name, std::string_view tool_args) {
+    if (core::tools::names::is_read_tool(tool_name)) {
+        if (auto options = core::tools::read::parse_options(tool_args)) {
+            return summarize_read_arguments(*options);
+        }
+    }
+
     simdjson::dom::parser parser;
     simdjson::dom::element document;
     if (parser.parse(tool_args).get(document) != simdjson::SUCCESS) {

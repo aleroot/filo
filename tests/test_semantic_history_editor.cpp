@@ -10,7 +10,7 @@ namespace {
 core::llm::Message read_call(std::string id, std::string arguments) {
     core::llm::ToolCall call;
     call.id = std::move(id);
-    call.function.name = "read_file";
+    call.function.name = "read";
     call.function.arguments = std::move(arguments);
     return core::llm::Message{
         .role = "assistant",
@@ -22,7 +22,7 @@ core::llm::Message result(std::string id, std::string content) {
     return core::llm::Message{
         .role = "tool",
         .content = std::move(content),
-        .name = "read_file",
+        .name = "read",
         .tool_call_id = std::move(id),
     };
 }

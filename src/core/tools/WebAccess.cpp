@@ -74,6 +74,7 @@ WebAccess::fetch(const FetchRequest& request,
                  const ToolInvocationContext& context) const {
     for (const auto& backend : fetch_backends_) {
         if (!backend || !backend->supports(context)) continue;
+        if (request.preserve_bytes && !backend->preserves_bytes()) continue;
         return backend->fetch(request, context);
     }
     return std::unexpected("No URL fetch backend is available.");

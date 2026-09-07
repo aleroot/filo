@@ -14,7 +14,7 @@ namespace core::workspace {
  * Filo hands the model two tools that reach the filesystem directly, without
  * passing through any workspace check: `run_terminal_command` (a persistent
  * shell) and `python` (an in-process interpreter). Denying the *native* path
- * tools (`read_file`, `list_directory`, `grep_search`, ...) access to a
+ * tools (`read`, `list_directory`, `grep_search`, ...) access to a
  * directory those execution tools can already reach buys no confidentiality --
  * it only removes the auditable, permission-gated, diff-rendering path to the
  * same bytes and pushes the model toward `cat`.

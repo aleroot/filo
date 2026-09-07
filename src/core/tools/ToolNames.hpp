@@ -7,7 +7,8 @@ namespace core::tools::names {
 
 inline constexpr std::string_view kRunTerminalCommand = "run_terminal_command";
 inline constexpr std::string_view kRunVerification = "run_verification";
-inline constexpr std::string_view kReadFile = "read_file";
+inline constexpr std::string_view kRead = "read";
+inline constexpr std::string_view kReadFile = "read_file"; // legacy alias for kRead
 inline constexpr std::string_view kWriteFile = "write_file";
 inline constexpr std::string_view kListDirectory = "list_directory";
 inline constexpr std::string_view kReplace = "replace";
@@ -33,7 +34,7 @@ inline constexpr std::string_view kTask = "task";
 inline constexpr std::string_view kDelegateTask = "delegate_task";
 
 inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
-    kReadFile,
+    kRead,
     kFileSearch,
     kGrepSearch,
     kListDirectory,
@@ -44,6 +45,28 @@ inline constexpr std::array<std::string_view, 7> kExploreAllowedTools{
 
 [[nodiscard]] constexpr bool is_web_access_tool(std::string_view tool_name) noexcept {
     return tool_name == kWebSearch || tool_name == kFetchUrl;
+}
+
+[[nodiscard]] constexpr bool is_read_tool(std::string_view tool_name) noexcept {
+    return tool_name == kRead || tool_name == kReadFile;
+}
+
+/// Canonical builtin name for a call alias. This is the single source of truth
+/// for the alias table: `policy::canonical_tool_name` normalizes case and
+/// whitespace and then delegates here, and the permission gate calls it
+/// directly so an aliased call is classified exactly like its canonical name.
+[[nodiscard]] constexpr std::string_view
+canonical_alias(std::string_view tool_name) noexcept {
+    if (tool_name == "shell" || tool_name == "terminal" || tool_name == "run_shell")
+        return kRunTerminalCommand;
+    if (tool_name == kReadFile) return kRead;
+    if (tool_name == "write")   return kWriteFile;
+    if (tool_name == "patch")   return kApplyPatch;
+    if (tool_name == "grep")    return kGrepSearch;
+    if (tool_name == "search")  return kFileSearch;
+    if (tool_name == "ls")      return kListDirectory;
+    if (tool_name == "mkdir")   return kCreateDirectory;
+    return tool_name;
 }
 
 [[nodiscard]] constexpr bool is_subagent_tool(std::string_view tool_name) noexcept {
@@ -81,7 +104,7 @@ is_verification_tool(std::string_view tool_name) noexcept {
 }
 
 [[nodiscard]] constexpr bool is_read_search_list_tool(std::string_view tool_name) noexcept {
-    return tool_name == kReadFile
+    return is_read_tool(tool_name)
         || tool_name == kFileSearch
         || tool_name == kGrepSearch
         || tool_name == kListDirectory;

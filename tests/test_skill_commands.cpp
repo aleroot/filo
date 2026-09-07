@@ -301,14 +301,14 @@ TEST_CASE("resolve_skill_turn selects the provider family for known model IDs",
     for (const auto* model : {"claude-sonnet-4-6", "claude-sonnet-5", "claude-fable-5"}) {
         const auto resolution = resolve_skill_turn(
             model,
-            {"read_file"},
+            {"read"},
             std::optional<std::string_view>{"claude"});
 
         CHECK(resolution.warning.empty());
         CHECK(resolution.callbacks.provider_override != nullptr);
         CHECK(resolution.callbacks.model_override == model);
         REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
-        CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+        CHECK(resolution.callbacks.allowed_tools.front() == "read");
     }
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
@@ -337,7 +337,7 @@ TEST_CASE("resolve_skill_turn falls back safely when provider hints are unavaila
 
     const auto resolution = resolve_skill_turn(
         "claude-sonnet-4-6",
-        {"read_file"});
+        {"read"});
 
     CHECK(resolution.callbacks.provider_override == nullptr);
     CHECK(resolution.callbacks.model_override.empty());
@@ -375,13 +375,13 @@ TEST_CASE("resolve_skill_turn matches Qwen model hints to DashScope providers",
 
     const auto resolution = resolve_skill_turn(
         "qwen3-max",
-        {"read_file"});
+        {"read"});
 
     CHECK(resolution.warning.empty());
     CHECK(resolution.callbacks.provider_override != nullptr);
     CHECK(resolution.callbacks.model_override == "qwen3-max");
     REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
-    CHECK(resolution.callbacks.allowed_tools.front() == "read_file");
+    CHECK(resolution.callbacks.allowed_tools.front() == "read");
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     fs::remove_all(sandbox);
@@ -424,7 +424,7 @@ TEST_CASE("resolve_skill_turn routes Token Plan model hints to Token Plan only",
 
     const auto resolution = resolve_skill_turn(
         "qwen3.7-plus",
-        {"read_file"});
+        {"read"});
 
     CHECK(resolution.warning.empty());
     CHECK(resolution.callbacks.provider_override != nullptr);
@@ -442,7 +442,7 @@ TEST_CASE("parse_manifest: parses 'allowed-tools' into allowed_tools vector",
     write_file(skill_dir / "SKILL.md", R"(---
 name: safe_review
 description: Review with limited tools.
-allowed-tools: shell, read_file, grep_search
+allowed-tools: shell, read, grep_search
 ---
 Review $ARGUMENTS.
 )");
@@ -451,7 +451,7 @@ Review $ARGUMENTS.
     REQUIRE(result.has_value());
     REQUIRE(result->allowed_tools.size() == 3);
     CHECK(result->allowed_tools[0] == "shell");
-    CHECK(result->allowed_tools[1] == "read_file");
+    CHECK(result->allowed_tools[1] == "read");
     CHECK(result->allowed_tools[2] == "grep_search");
 
     fs::remove_all(root);
@@ -465,7 +465,7 @@ TEST_CASE("parse_manifest: parses 'allowed_tools' (underscore variant) for cross
     write_file(skill_dir / "SKILL.md", R"(---
 name: safe_review2
 description: Review with limited tools (underscore key).
-allowed_tools: shell, read_file
+allowed_tools: shell, read
 ---
 Review $ARGUMENTS.
 )");
@@ -751,7 +751,7 @@ TEST_CASE("SkillCommand::execute dispatches direct agent fallback asynchronously
     m.description = "Fallback skill";
     m.type        = SkillType::Prompt;
     m.body        = "Run fallback prompt.";
-    m.allowed_tools = {"read_file"};
+    m.allowed_tools = {"read"};
 
     SkillCommand cmd(m);
 

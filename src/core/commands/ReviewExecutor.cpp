@@ -998,7 +998,7 @@ std::string build_review_submission_prompt(const ResolvedReviewRequest& request)
         prompt += "Use available tools to inspect the relevant git changes and code.\n";
         prompt += "Minimize token usage while staying accurate:\n";
         prompt += "- Start with diff summaries (`git diff --stat`, changed files) before deep dives.\n";
-        prompt += "- Read only targeted slices (`read_file` with offset_line/limit_lines) when possible.\n";
+        prompt += "- Read only targeted slices (`read` with offset_line/limit_lines) when possible.\n";
         prompt += "- Avoid redundant reads of the same large files unless needed to verify a finding.\n";
         prompt += "- Do not run broad repository scans or tests unless the diff makes them necessary.\n";
         prompt += "- Finish once you have inspected the relevant diff and any directly related code.\n";

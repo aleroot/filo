@@ -558,7 +558,7 @@ TEST_CASE("KimiSerializer - assistant message with tool_calls uses null content"
     ToolCall tc;
     tc.id = "call_xyz";
     tc.type = "function";
-    tc.function.name = "read_file";
+    tc.function.name = "read";
     tc.function.arguments = R"({"path": "/etc/hosts"})";
     assistant_msg.tool_calls = {tc};
     req.messages.push_back(assistant_msg);
@@ -567,7 +567,7 @@ TEST_CASE("KimiSerializer - assistant message with tool_calls uses null content"
     auto payload = protocol.serialize(req);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("tool_calls")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("id":"call_xyz")"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read_file")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"read")"));
     // Empty content with tool_calls should emit null, not an empty string
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("content":"")"));
     // No reasoning_content when empty — sending "" causes Kimi 400 on non-thinking models
@@ -586,7 +586,7 @@ TEST_CASE("KimiSerializer - assistant tool_calls message with reasoning_content 
     ToolCall tc;
     tc.id = "call_think";
     tc.type = "function";
-    tc.function.name = "read_file";
+    tc.function.name = "read";
     tc.function.arguments = R"({"path": "/etc/hosts"})";
     assistant_msg.tool_calls = {tc};
     req.messages.push_back(assistant_msg);
@@ -722,7 +722,7 @@ TEST_CASE("KimiSerializer - optional parameters excluded from required array", "
 
 TEST_CASE("KimiSerializer - multiple tools serialized without trailing comma", "[kimi][serializer][tools]") {
     auto req = make_simple_request();
-    for (const auto& name : {"read_file", "write_file"}) {
+    for (const auto& name : {"read", "write_file"}) {
         core::tools::ToolDefinition def;
         def.name = name;
         def.description = "A file tool";
@@ -734,7 +734,7 @@ TEST_CASE("KimiSerializer - multiple tools serialized without trailing comma", "
     }
 
     auto payload = Serializer::serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("read_file")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("read")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("write_file")"));
     // No trailing comma before closing bracket (rudimentary check)
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(",]"));
@@ -1153,7 +1153,7 @@ TEST_CASE("parse_kimi_sse_chunk - multiple tool calls in single chunk", "[kimi][
             "index": 0,
             "delta": {
                 "tool_calls": [
-                    {"index": 0, "id": "call_aaa", "type": "function", "function": {"name": "read_file", "arguments": ""}},
+                    {"index": 0, "id": "call_aaa", "type": "function", "function": {"name": "read", "arguments": ""}},
                     {"index": 1, "id": "call_bbb", "type": "function", "function": {"name": "grep_search", "arguments": ""}}
                 ]
             },
@@ -1165,7 +1165,7 @@ TEST_CASE("parse_kimi_sse_chunk - multiple tool calls in single chunk", "[kimi][
     REQUIRE(tools.size() == 2);
     REQUIRE(tools[0].index == 0);
     REQUIRE(tools[0].id == "call_aaa");
-    REQUIRE(tools[0].function.name == "read_file");
+    REQUIRE(tools[0].function.name == "read");
     REQUIRE(tools[1].index == 1);
     REQUIRE(tools[1].id == "call_bbb");
     REQUIRE(tools[1].function.name == "grep_search");

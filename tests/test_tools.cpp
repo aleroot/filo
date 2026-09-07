@@ -5,7 +5,7 @@
 #include "core/auth/ICredentialSource.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/ProviderClientIdentity.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
@@ -258,10 +258,10 @@ private:
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 
 // ---------------------------------------------------------------------------
-// WriteFileTool / ReadFileTool
+// WriteFileTool / ReadTool
 // ---------------------------------------------------------------------------
 
-TEST_CASE("WriteFileTool and ReadFileTool", "[tools]") {
+TEST_CASE("WriteFileTool and ReadTool", "[tools]") {
     std::string test_file = "test_artifact_1.txt";
 
     WriteFileTool write_tool;
@@ -271,7 +271,7 @@ TEST_CASE("WriteFileTool and ReadFileTool", "[tools]") {
     REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(R"("file_path")"));
     REQUIRE(std::filesystem::exists(test_file));
 
-    ReadFileTool read_tool;
+    ReadTool read_tool;
     std::string read_args = "{\"path\": \"" + test_file + "\"}";
     std::string read_res = read_tool.execute(read_args);
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Hello, Filo!\\nThis is a test."));
@@ -314,7 +314,7 @@ TEST_CASE("WriteFileTool resolves relative paths against scoped workspace overri
         REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(expected_path.string()));
         REQUIRE(std::filesystem::exists(expected_path));
 
-        ReadFileTool read_tool;
+        ReadTool read_tool;
         const auto read_res = read_tool.execute(
             std::string(R"({"path":")")
             + requested_relative.generic_string()
@@ -328,14 +328,14 @@ TEST_CASE("WriteFileTool resolves relative paths against scoped workspace overri
     ws.initialize("", {}, false);
 }
 
-TEST_CASE("ReadFileTool offset_line and limit_lines", "[tools]") {
+TEST_CASE("ReadTool offset_line and limit_lines", "[tools]") {
     const std::string path = "test_artifact_lines.txt";
     {
         std::ofstream ofs(path);
         for (int i = 1; i <= 10; ++i) ofs << "line" << i << "\n";
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     auto res = tool.execute("{\"path\": \"" + path + "\", \"offset_line\": 3, \"limit_lines\": 3}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("line3"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("line5"));
@@ -345,26 +345,26 @@ TEST_CASE("ReadFileTool offset_line and limit_lines", "[tools]") {
     std::filesystem::remove(path);
 }
 
-TEST_CASE("ReadFileTool returns error for missing file", "[tools]") {
-    ReadFileTool tool;
+TEST_CASE("ReadTool returns error for missing file", "[tools]") {
+    ReadTool tool;
     auto res = tool.execute("{\"path\": \"nonexistent_xyz_99999.txt\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("path does not exist"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("resolved"));
 }
 
-TEST_CASE("ReadFileTool returns error for unexpected arguments", "[tools]") {
-    ReadFileTool tool;
+TEST_CASE("ReadTool returns error for unexpected arguments", "[tools]") {
+    ReadTool tool;
     auto res = tool.execute(R"({"file_path":"legacy.txt"})");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
 }
 
-TEST_CASE("ReadFileTool reports directory path as non-regular file", "[tools]") {
+TEST_CASE("ReadTool reports directory path as non-regular file", "[tools]") {
     const std::string dir = "test_artifact_read_dir";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
-    ReadFileTool tool;
+    ReadTool tool;
     const auto res = tool.execute("{\"path\": \"" + dir + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("not a regular file"));
@@ -373,14 +373,14 @@ TEST_CASE("ReadFileTool reports directory path as non-regular file", "[tools]") 
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("ReadFileTool reads files that contain spaces in their path", "[tools]") {
+TEST_CASE("ReadTool reads files that contain spaces in their path", "[tools]") {
     const std::string path = "test artifact read with spaces.txt";
     {
         std::ofstream ofs(path);
         ofs << "space_path_ok";
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     const auto res = tool.execute("{\"path\": \"" + path + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("space_path_ok"));
 
@@ -433,7 +433,7 @@ TEST_CASE("Every path tool reaches scratch paths uniformly",
     // Reads, listings, and searches must not be second-class relative to
     // mutations. An asymmetry here is what forced the model onto `cat`.
     for (const auto tool_name : {
-             names::kReadFile,
+             names::kRead,
              names::kListDirectory,
              names::kGrepSearch,
              names::kFileSearch,
@@ -458,7 +458,7 @@ TEST_CASE("Every path tool reaches scratch paths uniformly",
     }
 }
 
-TEST_CASE("ReadFileTool reads a scratch file regardless of which tool created it",
+TEST_CASE("ReadTool reads a scratch file regardless of which tool created it",
           "[tools][workspace][temp]") {
     // Regression: the embedded Python interpreter and any out-of-band producer
     // write scratch files without notifying the tool layer. Reachability must
@@ -483,7 +483,7 @@ TEST_CASE("ReadFileTool reads a scratch file regardless of which tool created it
     { std::ofstream(temp_file) << "produced out of band\n"; }
 
 #undef execute
-    ReadFileTool read_tool;
+    ReadTool read_tool;
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
@@ -493,7 +493,7 @@ TEST_CASE("ReadFileTool reads a scratch file regardless of which tool created it
     std::filesystem::remove(temp_file, ec);
 }
 
-TEST_CASE("ReadFileTool can read temp files created by the same shell session",
+TEST_CASE("ReadTool can read temp files created by the same shell session",
           "[tools][workspace][temp]") {
     const auto workspace_root = std::filesystem::current_path();
     const ScopedWorkspaceEnforcement scoped_workspace(workspace_root);
@@ -522,7 +522,7 @@ TEST_CASE("ReadFileTool can read temp files created by the same shell session",
         context);
     REQUIRE_THAT(shell_res, Catch::Matchers::ContainsSubstring(R"("exit_code":0)"));
 
-    ReadFileTool read_tool;
+    ReadTool read_tool;
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
@@ -561,7 +561,7 @@ TEST_CASE("WriteFileTool round-trips temp files outside an enforced workspace",
         context);
     REQUIRE_THAT(write_res, Catch::Matchers::ContainsSubstring(R"("success":true)"));
 
-    ReadFileTool read_tool;
+    ReadTool read_tool;
     const auto read_res = read_tool.execute(
         std::format(R"({{"path":"{}"}})", temp_file.string()),
         context);
@@ -628,7 +628,7 @@ TEST_CASE("Session cleanup does not revoke scratch access",
 
 #undef execute
     ShellTool shell_tool;
-    ReadFileTool read_tool;
+    ReadTool read_tool;
 
     const auto shell_res = shell_tool.execute(
         std::format(
@@ -684,7 +684,7 @@ TEST_CASE("Scratch symlinks cannot escape into non-scratch targets",
         temp_link.string(),
         context,
         nullptr,
-        names::kReadFile);
+        names::kRead);
     REQUIRE(access_error.has_value());
     REQUIRE_THAT(*access_error, Catch::Matchers::ContainsSubstring("Access denied"));
 
@@ -710,7 +710,7 @@ TEST_CASE("An empty scratch scope denies temp paths to every tool",
         / ("filo_scratch_disabled_" + std::to_string(getpid()) + ".txt");
 
     for (const auto tool_name : {
-             names::kReadFile,
+             names::kRead,
              names::kListDirectory,
              names::kWriteFile,
              names::kDeleteFile,
@@ -749,11 +749,11 @@ TEST_CASE("A relocated scratch root is the only reachable scratch directory",
 
     const auto inside = sandbox_tmp / "inside.txt";
     REQUIRE_FALSE(detail::check_workspace_access(
-        inside, inside.string(), context, nullptr, names::kReadFile).has_value());
+        inside, inside.string(), context, nullptr, names::kRead).has_value());
 
     const auto outside = std::filesystem::path("/var/tmp/filo_scratch_outside.txt");
     const auto outside_error = detail::check_workspace_access(
-        outside, outside.string(), context, nullptr, names::kReadFile);
+        outside, outside.string(), context, nullptr, names::kRead);
     REQUIRE(outside_error.has_value());
     REQUIRE_THAT(*outside_error, Catch::Matchers::ContainsSubstring("Access denied"));
 
@@ -833,7 +833,7 @@ TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",
                     "denied_paths": ["blocked"],
                     "allowed_commands": ["echo base"]
                 },
-                "read_file": {
+                "read": {
                     "allowed_paths": ["allowed"]
                 },
                 "shell": {
@@ -861,7 +861,7 @@ TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",
             "tool-policy-session");
 
 #undef execute
-        ReadFileTool read_tool;
+        ReadTool read_tool;
         const auto allowed_result = read_tool.execute(
             R"({"path":"allowed/ok.txt"})",
             context);
@@ -928,7 +928,7 @@ TEST_CASE("Tool policies merge deterministically and enforce trusted URLs",
     std::filesystem::remove_all(sandbox, ec);
 }
 
-TEST_CASE("ReadFileTool handles dot-segment paths", "[tools]") {
+TEST_CASE("ReadTool handles dot-segment paths", "[tools]") {
     const std::string root = "test_artifact_read_segments";
     const std::string file = root + "/nested/value.txt";
     std::filesystem::remove_all(root);
@@ -938,7 +938,7 @@ TEST_CASE("ReadFileTool handles dot-segment paths", "[tools]") {
         ofs << "dot_segments_ok";
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     const std::string path_with_segments = root + "/nested/../nested/./value.txt";
     const auto res = tool.execute("{\"path\": \"" + path_with_segments + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("dot_segments_ok"));
@@ -947,7 +947,7 @@ TEST_CASE("ReadFileTool handles dot-segment paths", "[tools]") {
 }
 
 #ifndef _WIN32
-TEST_CASE("ReadFileTool reports open failure details for unreadable file", "[tools]") {
+TEST_CASE("ReadTool reports open failure details for unreadable file", "[tools]") {
     if (getuid() == 0) {
         SKIP("Running as root - permission checks don't apply");
     }
@@ -966,7 +966,7 @@ TEST_CASE("ReadFileTool reports open failure details for unreadable file", "[too
         SKIP("Permission changes are unavailable in this environment");
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     const auto res = tool.execute("{\"path\": \"" + path + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("failed to open file for reading"));
@@ -979,7 +979,7 @@ TEST_CASE("ReadFileTool reports open failure details for unreadable file", "[too
     std::filesystem::remove(path);
 }
 
-TEST_CASE("ReadFileTool follows symlink to regular file", "[tools]") {
+TEST_CASE("ReadTool follows symlink to regular file", "[tools]") {
     const std::string target = "test_artifact_read_target.txt";
     const std::string link = "test_artifact_read_link.txt";
     std::filesystem::remove(target);
@@ -997,7 +997,7 @@ TEST_CASE("ReadFileTool follows symlink to regular file", "[tools]") {
         SKIP("Symlink creation is unavailable in this environment");
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     const auto res = tool.execute("{\"path\": \"" + link + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("symlink_ok"));
 
@@ -1005,7 +1005,7 @@ TEST_CASE("ReadFileTool follows symlink to regular file", "[tools]") {
     std::filesystem::remove(target);
 }
 
-TEST_CASE("ReadFileTool reports missing target for dangling symlink", "[tools]") {
+TEST_CASE("ReadTool reports missing target for dangling symlink", "[tools]") {
     const std::string link = "test_artifact_read_dangling_link.txt";
     std::filesystem::remove(link);
 
@@ -1016,7 +1016,7 @@ TEST_CASE("ReadFileTool reports missing target for dangling symlink", "[tools]")
         SKIP("Symlink creation is unavailable in this environment");
     }
 
-    ReadFileTool tool;
+    ReadTool tool;
     const auto res = tool.execute("{\"path\": \"" + link + "\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("path does not exist"));
@@ -1832,6 +1832,22 @@ TEST_CASE("ToolManager returns error for unknown tool", "[tools]") {
     auto res = mgr.execute_tool("nonexistent_tool_xyz", "{}", make_tool_test_context());
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("not found"));
+}
+
+TEST_CASE("ToolManager executes the legacy read_file alias", "[tools][read]") {
+    auto& mgr = ToolManager::get_instance();
+    mgr.register_tool(std::make_shared<ReadTool>());
+    const std::string path = "test_artifact_read_file_alias.txt";
+    {
+        std::ofstream file(path);
+        file << "alias-ok\n";
+    }
+    const auto res = mgr.execute_tool(
+        "read_file",
+        std::string(R"({"path":")") + path + R"("})",
+        make_tool_test_context());
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("alias-ok"));
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("ToolManager get_all_tools returns registered tools", "[tools]") {

@@ -172,7 +172,7 @@ void capture_tool_effects(HandoffSignals& signals,
 
     append_unique_limited(signals.recent_tools, tool, 8, 64);
 
-    if (tool == core::tools::names::kReadFile) {
+    if (core::tools::names::is_read_tool(tool)) {
         append_unique_limited(signals.files_read, basename_or_self(core::utils::json::first_string_field_or_empty(tool_args, {"path"})), 6, 96);
     } else if (tool == core::tools::names::kApplyPatch) {
         capture_patch_paths(signals, core::utils::json::first_string_field_or_empty(tool_args, {"patch"}));

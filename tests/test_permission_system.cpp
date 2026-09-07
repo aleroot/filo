@@ -204,12 +204,12 @@ TEST_CASE("PermissionSystem basic flow", "[permissions]") {
         sys.set_yolo_mode(false);
         
         bool called = false;
-        bool result = sys.check_permission("read_file",
+        bool result = sys.check_permission("read",
                                            R"({"file_path":"test.txt"})",
                                            false,
                                            [&called](bool r) { called = r; });
         
-        // read_file doesn't need permission
+        // read doesn't need permission
         REQUIRE(result);
         REQUIRE(called);
     }
@@ -504,7 +504,7 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
         REQUIRE(normalize_session_allow_rule("run_terminal_command:")
                 == "run_terminal_command:");
         REQUIRE(normalize_session_allow_rule("write_file") == "write_file");
-        REQUIRE(normalize_session_allow_rule("tool:Read_File") == "tool:read_file");
+        REQUIRE(normalize_session_allow_rule("tool:Read") == "tool:read");
     }
 
     SECTION("session_allow_rule_matches supports shell, files, and tools") {

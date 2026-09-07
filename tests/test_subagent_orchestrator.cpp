@@ -8,7 +8,7 @@
 #include "core/llm/ProviderManager.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WriteFileTool.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/FileSearchTool.hpp"
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
@@ -270,7 +270,7 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     auto& tool_manager = core::tools::ToolManager::get_instance();
 
     tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReadFileTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
     tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
@@ -295,7 +295,7 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     REQUIRE_FALSE(requests.empty());
 
     const auto names = tool_names(requests.front());
-    REQUIRE(names.contains("read_file"));
+    REQUIRE(names.contains("read"));
     REQUIRE(names.contains("file_search"));
     REQUIRE(names.contains("grep_search"));
     REQUIRE(names.contains("list_directory"));
@@ -310,6 +310,33 @@ TEST_CASE("SubagentOrchestrator explore profile enforces read-only tool filterin
     REQUIRE_FALSE(orchestrator.task_is_read_only(
         R"({"description":"change repo","prompt":"make changes","subagent_type":"general"})",
         "BUILD"));
+}
+
+TEST_CASE("SubagentOrchestrator does not spawn the internal reader profile", "[agent][orchestration][read]") {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    core::config::AppConfig config;
+    core::config::SubagentConfig reader;
+    reader.provider = "local-reader";
+    reader.model = "test-reader";
+    reader.enabled = true;
+    config.subagents.emplace("reader", std::move(reader));
+    core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
+    const auto session_context = test_support::make_workspace_session_context();
+
+    const auto result = orchestrator.execute_task(
+        R"({"description":"read files","prompt":"summarize","subagent_type":"reader"})",
+        provider,
+        {
+            .active_model = "gpt-4o",
+            .parent_mode = "BUILD",
+            .session_context = session_context,
+            .permission_check = {},
+        });
+
+    REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("\"error\""));
+    REQUIRE_THAT(result, Catch::Matchers::ContainsSubstring("Unknown subagent_type"));
+    REQUIRE(provider->requests_snapshot().empty());
 }
 
 TEST_CASE("SubagentOrchestrator rejects unknown subagent_type", "[agent][orchestration]") {
@@ -502,7 +529,7 @@ TEST_CASE("AUTO parent mode is not inherited by delegated workers",
     auto& tool_manager = core::tools::ToolManager::get_instance();
 
     tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
-    tool_manager.register_tool(std::make_shared<core::tools::ReadFileTool>());
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
     tool_manager.register_tool(std::make_shared<core::tools::FileSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::GrepSearchTool>());
     tool_manager.register_tool(std::make_shared<core::tools::ListDirectoryTool>());

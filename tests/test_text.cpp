@@ -47,14 +47,14 @@ TEST_CASE("Text newline and utf8 editing helpers are stable", "[tui][text]") {
 TEST_CASE("Text search text includes tool metadata", "[tui][text]") {
     tui::UiMessage msg = tui::make_assistant_message("Primary answer", "", false);
     msg.secondary_text = "Secondary note";
-    auto tool = tui::make_tool_activity("tool-1", "read_file", "{}", "Open config");
+    auto tool = tui::make_tool_activity("tool-1", "read", "{}", "Open config");
     tool.result.summary = "line one\nline two";
     msg.tools.push_back(tool);
 
     const std::string searchable = tui::search_text_for_message(msg);
     REQUIRE_THAT(searchable, Catch::Matchers::ContainsSubstring("Primary answer"));
     REQUIRE_THAT(searchable, Catch::Matchers::ContainsSubstring("Secondary note"));
-    REQUIRE_THAT(searchable, Catch::Matchers::ContainsSubstring("read_file Open config"));
+    REQUIRE_THAT(searchable, Catch::Matchers::ContainsSubstring("read Open config"));
     REQUIRE_THAT(searchable, Catch::Matchers::ContainsSubstring("line one line two"));
 }
 

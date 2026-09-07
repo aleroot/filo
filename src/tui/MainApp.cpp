@@ -61,7 +61,7 @@
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/FileSearchTool.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
@@ -4637,7 +4637,7 @@ RunResult run(RunOptions opts) {
             next.help_text = "Esc closes this panel.";
             next.options = {
                 {.value = "off", .label = "Off", .description = "Keep tool outputs exact until the hard history-size clamp."},
-                {.value = "light", .label = "Light", .description = "Summarize only oversized read_file and shell outputs."},
+                {.value = "light", .label = "Light", .description = "Summarize only oversized read and shell outputs."},
                 {.value = "full", .label = "Full", .description = "Use read caching plus command-family summaries for common shell output."},
                 {.value = "ultra", .label = "Ultra", .description = "Use the tightest built-in budgets for high token pressure."},
             };
@@ -6061,6 +6061,11 @@ RunResult run(RunOptions opts) {
                                 tool_call.function.name,
                                 tool_call.function.arguments)));
                         tool = &message.tools.back();
+                    } else {
+                        tool->args = tool_call.function.arguments;
+                        tool->description = summarize_tool_arguments(
+                            tool_call.function.name,
+                            tool_call.function.arguments);
                     }
 
                     apply_tool_result(*tool, result.content);

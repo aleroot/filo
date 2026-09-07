@@ -664,7 +664,7 @@ std::string default_config_json() {
             "allow_task_tool": false,
             "use_allow_list": true,
             "allowed_tools": [
-                "read_file",
+                "read",
                 "file_search",
                 "grep_search",
                 "list_directory",

@@ -1,6 +1,7 @@
 #include "ToolCallDeduplicator.hpp"
 
 #include "../tools/ToolNames.hpp"
+#include "../tools/read/ReadTypes.hpp"
 
 #include <algorithm>
 #include <format>
@@ -150,6 +151,20 @@ std::string ToolCallDeduplicator::key_for_call(const core::llm::ToolCall& call) 
     if (!should_track_tool(call.function.name)) {
         return {};
     }
+    if (core::tools::names::is_read_tool(call.function.name)) {
+        // Resource snapshots and model answers have their own freshness rules.
+        // Restrict legacy deduplication to ordinary local exact file reads.
+        auto options = core::tools::read::parse_options(call.function.arguments);
+        if (!options
+            || options->paths.size() != 1
+            || options->paths.front().contains("://")
+            || !options->question.empty()
+            || !options->cell.empty()
+            || !options->expected_digest.empty()
+            || options->view != "exact") {
+            return {};
+        }
+    }
     return call.function.name + " " + canonicalize_arguments(call.function.arguments);
 }
 
@@ -187,7 +202,7 @@ std::string ToolCallDeduplicator::canonicalize_arguments(std::string_view argume
 
 bool ToolCallDeduplicator::should_track_tool(std::string_view tool_name) noexcept {
     using namespace core::tools::names;
-    return tool_name == kReadFile
+    return is_read_tool(tool_name)
         || tool_name == kFileSearch
         || tool_name == kGrepSearch
         || tool_name == kListDirectory

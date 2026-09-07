@@ -122,7 +122,7 @@ TEST_CASE("Qwen Token Plan completes a streamed HTTP tool round trip",
         received.push_back(request);
         const std::string body = received.size() == 1
             ? "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect the file.\"}}]}\r\n\r\n"
-              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_read\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_read\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\r\n\r\n"
               "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\r\n\r\n"
               "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":24,\"prompt_tokens_details\":{\"cached_tokens\":100},\"completion_tokens_details\":{\"reasoning_tokens\":8}}}\r\n\r\n"
               "data: [DONE]\r\n\r\n"
@@ -159,7 +159,7 @@ TEST_CASE("Qwen Token Plan completes a streamed HTTP tool round trip",
     request.messages = {Message{.role = "system", .content = "Inspect requested files."},
                         Message{.role = "user", .content = "Read README.md"}};
     Tool tool;
-    tool.function.name = "read_file";
+    tool.function.name = "read";
     tool.function.description = "Read a file";
     tool.function.input_schema = R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})";
     request.tools.push_back(tool);
@@ -180,7 +180,7 @@ TEST_CASE("Qwen Token Plan completes a streamed HTTP tool round trip",
     });
     REQUIRE_FALSE(had_error);
     REQUIRE(call.id == "call_read");
-    REQUIRE(call.function.name == "read_file");
+    REQUIRE(call.function.name == "read");
     REQUIRE(call.function.arguments == R"({"path":"README.md"})");
     REQUIRE(assistant.reasoning_content == "Inspect the file.");
     CHECK(assistant.reasoning_protocol == "dashscope");
@@ -860,7 +860,7 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
               "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"
               "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-first-turn\"}}\n\n"
               "event: content_block_stop\ndata: {\"index\":0}\n\n"
-              "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"read-1\",\"name\":\"read_file\",\"input\":{}}}\n\n"
+              "event: content_block_start\ndata: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"read-1\",\"name\":\"read\",\"input\":{}}}\n\n"
               "event: content_block_delta\ndata: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
               "event: content_block_stop\ndata: {\"index\":1}\n\n"
               "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":20}}\n\n"
@@ -890,7 +890,7 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
     auto request = make_claude_request("fable");
     request.messages.insert(request.messages.begin(), Message{.role = "system", .content = "Read the file."});
     core::tools::ToolDefinition definition;
-    definition.name = "read_file";
+    definition.name = "read";
     definition.description = "Read a file";
     request.tools.push_back(Tool{.type = "function", .function = std::move(definition)});
     Message assistant{.role = "assistant"};

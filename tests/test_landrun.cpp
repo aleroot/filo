@@ -67,7 +67,7 @@ TEST_CASE("read-only landrun mode blocks native mutation tools only",
     REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kWriteFile));
     REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kApplyPatch));
     REQUIRE_FALSE(landrun_allows_tool(LandrunMode::read_only, kCreateDirectory));
-    REQUIRE(landrun_allows_tool(LandrunMode::read_only, kReadFile));
+    REQUIRE(landrun_allows_tool(LandrunMode::read_only, kRead));
     REQUIRE(landrun_allows_tool(LandrunMode::read_only, kRunTerminalCommand));
     REQUIRE(landrun_allows_tool(LandrunMode::workspace_write, kWriteFile));
     REQUIRE(landrun_allows_tool(LandrunMode::off, kWriteFile));
@@ -490,7 +490,7 @@ TEST_CASE("scratch scope matches the sandbox temp grants in every mode",
     // whatever temp directory the compiled policy hands the process tree must
     // also be in the scope the native path tools consult. A previous revision
     // configured scratch from LandrunSettings::effective_tmpdir(), a strict
-    // subset, so the shell could create /tmp/output while read_file denied it.
+    // subset, so the shell could create /tmp/output while read denied it.
     namespace landrun = core::landrun;
 
     std::error_code ec;

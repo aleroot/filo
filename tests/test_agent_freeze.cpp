@@ -6,7 +6,7 @@
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/FileSearchTool.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
@@ -30,7 +30,7 @@ int main() {
     sm.register_tool(std::make_shared<core::tools::ShellTool>());
     sm.register_tool(std::make_shared<core::tools::ApplyPatchTool>());
     sm.register_tool(std::make_shared<core::tools::FileSearchTool>());
-    sm.register_tool(std::make_shared<core::tools::ReadFileTool>());
+    sm.register_tool(std::make_shared<core::tools::ReadTool>());
     sm.register_tool(std::make_shared<core::tools::WriteFileTool>());
     sm.register_tool(std::make_shared<core::tools::ListDirectoryTool>());
     sm.register_tool(std::make_shared<core::tools::ReplaceTool>());

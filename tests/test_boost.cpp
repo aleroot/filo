@@ -354,7 +354,7 @@ TEST_CASE("Boost respects read-only mode and explicit tool restrictions", "[boos
   std::string status;
   send(agent, "/boost inspect",
        {.on_status_log = [&](const std::string &text) { status += text; },
-        .allowed_tools = {"read_file"}});
+        .allowed_tools = {"read"}});
   CHECK_FALSE(agent->last_turn_failed());
   CHECK(provider->reviews == 1); // no second reviewer was ever consulted
   CHECK_THAT(status, ContainsSubstring("degraded"));

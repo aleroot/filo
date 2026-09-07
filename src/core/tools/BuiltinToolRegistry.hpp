@@ -3,6 +3,7 @@
 #include "AskUserQuestionTool.hpp"
 #include "../memory/MemoryStore.hpp"
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -25,6 +26,10 @@ struct BuiltinToolRegistrationOptions {
     /// Semantic store from the execution-root MemorySystem. When unset the
     /// tool uses the default on-disk path handle (same file, separate owner).
     std::optional<core::memory::MemoryStore> memory_store;
+    /// Root that `read` resolves `result://` references against. It must match
+    /// the root the owning Agent stores oversized tool output in; when unset
+    /// both sides use ToolResultStore's default root.
+    std::optional<std::filesystem::path> tool_result_root;
 };
 
 [[nodiscard]] BuiltinToolRegistrationOptions agent_builtin_tool_options();

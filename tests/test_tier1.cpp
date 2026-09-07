@@ -539,7 +539,7 @@ TEST_CASE("needs_permission — dangerous tools identified correctly", "[tier1][
     REQUIRE(needs_permission("delete_file"));
     REQUIRE(needs_permission("move_file"));
 
-    REQUIRE_FALSE(needs_permission("read_file"));
+    REQUIRE_FALSE(needs_permission("read"));
     REQUIRE_FALSE(needs_permission("list_directory"));
     REQUIRE_FALSE(needs_permission("grep_search"));
     REQUIRE_FALSE(needs_permission("file_search"));
@@ -554,7 +554,7 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
     constexpr std::string_view json = R"({
         "tools": [
             {
-                "name": "read_file",
+                "name": "read",
                 "title": "Read File",
                 "description": "Read a file from the filesystem.",
                 "inputSchema": {
@@ -597,7 +597,7 @@ TEST_CASE("parse_tools_list — parses a simple tools/list response", "[tier1][m
     auto tools = parse_tools_list(json);
     REQUIRE(tools.size() == 2);
 
-    REQUIRE(tools[0].name == "read_file");
+    REQUIRE(tools[0].name == "read");
     REQUIRE(tools[0].title == "Read File");
     REQUIRE_THAT(tools[0].description, Catch::Matchers::ContainsSubstring("Read a file"));
     REQUIRE_THAT(tools[0].input_schema, Catch::Matchers::ContainsSubstring(R"("properties")"));

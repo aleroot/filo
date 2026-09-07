@@ -14,7 +14,7 @@
 #include "MemoryTool.hpp"
 #include "MoveFileTool.hpp"
 #include "PathVisibilityToolDecorator.hpp"
-#include "ReadFileTool.hpp"
+#include "ReadTool.hpp"
 #include "ReplaceTool.hpp"
 #include "SearchReplaceTool.hpp"
 #include "ShellTool.hpp"
@@ -68,7 +68,11 @@ void register_builtin_tools(ToolManager& tool_manager,
     tool_manager.register_tool(with_path_visibility(std::make_shared<ApplyPatchTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<FileSearchTool>()));
     tool_manager.register_tool(
-        with_path_visibility(std::make_shared<ReadFileTool>()));
+        with_path_visibility(std::make_shared<ReadTool>(
+            read::ResourceReader(options.tool_result_root.has_value()
+                ? core::agent::ToolResultStore(*options.tool_result_root)
+                : core::agent::ToolResultStore{}),
+            read::ReaderWorker{})));
     tool_manager.register_tool(
         with_path_visibility(std::make_shared<WriteFileTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<ListDirectoryTool>()));

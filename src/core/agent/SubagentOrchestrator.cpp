@@ -5,8 +5,10 @@
 #include "../config/ConfigManager.hpp"
 #include "../llm/ProviderFactory.hpp"
 #include "../llm/ProviderManager.hpp"
+#include "../logging/Logger.hpp"
 #include "../tools/TaskTool.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../tools/read/ReadTypes.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <simdjson.h>
@@ -529,6 +531,19 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
     for (const auto& [raw_name, config_profile] : app_config.subagents) {
         const std::string name = normalize_agent_name(raw_name);
         if (name.empty()) continue;
+        // `reader` is the isolated evidence worker for `read.question`. It is not
+        // a spawnable task profile; only provider/model/enabled are consumed.
+        // Say so once, because a pre-existing profile of that name stops being
+        // delegatable and silence would look like a lost configuration.
+        if (name == core::tools::read::kReaderProfile) {
+            static std::once_flag announced;
+            std::call_once(announced, [] {
+                core::logging::info(
+                    "subagents.reader is reserved for the read tool's evidence "
+                    "worker and is not spawnable with task/delegate_task");
+            });
+            continue;
+        }
 
         auto it = std::find_if(
             profiles_.begin(),

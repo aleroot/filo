@@ -2,6 +2,7 @@
 
 #include "SubagentOrchestrator.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../tools/read/ReadTypes.hpp"
 #include "../utils/JsonUtils.hpp"
 
 #include <filesystem>
@@ -50,8 +51,16 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
         accesses = no_tool_access();
     } else if (name == kAskUserQuestion) {
         accesses = all_tool_access();
-    } else if (name == kReadFile) {
-        accesses = single_file_access(ToolFileOperation::Read, context, args, "path");
+    } else if (is_read_tool(name)) {
+        auto options = core::tools::read::parse_options(args);
+        if (!options) accesses = all_tool_access();
+        else for (const auto& path : options->paths) {
+            if (path.contains("://")) continue;
+            // Directory listings also overlap writes to their descendants.
+            const auto resolved = context.resolve_path(path);
+            accesses.push_back(ToolAccess::file_access(ToolFileOperation::Read,
+                resolved, true));
+        }
     } else if (name == kFileSearch || name == kGrepSearch || name == kListDirectory) {
         accesses = single_file_access(ToolFileOperation::Search, context, args, "path", true);
     } else if (name == kWriteFile) {

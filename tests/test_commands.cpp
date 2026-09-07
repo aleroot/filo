@@ -616,7 +616,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         budget.record(usage, "gpt-5.4", true);
         stats.record_api_call(true);
         stats.record_turn("gpt-5.4", usage, true);
-        stats.record_tool_call("read_file",
+        stats.record_tool_call("read",
                                true,
                                core::session::SessionStats::estimate_payload_tokens(R"({"path":"src/main.cpp"})"),
                                core::session::SessionStats::estimate_payload_tokens("file contents"),
@@ -633,7 +633,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[By Model]"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("gpt-5.4"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("[By Tool]"));
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("read_file"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("read"));
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("$0.003"));
 
         *mock_history = "";

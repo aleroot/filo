@@ -254,7 +254,7 @@ TEST_CASE("ConfigManager merges subagent overrides and custom profiles", "[confi
             },
             "explore": {
                 "use_allow_list": true,
-                "allowed_tools": ["read_file", "file_search"]
+                "allowed_tools": ["read", "file_search"]
             }
         }
     })");

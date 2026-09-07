@@ -498,7 +498,7 @@ TEST_CASE("MCP keeps non-delegate tools synchronous when the client supports tas
 
     const auto response = dispatch_json(
         std::format(
-            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"read_file","arguments":{{"path":"notes.txt"}},{}}},"id":251}})",
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"read","arguments":{{"path":"notes.txt"}},{}}},"id":251}})",
             task_client_meta()),
         sandbox.context);
     const auto doc = parse_json(response);

@@ -15,6 +15,7 @@
 #include "../tools/ShellTool.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/ToolPolicy.hpp"
+#include "../tools/read/ReadTypes.hpp"
 #include "../tools/ToolSchema.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -1291,6 +1292,19 @@ bool Agent::check_permission(const std::string& tool_name, const std::string& ar
         if (const auto def = skill_manager_.get_tool_definition(tool_name); def.has_value()) {
             const auto& ann = def->annotations;
             permission_required = ann.destructive_hint || ann.open_world_hint;
+            // `read` can fetch HTTP(S), so it advertises openWorldHint. Local
+            // files and result:// snapshots must stay auto-approved as plain
+            // reads always were; only network URLs inherit the open-world gate.
+            if (permission_required
+                && !ann.destructive_hint
+                && core::tools::names::is_read_tool(tool_name)) {
+                const auto options = core::tools::read::parse_options(args);
+                const bool network = options.has_value()
+                    && std::ranges::any_of(options->paths, [](const std::string& path) {
+                        return path.starts_with("http://") || path.starts_with("https://");
+                    });
+                if (!network) permission_required = false;
+            }
         }
     }
 
@@ -2446,6 +2460,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     .provider_name = active_provider_name_for_task,
                                     .model_name = active_model_for_task,
                                     .provider = provider_for_task,
+                                    .cancellation_requested = [self] { return self->is_stop_requested(); },
+                                    .session_stats = self->session_stats_registry_,
                                 });
                         }
                         const bool raw_tool_ok =

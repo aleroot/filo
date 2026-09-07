@@ -1,15 +1,12 @@
-#include "ReadFileTool.hpp"
-#include "ToolArgumentUtils.hpp"
-#include "ToolNames.hpp"
-#include "../utils/JsonUtils.hpp"
-#include <simdjson.h>
+#include "ReadTypes.hpp"
+#include "../ToolArgumentUtils.hpp"
+#include "../ToolNames.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include <fstream>
-#include <sstream>
 #include <format>
 #include <filesystem>
 #include <cerrno>
 #include <system_error>
-#include <utility>
 
 namespace {
 
@@ -43,56 +40,11 @@ namespace {
 
 } // namespace
 
-namespace core::tools {
-
-ReadFileTool::ReadFileTool() = default;
-
-ToolDefinition ReadFileTool::get_definition() const {
-    return {
-        .name  = std::string(names::kReadFile),
-        .title = "Read File",
-        .description =
-            "Read a text file or a 1-based line slice. Whole-file reads truncate at 1 MiB.",
-        .parameters = {
-            {"path",        "string",  "File path.", true},
-            {"offset_line", "integer", "First line; defaults to 1.", false},
-            {"limit_lines", "integer", "Maximum lines; defaults to all.", false}
-        },
-        .output_schema =
-            R"({"type":"object","properties":{"content":{"type":"string","description":"The requested file contents, possibly truncated."}},"required":["content"],"additionalProperties":false})",
-        .annotations = {
-            .read_only_hint   = true,
-            .idempotent_hint  = true,
-        },
-    };
-}
-
-std::string ReadFileTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    auto error = parser.parse(json_args).get(doc);
-
-    if (error) {
-        return "{\"error\": \"Invalid JSON arguments provided to read_file.\"}";
-    }
-
-    if (const auto validation_error =
-            detail::validate_object_arguments(doc, names::kReadFile, {"path", "offset_line", "limit_lines"})) {
-        return *validation_error;
-    }
-
-    std::string_view file_path;
-    if (doc["path"].get(file_path)) {
-        return "{\"error\": \"Missing or invalid 'path' argument.\"}";
-    }
-
-    int64_t offset_line = 1;
-    int64_t limit_lines = -1; // -1 = no limit
-
-    int64_t tmp = 0;
-    if (!doc["offset_line"].get(tmp) && tmp >= 1) offset_line = tmp;
-    if (!doc["limit_lines"].get(tmp) && tmp >= 1) limit_lines = tmp;
-
+namespace core::tools::read {
+std::string read_text_file(const Options& options, const core::context::SessionContext& context) {
+    const auto& file_path = options.paths.front();
+    const int64_t offset_line = options.offset_line;
+    const int64_t limit_lines = options.limit_lines ? options.limit_lines : -1;
     std::string path_str(file_path);
     const std::filesystem::path requested_path(path_str);
     std::filesystem::path resolved_path;
@@ -102,7 +54,7 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
                 path_str,
                 context,
                 &resolved_path,
-                names::kReadFile)) {
+                names::kRead)) {
         return *access_error;
     }
     const std::string resolved_path_string = resolved_path.string();
@@ -141,9 +93,7 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
 
     if (offset_line == 1 && limit_lines == -1) {
         // Fast path: read entire file at once
-        std::ostringstream buf;
-        buf << ifs.rdbuf();
-        content = buf.str();
+        content = read_prefix(ifs, 1024 * 1024 + 1);
         if (content.size() > 1024 * 1024) {
             content = content.substr(0, 1024 * 1024) + "\n\n... [TRUNCATED DUE TO SIZE] ...";
         }
@@ -152,7 +102,7 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
         std::string line;
         int64_t current_line = 0;
         int64_t collected = 0;
-        constexpr std::size_t kMaxBytes = 512 * 1024;
+        constexpr std::size_t kMaxBytes = kMaxSliceChars;
 
         while (std::getline(ifs, line)) {
             ++current_line;
@@ -173,4 +123,4 @@ std::string ReadFileTool::execute(const std::string& json_args, const core::cont
     return std::format("{{\"content\": \"{}\"}}", core::utils::escape_json_string(content));
 }
 
-} // namespace core::tools
+} // namespace core::tools::read

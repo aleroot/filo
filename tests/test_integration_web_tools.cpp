@@ -11,6 +11,8 @@
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/tools/WebFetchTool.hpp"
+#include "core/tools/ReadTool.hpp"
+#include <atomic>
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 
@@ -323,4 +325,43 @@ TEST_CASE("Web response JSON repairs malformed external bytes",
     REQUIRE(simdjson::validate_utf8(json));
     REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"(bad \ufffd title)"));
     REQUIRE_THAT(json, Catch::Matchers::ContainsSubstring(R"(bad \ufffd content)"));
+}
+
+TEST_CASE("Unified read preserves HTTP source lines and blocks redirects outside read policy",
+          "[integration][tools][web][read]") {
+    httplib::Server server;
+    std::atomic<bool> private_hit = false;
+    server.Get("/source", [](const httplib::Request&, httplib::Response& response) {
+        response.set_content("alpha\r\n  beta\n", "text/plain");
+    });
+    server.Get("/redirect", [](const httplib::Request&, httplib::Response& response) {
+        response.set_redirect("/private");
+    });
+    server.Get("/private", [&](const httplib::Request&, httplib::Response& response) {
+        private_hit = true;
+        response.set_content("private", "text/plain");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    const auto project = std::filesystem::temp_directory_path()
+        / ("filo-unified-http-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(project / ".filo");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } cleanup{project};
+    const auto base = std::format("http://127.0.0.1:{}", port);
+    {
+        std::ofstream config(project / ".filo/config.json");
+        config << std::format(R"({{"tools":{{"read":{{"trusted_urls":["{}/source","{}/redirect"]}},"fetch_url":{{"trusted_urls":["{}"]}}}}}})", base, base, base);
+    }
+    core::config::ConfigManager::get_instance().load(project);
+    ScopedConfigReload restore;
+    ReadTool tool;
+    const auto context = test_support::make_session_context({.primary = project, .enforce = true});
+    auto result = tool.execute(std::format(R"({{"path":"{}/source","offset_line":2,"limit_lines":1}})", base), context);
+    simdjson::dom::parser parser;
+    REQUIRE(parser.parse(result).value()["content"].get_string().value() == "  beta\n");
+    result = tool.execute(std::format(R"({{"path":"{}/redirect"}})", base), context);
+    CHECK_THAT(result, Catch::Matchers::ContainsSubstring("trusted_urls"));
+    CHECK_FALSE(private_hit.load());
 }

@@ -6,6 +6,7 @@
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "TestSessionContext.hpp"
 
 #include <algorithm>
@@ -216,6 +217,70 @@ TEST_CASE("Agent stops current loop after user denies a tool call", "[agent][per
     REQUIRE_THAT(history[3].content, Catch::Matchers::ContainsSubstring("skipped after a previous denial"));
 }
 
+TEST_CASE("Agent auto-approves local read and gates HTTP read",
+          "[agent][permission][read]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::ReadTool>());
+    auto make_agent = [&](std::string tool_name, std::string arguments) {
+        auto provider = std::make_shared<SingleToolCallProvider>(
+            std::move(tool_name), std::move(arguments));
+        auto agent = std::make_shared<core::agent::Agent>(
+            provider,
+            tool_manager,
+            test_support::make_workspace_session_context());
+        return std::pair{std::move(provider), std::move(agent)};
+    };
+
+    {
+        auto [provider, agent] = make_agent("read", R"({"path":"README.md"})");
+        std::atomic<int> permission_checks{0};
+        agent->set_permission_fn([&](std::string_view, std::string_view) {
+            ++permission_checks;
+            return true;
+        });
+        std::mutex done_mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        agent->send_message("Read the file.", [](const std::string&) {},
+            [](const std::string&, const std::string&) {},
+            [&]() {
+                std::lock_guard lock(done_mutex);
+                done = true;
+                done_cv.notify_one();
+            });
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&] { return done; }));
+        CHECK(permission_checks.load() == 0);
+    }
+
+    {
+        auto [provider, agent] = make_agent(
+            "read", R"({"path":"https://example.com/source.txt"})");
+        std::atomic<int> permission_checks{0};
+        agent->set_permission_fn([&](std::string_view name, std::string_view) {
+            REQUIRE(name == "read");
+            ++permission_checks;
+            return false;
+        });
+        std::mutex done_mutex;
+        std::condition_variable done_cv;
+        bool done = false;
+        agent->send_message("Fetch the URL.", [](const std::string&) {},
+            [](const std::string&, const std::string&) {},
+            [&]() {
+                std::lock_guard lock(done_mutex);
+                done = true;
+                done_cv.notify_one();
+            });
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(3), [&] { return done; }));
+        CHECK(permission_checks.load() == 1);
+        const auto history = visible_history(agent);
+        REQUIRE(history.size() >= 3);
+        REQUIRE_THAT(history[2].content, Catch::Matchers::ContainsSubstring("denied by user"));
+    }
+}
+
 TEST_CASE("Agent still gates destructive tools in EXECUTE mode",
           "[agent][permission]") {
     const std::string tool_name = "permission_test_execute_destructive_tool";
@@ -291,7 +356,7 @@ TEST_CASE("Agent distinguishes turn tool allow-list blocks from user denials",
             done_cv.notify_one();
         },
         core::agent::Agent::TurnCallbacks{
-            .allowed_tools = {"read_file"},
+            .allowed_tools = {"read"},
         });
 
     {

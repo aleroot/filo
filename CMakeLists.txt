@@ -330,7 +330,13 @@ set(FILO_CORE_SOURCES
     src/core/tools/ApplyPatchTool.cpp
     src/core/tools/PathVisibilityToolDecorator.cpp
     src/core/tools/FileSearchTool.cpp
-    src/core/tools/ReadFileTool.cpp
+    src/core/tools/ReadTool.cpp
+    src/core/tools/read/ReadTypes.cpp
+    src/core/tools/read/TextFileReader.cpp
+    src/core/tools/read/ResourceReader.cpp
+    src/core/tools/read/NotebookReader.cpp
+    src/core/tools/read/ReaderWorker.cpp
+    src/core/tools/read/EvidenceSelector.cpp
     src/core/tools/WriteFileTool.cpp
     src/core/tools/ListDirectoryTool.cpp
     src/core/tools/ReplaceTool.cpp
@@ -554,6 +560,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_reasoning_capabilities.cpp
     tests/test_goal_graph.cpp
     tests/test_tools.cpp
+    tests/test_read_resources.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
     tests/test_mime_utils.cpp
@@ -683,6 +690,12 @@ set_target_properties(test_integration PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_MINSIZEREL ${FILO_IPO_SUPPORTED}
 )
 
+# Keep the reader's local HTTP/policy regression in the standard CTest run,
+# including the existing Linux CI presets. No model service is contacted.
+add_test(NAME read_http_integration
+    COMMAND test_integration "[integration][tools][web][read]" --reporter compact)
+set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60)
+
 add_executable(test_agent_freeze tests/test_agent_freeze.cpp)
 target_link_libraries(test_agent_freeze PRIVATE filo_core)
 set_target_properties(test_agent_freeze PROPERTIES
@@ -749,6 +762,7 @@ source_group(
     PREFIX "Test Files"
     FILES
         tests/test_tools.cpp
+        tests/test_read_resources.cpp
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp
         tests/test_mime_utils.cpp

@@ -370,25 +370,9 @@ std::string canonical_tool_name(std::string_view name) {
         return static_cast<char>(std::tolower(ch));
     });
 
-    static constexpr std::array kAliases = {
-        std::pair{"shell", names::kRunTerminalCommand},
-        std::pair{"terminal", names::kRunTerminalCommand},
-        std::pair{"run_shell", names::kRunTerminalCommand},
-        std::pair{"read", names::kReadFile},
-        std::pair{"write", names::kWriteFile},
-        std::pair{"patch", names::kApplyPatch},
-        std::pair{"grep", names::kGrepSearch},
-        std::pair{"search", names::kFileSearch},
-        std::pair{"ls", names::kListDirectory},
-        std::pair{"mkdir", names::kCreateDirectory},
-    };
-
-    for (const auto& [alias, canonical] : kAliases) {
-        if (normalized == alias) {
-            return std::string(canonical);
-        }
-    }
-    return normalized;
+    // The alias table itself lives in ToolNames.hpp so the permission gate and
+    // the tool dispatcher classify a call by exactly the same mapping.
+    return std::string(names::canonical_alias(normalized));
 }
 
 bool is_tool_allowed(std::string_view tool_name,

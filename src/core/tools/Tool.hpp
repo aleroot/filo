@@ -3,12 +3,16 @@
 #include "../context/SessionContext.hpp"
 
 #include <memory>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace core::llm {
 class LLMProvider;
+}
+namespace core::session {
+class SessionStatsRegistry;
 }
 
 namespace core::tools {
@@ -27,6 +31,8 @@ struct ToolInvocationContext {
     std::string provider_name{};
     std::string model_name{};
     std::shared_ptr<core::llm::LLMProvider> provider{};
+    std::function<bool()> cancellation_requested{};
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats{};
 };
 
 /**
@@ -103,7 +109,7 @@ struct ToolAnnotations {
  *       structure returned in @c structuredContent.
  */
 struct ToolDefinition {
-    std::string name = {};         ///< Programmatic identifier used in @c tools/call (e.g. @c "read_file")
+    std::string name = {};         ///< Programmatic identifier used in @c tools/call (e.g. @c "read")
     std::string title = {};        ///< Human-readable display name shown in Lampo's tool list (e.g. @c "Read File")
     std::string description = {};  ///< Prose description shown to the LLM to guide tool selection
     std::vector<ToolParameter> parameters = {};  ///< Ordered list of accepted parameters

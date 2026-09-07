@@ -40,6 +40,8 @@ struct FetchRequest {
     // This is a transport safety budget, deliberately controlled by Filo rather
     // than by the model.  Presentation/output limits are applied downstream.
     int max_bytes = 2 * 1024 * 1024;
+    std::string policy_tool{};
+    bool preserve_bytes = false;
 };
 
 struct FetchResponse {
@@ -64,6 +66,7 @@ public:
 class IWebFetchBackend {
 public:
     virtual ~IWebFetchBackend() = default;
+    [[nodiscard]] virtual bool preserves_bytes() const noexcept { return false; }
 
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual bool supports(const ToolInvocationContext& context) const = 0;

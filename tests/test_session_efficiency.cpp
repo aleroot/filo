@@ -139,7 +139,7 @@ TEST_CASE("Session handoff builder captures recent files and commands", "[sessio
 
     core::llm::ToolCall read_call;
     read_call.id = "read-1";
-    read_call.function.name = "read_file";
+    read_call.function.name = "read";
     read_call.function.arguments = R"({"path":"/tmp/src/core/session/SessionStore.cpp"})";
 
     core::llm::ToolCall shell_call;
@@ -156,7 +156,7 @@ TEST_CASE("Session handoff builder captures recent files and commands", "[sessio
          .tool_call_id = "write-1"},
         {.role = "tool",
          .content = R"({"content":"session store contents"})",
-         .name = "read_file",
+         .name = "read",
          .tool_call_id = "read-1"},
         {.role = "tool",
          .content = R"({"output":"All tests passed\n","exit_code":0})",

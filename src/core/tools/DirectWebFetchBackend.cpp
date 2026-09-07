@@ -105,7 +105,7 @@ void erase_tag_blocks(std::string& html,
     return {};
 }
 
-[[nodiscard]] std::expected<void, std::string> validate_fetch_target(std::string_view url) {
+[[nodiscard]] std::expected<void, std::string> validate_fetch_target(std::string_view url, std::string_view operation) {
     if (auto valid = validate_http_url(url); !valid) {
         return std::unexpected(valid.error());
     }
@@ -113,6 +113,10 @@ void erase_tag_blocks(std::string& html,
             names::kFetchUrl,
             url)) {
         return std::unexpected("Tool policy blocked URL: " + *policy_error);
+    }
+    if (!operation.empty()) {
+        if (auto error = core::tools::policy::enforce_url_policy(operation, url))
+            return std::unexpected("Tool policy blocked URL: " + *error);
     }
     return {};
 }
@@ -189,6 +193,7 @@ void erase_tag_blocks(std::string& html,
 
 class DirectWebFetchBackend final : public IWebFetchBackend {
 public:
+    [[nodiscard]] bool preserves_bytes() const noexcept override { return true; }
     [[nodiscard]] std::string_view name() const noexcept override {
         return "direct-http-fetch";
     }
@@ -199,9 +204,9 @@ public:
 
     [[nodiscard]] std::expected<FetchResponse, std::string>
     fetch(const FetchRequest& request,
-          const ToolInvocationContext&) const override {
+          const ToolInvocationContext& context) const override {
         std::string current_url = request.url;
-        if (auto valid = validate_fetch_target(current_url); !valid) {
+        if (auto valid = validate_fetch_target(current_url, request.policy_tool); !valid) {
             return std::unexpected(valid.error());
         }
 
@@ -212,12 +217,15 @@ public:
 
         cpr::Response response;
         for (int redirect_count = 0; redirect_count <= kMaxRedirects; ++redirect_count) {
+            if (context.cancellation_requested && context.cancellation_requested())
+                return std::unexpected("Request cancelled.");
             body.clear();
             truncated = false;
             response = cpr::Download(
-                cpr::WriteCallback{[&body, &truncated, max_bytes](
+                cpr::WriteCallback{[&body, &truncated, &context, max_bytes](
                                        std::string_view data,
                                        intptr_t) {
+                    if (context.cancellation_requested && context.cancellation_requested()) return false;
                     const std::size_t remaining =
                         static_cast<std::size_t>(max_bytes) - body.size();
                     if (data.size() > remaining) {
@@ -234,6 +242,10 @@ public:
                     {"User-Agent", "filo/1.0 (+https://github.com/alessio/filo)"},
                 },
                 cpr::Redirect{false},
+                cpr::ProgressCallback{[&context](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t,
+                    cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) {
+                    return !context.cancellation_requested || !context.cancellation_requested();
+                }},
                 cpr::Timeout{kFetchTimeoutMs});
 
             // Returning false from the write callback intentionally aborts
@@ -263,7 +275,7 @@ public:
             if (!next_url) {
                 return std::unexpected(next_url.error());
             }
-            if (auto valid = validate_fetch_target(*next_url); !valid) {
+            if (auto valid = validate_fetch_target(*next_url, request.policy_tool); !valid) {
                 return std::unexpected(valid.error());
             }
             current_url = std::move(*next_url);
@@ -288,7 +300,8 @@ public:
             .final_url = response.url.str().empty() ? current_url : response.url.str(),
             .content_type = content_type,
             .title = looks_html ? extract_title(body) : std::string{},
-            .text = looks_html ? html_to_text(std::move(body)) : normalize_space(std::move(body)),
+            .text = looks_html ? html_to_text(std::move(body))
+                : request.preserve_bytes ? std::move(body) : normalize_space(std::move(body)),
             .status_code = response.status_code,
             .truncated = truncated,
         };

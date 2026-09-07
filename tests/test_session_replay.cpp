@@ -25,7 +25,7 @@ TEST_CASE("Session replay rebuilds UI transcript and tool status", "[tui][sessio
         .index = 0,
         .id = "call_1",
         .type = "function",
-        .function = {.name = "read_file", .arguments = R"({"path":"config.toml"})"},
+        .function = {.name = "read", .arguments = R"({"path":"config.toml"})"},
     });
     data.messages.push_back(assistant);
 
@@ -49,7 +49,7 @@ TEST_CASE("Session replay rebuilds UI transcript and tool status", "[tui][sessio
 
     REQUIRE(messages[2].type == tui::MessageType::Assistant);
     REQUIRE(messages[2].tools.size() == 1);
-    REQUIRE(messages[2].tools[0].name == "read_file");
+    REQUIRE(messages[2].tools[0].name == "read");
     REQUIRE(messages[2].tools[0].status == tui::ToolActivity::Status::Succeeded);
     REQUIRE(messages[2].tools[0].result.summary == "loaded");
 }
@@ -107,7 +107,7 @@ TEST_CASE("live multi-step tool turn has the same assistant boundaries as replay
     first->activity_recorded = true;
     first->tools.push_back(tui::make_tool_activity(
         "call_read",
-        "read_file",
+        "read",
         R"({"path":"config.toml"})",
         "config.toml"));
     tui::apply_tool_result(first->tools.back(), R"({"output":"loaded"})");
@@ -146,7 +146,7 @@ TEST_CASE("live multi-step tool turn has the same assistant boundaries as replay
     persisted_first.tool_calls.push_back(core::llm::ToolCall{
         .id = "call_read",
         .function = {
-            .name = "read_file",
+            .name = "read",
             .arguments = R"({"path":"config.toml"})",
         },
     });
@@ -296,7 +296,7 @@ TEST_CASE("Session replay leaves non-file tools without a diff",
     assistant.role = "assistant";
     assistant.tool_calls.push_back(core::llm::ToolCall{
         .id = "call_read",
-        .function = {.name = "read_file", .arguments = R"({"path":"notes.md"})"},
+        .function = {.name = "read", .arguments = R"({"path":"notes.md"})"},
     });
     data.messages.push_back(assistant);
 

@@ -6,7 +6,7 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/PathVisibilityToolDecorator.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/WriteFileTool.hpp"
 #include "core/workspace/AgentIgnore.hpp"
@@ -185,7 +185,7 @@ TEST_CASE("absent .agentignore leaves standard workspace access unchanged",
     write_text(tmp.path() / ".env", "needle env\n");
 
     const auto read_tool =
-        core::tools::with_path_visibility(std::make_shared<core::tools::ReadFileTool>());
+        core::tools::with_path_visibility(std::make_shared<core::tools::ReadTool>());
     const auto read_hidden = read_tool->execute(
         R"({"path":"secrets/hidden.txt"})",
         make_context());
@@ -259,7 +259,7 @@ TEST_CASE(".agentignore blocks direct reads and filters search tools",
     }
 
     const auto read_tool =
-        core::tools::with_path_visibility(std::make_shared<core::tools::ReadFileTool>());
+        core::tools::with_path_visibility(std::make_shared<core::tools::ReadTool>());
     const auto read_hidden = read_tool->execute(
         R"({"path":"secrets/hidden.txt"})",
         make_context());
@@ -327,7 +327,7 @@ TEST_CASE(".agentignore blocks mutating tools for ignored paths",
     REQUIRE_THAT(write_result, !Catch::Matchers::ContainsSubstring("original secret"));
 
     const auto read_tool =
-        core::tools::with_path_visibility(std::make_shared<core::tools::ReadFileTool>());
+        core::tools::with_path_visibility(std::make_shared<core::tools::ReadTool>());
     const auto visible_from_raw_fs = [&] {
         std::ifstream in(tmp.path() / "secrets" / "hidden.txt");
         std::string content;

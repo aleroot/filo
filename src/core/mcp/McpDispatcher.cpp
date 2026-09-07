@@ -8,7 +8,7 @@
 #include "../tools/ShellTool.hpp"
 #include "../tools/ApplyPatchTool.hpp"
 #include "../tools/FileSearchTool.hpp"
-#include "../tools/ReadFileTool.hpp"
+#include "../tools/ReadTool.hpp"
 #include "../tools/WriteFileTool.hpp"
 #include "../tools/ListDirectoryTool.hpp"
 #include "../tools/ReplaceTool.hpp"
@@ -74,7 +74,8 @@ constexpr const char* kTasksExtensionIdentifier = "io.modelcontextprotocol/tasks
 constexpr std::string_view kServerInstructions =
     "filo-mcp provides local coding tools in the configured workspace. "
     "Paths may be absolute or relative to the active workspace. "
-    "Prefer file_search or grep_search before read_file, and use line slices for large files. "
+    "Prefer file_search or grep_search before read, and use line slices for large files. "
+    "read.question asks the configured reader worker for cited evidence; use exact reads before editing. "
     "Prefer search_replace for exact edits or apply_patch for diffs; write_file replaces a whole file. "
     "Check run_terminal_command.exit_code after shell calls. "
     "write_file.previous_content supports diff display without another read. "

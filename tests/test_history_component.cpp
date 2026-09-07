@@ -495,7 +495,7 @@ TEST_CASE("HistoryComponent toggles a tool result by mouse click",
     auto msg = tui::make_assistant_message("", "", false);
     auto tool = tui::make_tool_activity(
         "read-click",
-        "read_file",
+        "read",
         R"({"path":"src/main.cpp"})",
         "src/main.cpp");
     tui::apply_tool_result(tool, R"({"content":"hidden source line\n"})");
@@ -1084,7 +1084,7 @@ TEST_CASE("HistoryComponent invalidates render cache when tool approval changes"
     std::vector<tui::UiMessage> messages;
     auto assistant = tui::make_assistant_message("", "", true);
     assistant.tools.push_back(tui::make_tool_activity(
-        "tool-1", "read_file", R"({"path":"README.md"})", "Read README.md"));
+        "tool-1", "read", R"({"path":"README.md"})", "Read README.md"));
     messages.push_back(std::move(assistant));
 
     tui::HistoryComponent history(

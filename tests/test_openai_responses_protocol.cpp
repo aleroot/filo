@@ -773,19 +773,19 @@ TEST_CASE("OpenAIResponsesProtocol - ignores provisional function call and parse
 
     const auto added = protocol.parse_event(
         "event: response.output_item.added\n"
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{}\",\"status\":\"in_progress\"}}");
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read\",\"arguments\":\"{}\",\"status\":\"in_progress\"}}");
     REQUIRE_FALSE(added.done);
     REQUIRE(added.chunks.empty());
 
     auto result = protocol.parse_event(
         "event: response.output_item.done\n"
-        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}");
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_abc\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}");
 
     REQUIRE_FALSE(result.done);
     REQUIRE(result.chunks.size() == 1);
     REQUIRE(result.chunks[0].tools.size() == 1);
     REQUIRE(result.chunks[0].tools[0].id == "call_abc");
-    REQUIRE(result.chunks[0].tools[0].function.name == "read_file");
+    REQUIRE(result.chunks[0].tools[0].function.name == "read");
     REQUIRE(result.chunks[0].tools[0].function.arguments
             == R"({"path":"README.md"})");
 }

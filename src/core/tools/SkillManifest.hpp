@@ -48,7 +48,7 @@ enum class SkillType {
  * name: review-pr
  * description: Security-focused code review for a GitHub pull request.
  * model: grok-3-mini
- * allowed-tools: shell, read_file
+ * allowed-tools: shell, read
  * enabled: true
  * ---
  *

@@ -420,7 +420,7 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
     REQUIRE_THAT(resp, ContainsSubstring(R"("tools")"));
 
     for (const char* name : {
-            "run_terminal_command", "read_file", "write_file", "list_directory",
+            "run_terminal_command", "read", "write_file", "list_directory",
             "replace", "file_search", "grep_search", "apply_patch", "search_replace",
             "delete_file", "move_file", "create_directory", "get_workspace_config", "delegate_task"
         }) {
@@ -444,7 +444,7 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
         auto catalog_array = catalog.array();
         bool first = true;
         constexpr std::array<std::string_view, 17> kBudgetedBuiltinNames{
-            "run_terminal_command", "apply_patch", "file_search", "read_file",
+            "run_terminal_command", "apply_patch", "file_search", "read",
             "write_file", "list_directory", "replace", "grep_search",
             "search_replace", "delete_file", "move_file", "create_directory",
             "web_search", "web_fetch", "memory", "get_workspace_config",
@@ -509,7 +509,7 @@ TEST_CASE("MCP tools/list includes title field for display names", "[mcp]") {
     // Every tool must have a title entry (display name for Lampo).
     REQUIRE_THAT(resp, ContainsSubstring(R"("title")"));
     REQUIRE_THAT(resp, ContainsSubstring("Run Terminal Command"));
-    REQUIRE_THAT(resp, ContainsSubstring("Read File"));
+    REQUIRE_THAT(resp, ContainsSubstring("Read"));
     REQUIRE_THAT(resp, ContainsSubstring("Write File"));
 }
 
@@ -652,13 +652,23 @@ TEST_CASE("MCP tools/list run_terminal_command has destructive+openWorld hints",
     REQUIRE(is_valid_json(resp));
 }
 
-TEST_CASE("MCP tools/list read_file has readOnly + idempotent hints true", "[mcp]") {
-    auto resp = disp().dispatch(
+TEST_CASE("MCP lists only canonical read with read-only annotations", "[mcp][read]") {
+    const auto response = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":7})");
-    // The response is a large JSON blob; parse it and find read_file's annotations.
-    REQUIRE(is_valid_json(resp));
-    // At minimum the hint keys must be present.
-    REQUIRE_THAT(resp, ContainsSubstring(R"("readOnlyHint")"));
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(response).get(doc) == simdjson::SUCCESS);
+    bool found = false;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        const auto name = tool["name"].get_string().value();
+        REQUIRE(name != "read_file");
+        if (name != "read") continue;
+        found = true;
+        REQUIRE(tool["annotations"]["readOnlyHint"].get_bool().value());
+        REQUIRE(tool["annotations"]["idempotentHint"].get_bool().value());
+        REQUIRE(tool["annotations"]["openWorldHint"].get_bool().value());
+    }
+    REQUIRE(found);
 }
 
 // ---------------------------------------------------------------------------
@@ -894,18 +904,32 @@ TEST_CASE("MCP tools/call list_directory on current directory succeeds", "[mcp]"
     REQUIRE_THAT(resp, ContainsSubstring(R"("content")"));
 }
 
-TEST_CASE("MCP tools/call read_file returns file contents", "[mcp]") {
+TEST_CASE("MCP read returns the requested line slice", "[mcp][read]") {
     const std::string path = "mcp_test_artifact.txt";
-    { std::ofstream ofs(path); ofs << "hello from lampo"; }
+    { std::ofstream out(path); out << "first\nsecond\nthird\n"; }
+    const auto request = std::format(
+        R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"read","arguments":{{"path":"{}","offset_line":2,"limit_lines":1}}}},"id":12}})",
+        path);
+    const auto response = disp().dispatch(request);
+    REQUIRE_THAT(response, ContainsSubstring("second"));
+    REQUIRE_THAT(response, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_THAT(response, !ContainsSubstring("first"));
+    REQUIRE_THAT(response, !ContainsSubstring("third"));
+    std::filesystem::remove(path);
+}
 
-    std::string req =
-        std::string(R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":")") +
-        path + R"("}},"id":12})";
-    auto resp = disp().dispatch(req);
-
-    REQUIRE_THAT(resp, ContainsSubstring("hello from lampo"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
-
+TEST_CASE("MCP accepts the legacy read_file alias", "[mcp][read]") {
+    const auto path = "mcp_read_file_alias.txt";
+    {
+        std::ofstream file(path);
+        file << "alias-ok\n";
+    }
+    const auto response = disp().dispatch(
+        std::format(
+            R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"read_file","arguments":{{"path":"{}"}}}},"id":12}})",
+            path));
+    REQUIRE_THAT(response, ContainsSubstring("alias-ok"));
+    REQUIRE_THAT(response, !ContainsSubstring("Unknown tool"));
     std::filesystem::remove(path);
 }
 
@@ -1331,17 +1355,17 @@ TEST_CASE("MCP tools/call move_file renames a file", "[mcp]") {
 }
 
 // ---------------------------------------------------------------------------
-// read_file offset_line / limit_lines
+// read offset_line / limit_lines
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MCP tools/call read_file with offset_line and limit_lines", "[mcp]") {
+TEST_CASE("MCP tools/call read with offset_line and limit_lines", "[mcp]") {
     const std::string path = "mcp_test_multiline.txt";
     {
         std::ofstream ofs(path);
         ofs << "line1\nline2\nline3\nline4\nline5\n";
     }
 
-    std::string req = R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":")" + path + R"(","offset_line":2,"limit_lines":2}},"id":70})";
+    std::string req = R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read","arguments":{"path":")" + path + R"(","offset_line":2,"limit_lines":2}},"id":70})";
     auto resp = disp().dispatch(req);
 
     REQUIRE_THAT(resp, ContainsSubstring("line2"));
@@ -1353,15 +1377,15 @@ TEST_CASE("MCP tools/call read_file with offset_line and limit_lines", "[mcp]") 
     std::filesystem::remove(path);
 }
 
-TEST_CASE("MCP tools/call read_file rejects working_dir argument", "[mcp]") {
-    const std::string path = "mcp_test_read_file_no_working_dir.txt";
+TEST_CASE("MCP tools/call read rejects working_dir argument", "[mcp]") {
+    const std::string path = "mcp_test_read_no_working_dir.txt";
     {
         std::ofstream ofs(path);
         ofs << "content\n";
     }
 
     auto resp = disp().dispatch(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":"mcp_test_read_file_no_working_dir.txt","working_dir":"/tmp"}},"id":71})");
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read","arguments":{"path":"mcp_test_read_no_working_dir.txt","working_dir":"/tmp"}},"id":71})");
 
     REQUIRE(is_valid_json(resp));
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":true)"));
@@ -1371,10 +1395,10 @@ TEST_CASE("MCP tools/call read_file rejects working_dir argument", "[mcp]") {
     std::filesystem::remove(path);
 }
 
-TEST_CASE("MCP tools/call read_file resolves relative paths against scoped roots",
+TEST_CASE("MCP tools/call read resolves relative paths against scoped roots",
           "[mcp][workspace]") {
     WorkspaceResetToDefault workspace_reset;
-    const auto scoped_root = make_temp_dir("read_file_scoped_roots");
+    const auto scoped_root = make_temp_dir("read_scoped_roots");
     const auto nested_dir = scoped_root / "nested";
     std::filesystem::create_directories(nested_dir);
     write_test_file(nested_dir / "file.txt", "scoped-root-content\n");
@@ -1391,7 +1415,7 @@ TEST_CASE("MCP tools/call read_file resolves relative paths against scoped roots
 
 #undef dispatch
     auto resp = disp().dispatch(
-        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_file","arguments":{"path":"nested/file.txt"}},"id":72})",
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"read","arguments":{"path":"nested/file.txt"}},"id":72})",
         session_context);
 #define dispatch(...) dispatch(__VA_ARGS__, make_mcp_test_context())
 

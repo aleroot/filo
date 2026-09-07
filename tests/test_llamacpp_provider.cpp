@@ -85,7 +85,7 @@ TEST_CASE("build_tool_parameters_schema - single required parameter", "[llamacpp
 }
 
 TEST_CASE("build_tool_parameters_schema - optional parameter not in required array", "[llamacpp][schema]") {
-    auto tool = make_tool("read_file", "Read a file",
+    auto tool = make_tool("read", "Read a file",
                           {make_param("path", "string", "File path", true),
                            make_param("encoding", "string", "File encoding", false)});
     const auto schema = LlamaCppProvider::build_tool_parameters_schema(tool);

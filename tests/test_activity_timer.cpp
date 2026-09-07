@@ -2,6 +2,7 @@
 
 #include "tui/ActivityTimer.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -197,13 +198,16 @@ TEST_CASE("format_elapsed_compact is well-formed for every duration",
     // minute and hour carry, then a coarse stride out to 90 days.
     for (int64_t s = 0; s <= 3 * 3600; ++s) examine(s);
     for (int64_t s = 3 * 3600; s <= 90 * 24 * 3600; s += 37) examine(s);
-    for (const int64_t boundary : {59LL, 60LL, 61LL, 3599LL, 3600LL, 3601LL,
-                                   86399LL, 86400LL, 86401LL,
-                                   30LL * 86400, 365LL * 86400,
-                                   // std::chrono::days holds 32 bits here, so
-                                   // a 64-bit seconds count must be decomposed
-                                   // without ever being cast into it.
-                                   std::chrono::seconds::max().count()}) {
+    // seconds::rep is long on Linux/libstdc++ and long long on macOS/libc++.
+    // Give the array an explicit element type instead of deducing a mixed list.
+    constexpr auto boundaries = std::to_array<std::chrono::seconds::rep>({
+        59, 60, 61, 3599, 3600, 3601, 86399, 86400, 86401,
+        30 * 86400, 365 * 86400,
+        // days may have a narrower representation, so decompose the maximum
+        // seconds count without casting it to days.
+        std::chrono::seconds::max().count(),
+    });
+    for (const auto boundary : boundaries) {
         examine(boundary);
     }
 

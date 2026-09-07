@@ -269,7 +269,7 @@ TEST_CASE("append_ui_message — collapses repeated system disclosures",
 
 TEST_CASE("make_tool_group_message — with tools", "[tui][conversation][factory]") {
     std::vector<ToolActivity> tools;
-    tools.push_back(make_tool_activity("id1", "read_file", "{}", "src/main.cpp"));
+    tools.push_back(make_tool_activity("id1", "read", "{}", "src/main.cpp"));
     tools.push_back(make_tool_activity("id2", "grep_search", "{}", "pattern in src/"));
     
     auto msg = make_tool_group_message(std::move(tools), true, true);
@@ -284,9 +284,9 @@ TEST_CASE("make_tool_group_message — with tools", "[tui][conversation][factory
 // ============================================================================
 
 TEST_CASE("make_tool_activity — basic creation", "[tui][conversation][tool]") {
-    auto tool = make_tool_activity("tc-123", "read_file", R"({"path":"main.cpp"})", "main.cpp");
+    auto tool = make_tool_activity("tc-123", "read", R"({"path":"main.cpp"})", "main.cpp");
     REQUIRE(tool.id == "tc-123");
-    REQUIRE(tool.name == "read_file");
+    REQUIRE(tool.name == "read");
     REQUIRE(tool.description == "main.cpp");
     REQUIRE(tool.auto_approved == false);
     REQUIRE(tool.status == ToolActivity::Status::Pending);
@@ -371,10 +371,28 @@ TEST_CASE("summarize_tool_arguments — grep_search", "[tui][conversation][args]
     REQUIRE_THAT(result, ContainsSubstring("/src"));
 }
 
-TEST_CASE("summarize_tool_arguments — read_file", "[tui][conversation][args]") {
+TEST_CASE("summarize_tool_arguments — read", "[tui][conversation][args]") {
     const auto result = summarize_tool_arguments(
-        "read_file", R"({"path":"/home/user/README.md"})");
+        "read", R"({"path":"/home/user/README.md"})");
     REQUIRE_THAT(result, ContainsSubstring("README.md"));
+    REQUIRE_THAT(
+        summarize_tool_arguments("read", R"({"path":["src/a.cpp","src/b.cpp"]})"),
+        ContainsSubstring("src/a.cpp"));
+    REQUIRE_THAT(
+        summarize_tool_arguments("read", R"({"path":"retry.cpp","offset_line":40,"limit_lines":5})"),
+        ContainsSubstring("retry.cpp:40+5"));
+    const std::string long_path(120, 'a');
+    const auto long_read = summarize_tool_arguments(
+        "read",
+        std::string(R"({"path":")") + long_path + R"(","offset_line":2820,"limit_lines":220})");
+    REQUIRE_THAT(long_read, ContainsSubstring(":2820+220"));
+    REQUIRE(long_read.size() <= 88);
+    REQUIRE_THAT(
+        summarize_tool_arguments("read", R"({"path":"src","view":"auto"})"),
+        ContainsSubstring("view=auto"));
+    REQUIRE_THAT(
+        summarize_tool_arguments("read_file", R"({"path":"legacy.cpp"})"),
+        ContainsSubstring("legacy.cpp"));
 }
 
 TEST_CASE("summarize_tool_arguments — apply_patch", "[tui][conversation][args]") {
@@ -525,7 +543,7 @@ TEST_CASE("find_subagent_activity — finds nested agent", "[tui][conversation][
 
 TEST_CASE("message_uses_animation — completed tool without pending assistant is static", "[tui][conversation][animation]") {
     auto message = make_assistant_message("", "", false);
-    auto tool = make_tool_activity("id", "read_file", "{}", "file");
+    auto tool = make_tool_activity("id", "read", "{}", "file");
     tool.status = ToolActivity::Status::Succeeded;
     message.tools.push_back(std::move(tool));
     REQUIRE_FALSE(message_uses_animation(message, true));
@@ -755,7 +773,7 @@ TEST_CASE("tool presentation uses semantic labels and compact result metrics",
     auto msg = make_assistant_message("", "", false);
     auto tool = make_tool_activity(
         "read-1",
-        "read_file",
+        "read",
         R"({"path":"src/main.cpp","offset_line":10})",
         "src/main.cpp");
     apply_tool_result(tool, R"({"content":"alpha\nbeta\n"})");
@@ -764,6 +782,7 @@ TEST_CASE("tool presentation uses semantic labels and compact result metrics",
 
     const auto compact = render_panel_text(messages);
     REQUIRE_THAT(compact, ContainsSubstring("Read"));
+    REQUIRE_THAT(compact, ContainsSubstring("src/main.cpp"));
     REQUIRE_THAT(compact, ContainsSubstring("2 lines"));
     REQUIRE(compact.find("read_file") == std::string::npos);
     REQUIRE(compact.find("alpha") == std::string::npos);
@@ -777,13 +796,73 @@ TEST_CASE("tool presentation uses semantic labels and compact result metrics",
     REQUIRE_THAT(expanded, ContainsSubstring("11"));
 }
 
+TEST_CASE("read header metric reports original lines for compressed summaries",
+          "[tui][conversation][render][tool][read]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "read-compressed",
+        "read",
+        R"({"path":"Chat.swift","offset_line":2820,"limit_lines":220})",
+        summarize_tool_arguments(
+            "read",
+            R"({"path":"Chat.swift","offset_line":2820,"limit_lines":220})"));
+    apply_tool_result(
+        tool,
+        R"({"content":"[full read summary]\nOriginal chars: 12081\nOriginal lines: 221\nUse read with offset_line/limit_lines for exact source slices.\n"})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto compact = render_panel_text(messages);
+    REQUIRE_THAT(compact, ContainsSubstring("Chat.swift:2820+220"));
+    REQUIRE_THAT(compact, ContainsSubstring("221 lines"));
+    REQUIRE(compact.find("3 lines") == std::string::npos);
+}
+
+TEST_CASE("read argument preview truncates paths on codepoint boundaries",
+          "[tui][conversation][render][tool][read]") {
+    // An odd-length prefix puts the 88-byte preview cut mid-codepoint.
+    std::string path = "src";
+    while (path.size() < 200) path += "é";  // two bytes per codepoint
+    const auto summary = summarize_tool_arguments(
+        "read",
+        R"({"path":")" + path + R"(","offset_line":2820,"limit_lines":220})");
+
+    REQUIRE_THAT(summary, ContainsSubstring(":2820+220"));
+    const auto cut = summary.find("...");
+    REQUIRE(cut != std::string::npos);
+    REQUIRE(cut > 0);
+    // Cutting mid-sequence would leave the lead byte of 'é' dangling.
+    REQUIRE(static_cast<unsigned char>(summary[cut - 1]) != 0xC3);
+}
+
+TEST_CASE("read header metric reports original lines for cached re-reads",
+          "[tui][conversation][render][tool][read]") {
+    std::vector<UiMessage> messages;
+    auto msg = make_assistant_message("", "", false);
+    auto tool = make_tool_activity(
+        "read-cached",
+        "read",
+        R"({"path":"Chat.swift"})",
+        "Chat.swift");
+    apply_tool_result(
+        tool,
+        R"({"content":"[cached read] Chat.swift unchanged (3412 lines, 128904 chars, read 2x, digest 63912ba9fc2786f4). Use read with offset_line/limit_lines for exact source slices."})");
+    msg.tools.push_back(std::move(tool));
+    messages.push_back(std::move(msg));
+
+    const auto compact = render_panel_text(messages);
+    REQUIRE_THAT(compact, ContainsSubstring("3412 lines"));
+    REQUIRE(compact.find("1 line ") == std::string::npos);
+}
+
 TEST_CASE("assistant narration renders before the tools from the same step",
           "[tui][conversation][render][tool][ordering]") {
     std::vector<UiMessage> messages;
     auto message = make_assistant_message("I will inspect the configuration.", "", false);
     auto tool = make_tool_activity(
         "read-config",
-        "read_file",
+        "read",
         R"({"path":"config.toml"})",
         "config.toml");
     tool.status = ToolActivity::Status::Succeeded;
@@ -889,7 +968,7 @@ TEST_CASE("tool header always labels a finished tool that produced no metric",
 
     SECTION("failed read") {
         auto tool = make_tool_activity(
-            "read-fail", "read_file", R"({"path":"missing.txt"})", "missing.txt");
+            "read-fail", "read", R"({"path":"missing.txt"})", "missing.txt");
         apply_tool_result(tool, R"({"error":"no such file"})");
         REQUIRE(tool.status == ToolActivity::Status::Failed);
         REQUIRE_THAT(render_single_tool(std::move(tool)),
@@ -961,7 +1040,7 @@ TEST_CASE("structured tools keep the payload their renderers need",
                ContainsSubstring("\"status_code\""));
 
     // Tools with no structured renderer must not pay for a second copy.
-    auto plain = make_tool_activity("id", "read_file", R"({"path":"a"})", "");
+    auto plain = make_tool_activity("id", "read", R"({"path":"a"})", "");
     apply_tool_result(plain, R"({"content":"line one\n"})");
     CHECK(plain.result.raw_payload.empty());
 }
@@ -1049,7 +1128,7 @@ TEST_CASE("web search results honour the compact preview limit",
 
 TEST_CASE("tool disclosure defaults follow tool outcome",
           "[tui][conversation][tool]") {
-    auto tool = make_tool_activity("d1", "read_file", R"({"path":"a"})", "a");
+    auto tool = make_tool_activity("d1", "read", R"({"path":"a"})", "a");
     apply_tool_result(tool, R"({"content":"x\n"})");
     CHECK_FALSE(tool_disclosure_defaults_expanded(tool));
 
@@ -1063,11 +1142,11 @@ TEST_CASE("tool disclosure defaults follow tool outcome",
 
 TEST_CASE("tool disclosure keys separate identical id-less calls",
           "[tui][conversation][tool][regression]") {
-    auto first = make_tool_activity("", "read_file", R"({"path":"a"})", "a");
-    auto second = make_tool_activity("", "read_file", R"({"path":"a"})", "a");
+    auto first = make_tool_activity("", "read", R"({"path":"a"})", "a");
+    auto second = make_tool_activity("", "read", R"({"path":"a"})", "a");
     CHECK(tool_disclosure_key(first, 0) != tool_disclosure_key(second, 1));
 
-    auto identified = make_tool_activity("call-1", "read_file", R"({"path":"a"})", "a");
+    auto identified = make_tool_activity("call-1", "read", R"({"path":"a"})", "a");
     CHECK(tool_disclosure_key(identified, 0) == tool_disclosure_key(identified, 7));
 }
 
@@ -1287,7 +1366,7 @@ TEST_CASE("a tool without a diff is unaffected by the diff budget",
           "[tui][conversation][render][tool][diff]") {
     std::vector<UiMessage> messages;
     auto msg = make_assistant_message("", "", false);
-    auto tool = make_tool_activity("read-nodiff", "read_file", R"({"path":"a"})", "a");
+    auto tool = make_tool_activity("read-nodiff", "read", R"({"path":"a"})", "a");
     apply_tool_result(tool, R"({"content":"only line\n"})");
     CHECK(tool.diff_preview.empty());
     CHECK(tool.diff_preview.total_line_count == 0);
@@ -1505,7 +1584,7 @@ TEST_CASE("render — activity disclosure always leads with the lightbulb",
 TEST_CASE("render_history_panel — tool group", "[tui][conversation][render]") {
     std::vector<UiMessage> messages;
     std::vector<ToolActivity> tools;
-    tools.push_back(make_tool_activity("t1", "read_file", "{}", "main.cpp"));
+    tools.push_back(make_tool_activity("t1", "read", "{}", "main.cpp"));
     tools.push_back(make_tool_activity("t2", "grep_search", "{}", "pattern"));
     messages.push_back(make_tool_group_message(std::move(tools)));
     REQUIRE_NOTHROW(render_history_panel(messages, 0));
@@ -1790,8 +1869,8 @@ TEST_CASE("make_allow_key — run_terminal_command extracts program", "[tui][con
 }
 
 TEST_CASE("make_allow_key — other tools use name", "[tui][conversation][allow]") {
-    auto key = make_allow_key("read_file", R"({"path":"test.cpp"})");
-    REQUIRE(key == "read_file");
+    auto key = make_allow_key("read", R"({"path":"test.cpp"})");
+    REQUIRE(key == "read");
 }
 
 TEST_CASE("make_allow_label — creates readable label", "[tui][conversation][allow]") {

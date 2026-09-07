@@ -407,7 +407,7 @@ TEST_CASE("DashScopeProtocol - preserves assistant reasoning across tool turns",
     assistant.reasoning_content = "Need to inspect the repository first.";
     assistant.tool_calls.push_back(ToolCall{
         .id = "call_1",
-        .function = {.name = "read_file", .arguments = R"({"path":"README.md"})"},
+        .function = {.name = "read", .arguments = R"({"path":"README.md"})"},
     });
     req.messages.insert(req.messages.begin() + 1, std::move(assistant));
 
@@ -517,7 +517,7 @@ TEST_CASE("DashScopeProtocol - streaming requests carry cache anchors and metada
         Message{.role = "user", .content = "Latest prompt"},
     };
     Tool first_tool;
-    first_tool.function.name = "read_file";
+    first_tool.function.name = "read";
     first_tool.function.description = "Read a file";
     Tool last_tool;
     last_tool.function.name = "run_command";
@@ -532,7 +532,7 @@ TEST_CASE("DashScopeProtocol - streaming requests carry cache anchors and metada
         R"("text":"Stable instructions","cache_control":{"type":"ephemeral"})"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("text":"Latest prompt","cache_control":{"type":"ephemeral"})"));
-    const auto first_tool_position = payload.find(R"("name":"read_file")");
+    const auto first_tool_position = payload.find(R"("name":"read")");
     const auto last_tool_position = payload.find(R"("name":"run_command")");
     const auto tool_cache_position = payload.find(
         R"("cache_control":{"type":"ephemeral"})", last_tool_position);
@@ -597,7 +597,7 @@ TEST_CASE("DashScope Responses retains its hosted/local tool serialization polic
           "[qwen][responses][token-plan][isolation]") {
     auto req = make_simple_request("qwen3.8-max");
     Tool local_tool;
-    local_tool.function.name = "read_file";
+    local_tool.function.name = "read";
     local_tool.function.description = "Read a file";
     req.tools.push_back(std::move(local_tool));
 
@@ -607,7 +607,7 @@ TEST_CASE("DashScope Responses retains its hosted/local tool serialization polic
 
     // Grok's collision policy must not reorder DashScope's established payload.
     const auto hosted_pos = payload.find(R"({"type":"web_search"})");
-    const auto local_pos = payload.find(R"("name":"read_file")");
+    const auto local_pos = payload.find(R"("name":"read")");
     REQUIRE(hosted_pos != std::string::npos);
     REQUIRE(local_pos != std::string::npos);
     CHECK(hosted_pos < local_pos);
@@ -618,7 +618,7 @@ TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
     auto req = make_simple_request("glm-5.2");
     req.effort = "high";
     Tool local_tool;
-    local_tool.function.name = "read_file";
+    local_tool.function.name = "read";
     local_tool.function.description = "Read a file";
     local_tool.function.input_schema =
         R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})";
@@ -633,7 +633,7 @@ TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("model":"glm-5.2")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("name":"read_file")"));
+        R"("name":"read")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
         R"("reasoning":)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(

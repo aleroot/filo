@@ -76,7 +76,7 @@ TEST_CASE("remote activity hub tracks client identity and tool lifecycle",
 
     const auto activity_id = hub.tool_started(
         "session-a",
-        "read_file",
+        "read",
         R"({"path":"/tmp/example"})");
 
     auto snapshot = hub.snapshot();
@@ -113,7 +113,7 @@ TEST_CASE("stateless MCP requests refresh identity without reset",
     hub.server_listening("127.0.0.1:8080");
 
     hub.client_identified("", "Lampo", "1.0");
-    const auto activity_id = hub.tool_started("", "read_file", "{}");
+    const auto activity_id = hub.tool_started("", "read", "{}");
     hub.tool_finished(activity_id, R"({"content":"ok"})", false);
 
     auto snapshot = hub.snapshot();
@@ -342,7 +342,7 @@ TEST_CASE("remote activity history stays bounded even when nothing finishes",
     // grow the history without limit.
     constexpr std::size_t kFlood = 150;
     for (std::size_t i = 0; i < kFlood; ++i) {
-        const std::uint64_t id = hub.tool_started("session-a", "read_file", "{}");
+        const std::uint64_t id = hub.tool_started("session-a", "read", "{}");
         CHECK(id != 0);
     }
     const auto snapshot = hub.snapshot(false);
@@ -365,7 +365,7 @@ TEST_CASE("remote activity payloads carry a single truncation marker",
     hub.server_listening("127.0.0.1:8080");
 
     const std::string oversized(40 * 1024, 'x');
-    const auto activity_id = hub.tool_started("session-a", "read_file", "{}");
+    const auto activity_id = hub.tool_started("session-a", "read", "{}");
     hub.tool_finished(activity_id, oversized, false);
 
     const auto snapshot = hub.snapshot();
@@ -390,7 +390,7 @@ TEST_CASE("evicting a failed activity does not strand the error badge",
     // Push the failure out of the retention window; the badge must follow the
     // history rather than keep counting an entry the user can no longer reach.
     for (std::size_t i = 0; i < 120; ++i) {
-        const auto id = hub.tool_started("session-a", "read_file", "{}");
+        const auto id = hub.tool_started("session-a", "read", "{}");
         hub.tool_finished(id, "{}", false);
     }
 
@@ -506,7 +506,7 @@ TEST_CASE("detaching the notify callback waits for in-flight notifications",
 
     // Once detached, no further notification may be delivered.
     const int observed = callbacks.load(std::memory_order_relaxed);
-    (void)hub.tool_started("session-a", "read_file", "{}");
+    (void)hub.tool_started("session-a", "read", "{}");
     CHECK(callbacks.load(std::memory_order_relaxed) == observed);
 
     hub.reset_for_testing();

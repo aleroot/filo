@@ -133,7 +133,7 @@ enum class PermissionProfile {
 // (rm, git push, npm install, …) always prompt the user.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] inline bool needs_permission(std::string_view tool_name,
+[[nodiscard]] inline bool needs_permission(std::string_view requested_tool,
                                            PermissionProfile profile = PermissionProfile::Interactive,
                                            std::string_view tool_args = {}) noexcept {
     // 1. Autonomous mode: Trust everything.
@@ -141,10 +141,14 @@ enum class PermissionProfile {
         return false;
     }
 
-    // 2. Identify tool categories.
+    // 2. Identify tool categories. ToolManager dispatches call aliases to the
+    //    canonical tool, so classify the tool that will actually run: `shell`
+    //    must be gated exactly like `run_terminal_command`.
+    const std::string_view tool_name =
+        core::tools::names::canonical_alias(requested_tool);
     const bool is_file_mod = core::tools::names::is_file_modification_tool(tool_name);
 
-    const bool is_task = (tool_name == "task");
+    const bool is_task = (tool_name == core::tools::names::kTask);
     const bool is_shell = core::tools::names::is_terminal_tool(tool_name);
     const bool is_verification =
         core::tools::names::is_verification_tool(tool_name);
@@ -168,7 +172,7 @@ enum class PermissionProfile {
             }
             return true;
         }
-        return false; // Safe tools (read_file, etc.) are always allowed.
+        return false; // Safe tools (read, etc.) are always allowed.
     }
 
     // 4. Restricted: Ask for everything.

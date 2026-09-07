@@ -255,7 +255,7 @@ Filo’s MCP server (`filo-mcp`) exposes local coding tools so a host such as La
 
 **Coding-oriented tools include** (MCP registration set):
 
-- **Read / search:** `read_file`, `list_directory`, `file_search`, `grep_search`
+- **Read / search:** `read`, `list_directory`, `file_search`, `grep_search`
 - **Write / edit:** `write_file`, `search_replace`, `apply_patch`, `replace`, `delete_file`, `move_file`, `create_directory`
 - **Shell:** `run_terminal_command`
 - **Workspace / orchestration:** `get_workspace_config`, `delegate_task`

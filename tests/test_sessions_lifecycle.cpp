@@ -415,7 +415,7 @@ TEST_CASE("Agent compaction preserves todos and deterministic tool execution sta
         .tool_calls = {{
             .id = "call-state",
             .function = {
-                .name = "read_file",
+                .name = "read",
                 .arguments = R"({"path":"src/core/agent/Agent.cpp"})",
             },
         }},
@@ -424,7 +424,7 @@ TEST_CASE("Agent compaction preserves todos and deterministic tool execution sta
         .role = "tool",
         .content =
             R"({"preview":"Agent state","offload":{"reference":"session/call-state.result"}})",
-        .name = "read_file",
+        .name = "read",
         .tool_call_id = "call-state",
     });
 

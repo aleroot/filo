@@ -73,7 +73,7 @@ struct ToolActivity {
     };
 
     std::string id;                      // Unique tool call ID
-    std::string name;                    // Tool name (e.g., "read_file")
+    std::string name;                    // Tool name (e.g., "read")
     std::string args;                    // JSON arguments
     std::string description;             // Human-readable summary
     Result result;                       // Structured tool output metadata

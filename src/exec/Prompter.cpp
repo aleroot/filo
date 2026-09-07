@@ -25,7 +25,7 @@
 #include "core/tools/GrepSearchTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
 #include "core/tools/MoveFileTool.hpp"
-#include "core/tools/ReadFileTool.hpp"
+#include "core/tools/ReadTool.hpp"
 #include "core/tools/ReplaceTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/ShellTool.hpp"

@@ -174,7 +174,7 @@ struct CompressionProfile {
         return profile;
     }
 
-    if (tool_name == core::tools::names::kReadFile) {
+    if (core::tools::names::is_read_tool(tool_name)) {
         profile.limits = sanitize(Limits{
             .max_chars = std::min<std::size_t>(profile.limits.max_chars, 4 * 1024),
             .head_chars = std::min<std::size_t>(profile.limits.head_chars, 2200),
@@ -574,10 +574,10 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
     });
 
     std::ostringstream out;
-    out << "[light read_file summary]\n";
+    out << "[light read summary]\n";
     out << "Original chars: " << content.size() << "\n";
     out << "Original lines: " << count_lines(content) << "\n";
-    out << "Use read_file with offset_line/limit_lines for exact source slices.\n";
+    out << "Use read with offset_line/limit_lines for exact source slices.\n";
     if (!signals.empty()) {
         out << "\nStructural lines:\n";
         const std::size_t signal_budget = max_chars > tail_chars + 512
@@ -676,9 +676,9 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
 [[nodiscard]] std::string oversized_full_file_summary(std::string_view content,
                                                       std::size_t max_chars) {
     std::string summary = structural_file_summary(content, max_chars);
-    constexpr std::string_view kLightHeader = "[light read_file summary]";
+    constexpr std::string_view kLightHeader = "[light read summary]";
     if (summary.starts_with(kLightHeader)) {
-        summary.replace(0, kLightHeader.size(), "[full read_file summary]");
+        summary.replace(0, kLightHeader.size(), "[full read summary]");
     }
     return summary;
 }
@@ -827,7 +827,7 @@ FullCompressionCache& full_cache() {
                                            std::string_view digest) {
     return std::format(
         "[cached read] {} unchanged ({} lines, {} chars, read {}x, digest {}). "
-        "Use read_file with offset_line/limit_lines for exact source slices.",
+        "Use read with offset_line/limit_lines for exact source slices.",
         compact_path_label(path),
         line_count,
         original_chars,
@@ -835,7 +835,8 @@ FullCompressionCache& full_cache() {
         digest);
 }
 
-[[nodiscard]] std::optional<std::string> full_compress_read_file(
+[[nodiscard]] std::optional<std::string> full_compress_read(
+    std::string_view tool_name,
     std::string_view raw_output,
     Context context,
     const CompressionProfile& profile) {
@@ -858,7 +859,8 @@ FullCompressionCache& full_cache() {
         line_count,
         content->size());
 
-    if (touch.unchanged && !is_line_range_request(context.tool_arguments)) {
+    const bool line_range = is_line_range_request(context.tool_arguments);
+    if (touch.unchanged && !line_range) {
         const std::string stub = cached_file_stub(
             path,
             line_count,
@@ -866,7 +868,7 @@ FullCompressionCache& full_cache() {
             touch.read_count,
             digest);
         return wrapped_full_payload(
-            core::tools::names::kReadFile,
+            tool_name,
             "content",
             path,
             *content,
@@ -874,12 +876,19 @@ FullCompressionCache& full_cache() {
             profile.label);
     }
 
+    // Exact offset/limit slices are the recovery path the summary itself
+    // recommends. Replacing them with a structural digest would hide the
+    // lines the model just asked for.
+    if (line_range) {
+        return std::nullopt;
+    }
+
     if (raw_output.size() > profile.limits.max_chars) {
         const std::string summary =
             oversized_full_file_summary(*content, profile.limits.max_chars);
         if (summary.size() < raw_output.size()) {
             return wrapped_full_payload(
-                core::tools::names::kReadFile,
+                tool_name,
                 "content",
                 path,
                 *content,
@@ -1132,7 +1141,7 @@ FullCompressionCache& full_cache() {
         limits,
         CompressionMode::Light);
 
-    if (tool_name == core::tools::names::kReadFile) {
+    if (core::tools::names::is_read_tool(tool_name)) {
         const auto content = core::utils::json::first_string_field(raw_output, {"content"});
         if (!content.has_value() || content->size() <= profile.limits.max_chars) {
             return std::nullopt;
@@ -1186,8 +1195,8 @@ FullCompressionCache& full_cache() {
     std::string_view raw_output,
     Context context,
     const CompressionProfile& profile) {
-    if (tool_name == core::tools::names::kReadFile) {
-        return full_compress_read_file(raw_output, context, profile);
+    if (core::tools::names::is_read_tool(tool_name)) {
+        return full_compress_read(tool_name, raw_output, context, profile);
     }
     if (tool_name == core::tools::names::kRunTerminalCommand) {
         return full_compress_shell_output(raw_output, context, profile);
@@ -1208,7 +1217,7 @@ FullCompressionCache& full_cache() {
 } // namespace
 
 Limits limits_for_tool(std::string_view tool_name) {
-    if (tool_name == core::tools::names::kReadFile) {
+    if (core::tools::names::is_read_tool(tool_name)) {
         return Limits{.max_chars = 12 * 1024, .head_chars = 8 * 1024, .tail_chars = 4 * 1024};
     }
     if (tool_name == core::tools::names::kReadToolResult) {
@@ -1304,9 +1313,20 @@ std::string clamp_for_history(
     Context context) {
     const CompressionProfile profile =
         compression_profile(tool_name, limits, parse_compression_mode(compression_mode));
-    if (tool_name == core::tools::names::kReadFile) {
+    if (core::tools::names::is_read_tool(tool_name)) {
         const auto path = core::utils::json::first_string_field(context.tool_arguments, {"path"}).value_or("");
+        // The reader already bounded this envelope and validated its citations.
+        // Re-compressing it would destroy the relationship to source locations.
+        if (raw_output.size() <= 128 * 1024
+            && core::utils::json::first_string_field(raw_output, {"read_view"}).has_value())
+            return std::string(raw_output);
         if (is_instruction_file(path)) {
+            return std::string(raw_output);
+        }
+        // Keep explicit line slices intact so the transcript metric and the
+        // model both see the requested source, not a 12 KiB structural digest.
+        if (raw_output.size() <= 128 * 1024
+            && is_line_range_request(context.tool_arguments)) {
             return std::string(raw_output);
         }
     }

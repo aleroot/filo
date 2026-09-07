@@ -51,7 +51,7 @@ TEST_CASE("HistoryCompactionPlanner produces provider-neutral retained context",
         {
             .role = "assistant",
             .content = "",
-            .tool_calls = {tool_call("call-1", "read_file", R"({"path":"src/main.cpp"})")},
+            .tool_calls = {tool_call("call-1", "read", R"({"path":"src/main.cpp"})")},
             .reasoning_content = "provider-private reasoning",
             .continuation_items = {
                 {.provider = "openai", .kind = "reasoning", .payload = R"({"id":"r1"})"},
@@ -60,7 +60,7 @@ TEST_CASE("HistoryCompactionPlanner produces provider-neutral retained context",
         {
             .role = "tool",
             .content = R"({"content":"int main() {}","offload":{"reference":"s/c.result"}})",
-            .name = "read_file",
+            .name = "read",
             .tool_call_id = "call-1",
         },
         {.role = "assistant", .content = "The entry point is small."},
@@ -79,7 +79,7 @@ TEST_CASE("HistoryCompactionPlanner produces provider-neutral retained context",
         ContainsSubstring("Earlier checkpoint."));
     CHECK_THAT(
         plan.summary_history.front().content,
-        ContainsSubstring("read_file"));
+        ContainsSubstring("read"));
 
     REQUIRE(plan.retained_history.size() == 2);
     for (const auto& message : plan.retained_history) {

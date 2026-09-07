@@ -184,10 +184,10 @@ TEST_CASE("SessionStore round-trips messages with tool calls", "[session][json]"
     core::llm::ToolCall tc;
     tc.id   = "call_001";
     tc.type = "function";
-    tc.function.name      = "read_file";
+    tc.function.name      = "read";
     tc.function.arguments = R"({"path":"/etc/hosts"})";
     data.messages.push_back({"assistant", "", "", "", {tc}});
-    data.messages.push_back({"tool", R"({"content":"127.0.0.1 localhost"})", "read_file", "call_001", {}});
+    data.messages.push_back({"tool", R"({"content":"127.0.0.1 localhost"})", "read", "call_001", {}});
 
     REQUIRE(store.save(data));
     const auto loaded = store.load_by_id("tooltest");
@@ -198,7 +198,7 @@ TEST_CASE("SessionStore round-trips messages with tool calls", "[session][json]"
     REQUIRE(msgs[2].role == "assistant");
     REQUIRE(msgs[2].tool_calls.size() == 1);
     CHECK(msgs[2].tool_calls[0].id              == "call_001");
-    CHECK(msgs[2].tool_calls[0].function.name   == "read_file");
+    CHECK(msgs[2].tool_calls[0].function.name   == "read");
     REQUIRE(msgs[3].role         == "tool");
     CHECK(msgs[3].tool_call_id   == "call_001");
 }
@@ -960,7 +960,7 @@ TEST_CASE("SessionStatsRegistry isolates concurrent thread metrics",
     };
     stats.record_api_call("thread-a", true);
     stats.record_turn("thread-a", "model-a", usage);
-    stats.record_tool_call("thread-a", "read_file", true);
+    stats.record_tool_call("thread-a", "read", true);
     stats.record_turn("thread-b", "model-b", usage);
 
     const auto first = stats.snapshot("thread-a");
@@ -990,15 +990,15 @@ TEST_CASE("SessionStats accumulates tool call success and failure", "[session][s
     auto& stats = core::session::SessionStats::get_instance();
     stats.reset();
 
-    stats.record_tool_call("read_file", true, 3, 10, 40, 100);
-    stats.record_tool_call("read_file", true, 2, 6, 20, 50);
+    stats.record_tool_call("read", true, 3, 10, 40, 100);
+    stats.record_tool_call("read", true, 2, 6, 20, 50);
     stats.record_tool_call("write_file", false, 8, 4, 10, 25);
 
     const auto snap = stats.snapshot();
     CHECK(snap.tool_calls_total   == 3);
     CHECK(snap.tool_calls_success == 2);
     REQUIRE(snap.per_tool.size() == 2);
-    CHECK(snap.per_tool[0].tool == "read_file");
+    CHECK(snap.per_tool[0].tool == "read");
     CHECK(snap.per_tool[0].call_count == 2);
     CHECK(snap.per_tool[0].success_count == 2);
     CHECK(snap.per_tool[0].argument_tokens == 5);
@@ -1091,7 +1091,7 @@ TEST_CASE("SessionStats reset is safe while recorders are active", "[session][st
             }
 
             const std::string model = (t % 2 == 0) ? "model-a" : "model-b";
-            const std::string tool = (t % 2 == 0) ? "read_file" : "write_file";
+            const std::string tool = (t % 2 == 0) ? "read" : "write_file";
             const core::llm::TokenUsage u{10, 5, 15};
             for (int i = 0; i < kPerThread; ++i) {
                 stats.record_turn(model, u);

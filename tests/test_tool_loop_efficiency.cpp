@@ -139,14 +139,14 @@ TEST_CASE("workspace-wide readers wait behind writes", "[agent][tools][parallel]
     REQUIRE(max_active.load(std::memory_order_acquire) == 1);
 }
 
-TEST_CASE("tool deduplicator reuses same-step identical calls", "[agent][tools]") {
+TEST_CASE("tool deduplicator reuses same-step identical reads", "[agent][tools][read]") {
     core::agent::ToolCallDeduplicator dedup;
     dedup.begin_step();
 
     const auto first = dedup.register_call(
-        make_call("call-1", "read_file", R"({"path":"a.cpp"})"));
+        make_call("call-1", "read", R"({"path":"a.cpp"})"));
     const auto second = dedup.register_call(
-        make_call("call-2", "read_file", "{  \"path\" : \"a.cpp\"  }"));
+        make_call("call-2", "read", "{  \"path\" : \"a.cpp\"  }"));
 
     REQUIRE_FALSE(first.duplicate_in_step);
     REQUIRE(second.duplicate_in_step);
@@ -154,6 +154,19 @@ TEST_CASE("tool deduplicator reuses same-step identical calls", "[agent][tools]"
 
     dedup.complete_original(first.original_index, R"({"content":"hello"})");
     REQUIRE(dedup.duplicate_result(second.original_index) == R"({"content":"hello"})");
+}
+
+TEST_CASE("tool deduplicator does not collapse question reads", "[agent][tools][read]") {
+    core::agent::ToolCallDeduplicator dedup;
+    dedup.begin_step();
+
+    const auto first = dedup.register_call(
+        make_call("call-1", "read", R"({"path":"a.cpp","question":"Where is main?"})"));
+    const auto second = dedup.register_call(
+        make_call("call-2", "read", R"({"path":"a.cpp","question":"Where is main?"})"));
+
+    REQUIRE_FALSE(first.duplicate_in_step);
+    REQUIRE_FALSE(second.duplicate_in_step);
 }
 
 TEST_CASE("tool deduplicator does not skip side-effecting tools", "[agent][tools]") {
@@ -192,7 +205,7 @@ TEST_CASE("tool deduplicator escalates repeated cross-step calls", "[agent][tool
 
 TEST_CASE("tool deduplicator force-stops only after repeated read-only calls", "[agent][tools]") {
     core::agent::ToolCallDeduplicator dedup;
-    const auto call = make_call("call", "read_file", R"({"path":"src/main.cpp"})");
+    const auto call = make_call("call", "read", R"({"path":"src/main.cpp"})");
 
     for (int i = 0; i < 11; ++i) {
         dedup.begin_step();
