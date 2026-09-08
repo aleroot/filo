@@ -814,8 +814,9 @@ TEST_CASE("read header metric reports original lines for compressed summaries",
     messages.push_back(std::move(msg));
 
     const auto compact = render_panel_text(messages);
-    REQUIRE_THAT(compact, ContainsSubstring("Chat.swift:2820+220"));
-    REQUIRE_THAT(compact, ContainsSubstring("221 lines"));
+    REQUIRE_THAT(compact, ContainsSubstring("Chat.swift"));
+    REQUIRE(compact.find("Chat.swift:2820+220") == std::string::npos);
+    REQUIRE_THAT(compact, ContainsSubstring("offset 2820+220 · 221 lines"));
     REQUIRE(compact.find("3 lines") == std::string::npos);
 }
 

@@ -835,11 +835,15 @@ struct ToolResultView {
     FetchMetadata                fetch;
     std::size_t                  read_line_count = 0;
     std::int64_t                 read_start_line = 1;
+    std::optional<std::string>    read_description;
+    std::string                  read_range;
     std::size_t                  diff_additions = 0;
     std::size_t                  diff_deletions = 0;
     /// True when the payload parsed into the shape this tool's renderer expects.
     bool                         payload_parsed = false;
 };
+
+std::string summarize_read_arguments(const core::tools::read::Options& options);
 
 ToolResultView build_tool_result_view(const ToolActivity& tool) {
     ToolResultView view;
@@ -850,6 +854,17 @@ ToolResultView build_tool_result_view(const ToolActivity& tool) {
         case ToolPresentationKind::Read:
             view.read_line_count = read_result_line_count(tool.result.summary);
             view.read_start_line = read_start_line(tool.args);
+            if (auto options = core::tools::read::parse_options(tool.args);
+                options && options->sliced) {
+                view.read_range = std::format("offset {}", options->offset_line);
+                if (options->limit_lines) {
+                    view.read_range += std::format("+{}", options->limit_lines);
+                }
+                // Keep the range separate in cards, including replayed calls
+                // whose stored description still attaches it to the filename.
+                options->sliced = false;
+                view.read_description = summarize_read_arguments(*options);
+            }
             break;
         case ToolPresentationKind::Write:
         case ToolPresentationKind::Edit:
@@ -1312,16 +1327,21 @@ Element render_tool_header(const ToolActivity& tool,
             ftxui::text("auto-approved") | ftxui::color(ColorYellowDark) | dim);
     }
 
-    if (!tool.description.empty()) {
+    const auto& description = view.read_description
+        ? *view.read_description : tool.description;
+    if (!description.empty()) {
         header_items.push_back(ftxui::text("  "));
         header_items.push_back(
-            ftxui::text(tool.description) | ftxui::color(Color::GrayDark) | xflex);
+            ftxui::text(description) | ftxui::color(Color::GrayDark) | xflex);
     }
 
     // Right-edge label. A collapsed card is the only thing standing between the
     // reader and the change, so a diff that chose to stay closed must say how
     // big it is — otherwise "collapsed by default" reads as "silently hidden".
     std::vector<std::string> trailing;
+    if (!view.read_range.empty()) {
+        trailing.push_back(view.read_range);
+    }
     if (tool.status != ToolActivity::Status::Pending &&
         tool.status != ToolActivity::Status::Executing) {
         trailing.push_back(tool_result_metric(tool, view));
@@ -2912,9 +2932,9 @@ std::string summarize_read_arguments(const core::tools::read::Options& options) 
     if (!options.cell.empty()) rest += " cell=" + options.cell;
     if (options.view != "exact" && options.question.empty()) rest += " view=" + options.view;
     if (!options.question.empty()) rest += " ? " + options.question;
-    // Keep `:offset+limit` visible when the path is long; truncate the path
-    // first so `Chat.swift:2820+220` cannot collapse to `Chat.swif...`.
-    if (!range.empty() && paths.size() + range.size() > kToolPreviewMaxLen) {
+    // Truncate long paths on a codepoint boundary, reserving room for the
+    // range when it is included in a standalone argument summary.
+    if (paths.size() + range.size() > kToolPreviewMaxLen) {
         const auto keep = kToolPreviewMaxLen > range.size() + 3
             ? kToolPreviewMaxLen - range.size() - 3 : 1;
         // Cut on a codepoint boundary; a path is bytes, not glyphs.
