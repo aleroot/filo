@@ -124,10 +124,9 @@ ToolDefinition VerificationTool::get_definition() const {
       .title = "Run Verification",
       .description = "Run a deterministic build, test, lint, type-check, or "
                      "format check and return "
-                     "a typed verification receipt. Prefer recipe_id values "
-                     "from the repository "
-                     "verification catalog in the system prompt. For uncovered "
-                     "checks, provide kind, "
+                     "a typed verification receipt. Use recipe_id only for "
+                     "checks listed in a repository verification catalog when "
+                     "the environment provides one; otherwise provide kind, "
                      "executable, and an argv arguments array. This tool does "
                      "not invoke a caller-supplied "
                      "shell string, so shell operators cannot mask failures.",

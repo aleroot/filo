@@ -70,6 +70,19 @@ constexpr std::string_view kLegacyProtocolVersion = "2025-11-25";
 constexpr std::string_view kDefaultProtocolVersion = kLegacyProtocolVersion;
 constexpr const char* kTasksExtensionIdentifier = "io.modelcontextprotocol/tasks";
 
+/// Cache-control hints for list-style results (MCP 2026-07-28 §Caching).
+///
+/// ttlMs 0 means "immediately stale": clients MAY re-fetch the result every
+/// time it is needed. Filo's tool catalog is registration-fixed and never
+/// changes within a process, so a positive TTL is the spec-intended signal
+/// that lets clients (Lampo resolves tooling per user message) keep their
+/// cached catalog instead of re-fetching the full payload on every request.
+/// Workspace- and disk-derived lists use a shorter TTL so edits stay visible;
+/// resources/read intentionally keeps ttlMs 0 because file contents must
+/// always be served fresh.
+constexpr int64_t kStaticListTtlMs    = 3'600'000; ///< 1 hour — registration-fixed lists
+constexpr int64_t kDerivedListTtlMs   = 60'000;    ///< 1 minute — workspace/disk-derived lists
+
 /// Human-readable instructions returned by discovery and legacy initialize.
 constexpr std::string_view kServerInstructions =
     "filo-mcp provides local coding tools in the configured workspace. "
@@ -653,15 +666,23 @@ static constexpr std::string_view kInvalidRequest{
             }
         }
 
-        w.comma().key("required");
-        {
-            auto _req = w.array();
-            bool first_req = true;
-            for (const auto& parameter : def.parameters) {
-                if (!parameter.required) continue;
-                if (!first_req) w.comma();
-                first_req = false;
-                w.str(parameter.name);
+        // Absent "required" already means "no constraints" in JSON Schema;
+        // an empty array is redundant wire bytes on every catalog fetch.
+        bool has_required = false;
+        for (const auto& parameter : def.parameters) {
+            if (parameter.required) { has_required = true; break; }
+        }
+        if (has_required) {
+            w.comma().key("required");
+            {
+                auto _req = w.array();
+                bool first_req = true;
+                for (const auto& parameter : def.parameters) {
+                    if (!parameter.required) continue;
+                    if (!first_req) w.comma();
+                    first_req = false;
+                    w.str(parameter.name);
+                }
             }
         }
     }
@@ -675,13 +696,15 @@ static constexpr std::string_view kInvalidRequest{
  * The result is built once on first call (C++11 magic-static guarantee) and
  * returned by const reference on every subsequent call.
  *
- * ### Emitted tool object fields (MCP 2025-11-25)
+ * ### Emitted tool object fields (MCP 2025-11-25 / 2026-07-28)
  * - @c name        — programmatic identifier
  * - @c title       — human-readable display name (optional, aids client UIs)
  * - @c description — prose description for the LLM
  * - @c inputSchema — JSON Schema object built from @c ToolDefinition::parameters
- * - @c annotations — behavioral hints (@c readOnlyHint, @c destructiveHint,
- *                    @c idempotentHint, @c openWorldHint)
+ * - @c annotations — behavioral hints; only @em non-default hints are emitted
+ *                    (@c readOnlyHint, @c destructiveHint, @c idempotentHint,
+ *                    @c openWorldHint — spec defaults are false, true, false,
+ *                    true respectively, and clients apply them themselves)
  *
  * @return A const reference to the cached JSON result string.
  */
@@ -693,7 +716,9 @@ static const std::string& tools_list_result() {
         JsonWriter w(8192);
         {
             auto _root = w.object();
-            w.kv_num("ttlMs", 0).comma()
+            // The catalog is registration-fixed (listChanged: false); a positive
+            // TTL lets stateless clients cache it instead of re-fetching per use.
+            w.kv_num("ttlMs", kStaticListTtlMs).comma()
                 .kv_str("cacheScope", "private").comma()
                 .key("tools");
             {
@@ -717,14 +742,40 @@ static const std::string& tools_list_result() {
                             w.comma().kv_raw("outputSchema", def.output_schema);
                         }
 
-                        w.comma().key("annotations");
-                        {
-                            auto _ann = w.object();
-                            const auto& ann = def.annotations;
-                            w.kv_bool("readOnlyHint",   ann.read_only_hint).comma()
-                             .kv_bool("destructiveHint", ann.destructive_hint).comma()
-                             .kv_bool("idempotentHint",  ann.idempotent_hint).comma()
-                             .kv_bool("openWorldHint",   ann.open_world_hint);
+                        // Emit only hints that differ from the spec defaults
+                        // (readOnly=false, destructive=true, idempotent=false,
+                        // openWorld=true). Clients apply the defaults for absent
+                        // keys, so redundant false/true entries are pure wire
+                        // waste. A tool whose hints are all defaults omits the
+                        // annotations object entirely.
+                        const auto& ann = def.annotations;
+                        const bool destructive_non_default = !ann.destructive_hint;
+                        const bool open_world_non_default  = !ann.open_world_hint;
+                        if (ann.read_only_hint || ann.idempotent_hint
+                            || destructive_non_default || open_world_non_default) {
+                            w.comma().key("annotations");
+                            {
+                                auto _ann = w.object();
+                                bool first_hint = true;
+                                const auto write_hint = [&](std::string_view key,
+                                                            bool value) {
+                                    if (!first_hint) w.comma();
+                                    first_hint = false;
+                                    w.kv_bool(key, value);
+                                };
+                                if (ann.read_only_hint) {
+                                    write_hint("readOnlyHint", true);
+                                }
+                                if (ann.idempotent_hint) {
+                                    write_hint("idempotentHint", true);
+                                }
+                                if (destructive_non_default) {
+                                    write_hint("destructiveHint", false);
+                                }
+                                if (open_world_non_default) {
+                                    write_hint("openWorldHint", false);
+                                }
+                            }
                         }
                     }
                 }
@@ -894,7 +945,7 @@ struct ParsedPromptGetRequest {
             }
         }
         rw.comma().kv_str("instructions", kServerInstructions)
-            .comma().kv_num("ttlMs", 0)
+            .comma().kv_num("ttlMs", kStaticListTtlMs)
             .comma().kv_str("cacheScope", "private");
     }
     return std::move(rw).take();
@@ -904,7 +955,8 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(128);
     {
         auto _res = rw.object();
-        rw.kv_num("ttlMs", 0).comma()
+        // Hardcoded empty template list — registration-fixed content.
+        rw.kv_num("ttlMs", kStaticListTtlMs).comma()
             .kv_str("cacheScope", "private").comma()
             .key("resourceTemplates");
         {
@@ -920,7 +972,9 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(512 + prompts.size() * 256);
     {
         auto _res = rw.object();
-        rw.kv_num("ttlMs", 0).comma()
+        // Prompt skills are re-discovered from disk on each call; a short TTL
+        // keeps client caches cheap without hiding skill edits for long.
+        rw.kv_num("ttlMs", kDerivedListTtlMs).comma()
             .kv_str("cacheScope", "private").comma()
             .key("prompts");
         {
@@ -959,7 +1013,8 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(2048);
     {
         auto _res = rw.object();
-        rw.kv_num("ttlMs", 0).comma()
+        // Workspace-derived (roots may change mid-connection): short TTL.
+        rw.kv_num("ttlMs", kDerivedListTtlMs).comma()
             .kv_str("cacheScope", "private").comma()
             .key("resources");
         {
@@ -1102,6 +1157,8 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(4096);
     {
         auto _res = rw.object();
+        // File contents must always be served fresh: ttlMs 0 (immediately
+        // stale) is intentional here, unlike the static catalog lists above.
         rw.kv_num("ttlMs", 0).comma()
             .kv_str("cacheScope", "private").comma()
             .key("contents");

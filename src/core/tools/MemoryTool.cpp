@@ -100,8 +100,8 @@ ToolDefinition MemoryTool::get_definition() const {
         .title = "Memory",
         .description =
             "Manage durable Filo memories for the current project. Memories never cross project boundaries. "
-            "Memory and automatic capture are enabled by default. Use status to check availability. "
-            "If disabled, the user can re-enable saving with /memory auto on.",
+            "Memory and automatic capture are enabled by default; use status to check availability. "
+            "If disabled, the user can re-enable saving from Filo.",
         .input_schema =
             R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Content for remember."},"id":{"type":"string","description":"Memory id for forget."},"scope":{"type":"string","enum":["project","session"],"description":"Defaults to project. Session memories are visible only in this session."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
         .annotations = {

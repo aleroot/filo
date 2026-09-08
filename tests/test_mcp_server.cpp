@@ -447,7 +447,7 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
             "run_terminal_command", "apply_patch", "file_search", "read",
             "write_file", "list_directory", "replace", "grep_search",
             "search_replace", "delete_file", "move_file", "create_directory",
-            "web_search", "web_fetch", "memory", "get_workspace_config",
+            "web_search", "fetch_url", "memory", "get_workspace_config",
             "delegate_task",
         };
         for (auto tool : tools) {
@@ -489,7 +489,10 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
         }
     }
 
-    REQUIRE(std::move(catalog).take().size() <= 9 * 1024);
+    // 10 KiB with the short-projection prefix used here. fetch_url was
+    // previously excluded by a name typo ("web_fetch") and never budgeted;
+    // including it puts the 17 built-ins at ~9.1 KiB.
+    REQUIRE(std::move(catalog).take().size() <= 10 * 1024);
 }
 
 TEST_CASE("MCP tools/list each tool has inputSchema with type object", "[mcp]") {
@@ -513,16 +516,146 @@ TEST_CASE("MCP tools/list includes title field for display names", "[mcp]") {
     REQUIRE_THAT(resp, ContainsSubstring("Write File"));
 }
 
-TEST_CASE("MCP tools/list includes annotations for all tools", "[mcp]") {
+TEST_CASE("MCP tools/list emits only non-default annotation hints", "[mcp][annotations]") {
     auto resp = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":5})");
 
-    // All four hint fields must be present for every tool.
-    REQUIRE_THAT(resp, ContainsSubstring(R"("annotations")"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("readOnlyHint")"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("destructiveHint")"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("idempotentHint")"));
-    REQUIRE_THAT(resp, ContainsSubstring(R"("openWorldHint")"));
+    // Spec defaults (MCP §Tool Annotations): readOnly=false, destructive=true,
+    // idempotent=false, openWorld=true. Only non-default hints are emitted;
+    // clients apply the defaults themselves. Absent keys are therefore
+    // semantically identical to the previous explicit emission.
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool saw_read_only   = false;
+    bool saw_destructive = false;
+    bool saw_idempotent  = false;
+    bool saw_open_world  = false;
+    bool saw_tool_without_annotations = false;
+
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        simdjson::dom::object annotations;
+        const auto status = tool["annotations"].get(annotations);
+        if (status == simdjson::NO_SUCH_FIELD || annotations.size() == 0) {
+            saw_tool_without_annotations = true;
+            continue;
+        }
+        REQUIRE(status == simdjson::SUCCESS);
+        for (const auto [key, value] : annotations) {
+            const bool hint = value.get_bool().value();
+            if (key == "readOnlyHint") {
+                REQUIRE(hint); // non-default means true
+                saw_read_only = true;
+            } else if (key == "idempotentHint") {
+                REQUIRE(hint); // non-default means true
+                saw_idempotent = true;
+            } else if (key == "destructiveHint") {
+                REQUIRE_FALSE(hint); // non-default means false
+                saw_destructive = true;
+            } else if (key == "openWorldHint") {
+                REQUIRE_FALSE(hint); // non-default means false
+                saw_open_world = true;
+            } else {
+                FAIL("unexpected annotation key: " << key);
+            }
+        }
+    }
+
+    // All four hints still occur across the catalog (some tool deviates from
+    // each default), and at least one all-default tool omits annotations.
+    REQUIRE(saw_read_only);
+    REQUIRE(saw_destructive);
+    REQUIRE(saw_idempotent);
+    REQUIRE(saw_open_world);
+    REQUIRE(saw_tool_without_annotations);
+}
+
+TEST_CASE("MCP tools/list advertises a cacheable TTL", "[mcp][caching]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":52})");
+
+    // The catalog is registration-fixed (listChanged: false); ttlMs must be
+    // positive or stateless clients treat it as immediately stale and
+    // re-fetch the full payload on every use (MCP 2026-07-28 §Caching).
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    int64_t ttl_ms = -1;
+    REQUIRE(doc["result"]["ttlMs"].get(ttl_ms) == simdjson::SUCCESS);
+    REQUIRE(ttl_ms >= 60'000);
+
+    std::string_view cache_scope;
+    REQUIRE(doc["result"]["cacheScope"].get(cache_scope) == simdjson::SUCCESS);
+    REQUIRE(cache_scope == "private");
+}
+
+TEST_CASE("MCP tools/list omits empty required arrays", "[mcp]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":53})");
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        simdjson::dom::array required;
+        if (tool["inputSchema"]["required"].get(required) == simdjson::SUCCESS) {
+            REQUIRE(required.size() > 0); // absent already means unconstrained
+        }
+    }
+}
+
+TEST_CASE("MCP tools/list stays within Lampo's full-catalog stuffing budget", "[mcp][budget]") {
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":54})");
+
+    // Lampo (ToolRegistry.ExternalToolDisclosurePolicy) keeps external tool
+    // schemas fully in model context while the catalog has <= 20 tools AND an
+    // estimated token count (serialized bytes / 4) <= 4096; above that it
+    // silently switches to progressive disclosure (a search wrapper), which
+    // measurably hurts small local models. This test pins Filo under that
+    // ceiling. The per-tool allowance covers Lampo's serialization overhead:
+    // the {"type":"function",...} wrapper, the "MCP server 'X' tool 'Y'. "
+    // description prefix, the mcp_-prefixed exposed name, and the optional
+    // per-tool workspace suffix (~141 bytes) Lampo appends when a workspace
+    // is selected.
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    // ToolManager is intentionally process-global and other randomized tests
+    // may register agent probes or executable skills; only the fixed MCP
+    // built-ins count toward Lampo's real catalog budget.
+    constexpr std::array<std::string_view, 19> kMcpBuiltinNames{
+        "run_terminal_command", "run_verification", "apply_patch", "file_search",
+        "read", "write_file", "list_directory", "replace", "grep_search",
+        "search_replace", "delete_file", "move_file", "create_directory",
+        "web_search", "fetch_url", "memory", "get_workspace_config",
+        "delegate_task", "activate_skill",
+    };
+    constexpr std::size_t kLampoOverheadPerTool = 130 + 141;
+    constexpr std::size_t kMaxTools = 20;
+    constexpr std::size_t kMaxEstimatedTokens = 4096;
+
+    std::size_t builtin_tools = 0;
+    std::size_t total_bytes = 0;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        std::string_view name;
+        std::string_view description;
+        REQUIRE(tool["name"].get(name) == simdjson::SUCCESS);
+        if (std::ranges::find(kMcpBuiltinNames, name) == kMcpBuiltinNames.end()) {
+            continue;
+        }
+        ++builtin_tools;
+        REQUIRE(tool["description"].get(description) == simdjson::SUCCESS);
+        const std::string schema = simdjson::minify(tool["inputSchema"]);
+        total_bytes += name.size() * 2 // bare name + mcp_-prefixed exposed name
+                     + description.size() + schema.size() + kLampoOverheadPerTool;
+    }
+    REQUIRE(builtin_tools <= kMaxTools);
+    REQUIRE(total_bytes / 4 <= kMaxEstimatedTokens);
 }
 
 TEST_CASE("MCP tools/list search_replace includes array items schema", "[mcp]") {
@@ -652,7 +785,7 @@ TEST_CASE("MCP tools/list run_terminal_command has destructive+openWorld hints",
     REQUIRE(is_valid_json(resp));
 }
 
-TEST_CASE("MCP lists only canonical read with read-only annotations", "[mcp][read]") {
+TEST_CASE("MCP lists only canonical read with read-only annotations", "[mcp][read][annotations]") {
     const auto response = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":7})");
     simdjson::dom::parser parser;
@@ -664,9 +797,15 @@ TEST_CASE("MCP lists only canonical read with read-only annotations", "[mcp][rea
         REQUIRE(name != "read_file");
         if (name != "read") continue;
         found = true;
+        // read is read-only and idempotent but open-world (it can fetch
+        // HTTP(S) URLs), so openWorldHint stays at the spec default (true)
+        // and is omitted from the minimal annotation emission.
         REQUIRE(tool["annotations"]["readOnlyHint"].get_bool().value());
         REQUIRE(tool["annotations"]["idempotentHint"].get_bool().value());
-        REQUIRE(tool["annotations"]["openWorldHint"].get_bool().value());
+        REQUIRE(tool["annotations"]["destructiveHint"].get_bool().value() == false);
+        simdjson::dom::element ignored;
+        REQUIRE(tool["annotations"]["openWorldHint"].get(ignored)
+                == simdjson::NO_SUCH_FIELD);
     }
     REQUIRE(found);
 }
