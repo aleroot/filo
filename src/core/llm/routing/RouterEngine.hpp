@@ -36,6 +36,7 @@ public:
     [[nodiscard]] std::vector<std::string> list_policies() const;
     [[nodiscard]] std::string active_policy() const;
     [[nodiscard]] std::optional<RouterGuardrails> guardrails() const;
+    [[nodiscard]] RouterFailover failover_config() const;
 
     [[nodiscard]] bool set_active_policy(std::string policy_name);
 

@@ -91,6 +91,8 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 
 - In-process router engine with policy rules and strategies: `smart`, `fallback`, `latency`, `load_balance`.
 - Automatic fallback chains with per-candidate retries.
+- Provider health memory: rate limits parsed from real response headers (`retry-after`, subscription window resets) cool a provider down across requests instead of re-hammering it, and a circuit breaker backs off repeatedly failing providers.
+- Optional wait-for-reset failover: when every routed provider is rate-limited, the router can park the turn until the soonest provider reset and resume automatically — overnight jobs finish without anyone typing "continue".
 - Guardrails for spend and quota reserves (`max_session_cost_usd`, token/request/window reserve ratios).
 - Auto-classifier that scores prompt complexity and routes to fast/balanced/powerful tiers.
 

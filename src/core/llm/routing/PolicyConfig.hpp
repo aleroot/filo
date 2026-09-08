@@ -81,11 +81,39 @@ struct RouterGuardrails {
     }
 };
 
+// Opt-in behaviour when every candidate in the fallback chain is exhausted
+// (failed or unavailable).  Mirrors the "wait for the printed reset and
+// continue" workflow popularised by rate-limit auto-retry helpers, but driven
+// by structured provider data and with cross-provider failover first.
+struct RouterFailover {
+    // false = surface an error and end the turn (historical behaviour).
+    // true  = when every candidate is rate-limited, park the turn until the
+    //         soonest provider reset and automatically re-route.
+    bool wait_on_exhaustion = false;
+
+    // Total wait budget per request when waiting is enabled. 0 = unlimited
+    // (overnight jobs).  When the soonest reset exceeds the budget the turn
+    // fails with the usual router error instead of parking.
+    int max_wait_seconds = 0;
+
+    // Extra pause after a reset before re-routing, absorbing clock skew and
+    // providers that reset slightly after the announced timestamp.
+    int reset_margin_seconds = 60;
+};
+
 struct RouterConfig {
     bool enabled = false;
     std::string default_policy;
     std::unordered_map<std::string, PolicyDefinition> policies;
     std::optional<RouterGuardrails> guardrails;
+
+    // Failover policy applied when the whole chain is exhausted.
+    RouterFailover failover;
+
+    // True when this config instance explicitly set the failover section.
+    // Needed so merge_router_config can avoid clobbering an existing failover
+    // policy when an overlay omits the section.
+    bool has_failover_overrides = false;
 
     // Auto-classifier configuration shared across all policies.
     // The Smart strategy uses this to choose the right tier per request.

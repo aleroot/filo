@@ -242,6 +242,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp
     src/core/llm/routing/PolicyConfig.cpp
+    src/core/llm/routing/ProviderHealth.cpp
     src/core/llm/routing/PolicyLoader.cpp
     src/core/llm/routing/RouterEngine.cpp
     src/core/llm/routing/AutoClassifier.cpp
@@ -610,6 +611,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_tier1.cpp
     tests/test_routing.cpp
     tests/test_router_provider.cpp
+    tests/test_provider_health.cpp
     tests/test_auto_classifier.cpp
     tests/test_complexity_scorer.cpp
     tests/test_prompt_input.cpp

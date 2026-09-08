@@ -1007,3 +1007,97 @@ TEST_CASE("route_chain: empty when no providers available", "[routing][chain]") 
     const auto chain = engine.route_chain({.prompt = "task", .has_tool_messages = false});
     REQUIRE(chain.empty());
 }
+
+// ─── Failover config ──────────────────────────────────────────────────────────
+
+TEST_CASE("Router policy loader parses failover config", "[routing][config]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "p",
+        "policies": { "p": { "defaults": [{ "provider": "x" }] } },
+        "failover": {
+            "on_exhaustion": "wait",
+            "max_wait_seconds": 1200,
+            "reset_margin_seconds": 30
+        }
+    })";
+    const auto config = parse_router_from_json(json);
+    REQUIRE(config.has_failover_overrides);
+    REQUIRE(config.failover.wait_on_exhaustion);
+    CHECK(config.failover.max_wait_seconds == 1200);
+    CHECK(config.failover.reset_margin_seconds == 30);
+}
+
+TEST_CASE("Router policy loader failover defaults", "[routing][config]") {
+    const auto config = parse_router_from_json(R"({
+        "enabled": false,
+        "policies": { "p": { "defaults": [{ "provider": "x" }] } }
+    })");
+    CHECK_FALSE(config.has_failover_overrides);
+    CHECK_FALSE(config.failover.wait_on_exhaustion); // opt-in
+    CHECK(config.failover.max_wait_seconds == 0);    // unlimited when waiting
+    CHECK(config.failover.reset_margin_seconds == 60);
+}
+
+TEST_CASE("Router policy loader rejects invalid failover values", "[routing][config]") {
+    const std::string json = R"({
+        "enabled": true,
+        "default_policy": "p",
+        "policies": { "p": { "defaults": [{ "provider": "x" }] } },
+        "failover": { "on_exhaustion": "explode" }
+    })";
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc = parser.parse(json);
+    simdjson::dom::object router_obj;
+    REQUIRE(doc.get(router_obj) == simdjson::SUCCESS);
+
+    core::llm::routing::RouterConfig config;
+    std::string error;
+    CHECK_FALSE(core::llm::routing::parse_router_config(router_obj, config, error));
+    CHECK(error.find("on_exhaustion") != std::string::npos);
+}
+
+TEST_CASE("Router policy loader clamps failover durations", "[routing][config]") {
+    const auto config = parse_router_from_json(R"({
+        "enabled": false,
+        "failover": {
+            "on_exhaustion": "wait",
+            "max_wait_seconds": -5,
+            "reset_margin_seconds": 99999
+        }
+    })");
+    REQUIRE(config.failover.wait_on_exhaustion);
+    CHECK(config.failover.max_wait_seconds == 0);
+    CHECK(config.failover.reset_margin_seconds == 3600);
+}
+
+TEST_CASE("merge_router_config preserves failover when overlay omits it", "[routing][config]") {
+    auto base = parse_router_from_json(R"({
+        "enabled": true,
+        "default_policy": "p",
+        "policies": { "p": { "defaults": [{ "provider": "x" }] } },
+        "failover": { "on_exhaustion": "wait", "max_wait_seconds": 600 }
+    })");
+    auto overlay = parse_router_from_json(R"({
+        "enabled": false,
+        "failover": {}
+    })");
+    REQUIRE(overlay.has_failover_overrides); // section present but empty
+
+    merge_router_config(base, overlay);
+    // An explicitly present-but-empty failover resets to defaults...
+    CHECK(base.failover.wait_on_exhaustion == false);
+
+    // ...while a missing section leaves the base policy untouched.
+    auto base2 = parse_router_from_json(R"({
+        "enabled": true,
+        "policies": { "p": { "defaults": [{ "provider": "x" }] } },
+        "failover": { "on_exhaustion": "wait", "max_wait_seconds": 600 }
+    })");
+    auto overlay2 = parse_router_from_json(R"({ "enabled": false })");
+    CHECK_FALSE(overlay2.has_failover_overrides);
+
+    merge_router_config(base2, overlay2);
+    CHECK(base2.failover.wait_on_exhaustion);
+    CHECK(base2.failover.max_wait_seconds == 600);
+}

@@ -349,6 +349,71 @@ void normalize_policy(PolicyDefinition& policy) {
     return true;
 }
 
+[[nodiscard]] bool parse_failover_object(simdjson::dom::object failover_obj,
+                                         RouterFailover& out,
+                                         std::string& error) {
+    out = RouterFailover{};
+
+    {
+        simdjson::dom::element el;
+        const auto ec = failover_obj["on_exhaustion"].get(el);
+        if (ec == simdjson::SUCCESS) {
+            std::string_view value;
+            if (el.get(value) != simdjson::SUCCESS) {
+                error = "field 'on_exhaustion': expected string";
+                return false;
+            }
+            if (value == "wait") {
+                out.wait_on_exhaustion = true;
+            } else if (value == "error") {
+                out.wait_on_exhaustion = false;
+            } else {
+                error = std::format(
+                    "field 'on_exhaustion': expected 'error' or 'wait', got '{}'",
+                    value);
+                return false;
+            }
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "failed to read field 'on_exhaustion'";
+            return false;
+        }
+    }
+
+    auto read_clamped_seconds = [&](std::string_view field_name,
+                                    int& target,
+                                    int max_value) -> bool {
+        simdjson::dom::element el;
+        const auto ec = failover_obj[field_name].get(el);
+        if (ec == simdjson::NO_SUCH_FIELD) return true;
+        if (ec != simdjson::SUCCESS) {
+            error = std::format("failed to read field '{}'", field_name);
+            return false;
+        }
+
+        int64_t value = 0;
+        if (el.get(value) != simdjson::SUCCESS) {
+            error = std::format("field '{}': expected integer", field_name);
+            return false;
+        }
+
+        target = static_cast<int>(std::clamp<int64_t>(value, 0, max_value));
+        return true;
+    };
+
+    // 30 days is far beyond any sane wait budget; the clamp keeps garbage
+    // config from producing overflow-prone durations.
+    if (!read_clamped_seconds("max_wait_seconds", out.max_wait_seconds,
+                              30 * 24 * 60 * 60)) {
+        return false;
+    }
+    if (!read_clamped_seconds("reset_margin_seconds", out.reset_margin_seconds,
+                              60 * 60)) {
+        return false;
+    }
+
+    return true;
+}
+
 [[nodiscard]] bool parse_scoring_object(simdjson::dom::object scoring_obj,
                                         ComplexityScoringConfig& out,
                                         std::string& error);
@@ -608,6 +673,23 @@ bool parse_router_config(simdjson::dom::object router_obj,
         }
     }
 
+    {
+        simdjson::dom::object failover_obj;
+        const auto ec = router_obj["failover"].get(failover_obj);
+        if (ec == simdjson::SUCCESS) {
+            RouterFailover parsed_failover;
+            if (!parse_failover_object(failover_obj, parsed_failover, error)) {
+                error = std::format("router.failover: {}", error);
+                return false;
+            }
+            out.failover = parsed_failover;
+            out.has_failover_overrides = true;
+        } else if (ec != simdjson::NO_SUCH_FIELD) {
+            error = "router.failover must be an object";
+            return false;
+        }
+    }
+
     for (const auto section_name : {"guardrails", "spend_limits", "limits"}) {
         simdjson::dom::object guardrails_obj;
         const auto ec = router_obj[section_name].get(guardrails_obj);
@@ -689,6 +771,10 @@ void merge_router_config(RouterConfig& base, const RouterConfig& overlay) {
     }
     if (overlay.guardrails.has_value()) {
         base.guardrails = overlay.guardrails;
+    }
+    if (overlay.has_failover_overrides) {
+        base.failover = overlay.failover;
+        base.has_failover_overrides = true;
     }
     if (overlay.has_auto_classifier_overrides) {
         base.auto_classifier = overlay.auto_classifier;

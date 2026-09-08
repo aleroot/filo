@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <format>
 #include <optional>
 #include <string_view>
@@ -56,12 +57,12 @@ namespace {
     return turns;
 }
 
-// Classify errors as retryable (rate-limit, network, timeout) vs non-retryable
-// (auth failure, invalid request).  We inspect the exception message because
-// all providers surface errors as std::runtime_error / std::exception with a
-// descriptive string.
-[[nodiscard]] bool is_retryable_error(const std::exception& e) noexcept {
-    const std::string_view msg{e.what()};
+// Classify failures as retryable (rate-limit, network, timeout) vs
+// non-retryable (auth failure, invalid request).  Providers surface errors
+// both as thrown exceptions and as terminal error chunks whose text is the
+// provider-formatted message, so the classifier works on message text and is
+// shared by both paths.
+[[nodiscard]] bool is_retryable_message(std::string_view msg) noexcept {
     // Non-retryable: authentication or client-side invalid request.
     for (const std::string_view marker : {
              "401", "403", "invalid_api_key", "authentication",
@@ -72,6 +73,48 @@ namespace {
         }
     }
     return true; // timeout, 429, 5xx, network error → retryable
+}
+
+[[nodiscard]] bool is_retryable_error(const std::exception& e) noexcept {
+    return is_retryable_message(e.what());
+}
+
+// "1h 05m" / "12m 30s" / "45s" — compact human durations for cooldown and
+// countdown notices.
+[[nodiscard]] std::string format_wait_duration(std::chrono::seconds duration) {
+    const auto total = duration.count();
+    if (total <= 0) return "0s";
+    const auto hours   = total / 3600;
+    const auto minutes = (total % 3600) / 60;
+    const auto seconds = total % 60;
+    if (hours > 0) return std::format("{}h {:02}m", hours, minutes);
+    if (minutes > 0) return std::format("{}m {:02}s", minutes, seconds);
+    return std::format("{}s", seconds);
+}
+
+[[nodiscard]] std::string format_wall_clock(
+    std::chrono::system_clock::time_point tp) {
+    const auto unix_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+        tp.time_since_epoch()).count();
+    const std::time_t time{static_cast<std::time_t>(unix_seconds)};
+    std::tm broken_down{};
+#if defined(_WIN32)
+    if (localtime_s(&broken_down, &time) != 0) return "<unknown time>";
+#else
+    if (localtime_r(&time, &broken_down) == nullptr) return "<unknown time>";
+#endif
+    char buffer[16];
+    if (std::strftime(buffer, sizeof(buffer), "%H:%M:%S", &broken_down) == 0) {
+        return "<unknown time>";
+    }
+    return std::string{buffer};
+}
+
+[[nodiscard]] std::string trim_leading_newline(std::string_view text) {
+    while (!text.empty() && (text.front() == '\n' || text.front() == '\r')) {
+        text.remove_prefix(1);
+    }
+    return std::string{text};
 }
 
 // Exponential backoff with ±25 % jitter.
@@ -175,10 +218,13 @@ void backoff_sleep(int attempt) {
 RouterProvider::RouterProvider(core::llm::ProviderManager& provider_manager,
                                std::shared_ptr<core::llm::routing::RouterEngine> router_engine,
                                std::unordered_map<std::string, std::string> provider_default_models,
-                               bool isolate_target_requests)
+                               bool isolate_target_requests,
+                               std::shared_ptr<core::llm::routing::ProviderHealthRegistry> health)
     : provider_manager_(provider_manager)
     , router_engine_(std::move(router_engine))
     , provider_default_models_(std::move(provider_default_models))
+    , health_(health ? std::move(health)
+                     : std::make_shared<core::llm::routing::ProviderHealthRegistry>())
     , isolate_target_requests_(isolate_target_requests) {}
 
 void RouterProvider::stream_response(
@@ -190,6 +236,7 @@ void RouterProvider::stream_response(
         last_should_estimate_cost_ = true;
         last_guardrail_summary_.clear();
     }
+    wait_aborted_.store(false, std::memory_order_release);
 
     if (!router_engine_) {
         callback(StreamChunk::make_error("\n[Router error: routing engine is not available]"));
@@ -203,6 +250,15 @@ void RouterProvider::stream_response(
         .history_tokens    = estimate_history_tokens(request),
     };
 
+    const auto failover = router_engine_->failover_config();
+    const auto wait_started_at = std::chrono::steady_clock::now();
+
+    // Outer loop: one iteration per routing attempt.  With the wait-for-reset
+    // failover policy enabled, an exhausted chain parks the turn until the
+    // soonest provider rate-limit reset and then re-routes from scratch
+    // (fresh chain, fresh health) — the in-process equivalent of "wait for
+    // the printed reset time, then continue", minus the terminal scraping.
+    while (true) {
     // Obtain the full fallback chain — ordered list of candidates to try.
     std::vector<core::llm::routing::RouteDecision> chain = router_engine_->route_chain(route_context);
 
@@ -216,11 +272,12 @@ void RouterProvider::stream_response(
     }
 
     // Iterate through the chain.  For each candidate, attempt up to (retries+1) calls.
-    // We only fall back to the next candidate if no streaming content has been sent yet
+    // We only fall back to the next candidate if no model output has been streamed yet
     // (once bytes are in flight we cannot cleanly restart the response).
     const auto guardrails = router_engine_->guardrails();
     std::string last_error;
     std::vector<std::string> guardrail_blocks;
+    std::vector<std::string> cooldown_blocks;
 
     for (auto& decision : chain) {
         // Resolve provider.
@@ -237,6 +294,31 @@ void RouterProvider::stream_response(
             }
             std::lock_guard lock(state_mutex_);
             active_isolated_provider_ = target_provider;
+        }
+
+        // Health check: skip candidates still in a rate-limit cooldown or
+        // breaker window instead of burning an attempt that is destined to
+        // fail.  Cooldowns come from structured provider data observed on
+        // previous requests (retry_after, subscription window resets).
+        {
+            const auto now = core::llm::routing::ProviderHealthRegistry::Clock::now();
+            const auto snap = health_->snapshot(decision.provider);
+            if (!snap.available(now)) {
+                const auto remaining = snap.cooldown_remaining(now);
+                last_error = std::format(
+                    "provider '{}' in cooldown ({}), available in {}",
+                    decision.provider, snap.reason, format_wait_duration(remaining));
+                cooldown_blocks.push_back(std::format(
+                    "{}: {} (resumes in {})",
+                    decision.provider, snap.reason, format_wait_duration(remaining)));
+                {
+                    std::lock_guard lock(state_mutex_);
+                    last_route_summary_ = std::format(
+                        "{} via policy '{}' (skipped: cooldown — {})",
+                        decision.provider, decision.policy, snap.reason);
+                }
+                continue;
+            }
         }
 
         // Resolve model: use decision.model if set, else provider default.
@@ -290,9 +372,12 @@ void RouterProvider::stream_response(
                 backoff_sleep(attempt);
             }
 
-            bool any_content_sent = false;
+            bool saw_output = false; // real model output reached the callback
             bool threw = false;
             bool non_retryable = false;
+            bool rate_limited = false;
+            bool auth_recovery = false;
+            std::string terminal_error_text;
             const auto started_at = std::chrono::steady_clock::now();
 
             try {
@@ -301,9 +386,48 @@ void RouterProvider::stream_response(
                     [&, started_at, tp = target_provider, dec = decision](
                         const StreamChunk& inner_chunk) mutable {
 
-                        any_content_sent = true;
+                        // Error chunks carry their message in `content`;
+                        // only non-error chunks count as streamed model output
+                        // (otherwise a terminal error would block fallback).
+                        const bool is_output = !inner_chunk.is_error
+                            && (!inner_chunk.content.empty()
+                                || !inner_chunk.reasoning_content.empty()
+                                || !inner_chunk.tools.empty());
+                        if (is_output) saw_output = true;
+
+                        // Authentication recovery drives the re-auth flow in
+                        // the agent loop; pass it through untouched.
+                        if (inner_chunk.is_error
+                            && inner_chunk.authentication_recovery.has_value()) {
+                            auth_recovery = true;
+                            callback(inner_chunk);
+                            return;
+                        }
+
+                        if (inner_chunk.is_final && inner_chunk.is_error) {
+                            // Terminal failure.  HttpLLMProvider-based
+                            // providers signal exhausted retries and hard
+                            // errors this way rather than throwing.  Keep the
+                            // provider's rate-limit snapshot visible to the
+                            // status bar, then suppress the chunk: when no
+                            // output was streamed we can still fall back to
+                            // the next candidate cleanly.
+                            set_last_rate_limit_info(tp->get_last_rate_limit_info());
+                            terminal_error_text = inner_chunk.content;
+                            if (saw_output) callback(inner_chunk);
+                            return;
+                        }
+
+                        // Non-final error chunks are the provider's own
+                        // transient retry notices; forward for visibility.
+                        if (inner_chunk.is_error) {
+                            callback(inner_chunk);
+                            return;
+                        }
 
                         if (inner_chunk.is_final) {
+                            health_->observe_success(dec.provider);
+
                             const auto usage = tp->get_last_usage();
                             set_last_usage(usage.prompt_tokens, usage.completion_tokens);
                             set_last_rate_limit_info(tp->get_last_rate_limit_info());
@@ -334,8 +458,18 @@ void RouterProvider::stream_response(
                         callback(inner_chunk);
                     });
 
-                // stream_response returned without throwing — success.
-                return;
+                if (auth_recovery) return; // surfaced; agent loop owns re-auth
+                if (terminal_error_text.empty()) {
+                    // stream_response completed without a terminal failure — success.
+                    return;
+                }
+
+                // Terminal error chunk: classify exactly like a thrown failure.
+                threw = true;
+                last_error = std::format("provider '{}' attempt {}/{}: {}",
+                                         decision.provider, attempt + 1, max_attempts,
+                                         trim_leading_newline(terminal_error_text));
+                non_retryable = !is_retryable_message(terminal_error_text);
 
             } catch (const std::exception& e) {
                 threw = true;
@@ -344,14 +478,37 @@ void RouterProvider::stream_response(
                 non_retryable = !is_retryable_error(e);
             }
 
-            if (any_content_sent) {
-                // Content was already streamed to the user; we cannot cleanly retry
-                // or fall back.  Surface the error inline and stop.
-                callback(StreamChunk::make_error(std::format("\n[Router: provider '{}' failed mid-stream — fallback not possible: {}]",
-                                     decision.provider, last_error)));
+            // Feed the structured health data the provider recorded before
+            // failing: 429 headers, retry_after, subscription window resets.
+            {
+                const auto info = target_provider->get_last_rate_limit_info();
+                const auto now = core::llm::routing::ProviderHealthRegistry::Clock::now();
+                health_->observe_rate_limit(decision.provider, info, now);
+                if (info.is_rate_limited || info.unified_status == "rate_limited") {
+                    rate_limited = true;
+                    cooldown_blocks.push_back(std::format(
+                        "{}: rate limited (resumes in {})",
+                        decision.provider,
+                        format_wait_duration(
+                            health_->snapshot(decision.provider)
+                                .cooldown_remaining(now))));
+                } else if (!non_retryable) {
+                    health_->observe_failure(decision.provider, now);
+                }
+            }
+
+            if (saw_output) {
+                // Model output was already streamed to the user; we cannot cleanly
+                // retry or fall back.  The provider's own error chunk (if any) was
+                // forwarded inline above; otherwise surface the failure here.
+                if (terminal_error_text.empty()) {
+                    callback(StreamChunk::make_error(std::format("\n[Router: provider '{}' failed mid-stream — fallback not possible: {}]",
+                                                         decision.provider, last_error)));
+                }
                 return;
             }
 
+            if (rate_limited) break;     // cooldown owns the timing — next candidate
             if (!threw) break;           // shouldn't happen — left for clarity
             if (non_retryable) break;    // skip remaining retries, try next candidate
             // else: retryable, loop continues with backoff
@@ -367,10 +524,100 @@ void RouterProvider::stream_response(
         }
         guardrail_note = std::format(" Guardrails blocked: {}.", join_limited(guardrail_blocks));
     }
+    std::string cooldown_note;
+    if (!cooldown_blocks.empty()) {
+        cooldown_note = std::format(" Provider cooldowns: {}.", join_limited(cooldown_blocks));
+    }
+
+    // Wait-for-reset policy: park the turn until the soonest provider
+    // rate-limit reset, then re-route.  Only scheduled resets are waited
+    // for — a chain that simply failed has nothing to wait for.
+    if (failover.wait_on_exhaustion) {
+        const auto now_sys = core::llm::routing::ProviderHealthRegistry::Clock::now();
+        std::string reset_provider;
+        const auto soonest = health_->soonest_rate_limit_reset(now_sys, &reset_provider);
+        if (soonest.has_value()) {
+            const auto target =
+                *soonest + std::chrono::seconds(failover.reset_margin_seconds);
+
+            if (failover.max_wait_seconds > 0) {
+                const auto waited = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - wait_started_at);
+                const auto budget_left =
+                    std::chrono::seconds(failover.max_wait_seconds) - waited;
+                const auto needed = std::chrono::duration_cast<std::chrono::seconds>(
+                    target - now_sys);
+                if (needed > budget_left) {
+                    callback(StreamChunk::make_error(std::format(
+                        "\n[Router error: all candidates failed.{}{} Next reset on '{}' "
+                        "in {} exceeds the {}s wait budget. Last error: {}]",
+                        guardrail_note, cooldown_note, reset_provider,
+                        format_wait_duration(needed),
+                        failover.max_wait_seconds, last_error)));
+                    return;
+                }
+            }
+
+            if (wait_for_reset(target, reset_provider, callback)) {
+                continue; // reset reached — re-route with fresh health
+            }
+            callback(StreamChunk::make_final()); // cancelled while parked
+            return;
+        }
+        // No scheduled reset to wait for — fall through to the terminal error.
+    }
+
     callback(StreamChunk::make_error(
-        std::format("\n[Router error: all candidates failed.{} Last error: {}]",
+        std::format("\n[Router error: all candidates failed.{}{} Last error: {}]",
                     guardrail_note,
+                    cooldown_note,
                     last_error)));
+    return;
+    } // wait/resume loop
+}
+
+bool RouterProvider::wait_for_reset(
+    std::chrono::system_clock::time_point target,
+    const std::string& provider,
+    const std::function<void(const StreamChunk&)>& callback) {
+    using clock = std::chrono::system_clock;
+
+    const auto emit_notice = [&callback](std::string_view text) {
+        callback(StreamChunk::make_content(std::string{text}));
+    };
+
+    {
+        const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+            target - clock::now());
+        emit_notice(std::format(
+            "\n[Failover] All routed providers are rate-limited. Waiting for '{}' "
+            "to reset at {} (in {}) before retrying — cancel to stop.",
+            provider, format_wall_clock(target),
+            format_wait_duration(remaining)));
+    }
+
+    auto next_update = clock::now() + std::chrono::seconds(60);
+    while (clock::now() < target) {
+        if (wait_aborted_.load(std::memory_order_acquire)) return false;
+
+        const auto now = clock::now();
+        if (now >= next_update) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
+                target - now);
+            emit_notice(std::format(
+                "\n[Failover] Still waiting for '{}' to reset (in {}).",
+                provider, format_wait_duration(remaining)));
+            next_update = now + std::chrono::seconds(60);
+        }
+        // Short ticks on the wall clock: a system suspend consumes the wait
+        // naturally, and cancel() takes effect within one tick.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (wait_aborted_.load(std::memory_order_acquire)) return false;
+    emit_notice(std::format(
+        "\n[Failover] Reset window reached for '{}'; re-routing.", provider));
+    return true;
 }
 
 std::string RouterProvider::get_last_model() const {
@@ -387,11 +634,14 @@ ProviderCapabilities RouterProvider::capabilities() const {
 }
 
 std::shared_ptr<LLMProvider> RouterProvider::fork_for_parallel_request() const {
+    // Forks share the health registry so parallel requests pool their
+    // provider knowledge (a 429 seen by one fork cools the provider for all).
     return std::make_shared<RouterProvider>(
         provider_manager_,
         router_engine_ ? router_engine_->fork() : nullptr,
         provider_default_models_,
-        true);
+        true,
+        health_);
 }
 
 bool RouterProvider::should_estimate_cost() const {
@@ -400,6 +650,9 @@ bool RouterProvider::should_estimate_cost() const {
 }
 
 void RouterProvider::cancel() {
+    // Abort an active wait-for-reset park before forwarding to providers.
+    wait_aborted_.store(true, std::memory_order_release);
+
     if (isolate_target_requests_) {
         std::shared_ptr<LLMProvider> active_provider;
         {

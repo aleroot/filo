@@ -76,6 +76,11 @@ std::optional<RouterGuardrails> RouterEngine::guardrails() const {
     return config_.guardrails;
 }
 
+RouterFailover RouterEngine::failover_config() const {
+    std::shared_lock lock(rwmutex_);
+    return config_.failover;
+}
+
 bool RouterEngine::set_active_policy(std::string policy_name) {
     std::unique_lock lock(rwmutex_);
     if (!config_.policies.contains(policy_name)) {

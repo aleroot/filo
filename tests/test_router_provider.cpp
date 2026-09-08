@@ -8,21 +8,32 @@
 #include "core/budget/BudgetTracker.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 using namespace core::llm;
 using namespace core::llm::routing;
 using namespace core::llm::providers;
+using namespace std::chrono_literals;
 
 // ─── Mock provider ────────────────────────────────────────────────────────────
 
-// Succeeds after `fail_count` throws.
-// retryable=true  → throws "503 Service Unavailable"
-// retryable=false → throws "401 authentication failed"
+// How a failing mock surfaces its failure.  Real HttpLLMProvider-based
+// providers end exhausted retries with a terminal error chunk (they never
+// throw), so ErrorChunk mode reproduces the production failure shape.
+enum class FailureMode {
+    Throw,      // Throws std::runtime_error (legacy mock behaviour).
+    ErrorChunk, // Emits a terminal StreamChunk::make_error().
+};
+
+// Succeeds after `fail_count` failures.
+// retryable=true  → "503 Service Unavailable"
+// retryable=false → "401 authentication failed"
 class MockProvider final : public LLMProvider {
 public:
     explicit MockProvider(int fail_count = 0,
@@ -30,13 +41,15 @@ public:
                           std::string success_text = "ok",
                           bool should_estimate_cost = true,
                           bool is_local = false,
-                          core::llm::protocols::RateLimitInfo rate_limit_info = {})
+                          core::llm::protocols::RateLimitInfo rate_limit_info = {},
+                          FailureMode failure_mode = FailureMode::Throw)
         : fail_count_(fail_count)
         , retryable_(retryable)
         , success_text_(std::move(success_text))
         , should_estimate_cost_(should_estimate_cost)
         , is_local_(is_local)
-        , rate_limit_info_(std::move(rate_limit_info)) {
+        , rate_limit_info_(std::move(rate_limit_info))
+        , failure_mode_(failure_mode) {
         set_last_rate_limit_info(rate_limit_info_);
     }
 
@@ -45,6 +58,12 @@ public:
         std::function<void(const StreamChunk&)> callback) override {
         ++call_count_;
         if (call_count_ <= fail_count_) {
+            if (failure_mode_ == FailureMode::ErrorChunk) {
+                callback(StreamChunk::make_error(retryable_
+                    ? "\n[503 Service Unavailable]"
+                    : "\n[401 authentication failed]"));
+                return;
+            }
             if (retryable_) {
                 throw std::runtime_error("503 Service Unavailable");
             } else {
@@ -73,6 +92,7 @@ private:
     bool should_estimate_cost_;
     bool is_local_;
     core::llm::protocols::RateLimitInfo rate_limit_info_;
+    FailureMode failure_mode_;
     std::atomic<int> call_count_{0};
 };
 
@@ -691,4 +711,203 @@ TEST_CASE("RouterProvider: guardrail summary clears on later non-guardrail succe
     REQUIRE(router.last_guardrail_summary().empty());
 
     budget.reset_session();
+}
+
+// ─── Provider health + failover ───────────────────────────────────────────────
+
+TEST_CASE("RouterProvider: terminal error chunk triggers fallback to next candidate",
+          "[router_provider][failover]") {
+    // HttpLLMProvider-based providers never throw; they end exhausted retries
+    // with a terminal error chunk.  The router must treat that as a candidate
+    // failure and fall back instead of reporting a dead turn.
+    auto primary = std::make_shared<MockProvider>(99, true, "never", true, false,
+                                                  core::llm::protocols::RateLimitInfo{},
+                                                  FailureMode::ErrorChunk);
+    auto secondary = std::make_shared<MockProvider>(0, true, "secondary-ok");
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [
+                { "provider": "rp_fo_chunk_primary",   "model": "m1", "retries": 0 },
+                { "provider": "rp_fo_chunk_secondary", "model": "m2", "retries": 0 }
+            ]
+        }}
+    })", {{"rp_fo_chunk_primary", primary}, {"rp_fo_chunk_secondary", secondary}});
+    auto router = f.make_router();
+
+    REQUIRE(collect(router) == "secondary-ok");
+    REQUIRE(primary->call_count() == 1);
+    REQUIRE(secondary->call_count() == 1);
+}
+
+TEST_CASE("RouterProvider: rate-limited candidate skips futile retries",
+          "[router_provider][failover]") {
+    // A hard 429 with retry_after=3600s must not be retried moments later by
+    // the per-candidate backoff loop; the cooldown owns the timing.
+    auto limited = std::make_shared<MockProvider>(
+        99, true, "never", true, false,
+        make_rate_limit(0, 0, 0, 0, {}, true, 3600));
+    auto backup = std::make_shared<MockProvider>(0, true, "backup-ok");
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [
+                { "provider": "rp_fo_rl_limited", "model": "m1", "retries": 2 },
+                { "provider": "rp_fo_rl_backup",  "model": "m2", "retries": 0 }
+            ]
+        }}
+    })", {{"rp_fo_rl_limited", limited}, {"rp_fo_rl_backup", backup}});
+    auto router = f.make_router();
+
+    REQUIRE(collect(router) == "backup-ok");
+    CHECK(limited->call_count() == 1); // one probe, no futile retries
+    REQUIRE(backup->call_count() == 1);
+}
+
+TEST_CASE("RouterProvider: cooldown from a 429 persists across requests",
+          "[router_provider][failover]") {
+    auto primary = std::make_shared<MockProvider>(
+        1, true, "primary-ok", true, false,
+        make_rate_limit(0, 0, 0, 0, {}, true, 3600));
+    auto secondary = std::make_shared<MockProvider>(0, true, "secondary-ok");
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [
+                { "provider": "rp_fo_persist_primary",   "model": "m1", "retries": 0 },
+                { "provider": "rp_fo_persist_secondary", "model": "m2", "retries": 0 }
+            ]
+        }}
+    })", {{"rp_fo_persist_primary", primary}, {"rp_fo_persist_secondary", secondary}});
+    auto router = f.make_router();
+
+    // First request: primary 429s once → cooldown → secondary serves.
+    REQUIRE(collect(router) == "secondary-ok");
+    REQUIRE(primary->call_count() == 1);
+
+    // Second request: primary is still cooling down and is skipped entirely.
+    REQUIRE(collect(router) == "secondary-ok");
+    CHECK(primary->call_count() == 1);
+    REQUIRE(secondary->call_count() == 2);
+}
+
+TEST_CASE("RouterProvider: exhaustion error lists provider cooldowns",
+          "[router_provider][failover]") {
+    auto p1 = std::make_shared<MockProvider>(
+        99, true, "", true, false, make_rate_limit(0, 0, 0, 0, {}, true, 3600));
+    auto p2 = std::make_shared<MockProvider>(
+        99, true, "", true, false, make_rate_limit(0, 0, 0, 0, {}, true, 7200));
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [
+                { "provider": "rp_fo_note_a", "model": "m1", "retries": 0 },
+                { "provider": "rp_fo_note_b", "model": "m2", "retries": 0 }
+            ]
+        }}
+    })", {{"rp_fo_note_a", p1}, {"rp_fo_note_b", p2}});
+    auto router = f.make_router();
+
+    const auto result = collect(router);
+    REQUIRE(result.starts_with("\n[Router error:"));
+    REQUIRE(result.find("all candidates failed") != std::string::npos);
+    REQUIRE(result.find("Provider cooldowns:") != std::string::npos);
+    REQUIRE(result.find("rate limited") != std::string::npos);
+}
+
+TEST_CASE("RouterProvider: wait-on-exhaustion parks until reset then resumes",
+          "[router_provider][failover]") {
+    // Fails once with a 1-second rate limit, then recovers.  With the wait
+    // policy enabled the turn parks ~1s and finishes without user action.
+    auto primary = std::make_shared<MockProvider>(
+        1, true, "recovered-ok", true, false,
+        make_rate_limit(0, 0, 0, 0, {}, true, 1));
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "failover": {
+            "on_exhaustion": "wait",
+            "max_wait_seconds": 15,
+            "reset_margin_seconds": 0
+        },
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [ { "provider": "rp_fo_wait_primary", "model": "m", "retries": 0 } ]
+        }}
+    })", {{"rp_fo_wait_primary", primary}});
+    auto router = f.make_router();
+
+    const auto result = collect(router);
+    CHECK(result.find("[Failover]") != std::string::npos);
+    CHECK(result.find("recovered-ok") != std::string::npos);
+    REQUIRE(primary->call_count() == 2); // failed probe + post-reset retry
+}
+
+TEST_CASE("RouterProvider: wait budget exceeded fails with reset info",
+          "[router_provider][failover]") {
+    auto primary = std::make_shared<MockProvider>(
+        99, true, "never", true, false,
+        make_rate_limit(0, 0, 0, 0, {}, true, 3600));
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "failover": {
+            "on_exhaustion": "wait",
+            "max_wait_seconds": 5,
+            "reset_margin_seconds": 0
+        },
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [ { "provider": "rp_fo_budget_primary", "model": "m", "retries": 0 } ]
+        }}
+    })", {{"rp_fo_budget_primary", primary}});
+    auto router = f.make_router();
+
+    const auto result = collect(router);
+    REQUIRE(result.starts_with("\n[Router error:"));
+    REQUIRE(result.find("wait budget") != std::string::npos);
+    REQUIRE(primary->call_count() == 1);
+}
+
+TEST_CASE("RouterProvider: cancel aborts a wait-for-reset park",
+          "[router_provider][failover]") {
+    auto primary = std::make_shared<MockProvider>(
+        99, true, "never", true, false,
+        make_rate_limit(0, 0, 0, 0, {}, true, 3600));
+
+    RouterFixture f(R"({
+        "enabled": true, "default_policy": "p",
+        "failover": { "on_exhaustion": "wait" },
+        "policies": { "p": { "strategy": "fallback",
+            "defaults": [ { "provider": "rp_fo_cancel_primary", "model": "m", "retries": 0 } ]
+        }}
+    })", {{"rp_fo_cancel_primary", primary}});
+    auto router = f.make_router();
+
+    std::thread canceller([&router] {
+        std::this_thread::sleep_for(300ms);
+        router.cancel();
+    });
+
+    std::string result;
+    bool saw_error = false;
+    ChatRequest req;
+    Message msg;
+    msg.role    = "user";
+    msg.content = "test";
+    req.messages.push_back(std::move(msg));
+    const auto started_at = std::chrono::steady_clock::now();
+    router.stream_response(req, [&](const StreamChunk& chunk) {
+        result += chunk.content;
+        saw_error = saw_error || chunk.is_error;
+    });
+    const auto elapsed = std::chrono::steady_clock::now() - started_at;
+    canceller.join();
+
+    CHECK(result.find("[Failover]") != std::string::npos); // parked visibly
+    CHECK_FALSE(saw_error);                                 // cancelled, not failed
+    CHECK(elapsed < 5s);
+    REQUIRE(primary->call_count() == 1);
 }
