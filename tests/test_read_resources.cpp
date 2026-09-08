@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/tools/ReadTool.hpp"
+#include "core/tools/read/ReaderProfile.hpp"
 #include "core/tools/PathVisibilityToolDecorator.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
 #include "core/agent/ToolOutputHistory.hpp"
@@ -379,4 +380,90 @@ TEST_CASE("Unified read stops waiting on a reader that ignores cancellation",
     // The turn is released at the deadline plus its bounded grace, never when
     // the orphaned request finally returns.
     CHECK(elapsed < std::chrono::seconds(1));
+}
+
+// ─── Reader profile resolution (pure policy) ─────────────────────────────────
+
+namespace {
+read::ReaderProfileSelection resolve(const core::config::AppConfig& config) {
+    auto selection = read::resolve_reader_profile(config);
+    REQUIRE(selection.has_value());
+    return std::move(*selection);
+}
+core::llm::routing::RouteCandidate candidate(std::string provider,
+                                             std::string model,
+                                             std::string tier = {}) {
+    return {.provider = std::move(provider), .model = std::move(model), .tier = std::move(tier)};
+}
+} // namespace
+
+TEST_CASE("Reader profile prefers explicit subagents.reader configuration", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    config.subagents["reader"] = {.provider = "ollama", .model = "qwen3"};
+    config.router.default_policy = "main";
+    config.router.policies["main"] = {.name = "main", .defaults = {candidate("openai", "gpt-5")}};
+    const auto selection = resolve(config);
+    CHECK(selection.provider == "ollama");
+    CHECK(selection.model == "qwen3");
+}
+
+TEST_CASE("Reader profile falls back to the routing fast-tier candidate", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    SECTION("disabled reader profile defers to routing") {
+        config.subagents["reader"] = {.provider = "ollama", .model = "qwen3", .enabled = false};
+    }
+    SECTION("incomplete reader profile defers to routing") {
+        config.subagents["reader"] = {.provider = "ollama"};
+    }
+    config.router.default_policy = "main";
+    config.router.policies["main"] = {
+        .name = "main",
+        .defaults = {candidate("anthropic", "claude-opus-4", "powerful"),
+                     candidate("openai", "gpt-5-mini", "fast")},
+    };
+    const auto selection = resolve(config);
+    CHECK(selection.provider == "openai");
+    CHECK(selection.model == "gpt-5-mini");
+}
+
+TEST_CASE("Reader profile fast tier is searched in rules when absent from defaults", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    config.router.policies["main"] = {
+        .name = "main",
+        .defaults = {candidate("anthropic", "claude-opus-4")},
+        .rules = {{
+            .name = "codegen",
+            .candidates = {candidate("openai", "gpt-5-mini", "fast")},
+        }},
+    };
+    const auto selection = resolve(config);
+    CHECK(selection.provider == "openai");
+    CHECK(selection.model == "gpt-5-mini");
+}
+
+TEST_CASE("Reader profile uses the first default candidate when nothing is pinned fast", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    config.router.policies["main"] = {
+        .name = "main",
+        .defaults = {candidate("anthropic", "claude-opus-4", "powerful")},
+    };
+    const auto selection = resolve(config);
+    CHECK(selection.provider == "anthropic");
+    CHECK(selection.model == "claude-opus-4");
+}
+
+TEST_CASE("Reader profile selects policies deterministically without a named default", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    config.router.policies["zebra"] = {.name = "zebra", .defaults = {candidate("zai", "glm")}};
+    config.router.policies["alpha"] = {.name = "alpha", .defaults = {candidate("ollama", "qwen3")}};
+    const auto selection = resolve(config);
+    CHECK(selection.provider == "ollama");
+}
+
+TEST_CASE("Reader profile reports both configuration paths when nothing resolves", "[read][reader-profile]") {
+    core::config::AppConfig config;
+    const auto selection = read::resolve_reader_profile(config);
+    REQUIRE_FALSE(selection.has_value());
+    CHECK_THAT(selection.error(), ContainsSubstring("subagents.reader"));
+    CHECK_THAT(selection.error(), ContainsSubstring("fast-tier"));
 }

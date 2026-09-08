@@ -336,6 +336,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/read/ResourceReader.cpp
     src/core/tools/read/NotebookReader.cpp
     src/core/tools/read/ReaderWorker.cpp
+    src/core/tools/read/ReaderProfile.cpp
     src/core/tools/read/EvidenceSelector.cpp
     src/core/tools/WriteFileTool.cpp
     src/core/tools/ListDirectoryTool.cpp

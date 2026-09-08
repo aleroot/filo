@@ -1,5 +1,6 @@
 #include "ReaderWorker.hpp"
 #include "EvidenceSelector.hpp"
+#include "ReaderProfile.hpp"
 #include "../ToolNames.hpp"
 #include "../../llm/ProviderManager.hpp"
 #include "../../llm/ProviderFactory.hpp"
@@ -17,21 +18,21 @@ namespace core::tools::read {
 namespace {
 std::expected<WorkerProfile, std::string> configured_profile() {
     const auto& config = core::config::ConfigManager::get_instance().get_config();
-    const auto entry = config.subagents.find(std::string(kReaderProfile));
-    if (entry == config.subagents.end() || !entry->second.enabled.value_or(true)
-        || entry->second.provider.empty() || entry->second.model.empty())
-        return std::unexpected("Configure subagents.reader.provider and model to enable question answering.");
-    const auto& profile = entry->second;
+    // Which provider/model should answer is a pure config decision owned by
+    // resolve_reader_profile; this wrapper only acquires the transport.
+    const auto selection = resolve_reader_profile(config);
+    if (!selection) return std::unexpected(selection.error());
     std::shared_ptr<core::llm::LLMProvider> provider;
     try {
-        provider = core::llm::ProviderManager::get_instance().get_provider(profile.provider)->fork_for_parallel_request();
+        provider = core::llm::ProviderManager::get_instance()
+                       .get_provider(selection->provider)->fork_for_parallel_request();
     } catch (const std::exception&) { }
     if (!provider) {
-        if (const auto settings = config.providers.find(profile.provider); settings != config.providers.end())
-            provider = core::llm::ProviderFactory::create_provider(profile.provider, settings->second);
+        if (const auto settings = config.providers.find(selection->provider); settings != config.providers.end())
+            provider = core::llm::ProviderFactory::create_provider(selection->provider, settings->second);
     }
     if (!provider) return std::unexpected("Configured reader provider is unavailable; no automatic provider fallback.");
-    return WorkerProfile{std::move(provider), profile.provider, profile.model};
+    return WorkerProfile{std::move(provider), selection->provider, selection->model};
 }
 // A cancelled provider is given a bounded chance to unwind cooperatively so the
 // common case still reports usage and joins its thread.

@@ -32,7 +32,7 @@ ToolDefinition ReadTool::get_definition() const {
     return {
         .name = std::string(names::kRead),
         .title = "Read",
-        .description = "Read files, notebooks, HTTP(S), result://. Text defaults stay exact (1 MiB). Use auto for directories/compact views; question uses a configured reader model. Recover evidence with exact, line ranges and select.",
+        .description = "Read files, notebooks, HTTP(S), result://. Text defaults stay exact (1 MiB). Use auto for directories/compact views; question answers via a reader model with validated citations. Recover evidence with exact, line ranges and select.",
         .input_schema = R"({"type":"object","properties":{"path":{"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}]},"view":{"type":"string","enum":["exact","auto","outline"]},"question":{"type":"string","maxLength":8192},"offset_line":{"type":"integer","minimum":1},"limit_lines":{"type":"integer","minimum":1,"maximum":10000},"select":{"type":"object","minProperties":1,"maxProperties":1,"properties":{"cell":{"type":"string"}},"additionalProperties":false},"expected_digest":{"type":"string"}},"required":["path"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint = true,
@@ -151,7 +151,14 @@ std::string ReadTool::execute(const std::string& args, const ToolInvocationConte
             }
         }
         if (!fallback.empty()) writer.comma().kv_str("fallback_reason", fallback);
-        writer.comma().kv_str("recovery", "Read one source with view=exact, the same select and expected_digest, and offset_line/limit_lines. Locations refer to decoded text. Digests cover bounded snapshots, not unread bytes.");
+        std::string recovery =
+            "Read one source with view=exact, the same select and expected_digest, and offset_line/limit_lines."
+            " Locations refer to decoded text. Digests cover bounded snapshots, not unread bytes.";
+        // Suggest the delegation path only when this read actually truncated:
+        // normal reads keep the hint at zero additional tokens.
+        if (!answer && omitted)
+            recovery += " For synthesis across large sources, pass question to get a validated, cited answer without slicing.";
+        writer.comma().kv_str("recovery", recovery);
     }
     return std::move(writer).take();
 }
