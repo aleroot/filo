@@ -353,6 +353,8 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     options.reasoning_content_policy =
         Serializer::ReasoningContentPolicy::NonEmptyOwned;
     options.reasoning_protocol = std::string(name());
+    options.empty_assistant_content_policy =
+        Serializer::EmptyAssistantContentPolicy::EmptyStringWhenReasoning;
     if (supports_dashscope_structured_cache_content(req)) {
         options.prompt_cache = {
             .first_system_message = true,

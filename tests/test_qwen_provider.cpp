@@ -417,6 +417,38 @@ TEST_CASE("DashScopeProtocol - preserves assistant reasoning across tool turns",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
 }
 
+TEST_CASE("DashScopeProtocol - steering after reasoning-only assistant keeps required content",
+          "[qwen][serializer][thinking][steering]") {
+    auto req = make_simple_request("qwen3.7-plus", "Steer the unfinished turn");
+    req.messages.insert(req.messages.begin(), Message{
+        .role = "assistant",
+        .reasoning_content = "I was planning the next edit.",
+        .reasoning_protocol = "dashscope",
+    });
+
+    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"assistant","content":"","reasoning_content":"I was planning the next edit.")"));
+}
+
+TEST_CASE("DashScopeProtocol - tool-call-only assistant keeps nullable content field",
+          "[qwen][serializer][tools]") {
+    auto req = make_simple_request("qwen3.7-plus");
+    Message assistant;
+    assistant.role = "assistant";
+    assistant.tool_calls.push_back(ToolCall{
+        .id = "call_1",
+        .function = {.name = "read", .arguments = R"({"path":"README.md"})"},
+    });
+    req.messages.insert(req.messages.begin(), std::move(assistant));
+
+    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"assistant","content":null,"tool_calls")"));
+}
+
 TEST_CASE("DashScopeProtocol - does not replay foreign reasoning state",
           "[qwen][serializer][thinking][provenance]") {
     auto req = make_simple_request("qwen3.7-plus");

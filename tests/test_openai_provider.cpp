@@ -412,6 +412,8 @@ TEST_CASE("Serializer - assistant message with tool_calls has null content", "[o
     asst.tool_calls.push_back(tc);
     req.messages.push_back(asst);
     auto payload = Serializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"assistant","content":null,"tool_calls")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("tool_calls")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("id":"call_abc")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"get_weather")"));
