@@ -60,4 +60,14 @@ namespace core::tools::schema {
 [[nodiscard]] std::string explain_string_value(std::string_view value,
                                                std::string_view expected_type);
 
+/**
+ * Explains why an argument payload could not be parsed at all.
+ *
+ * Distinguishes output that was cut off mid-value — by far the most common
+ * cause, and one the model can act on by sending less — from other syntax
+ * damage. Returns a sentence fragment beginning with " — ", or an empty
+ * string when there is nothing specific to say.
+ */
+[[nodiscard]] std::string explain_unparsable_arguments(std::string_view raw);
+
 } // namespace core::tools::schema

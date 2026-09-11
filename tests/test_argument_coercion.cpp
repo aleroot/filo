@@ -201,6 +201,62 @@ TEST_CASE("the shipped search_replace contract tolerates a stringified list",
     CHECK_THAT(*normalized, ContainsSubstring(R"("edits":[{"new_string":"int b;")"));
 }
 
+TEST_CASE("coercion is inert for the fields a safety gate inspects",
+          "[tools][coercion][safety]") {
+    // Permission prompts and PreToolUse hooks key off string-typed fields such
+    // as a shell command or a target path. There is no rule that *produces* a
+    // string, so such a field is either already valid (and untouched) or
+    // rejected — coercion can never rewrite what a gate judged.
+    const core::tools::ToolDefinition shell{
+        .name = "run_terminal_command",
+        .description = "Run a command",
+        .parameters = {
+            {.name = "command", .type = "string", .required = true},
+            {.name = "timeout_seconds", .type = "integer"},
+        },
+    };
+
+    // A command that looks like JSON stays the exact command it was.
+    const auto json_shaped = core::tools::schema::normalize_arguments(
+        shell, R"({"command":"[{\"rm\":\"-rf /\"}]"})");
+    REQUIRE(json_shaped.has_value());
+    CHECK(*json_shaped == R"({"command":"[{\"rm\":\"-rf /\"}]"})");
+
+    // A non-string command is rejected outright: nothing is coerced *into* a
+    // string, so a gate can never be handed a value it did not see.
+    CHECK_FALSE(core::tools::schema::normalize_arguments(
+                    shell, R"({"command":["rm","-rf","/"]})").has_value());
+    CHECK_FALSE(core::tools::schema::normalize_arguments(
+                    shell, R"({"command":{"run":"rm -rf /"}})").has_value());
+
+    // Only the mis-typed neighbour is repaired; the command is byte-identical.
+    const auto neighbour = core::tools::schema::normalize_arguments(
+        shell, R"({"command":"ls -la","timeout_seconds":"30"})");
+    REQUIRE(neighbour.has_value());
+    CHECK(*neighbour == R"({"command":"ls -la","timeout_seconds":30})");
+}
+
+TEST_CASE("unparsable arguments are diagnosed as a cut-off call",
+          "[tools][coercion]") {
+    const auto truncated = core::tools::schema::validate_arguments(
+        edit_tool(), R"({"file_path":"a.cpp","edits":)");
+    REQUIRE_FALSE(truncated.has_value());
+    CHECK(truncated.error().code
+          == core::tools::schema::ArgumentIssueCode::InvalidJson);
+    CHECK_THAT(truncated.error().message,
+               ContainsSubstring("arguments are not valid JSON"));
+    CHECK_THAT(truncated.error().message, ContainsSubstring("cut off"));
+
+    // Damage that is not truncation keeps the bare verdict rather than
+    // guessing at a cause.
+    const auto garbage = core::tools::schema::validate_arguments(
+        edit_tool(), "not json at all");
+    REQUIRE_FALSE(garbage.has_value());
+    CHECK_THAT(garbage.error().message,
+               ContainsSubstring("arguments are not valid JSON"));
+    CHECK_THAT(garbage.error().message, !ContainsSubstring("cut off"));
+}
+
 TEST_CASE("an empty-object placeholder never corrupts streamed arguments",
           "[tools][coercion][streaming]") {
     // Observed from an OpenAI-compatible provider: the call is announced with

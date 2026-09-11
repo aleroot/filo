@@ -2139,6 +2139,35 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     return;
                 }
                 auto& tc = (*tool_calls_accum)[i];
+
+                // Resolve the contract and settle the argument payload before
+                // any gate runs, so the hook, the permission prompt, the
+                // transcript and the executor all judge the *same* bytes.
+                // Validation cannot deny here: gating must not depend on tool
+                // registration, and denial precedence (allow-list, hook, user)
+                // is preserved by reporting argument failures further down.
+                std::optional<core::tools::schema::ArgumentIssue> argument_issue;
+                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
+                    resolved_definitions[i] = self->orchestrator_.task_tool_definition().function;
+                } else if (tc.function.name == core::tools::names::kWriteTodos) {
+                    resolved_definitions[i] = self->todo_tool_.get_definition();
+                } else if (tc.function.name == core::tools::names::kReadToolResult) {
+                    resolved_definitions[i] = self->read_tool_result_tool_.get_definition();
+                } else {
+                    resolved_definitions[i] =
+                        self->skill_manager_.get_tool_definition(tc.function.name);
+                }
+                if (resolved_definitions[i].has_value()) {
+                    auto normalized = core::tools::schema::validate_arguments(
+                        *resolved_definitions[i],
+                        tc.function.arguments);
+                    if (normalized.has_value()) {
+                        tc.function.arguments = std::move(*normalized);
+                    } else {
+                        argument_issue = std::move(normalized.error());
+                    }
+                }
+
                 if (turn_callbacks.on_tool_start) {
                     turn_callbacks.on_tool_start(tc);
                 }
@@ -2184,50 +2213,34 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     continue;
                 }
 
-                // Validate arguments against the authoritative schema only for
-                // calls that passed every approval gate. Gating (allow-list,
-                // hooks, user permission) must not depend on tool registration,
-                // and its denial precedence must be preserved.
-                std::optional<core::tools::ToolDefinition> definition;
-                if (tc.function.name == SubagentOrchestrator::kTaskToolName) {
-                    definition = self->orchestrator_.task_tool_definition().function;
-                } else if (tc.function.name == core::tools::names::kWriteTodos) {
-                    definition = self->todo_tool_.get_definition();
-                } else if (tc.function.name == core::tools::names::kReadToolResult) {
-                    definition = self->read_tool_result_tool_.get_definition();
-                } else {
-                    definition = self->skill_manager_.get_tool_definition(tc.function.name);
-                }
-                resolved_definitions[i] = definition;
-                if (!definition.has_value()) {
+                // Argument failures are reported only for calls that cleared
+                // every approval gate, so an unregistered or mis-shaped call
+                // can never pre-empt an allow-list, hook or user denial.
+                if (!resolved_definitions[i].has_value()) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::InvalidArguments;
                     argument_errors[i] = "tool not found";
                     tool_callback(tc.function.name, "[invalid tool call: tool not found]");
                     continue;
                 }
-                auto normalized = core::tools::schema::validate_arguments(
-                    *definition,
-                    tc.function.arguments);
-                if (!normalized.has_value()) {
+                if (argument_issue.has_value()) {
                     approved[i] = false;
                     denied_reasons[i] = DeniedReason::InvalidArguments;
-                    argument_errors[i] = normalized.error().message;
-                    argument_parameters[i] = normalized.error().parameter;
+                    argument_errors[i] = argument_issue->message;
+                    argument_parameters[i] = argument_issue->parameter;
                     if (auto hint = self->note_argument_validation_failure(
                             tc.function.name,
-                            *definition,
-                            normalized.error(),
+                            *resolved_definitions[i],
+                            *argument_issue,
                             tc.function.arguments,
                             *turn_state)) {
                         argument_recovery_hints[i] = std::move(*hint);
                     }
                     tool_callback(
                         tc.function.name,
-                        "[invalid tool arguments: " + normalized.error().message + "]");
+                        "[invalid tool arguments: " + argument_issue->message + "]");
                     continue;
                 }
-                tc.function.arguments = std::move(*normalized);
             }
 
             if (self->is_stop_requested() || !self->is_turn_current(turn_state)) {

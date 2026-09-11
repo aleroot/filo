@@ -104,6 +104,49 @@ public:
     }
 };
 
+/// Records the argument payload each invocation actually received.
+class ArgumentRecordingTool final : public core::tools::Tool {
+public:
+    static constexpr std::string_view kName = "recovery_recording_tool";
+
+    [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = std::string(kName),
+            .title = "Recording Tool",
+            .description = "Records the arguments it was executed with.",
+            .input_schema =
+                R"({"type":"object","properties":{"edits":{"type":"array","items":)"
+                R"({"type":"object","properties":{"old_string":{"type":"string"},)"
+                R"("new_string":{"type":"string"}},"required":["old_string","new_string"],)"
+                R"("additionalProperties":false}}},"required":["edits"],)"
+                R"("additionalProperties":false})",
+            .annotations = {.read_only_hint = true, .idempotent_hint = true},
+        };
+    }
+
+    [[nodiscard]] std::string execute(
+        const std::string& json_args,
+        const core::context::SessionContext&) override {
+        std::lock_guard lock(mutex_);
+        executed_.push_back(json_args);
+        return R"({"ok":true})";
+    }
+
+    [[nodiscard]] static std::vector<std::string> executed() {
+        std::lock_guard lock(mutex_);
+        return executed_;
+    }
+
+    static void reset() {
+        std::lock_guard lock(mutex_);
+        executed_.clear();
+    }
+
+private:
+    static inline std::mutex mutex_;
+    static inline std::vector<std::string> executed_;
+};
+
 class RecoveryRuntimeTool final : public core::tools::Tool {
 public:
     [[nodiscard]] core::tools::ToolDefinition get_definition() const override {
@@ -228,6 +271,43 @@ private:
     std::vector<rec::RecoveryLesson> lessons_;
     std::vector<rec::RecoveryKey> recalled_keys_;
 };
+
+std::vector<core::llm::Message> run_turn(
+    const std::shared_ptr<core::llm::LLMProvider>& provider,
+    const std::shared_ptr<core::memory::ToolRecoveryMemory>& recovery,
+    core::agent::Agent::TurnCallbacks turn_callbacks) {
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_workspace_session_context(),
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        std::shared_ptr<core::session::SessionStatsRegistry>{},
+        nullptr,
+        core::memory::make_memory_system(recovery));
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    agent->send_message(
+        "use the tool",
+        [](const std::string&) {},
+        [](const std::string&, const std::string&) {},
+        [&] {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        std::move(turn_callbacks));
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(
+            lock, std::chrono::seconds(10), [&] { return done; }));
+    }
+    return agent->get_history();
+}
 
 std::vector<core::llm::Message> run_turn(
     const std::shared_ptr<core::llm::LLMProvider>& provider,
@@ -789,6 +869,39 @@ TEST_CASE("agent records a lesson from failure followed by corrected success",
         }
     }
     CHECK(saw_structured_rejection);
+}
+
+TEST_CASE("the agent gates and executes the same coerced arguments",
+          "[agent][recovery][integration][coercion]") {
+    // Safety invariant: whatever a PreToolUse hook or permission prompt is
+    // shown must be exactly what runs. Argument coercion therefore settles
+    // before the gates, and on_tool_start — the first observer in the turn
+    // loop, and what the transcript renders — already carries the final bytes.
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<ArgumentRecordingTool>());
+    ArgumentRecordingTool::reset();
+
+    std::vector<std::string> observed_by_gate;
+    core::agent::Agent::TurnCallbacks callbacks;
+    callbacks.on_tool_start = [&observed_by_gate](const core::llm::ToolCall& call) {
+        observed_by_gate.push_back(call.function.arguments);
+    };
+
+    run_turn(
+        std::make_shared<ScriptedToolCallProvider>(
+            std::string(ArgumentRecordingTool::kName),
+            std::vector<std::string>{
+                R"({"edits":"[{\"old_string\":\"x\",\"new_string\":\"y\"}]"})",
+            }),
+        std::make_shared<RecordingToolRecoveryMemory>(),
+        std::move(callbacks));
+
+    const auto executed = ArgumentRecordingTool::executed();
+    REQUIRE(executed.size() == 1);
+    REQUIRE(observed_by_gate.size() == 1);
+    CHECK(executed[0] ==
+          R"({"edits":[{"new_string":"y","old_string":"x"}]})");
+    CHECK(observed_by_gate[0] == executed[0]);
 }
 
 TEST_CASE("agent recalls a proven lesson inside the failure payload",

@@ -493,6 +493,18 @@ std::optional<std::string> coerce_arguments(std::string_view arguments_json,
     return coerced;
 }
 
+std::string explain_unparsable_arguments(std::string_view raw) {
+    const std::string_view trimmed = trim(raw);
+    if (trimmed.empty()) return {};
+    if (looks_truncated(trimmed)) {
+        return " — the payload ends mid-value (unterminated string or bracket),"
+               " so the tool call was cut off rather than mis-typed. Send the"
+               " call again with less content, splitting large work across"
+               " several calls";
+    }
+    return {};
+}
+
 std::string explain_string_value(std::string_view value,
                                  std::string_view expected_type) {
     const std::string_view trimmed = trim(value);

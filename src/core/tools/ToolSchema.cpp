@@ -595,7 +595,11 @@ std::expected<std::string, ArgumentIssue> validate_arguments(
     Element arguments_root;
     if (arguments_parser.parse(padded_arguments).get(arguments_root) != simdjson::SUCCESS) {
         return std::unexpected(make_issue(
-            ArgumentIssueCode::InvalidJson, {}, {}, "arguments are not valid JSON"));
+            ArgumentIssueCode::InvalidJson,
+            {},
+            {},
+            "arguments are not valid JSON"
+                + explain_unparsable_arguments(arguments_json)));
     }
     Object arguments;
     if (arguments_root.get(arguments) != simdjson::SUCCESS) {
