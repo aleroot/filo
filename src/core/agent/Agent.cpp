@@ -1035,14 +1035,21 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
             .include_project_facts(false)
             .build_plan();
     stable_prompt_prefix_ = stable_prompt_plan_.render();
-    stable_prompt_prefix_tokens_ = stable_prompt_prefix_.empty()
-        ? 0
-        : core::context::ContextWindowTracker::estimate_tokens({
+    if (stable_prompt_prefix_.empty()) {
+        stable_prompt_prefix_tokens_ = 0;
+    } else {
+        // Named, so the probe vector outlives the call unambiguously: GCC
+        // reports a dangling temporary when this is spelled inline inside a
+        // conditional expression.
+        const std::vector<core::llm::Message> prefix_probe{
             core::llm::Message{
                 .role = "system",
                 .content = stable_prompt_prefix_,
             },
-        });
+        };
+        stable_prompt_prefix_tokens_ =
+            core::context::ContextWindowTracker::estimate_tokens(prefix_probe);
+    }
     stable_prompt_prefix_dirty_ = false;
 }
 

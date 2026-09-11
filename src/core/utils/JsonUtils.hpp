@@ -71,11 +71,22 @@ void append_escaped_utf8_safe(std::string& out, std::string_view sv);
 
 namespace json {
 
+// ---------------------------------------------------------------------------
+// ignore_error — deliberately discard an optional simdjson lookup.
+//
+// simdjson marks simdjson_result::get() with warn_unused_result. GCC, unlike
+// clang, does not accept `(void)` / static_cast<void> as an acknowledgement of
+// that attribute, so every "absent key keeps the fallback" site has to feed the
+// error code to a real call instead. Use this whenever the lookup failing is a
+// valid outcome; check the code explicitly when it is not.
+// ---------------------------------------------------------------------------
+inline void ignore_error(simdjson::error_code) noexcept {}
+
 [[nodiscard]] inline bool bool_field(simdjson::dom::object object,
                                      std::string_view key,
                                      bool fallback = false) {
     bool value = fallback;
-    static_cast<void>(object[key].get(value));
+    ignore_error(object[key].get(value));
     return value;
 }
 
@@ -131,7 +142,7 @@ first_string_field(const simdjson::dom::object& object) {
                                          std::string_view key,
                                          int64_t fallback = 0) {
     int64_t value = fallback;
-    static_cast<void>(object[key].get(value));
+    ignore_error(object[key].get(value));
     return value;
 }
 

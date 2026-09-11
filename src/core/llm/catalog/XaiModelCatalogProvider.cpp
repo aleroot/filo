@@ -4,6 +4,7 @@
 
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
+#include "../../utils/JsonUtils.hpp"
 
 #include <simdjson.h>
 
@@ -111,7 +112,7 @@ ModelCatalogResult XaiModelCatalogProvider::parse_models_response(
 
         int64_t input_price = 0;
         int64_t cached_price = 0;
-        (void)object["prompt_text_token_price"].get(input_price);
+        core::utils::json::ignore_error(object["prompt_text_token_price"].get(input_price));
         const bool has_cached_price =
             object["cached_prompt_text_token_price"].get(cached_price)
             == simdjson::SUCCESS;

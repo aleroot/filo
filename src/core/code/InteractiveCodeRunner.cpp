@@ -133,7 +133,7 @@ public:
             return std::unexpected(std::format(
                 "Could not protect temporary script: {}", std::strerror(errno)));
         }
-        return std::move(script);
+        return script;
     }
 
     TemporaryScript(TemporaryScript&& other) noexcept

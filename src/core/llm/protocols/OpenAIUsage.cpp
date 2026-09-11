@@ -1,4 +1,5 @@
 #include "OpenAIUsage.hpp"
+#include "../../utils/JsonUtils.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -37,8 +38,8 @@ bool parse_openai_usage(simdjson::dom::object usage,
         || usage["input_tokens_details"].get(prompt_details) == simdjson::SUCCESS) {
         int64_t cached = 0;
         int64_t created = 0;
-        (void)prompt_details["cached_tokens"].get(cached);
-        (void)prompt_details["cache_creation_input_tokens"].get(created);
+        core::utils::json::ignore_error(prompt_details["cached_tokens"].get(cached));
+        core::utils::json::ignore_error(prompt_details["cache_creation_input_tokens"].get(created));
         result.cached_prompt_tokens = token_count(cached);
         result.cache_creation_prompt_tokens = token_count(created);
     }
@@ -47,7 +48,7 @@ bool parse_openai_usage(simdjson::dom::object usage,
     if (usage["completion_tokens_details"].get(completion_details) == simdjson::SUCCESS
         || usage["output_tokens_details"].get(completion_details) == simdjson::SUCCESS) {
         int64_t reasoning = 0;
-        (void)completion_details["reasoning_tokens"].get(reasoning);
+        core::utils::json::ignore_error(completion_details["reasoning_tokens"].get(reasoning));
         result.reasoning_tokens = token_count(reasoning);
     }
 

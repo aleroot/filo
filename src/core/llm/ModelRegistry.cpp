@@ -1426,7 +1426,7 @@ void ModelRegistry::register_model(ModelInfo info) {
     if (info.canonical_id.empty()) return;
 
     auto next = std::make_shared<RegistryState>(
-        *std::atomic_load_explicit(&state_, std::memory_order_acquire));
+        *core::utils::atomic_load_acquire(state_));
     const std::string canonical = info.canonical_id;
     if (auto existing = next->models.find(canonical); existing != next->models.end()) {
         for (const auto& alias : existing->second.aliases) {
@@ -1443,7 +1443,7 @@ void ModelRegistry::register_model(ModelInfo info) {
     // Register aliases
     register_aliases(*next, next->models.at(canonical));
     std::shared_ptr<const RegistryState> published = std::move(next);
-    std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
+    core::utils::atomic_store_release(state_, std::move(published));
 }
 
 bool ModelRegistry::merge_model(ModelInfo info) {
@@ -1452,7 +1452,7 @@ bool ModelRegistry::merge_model(ModelInfo info) {
     if (info.canonical_id.empty()) return false;
 
     auto next = std::make_shared<RegistryState>(
-        *std::atomic_load_explicit(&state_, std::memory_order_acquire));
+        *core::utils::atomic_load_acquire(state_));
     const std::string discovered_id = info.canonical_id;
     auto existing = next->models.find(discovered_id);
     if (existing == next->models.end()) {
@@ -1465,7 +1465,7 @@ bool ModelRegistry::merge_model(ModelInfo info) {
         next->models[discovered_id] = std::move(info);
         register_aliases(*next, next->models.at(discovered_id));
         std::shared_ptr<const RegistryState> published = std::move(next);
-        std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
+        core::utils::atomic_store_release(state_, std::move(published));
         return true;
     }
 
@@ -1482,7 +1482,7 @@ bool ModelRegistry::merge_model(ModelInfo info) {
     existing->second = std::move(merged);
     register_aliases(*next, existing->second);
     std::shared_ptr<const RegistryState> published = std::move(next);
-    std::atomic_store_explicit(&state_, std::move(published), std::memory_order_release);
+    core::utils::atomic_store_release(state_, std::move(published));
     return false;
 }
 
@@ -1499,7 +1499,7 @@ void ModelRegistry::register_models(std::span<const ModelInfo> models) {
 }
 
 std::shared_ptr<const ModelInfo> ModelRegistry::lookup(std::string_view model_id) const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
     
     // Try canonical ID first
     auto it = state->models.find(std::string(model_id));
@@ -1579,7 +1579,7 @@ bool ModelRegistry::validate_max_tokens(std::string_view model_id, int max_token
 }
 
 std::vector<ModelInfo> ModelRegistry::filter_by_tier(ModelTier tier) const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
     
     std::vector<ModelInfo> result;
     for (const auto& [_, info] : state->models) {
@@ -1591,7 +1591,7 @@ std::vector<ModelInfo> ModelRegistry::filter_by_tier(ModelTier tier) const {
 }
 
 std::vector<ModelInfo> ModelRegistry::filter_by_capability(ModelCapability cap) const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
     
     std::vector<ModelInfo> result;
     for (const auto& [_, info] : state->models) {
@@ -1603,7 +1603,7 @@ std::vector<ModelInfo> ModelRegistry::filter_by_capability(ModelCapability cap) 
 }
 
 std::vector<std::string> ModelRegistry::list_models() const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
     
     std::vector<std::string> result;
     result.reserve(state->models.size());
@@ -1614,7 +1614,7 @@ std::vector<std::string> ModelRegistry::list_models() const {
 }
 
 std::vector<ModelInfo> ModelRegistry::get_by_provider(std::string_view provider) const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
     
     std::vector<ModelInfo> result;
     for (const auto& [_, info] : state->models) {
@@ -1638,12 +1638,12 @@ double ModelRegistry::estimate_cost(std::string_view model_id,
 void ModelRegistry::clear() {
     std::lock_guard lock(write_mutex_);
     std::shared_ptr<const RegistryState> empty = std::make_shared<RegistryState>();
-    std::atomic_store_explicit(&state_, std::move(empty), std::memory_order_release);
+    core::utils::atomic_store_release(state_, std::move(empty));
     defaults_loaded_ = false;
 }
 
 size_t ModelRegistry::size() const {
-    return std::atomic_load_explicit(&state_, std::memory_order_acquire)->models.size();
+    return core::utils::atomic_load_acquire(state_)->models.size();
 }
 
 // ============================================================================
@@ -1866,7 +1866,7 @@ int ModelRegistry::load_from_json_file(const std::string& file_path) {
 }
 
 std::string ModelRegistry::export_to_json() const {
-    auto state = std::atomic_load_explicit(&state_, std::memory_order_acquire);
+    auto state = core::utils::atomic_load_acquire(state_);
 
     core::utils::JsonWriter writer;
     {

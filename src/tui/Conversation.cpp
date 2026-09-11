@@ -664,7 +664,7 @@ bool parse_search_rows(std::string_view payload, std::vector<SearchResultRow>& o
             if (!path) continue;
             const auto text = core::utils::json::first_string_field(match, {"text"});
             std::int64_t line = 0;
-            (void)match["line"].get(line);
+            core::utils::json::ignore_error(match["line"].get(line));
             out.push_back({
                 .path = *path,
                 .line = line,
@@ -763,8 +763,8 @@ bool parse_fetch_metadata(std::string_view payload, FetchMetadata& out) {
                                .value_or(std::string{});
         out.title = core::utils::json::first_string_field(object, {"title"})
                         .value_or(std::string{});
-        (void)object["status_code"].get(out.status_code);
-        (void)object["truncated"].get(out.truncated);
+        core::utils::json::ignore_error(object["status_code"].get(out.status_code));
+        core::utils::json::ignore_error(object["truncated"].get(out.truncated));
     });
     return out.parsed;
 }

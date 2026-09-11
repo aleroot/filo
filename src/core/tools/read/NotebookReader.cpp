@@ -1,4 +1,5 @@
 #include "ReadTypes.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <format>
 #include <algorithm>
@@ -23,7 +24,7 @@ std::expected<Resource, std::string> decode_notebook(Resource resource, const Op
     for (auto cell : cells) {
         ++index;
         std::string_view id, type;
-        (void)cell["id"].get(id);
+        core::utils::json::ignore_error(cell["id"].get(id));
         if (cell["cell_type"].get(type)) return std::unexpected("Invalid notebook cell type.");
         if (!options.cell.empty() && (numeric ? selected_index != index : options.cell != id)) continue;
         if (!options.cell.empty() && found) return std::unexpected("Notebook contains ambiguous cell ids.");

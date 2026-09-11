@@ -1,6 +1,7 @@
 #include "ReadToolResultTool.hpp"
 
 #include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <simdjson.h>
@@ -50,8 +51,8 @@ std::string ReadToolResultTool::execute(
     std::int64_t offset = 0;
     std::int64_t limit = static_cast<std::int64_t>(
         core::agent::ToolResultStore::kDefaultReadChars);
-    (void)object["offset"].get(offset);
-    (void)object["limit"].get(limit);
+    core::utils::json::ignore_error(object["offset"].get(offset));
+    core::utils::json::ignore_error(object["limit"].get(limit));
     if (offset < 0 || limit < 4) {
         return R"({"error":"read_tool_result requires offset >= 0 and limit >= 4."})";
     }

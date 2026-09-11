@@ -281,7 +281,7 @@ void write_structural(core::utils::JsonWriter& writer,
         }
     }
 
-    for (const auto [keyword, exact] : {
+    for (const auto& [keyword, exact] : {
              std::pair<std::string_view, bool>{"anyOf", false},
              std::pair<std::string_view, bool>{"oneOf", true}}) {
         simdjson::dom::array alternatives;
@@ -312,7 +312,7 @@ void write_structural(core::utils::JsonWriter& writer,
     Object properties;
     const bool has_properties = schema["properties"].get(properties) == simdjson::SUCCESS;
     bool allow_additional = true;
-    static_cast<void>(schema["additionalProperties"].get(allow_additional));
+    core::utils::json::ignore_error(schema["additionalProperties"].get(allow_additional));
     Element additional_schema;
     const bool has_additional_schema =
         schema["additionalProperties"].get(additional_schema) == simdjson::SUCCESS

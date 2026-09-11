@@ -2,6 +2,7 @@
 #include "ToolArgumentUtils.hpp"
 #include "ToolNames.hpp"
 #include "shell/FsUtils.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
@@ -287,7 +288,7 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
         return R"({"error":"Missing 'pattern' argument."})";
 
     bool ignore_case = false;
-    static_cast<void>(doc["ignore_case"].get(ignore_case));
+    core::utils::json::ignore_error(doc["ignore_case"].get(ignore_case));
 
     std::string dir_path = ".";
     std::string_view dir_v;

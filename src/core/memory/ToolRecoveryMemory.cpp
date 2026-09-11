@@ -209,7 +209,7 @@ FileToolRecoveryMemory::load_unlocked() const {
     // Forward compatibility: a file written by a newer layout is left intact
     // and simply not used, rather than partially misinterpreted.
     int64_t version = kVersion;
-    static_cast<void>(root_object["version"].get(version));
+    core::utils::json::ignore_error(root_object["version"].get(version));
     if (version > kVersion) {
         core::logging::warn(
             "[ToolRecovery] Ignoring store at {} written by a newer version ({})",
@@ -251,7 +251,7 @@ FileToolRecoveryMemory::load_unlocked() const {
         }
 
         int64_t evidence = 1;
-        static_cast<void>(lesson_object["evidence"].get(evidence));
+        core::utils::json::ignore_error(lesson_object["evidence"].get(evidence));
         entries.push_back(Entry{
             .key = std::move(key),
             .hint = std::move(hint),

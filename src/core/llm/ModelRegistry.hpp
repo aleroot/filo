@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ReasoningCapabilities.hpp"
+#include "../utils/AtomicSharedPtr.hpp"
 
 #include <array>
 #include <memory>
@@ -526,7 +527,9 @@ private:
     
     static void register_aliases(RegistryState& state, const ModelInfo& info);
     
-    std::shared_ptr<const RegistryState> state_;
+    // Copy-on-write snapshot: writers publish a fresh state under
+    // write_mutex_, readers take it lock-free.
+    core::utils::AtomicSharedPtr<const RegistryState> state_;
     mutable std::mutex write_mutex_;
     bool defaults_loaded_ = false;
 };

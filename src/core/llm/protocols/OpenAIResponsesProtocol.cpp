@@ -508,7 +508,7 @@ struct CodexRateLimitUpdate {
             int64_t resets_at = 0;
             const bool has_minutes = window["window_minutes"].get_int64().get(minutes)
                 == simdjson::SUCCESS;
-            (void)window["reset_at"].get_int64().get(resets_at);
+            core::utils::json::ignore_error(window["reset_at"].get_int64().get(resets_at));
             update.usage_windows.push_back(UsageWindow{
                 .label = codex_window_label(
                     has_minutes ? std::optional<int64_t>{minutes} : std::nullopt,

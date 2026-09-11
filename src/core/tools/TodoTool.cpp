@@ -1,6 +1,7 @@
 #include "TodoTool.hpp"
 
 #include "ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <simdjson.h>
@@ -85,7 +86,7 @@ std::string TodoTool::execute(const std::string& json_args,
         std::string_view id;
         std::string_view content;
         std::string_view status;
-        (void)object["id"].get(id);
+        core::utils::json::ignore_error(object["id"].get(id));
         if (object["content"].get(content) != simdjson::SUCCESS
             || object["status"].get(status) != simdjson::SUCCESS) {
             return error_json("Each todo requires string content and status.");

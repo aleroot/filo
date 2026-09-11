@@ -1608,7 +1608,6 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
     for (int i = start_idx; i < end_idx; ++i) {
         const bool is_selected = (i == selected);
         const Color primary_color = is_selected ? Color::Black : Color::White;
-        const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;
         const Color index_color   = is_selected
             ? Color{Color::Black}
             : static_cast<Color>(ColorYellowDark);

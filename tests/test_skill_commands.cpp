@@ -1439,7 +1439,7 @@ Additional exclusive body.
 
     SECTION("the primary's version of a colliding skill wins outright") {
         const auto skills = SkillRegistry::discover_instruction_skills(roots);
-        const auto shared = std::ranges::find(skills, "shared", &SkillManifest::name);
+        const auto shared = std::ranges::find(skills, std::string("shared"), &SkillManifest::name);
         REQUIRE(shared != skills.end());
         CHECK(shared->description == "Primary shared skill.");
         CHECK_FALSE(shared->from_additional_workspace);
@@ -1448,7 +1448,8 @@ Additional exclusive body.
 
     SECTION("provenance marks skills that came from a granted root") {
         const auto skills = SkillRegistry::discover_instruction_skills(roots);
-        const auto extra_only = std::ranges::find(skills, "extra-only", &SkillManifest::name);
+        const auto extra_only =
+            std::ranges::find(skills, std::string("extra-only"), &SkillManifest::name);
         REQUIRE(extra_only != skills.end());
         CHECK(extra_only->from_additional_workspace);
         CHECK(extra_only->workspace_root == extra);
@@ -1529,7 +1530,8 @@ Additional exclusive body.
     CHECK(std::ranges::any_of(descriptors, [](const auto& descriptor) {
         return descriptor.name == "/extra-only";
     }));
-    const auto review = std::ranges::find(descriptors, "/review", &CommandDescriptor::name);
+    const auto review =
+        std::ranges::find(descriptors, std::string("/review"), &CommandDescriptor::name);
     REQUIRE(review != descriptors.end());
     // register_command replaces on collision, so the primary — scanned last — wins.
     CHECK(review->description == "Primary review skill.");

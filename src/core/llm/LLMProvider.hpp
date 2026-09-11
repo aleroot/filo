@@ -10,6 +10,7 @@
 #include "ReasoningCapabilities.hpp"
 #include "protocols/ApiProtocol.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../utils/AtomicSharedPtr.hpp"
 
 namespace core::auth {
 class ICredentialSource;
@@ -210,46 +211,30 @@ protected:
 private:
     using TokenUsageSnapshotPtr = std::shared_ptr<const TokenUsage>;
     using RateLimitSnapshotPtr = std::shared_ptr<const protocols::RateLimitInfo>;
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-    using RateLimitSnapshotStore = std::atomic<RateLimitSnapshotPtr>;
-#else
-    using RateLimitSnapshotStore = RateLimitSnapshotPtr;
-#endif
 
     [[nodiscard]] RateLimitSnapshotPtr load_last_rate_limit_snapshot() const noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-        return last_rate_limit_snapshot_.load(std::memory_order_acquire);
-#else
-        return std::atomic_load_explicit(
-            &last_rate_limit_snapshot_, std::memory_order_acquire);
-#endif
+        return core::utils::atomic_load_acquire(last_rate_limit_snapshot_);
     }
 
     void store_last_rate_limit_snapshot(RateLimitSnapshotPtr snapshot) noexcept {
-#if defined(__cpp_lib_atomic_shared_ptr) && __cpp_lib_atomic_shared_ptr >= 201711L
-        last_rate_limit_snapshot_.store(std::move(snapshot), std::memory_order_release);
-#else
-        std::atomic_store_explicit(
-            &last_rate_limit_snapshot_, std::move(snapshot), std::memory_order_release);
-#endif
+        core::utils::atomic_store_release(last_rate_limit_snapshot_, std::move(snapshot));
     }
 
     [[nodiscard]] TokenUsageSnapshotPtr load_last_usage_snapshot() const noexcept {
-        return std::atomic_load_explicit(
-            &last_usage_snapshot_, std::memory_order_acquire);
+        return core::utils::atomic_load_acquire(last_usage_snapshot_);
     }
 
     void store_last_usage_snapshot(TokenUsageSnapshotPtr snapshot) noexcept {
-        std::atomic_store_explicit(
-            &last_usage_snapshot_, std::move(snapshot), std::memory_order_release);
+        core::utils::atomic_store_release(last_usage_snapshot_, std::move(snapshot));
     }
 
-    TokenUsageSnapshotPtr last_usage_snapshot_ = std::make_shared<const TokenUsage>();
+    core::utils::AtomicSharedPtr<const TokenUsage> last_usage_snapshot_{
+        std::make_shared<const TokenUsage>()};
 
     // Immutable snapshot of the last rate-limit response.  Written by the
     // streaming thread via set_last_rate_limit_info(); read lock-free by the
     // render thread via get_last_rate_limit_info().
-    RateLimitSnapshotStore last_rate_limit_snapshot_{
+    core::utils::AtomicSharedPtr<const protocols::RateLimitInfo> last_rate_limit_snapshot_{
         std::make_shared<const protocols::RateLimitInfo>()};
 };
 

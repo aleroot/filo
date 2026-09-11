@@ -3,6 +3,7 @@
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
 #include "../../utils/UriUtils.hpp"
+#include "../../utils/JsonUtils.hpp"
 
 #include <simdjson.h>
 
@@ -140,7 +141,7 @@ ModelCatalogResult GeminiModelCatalogProvider::parse_models_response(
         info.tier = catalog::infer_tier(id, thinking);
 
         double max_temperature = 2.0;
-        (void)object["maxTemperature"].get(max_temperature);
+        core::utils::json::ignore_error(object["maxTemperature"].get(max_temperature));
         info.constraints =
             catalog::standard_constraints(std::max(0.0, max_temperature));
         result.models.push_back(std::move(info));

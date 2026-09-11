@@ -221,7 +221,7 @@ public:
     }
 
     int64_t version = 0;
-    static_cast<void>(document["version"].get(version));
+    core::utils::json::ignore_error(document["version"].get(version));
     if (version != 1) {
       result.project_config_valid = false;
       result.warnings.push_back(

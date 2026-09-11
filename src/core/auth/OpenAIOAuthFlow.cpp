@@ -123,8 +123,8 @@ constexpr std::string_view kFiloOriginator = "filo";
         simdjson::dom::element doc = parser.parse(padded);
         std::string_view error;
         std::string_view description;
-        (void)doc["error"].get_string().get(error);
-        (void)doc["error_description"].get_string().get(description);
+        core::utils::json::ignore_error(doc["error"].get_string().get(error));
+        core::utils::json::ignore_error(doc["error_description"].get_string().get(description));
         if (!error.empty() && !description.empty()) {
             return std::string(error) + ": " + std::string(description);
         }
@@ -332,7 +332,7 @@ OAuthToken OpenAIOAuthFlow::device_code_login() {
         throw std::runtime_error("OpenAI device-code response did not include device_auth_id");
     }
     if (doc["user_code"].get_string().get(user_code) != simdjson::SUCCESS) {
-        (void)doc["usercode"].get_string().get(user_code);
+        core::utils::json::ignore_error(doc["usercode"].get_string().get(user_code));
     }
     if (user_code.empty()) {
         throw std::runtime_error("OpenAI device-code response did not include user_code");

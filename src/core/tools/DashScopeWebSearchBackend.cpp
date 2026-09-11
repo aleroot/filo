@@ -3,6 +3,7 @@
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include "../llm/QwenModelTraits.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -303,7 +304,7 @@ void parse_web_extractor_call(SearchResponse& response,
     if (status == "failed") return;
 
     std::string_view goal;
-    (void)item["goal"].get(goal);
+    core::utils::json::ignore_error(item["goal"].get(goal));
 
     std::string_view output;
     if (item["output"].get(output) == simdjson::SUCCESS && !output.empty()) {
