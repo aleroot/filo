@@ -1,6 +1,7 @@
 #include "McpSamplingBridge.hpp"
 
 #include "../llm/Models.hpp"
+#include "../llm/ToolCallAssembly.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -189,23 +190,6 @@ struct StreamingSamplingResult {
     std::string error_message;
 };
 
-void merge_streamed_tool_call(std::vector<core::llm::ToolCall>& accumulator,
-                              const core::llm::ToolCall& incoming) {
-    for (auto& existing : accumulator) {
-        const bool same_by_index = incoming.index != -1 && incoming.index == existing.index;
-        const bool same_by_id = incoming.index == -1 && !incoming.id.empty() && incoming.id == existing.id;
-        if (!same_by_index && !same_by_id) continue;
-
-        if (!incoming.id.empty()) existing.id = incoming.id;
-        if (!incoming.type.empty()) existing.type = incoming.type;
-        if (!incoming.function.name.empty()) existing.function.name = incoming.function.name;
-        existing.function.arguments += incoming.function.arguments;
-        return;
-    }
-
-    accumulator.push_back(incoming);
-}
-
 [[nodiscard]] std::string tool_arguments_or_empty_object(std::string_view arguments_json) {
     simdjson::dom::parser parser;
     simdjson::padded_string padded(arguments_json);
@@ -302,7 +286,8 @@ std::string McpSamplingBridge::create_message(std::string_view server_name,
         [&sampling_result, &is_final_seen](const core::llm::StreamChunk& chunk) {
             sampling_result.text += chunk.content;
             for (const auto& tool_call : chunk.tools) {
-                merge_streamed_tool_call(sampling_result.tool_calls, tool_call);
+                core::llm::merge_tool_call_fragment(sampling_result.tool_calls,
+                                                    tool_call);
             }
 
             if (!chunk.is_final) return;

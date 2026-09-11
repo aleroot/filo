@@ -5,6 +5,8 @@
 #include "../context/SessionContext.hpp"
 #include "../tools/BuiltinToolRegistry.hpp"
 #include "../tools/ToolManager.hpp"
+#include "../tools/ArgumentCoercion.hpp"
+#include "../tools/ToolSchema.hpp"
 #include "../tools/ShellTool.hpp"
 #include "../tools/ApplyPatchTool.hpp"
 #include "../tools/FileSearchTool.hpp"
@@ -337,6 +339,35 @@ struct InitializeInfo {
     }
 
     return std::nullopt;
+}
+
+/**
+ * @brief Produces the argument payload a validated tool call should execute.
+ *
+ * Clients relay model output verbatim, so the same value-shape mistakes the
+ * agent loop absorbs (a list serialized into a string, a quoted number, a lone
+ * item where a list is declared) arrive over MCP too. Coercion is attempted
+ * only after the declared-type check has already failed, and its result is
+ * re-checked here, so a call is never executed with arguments this dispatcher
+ * would have rejected.
+ *
+ * @return The arguments to execute, or the validation error to report.
+ */
+[[nodiscard]] std::expected<std::string, std::string> prepare_tool_arguments(
+    const core::tools::ToolDefinition& def,
+    std::string_view args_json)
+{
+    auto error = validate_tool_arguments(def, args_json);
+    if (!error.has_value()) return std::string(args_json);
+
+    auto coerced = core::tools::schema::coerce_arguments(
+        args_json.empty() ? std::string_view{"{}"} : args_json,
+        core::tools::schema::canonical_input_schema(def));
+    if (coerced.has_value()
+        && !validate_tool_arguments(def, *coerced).has_value()) {
+        return std::move(*coerced);
+    }
+    return std::unexpected(std::move(*error));
 }
 
 constexpr std::size_t kMaxResourceBytes = 1024 * 1024; // 1 MiB
@@ -1393,9 +1424,11 @@ private:
 
     RemoteToolCallReporter remote_reporter(
         context, request.name, request.arguments_json);
-    if (auto validation_error = validate_tool_arguments(*tool_def, request.arguments_json)) {
-        remote_reporter.fail(*validation_error);
-        return std::unexpected(RpcError{-32602, *validation_error});
+    const auto prepared_arguments =
+        prepare_tool_arguments(*tool_def, request.arguments_json);
+    if (!prepared_arguments.has_value()) {
+        remote_reporter.fail(prepared_arguments.error());
+        return std::unexpected(RpcError{-32602, prepared_arguments.error()});
     }
 
     auto execution_context = context;
@@ -1408,7 +1441,7 @@ private:
     }
     const std::string tool_result = sm.execute_tool(
         request.name,
-        request.arguments_json,
+        *prepared_arguments,
         execution_context);
     if (modern) {
         sm.clear_session_state(execution_context.session_id);
@@ -1777,16 +1810,18 @@ using MethodHandler = std::string (*)(
     if (request->client_supports_tasks
         && mode == McpProtocolMode::stateless
         && is_long_running_delegate_task_call(*request)) {
-        if (auto validation_error = validate_tool_arguments(*tool_def, request->arguments_json)) {
+        const auto prepared_arguments =
+            prepare_tool_arguments(*tool_def, request->arguments_json);
+        if (!prepared_arguments.has_value()) {
             RemoteToolCallReporter remote_reporter(
                 context, request->name, request->arguments_json);
-            remote_reporter.fail(*validation_error);
-            return make_error(id, -32602, *validation_error);
+            remote_reporter.fail(prepared_arguments.error());
+            return make_error(id, -32602, prepared_arguments.error());
         }
 
         const auto create_result = McpTaskManager::get_instance().create_task_tool_call(
             request->name,
-            request->arguments_json,
+            *prepared_arguments,
             context,
             std::nullopt);
         return make_response(id, build_create_task_result(create_result), mode);

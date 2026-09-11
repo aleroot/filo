@@ -8,6 +8,7 @@
 #include "../core/budget/BudgetTracker.hpp"
 #include "../core/llm/ModelCatalogDiscovery.hpp"
 #include "../core/llm/Models.hpp"
+#include "../core/llm/ToolCallAssembly.hpp"
 #include "../core/llm/ProviderManager.hpp"
 #include "../core/llm/providers/RouterProvider.hpp"
 #include "../core/llm/routing/RouterEngine.hpp"
@@ -418,31 +419,6 @@ bool parse_anthropic_tools(simdjson::dom::array tools_arr,
         out_tools.push_back(std::move(tool));
     }
     return true;
-}
-
-void merge_tool_call_fragment(std::vector<core::llm::ToolCall>& accumulated,
-                              const core::llm::ToolCall& incoming) {
-    bool found = false;
-    for (auto& existing : accumulated) {
-        const bool same = (incoming.index != -1 && existing.index == incoming.index)
-            || (incoming.index == -1 && !incoming.id.empty() && existing.id == incoming.id)
-            || (incoming.index == -1
-                && incoming.id.empty()
-                && accumulated.size() == 1);
-        if (!same) continue;
-
-        if (!incoming.id.empty()) existing.id = incoming.id;
-        if (!incoming.type.empty()) existing.type = incoming.type;
-        if (!incoming.function.name.empty()) {
-            existing.function.name = incoming.function.name;
-        }
-        existing.function.arguments += incoming.function.arguments;
-        found = true;
-        break;
-    }
-    if (!found) {
-        accumulated.push_back(incoming);
-    }
 }
 
 bool parse_openai_message(simdjson::dom::object message_obj,
@@ -1190,7 +1166,7 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
                     state->content += chunk.content;
                 }
                 for (const auto& tool_call : chunk.tools) {
-                    merge_tool_call_fragment(state->tool_calls, tool_call);
+                    core::llm::merge_tool_call_fragment(state->tool_calls, tool_call);
                 }
                 if (chunk.is_error) {
                     state->had_error = true;

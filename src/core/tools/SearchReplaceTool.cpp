@@ -196,7 +196,9 @@ ToolDefinition SearchReplaceTool::get_definition() const {
             {
                 .name = "edits",
                 .type = "array",
-                .description = "Ordered {old_string,new_string} edits.",
+                .description =
+                    "Ordered {old_string,new_string} edits, as a JSON array value "
+                    "(never a string containing JSON).",
                 .required = true,
                 .items_schema = std::string{kEditsItemsSchema},
             },

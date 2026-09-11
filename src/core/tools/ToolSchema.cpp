@@ -1,5 +1,7 @@
 #include "ToolSchema.hpp"
 
+#include "ArgumentCoercion.hpp"
+#include "ToolSchemaInternal.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 
@@ -220,7 +222,11 @@ void write_structural(core::utils::JsonWriter& writer,
     return tokens;
 }
 
-[[nodiscard]] bool schema_accepts_type(Element schema, std::string_view wanted) {
+} // namespace
+
+namespace detail {
+
+bool schema_accepts_type(Element schema, std::string_view wanted) {
     Object object;
     if (schema.get(object) != simdjson::SUCCESS) return true;
 
@@ -250,7 +256,7 @@ void write_structural(core::utils::JsonWriter& writer,
     return true;
 }
 
-[[nodiscard]] std::string element_type_name(Element value) {
+std::string_view element_type_name(Element value) noexcept {
     switch (value.type()) {
         case simdjson::dom::element_type::ARRAY: return "array";
         case simdjson::dom::element_type::OBJECT: return "object";
@@ -265,10 +271,28 @@ void write_structural(core::utils::JsonWriter& writer,
     return "unknown";
 }
 
-[[nodiscard]] std::optional<ArgumentIssue> validate_value(
-    Element value,
-    Element schema,
-    std::string_view path);
+} // namespace detail
+
+namespace {
+
+using detail::element_type_name;
+using detail::schema_accepts_type;
+using detail::validate_value;
+
+/**
+ * Human-readable guidance appended to a type-mismatch message.
+ *
+ * The bare "$.edits must be array, got string" verdict tells a model what the
+ * contract is but not what it did wrong, which is why the same mistake recurs.
+ * Coercion already knows how a supplied string fails to become the declared
+ * type, so the explanation is sourced from there rather than re-derived here.
+ */
+[[nodiscard]] std::string type_mismatch_detail(Element value,
+                                               std::string_view expected_type) {
+    std::string_view text;
+    if (value.get(text) != simdjson::SUCCESS) return {};
+    return explain_string_value(text, expected_type);
+}
 
 [[nodiscard]] std::optional<ArgumentIssue> validate_combinators(
     Element value,
@@ -354,7 +378,11 @@ void write_structural(core::utils::JsonWriter& writer,
     return std::nullopt;
 }
 
-[[nodiscard]] std::optional<ArgumentIssue> validate_value(
+} // namespace
+
+namespace detail {
+
+std::optional<ArgumentIssue> validate_value(
     Element value,
     Element schema_element,
     std::string_view path) {
@@ -362,17 +390,20 @@ void write_structural(core::utils::JsonWriter& writer,
     if (schema_element.get(schema) != simdjson::SUCCESS) return std::nullopt;
     if (auto error = validate_combinators(value, schema, path)) return error;
 
-    const std::string actual = element_type_name(value);
+    const std::string_view actual = element_type_name(value);
     if (!schema_accepts_type(schema_element, actual)
         && !(actual == "integer" && schema_accepts_type(schema_element, "number"))) {
+        const std::string expected =
+            core::utils::json::string_field(schema, "type", "a valid schema type");
         return make_issue(
             ArgumentIssueCode::TypeMismatch,
             relative_path(path),
             declared_type_tokens(schema_element),
-            std::format("{} must be {}, got {}",
+            std::format("{} must be {}, got {}{}",
                         path,
-                        core::utils::json::string_field(schema, "type", "a valid schema type"),
-                        actual));
+                        expected,
+                        actual,
+                        type_mismatch_detail(value, expected)));
     }
 
     simdjson::dom::array enum_values;
@@ -426,6 +457,10 @@ void write_structural(core::utils::JsonWriter& writer,
     }
     return std::nullopt;
 }
+
+} // namespace detail
+
+namespace {
 
 [[nodiscard]] bool is_required(Object schema, std::string_view name) {
     simdjson::dom::array required;
@@ -588,7 +623,17 @@ std::expected<std::string, ArgumentIssue> validate_arguments(
         return std::unexpected(make_issue(
             ArgumentIssueCode::NormalizeFailed, {}, {}, "failed to normalize arguments"));
     }
-    if (auto error = validate_value(normalized_root, schema_root, "$")) {
+    if (auto error = detail::validate_value(normalized_root, schema_root, "$")) {
+        // Try-validate-then-coerce: a payload that already satisfies the
+        // contract is never rewritten, so coercion cannot disturb correct
+        // calls. coerce_arguments() returns a value only when the rewritten
+        // payload validates completely, which keeps this verdict authoritative.
+        if (auto coerced = coerce_arguments(normalized, schema_json)) {
+            // Coerced arguments re-enter the pipeline in the same canonical
+            // form every other accepted payload has, so downstream identity
+            // (deduplication, replay, recovery bookkeeping) stays stable.
+            return canonicalize_json(*coerced);
+        }
         return std::unexpected(std::move(*error));
     }
     return normalized;

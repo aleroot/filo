@@ -5,6 +5,7 @@
 #include "../context/ContextBuilder.hpp"
 #include "../hooks/HookManager.hpp"
 #include "../llm/ModelRegistry.hpp"
+#include "../llm/ToolCallAssembly.hpp"
 #include "../llm/OneShotCompletion.hpp"
 #include "../logging/Logger.hpp"
 #include "../memory/MemorySystem.hpp"
@@ -1799,21 +1800,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         // Accumulate streamed tool-call fragments (OpenAI-style delta streaming)
         for (const auto& t : chunk.tools) {
-            bool found = false;
-            for (auto& acc : *tool_calls_accum) {
-                bool same = (t.index != -1 && acc.index == t.index)
-                         || (t.index == -1 && !t.id.empty() && acc.id == t.id)
-                         || (t.index == -1 && t.id.empty() && tool_calls_accum->size() == 1);
-                if (same) {
-                    if (!t.id.empty())             acc.id             = t.id;
-                    if (!t.type.empty())            acc.type           = t.type;
-                    if (!t.function.name.empty())   acc.function.name  = t.function.name;
-                    acc.function.arguments += t.function.arguments;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) tool_calls_accum->push_back(t);
+            core::llm::merge_tool_call_fragment(*tool_calls_accum, t);
         }
 
         if (!chunk.is_final) return;

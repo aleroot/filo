@@ -287,6 +287,8 @@ set(FILO_CORE_SOURCES
     src/core/agent/ToolResultStore.cpp
     src/core/agent/SubagentOrchestrator.cpp
     src/core/tools/ToolSchema.cpp
+    src/core/tools/ArgumentCoercion.cpp
+    src/core/llm/ToolCallAssembly.cpp
     src/core/scm/GitProvider.cpp
     src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
@@ -659,6 +661,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_tool_loop_efficiency.cpp
     tests/test_tool_output_history.cpp
     tests/test_tool_schema.cpp
+    tests/test_argument_coercion.cpp
     tests/test_tool_recovery.cpp
     tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp

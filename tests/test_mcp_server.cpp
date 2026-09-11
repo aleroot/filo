@@ -1263,6 +1263,37 @@ TEST_CASE("MCP tools/call replace returns replaced_at_line", "[mcp]") {
     std::filesystem::remove(path);
 }
 
+TEST_CASE("MCP tools/call accepts an edits list serialized into a string",
+          "[mcp][coercion]") {
+    // Clients relay model output verbatim, and models routinely stringify a
+    // nested list. The declared-type check still rejects payloads that cannot
+    // be decoded, so only unambiguous shapes get through.
+    const std::string path = "mcp_search_replace_coercion.txt";
+    { std::ofstream ofs(path); ofs << "alpha\nbeta\n"; }
+
+    const std::string request =
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_replace","arguments":{"file_path":")"
+        + path
+        + R"(","edits":"[{\"old_string\":\"beta\",\"new_string\":\"BETA\"}]"}},"id":213})";
+    const auto resp = disp().dispatch(request);
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_THAT(resp, ContainsSubstring(R"("blocks_applied":1)"));
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("MCP tools/call still rejects arguments that cannot be decoded",
+          "[mcp][coercion]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"search_replace","arguments":{"file_path":"x.txt","edits":"[{\"old_string\": \"unterminated"}},"id":214})");
+
+    REQUIRE(is_valid_json(resp));
+    REQUIRE_THAT(resp, ContainsSubstring("Invalid params"));
+    REQUIRE_THAT(resp, ContainsSubstring("'edits' must be of type 'array'"));
+}
+
 TEST_CASE("MCP tools/call replace exposes structured unified diff", "[mcp]") {
     const std::string path = "mcp_replace_diff_test.txt";
     { std::ofstream ofs(path); ofs << "line one\nline two\nline three\n"; }
