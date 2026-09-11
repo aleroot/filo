@@ -107,6 +107,67 @@ TEST_CASE("SessionWorkspace resolves relative paths against its primary root", "
     std::filesystem::remove_all(root, ec);
 }
 
+TEST_CASE("ordered_roots is the single workspace ordering rule", "[Workspace][multiroot]") {
+    using core::workspace::ordered_roots;
+    using core::workspace::SessionWorkspace;
+    using core::workspace::Workspace;
+    using core::workspace::WorkspaceSnapshot;
+
+    const std::filesystem::path primary = "/tmp/filo_ordered_primary";
+    const std::filesystem::path extra_one = "/tmp/filo_ordered_extra_one";
+    const std::filesystem::path extra_two = "/tmp/filo_ordered_extra_two";
+
+    SECTION("primary first, additional roots in grant order") {
+        CHECK(ordered_roots(primary, {extra_one, extra_two})
+              == std::vector{primary, extra_one, extra_two});
+    }
+
+    SECTION("empty roots are dropped rather than scanned as relative paths") {
+        CHECK(ordered_roots(primary, {{}, extra_one, {}}) == std::vector{primary, extra_one});
+        CHECK(ordered_roots({}, {extra_one}) == std::vector{extra_one});
+        CHECK(ordered_roots({}, {}).empty());
+    }
+
+    SECTION("the snapshot overload agrees with the two-argument form") {
+        const auto snapshot = WorkspaceSnapshot{
+            .primary = primary,
+            .additional = {extra_one, extra_two},
+            .enforce = true,
+        };
+        CHECK(ordered_roots(snapshot) == ordered_roots(primary, {extra_one, extra_two}));
+    }
+
+    // Ordering is lexical and never touches the filesystem; normalization stays
+    // the job of whoever owns the snapshot. Both owners below normalize, so the
+    // expected list has to be built from normalized paths (on macOS /tmp is a
+    // symlink to /private/tmp, which is exactly the difference under test).
+    const auto normalized = SessionWorkspace::normalize_path(primary);
+    const auto normalized_expected = std::vector{
+        normalized,
+        SessionWorkspace::normalize_path(extra_one),
+        SessionWorkspace::normalize_path(extra_two),
+    };
+
+    SECTION("a session workspace keeps the order and adds normalization") {
+        const auto snapshot = WorkspaceSnapshot{
+            .primary = primary,
+            .additional = {extra_one, extra_two},
+            .enforce = true,
+        };
+        CHECK(SessionWorkspace{snapshot}.ordered_roots() == normalized_expected);
+    }
+
+    SECTION("the process-wide workspace reports the same order") {
+        auto& workspace = Workspace::get_instance();
+        workspace.initialize(primary, {extra_one, extra_two}, true);
+        CHECK(workspace.ordered_roots() == normalized_expected);
+
+        // Leave the singleton the way other tests expect to find it.
+        std::error_code ec;
+        workspace.initialize(std::filesystem::current_path(ec), {}, false);
+    }
+}
+
 TEST_CASE("SessionContext delegates to its owned SessionWorkspace", "[Workspace][SessionContext]") {
     using core::context::SessionContext;
     using core::workspace::WorkspaceSnapshot;

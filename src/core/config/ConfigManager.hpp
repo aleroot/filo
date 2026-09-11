@@ -30,6 +30,7 @@ enum class ManagedSettingKey {
     UiReasoning,
     AutoCompactThreshold,
     ContextCompression,
+    SteeringMode,
 };
 
 struct ManagedSettings {
@@ -46,6 +47,7 @@ struct ManagedSettings {
     std::optional<std::string> ui_reasoning;
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
+    std::optional<std::string> steering_mode;
 
     [[nodiscard]] bool empty() const;
 };
@@ -254,6 +256,10 @@ struct AppConfig {
     // re-enable the feature after the base configuration disabled it.
     bool        tool_recovery_explicit = false;
     std::string context_compression;
+    // Canonical steering token ("default", "fallback", "none"); empty means
+    // "not persisted", in which case --steering and then the built-in default
+    // decide. Precedence lives in main.cpp: an explicit flag wins over this.
+    std::string steering_mode;
     std::unordered_map<std::string, ProviderConfig> providers;
     std::unordered_map<std::string, SubagentConfig> subagents;
     std::unordered_map<std::string, ToolPolicyConfig> tool_policies;

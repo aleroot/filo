@@ -8,8 +8,10 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/scm/ScmFactory.hpp"
 #include "core/utils/FileSystemUtils.hpp"
+#include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -81,6 +83,14 @@ void write_text(const std::filesystem::path& path, std::string_view content) {
         },
         core::context::SessionTransport::cli,
         "context-builder-test");
+}
+
+/// The steering loader resolves roots through weakly_canonical(), so a macOS
+/// /var/... temp path only compares equal after the same normalization
+/// (/var -> /private/var). Expectations must go through this, not through
+/// lexically_normal(), which leaves symlinks alone.
+[[nodiscard]] std::filesystem::path resolved(const std::filesystem::path& path) {
+    return core::workspace::SessionWorkspace::normalize_path(path);
 }
 
 [[nodiscard]] std::string build_prompt(const core::context::SessionContext& context,
@@ -567,5 +577,272 @@ TEST_CASE("ContextBuilder integrates SteeringPolicy cleanly", "[context][builder
         CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Project Steering]"));
         CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("Poisoned rules"));
         CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Filo clean rules"));
+    }
+}
+
+TEST_CASE("collect_steering_roots orders the primary before additional roots",
+          "[context][steering]") {
+    const auto primary = std::filesystem::path("/w/primary");
+    const std::vector<std::filesystem::path> additional{"/w/second", "", "/w/third"};
+
+    const auto roots = core::context::collect_steering_roots(primary, additional);
+
+    // Blank entries are dropped; everything else keeps its CLI order, because
+    // Fallback mode treats that order as the chain of responsibility.
+    CHECK(roots == std::vector<std::filesystem::path>{"/w/primary", "/w/second", "/w/third"});
+    CHECK(core::context::collect_steering_roots("", additional).size() == 2);
+    CHECK(core::context::collect_steering_roots(primary).size() == 1);
+}
+
+TEST_CASE("SteeringMode tokens round-trip through the shared parser",
+          "[context][steering][policy]") {
+    for (const auto& option : core::context::steering_mode_options()) {
+        // The settings panel, the CLI, and settings.json all store `token`, so
+        // parsing it must return the mode the table says it means.
+        CHECK(core::context::parse_steering_policy(option.token).mode == option.mode);
+        CHECK_FALSE(option.label.empty());
+        CHECK_FALSE(option.description.empty());
+    }
+
+    // Case-insensitive, like every other steering spec.
+    CHECK(core::context::parse_steering_policy("  FALLBACK ").mode
+          == core::context::SteeringMode::Fallback);
+    CHECK(core::context::parse_steering_policy("chain").mode
+          == core::context::SteeringMode::Fallback);
+
+    // Path-parameterized modes are deliberately not selectable: they are
+    // expressed as `--steering <path>` and can never be persisted as a bare
+    // token, so the table must not offer them.
+    CHECK(core::context::steering_mode_options().size() == 3);
+    for (const auto& option : core::context::steering_mode_options()) {
+        CHECK(option.mode != core::context::SteeringMode::CustomFile);
+        CHECK(option.mode != core::context::SteeringMode::CustomDir);
+    }
+}
+
+TEST_CASE("Steering precedence: an explicit CLI spec beats the saved setting",
+          "[context][steering][policy]") {
+    // Mirrors the single expression main.cpp composes:
+    //     parse_steering_policy(from_cli ? cli_spec : config.steering_mode)
+    // A blank spec parses to Default, which is the "nothing persisted" answer,
+    // so no separate precedence helper is needed.
+    const auto effective = [](bool from_cli,
+                              std::string_view cli,
+                              std::string_view saved) {
+        return core::context::parse_steering_policy(from_cli ? cli : saved);
+    };
+    using M = core::context::SteeringMode;
+
+    CHECK(effective(true, "fallback", "none").mode == M::Fallback);
+    CHECK(effective(true, "none", "fallback").mode == M::None);
+    // No flag on the command line: the saved setting decides, whatever the
+    // unused CLI default string happens to be.
+    CHECK(effective(false, "default", "fallback").mode == M::Fallback);
+    CHECK(effective(false, "default", "none").mode == M::None);
+    // Neither layer expressed anything.
+    CHECK(effective(false, "", "").mode == M::Default);
+
+    // A persisted custom path is honoured exactly like a CLI one.
+    const auto custom = effective(false, "", "/definitely/missing/AGENTS.md");
+    CHECK(custom.mode == M::CustomFile);
+    CHECK(custom.custom_path == "/definitely/missing/AGENTS.md");
+}
+
+TEST_CASE("Fallback steering walks the workspace roots as a chain of responsibility",
+          "[context][steering][fallback]") {
+    auto primary = make_temp_workspace("filo_steering_fb_primary");
+    auto secondary = make_temp_workspace("filo_steering_fb_secondary");
+    auto tertiary = make_temp_workspace("filo_steering_fb_tertiary");
+
+    const core::context::SteeringPolicy fallback{
+        .mode = core::context::SteeringMode::Fallback};
+    const auto roots = core::context::collect_steering_roots(
+        primary.path(), {secondary.path(), tertiary.path()});
+
+    SECTION("An empty primary falls through to the next root that has steering") {
+        write_text(primary.path() / "README.md", "no steering here\n");
+        write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+        write_text(tertiary.path() / "AGENTS.md", "Tertiary workspace rules\n");
+
+        const auto result = core::context::load_workspace_steering_context(roots, fallback);
+
+        REQUIRE(result.source_labels.size() == 1);
+        CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Secondary workspace rules"));
+        CHECK_THAT(result.block, !Catch::Matchers::ContainsSubstring("Tertiary workspace rules"));
+        // The chain stops at the first root that can answer.
+        CHECK(result.root == resolved(secondary.path()));
+        CHECK(result.searched_roots.size() == 2);
+        REQUIRE(result.files.size() == 1);
+        CHECK(result.files[0].root == resolved(secondary.path()));
+    }
+
+    SECTION("A primary with its own steering never falls through") {
+        write_text(primary.path() / "AGENTS.md", "Primary workspace rules\n");
+        write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+
+        const auto result = core::context::load_workspace_steering_context(roots, fallback);
+
+        CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Primary workspace rules"));
+        CHECK_THAT(result.block, !Catch::Matchers::ContainsSubstring("Secondary workspace rules"));
+        CHECK(result.root == resolved(primary.path()));
+        CHECK(result.searched_roots.size() == 1);
+    }
+
+    SECTION("No root has steering") {
+        const auto result = core::context::load_workspace_steering_context(roots, fallback);
+
+        CHECK(result.block.empty());
+        CHECK(result.files.empty());
+        CHECK(result.root.empty());
+        // Every root was tried, which is what /steering status reports.
+        CHECK(result.searched_roots.size() == 3);
+        CHECK(result.mode == core::context::SteeringMode::Fallback);
+    }
+
+    SECTION("An explicitly unloaded file does not trigger a fall-through") {
+        write_text(primary.path() / "AGENTS.md", "Primary workspace rules\n");
+        write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+
+        auto policy = fallback;
+        policy.disable_source("AGENTS.md");
+        const auto result = core::context::load_workspace_steering_context(roots, policy);
+
+        // The primary still owns the session: substituting another project's
+        // instructions because the user muted one file would be a surprise.
+        CHECK(result.root == resolved(primary.path()));
+        CHECK(result.searched_roots.size() == 1);
+        CHECK(result.block.empty());
+        REQUIRE(result.files.size() == 1);
+        CHECK_FALSE(result.files[0].enabled);
+    }
+
+    SECTION("Default mode still reads the primary only") {
+        write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+
+        const auto result = core::context::load_workspace_steering_context(
+            roots, core::context::SteeringPolicy{});
+
+        CHECK(result.block.empty());
+        CHECK(result.searched_roots.size() == 1);
+        CHECK(result.searched_roots.front() == resolved(primary.path()));
+    }
+
+    SECTION("Custom modes ignore the workspace roots entirely") {
+        auto custom = make_temp_workspace("filo_steering_fb_custom");
+        write_text(custom.path() / "AGENTS.md", "Custom rules\n");
+        write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+
+        const auto result = core::context::load_workspace_steering_context(
+            roots,
+            core::context::SteeringPolicy{
+                .mode = core::context::SteeringMode::CustomDir,
+                .custom_path = custom.path()});
+
+        CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Custom rules"));
+        CHECK_THAT(result.block, !Catch::Matchers::ContainsSubstring("Secondary workspace rules"));
+    }
+}
+
+TEST_CASE("ContextBuilder renders fallback steering from a secondary workspace root",
+          "[context][builder][steering][fallback]") {
+    auto primary = make_temp_workspace("filo_builder_fb_primary");
+    auto secondary = make_temp_workspace("filo_builder_fb_secondary");
+    write_text(primary.path() / "README.md", "no steering here\n");
+    write_text(secondary.path() / "AGENTS.md", "Secondary workspace rules\n");
+
+    auto context = make_context(primary.path(), {secondary.path()});
+    context.steering_policy.mode = core::context::SteeringMode::Fallback;
+
+    const std::string prompt = build_prompt(context);
+
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Project Steering]"));
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Secondary workspace rules"));
+    // Both roots stay visible to the model as workspace facts.
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring(resolved(primary.path()).string()));
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring(resolved(secondary.path()).string()));
+}
+
+TEST_CASE("ContextBuilder renders the skill catalog from every workspace root",
+          "[context][builder][skills][multiroot]") {
+    auto primary = make_temp_workspace("filo_builder_skills_primary");
+    auto secondary = make_temp_workspace("filo_builder_skills_secondary");
+
+    write_text(primary.path() / ".filo" / "skills" / "primary-skill" / "SKILL.md", R"(---
+name: primary-skill
+description: Skill owned by the primary workspace.
+---
+Primary instructions.
+)");
+    write_text(secondary.path() / ".filo" / "skills" / "secondary-skill" / "SKILL.md", R"(---
+name: secondary-skill
+description: Skill owned by an additional workspace.
+---
+Additional instructions.
+)");
+
+    const auto context = make_context(primary.path(), {secondary.path()});
+    const auto layers = core::context::ContextBuilder(context).build_layers();
+
+    const auto catalog = std::ranges::find(
+        layers,
+        core::context::ContextLayerKind::SkillCatalog,
+        &core::context::ContextLayer::kind);
+    REQUIRE(catalog != layers.end());
+    CHECK(catalog->stability == core::context::PromptStability::Workspace);
+
+    // The catalog the model sees covers the whole workspace, not just the root
+    // Filo happens to be standing in.
+    CHECK_THAT(catalog->content,
+               Catch::Matchers::ContainsSubstring("<name>primary-skill</name>"));
+    CHECK_THAT(catalog->content,
+               Catch::Matchers::ContainsSubstring("<name>secondary-skill</name>"));
+
+    // A borrowed skill says where it came from; the primary's own skills do not,
+    // so a single-root prompt is unchanged.
+    CHECK_THAT(catalog->content, Catch::Matchers::ContainsSubstring(
+                                     "<workspace>" + resolved(secondary.path()).string()
+                                     + "</workspace>"));
+    CHECK_THAT(catalog->content, !Catch::Matchers::ContainsSubstring(
+                                     "<workspace>" + resolved(primary.path()).string()
+                                     + "</workspace>"));
+
+    SECTION("a colliding skill resolves to the primary workspace") {
+        write_text(secondary.path() / ".filo" / "skills" / "primary-skill" / "SKILL.md", R"(---
+name: primary-skill
+description: Skill claimed by the additional workspace.
+---
+Additional instructions.
+)");
+
+        const auto second_pass = core::context::ContextBuilder(context).build_layers();
+        const auto second_catalog = std::ranges::find(
+            second_pass,
+            core::context::ContextLayerKind::SkillCatalog,
+            &core::context::ContextLayer::kind);
+        REQUIRE(second_catalog != second_pass.end());
+
+        CHECK_THAT(second_catalog->content,
+                   Catch::Matchers::ContainsSubstring(
+                       "Skill owned by the primary workspace."));
+        CHECK_THAT(second_catalog->content,
+                   !Catch::Matchers::ContainsSubstring(
+                       "Skill claimed by the additional workspace."));
+    }
+
+    SECTION("a single-root workspace catalog carries no workspace annotations") {
+        const auto single = make_context(primary.path());
+        const auto single_layers = core::context::ContextBuilder(single).build_layers();
+        const auto single_catalog = std::ranges::find(
+            single_layers,
+            core::context::ContextLayerKind::SkillCatalog,
+            &core::context::ContextLayer::kind);
+        REQUIRE(single_catalog != single_layers.end());
+
+        CHECK_THAT(single_catalog->content,
+                   Catch::Matchers::ContainsSubstring("<name>primary-skill</name>"));
+        CHECK_THAT(single_catalog->content,
+                   !Catch::Matchers::ContainsSubstring("<workspace>"));
+        CHECK_THAT(single_catalog->content,
+                   !Catch::Matchers::ContainsSubstring("secondary-skill"));
     }
 }

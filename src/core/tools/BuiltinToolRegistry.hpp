@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace core::tools {
 
@@ -30,6 +31,12 @@ struct BuiltinToolRegistrationOptions {
     /// the root the owning Agent stores oversized tool output in; when unset
     /// both sides use ToolResultStore's default root.
     std::optional<std::filesystem::path> tool_result_root;
+    /// Workspace roots skill discovery scans, in precedence order
+    /// (core::workspace::ordered_roots(): index 0 is the primary, the rest are
+    /// additional roots). When empty, discovery falls back to the process-wide
+    /// Workspace singleton — the roots the composition root built from the `-w`
+    /// flags — and never to the ambient working directory.
+    std::vector<std::filesystem::path> workspace_roots;
 };
 
 [[nodiscard]] BuiltinToolRegistrationOptions agent_builtin_tool_options();

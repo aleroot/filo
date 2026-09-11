@@ -1,6 +1,7 @@
 #include "SteeringLoader.hpp"
 
 #include "core/utils/StringUtils.hpp"
+#include "core/workspace/SessionWorkspace.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -282,18 +283,36 @@ std::string SteeringPolicy::format() const {
             return "file (" + custom_path.string() + ")";
         case SteeringMode::CustomDir:
             return "directory (" + custom_path.string() + ")";
+        case SteeringMode::Fallback:
+            return "fallback (first workspace root with steering)";
     }
     return "default (project root)";
 }
 
 SteeringPolicy parse_steering_policy(std::string_view spec) {
     const auto trimmed = core::utils::str::trim_ascii_copy(spec);
-    if (trimmed.empty() || core::utils::str::to_lower_ascii_copy(trimmed) == "default") {
+    if (trimmed.empty()) {
         return SteeringPolicy{.mode = SteeringMode::Default};
     }
+
     const auto lower = core::utils::str::to_lower_ascii_copy(trimmed);
-    if (lower == "none" || lower == "off" || lower == "disabled" || lower == "no" || lower == "false") {
+
+    // Canonical mode tokens come from the same table that feeds the settings
+    // menu and the persisted `steering_mode` value, so a token can never mean
+    // one thing here and another there. Matching them before the path branch is
+    // what keeps "fallback" from being read as a missing relative file.
+    for (const auto& option : steering_mode_options()) {
+        if (lower == option.token) {
+            return SteeringPolicy{.mode = option.mode};
+        }
+    }
+
+    // Tolerated aliases for the two modes people spell several ways.
+    if (lower == "off" || lower == "disabled" || lower == "no" || lower == "false") {
         return SteeringPolicy{.mode = SteeringMode::None};
+    }
+    if (lower == "chain" || lower == "fallback-chain") {
+        return SteeringPolicy{.mode = SteeringMode::Fallback};
     }
 
     std::filesystem::path raw_path(trimmed);
@@ -337,37 +356,19 @@ SteeringPolicy parse_steering_policy(std::string_view spec) {
     };
 }
 
-SteeringLoadResult load_project_steering_context(const std::filesystem::path& project_root,
-                                                const SteeringPolicy& policy) {
+namespace {
+
+/// Renders discovered files into a result. Shared by every mode so the byte
+/// budget, labeling, and disabled-source handling cannot drift apart.
+[[nodiscard]] SteeringLoadResult assemble_steering_result(
+    std::vector<std::filesystem::path> files,
+    const std::filesystem::path& target_root,
+    const SteeringPolicy& policy,
+    std::vector<std::filesystem::path> searched_roots) {
     SteeringLoadResult result;
     result.mode = policy.mode;
-
-    if (policy.mode == SteeringMode::None) {
-        return result;
-    }
-
-    std::filesystem::path target_root;
-    std::vector<std::filesystem::path> files;
-
-    if (policy.mode == SteeringMode::CustomFile) {
-        if (policy.custom_path.empty() || !std::filesystem::is_regular_file(policy.custom_path)) {
-            return result;
-        }
-        files.push_back(normalize_path(policy.custom_path));
-        target_root = policy.custom_path.parent_path();
-    } else if (policy.mode == SteeringMode::CustomDir) {
-        if (policy.custom_path.empty() || !std::filesystem::is_directory(policy.custom_path)) {
-            return result;
-        }
-        target_root = normalize_path(policy.custom_path);
-        files = discover_directory_steering_files(target_root);
-    } else {
-        if (project_root.empty() || !std::filesystem::exists(project_root)) {
-            return result;
-        }
-        target_root = normalize_path(project_root);
-        files = discover_directory_steering_files(target_root);
-    }
+    result.root = target_root;
+    result.searched_roots = std::move(searched_roots);
 
     if (files.empty()) {
         return result;
@@ -391,6 +392,7 @@ SteeringLoadResult load_project_steering_context(const std::filesystem::path& pr
             .label = label,
             .content = content,
             .enabled = !disabled,
+            .root = target_root,
         });
 
         if (disabled || bytes_remaining == 0) {
@@ -421,9 +423,106 @@ SteeringLoadResult load_project_steering_context(const std::filesystem::path& pr
     return result;
 }
 
+/// Normalized, de-duplicated roots to consult, in chain order. Default mode
+/// stops after the first entry because it has only ever read the primary.
+[[nodiscard]] std::vector<std::filesystem::path> candidate_roots(
+    const std::vector<std::filesystem::path>& roots,
+    bool chain) {
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& root : roots) {
+        if (root.empty()) {
+            continue;
+        }
+        const auto normalized = normalize_path(root);
+        if (std::ranges::find(candidates, normalized) != candidates.end()) {
+            continue;
+        }
+        candidates.push_back(normalized);
+        if (!chain) {
+            break;
+        }
+    }
+    return candidates;
+}
+
+} // namespace
+
+std::vector<std::filesystem::path> collect_steering_roots(
+    const std::filesystem::path& primary,
+    const std::vector<std::filesystem::path>& additional) {
+    // One ordering rule for the whole codebase: skill discovery walks the same
+    // list, so "the workspace" can never mean two different orders in two
+    // subsystems. Steering is the first-wins consumer of it.
+    return core::workspace::ordered_roots(primary, additional);
+}
+
+SteeringLoadResult load_workspace_steering_context(
+    const std::vector<std::filesystem::path>& roots,
+    const SteeringPolicy& policy) {
+    SteeringLoadResult none;
+    none.mode = policy.mode;
+
+    if (policy.mode == SteeringMode::None) {
+        return none;
+    }
+
+    if (policy.mode == SteeringMode::CustomFile) {
+        if (policy.custom_path.empty()
+            || !std::filesystem::is_regular_file(policy.custom_path)) {
+            return none;
+        }
+        const auto file = normalize_path(policy.custom_path);
+        return assemble_steering_result({file}, file.parent_path(), policy, {});
+    }
+
+    if (policy.mode == SteeringMode::CustomDir) {
+        if (policy.custom_path.empty()
+            || !std::filesystem::is_directory(policy.custom_path)) {
+            return none;
+        }
+        const auto target_root = normalize_path(policy.custom_path);
+        return assemble_steering_result(
+            discover_directory_steering_files(target_root),
+            target_root,
+            policy,
+            {target_root});
+    }
+
+    const bool chain = policy.mode == SteeringMode::Fallback;
+    std::vector<std::filesystem::path> searched;
+    for (const auto& root : candidate_roots(roots, chain)) {
+        std::error_code ec;
+        if (!std::filesystem::exists(root, ec) || ec) {
+            continue;
+        }
+        searched.push_back(root);
+        auto files = discover_directory_steering_files(root);
+        // A root with nothing to offer hands off to the next one in Fallback
+        // mode; in Default mode it simply *is* the (empty) answer.
+        if (files.empty() && chain) {
+            continue;
+        }
+        return assemble_steering_result(std::move(files), root, policy, searched);
+    }
+
+    none.searched_roots = std::move(searched);
+    return none;
+}
+
+std::string load_workspace_steering_block(
+    const std::vector<std::filesystem::path>& roots,
+    const SteeringPolicy& policy) {
+    return load_workspace_steering_context(roots, policy).block;
+}
+
+SteeringLoadResult load_project_steering_context(const std::filesystem::path& project_root,
+                                                const SteeringPolicy& policy) {
+    return load_workspace_steering_context({project_root}, policy);
+}
+
 std::string load_project_steering_block(const std::filesystem::path& project_root,
                                         const SteeringPolicy& policy) {
-    return load_project_steering_context(project_root, policy).block;
+    return load_workspace_steering_context({project_root}, policy).block;
 }
 
 } // namespace core::context

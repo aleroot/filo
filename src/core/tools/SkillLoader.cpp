@@ -17,16 +17,36 @@ namespace core::tools {
 // SkillLoader
 // ---------------------------------------------------------------------------
 
-std::vector<fs::path> SkillLoader::default_search_paths() {
-    return SkillRegistry::default_search_paths();
-}
-
 std::optional<SkillManifest>
 SkillLoader::parse_manifest(const fs::path& skill_dir) {
     return SkillRegistry::parse_manifest(skill_dir);
 }
 
 #ifdef FILO_ENABLE_PYTHON
+
+namespace {
+
+/// True when @p skills_dir holds at least one executable (Tool) skill candidate.
+/// Consulted only to decide whether a refused additional-workspace root is worth
+/// warning about, so granting a repo that ships no Python stays silent.
+[[nodiscard]] bool has_tool_skill_candidates(const fs::path& skills_dir) {
+    std::error_code ec;
+    if (!fs::is_directory(skills_dir, ec) || ec) {
+        return false;
+    }
+    for (const auto& entry : fs::directory_iterator(skills_dir, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec)) continue;
+        const auto manifest = SkillRegistry::parse_manifest(entry.path());
+        if (manifest.has_value() && manifest->enabled
+            && manifest->type == SkillType::Tool) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
 
 int SkillLoader::load_from_directory(const fs::path& root, ToolManager& tool_manager) {
     if (!core::landrun::LandrunSettings::instance().permits(
@@ -81,14 +101,29 @@ int SkillLoader::load_from_directory(const fs::path& root, ToolManager& tool_man
     return count;
 }
 
-int SkillLoader::discover_and_register(ToolManager& tool_manager) {
+int SkillLoader::discover_and_register(ToolManager& tool_manager,
+                                       const std::vector<fs::path>& workspace_roots) {
     if (!core::landrun::LandrunSettings::instance().permits(
             core::landrun::LandrunCapability::in_process_untrusted_code)) {
         return 0;
     }
+
+    // Trust boundary: the user's own directories and the primary workspace may
+    // contribute executable skills; a merely-granted additional root may not. Its
+    // Prompt and instruction skills are still discovered by their own loaders.
+    const auto trust = SkillRegistry::split_tool_skill_roots(workspace_roots);
+    for (const auto& root : trust.restricted) {
+        if (has_tool_skill_candidates(root.path)) {
+            core::logging::warn(
+                "SkillLoader: ignoring executable skill(s) under '{}' - an additional "
+                "workspace root contributes instructions and prompt skills, not code",
+                root.path.string());
+        }
+    }
+
     int total = 0;
-    for (const auto& root : default_search_paths()) {
-        total += load_from_directory(root, tool_manager);
+    for (const auto& root : trust.trusted) {
+        total += load_from_directory(root.path, tool_manager);
     }
     if (total > 0) {
         core::logging::info("SkillLoader: {} Tool skill(s) loaded", total);
@@ -99,7 +134,7 @@ int SkillLoader::discover_and_register(ToolManager& tool_manager) {
 #else // FILO_ENABLE_PYTHON
 
 int SkillLoader::load_from_directory(const fs::path&, ToolManager&) { return 0; }
-int SkillLoader::discover_and_register(ToolManager&)                { return 0; }
+int SkillLoader::discover_and_register(ToolManager&, const std::vector<fs::path>&) { return 0; }
 
 #endif // FILO_ENABLE_PYTHON
 

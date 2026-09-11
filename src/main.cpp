@@ -11,6 +11,7 @@
 #include "core/session/SessionStore.hpp"
 #include "core/utils/StringUtils.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
+#include "core/cli/WorkDirLayout.hpp"
 #include "core/landrun/LandrunHelper.hpp"
 #include "core/landrun/LandrunDriverFactory.hpp"
 #include "core/landrun/LandrunPolicyCompiler.hpp"
@@ -181,19 +182,20 @@ int main(int argc, char** argv) {
         "--sandbox-status",
         sandbox_status,
         "Verify and print the effective sandbox guarantees, then exit.");
-    app.add_option(
+    auto* steering_opt = app.add_option(
         "--steering",
         steering_spec,
-        "Steering files mode: default, none, or custom file/folder path (e.g. /tmp/AGENTS.md or ~/data/)")
+        "Steering mode: default, fallback, none, or a custom file/folder path "
+        "(e.g. /tmp/AGENTS.md or ~/data/). 'fallback' walks the workspace roots "
+        "in order and uses the first one that has steering files. Overrides the "
+        "saved steering_mode setting.")
         ->capture_default_str();
-    app.add_flag_callback(
+    auto* no_steering_opt = app.add_flag_callback(
         "--no-steering",
         [&steering_spec]() { steering_spec = "none"; },
         "Disable loading project steering files (alias for --steering none)");
 
     CLI11_PARSE(app, argc, argv);
-
-    const auto startup_steering_policy = core::context::parse_steering_policy(steering_spec);
 
     if (sandbox_opt->count() > 0) {
         sandbox_mode = requested_sandbox_mode.has_value()
@@ -324,9 +326,17 @@ int main(int argc, char** argv) {
         headless = true;
     }
 
+    // Every -w entry must be resolved against the directory Filo was launched
+    // from *before* the process chdirs into the primary root. Doing it the
+    // other way round reinterprets the later entries against the new cwd, so
+    // `filo -w proj -w .` collapsed `.` onto the primary and silently lost the
+    // enclosing workspace. See core::cli::resolve_work_dirs.
+    const auto work_dir_layout = core::cli::resolve_work_dirs(
+        work_dirs, std::filesystem::current_path());
+
     if (!work_dirs.empty()) {
         std::error_code ec;
-        std::filesystem::current_path(work_dirs.front(), ec);
+        std::filesystem::current_path(work_dir_layout.primary, ec);
         if (ec) {
             core::logging::error(
                 "Failed to change working directory to '{}': {}",
@@ -336,13 +346,35 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::vector<std::filesystem::path> additional_work_dirs;
-    for (std::size_t i = 1; i < work_dirs.size(); ++i) {
-        additional_work_dirs.emplace_back(work_dirs[i]);
+    // Nothing that was dropped may be dropped quietly: -w consumes trailing
+    // arguments greedily, so a stray positional becomes a workspace root by
+    // accident as easily as by intent. These go to stderr as well as the logger
+    // because the default log sink is null — logging alone would be invisible.
+    // stderr is safe under --mcp stdio, where only stdout carries JSON-RPC.
+    for (const auto& dropped : work_dir_layout.rejected) {
+        const auto message = std::format(
+            "Ignoring workspace directory '{}': {}.",
+            dropped.requested,
+            dropped.reason);
+        core::logging::warn("{}", message);
+        std::cerr << message << '\n';
     }
+    if (!work_dir_layout.additional.empty()) {
+        std::string roots;
+        for (const auto& dir : work_dir_layout.additional) {
+            if (!roots.empty()) {
+                roots += ", ";
+            }
+            roots += dir.string();
+        }
+        const auto message = std::format("Additional workspace roots: {}.", roots);
+        core::logging::warn("{}", message);
+        std::cerr << message << '\n';
+    }
+
     core::workspace::Workspace::get_instance().initialize(
         std::filesystem::current_path(),
-        additional_work_dirs,
+        work_dir_layout.additional,
         true,
         scratch_scope);
 
@@ -354,7 +386,7 @@ int main(int argc, char** argv) {
                 std::filesystem::current_path());
             bool exposes_home = core::landrun::is_landrun_path_within(
                 workspace_root, home);
-            for (const auto& additional : additional_work_dirs) {
+            for (const auto& additional : work_dir_layout.additional) {
                 exposes_home = exposes_home
                     || core::landrun::is_landrun_path_within(
                         core::workspace::SessionWorkspace::normalize_path(additional),
@@ -405,6 +437,17 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         core::logging::warn("Could not load configuration: {}", e.what());
     }
+
+    // Resolved only now: the persisted `steering_mode` setting is a layer in the
+    // precedence chain, and configuration is not loaded until this point. An
+    // explicit --steering/--no-steering wins over it; a blank spec parses to
+    // Default, which is exactly the "nothing expressed" case.
+    const bool steering_from_cli =
+        steering_opt->count() > 0 || no_steering_opt->count() > 0;
+    const auto startup_steering_policy = core::context::parse_steering_policy(
+        steering_from_cli
+            ? steering_spec
+            : core::config::ConfigManager::get_instance().get_config().steering_mode);
 
     if (auth_action == "logout") {
         try {

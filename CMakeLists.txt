@@ -395,6 +395,7 @@ set(FILO_CORE_SOURCES
     src/core/history/PromptHistoryStore.cpp
     src/core/permissions/PermissionSystem.cpp
     src/core/cli/TrustFlagResolver.cpp
+    src/core/cli/WorkDirLayout.cpp
 )
 
 # Lampo is a native macOS App Store app: its backend only exists in Apple builds.
@@ -662,6 +663,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_semantic_history_editor.cpp
     tests/test_mcp_resources.cpp
     tests/test_trust_flag_resolver.cpp
+    tests/test_work_dir_layout.cpp
     tests/test_landrun.cpp
     tests/test_sleep_inhibitor.cpp
 )
@@ -853,5 +855,6 @@ source_group(
         tests/test_semantic_history_editor.cpp
         tests/test_mcp_resources.cpp
         tests/test_trust_flag_resolver.cpp
+        tests/test_work_dir_layout.cpp
         tests/test_sleep_inhibitor.cpp
 )

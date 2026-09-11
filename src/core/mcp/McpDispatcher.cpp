@@ -482,7 +482,14 @@ struct PromptTemplate {
 [[nodiscard]] std::vector<PromptTemplate> discover_prompt_templates() {
     std::vector<PromptTemplate> prompts;
 
-    for (const auto& root : core::tools::SkillLoader::default_search_paths()) {
+    // Prompt templates are markdown, so every workspace root may contribute them;
+    // only executable skills are restricted to the primary (see
+    // SkillSearchRoot::permits_tool_skills). Roots come from the process-wide
+    // workspace — which /workspace change keeps current — not from the cwd.
+    const auto workspace_roots =
+        core::workspace::Workspace::get_instance().ordered_roots();
+
+    for (const auto& root : core::tools::SkillRegistry::default_search_paths(workspace_roots)) {
         if (!std::filesystem::exists(root) || !std::filesystem::is_directory(root)) {
             continue;
         }
@@ -490,7 +497,7 @@ struct PromptTemplate {
         for (const auto& entry : std::filesystem::directory_iterator(root)) {
             if (!entry.is_directory()) continue;
 
-            auto manifest = core::tools::SkillLoader::parse_manifest(entry.path());
+            auto manifest = core::tools::SkillRegistry::parse_manifest(entry.path());
             if (!manifest.has_value()) continue;
             if (!manifest->enabled || manifest->type != core::tools::SkillType::Prompt) {
                 continue;

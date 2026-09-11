@@ -1791,7 +1791,7 @@ public:
     std::string get_name() const override { return "/steering"; }
     std::vector<std::string> get_aliases() const override { return {"/agents", "/steer"}; }
     std::string get_description() const override {
-        return "Inspect, switch mode, load, or unload AGENTS.md and steering instruction files";
+        return "Inspect steering files, switch mode, or load/unload individual files";
     }
     bool accepts_arguments() const override { return true; }
 
@@ -1833,6 +1833,14 @@ public:
         if (action == "none" || action == "off" || action == "disable" || action == "disabled") {
             apply_policy(ctx, core::context::SteeringPolicy{.mode = core::context::SteeringMode::None},
                          "Project steering disabled.");
+            return;
+        }
+
+        if (action == "fallback" || action == "chain") {
+            apply_policy(
+                ctx,
+                core::context::SteeringPolicy{.mode = core::context::SteeringMode::Fallback},
+                "Steering set to fallback: the first workspace root with steering files wins.");
             return;
         }
 
@@ -1905,20 +1913,51 @@ private:
 
     static std::string describe_steering(const CommandContext& ctx) {
         const auto policy = get_current_policy(ctx);
-        const auto primary = ctx.agent ? ctx.agent->workspace_snapshot().primary() : std::filesystem::path{};
-        const auto snapshot = core::context::load_project_steering_context(primary, policy);
+        // Read the live session workspace, not a startup snapshot: /workspace
+        // change moves the primary after the fact, and Fallback mode needs the
+        // additional roots to have somewhere to fall through to.
+        const auto workspace = ctx.agent
+            ? ctx.agent->workspace_snapshot()
+            : core::workspace::SessionWorkspace(core::workspace::WorkspaceSnapshot{});
+        const auto roots = core::context::collect_steering_roots(
+            workspace.primary(), workspace.additional());
+        const auto snapshot = core::context::load_workspace_steering_context(roots, policy);
 
         std::string body = std::format("Mode: {}", policy.format());
+        if (policy.mode == core::context::SteeringMode::Fallback && !snapshot.searched_roots.empty()) {
+            body += "\n        Roots searched:";
+            for (const auto& root : snapshot.searched_roots) {
+                const bool won = root == snapshot.root;
+                body += std::format("\n          - {}{}", root.string(),
+                                    won ? "  (used)" : "  (no steering)");
+            }
+        }
         if (snapshot.files.empty()) {
             body += "\n        Active files: <none>";
         } else {
+            if (!snapshot.root.empty()
+                && policy.mode == core::context::SteeringMode::Fallback) {
+                body += std::format("\n        Steering root: {}", snapshot.root.string());
+            }
             body += "\n        Steering files:";
             for (const auto& file : snapshot.files) {
                 const std::string status = file.enabled ? "[LOADED]" : "[UNLOADED]";
                 body += std::format("\n          - {:<10} {} ({})", status, file.label, file.path.string());
             }
         }
-        body += "\n        Use /steering [default|none|<path>|load <file>|unload <file>].";
+        // Mode names come from the shared table, so this hint can never drift
+        // from what parse_steering_policy() actually accepts.
+        std::string modes;
+        for (const auto& option : core::context::steering_mode_options()) {
+            if (!modes.empty()) {
+                modes += "|";
+            }
+            modes += option.token;
+        }
+        body += std::format(
+            "\n        Use /steering [{}|<path>|load <file>|unload <file>].", modes);
+        body += "\n        To keep a mode across sessions, set it in "
+                "/settings → Context · Steering Mode.";
         return body;
     }
 };
@@ -1989,12 +2028,19 @@ public:
             return;
         }
 
-        const std::filesystem::path requested = expand_user_path(tokens[1]);
+        std::filesystem::path requested = expand_user_path(tokens[1]);
 
         if (action == "add") {
             if (!ctx.agent) {
                 ctx.append_history_fn("\n✗  No agent available to extend the workspace.\n");
                 return;
+            }
+            // SessionWorkspace::add_additional_paths only accepts absolute
+            // paths, so a relative argument has to be resolved against the live
+            // session workspace first. Without this, `/workspace add ../sibling`
+            // failed with a message blaming existence or scope.
+            if (!requested.is_absolute()) {
+                requested = ctx.agent->workspace_snapshot().resolve_path(requested);
             }
             const auto added = ctx.agent->grant_workspace_paths({requested});
             ctx.append_history_fn(std::format(

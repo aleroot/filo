@@ -31,6 +31,10 @@ WorkspaceSnapshot Workspace::snapshot() const {
     };
 }
 
+std::vector<std::filesystem::path> Workspace::ordered_roots() const {
+    return core::workspace::ordered_roots(primary_, additional_);
+}
+
 std::filesystem::path Workspace::resolve_path(const std::filesystem::path& target_path) const {
     return SessionWorkspace(snapshot()).resolve_path(target_path);
 }

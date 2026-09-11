@@ -5,6 +5,7 @@
 #include "../scm/ScmFactory.hpp"
 #include "../tools/SkillRegistry.hpp"
 #include "../utils/FileSystemUtils.hpp"
+#include "../workspace/SessionWorkspace.hpp"
 
 #include <exception>
 #include <filesystem>
@@ -225,24 +226,33 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
     }
 
     try {
-        if (!project_root.empty()
-            || session_context_.steering_policy.mode == SteeringMode::CustomFile
-            || session_context_.steering_policy.mode == SteeringMode::CustomDir) {
+        // Both steering and the skill catalog are workspace-scoped, not
+        // primary-scoped, and they walk the *same* ordered root list so the two
+        // subsystems can never disagree about what "the workspace" is. Steering
+        // is the first-wins consumer (see SteeringMode::Fallback); skill
+        // discovery is the last-wins consumer, which is what lets the primary
+        // override a secondary root's skill of the same name.
+        const auto workspace_roots = core::workspace::ordered_roots(
+            project_root, session_context_.workspace_view().additional());
+        const auto steering_mode = session_context_.steering_policy.mode;
+        if (!workspace_roots.empty()
+            || steering_mode == SteeringMode::CustomFile
+            || steering_mode == SteeringMode::CustomDir) {
             append_layer(
                 layers,
                 ContextLayerKind::ProjectSteering,
                 PromptStability::Workspace,
                 "project_steering",
-                load_project_steering_block(project_root, session_context_.steering_policy));
+                load_workspace_steering_block(workspace_roots, session_context_.steering_policy));
         }
 
-        if (include_skill_catalog_ && !project_root.empty()) {
+        if (include_skill_catalog_ && !workspace_roots.empty()) {
             append_layer(
                 layers,
                 ContextLayerKind::SkillCatalog,
                 PromptStability::Workspace,
                 "skill_catalog",
-                core::tools::SkillRegistry::build_catalog_prompt(project_root));
+                core::tools::SkillRegistry::build_catalog_prompt(workspace_roots));
         }
 
     } catch (const std::exception&) {

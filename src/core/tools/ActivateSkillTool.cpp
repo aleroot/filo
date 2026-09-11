@@ -4,6 +4,7 @@
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../workspace/SessionWorkspace.hpp"
 
 #include <filesystem>
 #include <format>
@@ -12,6 +13,8 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -78,8 +81,9 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
     return escaped;
 }
 
-[[nodiscard]] std::string build_input_schema() {
-    const auto skills = SkillRegistry::discover_instruction_skills();
+[[nodiscard]] std::string build_input_schema(
+    const std::vector<fs::path>& workspace_roots) {
+    const auto skills = SkillRegistry::discover_instruction_skills(workspace_roots);
     core::utils::JsonWriter writer(2048);
     {
         auto _root = writer.object();
@@ -156,6 +160,19 @@ constexpr std::size_t kMaxResourceBytes = 512 * 1024;
 
 } // namespace
 
+ActivateSkillTool::ActivateSkillTool(std::vector<fs::path> workspace_roots)
+    : workspace_roots_(std::move(workspace_roots)) {}
+
+std::vector<fs::path> ActivateSkillTool::schema_workspace_roots() const {
+    if (!workspace_roots_.empty()) {
+        return workspace_roots_;
+    }
+    // No owner-supplied roots: fall back to the process-wide workspace, which the
+    // composition root built from the -w flags and /workspace change keeps
+    // current. Deliberately not the cwd.
+    return core::workspace::Workspace::get_instance().ordered_roots();
+}
+
 ToolDefinition ActivateSkillTool::get_definition() const {
     return {
         .name = std::string(names::kActivateSkill),
@@ -165,7 +182,7 @@ ToolDefinition ActivateSkillTool::get_definition() const {
             "Call this when the user's task matches one of the available Agent Skills. "
             "If activated instructions reference a listed relative resource, call this tool "
             "again with the same name and resource_path to read that resource.",
-        .input_schema = build_input_schema(),
+        .input_schema = build_input_schema(schema_workspace_roots()),
         .output_schema =
             R"({"type":"object","properties":{"content":{"type":"string"},"skill_directory":{"type":"string"},"resource_path":{"type":"string"},"truncated":{"type":"boolean"},"resources":{"type":"array","items":{"type":"string"}}},"required":["content","skill_directory"],"additionalProperties":false})",
         .annotations = {
@@ -194,10 +211,11 @@ std::string ActivateSkillTool::execute(
         return "{\"error\":\"Missing or invalid 'name' argument.\"}";
     }
 
-    const auto project_root = context.workspace_view().primary().empty()
-        ? fs::current_path()
-        : context.workspace_view().primary();
-    const auto skill = SkillRegistry::find_instruction_skill(name, project_root);
+    // The session's own workspace is authoritative: a subagent or MCP session can
+    // be scoped differently from the process-wide default, and every root it was
+    // granted may contribute instruction skills.
+    const auto workspace_roots = context.workspace_view().ordered_roots();
+    const auto skill = SkillRegistry::find_instruction_skill(name, workspace_roots);
     if (!skill.has_value()) {
         return std::format(
             "{{\"error\":\"Unknown or unavailable Agent Skill: {}\"}}",

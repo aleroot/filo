@@ -2,6 +2,7 @@
 
 #include "../landrun/LandrunSettings.hpp"
 #include "../logging/Logger.hpp"
+#include "../workspace/Workspace.hpp"
 #include "ActivateSkillTool.hpp"
 #include "ApplyPatchTool.hpp"
 #include "CreateDirectoryTool.hpp"
@@ -107,9 +108,19 @@ void register_builtin_tools(ToolManager& tool_manager,
         tool_manager.register_tool(std::move(ask_user_tool));
     }
 
+    // Skill discovery is workspace-scoped: every root granted with -w may
+    // contribute instruction and prompt skills, while executable Python skills
+    // stay limited to the user's own directories and the primary (enforced by
+    // SkillSearchRoot::permits_tool_skills). Roots come from the caller, or from
+    // the process-wide workspace the composition root initialized — never from
+    // the ambient cwd, which only coincided with the primary by accident.
+    const auto skill_roots = options.workspace_roots.empty()
+        ? core::workspace::Workspace::get_instance().ordered_roots()
+        : options.workspace_roots;
+
     if (options.include_instruction_skills
-        && !SkillRegistry::discover_instruction_skills().empty()) {
-        tool_manager.register_tool(std::make_shared<ActivateSkillTool>());
+        && !SkillRegistry::discover_instruction_skills(skill_roots).empty()) {
+        tool_manager.register_tool(std::make_shared<ActivateSkillTool>(skill_roots));
     }
 
 #ifdef FILO_ENABLE_PYTHON
@@ -119,7 +130,7 @@ void register_builtin_tools(ToolManager& tool_manager,
         tool_manager.register_tool(std::make_shared<PythonInterpreterTool>());
     }
     if (options.discover_python_skills && !secure_mode) {
-        SkillLoader::discover_and_register(tool_manager);
+        SkillLoader::discover_and_register(tool_manager, skill_roots);
     }
     if (secure_mode && (options.include_python || options.discover_python_skills)) {
         core::logging::warn(

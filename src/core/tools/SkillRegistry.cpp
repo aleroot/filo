@@ -4,15 +4,19 @@
 #include "../utils/AsciiUtils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -246,63 +250,122 @@ field(const ParsedFrontmatter& parsed, std::string_view key) {
     return escaped;
 }
 
+/// A project-local skills directory and the label it is reported under.
+using DirLabel = std::pair<std::string_view, std::string_view>;
+
+/// Compatibility directories first, Filo-native last: within one workspace root,
+/// a native `.filo/skills` entry always outranks its compatibility aliases.
+constexpr std::array<DirLabel, 3> kProjectDirs{{
+    {".claude", "project-claude"},
+    {".agents", "project-agent"},
+    {".filo", "project-filo"},
+}};
+
+/// The primary workspace scans these two, then the user-native root, then its own
+/// `.filo` — the historical interleaving, preserved exactly.
+constexpr std::span<const DirLabel> kCompatProjectDirs{kProjectDirs.data(), 2};
+constexpr std::span<const DirLabel> kNativeProjectDirs{kProjectDirs.data() + 2, 1};
+
+[[nodiscard]] SkillSearchRoot user_skill_root(const fs::path& home,
+                                             std::string_view relative_dir,
+                                             std::string_view label) {
+    return SkillSearchRoot{
+        .path = home / fs::path(relative_dir) / "skills",
+        .scope = SkillScope::User,
+        .label = std::string(label),
+        // User roots belong to no workspace; the origin only feeds
+        // permits_tool_skills(), which short-circuits on SkillScope::User.
+        .origin = SkillWorkspaceOrigin::Primary,
+        .workspace_root = {},
+    };
+}
+
 } // namespace
 
 std::vector<SkillSearchRoot>
-SkillRegistry::default_search_roots(const fs::path& project_root) {
+SkillRegistry::default_search_roots(const std::vector<fs::path>& workspace_roots) {
     std::vector<SkillSearchRoot> roots;
+
     const bool include_user_roots = !core::landrun::LandrunSettings::instance().enabled();
+    fs::path home_path;
     if (include_user_roots) {
-        if (const char* home = std::getenv("HOME")) {
-            const fs::path home_path(home);
-            roots.push_back({
-                .path = home_path / ".claude" / "skills",
-                .scope = SkillScope::User,
-                .label = "user-claude",
-            });
-            roots.push_back({
-                .path = home_path / ".agents" / "skills",
-                .scope = SkillScope::User,
-                .label = "user-agent",
-            });
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            home_path = fs::path(home);
         }
     }
 
-    roots.push_back({
-        .path = project_root / ".claude" / "skills",
-        .scope = SkillScope::Project,
-        .label = "project-claude",
-    });
-    roots.push_back({
-        .path = project_root / ".agents" / "skills",
-        .scope = SkillScope::Project,
-        .label = "project-agent",
-    });
-    if (include_user_roots) {
-        if (const char* home = std::getenv("HOME")) {
-            const fs::path home_path(home);
-            roots.push_back({
-                .path = home_path / ".config" / "filo" / "skills",
-                .scope = SkillScope::User,
-                .label = "user-filo",
+    // An empty workspace root is skipped rather than scanned as a relative path:
+    // `fs::is_directory(".filo/skills")` would silently resolve against the
+    // process cwd, which is exactly the ambient coupling these APIs exist to
+    // remove.
+    auto append_project_dirs = [&](const fs::path& workspace_root,
+                                   SkillWorkspaceOrigin origin,
+                                   std::string_view label_prefix,
+                                   std::span<const DirLabel> dirs) {
+        if (workspace_root.empty()) {
+            return;
+        }
+        for (const auto& [dir, label] : dirs) {
+            roots.push_back(SkillSearchRoot{
+                .path = workspace_root / fs::path(dir) / "skills",
+                .scope = SkillScope::Project,
+                .label = std::format("{}{}", label_prefix, label),
+                .origin = origin,
+                .workspace_root = workspace_root,
             });
         }
+    };
+
+    // Additional workspace roots are scanned first because precedence here is
+    // "last scanned wins": that makes the primary — and the user's own
+    // directories — outrank any secondary workspace. They are walked in reverse
+    // grant order so that workspace order and precedence order agree, i.e. the
+    // first `-w` after the primary beats the second, exactly as steering's
+    // fallback chain prefers the nearer root.
+    for (std::size_t i = workspace_roots.size(); i-- > 1;) {
+        append_project_dirs(workspace_roots[i],
+                            SkillWorkspaceOrigin::Additional,
+                            std::format("ws{}-", i),
+                            kProjectDirs);
     }
-    roots.push_back({
-        .path = project_root / ".filo" / "skills",
-        .scope = SkillScope::Project,
-        .label = "project-filo",
-    });
+
+    if (!home_path.empty()) {
+        roots.push_back(user_skill_root(home_path, ".claude", "user-claude"));
+        roots.push_back(user_skill_root(home_path, ".agents", "user-agent"));
+    }
+
+    // The primary's directories stay split around the user-native root so that a
+    // single-root workspace keeps the historical precedence byte for byte:
+    // ~/.config/filo/skills outranks <primary>/.claude|.agents but not
+    // <primary>/.filo.
+    const fs::path primary = workspace_roots.empty() ? fs::path{} : workspace_roots.front();
+    append_project_dirs(primary, SkillWorkspaceOrigin::Primary, {}, kCompatProjectDirs);
+
+    if (!home_path.empty()) {
+        roots.push_back(user_skill_root(home_path, ".config/filo", "user-filo"));
+    }
+
+    append_project_dirs(primary, SkillWorkspaceOrigin::Primary, {}, kNativeProjectDirs);
     return roots;
 }
 
 std::vector<fs::path>
-SkillRegistry::default_search_paths(const fs::path& project_root) {
+SkillRegistry::default_search_paths(const std::vector<fs::path>& workspace_roots) {
     std::vector<fs::path> paths;
-    for (const auto& root : default_search_roots(project_root)) {
+    for (const auto& root : default_search_roots(workspace_roots)) {
         paths.push_back(root.path);
     }
     return paths;
+}
+
+SkillRootTrustSplit
+SkillRegistry::split_tool_skill_roots(const std::vector<fs::path>& workspace_roots) {
+    SkillRootTrustSplit split;
+    for (auto& root : default_search_roots(workspace_roots)) {
+        auto& bucket = root.permits_tool_skills() ? split.trusted : split.restricted;
+        bucket.push_back(std::move(root));
+    }
+    return split;
 }
 
 std::optional<SkillManifest>
@@ -383,11 +446,11 @@ SkillRegistry::parse_manifest(const fs::path& skill_dir) {
 }
 
 std::vector<SkillManifest>
-SkillRegistry::discover_all(const fs::path& project_root) {
+SkillRegistry::discover_all(const std::vector<fs::path>& workspace_roots) {
     std::vector<SkillManifest> ordered;
     std::unordered_map<std::string, std::size_t> by_name;
 
-    for (const auto& root : default_search_roots(project_root)) {
+    for (const auto& root : default_search_roots(workspace_roots)) {
         std::error_code ec;
         if (!fs::is_directory(root.path, ec)) continue;
 
@@ -397,6 +460,13 @@ SkillRegistry::discover_all(const fs::path& project_root) {
 
             auto manifest = parse_manifest(entry.path());
             if (!manifest.has_value() || !manifest->enabled) continue;
+
+            // Provenance travels with the manifest so consumers can tell a
+            // secondary workspace's skill from the primary's without re-deriving
+            // which root it came from.
+            manifest->workspace_root = root.workspace_root;
+            manifest->from_additional_workspace =
+                root.origin == SkillWorkspaceOrigin::Additional;
 
             if (auto it = by_name.find(manifest->name); it != by_name.end()) {
                 ordered[it->second] = std::move(*manifest);
@@ -411,8 +481,8 @@ SkillRegistry::discover_all(const fs::path& project_root) {
 }
 
 std::vector<SkillManifest>
-SkillRegistry::discover_instruction_skills(const fs::path& project_root) {
-    auto skills = discover_all(project_root);
+SkillRegistry::discover_instruction_skills(const std::vector<fs::path>& workspace_roots) {
+    auto skills = discover_all(workspace_roots);
     std::erase_if(skills, [](const SkillManifest& skill) {
         return !skill.is_agent_instruction_skill();
     });
@@ -421,15 +491,16 @@ SkillRegistry::discover_instruction_skills(const fs::path& project_root) {
 }
 
 std::optional<SkillManifest>
-SkillRegistry::find_instruction_skill(std::string_view name, const fs::path& project_root) {
-    for (auto& skill : discover_instruction_skills(project_root)) {
+SkillRegistry::find_instruction_skill(std::string_view name,
+                                     const std::vector<fs::path>& workspace_roots) {
+    for (auto& skill : discover_instruction_skills(workspace_roots)) {
         if (skill.name == name) return skill;
     }
     return std::nullopt;
 }
 
-std::string SkillRegistry::build_catalog_prompt(const fs::path& project_root) {
-    const auto skills = discover_instruction_skills(project_root);
+std::string SkillRegistry::build_catalog_prompt(const std::vector<fs::path>& workspace_roots) {
+    const auto skills = discover_instruction_skills(workspace_roots);
     if (skills.empty()) return {};
 
     std::ostringstream out;
@@ -442,8 +513,15 @@ std::string SkillRegistry::build_catalog_prompt(const fs::path& project_root) {
     for (const auto& skill : skills) {
         out << "  <skill>\n"
             << "    <name>" << xml_escape(skill.name) << "</name>\n"
-            << "    <description>" << xml_escape(skill.description) << "</description>\n"
-            << "  </skill>\n";
+            << "    <description>" << xml_escape(skill.description) << "</description>\n";
+        // Only annotated when the skill belongs to another workspace: a
+        // single-root session's catalog stays byte-identical, so the cached
+        // prompt prefix is not disturbed and no redundant path is emitted.
+        if (skill.from_additional_workspace && !skill.workspace_root.empty()) {
+            out << "    <workspace>" << xml_escape(skill.workspace_root.string())
+                << "</workspace>\n";
+        }
+        out << "  </skill>\n";
     }
     out << "</available_skills>";
     return out.str();

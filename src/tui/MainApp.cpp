@@ -777,6 +777,11 @@ RunResult run(RunOptions opts) {
     auto tool_options = core::tools::agent_builtin_tool_options();
     tool_options.ask_user_question_tool_out = &ask_user_tool;
     tool_options.memory_store = memory_system->semantic();
+    // Skills are workspace-scoped, not cwd-scoped: pass every granted root so
+    // the activate_skill schema and Python skill discovery see the whole
+    // workspace (executable skills stay limited to the primary by policy).
+    tool_options.workspace_roots =
+        core::workspace::Workspace::get_instance().ordered_roots();
     core::tools::register_builtin_tools(tool_manager, std::move(tool_options));
 
     // ── MCP client connections ───────────────────────────────────────────────
@@ -797,11 +802,11 @@ RunResult run(RunOptions opts) {
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::cli);
     agent_session_context.steering_policy = opts.steering_policy;
-    auto steering_context = core::context::load_project_steering_context(
-        agent_session_context.workspace_view().primary(),
-        agent_session_context.steering_policy);
-    std::string context_sources_label =
-        join_context_source_labels(steering_context.source_labels);
+    // Populated by reload_steering() below, once the agent exists: the roots
+    // have to be read from the live session context, and there is deliberately
+    // only one place that loads steering.
+    core::context::SteeringLoadResult steering_context;
+    std::string context_sources_label;
     auto agent = std::make_shared<core::agent::Agent>(
         llm_provider,
         tool_manager,
@@ -817,6 +822,43 @@ RunResult run(RunOptions opts) {
         config.auto_compact_threshold,
         !config.auto_compact_threshold_explicit);
     agent->set_effort_level(session_effort_value);
+
+    // ── Steering ─────────────────────────────────────────────────────────────
+    // Steering is workspace-scoped, not primary-scoped: Fallback mode walks the
+    // additional roots when the primary carries none of its own. These three
+    // helpers are the *only* place steering is loaded, so every trigger —
+    // startup, /workspace change, the /steering picker, the settings panel, the
+    // instruction viewer — observes the same roots and the same policy.
+    //
+    // Roots come from the agent's live session context, never from
+    // `agent_session_context`: that is a startup snapshot which nothing
+    // refreshes, so reading it after /workspace change reloaded steering
+    // against the directory the user had already left.
+    auto live_steering_roots = [&agent]() -> std::vector<std::filesystem::path> {
+        if (!agent) {
+            return {};
+        }
+        const auto workspace = agent->workspace_snapshot();
+        return core::context::collect_steering_roots(
+            workspace.primary(), workspace.additional());
+    };
+
+    auto reload_steering = [&](const core::context::SteeringPolicy& policy) {
+        steering_context = core::context::load_workspace_steering_context(
+            live_steering_roots(), policy);
+        context_sources_label = join_context_source_labels(steering_context.source_labels);
+    };
+
+    auto apply_steering_policy = [&](core::context::SteeringPolicy policy) {
+        if (agent) {
+            agent->update_session_context([&](core::context::SessionContext& sctx) {
+                sctx.steering_policy = policy;
+            });
+        }
+        reload_steering(policy);
+    };
+
+    reload_steering(agent_session_context.steering_policy);
 
     // Set the active model for budget tracking
     if (model_selection_mode == ModelSelectionMode::Router
@@ -995,9 +1037,11 @@ RunResult run(RunOptions opts) {
     }
     std::function<void()> reset_history_view = [] {};
     core::commands::CommandExecutor cmd_executor;
-    // Load layered prompt skills (global → project-local) before describe_commands()
-    // so skill commands appear in the autocomplete index.
-    core::commands::SkillCommandLoader::discover_and_register(cmd_executor);
+    // Load layered prompt skills (global → every workspace root, primary last so
+    // it wins collisions) before describe_commands() so skill commands appear in
+    // the autocomplete index.
+    core::commands::SkillCommandLoader::discover_and_register(
+        cmd_executor, core::workspace::Workspace::get_instance().ordered_roots());
     using MentionIndex = std::vector<MentionSuggestion>;
     std::shared_ptr<const MentionIndex> mention_index =
         std::make_shared<const MentionIndex>();
@@ -1407,6 +1451,24 @@ RunResult run(RunOptions opts) {
                 SettingsChoice{.value = "full",  .label = "Full"},
                 SettingsChoice{.value = "ultra", .label = "Ultra"},
             },
+        });
+        // Choices come from the shared steering-mode table, so this panel can
+        // never offer a token that parse_steering_policy() would misread as a
+        // path. Custom file/directory steering stays CLI- and command-only
+        // because it is parameterized by a path, not a mode.
+        std::vector<SettingsChoice> steering_mode_choices;
+        for (const auto& option : core::context::steering_mode_options()) {
+            steering_mode_choices.push_back(SettingsChoice{
+                .value = std::string(option.token),
+                .label = std::string(option.label),
+            });
+        }
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::SteeringMode,
+            .label = "Context · Steering Mode",
+            .description = "Which project steering files load. Fallback walks the workspace "
+                           "roots in order and uses the first one that has any.",
+            .choices = std::move(steering_mode_choices),
         });
     }
 
@@ -4162,6 +4224,8 @@ RunResult run(RunOptions opts) {
                 return settings.auto_compact_threshold;
             case core::config::ManagedSettingKey::ContextCompression:
                 return settings.context_compression;
+            case core::config::ManagedSettingKey::SteeringMode:
+                return settings.steering_mode;
         }
         return std::nullopt;
     };
@@ -4201,6 +4265,13 @@ RunResult run(RunOptions opts) {
                 return effective.context_compression.empty()
                     ? std::string("off")
                     : effective.context_compression;
+            case core::config::ManagedSettingKey::SteeringMode:
+                // Unset means no persisted preference, so --steering and then
+                // the built-in default decide. Spelled literally, exactly like
+                // every other builtin fallback in this function.
+                return effective.steering_mode.empty()
+                    ? std::string("default")
+                    : effective.steering_mode;
         }
         return {};
     };
@@ -4236,6 +4307,7 @@ RunResult run(RunOptions opts) {
         config.ui_spinner = after.ui_spinner;
         config.ui_reasoning = after.ui_reasoning;
         config.context_compression = after.context_compression;
+        config.steering_mode = after.steering_mode;
 
         if (before.default_mode != after.default_mode) {
             const std::string desired_mode = normalize_mode(after.default_mode);
@@ -4250,6 +4322,14 @@ RunResult run(RunOptions opts) {
 
         if (before.default_approval_mode != after.default_approval_mode) {
             set_yolo_mode_enabled(parse_approval_mode(after.default_approval_mode) == ApprovalMode::Yolo);
+        }
+
+        if (before.steering_mode != after.steering_mode) {
+            // `after` is already the merged user+workspace value, and a blank one
+            // parses to Default — the correct "nothing persisted" answer. An
+            // explicit --steering still wins at startup; editing the setting
+            // afterwards is a newer and equally explicit instruction.
+            apply_steering_policy(core::context::parse_steering_policy(after.steering_mode));
         }
 
         if (before.router.default_policy != after.router.default_policy
@@ -4456,9 +4536,10 @@ RunResult run(RunOptions opts) {
         // report success regardless of whether the session-level root moved.
         if (agent) {
             agent->change_workspace_root(resolved);
-            steering_context = core::context::load_project_steering_context(
-                resolved, agent->session_context_snapshot().steering_policy);
-            context_sources_label = join_context_source_labels(steering_context.source_labels);
+            // change_workspace_root has already rebased the session, so
+            // reload_steering() picks the new primary (and its additional roots)
+            // up through live_steering_roots().
+            reload_steering(agent->session_context_snapshot().steering_policy);
         }
 
         // Auto-generated tab names follow the new primary workspace.
@@ -4693,27 +4774,34 @@ RunResult run(RunOptions opts) {
 
     open_steering_picker = [&]() -> bool {
         const auto policy = agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
-        const auto primary = agent_session_context.workspace_view().primary();
-        steering_context = core::context::load_project_steering_context(primary, policy);
+        reload_steering(policy);
 
         CommandOptionPickerState next;
         next.active = true;
         next.command_name = "/steering";
         next.title = "STEERING FILES";
+        // current_value is rendered verbatim in the panel header, so it stays
+        // human-readable; which mode row is marked is decided by comparing the
+        // enum below. The original code string-matched every row against this
+        // header text, which is why nothing was ever marked active.
         next.current_value = policy.format();
-        next.help_text = "Enter: toggle/apply  Esc: close";
+        next.help_text =
+            policy.mode == core::context::SteeringMode::Fallback
+                    && !steering_context.root.empty()
+                ? std::format("Fallback root: {}  ·  Enter: apply  Esc: close",
+                              steering_context.root.string())
+                : std::format("Current: {}  ·  Enter: apply  Esc: close", policy.format());
 
-        if (policy.mode == core::context::SteeringMode::None) {
+        // One row per selectable mode, straight from the shared table so this
+        // menu can never offer a mode the parser does not understand. Row values
+        // reuse the canonical tokens, so a choice round-trips through the CLI
+        // and settings.json unchanged.
+        for (const auto& option : core::context::steering_mode_options()) {
             next.options.push_back({
-                .value = "mode:default",
-                .label = "Enable all steering",
-                .description = "Switch back to default workspace steering discovery.",
-            });
-        } else {
-            next.options.push_back({
-                .value = "mode:none",
-                .label = "Disable all steering",
-                .description = "Unload and disable all project steering files (safe mode).",
+                .value = std::format("mode:{}", option.token),
+                .label = std::string(option.label),
+                .description = std::string(option.description),
+                .active = option.mode == policy.mode,
             });
         }
 
@@ -4739,10 +4827,12 @@ RunResult run(RunOptions opts) {
 
         next.on_select = [&](std::string_view value) -> std::string {
             auto cur_policy = agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
-            if (value == "mode:default") {
-                cur_policy.mode = core::context::SteeringMode::Default;
-            } else if (value == "mode:none") {
-                cur_policy.mode = core::context::SteeringMode::None;
+            if (value.starts_with("mode:")) {
+                // Only the mode is swapped: per-file unloads are a separate,
+                // deliberate choice and must survive a mode change. The token
+                // goes back through the shared parser rather than a local switch.
+                cur_policy.mode =
+                    core::context::parse_steering_policy(value.substr(5)).mode;
             } else if (value.starts_with("unload:")) {
                 cur_policy.disable_source(value.substr(7));
             } else if (value.starts_with("load:")) {
@@ -4753,20 +4843,16 @@ RunResult run(RunOptions opts) {
                 agents_visualizer_scroll_offset = 0;
                 return {};
             }
-            if (agent) {
-                agent->update_session_context([&](core::context::SessionContext& sctx) {
-                    sctx.steering_policy = cur_policy;
-                });
-                steering_context = core::context::load_project_steering_context(primary, cur_policy);
-                context_sources_label = join_context_source_labels(steering_context.source_labels);
-            }
+            apply_steering_policy(cur_policy);
             return {};
         };
 
+        // Park the cursor on the mode currently in effect. File rows keep the
+        // loaded/unloaded state they were built with.
         for (std::size_t i = 0; i < next.options.size(); ++i) {
-            next.options[i].active = next.options[i].value == next.current_value;
-            if (next.options[i].active) {
+            if (next.options[i].value.starts_with("mode:") && next.options[i].active) {
                 next.selected = static_cast<int>(i);
+                break;
             }
         }
 
@@ -6806,12 +6892,7 @@ RunResult run(RunOptions opts) {
                 if (!agent) {
                     return {.ok = false, .message = "No active agent session."};
                 }
-                agent->update_session_context([&](core::context::SessionContext& sctx) {
-                    sctx.steering_policy = pol;
-                });
-                steering_context = core::context::load_project_steering_context(
-                    agent_session_context.workspace_view().primary(), pol);
-                context_sources_label = join_context_source_labels(steering_context.source_labels);
+                apply_steering_policy(pol);
                 return {.ok = true, .message = std::format("Steering policy set to {}.", pol.format())};
             },
             .open_steering_picker_fn = open_steering_picker,
@@ -7042,11 +7123,7 @@ RunResult run(RunOptions opts) {
                 agents_visualizer_panel_active = !agents_visualizer_panel_active;
                 if (agents_visualizer_panel_active) {
                     const auto pol = agent ? agent->session_context_snapshot().steering_policy : agent_session_context.steering_policy;
-                    steering_context = core::context::load_project_steering_context(
-                        agent_session_context.workspace_view().primary(),
-                        pol);
-                    context_sources_label =
-                        join_context_source_labels(steering_context.source_labels);
+                    reload_steering(pol);
                     agents_visualizer_scroll_offset = 0;
                 }
             }
@@ -7137,13 +7214,7 @@ RunResult run(RunOptions opts) {
                         } else {
                             pol.enable_source(cur.label);
                         }
-                        agent->update_session_context([&](core::context::SessionContext& sctx) {
-                            sctx.steering_policy = pol;
-                        });
-                        steering_context = core::context::load_project_steering_context(
-                            agent_session_context.workspace_view().primary(), pol);
-                        context_sources_label =
-                            join_context_source_labels(steering_context.source_labels);
+                        apply_steering_policy(pol);
                     }
                     agents_panel_was_active = true;
                 }

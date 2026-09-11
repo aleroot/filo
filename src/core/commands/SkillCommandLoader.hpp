@@ -15,18 +15,26 @@ namespace core::commands {
  *
  * ## Layered precedence (lowest → highest)
  *
- *  1. @c ~/.claude/skills/       — Claude-compatible global fallback
- *  2. @c ~/.agents/skills/       — Agent Skills-compatible global fallback
- *  3. @c ./.claude/skills/       — Claude-compatible project fallback
- *  4. @c ./.agents/skills/       — Agent Skills-compatible project fallback
- *  5. @c ~/.config/filo/skills/  — Filo-native global skills
- *  6. @c ./.filo/skills/         — Filo-native project skills
+ * Roots come from @ref core::tools::SkillRegistry::default_search_roots(), which
+ * covers **every** workspace root, not just the primary. For a single-root
+ * workspace the layering is:
  *
- * Because @c CommandExecutor::register_command() appends to the registry and
- * @c try_execute() iterates in registration order, the last registration wins on
- * name collisions.  Compatibility roots load first as fallbacks; Filo-native
- * roots load last so native skills always override compatibility skills, with
- * project-local Filo skills taking the highest precedence.
+ *  1. @c ~/.claude/skills/             — Claude-compatible global fallback
+ *  2. @c ~/.agents/skills/             — Agent Skills-compatible global fallback
+ *  3. @c <primary>/.claude/skills/     — Claude-compatible project fallback
+ *  4. @c <primary>/.agents/skills/     — Agent Skills-compatible project fallback
+ *  5. @c ~/.config/filo/skills/        — Filo-native global skills
+ *  6. @c <primary>/.filo/skills/       — Filo-native project skills
+ *
+ * Additional workspace roots (granted with @c -w or @c /workspace add) are scanned
+ * *before* all of the above, so the primary workspace and the user's own
+ * directories always win a name collision against a secondary workspace. Prompt
+ * skills are plain markdown — no code runs — so unlike Python Tool skills they are
+ * accepted from every granted root.
+ *
+ * @c CommandExecutor::register_command() replaces any command already registered
+ * under the same name or alias, so the last registration wins outright: scanning
+ * in precedence order is all that is needed for the primary to override.
  *
  * ## Skill format
  *
@@ -51,24 +59,39 @@ namespace core::commands {
  *
  * @code{.cpp}
  * core::commands::CommandExecutor cmd_executor;
- * core::commands::SkillCommandLoader::discover_and_register(cmd_executor);
+ * core::commands::SkillCommandLoader::discover_and_register(
+ *     cmd_executor, core::workspace::Workspace::get_instance().ordered_roots());
  * const auto command_index = cmd_executor.describe_commands(); // includes skills
  * @endcode
+ *
+ * @note Registration is a **startup** step: `/workspace change` re-points the
+ *       workspace but does not re-run this loader, so commands from the previous
+ *       workspace stay registered until restart. Fixing that needs a way to
+ *       unregister a command — `register_command()` can replace one by name, but
+ *       nothing removes names that no longer exist. Instruction-skill activation
+ *       and the `[Agent Skills]` catalog have no such gap: they resolve the live
+ *       session workspace on every turn.
  *
  * @see core::tools::SkillLoader, core::commands::SkillCommand, core::tools::SkillManifest
  */
 class SkillCommandLoader {
 public:
     /**
-     * @brief Scans all standard skill directories and registers valid Prompt skills.
+     * @brief Scans the workspace's skill directories and registers valid Prompt skills.
      *
-     * Reuses @ref core::tools::SkillLoader::default_search_paths() for path discovery.
-     * Non-fatal errors are logged and do not abort the scan.
+     * Reuses @ref core::tools::SkillRegistry::default_search_paths() for path
+     * discovery, so this loader and the skill catalog can never disagree about
+     * which roots exist or which one wins a collision. Non-fatal errors are logged
+     * and do not abort the scan.
      *
-     * @param executor  The @c CommandExecutor to register skill commands into.
-     * @return          Total number of Prompt skills successfully registered.
+     * @param executor       The @c CommandExecutor to register skill commands into.
+     * @param workspace_roots Roots from @ref core::workspace::ordered_roots():
+     *                       index 0 is the primary, the rest are additional.
+     * @return               Total number of Prompt skills successfully registered.
      */
-    static int discover_and_register(CommandExecutor& executor);
+    static int discover_and_register(
+        CommandExecutor& executor,
+        const std::vector<std::filesystem::path>& workspace_roots);
 
     /**
      * @brief Scans a single skills root directory and registers valid Prompt skills.

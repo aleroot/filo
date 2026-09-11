@@ -212,7 +212,9 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 - `--input-format` one of `text`, `stream-json`
 - `--include-partial-messages` include deltas in `stream-json`
 - `-c, --continue` continue the latest project-scoped session (TUI + prompter)
-- `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories
+- `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories. Relative entries resolve against the directory Filo was **launched from**, not against the primary, so `-w proj -w .` opens `proj` as primary and its parent as an additional root. Redundant roots (duplicates, paths inside the primary, missing paths) are dropped with a warning naming each one.
+- `--steering [default|fallback|none|<path>]` which project steering files to load; overrides the saved `steering_mode` setting for that run. `fallback` walks the workspace roots in order and uses the first one that has any. A bare path selects a custom file or directory.
+- `--no-steering` alias for `--steering none`
 - `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
 
 ### Prompter examples
@@ -236,7 +238,8 @@ filo -p "Explain the architecture" -o stream-json --include-partial-messages
 # Continue latest project-scoped session
 filo --continue -p "Now apply the follow-up refactor"
 
-# Multi-project workspace: ../Lampo is primary, ../filo is additional
+# Multi-project workspace: ../Lampo is primary, ../filo is additional.
+# Both are relative to the directory this command runs in.
 filo -w ../Lampo -w ../filo
 ```
 
@@ -336,7 +339,7 @@ On macOS, Filo can open the current draft in Lampo’s Prompter instead of `$VIS
 
 ## Settings
 
-Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, auto-compaction, tool compression). Model selection is separate via **`/model`**.
+Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.
 
 Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settings.json` (workspace). Workspace values override user values.
 
@@ -355,6 +358,9 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Reasoning | `ui_reasoning` | `show`, `hide` |
 | Auto-Compaction | `auto_compact_threshold` | `0` (off), `25000`, `50000`, `100000`, `200000` |
 | Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
+| Steering Mode | `steering_mode` | `default`, `fallback`, `none` |
+
+`--steering` on the command line overrides the saved `steering_mode` for that run only.
 
 Useful slash commands:
 
@@ -366,6 +372,7 @@ Useful slash commands:
 | `/auth` · `/login` | Authenticate with a provider |
 | `/logout` | Sign out of a provider OAuth session |
 | `/compression` · `/compress` | Tool output compression (`off`, `light`, `full`, `ultra`) |
+| `/steering` · `/agents` | Inspect steering files, switch mode, load or unload individual files |
 | `/effort` | Model effort (`auto`, `low`, `medium`, `high`, `max`) |
 | `/yolo` | Toggle auto-approval for sensitive tools |
 | `/mcp` | List or manage external MCP tool servers |
@@ -376,6 +383,9 @@ Useful slash commands:
 | `/help` | Full command and keyboard shortcut list |
 
 Skills without an `entry_point` also appear as slash commands: `/<skill-name> [arguments]`.
+Skills are discovered from every workspace root and the primary wins name collisions,
+except executable (Python `entry_point`) skills, which load only from your own skill
+directories and the primary workspace.
 
 Durable memory and automatic capture are enabled by default. Models can save stable
 preferences and project facts in `~/.config/filo/memory.json` (or

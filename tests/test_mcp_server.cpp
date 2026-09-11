@@ -171,6 +171,23 @@ struct WorkspaceResetToDefault {
     }
 };
 
+/// Points the process-wide workspace at a root for the lifetime of a test, the
+/// way main() does before any dispatcher exists, and restores the process
+/// default afterwards. MCP prompt discovery reads the workspace roots — never
+/// the ambient cwd — so tests that expect a project's skills to be discovered
+/// have to say which project the process is in.
+struct ScopedWorkspaceRoot {
+    explicit ScopedWorkspaceRoot(const std::filesystem::path& root) {
+        core::workspace::Workspace::get_instance().initialize(root, {}, true);
+    }
+    ~ScopedWorkspaceRoot() {
+        std::error_code ec;
+        const auto cwd = std::filesystem::current_path(ec);
+        core::workspace::Workspace::get_instance().initialize(
+            ec ? std::filesystem::path{} : cwd, {}, false);
+    }
+};
+
 class EmptyTopLevelErrorTool final : public core::tools::Tool {
 public:
     explicit EmptyTopLevelErrorTool(std::string name)
@@ -331,6 +348,9 @@ description: Explain the supplied concept simply.
 ---
 Explain "$ARGUMENTS" in beginner-friendly terms.
 )");
+    // Prompt discovery is workspace-scoped, so name the workspace the way
+    // main() does; declared first so it is torn down after the cwd guard.
+    ScopedWorkspaceRoot workspace_root(project);
     ScopedEnvVar home("HOME", fake_home.string());
     ScopedCurrentPath cwd(project);
 
@@ -844,6 +864,9 @@ description: Tool skill, not a prompt.
 entry_point: weather.py
 ---
 )");
+    // Prompt discovery is workspace-scoped, so name the workspace the way
+    // main() does; declared first so it is torn down after the cwd guard.
+    ScopedWorkspaceRoot workspace_root(project);
     ScopedEnvVar home("HOME", fake_home.string());
     ScopedCurrentPath cwd(project);
 
@@ -904,6 +927,9 @@ description: Explain a concept simply.
 ---
 Explain "$ARGUMENTS" in beginner-friendly terms.
 )");
+    // Prompt discovery is workspace-scoped, so name the workspace the way
+    // main() does; declared first so it is torn down after the cwd guard.
+    ScopedWorkspaceRoot workspace_root(project);
     ScopedEnvVar home("HOME", fake_home.string());
     ScopedCurrentPath cwd(project);
 

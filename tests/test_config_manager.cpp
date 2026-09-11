@@ -93,6 +93,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.auto_compact_threshold;
         case core::config::ManagedSettingKey::ContextCompression:
             return settings.context_compression;
+        case core::config::ManagedSettingKey::SteeringMode:
+            return settings.steering_mode;
     }
     return settings.default_mode;
 }
@@ -126,6 +128,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return std::to_string(config.auto_compact_threshold);
         case core::config::ManagedSettingKey::ContextCompression:
             return config.context_compression;
+        case core::config::ManagedSettingKey::SteeringMode:
+            return config.steering_mode;
     }
     return config.default_mode;
 }
@@ -1364,6 +1368,14 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
             core::config::ManagedSettingKey::ContextCompression,
             "context_compression",
             "light",
+        },
+        // The value is a canonical steering token, so it must survive the
+        // settings.json round trip verbatim for parse_steering_policy() to read
+        // it back as the same mode.
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::SteeringMode,
+            "steering_mode",
+            "fallback",
         },
     };
 

@@ -14,6 +14,7 @@
 #include "core/tools/SkillRegistry.hpp"
 #include "TestSessionContext.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -887,12 +888,12 @@ description: Project Filo review skill.
 Project Filo body.
 )");
 
-        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        const auto skills = SkillRegistry::discover_instruction_skills({project});
         REQUIRE(skills.size() == 1);
         CHECK(skills.front().name == "review");
         CHECK(skills.front().description == "Project Filo review skill.");
         CHECK_THAT(
-            SkillRegistry::build_catalog_prompt(project),
+            SkillRegistry::build_catalog_prompt({project}),
             Catch::Matchers::ContainsSubstring("activate_skill"));
 
         core::tools::ActivateSkillTool tool;
@@ -925,7 +926,7 @@ TEST_CASE("SkillRegistry search roots keep compatibility paths as fallbacks",
     fs::create_directories(project);
     ScopedEnvVar home("HOME", fake_home.string());
     {
-        const auto paths = SkillRegistry::default_search_paths(project);
+        const auto paths = SkillRegistry::default_search_paths({project});
         REQUIRE(paths.size() == 6);
         CHECK(paths[0] == fake_home / ".claude" / "skills");
         CHECK(paths[1] == fake_home / ".agents" / "skills");
@@ -961,12 +962,12 @@ description: User Filo-native review skill.
 User Filo body.
 )");
 
-        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        const auto skills = SkillRegistry::discover_instruction_skills({project});
         REQUIRE(skills.size() == 1);
         CHECK(skills.front().description == "User Filo-native review skill.");
 
         CommandExecutor executor;
-        SkillCommandLoader::discover_and_register(executor);
+        SkillCommandLoader::discover_and_register(executor, {project});
 
         std::string sent_prompt;
         auto ctx = make_null_ctx();
@@ -995,12 +996,12 @@ user-invocable: false
 Use gh-axi for GitHub work.
 )");
 
-        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        const auto skills = SkillRegistry::discover_instruction_skills({project});
         REQUIRE(skills.size() == 1);
         CHECK(skills.front().name == "gh-axi");
         CHECK_FALSE(skills.front().user_invocable);
 
-        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        const auto catalog = SkillRegistry::build_catalog_prompt({project});
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("gh-axi"));
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("activate_skill"));
 
@@ -1035,7 +1036,7 @@ description: Claude-compatible debugging workflow.
 Reproduce, localize, fix, and guard.
 )");
 
-        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        const auto skills = SkillRegistry::discover_instruction_skills({project});
         REQUIRE(skills.size() == 1);
         CHECK(skills.front().name == "debug-flow");
         CHECK(skills.front().description == "Claude-compatible debugging workflow.");
@@ -1080,7 +1081,7 @@ description: Use <docs> "carefully" & consistently.
 Body.
 )");
 
-        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        const auto catalog = SkillRegistry::build_catalog_prompt({project});
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("<name>docs&amp;guide</name>"));
         CHECK_THAT(
             catalog,
@@ -1222,7 +1223,7 @@ Compatibility body should not win.
             project / ".filo" / "skills" / "idea-refine" / "scripts" / "idea-refine.sh",
             "#!/bin/bash\nset -e\necho ready\n");
 
-        const auto skills = SkillRegistry::discover_instruction_skills(project);
+        const auto skills = SkillRegistry::discover_instruction_skills({project});
         REQUIRE(skills.size() == upstream_skill_names.size());
         for (const auto& name : upstream_skill_names) {
             REQUIRE(std::ranges::any_of(skills, [&](const SkillManifest& skill) {
@@ -1230,12 +1231,15 @@ Compatibility body should not win.
             }));
         }
 
-        const auto catalog = SkillRegistry::build_catalog_prompt(project);
+        const auto catalog = SkillRegistry::build_catalog_prompt({project});
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("using-agent-skills"));
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("code-review-and-quality"));
         CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("activate_skill"));
 
-        core::tools::ActivateSkillTool tool;
+        // Roots are injected because get_definition() has no session context to
+        // read them from; without them the tool would fall back to the
+        // process-wide workspace, which this test does not initialize.
+        core::tools::ActivateSkillTool tool{{project}};
         const auto definition = tool.get_definition();
         CHECK_THAT(definition.input_schema,
                    Catch::Matchers::ContainsSubstring("using-agent-skills"));
@@ -1310,4 +1314,236 @@ Use an analogy if possible.
     CHECK_THAT(sent_prompt, Catch::Matchers::ContainsSubstring("analogy"));
 
     fs::remove_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-root workspaces: every granted root contributes skills
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SkillRegistry scans additional workspace roots ahead of the primary",
+          "[skill_commands][agent_skills][multiroot]") {
+    const auto sandbox = make_temp_root("skill_multiroot_order");
+    fs::remove_all(sandbox);
+    const auto fake_home = sandbox / "home";
+    const auto primary = sandbox / "primary";
+    const auto extra_one = sandbox / "extra-one";
+    const auto extra_two = sandbox / "extra-two";
+    fs::create_directories(primary);
+    fs::create_directories(extra_one);
+    fs::create_directories(extra_two);
+    ScopedEnvVar home("HOME", fake_home.string());
+
+    const auto roots = SkillRegistry::default_search_roots({primary, extra_one, extra_two});
+
+    // Three directories per additional workspace, then the historical six-root
+    // sequence for the user's directories and the primary — unchanged, and still
+    // scanned last so it wins every collision.
+    REQUIRE(roots.size() == 12);
+    CHECK(roots[0].path == extra_two / ".claude" / "skills");
+    CHECK(roots[2].path == extra_two / ".filo" / "skills");
+    // Additional roots are walked in reverse grant order, so the *nearer* root
+    // (extra-one) is scanned later and outranks the farther one.
+    CHECK(roots[3].path == extra_one / ".claude" / "skills");
+    CHECK(roots[5].path == extra_one / ".filo" / "skills");
+    CHECK(roots[6].path == fake_home / ".claude" / "skills");
+    CHECK(roots[7].path == fake_home / ".agents" / "skills");
+    CHECK(roots[8].path == primary / ".claude" / "skills");
+    CHECK(roots[9].path == primary / ".agents" / "skills");
+    CHECK(roots[10].path == fake_home / ".config" / "filo" / "skills");
+    CHECK(roots[11].path == primary / ".filo" / "skills");
+
+    SECTION("provenance and the trust boundary travel with each root") {
+        CHECK(roots[0].origin == SkillWorkspaceOrigin::Additional);
+        CHECK(roots[0].workspace_root == extra_two);
+        CHECK(roots[0].label == "ws2-project-claude");
+        CHECK(roots[3].label == "ws1-project-claude");
+        // An additional root may contribute instructions, never executable code.
+        CHECK_FALSE(roots[0].permits_tool_skills());
+
+        CHECK(roots[11].origin == SkillWorkspaceOrigin::Primary);
+        CHECK(roots[11].workspace_root == primary);
+        CHECK(roots[11].label == "project-filo");
+        CHECK(roots[11].permits_tool_skills());
+
+        CHECK(roots[6].scope == SkillScope::User);
+        CHECK(roots[6].workspace_root.empty());
+        CHECK(roots[6].permits_tool_skills());
+    }
+
+    SECTION("a single-root workspace keeps the historical layout exactly") {
+        const auto single = SkillRegistry::default_search_roots({primary});
+        REQUIRE(single.size() == 6);
+        CHECK(single[0].label == "user-claude");
+        CHECK(single[5].label == "project-filo");
+        CHECK(std::ranges::all_of(single, [](const SkillSearchRoot& root) {
+            return root.permits_tool_skills();
+        }));
+    }
+
+    SECTION("an empty workspace contributes no relative scan paths") {
+        const auto roots_only_user = SkillRegistry::default_search_roots({});
+        REQUIRE(roots_only_user.size() == 3);
+        CHECK(std::ranges::all_of(roots_only_user, [](const SkillSearchRoot& root) {
+            return root.scope == SkillScope::User && root.path.is_absolute();
+        }));
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Skills from every workspace root are discovered and the primary wins collisions",
+          "[skill_commands][agent_skills][multiroot]") {
+    const auto sandbox = make_temp_root("skill_multiroot_discovery");
+    fs::remove_all(sandbox);
+    const auto fake_home = sandbox / "home";
+    const auto primary = sandbox / "primary";
+    const auto extra = sandbox / "extra";
+    fs::create_directories(fake_home);
+    ScopedEnvVar home("HOME", fake_home.string());
+
+    write_file(primary / ".filo" / "skills" / "shared" / "SKILL.md", R"(---
+name: shared
+description: Primary shared skill.
+---
+Primary shared body.
+)");
+    write_file(primary / ".filo" / "skills" / "primary-only" / "SKILL.md", R"(---
+name: primary-only
+description: Primary exclusive skill.
+---
+Primary exclusive body.
+)");
+    write_file(extra / ".filo" / "skills" / "shared" / "SKILL.md", R"(---
+name: shared
+description: Additional shared skill.
+---
+Additional shared body.
+)");
+    write_file(extra / ".filo" / "skills" / "extra-only" / "SKILL.md", R"(---
+name: extra-only
+description: Additional exclusive skill.
+---
+Additional exclusive body.
+)");
+
+    const std::vector<fs::path> roots{primary, extra};
+
+    SECTION("the catalog covers both workspaces") {
+        const auto skills = SkillRegistry::discover_instruction_skills(roots);
+        REQUIRE(skills.size() == 3);
+        // Sorted by name.
+        CHECK(skills[0].name == "extra-only");
+        CHECK(skills[1].name == "primary-only");
+        CHECK(skills[2].name == "shared");
+    }
+
+    SECTION("the primary's version of a colliding skill wins outright") {
+        const auto skills = SkillRegistry::discover_instruction_skills(roots);
+        const auto shared = std::ranges::find(skills, "shared", &SkillManifest::name);
+        REQUIRE(shared != skills.end());
+        CHECK(shared->description == "Primary shared skill.");
+        CHECK_FALSE(shared->from_additional_workspace);
+        CHECK(shared->workspace_root == primary);
+    }
+
+    SECTION("provenance marks skills that came from a granted root") {
+        const auto skills = SkillRegistry::discover_instruction_skills(roots);
+        const auto extra_only = std::ranges::find(skills, "extra-only", &SkillManifest::name);
+        REQUIRE(extra_only != skills.end());
+        CHECK(extra_only->from_additional_workspace);
+        CHECK(extra_only->workspace_root == extra);
+    }
+
+    SECTION("the catalog names the workspace of a secondary skill only") {
+        const auto catalog = SkillRegistry::build_catalog_prompt(roots);
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("<name>extra-only</name>"));
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("<name>primary-only</name>"));
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring(
+                                "<workspace>" + extra.string() + "</workspace>"));
+        // The primary is the implied workspace: annotating it would only add
+        // noise and would change the prompt for every single-root session.
+        CHECK_THAT(catalog, !Catch::Matchers::ContainsSubstring(
+                                "<workspace>" + primary.string() + "</workspace>"));
+    }
+
+    SECTION("a single-root catalog carries no workspace annotations") {
+        const auto catalog = SkillRegistry::build_catalog_prompt({primary});
+        CHECK_THAT(catalog, Catch::Matchers::ContainsSubstring("<name>primary-only</name>"));
+        CHECK_THAT(catalog, !Catch::Matchers::ContainsSubstring("<workspace>"));
+        CHECK_THAT(catalog, !Catch::Matchers::ContainsSubstring("extra-only"));
+    }
+
+    SECTION("activate_skill reaches a skill that lives only in an additional root") {
+        core::tools::ActivateSkillTool tool;
+        const auto ctx = test_support::make_session_context({
+            .primary = primary,
+            .additional = {extra},
+            .enforce = true,
+        });
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        const auto activated = tool.execute(R"({"name":"extra-only"})", ctx);
+        REQUIRE(parser.parse(activated).get(doc) == simdjson::SUCCESS);
+        std::string_view content;
+        REQUIRE(doc["content"].get(content) == simdjson::SUCCESS);
+        CHECK(content.find("Additional exclusive body.") != std::string_view::npos);
+    }
+
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("Prompt skills from additional workspaces become slash commands",
+          "[skill_commands][multiroot]") {
+    const auto sandbox = make_temp_root("skill_multiroot_commands");
+    fs::remove_all(sandbox);
+    const auto fake_home = sandbox / "home";
+    const auto primary = sandbox / "primary";
+    const auto extra = sandbox / "extra";
+    fs::create_directories(fake_home);
+    ScopedEnvVar home("HOME", fake_home.string());
+
+    write_file(primary / ".filo" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Primary review skill.
+---
+Primary review body.
+)");
+    write_file(extra / ".filo" / "skills" / "review" / "SKILL.md", R"(---
+name: review
+description: Additional review skill.
+---
+Additional review body.
+)");
+    write_file(extra / ".filo" / "skills" / "extra-only" / "SKILL.md", R"(---
+name: extra-only
+description: Additional exclusive skill.
+---
+Additional exclusive body.
+)");
+
+    CommandExecutor executor;
+    REQUIRE(SkillCommandLoader::discover_and_register(executor, {primary, extra}) == 3);
+
+    const auto descriptors = executor.describe_commands();
+    CHECK(std::ranges::any_of(descriptors, [](const auto& descriptor) {
+        return descriptor.name == "/extra-only";
+    }));
+    const auto review = std::ranges::find(descriptors, "/review", &CommandDescriptor::name);
+    REQUIRE(review != descriptors.end());
+    // register_command replaces on collision, so the primary — scanned last — wins.
+    CHECK(review->description == "Primary review skill.");
+
+    std::string sent_prompt;
+    auto ctx = make_null_ctx();
+    ctx.send_user_message_fn = [&](const std::string& msg) { sent_prompt = msg; };
+
+    REQUIRE(executor.try_execute("/review", ctx));
+    CHECK(sent_prompt == "Primary review body.");
+
+    sent_prompt.clear();
+    REQUIRE(executor.try_execute("/extra-only", ctx));
+    CHECK(sent_prompt == "Additional exclusive body.");
+
+    fs::remove_all(sandbox);
 }

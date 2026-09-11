@@ -20,16 +20,21 @@ namespace core::tools {
  *
  * ## Directory layout
  *
- * Compatibility paths are scanned before native Filo paths. Because
- * @c ToolManager::register_tool silently overwrites on name collision, later
- * roots take precedence:
+ * Roots come from @ref core::tools::SkillRegistry::default_search_roots(), which
+ * layers the user's own directories with **every** workspace root — the primary
+ * plus each additional root granted with `-w` or `/workspace add`. Scan order is
+ * precedence and later roots win on a name collision, so the primary workspace
+ * and the user's own directories always outrank a secondary workspace.
+ *
+ * For the primary workspace the compatibility paths are scanned before the
+ * native Filo paths:
  *
  *  1. @c ~/.claude/skills/
  *  2. @c ~/.agents/skills/
- *  3. @c ./.claude/skills/
- *  4. @c ./.agents/skills/
+ *  3. @c <primary>/.claude/skills/
+ *  4. @c <primary>/.agents/skills/
  *  5. @c ~/.config/filo/skills/
- *  6. @c ./.filo/skills/
+ *  6. @c <primary>/.filo/skills/
  *
  * Each immediate subdirectory of a skills root is one skill candidate.
  * A valid Tool-skill candidate contains:
@@ -38,6 +43,17 @@ namespace core::tools {
  *
  * Errors (bad frontmatter, missing script, Python load failure) are logged and
  * skipped; the remaining skills still load.
+ *
+ * ## Workspace trust boundary
+ *
+ * **This loader registers executable code, so it only reads roots that
+ * @ref SkillSearchRoot::permits_tool_skills() allows: the user's own directories
+ * and the primary workspace.** An additional workspace root is a directory the
+ * user granted *read* access to; turning that grant into in-process Python
+ * execution would be a privilege they never asked for. Additional roots still
+ * contribute Prompt skills (slash commands, via
+ * @ref core::commands::SkillCommandLoader) and Agent Skill instruction packages
+ * (via @ref core::tools::SkillRegistry), both of which are data.
  *
  * ## Skill types
  *
@@ -89,7 +105,8 @@ namespace core::tools {
  * @code{.cpp}
  * // In MainApp.cpp, after registering built-in tools:
  * #ifdef FILO_ENABLE_PYTHON
- *     core::tools::SkillLoader::discover_and_register(tool_manager);
+ *     core::tools::SkillLoader::discover_and_register(
+ *         tool_manager, core::workspace::Workspace::get_instance().ordered_roots());
  * #endif
  * @endcode
  *
@@ -100,34 +117,22 @@ namespace core::tools {
 class SkillLoader {
 public:
     /**
-     * @brief Scans all standard skill directories and registers valid skills.
+     * @brief Scans the workspace's trusted skill directories and registers valid
+     *        Tool skills.
      *
-     * Iterates @ref default_search_paths() and calls @ref load_from_directory()
-     * for each path.  Non-fatal errors are logged at @c warn / @c error level
-     * and do not abort the scan.
+     * Iterates @ref core::tools::SkillRegistry::default_search_roots() and calls
+     * @ref load_from_directory() for each root that is allowed to contribute
+     * executable code. Roots belonging to an additional workspace are skipped and
+     * reported, so a refused skill is never refused silently. Non-fatal errors are
+     * logged at @c warn / @c error level and do not abort the scan.
      *
-     * @param tool_manager  The @c ToolManager singleton to register skills into.
-     * @return              Total number of skills successfully registered.
+     * @param tool_manager   The @c ToolManager singleton to register skills into.
+     * @param workspace_roots Roots from @ref core::workspace::ordered_roots():
+     *                       index 0 is the primary, the rest are additional.
+     * @return               Total number of skills successfully registered.
      */
-    static int discover_and_register(ToolManager& tool_manager);
-
-    /**
-     * @brief Returns the ordered list of skill directories to scan.
-     *
-     * Order is compatibility fallback first, then native Filo roots:
-     *  1. @c $HOME/.claude/skills/
-     *  2. @c $HOME/.agents/skills/
-     *  3. @c $PWD/.claude/skills/
-     *  4. @c $PWD/.agents/skills/
-     *  5. @c $HOME/.config/filo/skills/
-     *  6. @c $PWD/.filo/skills/
-     *
-     * Directories that do not exist are silently skipped by
-     * @ref load_from_directory().
-     *
-     * @return Vector of candidate paths (may not exist on disk).
-     */
-    static std::vector<std::filesystem::path> default_search_paths();
+    static int discover_and_register(ToolManager& tool_manager,
+                                     const std::vector<std::filesystem::path>& workspace_roots);
 
     /**
      * @brief Parses the @c SKILL.md inside @p skill_dir and returns a manifest.

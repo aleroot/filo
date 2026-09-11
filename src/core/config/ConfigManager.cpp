@@ -58,7 +58,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 13> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 14> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -82,6 +82,9 @@ static constexpr std::array<ManagedSettingDescriptor, 13> kManagedSettingDescrip
     { ManagedSettingKey::ContextCompression,
       "context_compression",
       &ManagedSettings::context_compression },
+    { ManagedSettingKey::SteeringMode,
+      "steering_mode",
+      &ManagedSettings::steering_mode },
 }};
 
 const ManagedSettingDescriptor* managed_setting_descriptor(ManagedSettingKey key) {
@@ -146,6 +149,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::ContextCompression:
             config.context_compression = value;
+            break;
+        case ManagedSettingKey::SteeringMode:
+            config.steering_mode = value;
             break;
     }
 }
@@ -1125,6 +1131,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     }
     if (!doc["context_compression"].get(value)) {
         parsed.context_compression = std::string(value);
+    }
+    if (!doc["steering_mode"].get(value)) {
+        parsed.steering_mode = std::string(value);
     }
     int64_t threshold = 0;
     if (!doc["auto_compact_threshold"].get(threshold)) {

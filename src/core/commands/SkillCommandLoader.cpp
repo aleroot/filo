@@ -1,6 +1,6 @@
 #include "SkillCommandLoader.hpp"
 #include "SkillCommand.hpp"
-#include "../tools/SkillLoader.hpp"
+#include "../tools/SkillRegistry.hpp"
 #include "../logging/Logger.hpp"
 #include <filesystem>
 #include <memory>
@@ -17,7 +17,7 @@ int SkillCommandLoader::load_from_directory(const fs::path& root,
     for (const auto& entry : fs::directory_iterator(root)) {
         if (!entry.is_directory()) continue;
 
-        auto maybe = core::tools::SkillLoader::parse_manifest(entry.path());
+        auto maybe = core::tools::SkillRegistry::parse_manifest(entry.path());
         if (!maybe) continue;
 
         const auto& m = *maybe;
@@ -42,11 +42,15 @@ int SkillCommandLoader::load_from_directory(const fs::path& root,
     return count;
 }
 
-int SkillCommandLoader::discover_and_register(CommandExecutor& executor) {
+int SkillCommandLoader::discover_and_register(
+    CommandExecutor& executor,
+    const std::vector<fs::path>& workspace_roots) {
     int total = 0;
-    // Reuse SkillLoader's canonical search-path ordering: compatibility
-    // fallbacks first, then Filo-native roots.
-    for (const auto& root : core::tools::SkillLoader::default_search_paths()) {
+    // The registry owns the canonical ordering — additional workspace roots,
+    // then the user's directories, then the primary — so prompt skills and the
+    // Agent Skills catalog can never disagree about who wins a name collision.
+    // register_command() replaces on collision, hence the last root scanned wins.
+    for (const auto& root : core::tools::SkillRegistry::default_search_paths(workspace_roots)) {
         total += load_from_directory(root, executor);
     }
     if (total > 0) {

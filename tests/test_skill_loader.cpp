@@ -2,13 +2,17 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/tools/SkillLoader.hpp"
+#include "core/tools/SkillRegistry.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "TestSessionContext.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace core::tools;
@@ -28,6 +32,27 @@ static void write_file(const fs::path& p, std::string_view content) {
     std::ofstream f(p);
     f << content;
 }
+
+struct ScopedEnvVar {
+    std::string name;
+    std::optional<std::string> old_value;
+
+    ScopedEnvVar(std::string env_name, std::string value)
+        : name(std::move(env_name)) {
+        if (const char* existing = std::getenv(name.c_str())) {
+            old_value = std::string(existing);
+        }
+        ::setenv(name.c_str(), value.c_str(), 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value.has_value()) {
+            ::setenv(name.c_str(), old_value->c_str(), 1);
+        } else {
+            ::unsetenv(name.c_str());
+        }
+    }
+};
 
 // ---------------------------------------------------------------------------
 // parse_manifest — valid inputs
@@ -238,6 +263,57 @@ TEST_CASE("SkillLoader::load_from_directory skips skill when entry_point file ab
 }
 
 // ---------------------------------------------------------------------------
+// Executable-skill trust boundary
+//
+// Split out from the Python tests below so the policy is verified in every
+// build: SkillLoader compiles to a stub without FILO_ENABLE_PYTHON, but the rule
+// it applies lives in SkillRegistry and is always compiled.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Executable skills are trusted only from user directories and the primary workspace",
+          "[skill_loader][multiroot]") {
+    const auto sandbox = make_temp_skill_root("trust_split");
+    fs::remove_all(sandbox);
+    const auto fake_home = sandbox / "home";
+    const auto primary = sandbox / "primary";
+    const auto extra = sandbox / "extra";
+    fs::create_directories(fake_home);
+    ScopedEnvVar home("HOME", fake_home.string());
+
+    const auto trust = SkillRegistry::split_tool_skill_roots(
+        std::vector<fs::path>{primary, extra});
+
+    // Six trusted roots: the user's three directories plus the primary's three.
+    REQUIRE(trust.trusted.size() == 6);
+    CHECK(std::ranges::all_of(trust.trusted, [](const SkillSearchRoot& root) {
+        return root.permits_tool_skills();
+    }));
+    CHECK(std::ranges::any_of(trust.trusted, [&](const SkillSearchRoot& root) {
+        return root.path == primary / ".filo" / "skills";
+    }));
+    CHECK(std::ranges::any_of(trust.trusted, [&](const SkillSearchRoot& root) {
+        return root.path == fake_home / ".config" / "filo" / "skills";
+    }));
+
+    // Every additional-workspace directory is restricted, and each still carries
+    // the provenance needed to explain the refusal to the user.
+    REQUIRE(trust.restricted.size() == 3);
+    CHECK(std::ranges::all_of(trust.restricted, [&](const SkillSearchRoot& root) {
+        return !root.permits_tool_skills()
+            && root.origin == SkillWorkspaceOrigin::Additional
+            && root.workspace_root == extra;
+    }));
+
+    // A single-root workspace restricts nothing, which is what keeps the
+    // historical behaviour intact.
+    const auto single = SkillRegistry::split_tool_skill_roots(std::vector<fs::path>{primary});
+    CHECK(single.trusted.size() == 6);
+    CHECK(single.restricted.empty());
+
+    fs::remove_all(sandbox);
+}
+
+// ---------------------------------------------------------------------------
 // Python integration (requires FILO_ENABLE_PYTHON)
 // ---------------------------------------------------------------------------
 
@@ -317,5 +393,62 @@ def execute(json_args):
     CHECK(count == 0);
 
     fs::remove_all(root);
+}
+
+TEST_CASE("SkillLoader registers executable skills from the primary workspace only",
+          "[skill_loader][python][multiroot]") {
+    const auto sandbox = make_temp_skill_root("multiroot_trust");
+    fs::remove_all(sandbox);
+    const auto fake_home = sandbox / "home";
+    const auto primary = sandbox / "primary";
+    const auto extra = sandbox / "extra";
+    fs::create_directories(fake_home);
+    ScopedEnvVar home("HOME", fake_home.string());
+
+    const auto primary_skill = primary / ".filo" / "skills" / "mr_primary_tool";
+    const auto extra_skill = extra / ".filo" / "skills" / "mr_extra_tool";
+    fs::create_directories(primary_skill);
+    fs::create_directories(extra_skill);
+
+    write_file(primary_skill / "SKILL.md", R"(---
+name: mr_primary_tool
+description: Executable skill in the primary workspace.
+entry_point: mr_primary_tool.py
+---
+)");
+    write_file(primary_skill / "mr_primary_tool.py", R"(
+def get_schema():
+    return {"name": "mr_primary_tool", "description": "d", "parameters": []}
+
+def execute(json_args):
+    return '{"output": "ran"}'
+)");
+
+    write_file(extra_skill / "SKILL.md", R"(---
+name: mr_extra_tool
+description: Executable skill in an additional workspace.
+entry_point: mr_extra_tool.py
+---
+)");
+    write_file(extra_skill / "mr_extra_tool.py", R"(
+def get_schema():
+    return {"name": "mr_extra_tool", "description": "d", "parameters": []}
+
+def execute(json_args):
+    return '{"output": "should never run"}'
+)");
+
+    ToolManager& tm = ToolManager::get_instance();
+    const int count = SkillLoader::discover_and_register(
+        tm, std::vector<fs::path>{primary, extra});
+
+    // Granting a root with -w grants read access; it must not silently become
+    // in-process code execution. The primary's skill loads, the secondary's does
+    // not — and the refusal is logged rather than silent.
+    CHECK(count == 1);
+    CHECK(tm.has_tool("mr_primary_tool"));
+    CHECK_FALSE(tm.has_tool("mr_extra_tool"));
+
+    fs::remove_all(sandbox);
 }
 #endif // FILO_ENABLE_PYTHON

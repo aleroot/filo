@@ -130,6 +130,19 @@ struct SkillManifest {
     std::string license;
     std::string compatibility;
 
+    // ── Discovery provenance (set by SkillRegistry::discover_all) ────────────
+
+    /// Workspace root this skill was discovered under. Empty for user-scope
+    /// roots (~/.claude, ~/.agents, ~/.config/filo), which belong to no project.
+    std::filesystem::path workspace_root;
+
+    /// True when the skill came from an additional (non-primary) workspace root.
+    /// Two consequences: the catalog names the project it belongs to instead of
+    /// implying it came from the primary, and its Python entry point is never
+    /// registered — a root the user merely granted read access to may contribute
+    /// instructions, not executable code.
+    bool from_additional_workspace = false;
+
     /// True when the skill has no Filo-specific Python entry point and can be
     /// activated as a standard Agent Skill instruction package.
     [[nodiscard]] bool is_agent_instruction_skill() const noexcept {

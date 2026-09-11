@@ -37,6 +37,11 @@ public:
     [[nodiscard]] const std::vector<std::filesystem::path>& get_additional() const noexcept { return additional_; }
     [[nodiscard]] bool is_enforced() const noexcept { return enforce_; }
     [[nodiscard]] WorkspaceSnapshot snapshot() const;
+    /// Roots in precedence order (primary first). Composition-root code that has
+    /// no SessionContext — tool registration, MCP prompt discovery — uses this
+    /// instead of the ambient working directory, so it sees every `-w` root and
+    /// follows `/workspace change`.
+    [[nodiscard]] std::vector<std::filesystem::path> ordered_roots() const;
     [[nodiscard]] std::filesystem::path resolve_path(const std::filesystem::path& target_path) const;
 
     // True when the path is inside the project roots or the readable/writable
