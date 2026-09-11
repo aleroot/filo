@@ -539,6 +539,7 @@ AppConfig make_default_config() {
     config.auto_compact_threshold = 25000;
     config.tool_output_token_limit = 3072;
     config.tool_recovery = true;
+    config.strict_tool_schemas = false;
     config.context_compression = "off";
     config.router = core::llm::routing::make_default_router_config();
 
@@ -1151,6 +1152,11 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
         parsed.tool_recovery = tool_recovery;
         parsed.tool_recovery_explicit = true;
     }
+    bool strict_tool_schemas = false;
+    if (!doc["strict_tool_schemas"].get(strict_tool_schemas)) {
+        parsed.strict_tool_schemas = strict_tool_schemas;
+        parsed.strict_tool_schemas_explicit = true;
+    }
 
     simdjson::dom::object providers_obj;
     if (!doc["providers"].get(providers_obj)) {
@@ -1460,6 +1466,10 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     if (overlay.tool_recovery_explicit) {
         base.tool_recovery = overlay.tool_recovery;
         base.tool_recovery_explicit = true;
+    }
+    if (overlay.strict_tool_schemas_explicit) {
+        base.strict_tool_schemas = overlay.strict_tool_schemas;
+        base.strict_tool_schemas_explicit = true;
     }
     if (!overlay.context_compression.empty()) {
         base.context_compression = overlay.context_compression;

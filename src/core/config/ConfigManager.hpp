@@ -255,6 +255,13 @@ struct AppConfig {
     // Distinguishes "absent" from "explicitly set" so a profile overlay can
     // re-enable the feature after the base configuration disabled it.
     bool        tool_recovery_explicit = false;
+    // Send tool schemas under the provider's strict (constrained-decoding)
+    // contract where the model documents support, so a mis-shaped argument is
+    // unrepresentable rather than repaired after the fact. Opt-in: a provider
+    // that does not recognise the strict contract rejects the whole request,
+    // and no vendor advertises support over the wire.
+    bool        strict_tool_schemas = false;
+    bool        strict_tool_schemas_explicit = false;
     std::string context_compression;
     // Canonical steering token ("default", "fallback", "none"); empty means
     // "not persisted", in which case --steering and then the built-in default

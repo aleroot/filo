@@ -6,7 +6,9 @@
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
 #include "../../logging/Logger.hpp"
+#include "../../tools/StrictToolSchema.hpp"
 #include "../../tools/ToolSchema.hpp"
+#include "../StrictToolPolicy.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
 #include "core/version/Version.hpp"
@@ -21,6 +23,9 @@
 #include <set>
 
 namespace core::llm::protocols {
+
+using core::llm::ToolSchemaWire;
+using core::llm::configured_strict_tool_dialect;
 
 namespace {
 
@@ -52,9 +57,11 @@ void append_member_before_object_end(std::string& object_json, std::string_view 
     return url + "/responses";
 }
 
-void append_tool_schema(std::string& payload,
-                        const std::vector<Tool>& tools,
-                        std::span<const std::string_view> hosted_tool_types = {}) {
+void append_tool_schema(
+    std::string& payload,
+    const std::vector<Tool>& tools,
+    std::span<const std::string_view> hosted_tool_types = {},
+    std::optional<core::tools::schema::StrictDialect> strict_dialect = std::nullopt) {
     payload += R"(,"tools":[)";
     bool first = true;
     for (const std::string_view type : hosted_tool_types) {
@@ -72,8 +79,18 @@ void append_tool_schema(std::string& payload,
         payload += core::utils::escape_json_string(def.name);
         payload += R"(","description":")";
         payload += core::utils::escape_json_string(def.description);
-        payload += R"(","strict":false,"parameters":)";
-        payload += core::tools::schema::canonical_input_schema(def);
+        // Strict mode compiles the schema into a decoding grammar, which is the
+        // only place an out-of-shape argument can be prevented rather than
+        // rejected. A contract that does not survive the projection stays on the
+        // permissive path instead of being silently narrowed.
+        const std::string canonical_schema =
+            core::tools::schema::canonical_input_schema(def);
+        const auto strict_schema = strict_dialect.has_value()
+            ? core::tools::schema::strict_input_schema(canonical_schema, *strict_dialect)
+            : std::nullopt;
+        payload += strict_schema.has_value() ? R"(","strict":true,"parameters":)"
+                                             : R"(","strict":false,"parameters":)";
+        payload += strict_schema.value_or(canonical_schema);
         payload += "}";
     }
     payload += "]";
@@ -799,7 +816,11 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     payload += has_tools ? "true" : "false";
 
     if (has_tools) {
-        append_tool_schema(payload, req.tools, options.hosted_tool_types);
+        append_tool_schema(
+            payload,
+            req.tools,
+            options.hosted_tool_types,
+            configured_strict_tool_dialect(ToolSchemaWire::OpenAI, req.model));
     }
 
     if (options.include_prompt_cache_key && !req.prompt_cache_key.empty()) {

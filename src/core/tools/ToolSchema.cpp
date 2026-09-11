@@ -472,17 +472,36 @@ namespace {
     return false;
 }
 
-[[nodiscard]] std::string strip_optional_nulls(Object arguments,
-                                               Object schema) {
+/// Structural recursion guard for null stripping; argument payloads are far
+/// shallower than this, and a hostile nesting depth simply stops being pruned.
+constexpr std::size_t kMaxStripDepth = 16;
+
+void write_without_optional_nulls(core::utils::JsonWriter& writer,
+                                  Element value,
+                                  Element schema_element,
+                                  std::size_t depth);
+
+/**
+ * Emits an object with the members that are only standing in for absence
+ * removed.
+ *
+ * Providers represent an unused optional with an explicit null, and a strict
+ * (constrained-decoding) schema makes that the *only* way to express omission.
+ * Both cases must reduce to the same payload as leaving the member out, at any
+ * depth — a nested optional is no less optional than a top-level one. A
+ * property that genuinely accepts null keeps it: there null is a value
+ * (clear/reset), not an omission.
+ */
+void write_object_without_optional_nulls(core::utils::JsonWriter& writer,
+                                         Object value,
+                                         Object schema,
+                                         std::size_t depth) {
     std::vector<std::pair<std::string, Element>> fields;
-    for (const auto field : arguments) {
+    for (const auto field : value) {
         const bool is_null = field.value.type() == simdjson::dom::element_type::NULL_VALUE;
         Element property;
         const bool declared = schema["properties"][field.key].get(property)
             == simdjson::SUCCESS;
-        // Providers often send explicit null for unused optionals. Drop those
-        // only when the schema does not accept null — a nullable property uses
-        // null as a real value (clear/reset), not an omission.
         if (is_null && declared && !is_required(schema, field.key)
             && !schema_accepts_type(property, "null")) {
             continue;
@@ -490,15 +509,56 @@ namespace {
         fields.emplace_back(std::string(field.key), field.value);
     }
     std::ranges::sort(fields, {}, &std::pair<std::string, Element>::first);
-    core::utils::JsonWriter writer(128);
-    {
-        auto root = writer.object();
-        for (std::size_t i = 0; i < fields.size(); ++i) {
-            if (i > 0) writer.comma();
-            writer.key(fields[i].first);
+
+    auto scope = writer.object();
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (i > 0) writer.comma();
+        writer.key(fields[i].first);
+        Element property_schema;
+        if (schema["properties"][fields[i].first].get(property_schema)
+            == simdjson::SUCCESS) {
+            write_without_optional_nulls(writer, fields[i].second, property_schema, depth);
+        } else {
             write_canonical(writer, fields[i].second);
         }
     }
+}
+
+void write_without_optional_nulls(core::utils::JsonWriter& writer,
+                                  Element value,
+                                  Element schema_element,
+                                  std::size_t depth) {
+    Object schema;
+    if (depth >= kMaxStripDepth || schema_element.get(schema) != simdjson::SUCCESS) {
+        write_canonical(writer, value);
+        return;
+    }
+
+    if (Object object; value.get(object) == simdjson::SUCCESS) {
+        write_object_without_optional_nulls(writer, object, schema, depth + 1);
+        return;
+    }
+
+    simdjson::dom::array array;
+    Element items;
+    if (value.get(array) != simdjson::SUCCESS
+        || schema["items"].get(items) != simdjson::SUCCESS) {
+        write_canonical(writer, value);
+        return;
+    }
+    auto scope = writer.array();
+    bool first = true;
+    for (Element item : array) {
+        if (!first) writer.comma();
+        first = false;
+        write_without_optional_nulls(writer, item, items, depth + 1);
+    }
+}
+
+[[nodiscard]] std::string strip_optional_nulls(Object arguments,
+                                               Object schema) {
+    core::utils::JsonWriter writer(128);
+    write_object_without_optional_nulls(writer, arguments, schema, 0);
     return std::move(writer).take();
 }
 

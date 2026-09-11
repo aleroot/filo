@@ -14,6 +14,7 @@
 #include <functional>
 #include <fstream>
 #include "../tools/Tool.hpp"
+#include "../tools/StrictToolSchema.hpp"
 #include "../tools/ToolSchema.hpp"
 #include "../context/PromptPlan.hpp"
 #include "../utils/Base64.hpp"
@@ -681,6 +682,11 @@ struct Serializer {
         // Some providers need provider-specific schema normalization.
         std::function<std::string(std::string_view, bool)> transform_tool_schema;
         std::function<std::optional<std::string>(const Tool&)> serialize_tool_override;
+        // When set, tool schemas are projected into the provider's
+        // constrained-decoding subset and flagged strict, so the sampler cannot
+        // emit an out-of-shape argument. A tool whose contract does not survive
+        // the projection is sent permissively instead of weakened.
+        std::optional<core::tools::schema::StrictDialect> strict_tools;
         // Provider-neutral cache anchors. Protocol adapters opt in and own the
         // wire contract; the shared serializer only applies the requested JSON
         // annotation to the selected content/tool objects.
@@ -761,7 +767,15 @@ struct Serializer {
                 serialized_tool += R"({"type":")" + req.tools[i].type + R"(","function":{"name":")" + core::utils::escape_json_string(def.name) + R"(","description":")" + core::utils::escape_json_string(def.description) + R"(","parameters":)";
                 const std::string canonical_schema =
                     core::tools::schema::canonical_input_schema(def);
-                serialized_tool += transform_schema(canonical_schema, false);
+                const auto strict_schema = options.strict_tools.has_value()
+                    ? core::tools::schema::strict_input_schema(
+                          canonical_schema, *options.strict_tools)
+                    : std::nullopt;
+                serialized_tool += transform_schema(
+                    strict_schema.value_or(canonical_schema), false);
+                if (strict_schema.has_value()) {
+                    serialized_tool += R"(,"strict":true)";
+                }
                 serialized_tool += "}}";
                 if (options.prompt_cache.last_tool && i + 1 == req.tools.size()) {
                     serialized_tool.pop_back();

@@ -8,7 +8,9 @@
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
 #include "../../utils/TimeUtils.hpp"
+#include "../../tools/StrictToolSchema.hpp"
 #include "../../tools/ToolSchema.hpp"
+#include "../StrictToolPolicy.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -22,6 +24,9 @@
 #include <utility>
 
 namespace core::llm::protocols {
+
+using core::llm::ToolSchemaWire;
+using core::llm::configured_strict_tool_dialect;
 
 namespace {
     constexpr std::string_view ANTHROPIC_VERSION       = "2023-06-01";
@@ -808,6 +813,11 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
 
     // Tools (Anthropic uses "input_schema" instead of "parameters").
     if (!req.tools.empty()) {
+        // Strict tool use constrains the sampler to the declared shape, so a
+        // mis-typed argument cannot be generated in the first place. A tool
+        // whose contract does not survive the projection is sent unflagged.
+        const auto strict_dialect = configured_strict_tool_dialect(
+            ToolSchemaWire::Anthropic, req.model);
         payload += R"(,"tools":[)";
         for (size_t i = 0; i < req.tools.size(); ++i) {
             const auto& def = req.tools[i].function;
@@ -816,7 +826,16 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
             payload += R"(","description":")";
             payload += core::utils::escape_json_string(def.description);
             payload += R"(","input_schema":)";
-            payload += core::tools::schema::canonical_input_schema(def);
+            const std::string canonical_schema =
+                core::tools::schema::canonical_input_schema(def);
+            const auto strict_schema = strict_dialect.has_value()
+                ? core::tools::schema::strict_input_schema(
+                      canonical_schema, *strict_dialect)
+                : std::nullopt;
+            payload += strict_schema.value_or(canonical_schema);
+            if (strict_schema.has_value()) {
+                payload += R"(,"strict":true)";
+            }
             if (i + 1 == req.tools.size()) {
                 payload += R"(,"cache_control":{"type":"ephemeral"})";
             }

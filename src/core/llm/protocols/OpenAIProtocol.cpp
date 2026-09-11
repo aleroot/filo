@@ -4,6 +4,7 @@
 #include "core/utils/AsciiUtils.hpp"
 #include "../Models.hpp"
 #include "../OpenAIEndpointUtils.hpp"
+#include "../StrictToolPolicy.hpp"
 #include "../../logging/Logger.hpp"
 #include "core/utils/TimeUtils.hpp"
 #include <simdjson.h>
@@ -245,7 +246,10 @@ parse_openai_sse_chunk(std::string_view json_str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::string OpenAIProtocol::serialize(const ChatRequest& req) const {
-    std::string payload = Serializer::serialize(req);
+    Serializer::Options options;
+    options.strict_tools = configured_strict_tool_dialect(
+        ToolSchemaWire::OpenAI, req.model);
+    std::string payload = Serializer::serialize(req, options);
 
     if (payload.ends_with('}')) {
         payload.pop_back();
