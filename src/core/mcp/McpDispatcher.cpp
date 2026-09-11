@@ -23,6 +23,7 @@
 #include "../tools/SkillRegistry.hpp"
 #include "../tools/ActivateSkillTool.hpp"
 #include "../workspace/Workspace.hpp"
+#include "../workspace/MentionIndex.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/Base64.hpp"
@@ -32,6 +33,7 @@
 #include "core/version/Version.hpp"
 #include <simdjson.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -43,6 +45,7 @@
 #include <optional>
 #include <ranges>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 namespace core::mcp {
@@ -339,6 +342,14 @@ struct InitializeInfo {
 constexpr std::size_t kMaxResourceBytes = 1024 * 1024; // 1 MiB
 constexpr std::size_t kMaxDirectoryListingBytes = 256 * 1024; // 256 KiB
 constexpr std::size_t kMaxDirectoryEntries = 4096;
+
+/// Resource template completed by `completion/complete` so clients can offer an
+/// `@`-style workspace file picker. `{+path}` uses RFC 6570 reserved expansion
+/// because completion values are absolute paths and must keep their separators.
+constexpr std::string_view kFileResourceTemplate = "file:///{+path}";
+constexpr std::string_view kFileResourceTemplateArgument = "path";
+/// MCP caps a completion result at 100 values.
+constexpr std::size_t kMaxCompletionValues = 100;
 constexpr int kResourceNotFoundCode = -32002;
 constexpr int kResourceInternalErrorCode = -32603;
 
@@ -866,6 +877,8 @@ struct ParsedPromptGetRequest {
                 rw.kv_bool("subscribe", false).comma()
                     .kv_bool("listChanged", false);
             }
+            rw.comma().key("completions");
+            { auto _completions = rw.object(); }
             if (has_prompts) {
                 rw.comma().key("prompts");
                 {
@@ -933,6 +946,8 @@ struct ParsedPromptGetRequest {
             { auto tools = rw.object(); }
             rw.comma().key("resources");
             { auto resources = rw.object(); }
+            rw.comma().key("completions");
+            { auto completions = rw.object(); }
             if (has_prompts) {
                 rw.comma().key("prompts");
                 auto prompts = rw.object();
@@ -955,12 +970,19 @@ struct ParsedPromptGetRequest {
     JsonWriter rw(128);
     {
         auto _res = rw.object();
-        // Hardcoded empty template list — registration-fixed content.
+        // Registration-fixed content: the single workspace file template whose
+        // `path` argument is completed by completion/complete.
         rw.kv_num("ttlMs", kStaticListTtlMs).comma()
             .kv_str("cacheScope", "private").comma()
             .key("resourceTemplates");
         {
             auto _arr = rw.array();
+            auto _item = rw.object();
+            rw.kv_str("uriTemplate", kFileResourceTemplate).comma()
+                .kv_str("name", "Workspace File").comma()
+                .kv_str("description",
+                        "Any file or directory visible inside the session workspace. "
+                        "Complete the 'path' argument to search the workspace by name.");
         }
     }
     return std::move(rw).take();
@@ -1498,6 +1520,124 @@ private:
     return std::string(task_id);
 }
 
+/// Per-root mention indexes shared by every completion request.
+///
+/// The dispatcher is a stateless free-function router, so the cache is owned by
+/// this accessor rather than threaded through every handler signature. Its TTL
+/// matches the one advertised for workspace-derived lists.
+[[nodiscard]] core::workspace::MentionIndexCache& mention_index_cache() {
+    static core::workspace::MentionIndexCache cache{std::chrono::milliseconds(kDerivedListTtlMs)};
+    return cache;
+}
+
+/// Partial `path` value a client wants completed for the workspace file template.
+[[nodiscard]] RpcExpected<std::string> parse_completion_query(
+    simdjson::ondemand::object& root)
+{
+    simdjson::ondemand::object params;
+    if (auto params_result = parse_params_object(root, params); !params_result) {
+        return std::unexpected(params_result.error());
+    }
+
+    simdjson::ondemand::object ref;
+    if (params["ref"].get_object().get(ref) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'ref'"});
+    }
+
+    std::string_view ref_type;
+    if (ref["type"].get_string().get(ref_type) != simdjson::SUCCESS
+        || ref_type != "ref/resource") {
+        return std::unexpected(RpcError{-32602, "Invalid params: only 'ref/resource' is supported"});
+    }
+
+    std::string_view ref_uri;
+    if (ref["uri"].get_string().get(ref_uri) != simdjson::SUCCESS
+        || ref_uri != kFileResourceTemplate) {
+        return std::unexpected(RpcError{-32602, "Invalid params: unknown resource template"});
+    }
+
+    simdjson::ondemand::object argument;
+    if (params["argument"].get_object().get(argument) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'argument'"});
+    }
+
+    std::string_view argument_name;
+    if (argument["name"].get_string().get(argument_name) != simdjson::SUCCESS
+        || argument_name != kFileResourceTemplateArgument) {
+        return std::unexpected(RpcError{-32602, "Invalid params: unknown template argument"});
+    }
+
+    std::string_view argument_value;
+    if (argument["value"].get_string().get(argument_value) != simdjson::SUCCESS) {
+        return std::unexpected(RpcError{-32602, "Invalid params: missing 'argument.value'"});
+    }
+    return std::string(argument_value);
+}
+
+/// Completion values are substituted into `file:///{+path}`, so each one is an
+/// absolute path with its leading separator removed.
+[[nodiscard]] std::string to_template_value(const std::filesystem::path& root,
+                                            std::string_view relative_path) {
+    std::string value = root.generic_string();
+    if (!value.empty() && value.back() == '/') value.pop_back();
+    value += '/';
+    value += relative_path;
+    if (!value.empty() && value.front() == '/') value.erase(value.begin());
+    return value;
+}
+
+[[nodiscard]] std::string build_completion_result(
+    std::string_view query,
+    const core::context::SessionContext& context)
+{
+    const auto& workspace = context.workspace_view();
+    std::vector<std::string> values;
+    values.reserve(kMaxCompletionValues);
+
+    // A completion result is a set of candidates. The primary root is commonly
+    // repeated in the additional roots, and roots may nest, so both the roots
+    // and the values they produce are de-duplicated.
+    std::unordered_set<std::string> seen_roots;
+    std::unordered_set<std::string> seen_values;
+
+    auto append_root = [&](const std::filesystem::path& root) {
+        if (root.empty() || values.size() >= kMaxCompletionValues) return;
+        if (!seen_roots.insert(root.generic_string()).second) return;
+
+        const auto index = mention_index_cache().index_for(root);
+        for (const auto& suggestion :
+             core::workspace::search_mention_index(*index, query, kMaxCompletionValues - values.size())) {
+            auto value = to_template_value(root, suggestion.display_path);
+            if (!seen_values.insert(value).second) continue;
+            values.push_back(std::move(value));
+        }
+    };
+
+    append_root(workspace.primary());
+    for (const auto& additional : workspace.additional()) {
+        append_root(additional);
+    }
+
+    JsonWriter rw(2048);
+    {
+        auto _res = rw.object();
+        rw.key("completion");
+        auto _completion = rw.object();
+        rw.key("values");
+        {
+            auto _arr = rw.array();
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                if (i != 0) rw.comma();
+                rw.str(values[i]);
+            }
+        }
+        // `total` is omitted: the index is truncated per root while ranking, so
+        // an exact match count is not available without a second pass.
+        rw.comma().kv_bool("hasMore", values.size() >= kMaxCompletionValues);
+    }
+    return std::move(rw).take();
+}
+
 [[nodiscard]] bool request_supports_tasks(simdjson::ondemand::object& root) {
     simdjson::ondemand::object params;
     if (root["params"].get_object().get(params) != simdjson::SUCCESS) return false;
@@ -1588,6 +1728,18 @@ using MethodHandler = std::string (*)(
     if (!result) return make_rpc_error(id, result.error());
 
     return make_response(id, *result, mode);
+}
+
+[[nodiscard]] std::string handle_completion_complete(
+    const RequestId& id,
+    simdjson::ondemand::object& root,
+    const core::context::SessionContext& context,
+    McpProtocolMode mode)
+{
+    auto query = parse_completion_query(root);
+    if (!query) return make_rpc_error(id, query.error());
+
+    return make_response(id, build_completion_result(*query, context), mode);
 }
 
 [[nodiscard]] std::string handle_tools_list(
@@ -1730,7 +1882,7 @@ struct MethodRoute {
     MethodHandler handler;
 };
 
-constexpr std::array<MethodRoute, 13> kMethodRoutes{{
+constexpr std::array<MethodRoute, 14> kMethodRoutes{{
     {"server/discover", &handle_server_discover},
     {"initialize", &handle_initialize},
     {"prompts/list", &handle_prompts_list},
@@ -1738,6 +1890,7 @@ constexpr std::array<MethodRoute, 13> kMethodRoutes{{
     {"resources/templates/list", &handle_resources_templates_list},
     {"resources/list", &handle_resources_list},
     {"resources/read", &handle_resources_read},
+    {"completion/complete", &handle_completion_complete},
     {"tools/list", &handle_tools_list},
     {"tools/call", &handle_tools_call},
     {"tasks/get", &handle_tasks_get},

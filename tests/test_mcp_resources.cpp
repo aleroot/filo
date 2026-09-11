@@ -9,6 +9,7 @@
 #include <fstream>
 #include <simdjson.h>
 #include <string>
+#include <vector>
 
 using namespace Catch::Matchers;
 
@@ -646,7 +647,8 @@ TEST_CASE("MCP resources/read rejects URI query and fragment", "[mcp][resources]
     REQUIRE(c2 == -32602);
 }
 
-TEST_CASE("MCP resources/templates/list returns an empty array", "[mcp][resources]") {
+TEST_CASE("MCP resources/templates/list advertises the workspace file template",
+          "[mcp][resources]") {
     WorkspaceResetToDefault workspace_reset;
     auto resp = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"resources/templates/list","params":{},"id":8})");
@@ -656,5 +658,128 @@ TEST_CASE("MCP resources/templates/list returns an empty array", "[mcp][resource
 
     simdjson::dom::array templates;
     REQUIRE(root["result"]["resourceTemplates"].get(templates) == simdjson::SUCCESS);
-    REQUIRE(templates.begin() == templates.end());
+
+    bool found = false;
+    for (auto entry : templates) {
+        std::string_view uri_template;
+        if (entry["uriTemplate"].get(uri_template) != simdjson::SUCCESS) continue;
+        if (uri_template == "file:///{+path}") found = true;
+    }
+    REQUIRE(found);
+}
+
+// ---------------------------------------------------------------------------
+// completion/complete
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct CompletionWorkspace {
+    ScopedPathCleanup cleanup;
+    std::filesystem::path root;
+
+    CompletionWorkspace() {
+        root = std::filesystem::temp_directory_path()
+             / ("filo-completion-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()));
+        cleanup.path = root;
+        std::filesystem::create_directories(root / "src" / "core");
+        std::ofstream{root / "src" / "core" / "Widget.cpp"} << "int main() { return 0; }\n";
+        std::ofstream{root / "src" / "Gadget.cpp"} << "// gadget\n";
+        std::ofstream{root / "README.md"} << "# readme\n";
+        core::workspace::Workspace::get_instance().initialize(root, {}, true);
+        // The workspace canonicalizes its root (/var is a symlink on macOS),
+        // so completion values are relative to the resolved path.
+        root = core::workspace::Workspace::get_instance().snapshot().primary;
+    }
+};
+
+std::string completion_request(std::string_view value) {
+    return std::string(R"({"jsonrpc":"2.0","method":"completion/complete","params":{)")
+         + R"("ref":{"type":"ref/resource","uri":"file:///{+path}"},)"
+         + R"("argument":{"name":"path","value":")" + std::string(value) + R"("}},"id":40})";
+}
+
+std::vector<std::string> completion_values(const std::string& response,
+                                           simdjson::dom::parser& parser) {
+    auto root = parse_json_or_require(response, parser);
+    simdjson::dom::array values;
+    REQUIRE(root["result"]["completion"]["values"].get(values) == simdjson::SUCCESS);
+
+    std::vector<std::string> out;
+    for (auto value : values) {
+        std::string_view text;
+        REQUIRE(value.get(text) == simdjson::SUCCESS);
+        out.emplace_back(text);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("MCP completion/complete ranks workspace paths by basename prefix",
+          "[mcp][completion]") {
+    WorkspaceResetToDefault workspace_reset;
+    CompletionWorkspace workspace;
+
+    simdjson::dom::parser parser;
+    const auto values = completion_values(disp().dispatch(completion_request("Widget")), parser);
+
+    REQUIRE_FALSE(values.empty());
+    REQUIRE_THAT(values.front(), EndsWith("src/core/Widget.cpp"));
+}
+
+TEST_CASE("MCP completion/complete returns template-substitutable absolute paths",
+          "[mcp][completion]") {
+    WorkspaceResetToDefault workspace_reset;
+    CompletionWorkspace workspace;
+
+    simdjson::dom::parser parser;
+    const auto values = completion_values(disp().dispatch(completion_request("README")), parser);
+
+    REQUIRE(values.size() == 1);
+    // The value expands into file:///{+path}, so it carries no leading separator.
+    REQUIRE_FALSE(values.front().starts_with("/"));
+    REQUIRE("/" + values.front() == (workspace.root / "README.md").generic_string());
+}
+
+TEST_CASE("MCP completion/complete de-duplicates repeated workspace roots",
+          "[mcp][completion]") {
+    WorkspaceResetToDefault workspace_reset;
+    CompletionWorkspace workspace;
+    // Clients commonly advertise the primary root again as an additional one.
+    core::workspace::Workspace::get_instance().initialize(
+        workspace.root, {workspace.root}, true);
+
+    simdjson::dom::parser parser;
+    const auto values = completion_values(disp().dispatch(completion_request("Widget")), parser);
+
+    REQUIRE(values.size() == 1);
+}
+
+TEST_CASE("MCP completion/complete rejects unknown references", "[mcp][completion]") {
+    WorkspaceResetToDefault workspace_reset;
+    CompletionWorkspace workspace;
+
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"completion/complete","params":{)"
+        R"("ref":{"type":"ref/prompt","name":"review"},)"
+        R"("argument":{"name":"path","value":"src"}},"id":41})");
+
+    simdjson::dom::parser parser;
+    auto root = parse_json_or_require(resp, parser);
+    int64_t code = 0;
+    REQUIRE(root["error"]["code"].get(code) == simdjson::SUCCESS);
+    REQUIRE(code == -32602);
+}
+
+TEST_CASE("MCP initialize advertises the completions capability", "[mcp][completion]") {
+    WorkspaceResetToDefault workspace_reset;
+    auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"initialize","params":{},"id":42})");
+
+    simdjson::dom::parser parser;
+    auto root = parse_json_or_require(resp, parser);
+    simdjson::dom::object completions;
+    REQUIRE(root["result"]["capabilities"]["completions"].get(completions) == simdjson::SUCCESS);
 }

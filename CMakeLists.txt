@@ -302,6 +302,7 @@ set(FILO_CORE_SOURCES
     src/core/power/linux/LinuxSleepInhibitor.cpp
     src/core/power/macos/MacOSSleepInhibitor.cpp
     src/core/workspace/AgentIgnore.cpp
+    src/core/workspace/MentionIndex.cpp
     src/core/workspace/PathVisibility.cpp
     src/core/workspace/Workspace.cpp
     src/core/workspace/FileAccessScope.cpp
