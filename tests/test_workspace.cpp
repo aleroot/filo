@@ -240,6 +240,67 @@ TEST_CASE("SessionContext grants existing absolute paths for the session", "[Wor
     std::filesystem::remove_all(base, ec);
 }
 
+TEST_CASE("Visible-file traversal rechecks leaf symlinks before using a readable tree",
+          "[Workspace][PathVisibility]") {
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-visible-symlink-{}", std::rand());
+    std::filesystem::create_directories(base, ec);
+    { std::ofstream(base / "inside.txt") << "inside\n"; }
+
+    const auto outside = std::filesystem::path("/etc/hosts");
+    if (!std::filesystem::exists(outside)) {
+        std::filesystem::remove_all(base, ec);
+        SKIP("No stable out-of-workspace target available.");
+    }
+    std::filesystem::create_symlink(outside, base / "escape.txt", ec);
+    if (ec) {
+        std::filesystem::remove_all(base, ec);
+        SKIP("Filesystem does not permit symlink creation.");
+    }
+
+    const auto context = core::context::make_session_context(WorkspaceSnapshot{
+        .primary = base,
+        .additional = {},
+        .enforce = true,
+        .version = 1,
+    });
+    const auto files = core::workspace::collect_visible_regular_files(base, context);
+
+    REQUIRE(std::ranges::find(files, base / "inside.txt") != files.end());
+    REQUIRE(std::ranges::find(files, base / "escape.txt") == files.end());
+    std::filesystem::remove_all(base, ec);
+}
+
+TEST_CASE("Visible-file traversal honors excluded scratch subtrees",
+          "[Workspace][PathVisibility]") {
+    using core::workspace::FileAccessScope;
+    using core::workspace::WorkspaceSnapshot;
+
+    std::error_code ec;
+    const auto base = std::filesystem::temp_directory_path(ec)
+        / std::format("filo-visible-excluded-{}", std::rand());
+    const auto blocked = base / "blocked";
+    std::filesystem::create_directories(blocked, ec);
+    { std::ofstream(base / "allowed.txt") << "allowed\n"; }
+    { std::ofstream(blocked / "secret.txt") << "secret\n"; }
+
+    const auto context = core::context::make_session_context(WorkspaceSnapshot{
+        .primary = std::filesystem::current_path(),
+        .additional = {},
+        .enforce = true,
+        .version = 1,
+        .scratch = FileAccessScope({base}, {base}, {blocked}),
+    });
+    const auto files = core::workspace::collect_visible_regular_files(base, context);
+
+    REQUIRE(std::ranges::find(files, base / "allowed.txt") != files.end());
+    REQUIRE(std::ranges::find(files, blocked / "secret.txt") == files.end());
+    std::filesystem::remove_all(base, ec);
+}
+
 TEST_CASE("SessionContext replaces the primary workspace root", "[Workspace][SessionContext]") {
     using core::workspace::WorkspaceSnapshot;
 

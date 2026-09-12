@@ -2275,6 +2275,36 @@ TEST_CASE("GrepSearchTool literal path handles special char in text", "[tools][g
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("GrepSearchTool literal path reports one result per matching line", "[tools][grep]") {
+    const std::string dir = "test_grep_literal_duplicate_line";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "needle then needle again\nmiss\n"; }
+
+    GrepSearchTool tool;
+    const auto res = tool.execute(grep_args("needle", dir));
+
+    size_t count = 0;
+    size_t pos = 0;
+    while ((pos = res.find("\"line\":", pos)) != std::string::npos) {
+        ++count;
+        pos += 7;
+    }
+    REQUIRE(count == 1);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool literal path does not match across lines", "[tools][grep]") {
+    const std::string dir = "test_grep_literal_multiline";
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir + "/f.txt") << "alpha\nbeta\n"; }
+
+    GrepSearchTool tool;
+    const auto res = tool.execute(grep_args("alpha\\nbeta", dir));
+    REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("\"matches\":[]"));
+
+    std::filesystem::remove_all(dir);
+}
+
 // ── CRLF and edge-case line endings ─────────────────────────────────────────
 
 TEST_CASE("GrepSearchTool handles CRLF line endings", "[tools][grep]") {

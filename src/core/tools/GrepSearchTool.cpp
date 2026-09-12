@@ -6,6 +6,7 @@
 #include "../utils/JsonWriter.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
+#include <array>
 #include <filesystem>
 #include <regex>
 #include <string>
@@ -136,6 +137,61 @@ struct SearchScope {
     return pattern.find_first_of(kMeta) == std::string_view::npos;
 }
 
+[[nodiscard]] bool is_ascii(std::string_view text) noexcept {
+    return std::ranges::all_of(text, [](const char byte) {
+        return static_cast<unsigned char>(byte) < 0x80;
+    });
+}
+
+[[nodiscard]] constexpr unsigned char fold_ascii(unsigned char byte) noexcept {
+    if (byte >= 'A' && byte <= 'Z') return static_cast<unsigned char>(byte + ('a' - 'A'));
+    return byte;
+}
+
+class AsciiCaseInsensitiveLiteral {
+public:
+    explicit AsciiCaseInsensitiveLiteral(std::string_view needle)
+        : needle_(needle) {
+        skip_.fill(needle_.size());
+        for (size_t i = 0; i + 1 < needle_.size(); ++i) {
+            skip_[fold_ascii(static_cast<unsigned char>(needle_[i]))] = needle_.size() - i - 1;
+        }
+    }
+
+    [[nodiscard]] size_t find(std::string_view haystack, size_t from) const noexcept {
+        if (needle_.empty()) return std::min(from, haystack.size());
+        if (from >= haystack.size() || needle_.size() > haystack.size() - from) {
+            return std::string_view::npos;
+        }
+
+        if (needle_.size() == 1) {
+            const auto wanted = fold_ascii(static_cast<unsigned char>(needle_.front()));
+            for (size_t i = from; i < haystack.size(); ++i) {
+                if (fold_ascii(static_cast<unsigned char>(haystack[i])) == wanted) return i;
+            }
+            return std::string_view::npos;
+        }
+
+        const size_t last_start = haystack.size() - needle_.size();
+        for (size_t start = from; start <= last_start;) {
+            size_t index = needle_.size();
+            while (index > 0
+                   && fold_ascii(static_cast<unsigned char>(haystack[start + index - 1]))
+                       == fold_ascii(static_cast<unsigned char>(needle_[index - 1]))) {
+                --index;
+            }
+            if (index == 0) return start;
+            start += skip_[fold_ascii(
+                static_cast<unsigned char>(haystack[start + needle_.size() - 1]))];
+        }
+        return std::string_view::npos;
+    }
+
+private:
+    std::string_view needle_;
+    std::array<size_t, 256> skip_{};
+};
+
 // `nosubs` lets standard-library regex engines omit capture bookkeeping when
 // callers only need a boolean result. It cannot be used when the expression
 // contains a numeric backreference because those depend on captured text.
@@ -176,6 +232,7 @@ void search_file(
     const std::filesystem::path& fpath,
     bool                         literal_mode,
     std::string_view             literal_str,
+    const AsciiCaseInsensitiveLiteral* caseless_literal,
     const std::regex&            re,
     size_t                       max_results,
     std::atomic<size_t>&         total_found,
@@ -209,6 +266,66 @@ void search_file(
     const char* end   = buf + sz;
     int64_t     lineno = 0;
     std::string path_str = fpath.string();
+
+    // Search literal needles across the mapped buffer instead of restarting a
+    // substring search for every line.  Matches are normally sparse, so this
+    // avoids both newline discovery and matcher setup for every non-matching
+    // line.  A literal containing a newline could never match the old
+    // line-oriented implementation, either.
+    if (literal_mode && !literal_str.empty()) {
+        if (literal_str.find('\n') != std::string_view::npos) {
+            ::munmap(raw, sz);
+            return;
+        }
+
+        const std::string_view data(buf, sz);
+        size_t search_from = 0;
+        size_t line_start = 0;
+        lineno = 1;
+
+        while (search_from < sz
+               && total_found.load(std::memory_order_relaxed) < max_results) {
+            const size_t match = caseless_literal != nullptr
+                ? caseless_literal->find(data, search_from)
+                : data.find(literal_str, search_from);
+            if (match == std::string_view::npos) break;
+
+            while (line_start < match) {
+                const char* nl = static_cast<const char*>(
+                    ::memchr(buf + line_start, '\n', match - line_start));
+                if (nl == nullptr) break;
+                line_start = static_cast<size_t>(nl - buf) + 1;
+                ++lineno;
+            }
+
+            const char* nl = static_cast<const char*>(
+                ::memchr(buf + match, '\n', sz - match));
+            size_t line_end = nl == nullptr ? sz : static_cast<size_t>(nl - buf);
+
+            // A literal containing CR can still begin before the CR in a CRLF
+            // line.  Match against the same CR-stripped view as the general
+            // line path below.
+            size_t text_end = line_end;
+            if (text_end > line_start && buf[text_end - 1] == '\r') --text_end;
+            if (match + literal_str.size() <= text_end) {
+                out.push_back({
+                    path_str,
+                    lineno,
+                    std::string(buf + line_start, text_end - line_start),
+                });
+                total_found.fetch_add(1, std::memory_order_relaxed);
+                if (line_end == sz) break;
+                search_from = line_end + 1;
+                line_start = search_from;
+                ++lineno;
+            } else {
+                search_from = match + 1;
+            }
+        }
+
+        ::munmap(raw, sz);
+        return;
+    }
 
     while (p < end && total_found.load(std::memory_order_relaxed) < max_results) {
         const char* nl       = static_cast<const char*>(::memchr(p, '\n', static_cast<size_t>(end - p)));
@@ -336,11 +453,14 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     }
 
     // ── Regex or literal? ───────────────────────────────────────────────────
-    // Preserve the fast literal path for the default case-sensitive mode.
-    // Case-insensitive searches use std::regex::icase so literal and regex
-    // patterns share the same matching semantics.
-    const bool literal_mode = is_literal_pattern(pattern) && !ignore_case;
+    // Plain ASCII patterns can avoid std::regex even when matching without
+    // case. Non-ASCII case folding remains on std::regex to preserve its
+    // locale-aware behavior.
+    const bool literal_mode = is_literal_pattern(pattern)
+        && (!ignore_case || is_ascii(pattern));
     const std::string literal_str(pattern);
+    std::optional<AsciiCaseInsensitiveLiteral> caseless_literal;
+    if (literal_mode && ignore_case) caseless_literal.emplace(literal_str);
 
     std::regex re;
     if (!literal_mode) {
@@ -418,7 +538,8 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
                     const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
                     if (idx >= files.size()) break;
                     if (total_found.load(std::memory_order_relaxed) >= kMaxResults) break;
-                    search_file(files[idx], literal_mode, literal_str, re,
+                    search_file(files[idx], literal_mode, literal_str,
+                                caseless_literal ? &*caseless_literal : nullptr, re,
                                 kMaxResults, total_found, local);
                 }
             });

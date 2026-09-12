@@ -6,6 +6,7 @@
 #include "../landrun/LandrunSettings.hpp"
 
 #include <memory>
+#include <ranges>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -103,6 +104,71 @@ public:
     return std::make_shared<AgentIgnoreVisibilityDecorator>(
         std::move(wrapped),
         std::move(matcher));
+}
+
+[[nodiscard]] bool subtree_is_uniformly_readable(
+    const std::filesystem::path& root,
+    const core::context::SessionContext& context) {
+    const auto& workspace = context.workspace_view();
+    if (!workspace.enforce()) return true;
+    const auto normalized_root = context.resolve_path(root);
+
+    for (const auto& project_root : workspace.ordered_roots()) {
+        if (SessionWorkspace::is_subpath(project_root, normalized_root)) return true;
+    }
+
+    const auto& scratch = workspace.scratch();
+    if (!scratch.allows_read(normalized_root)) return false;
+
+    // A readable scratch root can contain an explicitly denied subtree.  In
+    // that case each file still needs the full canonical access check.
+    return std::ranges::none_of(
+        scratch.excluded_roots(),
+        [&](const auto& excluded) {
+            return SessionWorkspace::is_subpath(normalized_root, excluded);
+        });
+}
+
+template<typename Visitor>
+void visit_visible_regular_file_entries(
+    const std::filesystem::path& root,
+    const PathVisibility* visibility,
+    DirectoryPrunePredicate should_prune_directory,
+    Visitor&& visitor) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(
+        root,
+        std::filesystem::directory_options::skip_permission_denied,
+        ec);
+    const auto end = std::filesystem::recursive_directory_iterator{};
+
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+
+        const auto& entry = *it;
+        if (entry.is_directory(ec)) {
+            const bool prune_by_name =
+                should_prune_directory && should_prune_directory(entry.path());
+            const bool prune_by_visibility =
+                visibility != nullptr && visibility->should_prune_directory(entry);
+            if (prune_by_name || prune_by_visibility) {
+                it.disable_recursion_pending();
+            }
+            ec.clear();
+            continue;
+        }
+        ec.clear();
+
+        if (!entry.is_regular_file(ec)) {
+            ec.clear();
+            continue;
+        }
+        if (visibility != nullptr && !visibility->is_visible(entry)) continue;
+        if (!visitor(entry)) break;
+    }
 }
 
 } // namespace
@@ -302,48 +368,12 @@ void visit_visible_regular_files(
     const PathVisibility* visibility,
     DirectoryPrunePredicate should_prune_directory,
     RegularFileVisitor visitor) {
-    if (!visitor) {
-        return;
-    }
-
-    std::error_code ec;
-    std::filesystem::recursive_directory_iterator it(
+    if (!visitor) return;
+    visit_visible_regular_file_entries(
         root,
-        std::filesystem::directory_options::skip_permission_denied,
-        ec);
-    const auto end = std::filesystem::recursive_directory_iterator{};
-
-    for (; it != end; it.increment(ec)) {
-        if (ec) {
-            ec.clear();
-            continue;
-        }
-
-        const auto& entry = *it;
-        if (entry.is_directory(ec)) {
-            const bool prune_by_name =
-                should_prune_directory && should_prune_directory(entry.path());
-            const bool prune_by_visibility =
-                visibility != nullptr && visibility->should_prune_directory(entry);
-            if (prune_by_name || prune_by_visibility) {
-                it.disable_recursion_pending();
-            }
-            ec.clear();
-            continue;
-        }
-        ec.clear();
-
-        if (!entry.is_regular_file(ec)) {
-            ec.clear();
-            continue;
-        }
-        if (visibility != nullptr && !visibility->is_visible(entry)) {
-            continue;
-        }
-        if (!visitor(entry.path())) {
-            break;
-        }
-    }
+        visibility,
+        std::move(should_prune_directory),
+        [&](const auto& entry) { return visitor(entry.path()); });
 }
 
 std::vector<std::filesystem::path> collect_visible_regular_files(
@@ -380,15 +410,28 @@ void visit_visible_regular_files(
     if (!visitor) {
         return;
     }
-    visit_visible_regular_files(
+
+    const bool uniformly_readable = subtree_is_uniformly_readable(root, context);
+    visit_visible_regular_file_entries(
         root,
         context.path_visibility.get(),
         std::move(should_prune_directory),
-        [&](const std::filesystem::path& file) {
-            if (!context.allows_read(file)) {
-                return true;
+        [&](const std::filesystem::directory_entry& entry) {
+            if (!uniformly_readable) {
+                if (!context.allows_read(entry.path())) return true;
+            } else {
+                // recursive_directory_iterator does not follow directory
+                // symlinks by default.  A leaf symlink can still point outside
+                // the already-authorized tree, so retain the canonical check
+                // for that exceptional case.
+                std::error_code ec;
+                const bool is_symlink = entry.is_symlink(ec);
+                if (ec) return true;
+                if (is_symlink && !context.allows_read(entry.path())) {
+                    return true;
+                }
             }
-            return visitor(file);
+            return visitor(entry.path());
         });
 }
 
