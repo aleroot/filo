@@ -1,6 +1,7 @@
 #include "GrokProtocol.hpp"
 #include "GrokBuildEndpoint.hpp"
 #include "SseUtils.hpp"
+#include "GrokImage.hpp"
 #include "core/auth/XaiGrokClientIdentity.hpp"
 #include "core/utils/AsciiUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -309,9 +310,16 @@ void GrokResponsesProtocol::enrich_rate_limit(
     }
 }
 
+std::string GrokProtocol::serialize(const ChatRequest& request) const {
+    ChatRequest prepared = request;
+    prepare_grok_images(prepared);
+    return OpenAIProtocol::serialize(prepared);
+}
+
 std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
     SerializationOptions options;
     ChatRequest effective = request;
+    prepare_grok_images(effective);
     if (enable_hosted_tools_) {
         // xAI hosted server-side tools. The Grok Build session proxy resolves
         // these internally, giving the model access to real-time web search

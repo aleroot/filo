@@ -127,6 +127,9 @@ public:
         return std::make_unique<GrokProtocol>(*this);
     }
 
+    /// Applies Grok image policy (GrokImage.hpp) then OpenAI Chat Completions.
+    [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
+
     // ── Response lifecycle hooks (xAI-specific) ──────────────────────────────
 
     /**

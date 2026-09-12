@@ -233,6 +233,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/MistralProtocol.cpp
     src/core/llm/protocols/KimiProtocol.cpp
     src/core/llm/protocols/GrokBillingUsage.cpp
+    src/core/llm/protocols/GrokImage.cpp
     src/core/llm/protocols/GrokProtocol.cpp
     src/core/llm/protocols/DashScopeProtocol.cpp
     src/core/llm/protocols/AnthropicProtocol.cpp
@@ -598,6 +599,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_model_registry.cpp
     tests/test_provider_catalog_grouping.cpp
     tests/test_grok_provider.cpp
+    tests/test_grok_image.cpp
     tests/test_grok_enhanced.cpp
     tests/test_gemini_provider.cpp
     tests/test_claude_provider.cpp
@@ -797,6 +799,7 @@ source_group(
         tests/test_model_catalog_provider.cpp
         tests/test_provider_catalog_grouping.cpp
         tests/test_grok_provider.cpp
+        tests/test_grok_image.cpp
         tests/test_grok_enhanced.cpp
         tests/test_gemini_provider.cpp
         tests/test_claude_provider.cpp
