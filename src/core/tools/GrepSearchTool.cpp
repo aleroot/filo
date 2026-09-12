@@ -4,9 +4,9 @@
 #include "shell/FsUtils.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
+#include "../utils/StringUtils.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include <simdjson.h>
-#include <array>
 #include <filesystem>
 #include <regex>
 #include <string>
@@ -137,61 +137,6 @@ struct SearchScope {
     return pattern.find_first_of(kMeta) == std::string_view::npos;
 }
 
-[[nodiscard]] bool is_ascii(std::string_view text) noexcept {
-    return std::ranges::all_of(text, [](const char byte) {
-        return static_cast<unsigned char>(byte) < 0x80;
-    });
-}
-
-[[nodiscard]] constexpr unsigned char fold_ascii(unsigned char byte) noexcept {
-    if (byte >= 'A' && byte <= 'Z') return static_cast<unsigned char>(byte + ('a' - 'A'));
-    return byte;
-}
-
-class AsciiCaseInsensitiveLiteral {
-public:
-    explicit AsciiCaseInsensitiveLiteral(std::string_view needle)
-        : needle_(needle) {
-        skip_.fill(needle_.size());
-        for (size_t i = 0; i + 1 < needle_.size(); ++i) {
-            skip_[fold_ascii(static_cast<unsigned char>(needle_[i]))] = needle_.size() - i - 1;
-        }
-    }
-
-    [[nodiscard]] size_t find(std::string_view haystack, size_t from) const noexcept {
-        if (needle_.empty()) return std::min(from, haystack.size());
-        if (from >= haystack.size() || needle_.size() > haystack.size() - from) {
-            return std::string_view::npos;
-        }
-
-        if (needle_.size() == 1) {
-            const auto wanted = fold_ascii(static_cast<unsigned char>(needle_.front()));
-            for (size_t i = from; i < haystack.size(); ++i) {
-                if (fold_ascii(static_cast<unsigned char>(haystack[i])) == wanted) return i;
-            }
-            return std::string_view::npos;
-        }
-
-        const size_t last_start = haystack.size() - needle_.size();
-        for (size_t start = from; start <= last_start;) {
-            size_t index = needle_.size();
-            while (index > 0
-                   && fold_ascii(static_cast<unsigned char>(haystack[start + index - 1]))
-                       == fold_ascii(static_cast<unsigned char>(needle_[index - 1]))) {
-                --index;
-            }
-            if (index == 0) return start;
-            start += skip_[fold_ascii(
-                static_cast<unsigned char>(haystack[start + needle_.size() - 1]))];
-        }
-        return std::string_view::npos;
-    }
-
-private:
-    std::string_view needle_;
-    std::array<size_t, 256> skip_{};
-};
-
 // `nosubs` lets standard-library regex engines omit capture bookkeeping when
 // callers only need a boolean result. It cannot be used when the expression
 // contains a numeric backreference because those depend on captured text.
@@ -232,7 +177,7 @@ void search_file(
     const std::filesystem::path& fpath,
     bool                         literal_mode,
     std::string_view             literal_str,
-    const AsciiCaseInsensitiveLiteral* caseless_literal,
+    const core::utils::str::CaseInsensitiveAsciiSearcher* caseless_literal,
     const std::regex&            re,
     size_t                       max_results,
     std::atomic<size_t>&         total_found,
@@ -457,9 +402,9 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     // case. Non-ASCII case folding remains on std::regex to preserve its
     // locale-aware behavior.
     const bool literal_mode = is_literal_pattern(pattern)
-        && (!ignore_case || is_ascii(pattern));
+        && (!ignore_case || core::utils::ascii::is_ascii(pattern));
     const std::string literal_str(pattern);
-    std::optional<AsciiCaseInsensitiveLiteral> caseless_literal;
+    std::optional<core::utils::str::CaseInsensitiveAsciiSearcher> caseless_literal;
     if (literal_mode && ignore_case) caseless_literal.emplace(literal_str);
 
     std::regex re;

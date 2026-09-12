@@ -12,6 +12,12 @@ namespace core::utils::ascii {
     return ch;
 }
 
+[[nodiscard]] inline bool is_ascii(std::string_view value) noexcept {
+    return std::ranges::all_of(value, [](const unsigned char ch) {
+        return ch < 0x80;
+    });
+}
+
 [[nodiscard]] constexpr bool is_alnum(unsigned char ch) noexcept {
     return (ch >= '0' && ch <= '9')
         || (ch >= 'A' && ch <= 'Z')

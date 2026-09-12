@@ -11,6 +11,12 @@ TEST_CASE("ascii::to_lower lowercases only ASCII uppercase letters", "[utils][as
     REQUIRE(core::utils::ascii::to_lower('-') == '-');
 }
 
+TEST_CASE("ascii::is_ascii rejects non-ASCII bytes", "[utils][ascii]") {
+    REQUIRE(core::utils::ascii::is_ascii("plain ASCII"));
+    REQUIRE(core::utils::ascii::is_ascii(""));
+    REQUIRE_FALSE(core::utils::ascii::is_ascii("caf\xc3\xa9"));
+}
+
 TEST_CASE("ascii::is_alnum recognizes ASCII letters and digits", "[utils][ascii]") {
     REQUIRE(core::utils::ascii::is_alnum(static_cast<unsigned char>('a')));
     REQUIRE(core::utils::ascii::is_alnum(static_cast<unsigned char>('Z')));
@@ -55,6 +61,16 @@ TEST_CASE("str::contains_case_insensitive finds ASCII substrings without allocat
     REQUIRE(core::utils::str::contains_case_insensitive("anything", ""));
     REQUIRE_FALSE(core::utils::str::contains_case_insensitive("claude-haiku", "sonnet"));
     REQUIRE_FALSE(core::utils::str::contains_case_insensitive("short", "longer"));
+}
+
+TEST_CASE("str::CaseInsensitiveAsciiSearcher supports reuse and offsets",
+          "[utils][string]") {
+    const core::utils::str::CaseInsensitiveAsciiSearcher searcher("needle");
+    const std::string_view text = "NEEDLE then another Needle";
+
+    REQUIRE(searcher.find(text) == 0);
+    REQUIRE(searcher.find(text, 1) == 20);
+    REQUIRE(searcher.find(text, 21) == std::string_view::npos);
 }
 
 TEST_CASE("str::trim_ascii_view returns empty view for all-whitespace input",

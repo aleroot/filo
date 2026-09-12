@@ -3,11 +3,60 @@
 #include "AsciiUtils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace core::utils::str {
+
+class CaseInsensitiveAsciiSearcher {
+public:
+    explicit CaseInsensitiveAsciiSearcher(std::string_view needle)
+        : needle_(needle) {
+        skip_.fill(needle_.size());
+        for (std::size_t i = 0; i + 1 < needle_.size(); ++i) {
+            skip_[folded_index(needle_[i])] = needle_.size() - i - 1;
+        }
+    }
+
+    [[nodiscard]] std::size_t find(std::string_view haystack,
+                                   std::size_t from = 0) const noexcept {
+        if (needle_.empty()) return std::min(from, haystack.size());
+        if (from >= haystack.size() || needle_.size() > haystack.size() - from) {
+            return std::string_view::npos;
+        }
+
+        if (needle_.size() == 1) {
+            const auto wanted = folded_index(needle_.front());
+            for (std::size_t i = from; i < haystack.size(); ++i) {
+                if (folded_index(haystack[i]) == wanted) return i;
+            }
+            return std::string_view::npos;
+        }
+
+        const std::size_t last_start = haystack.size() - needle_.size();
+        for (std::size_t start = from; start <= last_start;) {
+            std::size_t index = needle_.size();
+            while (index > 0
+                   && core::utils::ascii::to_lower(haystack[start + index - 1])
+                       == core::utils::ascii::to_lower(needle_[index - 1])) {
+                --index;
+            }
+            if (index == 0) return start;
+            start += skip_[folded_index(haystack[start + needle_.size() - 1])];
+        }
+        return std::string_view::npos;
+    }
+
+private:
+    [[nodiscard]] static constexpr unsigned char folded_index(char ch) noexcept {
+        return static_cast<unsigned char>(core::utils::ascii::to_lower(ch));
+    }
+
+    std::string_view needle_;
+    std::array<std::size_t, 256> skip_{};
+};
 
 [[nodiscard]] inline std::string to_lower_ascii_copy(std::string_view value) {
     std::string out(value);
@@ -55,22 +104,13 @@ namespace core::utils::str {
 
 [[nodiscard]] inline bool contains_case_insensitive(std::string_view haystack,
                                                     std::string_view needle) noexcept {
-    if (needle.empty()) return true;
-    if (haystack.size() < needle.size()) return false;
-    for (std::size_t pos = 0; pos + needle.size() <= haystack.size(); ++pos) {
-        if (core::utils::ascii::iequals(haystack.substr(pos, needle.size()), needle)) {
-            return true;
-        }
-    }
-    return false;
+    return CaseInsensitiveAsciiSearcher(needle).find(haystack) != std::string_view::npos;
 }
 
 [[nodiscard]] inline std::optional<std::size_t>
 find_case_insensitive(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) return std::nullopt;
-    const std::string lowered_haystack = to_lower_ascii_copy(haystack);
-    const std::string lowered_needle = to_lower_ascii_copy(needle);
-    const auto pos = lowered_haystack.find(lowered_needle);
+    const auto pos = CaseInsensitiveAsciiSearcher(needle).find(haystack);
     if (pos == std::string::npos) return std::nullopt;
     return pos;
 }
