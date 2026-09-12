@@ -51,8 +51,8 @@ public:
         core::tools::QuestionRequest request,
         std::string origin_label = {});
 
-    /// Thread label captured by open(); rendered next to the dialog so users
-    /// know which conversation is waiting on them.
+    /// Optional thread label captured by open(). Isolation is owned by
+    /// ThreadModalHost; this is decoration only.
     [[nodiscard]] std::string origin_label() const;
 
     /// Force-dismiss an active dialog with an interrupt. Used at shutdown so

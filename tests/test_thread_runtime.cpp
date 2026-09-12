@@ -235,7 +235,8 @@ TEST_CASE("ThreadRuntimeRegistry retitle_auto_named follows the workspace",
 
     auto main = make_runtime("aaaa1111");
     main->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "main";
+        metadata.thread_name = "oldproj";
+        metadata.auto_thread_name = true;
         metadata.created_at = "2026-08-08T12:00:00Z";
     });
     auto first_auto = make_runtime("bbbb2222");
@@ -264,15 +265,40 @@ TEST_CASE("ThreadRuntimeRegistry retitle_auto_named follows the workspace",
 
     registry.retitle_auto_named("newproj", main->session_id());
 
-    CHECK(main->metadata().thread_name == "main");
     CHECK(user_named->metadata().thread_name == "newproj");
-    CHECK(first_auto->metadata().thread_name == "newproj 2");
-    CHECK(second_auto->metadata().thread_name == "newproj 3");
+    CHECK(main->metadata().thread_name == "newproj 2");
+    CHECK(first_auto->metadata().thread_name == "newproj 3");
+    CHECK(second_auto->metadata().thread_name == "newproj 4");
+    CHECK(main->metadata().auto_thread_name);
     CHECK(first_auto->metadata().auto_thread_name);
     CHECK_FALSE(user_named->metadata().auto_thread_name);
 
     // Retitling is idempotent when the workspace has not actually changed.
     registry.retitle_auto_named("newproj", main->session_id());
-    CHECK(first_auto->metadata().thread_name == "newproj 2");
-    CHECK(second_auto->metadata().thread_name == "newproj 3");
+    CHECK(main->metadata().thread_name == "newproj 2");
+    CHECK(first_auto->metadata().thread_name == "newproj 3");
+    CHECK(second_auto->metadata().thread_name == "newproj 4");
+}
+
+TEST_CASE("the first auto-named thread takes the project name",
+          "[tui][thread_runtime][workspace]") {
+    tui::ThreadRuntimeRegistry registry;
+    auto first = make_runtime("aaaa1111");
+    first->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "oldproj";
+        metadata.auto_thread_name = true;
+        metadata.created_at = "2026-08-08T12:00:00Z";
+    });
+    auto second = make_runtime("bbbb2222");
+    second->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "oldproj 2";
+        metadata.auto_thread_name = true;
+        metadata.created_at = "2026-08-08T13:00:00Z";
+    });
+    REQUIRE(registry.insert(first));
+    REQUIRE(registry.insert(second));
+
+    registry.retitle_auto_named("filo", first->session_id());
+    CHECK(first->metadata().thread_name == "filo");
+    CHECK(second->metadata().thread_name == "filo 2");
 }

@@ -183,6 +183,7 @@ set(FILO_CORE_SOURCES
     src/tui/KeyInput.cpp
     src/tui/SessionPicker.cpp
     src/tui/ThreadRuntime.cpp
+    src/tui/ThreadModalHost.cpp
     src/tui/SessionReplay.cpp
     src/tui/Text.cpp
     src/tui/TextLayout.cpp
@@ -627,6 +628,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_thread_catalog.cpp
     tests/test_session_picker.cpp
     tests/test_thread_runtime.cpp
+    tests/test_thread_modal_host.cpp
     tests/test_session_efficiency.cpp
     tests/test_sessions_lifecycle.cpp
     tests/test_budget_tracker.cpp
@@ -819,6 +821,7 @@ source_group(
         tests/test_thread_catalog.cpp
         tests/test_session_picker.cpp
         tests/test_thread_runtime.cpp
+        tests/test_thread_modal_host.cpp
         tests/test_agent_ignore.cpp
         tests/test_session_efficiency.cpp
         tests/test_sessions_lifecycle.cpp

@@ -64,6 +64,8 @@ struct ThreadTab {
     std::string label;
     bool active = false;
     bool running = false;
+    /// True when a hidden thread is waiting on a question or permission.
+    bool waiting = false;
 };
 
 using ReviewBaseRef = core::scm::BranchRef;
@@ -142,8 +144,8 @@ ftxui::Element render_mention_prompt_panel(const std::vector<MentionSuggestion>&
                                            ftxui::Element input_line,
                                            std::string_view input_text);
 
-/// @p origin_label identifies the thread that triggered the prompt; empty
-/// for the current thread, rendered when a hidden thread requests approval.
+/// @p origin_label is optional decoration. Isolation is owned by
+/// ThreadModalHost: a prompt only paints on its origin thread.
 ftxui::Element render_permission_prompt_panel(std::string_view tool_name,
                                               std::string_view args_preview,
                                               const ToolDiffPreview& diff_preview,

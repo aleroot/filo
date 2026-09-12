@@ -20,6 +20,7 @@
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
 #include "QuestionDialogController.hpp"
+#include "ThreadModalHost.hpp"
 #include "RewindActions.hpp"
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
@@ -1106,34 +1107,10 @@ RunResult run(RunOptions opts) {
         }
     }
 
-    // Permission overlay state
-    struct PermissionState {
-        bool                                            active = false;
-        std::string                                     tool_name;
-        std::string                                     args_preview;
-        ToolDiffPreview                                 diff_preview;
-        int                                             selected = 0;  // 0-3
-        std::string                                     remember_rule;
-        std::string                                     allow_label;
-        std::shared_ptr<std::promise<bool>>             promise;
-        /// Thread asking for permission and a display label; Ctrl+C must stop
-        /// this thread's agent (not necessarily the currently visible one).
-        ThreadRuntime::Ptr                              origin_runtime;
-        std::string                                     origin_label;
-    };
-    PermissionState perm_state;
-    std::mutex permission_prompt_mutex;
-    std::condition_variable permission_prompt_cv;
-    bool permission_prompt_in_flight = false;
-    // Set at shutdown under ui_mutex; permission waiters treat it as an
-    // immediate deny so they never block the idle barriers during exit.
-    bool permission_prompt_shutdown = false;
-    // AskUserQuestion overlays are also single-slot UI resources. Concurrent
-    // threads wait here instead of displacing (and silently cancelling) the
-    // question already visible to the user.
-    std::mutex question_prompt_mutex;
-    std::condition_variable question_prompt_cv;
-    bool question_prompt_shutdown = false;
+    // Thread-owned overlays (questions, permissions). Visibility follows the
+    // FTXUI Modal contract: only the currently visible thread paints and
+    // receives keys. Hidden threads keep their blocked workers and state.
+    ThreadModalHost thread_modals;
 
     struct ModelPickerState {
         bool active = false;
@@ -1267,7 +1244,8 @@ RunResult run(RunOptions opts) {
     };
     ConversationSearchState conversation_search_state;
 
-    QuestionDialogController question_dialog;
+    // Question/permission state lives in thread_modals so each live thread
+    // can wait independently, like a tmux window.
 
     struct SettingsChoice {
         std::string value;
@@ -1613,7 +1591,8 @@ RunResult run(RunOptions opts) {
     auto current_runtime = std::make_shared<ThreadRuntime>(
         ThreadRuntimeMetadata{
             .session_id = session_id,
-            .thread_name = "main",
+            .thread_name = project_thread_base_name,
+            .auto_thread_name = true,
             .session_name = session_name,
             .created_at = session_created_at,
             .file_path = session_file_path,
@@ -4993,65 +4972,34 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        // Serialize prompt-based approvals across concurrent agent threads to
-        // prevent multiple permission overlays from racing and overwriting state.
-        {
-            std::unique_lock slot_lock(permission_prompt_mutex);
-            permission_prompt_cv.wait(slot_lock, [&]() {
-                return permission_prompt_shutdown || !permission_prompt_in_flight;
-            });
-            if (permission_prompt_shutdown) {
-                // The app is winding down: deny instead of blocking exit.
-                return false;
-            }
-            permission_prompt_in_flight = true;
+        // One permission prompt per session. Other threads keep working; a
+        // second tool on this same thread waits for the current prompt.
+        auto slot_guard = thread_modals.acquire_permission_slot(runtime->session_id());
+        if (!slot_guard) {
+            return false;
         }
-        struct PermissionPromptSlotGuard {
-            std::mutex* mutex = nullptr;
-            std::condition_variable* cv = nullptr;
-            bool* in_flight = nullptr;
-            ~PermissionPromptSlotGuard() {
-                if (mutex == nullptr || cv == nullptr || in_flight == nullptr) {
-                    return;
-                }
-                {
-                    std::lock_guard lock(*mutex);
-                    *in_flight = false;
-                }
-                cv->notify_one();
-            }
-        } slot_guard{
-            .mutex = &permission_prompt_mutex,
-            .cv = &permission_prompt_cv,
-            .in_flight = &permission_prompt_in_flight
-        };
 
         // Block this worker thread on a promise resolved by the TUI.
         auto prom = std::make_shared<std::promise<bool>>();
         auto fut  = prom->get_future();
 
-        {
-            std::lock_guard lock(ui_mutex);
-            perm_state.active       = true;
-            perm_state.tool_name    = std::string(tool_name);
+        thread_modals.post_permission(PermissionPrompt{
+            .session_id = runtime->session_id(),
+            .tool_name = std::string(tool_name),
             // Keep full arguments so the permission panel can parse/render
             // a structured, user-friendly preview instead of truncated JSON.
-            perm_state.args_preview = std::string(args);
+            .args_preview = std::string(args),
             // The overlay is a fixed-height panel, so it clamps explicitly
             // rather than relying on the model to arrive pre-truncated.
-            perm_state.diff_preview = clamp_diff_preview(
+            .diff_preview = clamp_diff_preview(
                 build_tool_diff_preview(tool_name, args),
-                kPermissionDiffPreviewMaxLines);
-            perm_state.selected     = 0;
-            perm_state.remember_rule =
-                core::permissions::make_session_allow_rule(tool_name, args);
-            perm_state.allow_label  = make_allow_label(tool_name, args);
-            perm_state.promise      = prom;
-            // Attribute the overlay to the requesting thread. A hidden thread
-            // can reach the user too; Ctrl+C must stop the right agent.
-            perm_state.origin_runtime = runtime;
-            perm_state.origin_label = thread_display_label(runtime);
-        }
+                kPermissionDiffPreviewMaxLines),
+            .selected = 0,
+            .remember_rule =
+                core::permissions::make_session_allow_rule(tool_name, args),
+            .allow_label = make_allow_label(tool_name, args),
+            .promise = prom,
+        });
         wake_ui();
         return fut.get();
         };
@@ -5059,28 +5007,13 @@ RunResult run(RunOptions opts) {
 
     // ── AskUserQuestion callback ─────────────────────────────────────────────
     ask_user_tool->setQuestionCallback([&](core::tools::QuestionRequest request) {
-        auto origin_runtime = thread_runtimes.find(request.session_id);
-        std::unique_lock slot_lock(question_prompt_mutex);
-        question_prompt_cv.wait(slot_lock, [&]() {
-            return question_prompt_shutdown || !question_dialog.active();
-        });
-        if (question_prompt_shutdown) {
-            request.promise->set_value(std::nullopt);
-            return;
+        if (request.session_id.empty()) {
+            if (auto current = thread_runtimes.current()) {
+                request.session_id = current->session_id();
+            }
         }
-        const bool origin_is_hidden = origin_runtime
-            && thread_runtimes.current() != origin_runtime;
-        auto displaced_promise = question_dialog.open(
-            std::move(request),
-            origin_is_hidden ? thread_display_label(origin_runtime) : std::string{});
-        slot_lock.unlock();
+        thread_modals.post_question(std::move(request));
         wake_ui();
-
-        if (displaced_promise) {
-            displaced_promise->set_value(std::nullopt);
-        }
-        
-        // Wait for the result (UI will resolve the promise)
     });
 
     auto append_runtime_history = [&](const ThreadRuntime::Ptr& runtime,
@@ -5460,6 +5393,11 @@ RunResult run(RunOptions opts) {
         runtime->wait_until_saved();
         if (!thread_runtimes.erase(target_session_id)) {
             return "The thread became active while it was being closed.";
+        }
+
+        auto dismissed_overlay = thread_modals.erase_session(target_session_id);
+        if (dismissed_overlay.has_resolution()) {
+            dismissed_overlay.resolve();
         }
 
         runtime->set_lease(nullptr);
@@ -6705,8 +6643,8 @@ RunResult run(RunOptions opts) {
         // If permission overlay is active, ignore normal input submission
         {
             std::lock_guard lock(ui_mutex);
-            if (perm_state.active
-                || question_dialog.active()
+            if (thread_modals.question_visible(session_id)
+                || thread_modals.permission_visible(session_id)
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
@@ -6922,8 +6860,8 @@ RunResult run(RunOptions opts) {
     auto open_external_editor = [&]() -> bool {
         {
             std::lock_guard lock(ui_mutex);
-            if (perm_state.active
-                || question_dialog.active()
+            if (thread_modals.question_visible(session_id)
+                || thread_modals.permission_visible(session_id)
                 || model_picker_state.active
                 || model_provider_picker_state.active
                 || provider_model_picker_state.active
@@ -7000,10 +6938,10 @@ RunResult run(RunOptions opts) {
     };
 
     auto input_component = PromptInput(&input_text, "Ask anything", input_option);
-    auto input_stack = Container::Stacked({
-        input_component,
-        question_dialog.editor_component(),
-    });
+    // Question editors live on ThreadModalHost and are dispatched manually.
+    // Putting them in the FTXUI tree would leak a hidden thread's input
+    // component into the visible session (the FTXUI Modal anti-pattern).
+    auto input_stack = input_component;
     std::size_t history_snapshot_revision = 0;
     auto history_snapshot = std::make_shared<const std::vector<UiMessage>>();
     auto history_component = Make<HistoryComponent>(
@@ -7357,7 +7295,10 @@ RunResult run(RunOptions opts) {
         bool authentication_recovery_accepted = false;
         {
             std::lock_guard lock(ui_mutex);
-            if (authentication_recovery_state.active.has_value()) {
+            if (authentication_recovery_state.active.has_value()
+                && authentication_recovery_state.active->runtime
+                && authentication_recovery_state.active->runtime->session_id()
+                    == session_id) {
                 authentication_recovery_was_active = true;
                 if (event == Event::ArrowUp || event == Event::ArrowDown) {
                     authentication_recovery_state.selected =
@@ -7463,124 +7404,63 @@ RunResult run(RunOptions opts) {
         }
 
         // ── Permission overlay keypresses ────────────────────────────────
-        // Resolve the promise OUTSIDE the lock to avoid locking issues when
-        // the worker thread wakes up and might try to re-acquire ui_mutex.
-        std::shared_ptr<std::promise<bool>> perm_prom;
-        std::optional<bool> perm_answer;
-        bool enable_yolo_from_permission = false;
-        bool enable_always_allow = false;
-        std::string always_allow_rule;
-        std::string always_allow_label;
-        ThreadRuntime::Ptr permission_runtime;
-        bool perm_was_active = false;
-        {
-            std::lock_guard lock(ui_mutex);
-            if (perm_state.active) {
-                perm_was_active = true;
-                permission_runtime = perm_state.origin_runtime;
-                // ── Option indices:
-                //   0 = Yes, once
-                //   1 = Yes, don't ask again for this
-                //   2 = Yes, enable YOLO
-                //   3 = No, suggest something
-                if (event == Event::ArrowUp) {
-                    perm_state.selected = (perm_state.selected + 3) % 4;
-                } else if (event == Event::ArrowDown) {
-                    perm_state.selected = (perm_state.selected + 1) % 4;
-                } else if (event == Event::Character('1')
-                           || event == Event::Character('y')
-                           || event == Event::Character('Y')) {
-                    // Yes, once
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = true;
-                    perm_state.active = false;
-                } else if (event == Event::Character('2')
-                           || event == Event::Character('a')
-                           || event == Event::Character('A')) {
-                    // Yes, don't ask again for this
-                    always_allow_rule  = perm_state.remember_rule;
-                    always_allow_label = perm_state.allow_label;
-                    enable_always_allow = true;
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = true;
-                    perm_state.active = false;
-                } else if (event == Event::Character('3')
-                           || is_ctrl_y_event(event)) {
-                    // Yes, enable YOLO
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = true;
-                    enable_yolo_from_permission = true;
-                    perm_state.active = false;
-                } else if (event == Event::Return) {
-                    const int sel = perm_state.selected;
-                    always_allow_rule  = perm_state.remember_rule;
-                    always_allow_label = perm_state.allow_label;
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = sel != 3;
-                    enable_always_allow         = sel == 1;
-                    enable_yolo_from_permission = sel == 2;
-                    perm_state.active = false;
-                } else if (is_ctrl_c_event(event)) {
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = false;
-                    perm_state.active = false;
-                    // Stop the thread that asked, which may be a hidden one;
-                    // fall back to the visible agent if attribution is lost.
-                    if (perm_state.origin_runtime) {
-                        perm_state.origin_runtime->request_stop();
-                    } else {
-                        agent->request_stop();
+        // Hidden-thread prompts do not steal keys: handle_permission_event
+        // is a no-op unless the visible session owns the overlay.
+        auto perm_result = thread_modals.handle_permission_event(
+            session_id,
+            event,
+            is_ctrl_c_event(event),
+            is_ctrl_y_event(event));
+        if (perm_result.handled) {
+            ThreadRuntime::Ptr permission_runtime;
+            if (!perm_result.origin_session_id.empty()) {
+                permission_runtime = thread_runtimes.find(perm_result.origin_session_id);
+            }
+            if (perm_result.stop_agent) {
+                if (permission_runtime) {
+                    permission_runtime->request_stop();
+                } else {
+                    agent->request_stop();
+                }
+            }
+            if (perm_result.has_resolution()) {
+                if (perm_result.always_allow && !perm_result.remember_rule.empty()) {
+                    if (!permission_runtime) {
+                        permission_runtime = current_runtime;
                     }
-                } else if (event == Event::Character('4')
-                           || event == Event::Character('n')
-                           || event == Event::Character('N')
-                           || event == Event::Escape) {
-                    // No, suggest something
-                    perm_prom   = std::move(perm_state.promise);
-                    perm_answer = false;
-                    perm_state.active = false;
+                    permission_runtime->mutate_metadata(
+                        [&](ThreadRuntimeMetadata& metadata) {
+                            metadata.permission_rules.insert(perm_result.remember_rule);
+                        });
                 }
-                // else: absorb all other keys while overlay is active
-            }
-        }
-        if (perm_was_active) {
-            // Resolve the promise FIRST (before re-acquiring ui_mutex) to avoid
-            // a race where the worker thread wakes up and tries to re-enter the
-            // permission check while we're still updating its runtime state.
-            if (perm_prom && perm_answer.has_value()) {
-                perm_prom->set_value(*perm_answer);
-            }
-            if (enable_always_allow && !always_allow_rule.empty()) {
-                if (!permission_runtime) {
-                    permission_runtime = current_runtime;
+                if (perm_result.enable_yolo) {
+                    if (!permission_runtime) {
+                        permission_runtime = current_runtime;
+                    }
+                    permission_runtime->mutate_metadata(
+                        [](ThreadRuntimeMetadata& metadata) {
+                            metadata.yolo_enabled = true;
+                        });
+                    append_history(
+                        "\n\xe2\x9a\xa0  Approval mode set to YOLO: sensitive tools will auto-run.\n");
                 }
-                permission_runtime->mutate_metadata(
-                    [&](ThreadRuntimeMetadata& metadata) {
-                        metadata.permission_rules.insert(always_allow_rule);
-                    });
-                // Session allow-list updated - no status message needed
-                (void)always_allow_label;
-            }
-            if (enable_yolo_from_permission) {
-                if (!permission_runtime) {
-                    permission_runtime = current_runtime;
+                if (perm_result.approved == false) {
+                    append_history(
+                        "\n\xe2\x84\xb9  Tool call rejected. Share a suggestion and Filo will adapt.\n");
                 }
-                permission_runtime->mutate_metadata(
-                    [](ThreadRuntimeMetadata& metadata) {
-                        metadata.yolo_enabled = true;
-                    });
-                append_history(
-                    "\n\xe2\x9a\xa0  Approval mode set to YOLO: sensitive tools will auto-run.\n");
-            }
-            if (perm_prom && perm_answer.has_value() && !*perm_answer) {
-                append_history(
-                    "\n\xe2\x84\xb9  Tool call rejected. Share a suggestion and Filo will adapt.\n");
+                if (perm_result.restore_main_input_focus) {
+                    input_component->TakeFocus();
+                }
+                perm_result.resolve();
             }
             return true;
         }
 
         // ── Question dialog input handling ───────────────────────────────
-        auto question_result = question_dialog.handle_event(
+        // Hidden-thread questions do not steal keys: handle_question_event
+        // is a no-op unless the visible session owns the dialog.
+        auto question_result = thread_modals.handle_question_event(
+            session_id,
             event,
             is_ctrl_c_event(event));
         if (question_result.handled) {
@@ -7595,11 +7475,7 @@ RunResult run(RunOptions opts) {
                     agent->request_stop();
                 }
             }
-            const bool resolved_question = question_result.has_resolution();
             question_result.resolve();
-            if (resolved_question) {
-                question_prompt_cv.notify_one();
-            }
             return true;
         }
 
@@ -8845,7 +8721,7 @@ RunResult run(RunOptions opts) {
         bool                   review_activity_active = false;
         bool                   settings_panel_active = false;
         bool                   authentication_recovery_active = false;
-        std::string            perm_tool, perm_args, perm_allow_label, perm_origin_label;
+        std::string            perm_tool, perm_args, perm_allow_label;
         std::string            review_activity_hint;
         std::string            settings_panel_status;
         std::string            authentication_recovery_provider;
@@ -8920,13 +8796,14 @@ RunResult run(RunOptions opts) {
             if (conversation_search_state.active) {
                 refresh_conversation_search_locked();
             }
-            perm_active       = perm_state.active;
-            perm_tool         = perm_state.tool_name;
-            perm_args         = perm_state.args_preview;
-            perm_diff         = perm_state.diff_preview;
-            perm_selected     = perm_state.selected;
-            perm_allow_label  = perm_state.allow_label;
-            perm_origin_label = perm_state.origin_label;
+            if (auto prompt = thread_modals.permission_view(session_id)) {
+                perm_active       = true;
+                perm_tool         = prompt->tool_name;
+                perm_args         = prompt->args_preview;
+                perm_diff         = prompt->diff_preview;
+                perm_selected     = prompt->selected;
+                perm_allow_label  = prompt->allow_label;
+            }
             model_picker_active   = model_picker_state.active;
             model_picker_selected = model_picker_state.selected;
             model_provider_picker_active = model_provider_picker_state.active;
@@ -8959,8 +8836,11 @@ RunResult run(RunOptions opts) {
             settings_panel_scope = settings_panel_state.scope;
             settings_panel_status = settings_panel_state.status_message;
             authentication_recovery_active =
-                authentication_recovery_state.active.has_value();
-            if (authentication_recovery_state.active.has_value()) {
+                authentication_recovery_state.active.has_value()
+                && authentication_recovery_state.active->runtime
+                && authentication_recovery_state.active->runtime->session_id()
+                    == session_id;
+            if (authentication_recovery_active) {
                 authentication_recovery_provider =
                     authentication_recovery_state.active->provider.display_name;
                 authentication_recovery_reason =
@@ -9045,19 +8925,20 @@ RunResult run(RunOptions opts) {
                 std::string label = item.metadata.thread_name;
                 if (label.empty()) {
                     label = i == 0
-                        ? std::string{"main"}
+                        ? project_thread_base_name
                         : std::format("{} {}", project_thread_base_name, i + 1);
                 }
                 thread_tabs.push_back(ThreadTab{
                     .label = std::move(label),
                     .active = item.runtime == selected_runtime,
                     .running = item.runtime->turn_active(),
+                    .waiting = thread_modals.waiting(item.metadata.session_id),
                 });
                 thread_tab_session_ids.push_back(item.metadata.session_id);
             }
         }
 
-        const bool question_dialog_active = question_dialog.active();
+        const bool question_dialog_active = thread_modals.question_visible(session_id);
         
         auto history_el = history_component->Render() | flex;
 
@@ -9170,7 +9051,7 @@ RunResult run(RunOptions opts) {
                 settings_panel_selected,
                 settings_panel_status);
         } else if (question_dialog_active) {
-            bottom_el = question_dialog.render();
+            bottom_el = thread_modals.render_question(session_id);
         } else if (code_block_runner_snapshot.active) {
             bottom_el = render_code_block_runner_panel(code_block_runner_snapshot);
         } else if (rewind_picker_active) {
@@ -9270,8 +9151,7 @@ RunResult run(RunOptions opts) {
                 perm_args,
                 perm_diff,
                 perm_allow_label,
-                perm_selected,
-                perm_origin_label);
+                perm_selected);
         } else {
             Element input_el =
                 input_component->Render() | color(tui::ColorYellowBright) | xflex;
@@ -9627,32 +9507,7 @@ RunResult run(RunOptions opts) {
     // Force-dismiss any interactive blockers before the idle barriers, or a
     // waiting worker would block shutdown forever (permission slot queue,
     // unanswered question dialog, queued steering turns).
-    {
-        std::lock_guard lock(ui_mutex);
-        if (perm_state.active && perm_state.promise) {
-            auto pending = std::move(perm_state.promise);
-            perm_state.active = false;
-            perm_state.origin_runtime.reset();
-            pending->set_value(false);
-        }
-    }
-    {
-        std::lock_guard lock(permission_prompt_mutex);
-        permission_prompt_shutdown = true;
-        permission_prompt_cv.notify_all();
-    }
-    {
-        std::lock_guard lock(question_prompt_mutex);
-        question_prompt_shutdown = true;
-        question_prompt_cv.notify_all();
-    }
-    {
-        auto dismissed = question_dialog.force_interrupt();
-        if (dismissed.has_resolution()) {
-            dismissed.resolve();
-            question_prompt_cv.notify_all();
-        }
-    }
+    thread_modals.request_shutdown();
 
     // Detached turn launchers only retain runtime-owned state, but their TUI
     // callbacks still reference this composition root. Stop and join logically

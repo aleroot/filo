@@ -724,10 +724,17 @@ Element render_startup_banner_panel(std::string_view provider_name,
         Elements tabs;
         for (std::size_t i = 0; i < thread_tabs.size(); ++i) {
             const auto& tab = thread_tabs[i];
-            const std::string marker = tab.running && !tab.active ? "● " : "";
+            std::string marker;
+            Color tab_color = tab.active ? Color::Black
+                                         : static_cast<Color>(ColorYellowBright);
+            if (!tab.active && tab.waiting) {
+                marker = "? ";
+                tab_color = ColorQuestionCyan;
+            } else if (!tab.active && tab.running) {
+                marker = "● ";
+            }
             auto rendered = text(std::format(" {}{} ", marker, fit_column(tab.label, 16)))
-                | color(tab.active ? Color::Black
-                                   : static_cast<Color>(ColorYellowBright));
+                | color(tab_color);
             if (tab.active) {
                 rendered = rendered | ftxui::bold | bgcolor(ColorYellowDark);
             }
@@ -894,8 +901,8 @@ Element render_permission_prompt_panel(std::string_view tool_name,
     std::vector<Element> children = {
         hbox({
             text("\xe2\x9a\xa0 WARNING ") | ftxui::bold | color(ColorWarn),
-            // A hidden thread can reach this overlay too; the label makes it
-            // clear which conversation is asking so Ctrl+C stops the right one.
+            // Optional origin label. Isolation is owned by ThreadModalHost;
+            // the overlay only paints on the thread that asked.
             !origin_label.empty()
                 ? text(std::format("thread: {}", origin_label))
                       | ftxui::bold | color(ColorYellowBright)
