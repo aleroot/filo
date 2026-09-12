@@ -360,6 +360,7 @@ TEST_CASE("resolve_skill_turn matches Qwen model hints to DashScope providers",
     ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
 
     write_file(config_path, R"({
+        "default_provider": "dashscope-prod",
         "providers": {
             "dashscope-prod": {
                 "api_type": "dashscope",
@@ -383,6 +384,62 @@ TEST_CASE("resolve_skill_turn matches Qwen model hints to DashScope providers",
     CHECK(resolution.callbacks.model_override == "qwen3-max");
     REQUIRE(resolution.callbacks.allowed_tools.size() == 1);
     CHECK(resolution.callbacks.allowed_tools.front() == "read");
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("resolve_skill_turn prefers canonical qwen over Coding Plan",
+          "[skill_commands][model_resolution][qwen]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_qwen_canonical");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "default_provider": "openai"
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    auto public_qwen = std::make_shared<DummyProvider>();
+    auto coding = std::make_shared<DummyProvider>();
+    core::llm::ProviderManager::get_instance().register_provider("qwen", public_qwen);
+    core::llm::ProviderManager::get_instance().register_provider("qwen-coding", coding);
+
+    const auto resolution = resolve_skill_turn("qwen3-max", {"read"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override == public_qwen);
+    CHECK(resolution.callbacks.model_override == "qwen3-max");
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("resolve_skill_turn honours default_provider among Qwen family presets",
+          "[skill_commands][model_resolution][qwen]") {
+    const auto sandbox = make_temp_root("skill_turn_resolution_qwen_default");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    const auto config_path = project_dir / ".filo" / "config.json";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    write_file(config_path, R"({
+        "default_provider": "qwen-coding"
+    })");
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    auto public_qwen = std::make_shared<DummyProvider>();
+    auto coding = std::make_shared<DummyProvider>();
+    core::llm::ProviderManager::get_instance().register_provider("qwen", public_qwen);
+    core::llm::ProviderManager::get_instance().register_provider("qwen-coding", coding);
+
+    const auto resolution = resolve_skill_turn("qwen3-max", {"read"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override == coding);
+    CHECK(resolution.callbacks.model_override == "qwen3-max");
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     fs::remove_all(sandbox);

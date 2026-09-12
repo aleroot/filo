@@ -30,6 +30,11 @@ public:
         return it->second;
     }
 
+    [[nodiscard]] bool has_provider(const std::string& name) const {
+        std::lock_guard lock(mutex_);
+        return providers_.contains(name);
+    }
+
 private:
     ProviderManager() = default;
     mutable std::mutex mutex_;

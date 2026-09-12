@@ -164,32 +164,65 @@ inline bool try_select_from_candidates(
         return false;
     }
 
+    // Default configs now ship several Qwen family presets (public DashScope,
+    // Coding Plan, Token Plan). Prefer providers that are actually registered
+    // so unused sibling plans do not make a skill model hint ambiguous.
+    std::vector<std::string> selectable;
+    auto& manager = core::llm::ProviderManager::get_instance();
+    for (const auto& candidate : candidates) {
+        if (manager.has_provider(candidate)) {
+            selectable.push_back(candidate);
+        }
+    }
+    const std::vector<std::string>& pool =
+        selectable.empty() ? candidates : selectable;
+
     if (preferred_provider.has_value()) {
-        if (const auto preferred_it = std::ranges::find(candidates, std::string(*preferred_provider));
-            preferred_it != candidates.end()) {
+        if (const auto preferred_it = std::ranges::find(pool, std::string(*preferred_provider));
+            preferred_it != pool.end()) {
             return try_select_provider(*preferred_it, requested_model, original_hint, resolution);
         }
     }
 
     const auto& config = core::config::ConfigManager::get_instance().get_config();
     if (!config.default_provider.empty()) {
-        if (const auto default_it = std::ranges::find(candidates, config.default_provider);
-            default_it != candidates.end()) {
+        if (const auto default_it = std::ranges::find(pool, config.default_provider);
+            default_it != pool.end()) {
             return try_select_provider(*default_it, requested_model, original_hint, resolution);
         }
     }
 
-    if (allow_single_candidate && candidates.size() == 1) {
-        return try_select_provider(candidates.front(), requested_model, original_hint, resolution);
+    if (allow_single_candidate && pool.size() == 1) {
+        return try_select_provider(pool.front(), requested_model, original_hint, resolution);
     }
     if (!allow_single_candidate) {
         return false;
     }
 
+    // When several family members are live, pick the registry's canonical
+    // provider ("qwen", "grok", ...) rather than warning and giving up.
+    if (const auto model_info =
+            core::llm::ModelRegistry::instance().get_info(requested_model);
+        model_info.has_value() && !model_info->provider.empty()) {
+        if (const auto canonical_it = std::ranges::find(pool, model_info->provider);
+            canonical_it != pool.end()) {
+            return try_select_provider(
+                *canonical_it, requested_model, original_hint, resolution);
+        }
+    }
+    const std::string hinted_family = model_family_key(requested_model);
+    if (!hinted_family.empty()) {
+        if (const auto family_it = std::ranges::find(pool, hinted_family);
+            family_it != pool.end()) {
+            return try_select_provider(
+                *family_it, requested_model, original_hint, resolution);
+        }
+    }
+
     resolution.warning = std::format(
         "Skill model '{}' matches multiple configured providers ({}); using the current model.",
         original_hint,
-        join_items(candidates));
+        join_items(pool));
     return false;
 }
 
