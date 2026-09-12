@@ -376,6 +376,28 @@ TEST_CASE("DashScopeProtocol - thinking fields absent when budget is zero",
     auto payload = DashScopeProtocol{/*thinking_budget=*/0}.serialize(make_simple_request());
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
+    // Qwen Code still stamps preserve_thinking so tool turns keep the trace.
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("vl_high_resolution_images"));
+}
+
+TEST_CASE("DashScopeProtocol - preserve_thinking covers Coding Plan coder models",
+          "[qwen][serializer][thinking][coding-plan]") {
+    auto req = make_simple_request("qwen3-coder-plus");
+    req.effort = "high";
+    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("vl_high_resolution_images"));
+}
+
+TEST_CASE("DashScopeProtocol - vision models request high-resolution images",
+          "[qwen][serializer][vision]") {
+    auto payload = DashScopeProtocol(0, "high").serialize(
+        make_simple_request("qwen3.5-plus"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("vl_high_resolution_images":true)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
 }
 
 TEST_CASE("DashScopeProtocol - enable_thinking injected when budget > 0",
@@ -688,6 +710,22 @@ TEST_CASE("Qwen Token Plan hosted tools are selected by model generation",
         "glm-5.2"));
     CHECK_FALSE(core::llm::qwen_model_supports_token_plan_hosted_tools(
         "deepseek-v4-pro"));
+}
+
+TEST_CASE("Qwen preserve_thinking and vision traits match Qwen Code",
+          "[qwen][traits]") {
+    CHECK(core::llm::qwen_model_supports_preserve_thinking("qwen3-coder-plus"));
+    CHECK(core::llm::qwen_model_supports_preserve_thinking("qwen3.5-plus"));
+    CHECK(core::llm::qwen_model_supports_preserve_thinking("coder-model"));
+    CHECK_FALSE(core::llm::qwen_model_supports_preserve_thinking("glm-5.2"));
+    CHECK_FALSE(core::llm::qwen_model_supports_preserve_thinking("qwen-image-2.0"));
+
+    CHECK(core::llm::qwen_model_supports_vision("qwen3.5-plus"));
+    CHECK(core::llm::qwen_model_supports_vision("qwen3.6-plus"));
+    CHECK(core::llm::qwen_model_supports_vision("qwen3.8-max"));
+    CHECK(core::llm::qwen_model_supports_vision("qwen3-vl-plus"));
+    CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen3-coder-plus"));
+    CHECK_FALSE(core::llm::qwen_model_supports_vision("qwen3.7-max"));
 }
 
 TEST_CASE("DashScope Responses - sends only incremental messages with previous response",
@@ -1126,7 +1164,7 @@ TEST_CASE("DashScopeProtocol - format_error_message 401 mentions API key", "[qwe
     DashScopeProtocol proto;
     auto msg = proto.format_error_message(make_response(401).view());
     REQUIRE_THAT(msg, Catch::Matchers::ContainsSubstring("401"));
-    REQUIRE_THAT(msg, Catch::Matchers::ContainsSubstring("DASHSCOPE_API_KEY"));
+    REQUIRE_THAT(msg, Catch::Matchers::ContainsSubstring("QWEN_API_KEY"));
 }
 
 TEST_CASE("DashScopeProtocol - format_error_message 429 mentions quota", "[qwen][errors]") {
@@ -1225,6 +1263,37 @@ TEST_CASE("ProviderFactory - qwen with thinking_budget creates provider", "[qwen
 
     auto provider = core::llm::ProviderFactory::create_provider("qwen", cfg);
     REQUIRE(provider != nullptr);
+}
+
+TEST_CASE("ProviderFactory - qwen-coding uses Coding Plan host and subscription billing",
+          "[qwen][factory][coding-plan]") {
+    core::config::ProviderConfig cfg;
+    cfg.api_key = "sk-sp-coding";
+    cfg.model = "qwen3-coder-plus";
+
+    auto provider = core::llm::ProviderFactory::create_provider("qwen-coding", cfg);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->should_estimate_cost());
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    REQUIRE(metadata->api_type == core::config::ApiType::DashScope);
+    REQUIRE(metadata->base_url == "https://coding.dashscope.aliyuncs.com/v1");
+}
+
+TEST_CASE("ProviderFactory - coding.dashscope host upgrades OpenAI api_type to DashScope",
+          "[qwen][factory][coding-plan]") {
+    core::config::ProviderConfig cfg;
+    cfg.api_type = core::config::ApiType::OpenAI;
+    cfg.base_url = "https://coding.dashscope.aliyuncs.com/v1";
+    cfg.model = "qwen3-coder-plus";
+    cfg.api_key = "sk-sp-coding";
+
+    auto provider = core::llm::ProviderFactory::create_provider("company-qwen", cfg);
+    REQUIRE(provider != nullptr);
+    REQUIRE_FALSE(provider->should_estimate_cost());
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    REQUIRE(metadata->api_type == core::config::ApiType::DashScope);
 }
 
 TEST_CASE("ProviderFactory - Qwen Token Plan is subscription-backed Chat Completions",

@@ -27,7 +27,9 @@
 #include "../utils/StringUtils.hpp"
 #include "../utils/UriUtils.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdlib>
+#include <span>
 
 namespace core::llm {
 
@@ -40,20 +42,15 @@ enum class OpenAIWireApi { ChatCompletions, Responses };
 
 std::string resolve_key(
     std::string_view config_key,
-    std::string_view env_var) {
+    std::span<const std::string_view> env_vars) {
     if (!config_key.empty()) {
         return core::auth::normalize_secret_input(config_key);
     }
-    if (!env_var.empty()) {
+    for (const auto env_var : env_vars) {
+        if (env_var.empty()) continue;
         if (const char* e = std::getenv(std::string(env_var).c_str());
             e && *e) {
             return core::auth::normalize_secret_input(e);
-        }
-        if (env_var == "KIMI_API_KEY") {
-            if (const char* e = std::getenv("MOONSHOT_API_KEY");
-                e && *e) {
-                return core::auth::normalize_secret_input(e);
-            }
         }
     }
     return {};
@@ -92,6 +89,14 @@ std::string resolve_key(
             *host, "token-plan.ap-southeast-1.maas.aliyuncs.com");
 }
 
+[[nodiscard]] bool is_qwen_coding_plan_endpoint(std::string_view base_url) noexcept {
+    const auto host = core::utils::uri::extract_http_host(base_url);
+    if (!host) return false;
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(*host);
+    if (lowered.find("dashscope") == std::string::npos) return false;
+    return lowered.starts_with("coding.") || lowered.starts_with("coding-");
+}
+
 } // namespace
 
 std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
@@ -104,7 +109,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     ApiType     api_type  = config.api_type;
     std::string base_url  = config.base_url;
     ProviderAuthStyle auth_style = ProviderAuthStyle::Bearer;
-    std::string_view env_var;
+    std::array<std::string_view, 2> env_vars{};
     std::string_view canonical_type = name;   // for OAuth strategy matching
     std::string wire_api  = config.wire_api;
 
@@ -112,7 +117,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         if (api_type == ApiType::Unknown) api_type = builtin->api_type;
         if (base_url.empty())            base_url  = builtin->base_url;
         auth_style     = builtin->auth_style;
-        env_var        = builtin->env_var;
+        env_vars       = builtin->env_vars;
         canonical_type = builtin->prefix;    // e.g. "grok" for "grok-reasoning"
     } else {
         // User-defined provider: api_type and base_url must be explicit.
@@ -222,15 +227,26 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
 
     const bool qwen_token_plan = canonical_type == "qwen-token-plan"
         || is_qwen_token_plan_endpoint(base_url);
-    if (qwen_token_plan && env_var.empty()) {
-        env_var = "QWEN_TOKEN_PLAN_API_KEY";
+    const bool qwen_coding_plan = canonical_type == "qwen-coding"
+        || is_qwen_coding_plan_endpoint(base_url);
+    if (qwen_token_plan && env_vars.front().empty()) {
+        env_vars[0] = "QWEN_TOKEN_PLAN_API_KEY";
+    }
+    if (qwen_coding_plan && env_vars.front().empty()) {
+        env_vars = { "QWEN_CODING_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY" };
+    }
+    if (qwen_coding_plan
+        && (api_type == ApiType::Unknown || api_type == ApiType::OpenAI)) {
+        // Coding Plan is DashScope-compatible. Treating it as vanilla OpenAI
+        // drops X-DashScope-* cache headers and Qwen thinking fields.
+        api_type = ApiType::DashScope;
     }
     if (qwen_token_plan && config.model.empty()) {
         model_catalog_selector = providers::make_qwen_model_catalog_selector();
     }
 
     if (!cred) {
-        const std::string key = resolve_key(config.api_key, env_var);
+        const std::string key = resolve_key(config.api_key, env_vars);
         switch (auth_style) {
         case ProviderAuthStyle::Bearer:
             if (api_type == ApiType::OpenAI
@@ -239,7 +255,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             } else {
                 cred = core::auth::ApiKeyCredentialSource::as_bearer(
                     key,
-                    canonical_type == "zai-coding" || qwen_token_plan);
+                    canonical_type == "zai-coding"
+                        || qwen_token_plan
+                        || qwen_coding_plan);
             }
             break;
         case ProviderAuthStyle::QueryParam:

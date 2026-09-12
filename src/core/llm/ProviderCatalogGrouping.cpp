@@ -45,6 +45,10 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     return normalized(provider_name).starts_with("qwen-token-plan");
 }
 
+[[nodiscard]] bool is_qwen_coding_source(std::string_view provider_name) {
+    return normalized(provider_name).starts_with("qwen-coding");
+}
+
 [[nodiscard]] ProviderCatalogModelFilter model_filter(
     ProviderCatalogModelRule rule,
     std::span<const std::string_view> model_ids) {
@@ -118,6 +122,10 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
+    } else if (group_name == "qwen" && is_qwen_coding_source(provider_name)) {
+        source.category_label = "Coding Plan endpoint.";
+    } else if (group_name == "qwen") {
+        source.category_label = "DashScope API.";
     }
 
     return source;

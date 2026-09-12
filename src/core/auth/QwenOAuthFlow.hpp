@@ -12,7 +12,8 @@ namespace core::auth {
  * @brief Qwen OAuth2 device code flow (RFC 8628) with PKCE S256 (RFC 7636).
  *
  * Mirrors the authentication used by qwen-code CLI against chat.qwen.ai.
- * Provides access to the free tier (1000 req/day via "coder-model").
+ * The Qwen OAuth free tier was discontinued on 2026-04-15; Filo keeps this
+ * flow for credential parsing/tests but login is rejected in favor of API keys.
  *
  * Flow:
  *   1. Generate PKCE code_verifier (43-char base64url) + S256 code_challenge

@@ -144,6 +144,10 @@ TEST_CASE("AuthenticationManager — qwen is an available login provider", "[Qwe
     auto providers = manager.available_login_providers();
     auto it = std::find(providers.begin(), providers.end(), "qwen");
     REQUIRE(it != providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "qwen-coding")
+            != providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "dashscope")
+            != providers.end());
 }
 
 TEST_CASE("AuthenticationManager — oauth_qwen is rejected for Token Plan", "[QwenOAuthStrategy]") {

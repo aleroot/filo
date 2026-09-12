@@ -1106,6 +1106,50 @@ TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and c
             != std::string::npos);
 }
 
+TEST_CASE("AuthenticationManager login(qwen-coding) configures Coding Plan API key",
+          "[AuthenticationManager][qwen][coding-plan]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("test-coding-plan-key\n");
+    ScopedCinRedirect redirect(input);
+    auto result = manager.login("qwen-coding");
+
+    REQUIRE(result.provider == "Qwen Coding Plan");
+    REQUIRE(result.login_provider == "qwen-coding");
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+    REQUIRE(overlay.find(R"("default_provider":"qwen-coding")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("qwen-coding":{"model":"qwen3-coder-plus","api_key":"test-coding-plan-key"})")
+        != std::string::npos);
+}
+
+TEST_CASE("AuthenticationManager login(dashscope) configures public DashScope API key",
+          "[AuthenticationManager][qwen][dashscope]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("test-dashscope-key\n");
+    ScopedCinRedirect redirect(input);
+    auto result = manager.login("dashscope");
+
+    REQUIRE(result.provider == "Qwen");
+    REQUIRE(result.login_provider == "dashscope");
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+    REQUIRE(overlay.find(R"("default_provider":"qwen")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("qwen":{"model":"qwen3-coder-plus","api_key":"test-dashscope-key"})")
+        != std::string::npos);
+}
+
 TEST_CASE("AuthenticationManager login(qwen) configures Token Plan API key",
           "[AuthenticationManager][qwen][token-plan]") {
     TempDir tmp;

@@ -58,6 +58,15 @@ std::string normalize_login_provider(std::string_view provider) {
         || requested == "qwencloud" || requested == "qwen-cloud") {
         return "qwen";
     }
+    if (requested == "qwen_coding" || requested == "qwencoding"
+        || requested == "qwen-coding-plan" || requested == "coding-plan"
+        || requested == "codingplan" || requested == "bailian") {
+        return "qwen-coding";
+    }
+    if (requested == "qwen-api" || requested == "qwen_api"
+        || requested == "qwen-dashscope") {
+        return "dashscope";
+    }
     return requested;
 }
 
@@ -485,18 +494,22 @@ public:
         const core::config::ProviderConfig& /*provider_config*/,
         std::string_view /*config_dir*/) const override {
         throw std::runtime_error(
-            "Qwen Cloud Token Plan does not support OAuth. Run `filo --auth qwen` "
-            "and paste its dedicated API key instead.");
+            "Qwen OAuth was discontinued on 2026-04-15 and does not support OAuth "
+            "for current Qwen Cloud APIs. Run `filo --auth qwen-coding` for Coding Plan, "
+            "`filo --auth dashscope` for a DashScope API key, or `filo --auth qwen` "
+            "for Token Plan.");
     }
 
     void login(std::string_view /*config_dir*/) const override {
         throw std::runtime_error(
-            "Qwen Cloud Token Plan does not support OAuth. Use its dedicated API key.");
+            "Qwen OAuth was discontinued on 2026-04-15 and does not support "
+            "current Qwen Cloud APIs. Use an API key instead.");
     }
 
     std::vector<std::string> post_login_hints() const override {
         return {
-            "Run `filo --auth qwen` to configure a Token Plan API key.",
+            "Run `filo --auth qwen-coding` for Coding Plan, "
+            "`filo --auth dashscope` for DashScope, or `filo --auth qwen` for Token Plan.",
         };
     }
 };
@@ -568,6 +581,26 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "Uses the Token Plan Chat Completions API with Qwen reasoning and "
         "subscription billing. Manage usage at "
         "https://home.qwencloud.com/token-plan."));
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "qwen-coding",
+        "Qwen Coding Plan",
+        "qwen-coding",
+        "qwen3-coder-plus",
+        std::vector<ApiKeyProviderSeed>{},
+        "QWEN_CODING_PLAN_API_KEY",
+        "Uses the Qwen Coding Plan endpoint at "
+        "https://coding.dashscope.aliyuncs.com/v1. BAILIAN_CODING_PLAN_API_KEY "
+        "is also accepted. This is not the Token Plan or public DashScope key."));
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "dashscope",
+        "Qwen",
+        "qwen",
+        "qwen3-coder-plus",
+        std::vector<ApiKeyProviderSeed>{},
+        "QWEN_API_KEY",
+        "Uses the public DashScope compatible-mode API "
+        "(dashscope-intl.aliyuncs.com). DASHSCOPE_API_KEY is also accepted. "
+        "For Coding Plan use `filo --auth qwen-coding` instead."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",
         "Z.AI",

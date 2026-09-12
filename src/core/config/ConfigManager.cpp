@@ -6,6 +6,7 @@
 #include <fstream>
 #include <filesystem>
 #include "core/llm/KimiModelTraits.hpp"
+#include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/routing/PolicyLoader.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/tools/ToolNames.hpp"
@@ -198,31 +199,12 @@ namespace {
 void apply_api_key_fallback(std::string_view name, ProviderConfig& provider) {
     if (!provider.api_key.empty()) return;
 
-    struct Entry {
-        const char* prefix;
-        const char* env_var;
-        const char* alternative_env_var = nullptr;
-    };
-    static constexpr Entry kEnvVars[] = {
-        { "grok",    "XAI_API_KEY" },
-        { "openai",  "OPENAI_API_KEY" },
-        { "claude",  "ANTHROPIC_API_KEY" },
-        { "gemini",  "GEMINI_API_KEY" },
-        { "mistral", "MISTRAL_API_KEY" },
-        { "kimi",    "KIMI_API_KEY", "MOONSHOT_API_KEY" },
-        { "zai",     "ZAI_API_KEY" },
-    };
-    for (const auto& entry : kEnvVars) {
-        if (name.starts_with(entry.prefix)) {
-            if (const char* e = std::getenv(entry.env_var); e && *e) {
-                provider.api_key = e;
-            } else if (entry.alternative_env_var) {
-                if (const char* alternative =
-                        std::getenv(entry.alternative_env_var);
-                    alternative && *alternative) {
-                    provider.api_key = alternative;
-                }
-            }
+    const auto* builtin = core::llm::find_builtin_provider_definition(name);
+    if (!builtin) return;
+    for (const auto env_name : builtin->env_vars) {
+        if (env_name.empty()) continue;
+        if (const char* e = std::getenv(std::string(env_name).c_str()); e && *e) {
+            provider.api_key = e;
             return;
         }
     }
@@ -367,6 +349,24 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
             .provider_name = "qwen-token-plan",
             .auth_type = "",
             .default_model = "",
+        };
+    }
+    if (normalized == "qwen-coding" || normalized == "qwen_coding"
+        || normalized == "qwencoding" || normalized == "qwen-coding-plan"
+        || normalized == "coding-plan" || normalized == "codingplan"
+        || normalized == "bailian") {
+        return LoginProfileMapping{
+            .provider_name = "qwen-coding",
+            .auth_type = "",
+            .default_model = "qwen3-coder-plus",
+        };
+    }
+    if (normalized == "dashscope" || normalized == "qwen-api"
+        || normalized == "qwen_api" || normalized == "qwen-dashscope") {
+        return LoginProfileMapping{
+            .provider_name = "qwen",
+            .auth_type = "",
+            .default_model = "qwen3-coder-plus",
         };
     }
     if (normalized == "zai" || normalized == "z.ai" || normalized == "z-ai") {
@@ -581,6 +581,8 @@ AppConfig make_default_config() {
     add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.com/coding/v1");
     add_provider("kimi-32k",       "moonshot-v1-32k");
     add_provider("kimi-128k",      "moonshot-v1-128k");
+    add_provider("qwen",            "qwen3-coder-plus", "high");
+    add_provider("qwen-coding",     "qwen3-coder-plus", "high");
     add_provider("qwen-token-plan", {}, "high");
     add_provider("zai",            "glm-5.1");
     add_provider("zai-coding",     "glm-5.3");
@@ -651,6 +653,8 @@ std::string default_config_json() {
         "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.com/coding/v1" },
         "kimi-32k":       { "model": "moonshot-v1-32k" },
         "kimi-128k":      { "model": "moonshot-v1-128k" },
+        "qwen":           { "model": "qwen3-coder-plus", "reasoning_effort": "high" },
+        "qwen-coding":    { "model": "qwen3-coder-plus", "reasoning_effort": "high" },
         "qwen-token-plan":{ "reasoning_effort": "high" },
         "zai":            { "model": "glm-5.1" },
         "zai-coding":     { "model": "glm-5.3" },

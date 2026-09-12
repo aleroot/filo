@@ -612,6 +612,16 @@ std::string format_provider_setup_hint(std::string_view provider_name,
                "Alternatively set QWEN_TOKEN_PLAN_API_KEY. Do not use a pay-as-you-go or Coding Plan key.\n"
                "Usage: https://home.qwencloud.com/token-plan\n";
     }
+    if (provider_name.starts_with("qwen-coding") && api_key.empty()) {
+        return "Run `filo --auth qwen-coding` and paste your Qwen Coding Plan API key.\n"
+               "Alternatively set QWEN_CODING_PLAN_API_KEY. Endpoint: coding.dashscope.aliyuncs.com.\n"
+               "This is not the Token Plan or public DashScope key.\n";
+    }
+    if ((provider_name == "qwen" || provider_name.starts_with("qwen-"))
+        && api_key.empty()) {
+        return "Run `filo --auth dashscope` and paste a Qwen API key, or set QWEN_API_KEY.\n"
+               "For Coding Plan use `filo --auth qwen-coding` instead.\n";
+    }
     return {};
 }
 

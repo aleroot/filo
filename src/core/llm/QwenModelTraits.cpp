@@ -2,6 +2,7 @@
 
 #include "core/utils/StringUtils.hpp"
 
+#include <array>
 #include <limits>
 
 namespace core::llm {
@@ -40,13 +41,33 @@ bool is_qwen_text_model(std::string_view model_id) {
 }
 
 bool qwen_model_supports_preserve_thinking(std::string_view model_id) {
-    const std::vector<int> generation = qwen_model_generation(model_id);
-    if (generation >= std::vector<int>{3, 7}) return true;
-    if (generation != std::vector<int>{3, 6}) return false;
+    // Qwen Code stamps preserve_thinking on every DashScope chat request for
+    // the Qwen family (including coder-model). Restricting it to 3.6+/3.7+
+    // left qwen3-coder-plus and qwen3.5-plus unable to keep reasoning across
+    // tool turns, which is the common Coding Plan / public DashScope path.
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(model_id));
+    return is_qwen_text_model(model_id) || lowered == "coder-model";
+}
 
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(model_id);
-    return lowered.find("-max") != std::string::npos
-        || lowered.find("-plus") != std::string::npos;
+bool qwen_model_supports_vision(std::string_view model_id) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(model_id));
+    if (lowered == "coder-model") return true;
+    static constexpr std::array<std::string_view, 8> kPrefixes{
+        "qwen-vl",
+        "qwen3-vl",
+        "qwen3.5-plus",
+        "qwen3.6-plus",
+        "qwen3.7-plus",
+        "qwen3.8-plus",
+        "qwen3.8-flash",
+        "qwen3.8-max",
+    };
+    for (const auto prefix : kPrefixes) {
+        if (lowered.starts_with(prefix)) return true;
+    }
+    return false;
 }
 
 bool qwen_model_supports_token_plan_hosted_tools(

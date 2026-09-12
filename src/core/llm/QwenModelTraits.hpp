@@ -9,6 +9,7 @@ namespace core::llm {
 [[nodiscard]] bool is_qwen_text_model(std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_preserve_thinking(
     std::string_view model_id);
+[[nodiscard]] bool qwen_model_supports_vision(std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_token_plan_hosted_tools(
     std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_tiered_effort(

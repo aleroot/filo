@@ -246,7 +246,8 @@ struct DashScopeErrorDetails {
                       "Manage it at https://home.qwencloud.com/token-plan]";
             }
             return "[DashScope Error 401: Authentication failed." + detail()
-                + " Verify DASHSCOPE_API_KEY is set correctly.]";
+                + " Verify QWEN_API_KEY (public DashScope) or "
+                  "QWEN_CODING_PLAN_API_KEY (Coding Plan) matches this endpoint.]";
         case 403:
             return std::string(token_plan ? "[Qwen Token Plan Error 403: Access denied."
                                           : "[DashScope Error 403: Access denied.") + detail()
@@ -392,52 +393,53 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
 
 void DashScopeProtocol::append_extra_fields(std::string&       payload,
                                              const ChatRequest& req) const {
-    if (!qwen_reasoning_capabilities(req.model).supports_effort()) {
-        return;
+    // Qwen Code always sends vl_high_resolution_images for DashScope vision
+    // models. Omitting it silently downgrades screenshot / image-tool quality.
+    if (qwen_model_supports_vision(req.model)) {
+        payload += R"(,"vl_high_resolution_images":true)";
     }
 
-    const std::string effort = normalize_qwen_effort(
-        req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort),
-        req.model);
+    if (qwen_reasoning_capabilities(req.model).supports_effort()) {
+        const std::string effort = normalize_qwen_effort(
+            req.effort.empty() ? std::string_view(default_effort_)
+                               : std::string_view(req.effort),
+            req.model);
 
-    if (qwen_model_supports_tiered_effort(req.model)) {
-        std::string tier = effort;
-        if (req.effort.empty() && thinking_budget_ > 0 && tier != "none") tier.clear();
-        if (tier.empty() && thinking_budget_ > 0) {
-            // A configured budget must not silently become unlimited thinking.
-            // Budget and effort are mutually exclusive on Qwen 3.8.
-            payload += R"(,"enable_thinking":true,"thinking_budget":)";
-            payload += std::to_string(thinking_budget_);
-        } else {
-            if (tier.empty()) return;
-            if (tier == "none"
-                && core::utils::ascii::istarts_with(req.model, "qwen3.8-flash")) {
-                payload += R"(,"enable_thinking":false)";
-                return;
+        if (qwen_model_supports_tiered_effort(req.model)) {
+            std::string tier = effort;
+            if (req.effort.empty() && thinking_budget_ > 0 && tier != "none") {
+                tier.clear();
             }
-            // The max family's canonical disable is reasoning_effort:none,
-            // also used by Qwen Code's DashScope request builder.
-            payload += R"(,"reasoning_effort":")";
-            payload += core::utils::escape_json_string(tier);
-            payload += '"';
+            if (tier.empty() && thinking_budget_ > 0) {
+                // A configured budget must not silently become unlimited thinking.
+                // Budget and effort are mutually exclusive on Qwen 3.8.
+                payload += R"(,"enable_thinking":true,"thinking_budget":)";
+                payload += std::to_string(thinking_budget_);
+            } else if (!tier.empty()) {
+                if (tier == "none"
+                    && core::utils::ascii::istarts_with(req.model, "qwen3.8-flash")) {
+                    payload += R"(,"enable_thinking":false)";
+                } else {
+                    // The max family's canonical disable is reasoning_effort:none,
+                    // also used by Qwen Code's DashScope request builder.
+                    payload += R"(,"reasoning_effort":")";
+                    payload += core::utils::escape_json_string(tier);
+                    payload += '"';
+                }
+            }
+        } else if (effort == "none") {
+            payload += R"(,"enable_thinking":false)";
+        } else if (!effort.empty() || thinking_budget_ > 0) {
+            payload += R"(,"enable_thinking":true)";
+            if (thinking_budget_ > 0) {
+                payload += R"(,"thinking_budget":)";
+                payload += std::to_string(thinking_budget_);
+            }
         }
-        if (qwen_model_supports_preserve_thinking(req.model)) {
-            payload += R"(,"preserve_thinking":true)";
-        }
-        return;
     }
 
-    if (effort == "none") {
-        payload += R"(,"enable_thinking":false)";
-        return;
-    }
-    if (effort.empty() && thinking_budget_ <= 0) return;
-
-    payload += R"(,"enable_thinking":true)";
-    if (thinking_budget_ > 0) {
-        payload += R"(,"thinking_budget":)";
-        payload += std::to_string(thinking_budget_);
-    }
+    // Qwen Code stamps preserve_thinking on every DashScope chat request for
+    // the Qwen family so multi-turn tool use keeps the thinking trace.
     if (qwen_model_supports_preserve_thinking(req.model)) {
         payload += R"(,"preserve_thinking":true)";
     }

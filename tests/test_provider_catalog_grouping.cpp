@@ -216,6 +216,7 @@ TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fal
     REQUIRE(public_api != nullptr);
     REQUIRE(token_plan != nullptr);
     REQUIRE(token_plan->category_label == "Token Plan endpoint.");
+    REQUIRE(public_api->category_label == "DashScope API.");
     for (const auto model : {"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max",
                              "qwen3.7-plus", "qwen3.6-flash"}) {
         CHECK(token_plan->includes_registry_model(model));
@@ -271,6 +272,18 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     CHECK(token_plan->prefix == "qwen-token-plan");
     CHECK(token_plan->registry_provider == "qwen");
     CHECK(token_plan->default_wire_api == "chat_completions");
+
+    const auto* coding = find_builtin_provider_definition("qwen-coding");
+    REQUIRE(coding != nullptr);
+    CHECK(coding->prefix == "qwen-coding");
+    CHECK(coding->base_url == "https://coding.dashscope.aliyuncs.com/v1");
+    CHECK(coding->env_var() == "QWEN_CODING_PLAN_API_KEY");
+    CHECK(coding->env_vars[1] == "BAILIAN_CODING_PLAN_API_KEY");
+
+    const auto* public_qwen = find_builtin_provider_definition("qwen");
+    REQUIRE(public_qwen != nullptr);
+    CHECK(public_qwen->env_var() == "QWEN_API_KEY");
+    CHECK(public_qwen->env_vars[1] == "DASHSCOPE_API_KEY");
 
     CHECK(find_builtin_provider_definition("grokker") == nullptr);
     CHECK(find_builtin_provider_definition("kimiko") == nullptr);

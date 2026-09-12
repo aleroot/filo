@@ -29,7 +29,7 @@
  * naming.  Both variants are tried when extracting rate-limit information.
  *
  * ## Authentication
- * `Authorization: Bearer <DASHSCOPE_API_KEY>`
+ * `Authorization: Bearer <QWEN_API_KEY>`
  *
  * ## Base URL
  * `https://dashscope.aliyuncs.com/compatible-mode/v1`
@@ -108,7 +108,7 @@ public:
      * - `X-DashScope-CacheControl: enable`   — activates server-side prompt caching
      * - `X-DashScope-UserAgent: filo/0.1`    — client identification for telemetry
      *
-     * @param auth  Resolved auth info (Bearer token from DASHSCOPE_API_KEY).
+     * @param auth  Resolved auth info (Bearer token from QWEN_API_KEY).
      */
     [[nodiscard]] cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
 

@@ -281,6 +281,23 @@ TEST_CASE("Grok setup hint treats OAuth as a usable credential",
     CHECK_THAT(missing, Catch::Matchers::ContainsSubstring("Set XAI_API_KEY"));
 }
 
+TEST_CASE("Qwen setup hints distinguish Coding Plan, DashScope, and Token Plan",
+          "[tui][authentication][qwen]") {
+    const auto token_plan = format_provider_setup_hint("qwen-token-plan", "", "");
+    CHECK_THAT(token_plan, Catch::Matchers::ContainsSubstring("filo --auth qwen"));
+    CHECK_THAT(token_plan, Catch::Matchers::ContainsSubstring("QWEN_TOKEN_PLAN_API_KEY"));
+
+    const auto coding = format_provider_setup_hint("qwen-coding", "", "");
+    CHECK_THAT(coding, Catch::Matchers::ContainsSubstring("filo --auth qwen-coding"));
+    CHECK_THAT(coding, Catch::Matchers::ContainsSubstring("QWEN_CODING_PLAN_API_KEY"));
+
+    const auto dashscope = format_provider_setup_hint("qwen", "", "");
+    CHECK_THAT(dashscope, Catch::Matchers::ContainsSubstring("filo --auth dashscope"));
+    CHECK_THAT(dashscope, Catch::Matchers::ContainsSubstring("QWEN_API_KEY"));
+
+    CHECK(format_provider_setup_hint("qwen-coding", "sk-present", "").empty());
+}
+
 TEST_CASE("subscription token badge hides details beside quota windows",
           "[tui][status-bar][usage-windows]") {
     const core::llm::TokenUsage usage{
