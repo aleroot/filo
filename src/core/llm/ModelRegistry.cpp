@@ -175,6 +175,10 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // xAI Grok Models
     // -----------------------------------------------------------------------
     { "grok-4.6",         500000 },
+    { "grok-4.3",         1000000 },
+    { "grok-4.20",        1000000 },
+    { "grok-build-0.1",   256000 },
+    { "grok-code-fast",   256000 },
     { "grok-build",       500000 },
     { "grok-4.5",         500000 },
     { "grok-",             128000 },
@@ -1005,7 +1009,7 @@ std::vector<ModelInfo> build_grok_catalog() {
     return {
         {
             .canonical_id = "grok-4.6",
-            .aliases = {},
+            .aliases = {"grok-4-6", "grok-4.6-latest"},
             .display_name = "Grok 4.6",
             .provider = "grok",
             .context_window = 500000,
@@ -1023,6 +1027,55 @@ std::vector<ModelInfo> build_grok_catalog() {
             .constraints = kStandardConstraints,
         },
         {
+            .canonical_id = "grok-4.3",
+            .aliases = {"grok-4-3", "grok-4.3-latest"},
+            .display_name = "Grok 4.3",
+            .provider = "grok",
+            .context_window = 1000000,
+            .max_output_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .reasoning = {
+                .effort = ReasoningCapability::Effort
+                    | ReasoningCapability::XHighEffort,
+            },
+            .tier = ModelTier::Powerful,
+            .pricing = {1.25, 2.50, 0.20, -1.0},
+            .knowledge_cutoff = "",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "grok-build-0.1",
+            .aliases = {"grok-code-fast-1", "grok-code-fast", "grok-code-fast-1-0825"},
+            .display_name = "Grok Build 0.1",
+            .provider = "grok",
+            .context_window = 256000,
+            .max_output_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .tier = ModelTier::Balanced,
+            .pricing = {1.0, 2.0, 0.20, -1.0},
+            .knowledge_cutoff = "",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "grok-4.20-0309-reasoning",
+            .aliases = {"grok-4.20", "grok-4.20-reasoning", "grok-4.20-reasoning-latest"},
+            .display_name = "Grok 4.20",
+            .provider = "grok",
+            .context_window = 1000000,
+            .max_output_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .tier = ModelTier::Powerful,
+            .pricing = {1.25, 2.50, 0.20, -1.0},
+            .knowledge_cutoff = "",
+            .constraints = kStandardConstraints,
+        },
+        {
             .canonical_id = "grok-build",
             .aliases = {},
             .display_name = "Grok Build",
@@ -1032,6 +1085,9 @@ std::vector<ModelInfo> build_grok_catalog() {
             .capabilities = CAP_FULL |
                 static_cast<uint32_t>(ModelCapability::Reasoning) |
                 static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .reasoning = {
+                .effort = ReasoningCapabilities{ReasoningCapability::Effort},
+            },
             .tier = ModelTier::Powerful,
             .pricing = {-1.0, -1.0, -1.0, -1.0},
             .knowledge_cutoff = "",
@@ -1039,7 +1095,7 @@ std::vector<ModelInfo> build_grok_catalog() {
         },
         {
             .canonical_id = "grok-4.5",
-            .aliases = {"grok-4-5", "grok-reasoning"},
+            .aliases = {"grok-4-5", "grok-reasoning", "grok-4.5-latest"},
             .display_name = "Grok 4.5",
             .provider = "grok",
             .context_window = 500000,
@@ -1047,6 +1103,9 @@ std::vector<ModelInfo> build_grok_catalog() {
             .capabilities = CAP_FULL |
                 static_cast<uint32_t>(ModelCapability::Reasoning) |
                 static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .reasoning = {
+                .effort = ReasoningCapabilities{ReasoningCapability::Effort},
+            },
             .tier = ModelTier::Powerful,
             .pricing = {2.0, 6.0, 0.30, -1.0},
             .knowledge_cutoff = "",

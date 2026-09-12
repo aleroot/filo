@@ -55,7 +55,7 @@ inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
         "grok", "grok", "grok", config::ApiType::OpenAI,
         "https://api.x.ai/v1", "XAI_API_KEY",
-        ProviderAuthStyle::Bearer, "chat_completions",
+        ProviderAuthStyle::Bearer, "responses",
     },
     BuiltinProviderDefinition{
         "openai", "openai", {}, config::ApiType::OpenAI,

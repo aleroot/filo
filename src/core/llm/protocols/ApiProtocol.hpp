@@ -87,6 +87,7 @@
 
 #include "../Models.hpp"
 #include "../ReasoningCapabilities.hpp"
+#include "../transport/StreamResilience.hpp"
 #include "../../auth/ICredentialSource.hpp"
 #include <cpr/cpr.h>
 #include <algorithm>
@@ -432,6 +433,18 @@ public:
     /** Provider/model reasoning controls accepted by this wire protocol. */
     [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(
         [[maybe_unused]] std::string_view model) const noexcept {
+        return {};
+    }
+
+    /**
+     * Idle and response-start deadlines for one HTTP stream.
+     *
+     * HttpLLMProvider asks the protocol instead of switching on the provider
+     * name. Override when a vendor routinely thinks longer than the generic
+     * 120s/240s budget (for example Grok high/xhigh reasoning).
+     */
+    [[nodiscard]] virtual transport::StreamTimeoutPolicy stream_timeouts()
+        const noexcept {
         return {};
     }
 

@@ -57,9 +57,13 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("gemini-2.0-flash") == 1048576);
     REQUIRE(get_max_context_size("gemini-1.5-pro") == 2097152);
     
-    // Grok (via legacy fallback)
+    // Grok (via new registry + aliases)
     REQUIRE(get_max_context_size("grok-4.6") == 500000);
     REQUIRE(get_max_context_size("grok-4.5") == 500000);
+    REQUIRE(get_max_context_size("grok-4.3") == 1000000);
+    REQUIRE(get_max_context_size("grok-code-fast-1") == 256000);
+    REQUIRE(get_max_context_size("grok-build-0.1") == 256000);
+    REQUIRE(get_max_context_size("grok-4.20") == 1000000);
     REQUIRE(get_max_context_size("grok-1") == 128000);
 
     // Mistral (via new registry)

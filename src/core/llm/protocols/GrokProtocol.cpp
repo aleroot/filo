@@ -8,6 +8,7 @@
 #include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
 #include <simdjson.h>
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <optional>
@@ -155,32 +156,44 @@ parse_grok_responses_stream_error(std::string_view raw_event) {
 void prepare_grok_session_headers(cpr::Header& headers,
                                   const ChatRequest& request,
                                   std::string_view base_url) {
-    if (!is_xai_oauth_request(request)) return;
-    if (!grok_build::is_official_proxy(base_url)) {
+    const bool oauth = is_xai_oauth_request(request);
+    const bool official_proxy = grok_build::is_official_proxy(base_url);
+
+    if (oauth && !official_proxy) {
         // XaiOAuthCredentialSource also serves model discovery, so its generic
         // auth map carries proxy identity headers. Remove them here when the
         // inference destination is not the official Grok CLI proxy.
         core::auth::xai_grok::remove_proxy_identity_headers(headers);
-        return;
     }
 
     const std::string conversation_id = request.session_id.empty()
         ? core::auth::xai_grok::process_agent_id()
         : request.session_id;
-    const std::string request_id = request.transport_turn_id.empty()
-        ? core::utils::random_uuid_v4()
-        : request.transport_turn_id;
 
-    core::auth::xai_grok::apply_proxy_identity_headers(headers);
-    headers["x-grok-conv-id"] = conversation_id;
-    headers["x-grok-session-id"] = conversation_id;
-    headers["x-grok-req-id"] = request_id;
-    headers["x-grok-model-override"] = request.model;
-    if (const auto user_id = request.auth_properties.find("user_id");
-        user_id != request.auth_properties.end() && !user_id->second.empty()) {
-        // Chat requests use x-grok-user-id; the billing endpoint expects the
-        // same value translated to x-userid by GrokBillingUsageSource.
-        headers["x-grok-user-id"] = user_id->second;
+    if (oauth && official_proxy) {
+        const std::string request_id = request.transport_turn_id.empty()
+            ? core::utils::random_uuid_v4()
+            : request.transport_turn_id;
+
+        core::auth::xai_grok::apply_proxy_identity_headers(headers);
+        headers["x-grok-conv-id"] = conversation_id;
+        headers["x-grok-session-id"] = conversation_id;
+        headers["x-grok-req-id"] = request_id;
+        headers["x-grok-model-override"] = request.model;
+        if (const auto user_id = request.auth_properties.find("user_id");
+            user_id != request.auth_properties.end() && !user_id->second.empty()) {
+            // Chat requests use x-grok-user-id; the billing endpoint expects the
+            // same value translated to x-userid by GrokBillingUsageSource.
+            headers["x-grok-user-id"] = user_id->second;
+        }
+        return;
+    }
+
+    // xAI Chat Completions uses this header for cache-sticky routing. Without
+    // it, multi-turn requests often land on a cache-cold replica and pay full
+    // input price. Safe on the public API; never forwarded to a custom host.
+    if (grok_build::is_public_api(base_url)) {
+        headers["x-grok-conv-id"] = conversation_id;
     }
 }
 
@@ -189,6 +202,22 @@ void prepare_grok_session_headers(cpr::Header& headers,
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+/// True when @p model is in a family such as "grok-4.6", including the
+/// hyphenated spelling "grok-4-6" xAI uses interchangeably.
+[[nodiscard]] bool grok_id_in_family(
+    std::string_view model,
+    std::string_view dotted_prefix) noexcept {
+    using core::utils::ascii::istarts_with;
+    if (istarts_with(model, dotted_prefix)) return true;
+    std::string hyphenated(dotted_prefix);
+    std::replace(hyphenated.begin(), hyphenated.end(), '.', '-');
+    return hyphenated != dotted_prefix && istarts_with(model, hyphenated);
+}
+
+} // namespace
 
 bool grok_supports_reasoning_effort(std::string_view model) noexcept {
     // Only the grok-3-mini family accepts reasoning_effort.
@@ -199,22 +228,30 @@ bool grok_supports_reasoning_effort(std::string_view model) noexcept {
 bool grok_responses_supports_effort(std::string_view model) noexcept {
     using core::utils::ascii::istarts_with;
     // The Responses-API `reasoning:{effort:...}` object is supported by the
-    // Grok 4.6, 4.5, and 4.3 families and by the Grok Build coding model.
+    // Grok 4.6, 4.5, and 4.3 families and by the Grok Build session model.
     // Grok 4 / 4.1 and the non-reasoning variants are always-on or always-off
     // and reject the control.
-    if (istarts_with(model, "grok-4.6") || istarts_with(model, "grok-4-6")) return true;
-    if (istarts_with(model, "grok-4.5") || istarts_with(model, "grok-4-5")) return true;
-    if (istarts_with(model, "grok-4.3") || istarts_with(model, "grok-4-3")) return true;
-    if (istarts_with(model, "grok-build")) return true;
+    if (grok_id_in_family(model, "grok-4.6")) return true;
+    if (grok_id_in_family(model, "grok-4.5")) return true;
+    if (grok_id_in_family(model, "grok-4.3")) return true;
+    // Session-proxy "grok-build", not the public grok-build-0.1 coding model.
+    if (istarts_with(model, "grok-build") && !istarts_with(model, "grok-build-0"))
+        return true;
     // grok-composer-* are compatibility aliases of grok-4.5.
     if (istarts_with(model, "grok-composer")) return true;
     return false;
 }
 
 bool grok_responses_supports_xhigh_effort(std::string_view model) noexcept {
-    using core::utils::ascii::istarts_with;
-    return istarts_with(model, "grok-4.6")
-        || istarts_with(model, "grok-4-6");
+    // grok-build advertises xhigh for grok-4.6. xAI's current grok-4.3 model
+    // page also lists xhigh; grok-4.5 stays high-max to match grok-build's
+    // bundled catalog, which still omits the extra-high tier there.
+    return grok_id_in_family(model, "grok-4.6")
+        || grok_id_in_family(model, "grok-4.3");
+}
+
+bool grok_responses_supports_hosted_search(std::string_view model) noexcept {
+    return grok_id_in_family(model, "grok-4.6");
 }
 
 namespace {
@@ -320,10 +357,10 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
     SerializationOptions options;
     ChatRequest effective = request;
     prepare_grok_images(effective);
-    if (enable_hosted_tools_) {
-        // xAI hosted server-side tools. The Grok Build session proxy resolves
-        // these internally, giving the model access to real-time web search
-        // and X (Twitter) data that filo's own client-side tools cannot reach.
+    if (enable_hosted_tools_
+        && grok_responses_supports_hosted_search(request.model)) {
+        // xAI hosted server-side tools. grok-build enables backend search only
+        // for Grok 4.6; older families keep Filo's local search tools instead.
         // `code_execution` is intentionally omitted to avoid shadowing filo's
         // local exec tool.
         static constexpr std::array<std::string_view, 2> kHostedTools{

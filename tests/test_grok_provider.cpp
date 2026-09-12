@@ -836,6 +836,28 @@ TEST_CASE("ProviderFactory - handles various grok-prefixed provider names", "[gr
     REQUIRE(ProviderFactory::create_provider("grok-mini", config) != nullptr);
 }
 
+TEST_CASE("ProviderFactory - API-key grok defaults to the Responses wire API",
+          "[grok][factory][responses]") {
+    core::config::ProviderConfig config;
+    config.model = "grok-4.6";
+
+    auto provider = ProviderFactory::create_provider("grok", config);
+    REQUIRE(provider != nullptr);
+    const auto capabilities = provider->reasoning_capabilities("grok-4.6");
+    CHECK(capabilities.supports_effort());
+    CHECK(capabilities.supports(ReasoningCapability::XHighEffort));
+}
+
+TEST_CASE("Grok protocols own grok-build's 600s idle timeout",
+          "[grok][protocol][timeout]") {
+    using namespace std::chrono_literals;
+    const auto grok = GrokProtocol{}.stream_timeouts();
+    CHECK(grok.response_start == 180s);
+    CHECK(grok.inactivity == 600s);
+    CHECK(GrokResponsesProtocol{}.stream_timeouts().inactivity == 600s);
+    CHECK(OpenAIProtocol{}.stream_timeouts().inactivity == 240s);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // NEW: Response parsing with usage information
 // ─────────────────────────────────────────────────────────────────────────────
@@ -900,6 +922,10 @@ TEST_CASE("grok_responses_supports_effort flags current reasoning families",
     CHECK_FALSE(grok_responses_supports_effort("grok-4.1"));
     CHECK_FALSE(grok_responses_supports_effort("grok-3-mini"));
     CHECK_FALSE(grok_responses_supports_effort("grok-code-fast-1"));
+    CHECK_FALSE(grok_responses_supports_effort("grok-build-0.1"));
+    CHECK(grok_responses_supports_hosted_search("grok-4.6"));
+    CHECK_FALSE(grok_responses_supports_hosted_search("grok-4.5"));
+    CHECK_FALSE(grok_responses_supports_hosted_search("grok-build"));
 }
 
 TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
@@ -908,6 +934,8 @@ TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
     const auto grok46 = proto.reasoning_capabilities("grok-4.6");
     CHECK(grok46.supports_effort());
     CHECK(grok46.supports(ReasoningCapability::XHighEffort));
+    CHECK(proto.reasoning_capabilities("grok-4.3").supports(
+        ReasoningCapability::XHighEffort));
     CHECK_FALSE(proto.reasoning_capabilities("grok-4.5").supports(
         ReasoningCapability::XHighEffort));
     CHECK(proto.reasoning_capabilities("grok-4.5").supports_effort());
@@ -919,15 +947,28 @@ TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
 TEST_CASE("GrokResponsesProtocol serializes hosted tools and encrypted reasoning",
           "[grok][serializer][responses]") {
     GrokResponsesProtocol proto;
-    const auto payload = proto.serialize(make_simple_request("grok-4.5"));
+    const auto payload = proto.serialize(make_simple_request("grok-4.6"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"web_search")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"x_search")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("reasoning.encrypted_content"));
 }
 
-TEST_CASE("GrokResponsesProtocol lets hosted tools override duplicate local tools",
+TEST_CASE("GrokResponsesProtocol keeps local search tools on models without backend search",
           "[grok][serializer][responses][tools]") {
     auto req = make_simple_request("grok-4.5");
+    Tool tool;
+    tool.function.name = "web_search";
+    tool.function.description = "A local tool";
+    req.tools.push_back(std::move(tool));
+
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"({"type":"web_search"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("name":"web_search")"));
+}
+
+TEST_CASE("GrokResponsesProtocol lets hosted tools override duplicate local tools",
+          "[grok][serializer][responses][tools]") {
+    auto req = make_simple_request("grok-4.6");
     for (const auto& name : {"web_search", "read"}) {
         Tool tool;
         tool.function.name = name;

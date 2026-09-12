@@ -735,8 +735,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 bool        output_emitted = false;
                 const bool requires_terminal_event =
                     protocol->requires_terminal_event();
-                transport::StreamWatchdog watchdog(
-                    self->transport_options_.timeouts);
+                transport::StreamWatchdog watchdog(protocol->stream_timeouts());
 
                 uint64_t response_bytes_received = 0;
                 const uint64_t request_bytes_sent =

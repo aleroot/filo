@@ -154,7 +154,7 @@ TEST_CASE("xAI OAuth credentials include Grok session transport markers",
     CHECK(auth.headers.at("x-grok-client-mode") == "interactive");
     CHECK(auth.headers.at("User-Agent")
         == core::auth::xai_grok::user_agent());
-    CHECK_THAT(auth.headers.at("User-Agent"), ContainsSubstring("grok-shell/1.0.16"));
+    CHECK_THAT(auth.headers.at("User-Agent"), ContainsSubstring("grok-shell/1.0.25"));
     CHECK(auth.properties.at("oauth_issuer") == core::auth::XaiOAuthFlow::kIssuer);
     CHECK(auth.properties.at("user_id") == "user-123");
 }
@@ -184,7 +184,7 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
         response_headers, request, "https://cli-chat-proxy.grok.com/v1");
     CHECK(response_headers.at("X-XAI-Token-Auth") == "xai-grok-cli");
     CHECK(response_headers.at("x-grok-client-identifier") == "grok-shell");
-    CHECK(response_headers.at("x-grok-client-version") == "1.0.16");
+    CHECK(response_headers.at("x-grok-client-version") == "1.0.25");
     CHECK(response_headers.at("x-grok-client-mode") == "interactive");
     CHECK(response_headers.at("x-grok-user-id") == "user-123");
     CHECK(response_headers.at("User-Agent")
@@ -213,6 +213,26 @@ TEST_CASE("Grok protocols add request-scoped proxy routing headers",
                   == untrusted_headers.end());
         }
     }
+}
+
+TEST_CASE("Grok API-key requests send cache-sticky conv-id without proxy identity",
+          "[xai][grok][transport][caching]") {
+    core::llm::ChatRequest request;
+    request.model = "grok-4.6";
+    request.session_id = "conversation-api";
+
+    cpr::Header chat_headers;
+    core::llm::protocols::GrokProtocol chat;
+    chat.prepare_headers(chat_headers, request, "https://api.x.ai/v1");
+    CHECK(chat_headers.at("x-grok-conv-id") == "conversation-api");
+    CHECK(chat_headers.find("X-XAI-Token-Auth") == chat_headers.end());
+    CHECK(chat_headers.find("x-grok-model-override") == chat_headers.end());
+
+    cpr::Header response_headers;
+    core::llm::protocols::GrokResponsesProtocol responses;
+    responses.prepare_headers(response_headers, request, "https://api.x.ai/v1");
+    CHECK(response_headers.at("x-grok-conv-id") == "conversation-api");
+    CHECK(response_headers.find("X-XAI-Token-Auth") == response_headers.end());
 }
 
 TEST_CASE("Grok OAuth catalogs retain session-only models", "[xai][grok][models]") {

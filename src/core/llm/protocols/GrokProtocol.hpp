@@ -52,6 +52,7 @@
 #include "OpenAIProtocol.hpp"
 #include "OpenAIResponsesProtocol.hpp"
 #include "GrokBillingUsage.hpp"
+#include <chrono>
 #include <memory>
 #include <string_view>
 
@@ -89,6 +90,25 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
     std::string_view model) noexcept;
 
 /**
+ * @brief Return true if @p model accepts xAI hosted `web_search` / `x_search`.
+ *
+ * grok-build advertises `supports_backend_search` only for Grok 4.6. Sending
+ * those tools to older families can 400 the request or shadow Filo's local
+ * search tools without a working server-side implementation.
+ */
+[[nodiscard]] bool grok_responses_supports_hosted_search(
+    std::string_view model) noexcept;
+
+/// grok-build's inference_idle_timeout_secs default (600s), with a slightly
+/// longer response-start budget than the generic HTTP watchdog.
+[[nodiscard]] inline transport::StreamTimeoutPolicy grok_stream_timeouts() noexcept {
+    return {
+        .response_start = std::chrono::seconds(180),
+        .inactivity = std::chrono::seconds(600),
+    };
+}
+
+/**
  * @brief xAI Grok protocol — OpenAI format + xAI-specific enhancements.
  *
  * ## Features
@@ -121,6 +141,10 @@ public:
         std::string_view model) const noexcept override {
         if (!grok_supports_reasoning_effort(model)) return {};
         return ReasoningCapabilities{ReasoningCapability::Effort};
+    }
+    [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
+        const noexcept override {
+        return grok_stream_timeouts();
     }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
@@ -206,11 +230,11 @@ private:
  * Extends the base OpenAI Responses protocol with:
  *  - Grok Build session proxy headers (`x-grok-*`)
  *  - Reasoning-effort control (`reasoning:{effort:...}`) for Grok 4.6 / 4.5 /
- *    4.3 / Grok Build. Grok 4.6 additionally exposes the `xhigh` tier.
+ *    4.3 / Grok Build. Grok 4.6 and 4.3 additionally expose the `xhigh` tier.
  *  - Encrypted reasoning replay (`include:["reasoning.encrypted_content"]`) so
  *    prior reasoning can be carried across turns
  *  - Optional xAI hosted server-side tools (real-time `web_search` and
- *    `x_search`), which the proxy resolves internally
+ *    `x_search`) on Grok 4.6, matching grok-build's backend-search gate
  */
 class GrokResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
@@ -232,6 +256,10 @@ public:
 
     [[nodiscard]] std::string_view name() const noexcept override {
         return "grok_responses";
+    }
+    [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
+        const noexcept override {
+        return grok_stream_timeouts();
     }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
