@@ -307,5 +307,5 @@ TEST_CASE("filo --auth mistral is a first-class login",
     const auto providers =
         core::auth::AuthenticationManager::create_with_defaults("/tmp")
             .available_login_providers();
-    REQUIRE(std::ranges::find(providers, "mistral") != providers.end());
+    REQUIRE(std::ranges::find(providers, std::string("mistral")) != providers.end());
 }
