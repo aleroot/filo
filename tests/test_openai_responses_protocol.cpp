@@ -5,6 +5,7 @@
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/llm/Models.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 
@@ -64,6 +65,46 @@ TEST_CASE("OpenAIResponsesProtocol - serializer emits responses request fields",
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("parallel_tool_calls":false)"));
 }
 
+TEST_CASE("OpenAIResponsesProtocol omits reasoning.summary on the public API",
+          "[openai][responses][serializer][reasoning]") {
+    OpenAIResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-5.6-sol";
+    req.messages.push_back(Message{.role = "user", .content = "Hello."});
+
+    const std::string payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning")"));
+}
+
+TEST_CASE("CodexResponsesProtocol always sends reasoning.summary",
+          "[openai][responses][codex][serializer][reasoning]") {
+    CodexResponsesProtocol protocol;
+    ChatRequest req;
+    req.model = "gpt-5.6-sol";
+    req.messages.push_back(Message{.role = "user", .content = "Hello."});
+
+    const std::string payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"summary":"auto"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("effort")"));
+}
+
+TEST_CASE("CodexResponsesProtocol matches Codex stream idle and retry budgets",
+          "[openai][responses][codex][timeout][retry]") {
+    using namespace std::chrono_literals;
+    const auto generic = OpenAIResponsesProtocol{}.stream_timeouts();
+    CHECK(generic.response_start == 120s);
+    CHECK(generic.inactivity == 240s);
+    CHECK(OpenAIResponsesProtocol{}.stream_retry_policy().retry_only_before_output);
+
+    const auto timeouts = CodexResponsesProtocol{}.stream_timeouts();
+    CHECK(timeouts.response_start == 300s);
+    CHECK(timeouts.inactivity == 300s);
+
+    const auto retries = CodexResponsesProtocol{}.stream_retry_policy();
+    CHECK(retries.max_retries == 5);
+    CHECK_FALSE(retries.retry_only_before_output);
+}
+
 TEST_CASE("OpenAIResponsesProtocol - GPT-5.6 preserves max reasoning effort",
           "[openai][responses][serializer][effort]") {
     OpenAIResponsesProtocol protocol;
@@ -95,7 +136,8 @@ TEST_CASE("OpenAIResponsesProtocol - clamps private Codex effort tiers",
     CodexResponsesProtocol codex;
     req.model = "gpt-5.6-sol";
     CHECK_THAT(codex.serialize(req),
-               Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"ultra"})"));
+               Catch::Matchers::ContainsSubstring(
+                   R"("reasoning":{"effort":"ultra","summary":"auto"})"));
 }
 
 TEST_CASE("OpenAIResponsesProtocol - serializer emits input_image items",
@@ -268,6 +310,8 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("x-client-request-id") == "thread-123");
     REQUIRE(headers.at("x-codex-window-id") == "thread-123:0");
     REQUIRE(headers.at("originator") == "filo");
+    REQUIRE(headers.at("session_id") == "thread-123");
+    REQUIRE_FALSE(headers.at("version").empty());
     REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::StartsWith("filo/"));
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
@@ -304,6 +348,9 @@ TEST_CASE("CodexResponsesProtocol - HTTP replay includes system context and encr
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"system")"));
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("include":["reasoning.encrypted_content"])"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("store":false)"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"summary":"auto"})"));
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring("previous_response_id"));
 }
 

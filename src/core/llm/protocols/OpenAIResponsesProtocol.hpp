@@ -87,6 +87,8 @@ protected:
         bool include_store = true;
         bool include_prompt_cache_key = true;
         bool include_response_include = true;
+        // Codex requires `reasoning.summary`; public OpenAI, Grok, and DashScope omit it.
+        bool include_reasoning_summary = false;
         std::optional<std::string_view> reasoning_effort_override;
         std::span<const std::string_view> hosted_tool_types;
     };
@@ -130,12 +132,43 @@ private:
     RateLimitInfo last_rate_limit_;
 };
 
+/// Codex `DEFAULT_STREAM_IDLE_TIMEOUT_MS` is 300s. GPT-5.x reasoning on the
+/// ChatGPT subscription backend routinely thinks longer than Filo's generic
+/// 120s/240s HTTP watchdog, which would abort a healthy stream.
+[[nodiscard]] inline transport::StreamTimeoutPolicy
+codex_stream_timeouts() noexcept {
+    return {
+        .response_start = std::chrono::seconds(300),
+        .inactivity = std::chrono::seconds(300),
+    };
+}
+
+/// Codex `DEFAULT_STREAM_MAX_RETRIES` is 5. Responses `response.failed` can
+/// fire after streamed reasoning, so retry even after output — same contract
+/// as grok-build, handled by HttpLLMProvider's reset_attempt path.
+[[nodiscard]] inline transport::RetryPolicy
+codex_stream_retry_policy() noexcept {
+    transport::RetryPolicy policy;
+    policy.max_retries = 5;
+    policy.retry_only_before_output = false;
+    return policy;
+}
+
 class CodexResponsesProtocol final : public OpenAIResponsesProtocol {
 public:
     explicit CodexResponsesProtocol(bool include_reasoning_encrypted = true,
                                     std::string default_service_tier = {},
                                     std::shared_ptr<IProviderClientIdentitySource>
                                         client_identity_source = {});
+
+    [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
+        const noexcept override {
+        return codex_stream_timeouts();
+    }
+    [[nodiscard]] transport::RetryPolicy stream_retry_policy()
+        const noexcept override {
+        return codex_stream_retry_policy();
+    }
 
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;

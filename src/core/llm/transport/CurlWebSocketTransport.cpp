@@ -200,8 +200,10 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
     const cpr::Header& headers,
     std::string_view request_payload,
     const MessageCallback& on_message,
-    const std::atomic_bool* cancel_requested) {
+    const std::atomic_bool* cancel_requested,
+    std::optional<std::chrono::milliseconds> idle_timeout) {
     std::lock_guard lock(mutex_);
+    const std::chrono::milliseconds idle = idle_timeout.value_or(idle_timeout_);
 
     if (cancel_requested != nullptr
         && cancel_requested->load(std::memory_order_acquire)) {
@@ -263,7 +265,7 @@ WebSocketStreamResult CurlWebSocketTransport::stream_text(
         }
 
         if (code == CURLE_AGAIN) {
-            if (std::chrono::steady_clock::now() - last_activity > idle_timeout_) {
+            if (std::chrono::steady_clock::now() - last_activity > idle) {
                 auto response_headers = connection_->response_headers;
                 auto* curl = connection_->curl.get();
                 auto result = failed(

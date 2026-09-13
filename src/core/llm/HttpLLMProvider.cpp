@@ -654,7 +654,8 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                                 }
                                 return websocket_done;
                             },
-                            &self->cancel_requested_);
+                            &self->cancel_requested_,
+                            protocol->stream_timeouts().inactivity);
 
                         protocol->observe_response_headers(
                             websocket_result.response_headers, request_metadata);

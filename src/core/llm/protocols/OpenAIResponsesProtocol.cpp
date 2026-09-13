@@ -798,14 +798,27 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
     }
     if (options.reasoning_effort_override.has_value()
         || reasoning_capabilities(req.model).supports_effort()) {
+        // Public OpenAI/Grok/DashScope send effort only. Codex opts into
+        // `summary: auto` via SerializationOptions because the ChatGPT
+        // backend 400s when that field is missing.
         const std::string effort = options.reasoning_effort_override.has_value()
             ? std::string(*options.reasoning_effort_override)
             : normalize_openai_reasoning_effort(
                   req.effort, reasoning_capabilities(req.model));
-        if (!effort.empty()) {
-            payload += R"(,"reasoning":{"effort":")";
-            payload += core::utils::escape_json_string(effort);
-            payload += R"("})";
+        if (!effort.empty() || options.include_reasoning_summary) {
+            payload += R"(,"reasoning":{)";
+            bool first = true;
+            if (!effort.empty()) {
+                payload += R"("effort":")";
+                payload += core::utils::escape_json_string(effort);
+                payload += '"';
+                first = false;
+            }
+            if (options.include_reasoning_summary) {
+                if (!first) payload += ',';
+                payload += R"("summary":"auto")";
+            }
+            payload += '}';
         }
     }
 
@@ -935,8 +948,10 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     const ChatRequest& request,
     const std::vector<std::string>& input_items,
     std::optional<std::string_view> previous_response_id_override) const {
+    SerializationOptions options;
+    options.include_reasoning_summary = true;
     std::string payload = serialize_with_input_items(
-        request, input_items, previous_response_id_override);
+        request, input_items, previous_response_id_override, options);
     const std::string window_id = (request.session_id.empty() ? std::string("filo") : request.session_id) + ":0";
     std::string metadata = R"("client_metadata":{"x-codex-installation-id":")";
     metadata += core::utils::escape_json_string(installation_id());
@@ -970,6 +985,8 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-codex-window-id"] = thread_id + ":0";
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = "filo";
+    headers["version"] = std::string(core::version::value);
+    headers["session_id"] = thread_id;
     headers["User-Agent"] = std::string(core::version::user_agent);
     if (!turn_state.empty()) {
         headers["x-codex-turn-state"] = turn_state;

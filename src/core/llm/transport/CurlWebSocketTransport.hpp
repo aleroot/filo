@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -48,7 +49,8 @@ public:
         const cpr::Header& headers,
         std::string_view request_payload,
         const MessageCallback& on_message,
-        const std::atomic_bool* cancel_requested = nullptr);
+        const std::atomic_bool* cancel_requested = nullptr,
+        std::optional<std::chrono::milliseconds> idle_timeout = std::nullopt);
 
     void reset();
 
