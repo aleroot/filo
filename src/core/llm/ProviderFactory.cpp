@@ -327,8 +327,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 protocol = std::make_unique<protocols::GrokProtocol>(
                     effort, config.stream_usage);
             } else if (canonical_type == "mistral") {
-                protocol = std::make_unique<protocols::MistralProtocol>(
-                    config.stream_usage);
+                protocol = std::make_unique<protocols::MistralProtocol>();
             } else {
                 protocol = std::make_unique<protocols::OpenAIProtocol>(config.stream_usage);
             }

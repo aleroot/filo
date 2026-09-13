@@ -663,6 +663,14 @@ struct Serializer {
         EveryAssistant,
     };
 
+    // How owned assistant reasoning is represented in the messages array.
+    // SiblingField is the OpenAI-compatible `reasoning_content` key; ThinkingBlocks
+    // is the typed content-array shape (`thinking` + `text`).
+    enum class ReasoningContentLayout {
+        SiblingField,
+        ThinkingBlocks,
+    };
+
     enum class EmptyAssistantContentPolicy {
         Null,
         EmptyStringWhenReasoning,
@@ -681,6 +689,8 @@ struct Serializer {
         // identifies the wire family that owns non-empty replay state.
         ReasoningContentPolicy reasoning_content_policy =
             ReasoningContentPolicy::Omit;
+        ReasoningContentLayout reasoning_layout =
+            ReasoningContentLayout::SiblingField;
         std::string reasoning_protocol;
         // OpenAI-compatible endpoints disagree on the representation of an
         // assistant turn that contains reasoning but no visible text.
@@ -821,7 +831,36 @@ struct Serializer {
             if (!req.messages[i].tool_call_id.empty()) {
                 payload += R"(,"tool_call_id":")" + core::utils::escape_json_string(req.messages[i].tool_call_id) + "\"";
             }
-            if (!req.messages[i].content_parts.empty()) {
+
+            // Vendor extension: only replay reasoning owned by this wire
+            // protocol. Legacy messages have no provenance and retain the old
+            // behavior for backward-compatible session resumes. When a
+            // provider requires a structurally present field (Kimi preserved
+            // thinking), foreign reasoning is replaced with an empty value.
+            const bool reasoning_owned =
+                req.messages[i].reasoning_protocol.empty()
+                || (!options.reasoning_protocol.empty()
+                    && req.messages[i].reasoning_protocol
+                        == options.reasoning_protocol);
+            const bool emit_thinking_blocks =
+                options.reasoning_layout == ReasoningContentLayout::ThinkingBlocks
+                && req.messages[i].role == "assistant"
+                && reasoning_owned
+                && !req.messages[i].reasoning_content.empty();
+
+            if (emit_thinking_blocks) {
+                payload += R"(,"content":[{"type":"thinking","thinking":[{"type":"text","text":")";
+                payload += core::utils::escape_json_string(
+                    req.messages[i].reasoning_content);
+                payload += "\"}]";
+                payload += '}';
+                if (!req.messages[i].content.empty()) {
+                    payload += R"(,{"type":"text","text":")";
+                    payload += core::utils::escape_json_string(req.messages[i].content);
+                    payload += "\"}";
+                }
+                payload += ']';
+            } else if (!req.messages[i].content_parts.empty()) {
                 std::vector<std::string> serialized_parts;
                 serialized_parts.reserve(req.messages[i].content_parts.size() + 1);
                 bool has_text_part = false;
@@ -929,23 +968,15 @@ struct Serializer {
                 payload += "]";
             }
 
-            // Vendor extension: only replay reasoning owned by this wire
-            // protocol. Legacy messages have no provenance and retain the old
-            // behavior for backward-compatible session resumes. When a
-            // provider requires a structurally present field (Kimi preserved
-            // thinking), foreign reasoning is replaced with an empty value.
-            const bool reasoning_owned =
-                req.messages[i].reasoning_protocol.empty()
-                || (!options.reasoning_protocol.empty()
-                    && req.messages[i].reasoning_protocol
-                        == options.reasoning_protocol);
             const bool emit_non_empty_reasoning =
-                options.reasoning_content_policy
+                options.reasoning_layout == ReasoningContentLayout::SiblingField
+                && options.reasoning_content_policy
                     == ReasoningContentPolicy::NonEmptyOwned
                 && reasoning_owned
                 && !req.messages[i].reasoning_content.empty();
             const bool emit_required_assistant_reasoning =
-                options.reasoning_content_policy
+                options.reasoning_layout == ReasoningContentLayout::SiblingField
+                && options.reasoning_content_policy
                     == ReasoningContentPolicy::EveryAssistant
                 && req.messages[i].role == "assistant";
             if (emit_non_empty_reasoning || emit_required_assistant_reasoning) {

@@ -613,6 +613,17 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "ZAI_API_KEY",
         "The same key is also saved for the Coding Plan endpoint "
         "with account-scoped models discovered automatically."));
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "mistral",
+        "Mistral",
+        "mistral",
+        "mistral-vibe-cli-latest",
+        std::vector<ApiKeyProviderSeed>{},
+        "MISTRAL_API_KEY",
+        "Uses api.mistral.ai. A Vibe or Studio key from console.mistral.ai "
+        "works with your subscription plan's included monthly usage. "
+        "mistral-vibe browser sign-in stores the same key as MISTRAL_API_KEY "
+        "in ~/.vibe/.env."));
     return manager;
 }
 

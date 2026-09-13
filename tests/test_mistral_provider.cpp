@@ -1,13 +1,18 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "core/auth/AuthenticationManager.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/MistralProtocol.hpp"
+#include "core/version/Version.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <cpr/cpr.h>
 #include <memory>
 
 using namespace core::llm;
@@ -90,6 +95,8 @@ TEST_CASE("Mistral protocol mirrors Vibe reasoning effort semantics",
     const auto high_payload = protocol.serialize(high);
     REQUIRE_THAT(high_payload,
                  Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(high_payload,
+                 !Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
     REQUIRE_THAT(high_payload,
                  Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
 
@@ -182,4 +189,123 @@ TEST_CASE("Mistral SSE - finish_reason chunk is ignored", "[mistral][sse]") {
         R"({"choices":[{"delta":{},"finish_reason":"stop","index":0}]})");
     REQUIRE(content.empty());
     REQUIRE(tools.empty());
+}
+
+TEST_CASE("Mistral protocol defaults reasoning models to Vibe high effort",
+          "[mistral][serializer][effort]") {
+    MistralProtocol protocol;
+    const auto payload = protocol.serialize(
+        make_mistral_request("mistral-vibe-cli-latest"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(
+                     R"("stream_options":{"include_usage":true})"));
+}
+
+TEST_CASE("Mistral protocol replays thinking as typed content blocks",
+          "[mistral][serializer][thinking]") {
+    MistralProtocol protocol;
+    ChatRequest req;
+    req.model = "mistral-vibe-cli-latest";
+    req.effort = "high";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .content = "answer",
+        .reasoning_content = "reason",
+        .reasoning_protocol = "mistral",
+    });
+
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("type":"thinking")"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("text":"reason")"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("type":"text")"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("text":"answer")"));
+    REQUIRE_THAT(payload,
+                 !Catch::Matchers::ContainsSubstring("reasoning_content"));
+}
+
+TEST_CASE("Mistral protocol omits an empty text chunk when replaying reasoning",
+          "[mistral][serializer][thinking]") {
+    MistralProtocol protocol;
+    ChatRequest req;
+    req.model = "mistral-vibe-cli-latest";
+    req.effort = "high";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .reasoning_content = "Let me think step by step.",
+        .reasoning_protocol = "mistral",
+    });
+
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(
+        payload,
+        Catch::Matchers::ContainsSubstring(
+            R"("content":[{"type":"thinking","thinking":[{"type":"text","text":"Let me think step by step."}]}])"));
+}
+
+TEST_CASE("Mistral protocol drops thinking blocks when effort is off",
+          "[mistral][serializer][thinking]") {
+    MistralProtocol protocol;
+    ChatRequest req;
+    req.model = "mistral-vibe-cli-latest";
+    req.effort = "off";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .content = "answer",
+        .reasoning_content = "hidden",
+        .reasoning_protocol = "mistral",
+    });
+
+    const auto payload = protocol.serialize(req);
+    REQUIRE_THAT(payload,
+                 !Catch::Matchers::ContainsSubstring(R"("type":"thinking")"));
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(R"("content":"answer")"));
+}
+
+TEST_CASE("Mistral protocol uses Vibe-length stream timeouts",
+          "[mistral][timeout]") {
+    MistralProtocol protocol;
+    const auto timeouts = protocol.stream_timeouts();
+    CHECK(timeouts.response_start == std::chrono::seconds(180));
+    CHECK(timeouts.inactivity == std::chrono::seconds(720));
+}
+
+TEST_CASE("Mistral protocol stamps a Filo User-Agent",
+          "[mistral][headers]") {
+    MistralProtocol protocol;
+    const auto headers = protocol.build_headers({});
+    REQUIRE(headers.contains("User-Agent"));
+    REQUIRE_THAT(headers.at("User-Agent"),
+                 Catch::Matchers::ContainsSubstring(
+                     std::string(core::version::user_agent)));
+}
+
+TEST_CASE("Mistral protocol formats subscription auth errors",
+          "[mistral][errors]") {
+    MistralProtocol protocol;
+    const cpr::Header headers;
+    const protocols::HttpResponse unauthorized{401, "{}", headers};
+    REQUIRE_THAT(protocol.format_error_message(unauthorized),
+                 Catch::Matchers::ContainsSubstring("MISTRAL_API_KEY"));
+
+    const protocols::HttpResponse limited{
+        429, R"({"message":"Rate limited"})", headers};
+    REQUIRE_THAT(protocol.format_error_message(limited),
+                 Catch::Matchers::ContainsSubstring("Rate limited"));
+}
+
+TEST_CASE("filo --auth mistral is a first-class login",
+          "[mistral][auth]") {
+    const auto providers =
+        core::auth::AuthenticationManager::create_with_defaults("/tmp")
+            .available_login_providers();
+    REQUIRE(std::ranges::find(providers, "mistral") != providers.end());
 }

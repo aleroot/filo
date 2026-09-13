@@ -533,7 +533,9 @@ std::vector<ModelInfo> build_openai_catalog() {
 // Mistral API models (updated July 2026)
 std::vector<ModelInfo> build_mistral_catalog() {
     constexpr ModelCapabilities CAP_MISTRAL_REASONING =
-        CAP_FULL | static_cast<uint32_t>(ModelCapability::Reasoning);
+        CAP_FULL
+        | static_cast<uint32_t>(ModelCapability::Reasoning)
+        | static_cast<uint32_t>(ModelCapability::PromptCaching);
 
     return {
         {
@@ -548,7 +550,7 @@ std::vector<ModelInfo> build_mistral_catalog() {
             .context_window = 256'000,
             .capabilities = CAP_MISTRAL_REASONING,
             .tier = ModelTier::Reasoning,
-            .pricing = {1.50, 7.50, -1.0, -1.0},
+            .pricing = {1.50, 7.50, 0.15, -1.0},
             .constraints = kStandardConstraints,
         },
         {
