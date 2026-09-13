@@ -449,6 +449,18 @@ public:
     }
 
     /**
+     * Retry knobs for one HTTP stream.
+     *
+     * HttpLLMProvider feeds this to `RetryController`, the same way it feeds
+     * `stream_timeouts()` to `StreamWatchdog`. Override when a vendor retries
+     * mid-generation failures (Grok `response.failed` / `error` after output).
+     */
+    [[nodiscard]] virtual transport::RetryPolicy stream_retry_policy()
+        const noexcept {
+        return {};
+    }
+
+    /**
      * @brief Create an independent copy with fresh per-stream state.
      *
      * HttpLLMProvider calls this once per stream_response() invocation.

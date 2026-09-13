@@ -78,6 +78,24 @@ TEST_CASE("RetryController centralizes retry safety and exponential backoff",
     CHECK_FALSE(retries.schedule(true, false).has_value());
 }
 
+TEST_CASE("RetryController can restart after streamed output",
+          "[http][resilience][retry]") {
+    RetryController after_output(RetryPolicy{
+        .max_retries = 2,
+        .initial_backoff = 500ms,
+        .maximum_backoff = 30s,
+        .minimum_delay = 0ms,
+        .server_delay_padding = 100ms,
+        .jitter_ratio = 0.0,
+        .retry_only_before_output = false,
+    });
+    const auto first = after_output.schedule(true, true);
+    REQUIRE(first.has_value());
+    CHECK(first->attempt == 1);
+    CHECK(after_output.schedule(true, true).has_value());
+    CHECK_FALSE(after_output.schedule(true, true).has_value());
+}
+
 TEST_CASE("Terminal-event requirements are protocol capabilities",
           "[http][resilience][protocol]") {
     CHECK_FALSE(core::llm::protocols::OpenAIProtocol{}

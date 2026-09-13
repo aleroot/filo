@@ -419,6 +419,10 @@ struct StreamChunk {
     // "kimi" or "dashscope"). This prevents reasoning text from one provider
     // being replayed through another provider after a live model switch.
     std::string reasoning_protocol;
+    // True when the transport is discarding the in-progress generation because
+    // RetryController is restarting the request. Not a terminal event: Agent
+    // clears accumulators and the TUI retracts the live card.
+    bool reset_attempt = false;
 
     // Factory methods for common cases
     [[nodiscard]] static StreamChunk make_final(
@@ -443,6 +447,12 @@ struct StreamChunk {
             .is_final = true,
             .is_error = true,
         };
+    }
+    [[nodiscard]] static StreamChunk make_attempt_reset(std::string status = {}) {
+        StreamChunk chunk;
+        chunk.content = std::move(status);
+        chunk.reset_attempt = true;
+        return chunk;
     }
     [[nodiscard]] static StreamChunk make_authentication_error(
         std::string message,

@@ -383,6 +383,19 @@ private:
   std::atomic<int> explores_{0};
 };
 
+class ResetThenRecoverProvider final : public core::llm::LLMProvider {
+public:
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        callback(core::llm::StreamChunk::make_content("partial "));
+        callback(core::llm::StreamChunk::make_attempt_reset(
+            "[grok_responses retrying after a generation failure (1/3)]"));
+        callback(core::llm::StreamChunk::make_content("recovered after generation failure"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+};
+
 class RecoveringMaxOutputProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -1160,6 +1173,70 @@ TEST_CASE("Agent enforces a per-turn model step bound", "[agent][loop]") {
     CHECK(found_limit_message);
 }
 
+TEST_CASE("Agent retracts in-progress output when the transport resets an attempt",
+          "[agent][loop][retry]") {
+    auto provider = std::make_shared<ResetThenRecoverProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    std::mutex capture_mutex;
+    std::string streamed_text;
+    std::vector<std::string> status_logs;
+    int reset_count = 0;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+
+    agent->send_message(
+        "continue the task",
+        [&](const std::string& chunk) {
+            std::lock_guard lock(capture_mutex);
+            streamed_text += chunk;
+        },
+        [](const std::string&, const std::string&) {},
+        [&]() {
+            {
+                std::lock_guard lock(done_mutex);
+                done = true;
+            }
+            done_cv.notify_one();
+        },
+        core::agent::Agent::TurnCallbacks{
+            .on_status_log = [&](const std::string& status) {
+                std::lock_guard lock(capture_mutex);
+                status_logs.push_back(status);
+            },
+            .on_attempt_reset = [&]() {
+                std::lock_guard lock(capture_mutex);
+                ++reset_count;
+                streamed_text.clear();
+            },
+        });
+
+    {
+        std::unique_lock lock(done_mutex);
+        REQUIRE(done_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return done; }));
+    }
+
+    {
+        std::lock_guard lock(capture_mutex);
+        CHECK(streamed_text == "recovered after generation failure");
+        REQUIRE(status_logs.size() == 1);
+        CHECK_THAT(status_logs.front(),
+                   Catch::Matchers::ContainsSubstring("retrying after a generation failure"));
+        CHECK(reset_count == 1);
+    }
+
+    const auto history = agent->get_history();
+    REQUIRE_FALSE(history.empty());
+    CHECK(history.back().role == "assistant");
+    CHECK(history.back().content == "recovered after generation failure");
+    CHECK_FALSE(agent->last_turn_failed());
+}
+
 TEST_CASE("Agent automatically recovers from truncated Claude turns",
           "[agent][loop][claude]") {
     auto provider = std::make_shared<RecoveringMaxOutputProvider>();
@@ -1297,7 +1374,7 @@ TEST_CASE("Agent bounds automatic recovery for repeated truncated Claude turns",
         CHECK_THAT(status_logs.back(),
                    Catch::Matchers::ContainsSubstring("continuing automatically (3/3)"));
         CHECK_THAT(streamed_text,
-                   Catch::Matchers::ContainsSubstring("Claude ended this turn"));
+                   Catch::Matchers::ContainsSubstring("claude ended this turn"));
         CHECK_THAT(streamed_text,
                    Catch::Matchers::ContainsSubstring("stream ended before the provider completed a tool call"));
     }

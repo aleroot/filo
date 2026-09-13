@@ -88,19 +88,7 @@ private:
 }
 
 [[nodiscard]] std::string provider_notice_subject(std::string_view provider_name) {
-    std::string lowered;
-    lowered.reserve(provider_name.size());
-    for (const char ch : provider_name) {
-        lowered.push_back(static_cast<char>(
-            std::tolower(static_cast<unsigned char>(ch))));
-    }
-    if (lowered.find("claude") != std::string::npos) {
-        return "Claude";
-    }
-    if (!provider_name.empty()) {
-        return "Provider '" + std::string(provider_name) + "'";
-    }
-    return "Model";
+    return provider_name.empty() ? std::string("Model") : std::string(provider_name);
 }
 
 [[nodiscard]] std::string empty_response_detail(std::string_view stop_reason,
@@ -1766,6 +1754,26 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         // stream by emitting only a final marker after cancellation.
         if (self->is_stop_requested()) {
             finish_stopped_turn();
+            return;
+        }
+
+        if (chunk.reset_attempt) {
+            assistant_response->clear();
+            reasoning_accum->clear();
+            reasoning_protocol_accum->clear();
+            tool_calls_accum->clear();
+            continuation_accum->clear();
+            if (turn_callbacks.on_attempt_reset) {
+                turn_callbacks.on_attempt_reset();
+            }
+            if (!chunk.content.empty()) {
+                if (turn_callbacks.on_status_log) {
+                    turn_callbacks.on_status_log(
+                        std::format("\n{}\n", chunk.content));
+                } else {
+                    text_callback(std::format("\n{}\n", chunk.content));
+                }
+            }
             return;
         }
 

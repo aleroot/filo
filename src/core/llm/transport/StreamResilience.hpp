@@ -61,6 +61,11 @@ struct RetryPolicy {
     std::chrono::milliseconds server_delay_padding =
         std::chrono::milliseconds(100);
     double jitter_ratio = 0.25;
+    // When true (Filo's generic default), a retryable failure after any
+    // forwarded content/reasoning/tool delta is terminal: the caller cannot
+    // retract text already shown. grok-build defaults this to false so a
+    // mid-generation `response.failed` restarts the request.
+    bool retry_only_before_output = true;
 };
 
 struct RetrySchedule {

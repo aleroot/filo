@@ -81,6 +81,10 @@ public:
         // routing status here keeps it out of the assistant response body and
         // avoids re-marking a finalized assistant message as pending.
         std::function<void(const std::string&)> on_status_log = {};
+        // Raised when RetryController discards an in-progress generation and
+        // restarts the request. The TUI retracts the live assistant card so
+        // the retry does not concatenate with the aborted attempt.
+        std::function<void()> on_attempt_reset = {};
         // Raised only when an OAuth refresh credential was definitively
         // rejected and interactive sign-in can recover the provider.
         std::function<void(const core::llm::AuthenticationRecoveryRequest&)>

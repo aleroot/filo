@@ -6247,6 +6247,22 @@ RunResult run(RunOptions opts) {
         callbacks.on_status_log = [runtime, &append_runtime_history](const std::string& status) {
             append_runtime_history(runtime, status);
         };
+        callbacks.on_attempt_reset =
+            [runtime, timeline, &update_live_assistant_message]() {
+                update_live_assistant_message(runtime, timeline, [&](UiMessage& message) {
+                    if (message.finalized) {
+                        return;
+                    }
+                    message.text.clear();
+                    message.assistant_source_text.clear();
+                    message.reasoning_text.clear();
+                    message.reasoning_active = false;
+                    message.tools.clear();
+                    message.pending = true;
+                    message.thinking = false;
+                    message.show_activity_status = true;
+                });
+            };
         callbacks.allow_efficiency_rotation = true;
         callbacks.min_context_utilization_for_rotation = 0.75;
         return callbacks;

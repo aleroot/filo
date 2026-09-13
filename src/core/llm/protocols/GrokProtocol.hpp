@@ -108,6 +108,15 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
     };
 }
 
+/// grok-build RetryPolicy::default sets `retry_only_before_output = false` so a
+/// mid-generation `response.failed` / `error` event (including "Internal error
+/// during token generation") restarts the request instead of killing the turn.
+[[nodiscard]] inline transport::RetryPolicy grok_stream_retry_policy() noexcept {
+    transport::RetryPolicy policy;
+    policy.retry_only_before_output = false;
+    return policy;
+}
+
 /**
  * @brief xAI Grok protocol — OpenAI format + xAI-specific enhancements.
  *
@@ -145,6 +154,10 @@ public:
     [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
         const noexcept override {
         return grok_stream_timeouts();
+    }
+    [[nodiscard]] transport::RetryPolicy stream_retry_policy()
+        const noexcept override {
+        return grok_stream_retry_policy();
     }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
@@ -261,6 +274,10 @@ public:
         const noexcept override {
         return grok_stream_timeouts();
     }
+    [[nodiscard]] transport::RetryPolicy stream_retry_policy()
+        const noexcept override {
+        return grok_stream_retry_policy();
+    }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         auto cloned = std::make_unique<GrokResponsesProtocol>(
@@ -291,8 +308,10 @@ public:
     [[nodiscard]] std::string serialize(const ChatRequest& request) const override;
 
     /// xAI reports model-generation failures inside otherwise-successful SSE
-    /// responses. Retry transient failures only before output, honoring the
-    /// server retry veto and failing fast on deterministic context overflow.
+    /// responses. Classify them as retryable (honoring `x-should-retry: false`
+    /// and failing fast on deterministic context overflow). grok-build restarts
+    /// the request even after output has started; HttpLLMProvider follows that
+    /// via `stream_retry_policy()`.
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
 
     void reset_state() override;

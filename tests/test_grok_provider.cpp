@@ -1083,6 +1083,13 @@ TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported model
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort")"));
 }
 
+TEST_CASE("Grok protocols retry mid-generation failures like grok-build",
+          "[grok][responses][retry]") {
+    CHECK_FALSE(GrokProtocol{}.stream_retry_policy().retry_only_before_output);
+    CHECK_FALSE(GrokResponsesProtocol{}.stream_retry_policy().retry_only_before_output);
+    CHECK(OpenAIProtocol{}.stream_retry_policy().retry_only_before_output);
+}
+
 TEST_CASE("GrokResponsesProtocol classifies generation failures as retryable stream errors",
           "[grok][responses][sse][retry]") {
     GrokResponsesProtocol protocol;

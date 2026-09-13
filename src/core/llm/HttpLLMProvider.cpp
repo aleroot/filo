@@ -710,8 +710,18 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             }
 
             transport::RetryController retry_controller(
-                self->transport_options_.retries);
+                protocol->stream_retry_policy());
             bool attempted_auth_recovery = false;
+
+            const auto emit_retry_reset = [&](const transport::RetrySchedule& retry,
+                                              std::string_view reason) {
+                callback(StreamChunk::make_attempt_reset(std::format(
+                    "[{} retrying after {} ({}/{})]",
+                    protocol->name(),
+                    reason,
+                    retry.attempt,
+                    retry.max_retries)));
+            };
 
             const auto prepare_retry = [&](const transport::RetrySchedule& retry) {
                 if (!transport::wait_for_retry(
@@ -972,6 +982,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                             retry->attempt,
                             retry->max_retries);
 
+                        emit_retry_reset(
+                            *retry,
+                            incomplete_required_stream
+                                ? "an incomplete stream"
+                                : "a generation failure");
                         if (!prepare_retry(*retry)) break;
                         continue;
                     }
@@ -1013,6 +1028,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                         failure,
                         transport_retry->attempt,
                         transport_retry->max_retries);
+                    emit_retry_reset(*transport_retry, "a transport failure");
                     if (!prepare_retry(*transport_retry)) break;
                     continue;
                 }
@@ -1065,20 +1081,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     output_emitted,
                     std::chrono::seconds(retry_rate_limit.retry_after));
                 if (http_retry.has_value()) {
-                    // Notify the caller without assuming a provider-specific
-                    // meaning for the retryable status.
-                    if (retry_rate_limit.retry_after > 0) {
-                        callback(StreamChunk::make_error(
-                            std::format("\n[Transient HTTP failure ({}). Retrying in {}s (attempt {}/{})...]",
-                                       r.status_code, retry_rate_limit.retry_after,
-                                       http_retry->attempt, http_retry->max_retries)));
-                    } else {
-                        callback(StreamChunk::make_error(
-                            std::format("\n[Transient HTTP failure ({}). Retrying with backoff (attempt {}/{})...]",
-                                       r.status_code, http_retry->attempt,
-                                       http_retry->max_retries)));
-                    }
-
+                    emit_retry_reset(
+                        *http_retry,
+                        std::format("HTTP {}", r.status_code));
                     if (!prepare_retry(*http_retry)) break;
                     continue;
                 }

@@ -88,7 +88,8 @@ std::optional<RetrySchedule> RetryController::schedule(
     bool classified_retryable,
     bool output_emitted,
     std::chrono::seconds server_delay) {
-    if (!classified_retryable || output_emitted
+    if (!classified_retryable
+        || (policy_.retry_only_before_output && output_emitted)
         || retries_completed_ >= policy_.max_retries) {
         return std::nullopt;
     }
