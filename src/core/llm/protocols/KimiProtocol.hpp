@@ -6,7 +6,7 @@
  *
  * KimiProtocol inherits the full OpenAI Chat Completions wire format and
  * overrides header generation to inject the X-Msh-* headers required by
- * the Kimi API (api.moonshot.ai; legacy regional hosts are also supported).
+ * the Kimi API (api.moonshot.ai) and Kimi Code (api.kimi.ai / api.kimi.com).
  *
  * ## Why This Is Necessary
  *
@@ -58,6 +58,7 @@
  */
 
 #include "OpenAIProtocol.hpp"
+#include <chrono>
 #include <string_view>
 
 namespace core::llm::protocols {
@@ -80,6 +81,16 @@ namespace core::llm::protocols {
  * - X-Msh-Os-Version: kernel/OS version
  * - X-Msh-Device-Id: OAuth token device id when available
  */
+/// OpenAI Python SDK default timeout is 600s; keep a shorter response-start
+/// budget so a hung handshake fails before the idle ceiling.
+[[nodiscard]] inline transport::StreamTimeoutPolicy
+kimi_stream_timeouts() noexcept {
+    return {
+        .response_start = std::chrono::seconds(180),
+        .inactivity = std::chrono::seconds(600),
+    };
+}
+
 class KimiProtocol : public OpenAIProtocol {
 public:
     // Match official kimi-cli behavior: always request usage in streaming mode.
@@ -88,6 +99,13 @@ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "kimi"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
+
+    /// K3/K2 thinking can sit silent for minutes. Match the OpenAI SDK's
+    /// 10-minute request budget with a faster handshake timeout.
+    [[nodiscard]] transport::StreamTimeoutPolicy stream_timeouts()
+        const noexcept override {
+        return kimi_stream_timeouts();
+    }
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
         return std::make_unique<KimiProtocol>(*this);

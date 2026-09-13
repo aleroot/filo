@@ -1,4 +1,5 @@
 #include "KimiOAuthFlow.hpp"
+#include "KimiClientIdentity.hpp"
 #include "OAuthErrors.hpp"
 #include "AuthBrowserLauncher.hpp"
 #include "core/utils/Base64.hpp"
@@ -25,11 +26,6 @@ namespace core::auth {
 
 namespace {
 
-constexpr std::string_view KIMI_OAUTH_HOST = "https://auth.kimi.com";
-constexpr std::string_view KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
-constexpr std::string_view KIMI_PLATFORM = "kimi_code_cli";
-constexpr std::string_view KIMI_USER_AGENT_PRODUCT = "kimi-code-cli";
-constexpr std::string_view KIMI_CLIENT_VERSION = "1.49.0";
 constexpr int KIMI_OAUTH_TIMEOUT_MS = 30'000;
 
 /**
@@ -88,6 +84,89 @@ std::filesystem::path getDeviceIdPath() {
     }
     std::filesystem::create_directories(config_dir);
     return config_dir / "kimi_device_id";
+}
+
+std::filesystem::path getOAuthHostPath() {
+    return getDeviceIdPath().parent_path() / "kimi_oauth_host";
+}
+
+[[nodiscard]] std::string normalize_oauth_host(std::string_view host) {
+    while (!host.empty() && (host.back() == '/' || host.back() == ' '
+                             || host.back() == '\n' || host.back() == '\r'
+                             || host.back() == '\t')) {
+        host.remove_suffix(1);
+    }
+    while (!host.empty() && (host.front() == ' ' || host.front() == '\t'
+                             || host.front() == '\n' || host.front() == '\r')) {
+        host.remove_prefix(1);
+    }
+    return std::string(host);
+}
+
+[[nodiscard]] bool env_starts_with_zh_cn(std::string_view value) {
+    return value.size() >= 5
+        && (value[0] == 'z' || value[0] == 'Z')
+        && (value[1] == 'h' || value[1] == 'H')
+        && (value[2] == '_' || value[2] == '-')
+        && (value[3] == 'C' || value[3] == 'c')
+        && (value[4] == 'N' || value[4] == 'n');
+}
+
+[[nodiscard]] std::string env_trimmed(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) return {};
+    std::string_view view(value);
+    while (!view.empty() && (view.front() == ' ' || view.front() == '\t')) {
+        view.remove_prefix(1);
+    }
+    while (!view.empty() && (view.back() == ' ' || view.back() == '\t'
+                             || view.back() == '\n' || view.back() == '\r')) {
+        view.remove_suffix(1);
+    }
+    return std::string(view);
+}
+
+[[nodiscard]] std::string oauth_host_for_region_id(std::string_view id) {
+    if (id == "mainland-cn" || id == "cn" || id == "china") {
+        return std::string(kimi_code::kMainlandOAuthHost);
+    }
+    if (id == "global" || id == "international" || id == "intl") {
+        return std::string(kimi_code::kGlobalOAuthHost);
+    }
+    return {};
+}
+
+[[nodiscard]] std::string resolve_oauth_host(bool new_login) {
+    if (const auto host = env_trimmed("KIMI_CODE_OAUTH_HOST"); !host.empty()) {
+        return normalize_oauth_host(host);
+    }
+    if (const auto host = env_trimmed("KIMI_OAUTH_HOST"); !host.empty()) {
+        return normalize_oauth_host(host);
+    }
+    if (const auto base = env_trimmed("KIMI_CODE_BASE_URL"); !base.empty()) {
+        if (base.find("api.kimi.ai") != std::string::npos) {
+            return std::string(kimi_code::kGlobalOAuthHost);
+        }
+        if (base.find("api.kimi.com") != std::string::npos) {
+            return std::string(kimi_code::kMainlandOAuthHost);
+        }
+    }
+    if (const auto region = env_trimmed("KIMI_CODE_REGION"); !region.empty()) {
+        if (auto host = oauth_host_for_region_id(region); !host.empty()) {
+            return host;
+        }
+    }
+    if (const auto persisted = KimiOAuthFlow::persisted_oauth_host();
+        !persisted.empty()) {
+        return persisted;
+    }
+    (void)new_login;
+    std::string locale = env_trimmed("LC_ALL");
+    if (locale.empty()) locale = env_trimmed("LANG");
+    if (env_starts_with_zh_cn(locale) || locale == "zh" || locale == "ZH") {
+        return std::string(kimi_code::kMainlandOAuthHost);
+    }
+    return std::string(kimi_code::kGlobalOAuthHost);
 }
 
 [[nodiscard]] std::string ascii_header(std::string_view value,
@@ -196,8 +275,8 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
         os_version = buf.release;
     }
     
-    headers["X-Msh-Platform"] = std::string(KIMI_PLATFORM);
-    headers["X-Msh-Version"] = std::string(KIMI_CLIENT_VERSION);
+    headers["X-Msh-Platform"] = std::string(kimi_code::kPlatform);
+    headers["X-Msh-Version"] = std::string(kimi_code::kClientVersion);
     headers["X-Msh-Device-Name"] = ascii_header(device_name);
     headers["X-Msh-Device-Model"] = ascii_header(getDeviceModel());
     headers["X-Msh-Os-Version"] = ascii_header(os_version);
@@ -209,7 +288,38 @@ std::unordered_map<std::string, std::string> KimiOAuthFlow::getCommonHeaders(
 }
 
 std::string KimiOAuthFlow::getUserAgent() {
-    return std::string(KIMI_USER_AGENT_PRODUCT) + "/" + std::string(KIMI_CLIENT_VERSION);
+    return kimi_code::user_agent();
+}
+
+std::string KimiOAuthFlow::persisted_oauth_host() {
+    const auto path = getOAuthHostPath();
+    if (!std::filesystem::exists(path)) return {};
+    std::ifstream file(path);
+    std::string host;
+    if (!std::getline(file, host)) return {};
+    return normalize_oauth_host(host);
+}
+
+void KimiOAuthFlow::persist_oauth_host(std::string_view oauth_host) {
+    const std::string host = normalize_oauth_host(oauth_host);
+    if (host.empty()) return;
+    const auto path = getOAuthHostPath();
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path);
+    if (file) {
+        file << host;
+        std::filesystem::permissions(path,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace);
+    }
+}
+
+std::string KimiOAuthFlow::resolved_oauth_host_for_login() {
+    return resolve_oauth_host(true);
+}
+
+std::string KimiOAuthFlow::resolved_oauth_host_for_session() {
+    return resolve_oauth_host(false);
 }
 
 std::string KimiOAuthFlow::getDeviceName() const {
@@ -246,10 +356,12 @@ std::string KimiOAuthFlow::loadOrCreatePersistentDeviceId() {
 KimiOAuthFlow::KimiOAuthFlow() {
     // Load or create persistent device_id
     device_id_ = loadOrCreatePersistentDeviceId();
+    oauth_host_ = resolved_oauth_host_for_session();
 }
 
 OAuthToken KimiOAuthFlow::login() {
-    core::logging::info("Starting Kimi OAuth device flow...");
+    oauth_host_ = resolved_oauth_host_for_login();
+    core::logging::info("Starting Kimi OAuth device flow on {}...", oauth_host_);
     
     auto auth = requestDeviceAuthorization();
     
@@ -276,11 +388,11 @@ KimiOAuthFlow::DeviceAuthorization KimiOAuthFlow::requestDeviceAuthorization() {
     headers["User-Agent"] = getUserAgent();
     
     cpr::Payload payload{
-        {"client_id", std::string(KIMI_CLIENT_ID)},
+        {"client_id", std::string(kimi_code::kClientId)},
     };
     
     cpr::Response r = cpr::Post(
-        cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/device_authorization"},
+        cpr::Url{oauth_host_ + "/api/oauth/device_authorization"},
         std::move(headers),
         std::move(payload),
         cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
@@ -341,13 +453,13 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
         headers["User-Agent"] = getUserAgent();
         
         cpr::Payload payload{
-            {"client_id", std::string(KIMI_CLIENT_ID)},
+            {"client_id", std::string(kimi_code::kClientId)},
             {"device_code", auth.device_code},
             {"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
         };
         
         cpr::Response r = cpr::Post(
-            cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/token"},
+            cpr::Url{oauth_host_ + "/api/oauth/token"},
             std::move(headers),
             std::move(payload),
             cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
@@ -391,6 +503,9 @@ OAuthToken KimiOAuthFlow::pollForToken(const DeviceAuthorization& auth) {
             if (!token.device_id.empty()) {
                 core::logging::info("Kimi OAuth: extracted device_id from token");
             }
+            token.issuer = oauth_host_;
+            token.client_id = std::string(kimi_code::kClientId);
+            persist_oauth_host(oauth_host_);
             
             core::logging::info("Kimi OAuth authorization successful!");
             return token;
@@ -426,6 +541,9 @@ OAuthToken KimiOAuthFlow::refresh(std::string_view refresh_token) {
 }
 
 OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
+    if (oauth_host_.empty()) {
+        oauth_host_ = resolved_oauth_host_for_session();
+    }
     auto request_time = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     
@@ -438,7 +556,7 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
     headers["User-Agent"] = getUserAgent();
     
     cpr::Payload payload{
-        {"client_id", std::string(KIMI_CLIENT_ID)},
+        {"client_id", std::string(kimi_code::kClientId)},
         {"grant_type", "refresh_token"},
         {"refresh_token", std::string(refresh_token)},
     };
@@ -446,7 +564,7 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
     cpr::Response r;
     for (int attempt = 0; attempt < 3; ++attempt) {
         r = cpr::Post(
-            cpr::Url{std::string(KIMI_OAUTH_HOST) + "/api/oauth/token"},
+            cpr::Url{oauth_host_ + "/api/oauth/token"},
             headers,
             payload,
             cpr::Timeout{KIMI_OAUTH_TIMEOUT_MS}
@@ -506,6 +624,8 @@ OAuthToken KimiOAuthFlow::exchangeRefreshToken(std::string_view refresh_token) {
     if (!token.device_id.empty()) {
         core::logging::info("Kimi OAuth refresh: extracted device_id from token");
     }
+    token.issuer = oauth_host_;
+    token.client_id = std::string(kimi_code::kClientId);
     
     return token;
 }

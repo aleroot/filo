@@ -174,7 +174,13 @@ TEST_CASE("Kimi service routing is host-safe and independent of catalog DTOs",
               "HTTPS://API.KIMI.COM:443/coding/v1/")
           == KimiService::Code);
     CHECK(kimi_service_for_endpoint(
+              "https://api.kimi.ai/coding/v1")
+          == KimiService::Code);
+    CHECK(kimi_service_for_endpoint(
               "https://api.kimi.com.evil.example/coding/v1")
+          == KimiService::Unknown);
+    CHECK(kimi_service_for_endpoint(
+              "https://api.kimi.ai.evil.example/coding/v1")
           == KimiService::Unknown);
     CHECK(kimi_service_for_endpoint(
               "https://api.kimi.com/not-coding/v1")

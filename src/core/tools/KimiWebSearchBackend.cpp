@@ -3,6 +3,7 @@
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include "../auth/KimiOAuthFlow.hpp"
+#include "../llm/KimiModelTraits.hpp"
 #include "../utils/JsonWriter.hpp"
 
 #include <cpr/cpr.h>
@@ -23,7 +24,8 @@ constexpr int kSearchTimeoutMs = 60000;
 [[nodiscard]] bool is_kimi_coding_endpoint(
     const core::llm::ProviderMetadata& metadata) {
     return metadata.api_type == core::config::ApiType::Kimi
-        && core::utils::str::contains_case_insensitive(metadata.base_url, "api.kimi.com/coding");
+        && core::llm::kimi_service_for_endpoint(metadata.base_url)
+            == core::llm::KimiService::Code;
 }
 
 void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {

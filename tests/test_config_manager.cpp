@@ -757,7 +757,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("kimi").reasoning_effort == "max");
     REQUIRE(config.providers.contains("kimi-code"));
     REQUIRE(config.providers.at("kimi-code").model == "k3");
-    REQUIRE(config.providers.at("kimi-code").base_url == "https://api.kimi.com/coding/v1");
+    REQUIRE(config.providers.at("kimi-code").base_url == "https://api.kimi.ai/coding/v1");
     REQUIRE(config.providers.contains("kimi-code-fast"));
     REQUIRE(config.providers.at("kimi-code-fast").model == "kimi-for-coding-highspeed");
     REQUIRE(config.providers.contains("kimi-k2-6"));
@@ -766,7 +766,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.providers.at("kimi-k2-5").model == "kimi-k2.5");
     REQUIRE(config.providers.contains("kimi-for-coding"));
     REQUIRE(config.providers.at("kimi-for-coding").model == "kimi-for-coding");
-    REQUIRE(config.providers.at("kimi-for-coding").base_url == "https://api.kimi.com/coding/v1");
+    REQUIRE(config.providers.at("kimi-for-coding").base_url == "https://api.kimi.ai/coding/v1");
     REQUIRE(config.providers.contains("claude"));
     REQUIRE_FALSE(config.providers.contains("claude-fable"));
     REQUIRE_FALSE(config.providers.contains("claude-haiku"));

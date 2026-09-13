@@ -469,6 +469,8 @@ public:
         return {
             "Set \"auth_type\": \"oauth_kimi\" on a Kimi provider in "
             "~/.config/filo/config.json to use the stored OAuth token.",
+            "Kimi Code defaults to the international host (api.kimi.ai). "
+            "Set KIMI_CODE_REGION=mainland-cn before login for the China host.",
             "You can also export KIMI_API_KEY for one-time / CI use without OAuth.",
         };
     }

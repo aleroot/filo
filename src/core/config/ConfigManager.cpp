@@ -573,12 +573,12 @@ AppConfig make_default_config() {
     add_provider("claude",         "claude-sonnet-5");
     add_provider("gemini",         "gemini-2.5-flash");
     add_provider("kimi",           "kimi-k3", "max");
-    add_provider("kimi-code",      "k3", "max", {}, "https://api.kimi.com/coding/v1");
+    add_provider("kimi-code",      "k3", "max", {}, "https://api.kimi.ai/coding/v1");
     add_provider("kimi-code-fast", "kimi-for-coding-highspeed", {}, {},
-                 "https://api.kimi.com/coding/v1");
+                 "https://api.kimi.ai/coding/v1");
     add_provider("kimi-k2-6",      "kimi-k2.6");
     add_provider("kimi-k2-5",      "kimi-k2.5");
-    add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.com/coding/v1");
+    add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.ai/coding/v1");
     add_provider("kimi-32k",       "moonshot-v1-32k");
     add_provider("kimi-128k",      "moonshot-v1-128k");
     add_provider("qwen",            "qwen3-coder-plus", "high");
@@ -646,11 +646,11 @@ std::string default_config_json() {
         "gemini":         { "model": "gemini-2.5-flash" },
         "gemini-oauth":   { "model": "gemini-2.5-flash", "auth_type": "oauth_google" },
         "kimi":           { "model": "kimi-k3", "reasoning_effort": "max" },
-        "kimi-code":     { "model": "k3", "reasoning_effort": "max", "base_url": "https://api.kimi.com/coding/v1" },
-        "kimi-code-fast":{ "model": "kimi-for-coding-highspeed", "base_url": "https://api.kimi.com/coding/v1" },
+        "kimi-code":     { "model": "k3", "reasoning_effort": "max", "base_url": "https://api.kimi.ai/coding/v1" },
+        "kimi-code-fast":{ "model": "kimi-for-coding-highspeed", "base_url": "https://api.kimi.ai/coding/v1" },
         "kimi-k2-6":      { "model": "kimi-k2.6" },
         "kimi-k2-5":      { "model": "kimi-k2.5" },
-        "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.com/coding/v1" },
+        "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.ai/coding/v1" },
         "kimi-32k":       { "model": "moonshot-v1-32k" },
         "kimi-128k":      { "model": "moonshot-v1-128k" },
         "qwen":           { "model": "qwen3-coder-plus", "reasoning_effort": "high" },

@@ -1032,10 +1032,17 @@ struct KimiParseResult {
             result.content = std::string(c);
         }
 
-        // delta.reasoning_content (Kimi thinking stream)
-        std::string_view rc;
-        if (delta["reasoning_content"].get(rc) == simdjson::SUCCESS && rc.size() > 0) {
-            result.reasoning_content.append(rc.data(), rc.size());
+        // Thinking stream: Moonshot uses reasoning_content; vLLM/OpenRouter
+        // gateways may speak reasoning or reasoning_details instead.
+        static constexpr std::array<std::string_view, 3> kReasoningKeys{{
+            "reasoning_content", "reasoning_details", "reasoning",
+        }};
+        for (const auto key : kReasoningKeys) {
+            std::string_view rc;
+            if (delta[key].get(rc) == simdjson::SUCCESS && rc.size() > 0) {
+                result.reasoning_content.append(rc.data(), rc.size());
+                break;
+            }
         }
 
         // delta.tool_calls
@@ -1281,9 +1288,11 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
         
         case 401:
             return "[Kimi API Error 401: Authentication failed. "
-                   "If using OAuth, ensure the X-Msh-* headers are present. "
-                   "If using an API key, check your KIMI_API_KEY is valid. "
-                   "Visit https://platform.moonshot.cn to verify credentials.]";
+                   "If using OAuth, ensure the X-Msh-* headers are present and "
+                   "the token region matches the endpoint "
+                   "(auth.kimi.ai / api.kimi.ai internationally, "
+                   "auth.kimi.com / api.kimi.com in mainland China). "
+                   "If using an API key, check your KIMI_API_KEY is valid.]";
 
         case 402:
             return "[Kimi API Error 402: Membership expired or payment required. "
@@ -1299,9 +1308,25 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
                    "is correct. Public API models include kimi-k3 and kimi-k2.7-code; "
                    "the Kimi Code subscription endpoint uses k3.]";
         
-        case 429:
+        case 429: {
+            const std::string lower = core::utils::str::to_lower_ascii_copy(kimi_message);
+            const bool quota = lower.find("exceeded_current_quota_error") != std::string::npos
+                || lower.find("exceeded your current") != std::string::npos
+                || lower.find("account balance") != std::string::npos
+                || lower.find("insufficient balance") != std::string::npos
+                || lower.find("please recharge") != std::string::npos
+                || lower.find("in arrears") != std::string::npos;
+            if (quota) {
+                return "[Kimi API Error 429: Plan quota exhausted. "
+                       "This is not a transient rate limit — wait for the "
+                       "weekly/5h window to reset, or upgrade the Kimi Code plan. "
+                       + (kimi_message.empty() ? std::string{} : kimi_message)
+                       + "]";
+            }
             return "[Kimi API Error 429: Rate limit exceeded. Please reduce request frequency. "
-                   "Check your usage at https://platform.moonshot.cn]";
+                   + (kimi_message.empty() ? std::string{} : kimi_message)
+                   + "]";
+        }
         
         case 500:
             return "[Kimi API Error 500: Internal server error. This is a temporary issue on "
@@ -1332,13 +1357,35 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
     }
 }
 
+[[nodiscard]] bool kimi_quota_exhausted(const HttpResponse& response) noexcept {
+    if (response.status_code != 429) return false;
+    const std::string_view body = response.body;
+    if (body.empty()) return false;
+    // Structured Moonshot code plus billing wording from kimi-code's
+    // classifyKimiQuotaError. Bare "quota" is too broad (RPM token quota).
+    if (body.find("exceeded_current_quota_error") != std::string_view::npos) {
+        return true;
+    }
+    std::string lower;
+    lower.reserve(body.size());
+    for (const unsigned char c : body) {
+        lower.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return lower.find("exceeded your current") != std::string::npos
+        || lower.find("check your account balance") != std::string::npos
+        || lower.find("insufficient balance") != std::string::npos
+        || lower.find("please recharge") != std::string::npos
+        || lower.find("recharge your account") != std::string::npos
+        || lower.find("in arrears") != std::string::npos;
+}
+
 bool KimiProtocol::is_retryable(const HttpResponse& response) const noexcept {
-    // Kimi retryable status codes (standard OpenAI-compatible)
-    return response.status_code == 429 ||  // Rate limit
-           response.status_code == 500 ||  // Internal server error
-           response.status_code == 502 ||  // Bad gateway
-           response.status_code == 503 ||  // Service unavailable
-           response.status_code == 504;    // Gateway timeout
+    if (kimi_quota_exhausted(response)) return false;
+    return response.status_code == 429 ||
+           response.status_code == 500 ||
+           response.status_code == 502 ||
+           response.status_code == 503 ||
+           response.status_code == 504;
 }
 
 void KimiProtocol::on_response(const HttpResponse& response) {

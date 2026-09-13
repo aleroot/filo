@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -17,7 +18,9 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+#include "core/auth/KimiClientIdentity.hpp"
 #include "core/auth/KimiOAuthFlow.hpp"
+#include "core/llm/KimiModelTraits.hpp"
 #include "core/tools/Tool.hpp"
 
 using namespace core::llm;
@@ -54,12 +57,50 @@ struct ScopedEnvVar {
     }
 };
 
+struct ScopedEnvClear {
+    std::string name;
+    std::string old_value;
+    bool had_value = false;
+
+    explicit ScopedEnvClear(std::string env_name)
+        : name(std::move(env_name)) {
+        if (const char* existing = std::getenv(name.c_str())) {
+            had_value = true;
+            old_value = existing;
+        }
+        unsetenv(name.c_str());
+    }
+
+    ~ScopedEnvClear() {
+        if (had_value) {
+            setenv(name.c_str(), old_value.c_str(), 1);
+        }
+    }
+};
+
 fs::path make_temp_dir(const std::string& label) {
     const auto path = fs::temp_directory_path()
         / (label + "_" + core::auth::KimiOAuthFlow::generateDeviceId());
     fs::create_directories(path);
     return path;
 }
+
+struct ScopedKimiProcessEnv {
+    ScopedEnvClear region{"KIMI_CODE_REGION"};
+    ScopedEnvClear oauth{"KIMI_CODE_OAUTH_HOST"};
+    ScopedEnvClear oauth_alias{"KIMI_OAUTH_HOST"};
+    ScopedEnvClear base{"KIMI_CODE_BASE_URL"};
+    ScopedEnvClear lang{"LANG"};
+    ScopedEnvClear lc_all{"LC_ALL"};
+    fs::path dir;
+    ScopedEnvVar xdg;
+
+    ScopedKimiProcessEnv()
+        : dir(make_temp_dir("filo_kimi_env")),
+          xdg("XDG_CONFIG_HOME", dir.string()) {}
+
+    ~ScopedKimiProcessEnv() { fs::remove_all(dir); }
+};
 
 fs::path make_temp_video_file(std::string_view filename = "filo-kimi-video.mp4") {
     const auto path = fs::temp_directory_path() / filename;
@@ -1025,6 +1066,14 @@ TEST_CASE("KimiProtocol parse_event - extracts reasoning_content from delta", "[
     REQUIRE(result.chunks[0].tools.empty());
 }
 
+TEST_CASE("KimiProtocol parse_event - extracts vLLM reasoning field", "[kimi][parser]") {
+    KimiProtocol protocol;
+    std::string event = R"(data: {"id": "chatcmpl-123", "choices": [{"index": 0, "delta": {"reasoning": "plan"}, "finish_reason": null}]})";
+    auto result = protocol.parse_event(event);
+    REQUIRE(result.chunks.size() == 1);
+    REQUIRE(result.chunks[0].reasoning_content == "plan");
+}
+
 TEST_CASE("KimiProtocol parse_event - extracts both content and reasoning_content", "[kimi][parser]") {
     // If both are present, both should be extracted (reasoning for history, content for display)
     KimiProtocol protocol;
@@ -1429,6 +1478,63 @@ TEST_CASE("KimiProvider - reports correct capabilities", "[kimi][provider]") {
     REQUIRE(caps.is_local == false);
 }
 
+TEST_CASE("KimiProtocol - thinking models use a long idle timeout", "[kimi][timeout]") {
+    KimiProtocol protocol;
+    CHECK(protocol.stream_timeouts().response_start == std::chrono::seconds(180));
+    CHECK(protocol.stream_timeouts().inactivity == std::chrono::seconds(600));
+}
+
+TEST_CASE("KimiProtocol - quota exhausted 429 is not retryable", "[kimi][retry]") {
+    KimiProtocol protocol;
+    cpr::Header headers;
+    const HttpResponse limited{
+        .status_code = 429,
+        .body = R"({"error":{"message":"Rate limit reached","type":"rate_limit_error"}})",
+        .headers = headers,
+    };
+    CHECK(protocol.is_retryable(limited));
+
+    const HttpResponse quota{
+        .status_code = 429,
+        .body = R"({"error":{"message":"You exceeded your current token quota, please check your account balance","type":"exceeded_current_quota_error"}})",
+        .headers = headers,
+    };
+    CHECK_FALSE(protocol.is_retryable(quota));
+    REQUIRE_THAT(protocol.format_error_message(quota),
+                 Catch::Matchers::ContainsSubstring("quota exhausted"));
+}
+
+TEST_CASE("Kimi region resolver defaults to the international deployment",
+          "[kimi][region]") {
+    const ScopedKimiProcessEnv env;
+    const ScopedEnvClear lang("LANG");
+    const ScopedEnvClear lc("LC_ALL");
+    const auto resolved = core::llm::resolve_kimi_region(
+        {}, core::llm::KimiRegionResolveMode::Session);
+    CHECK(resolved.region == core::llm::KimiRegion::Global);
+    CHECK(resolved.oauth_host == "https://auth.kimi.ai");
+    CHECK(resolved.coding_base_url == "https://api.kimi.ai/coding/v1");
+}
+
+TEST_CASE("Kimi region resolver honors KIMI_CODE_REGION", "[kimi][region]") {
+    const ScopedKimiProcessEnv env;
+    {
+        const ScopedEnvVar region("KIMI_CODE_REGION", "global");
+        const auto resolved = core::llm::resolve_kimi_region(
+            {}, core::llm::KimiRegionResolveMode::Session);
+        CHECK(resolved.region == core::llm::KimiRegion::Global);
+        CHECK(resolved.oauth_host == "https://auth.kimi.ai");
+        CHECK(resolved.coding_base_url == "https://api.kimi.ai/coding/v1");
+    }
+    {
+        const ScopedEnvVar region("KIMI_CODE_REGION", "mainland-cn");
+        const auto resolved = core::llm::resolve_kimi_region(
+            {}, core::llm::KimiRegionResolveMode::Session);
+        CHECK(resolved.region == core::llm::KimiRegion::MainlandCn);
+        CHECK(resolved.coding_base_url == "https://api.kimi.com/coding/v1");
+    }
+}
+
 TEST_CASE("KimiOAuthFlow - device id uses UUID format", "[kimi][oauth]") {
     const std::string id = core::auth::KimiOAuthFlow::generateDeviceId();
     REQUIRE(id.size() == 36);
@@ -1448,7 +1554,7 @@ TEST_CASE("KimiOAuthFlow - common headers match managed Kimi Code platform",
     const auto headers = core::auth::KimiOAuthFlow::getCommonHeaders();
 
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
-    REQUIRE(headers.at("X-Msh-Version") == "1.49.0");
+    REQUIRE(headers.at("X-Msh-Version") == "0.42.0");
     REQUIRE_FALSE(headers.at("X-Msh-Device-Name").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Device-Model").empty());
     REQUIRE_FALSE(headers.at("X-Msh-Os-Version").empty());
@@ -1488,13 +1594,14 @@ TEST_CASE("KimiProtocol - headers identify Kimi CLI and preserve OAuth device id
 
     const auto headers = protocol.build_headers(auth);
 
-    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/1.49.0");
+    REQUIRE(headers.at("User-Agent") == "kimi-code-cli/0.42.0");
     REQUIRE(headers.at("X-Msh-Platform") == "kimi_code_cli");
     REQUIRE(headers.at("X-Msh-Device-Id") == "device-from-jwt");
     REQUIRE(headers.at("Authorization") == "Bearer token");
 }
 
 TEST_CASE("ProviderFactory - kimi oauth disables synthetic cost estimation", "[kimi][factory][oauth]") {
+    const ScopedKimiProcessEnv env;
     core::config::ProviderConfig cfg;
     cfg.model = "kimi-for-coding";
     cfg.auth_type = "oauth_kimi";
@@ -1516,6 +1623,7 @@ TEST_CASE("ProviderFactory - kimi api-key mode keeps cost estimation enabled", "
 }
 
 TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][factory][oauth][k3]") {
+    const ScopedKimiProcessEnv env;
     core::config::ProviderConfig cfg;
     cfg.model = "k3";
     cfg.auth_type = "oauth_kimi";
@@ -1524,7 +1632,7 @@ TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][
     REQUIRE(provider != nullptr);
     const auto metadata = provider->metadata();
     REQUIRE(metadata.has_value());
-    CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
+    CHECK(metadata->base_url == "https://api.kimi.ai/coding/v1");
     CHECK(metadata->default_model == "k3");
     CHECK(metadata->service_id == "kimi:code");
     CHECK(provider->max_context_size() == 1'048'576);
@@ -1532,6 +1640,7 @@ TEST_CASE("ProviderFactory - Kimi OAuth K3 uses subscription endpoint", "[kimi][
 
 TEST_CASE("ProviderFactory - K3 256K uses subscription endpoint",
           "[kimi][factory][k3]") {
+    const ScopedKimiProcessEnv env;
     core::config::ProviderConfig cfg;
     cfg.model = "k3-256k";
     cfg.auth_type = "api_key";
@@ -1542,10 +1651,74 @@ TEST_CASE("ProviderFactory - K3 256K uses subscription endpoint",
     REQUIRE(provider != nullptr);
     const auto metadata = provider->metadata();
     REQUIRE(metadata.has_value());
-    CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
+    CHECK(metadata->base_url == "https://api.kimi.ai/coding/v1");
     CHECK(metadata->default_model == "k3-256k");
     CHECK(metadata->service_id == "kimi:code");
     CHECK(provider->max_context_size() == 262'144);
+}
+
+TEST_CASE("ProviderFactory - Kimi OAuth mainland region uses api.kimi.com",
+          "[kimi][factory][oauth][region]") {
+    const ScopedKimiProcessEnv env;
+    const ScopedEnvVar region("KIMI_CODE_REGION", "mainland-cn");
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3";
+    cfg.auth_type = "oauth_kimi";
+
+    const auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.com/coding/v1");
+    CHECK(metadata->service_id == "kimi:code");
+}
+
+TEST_CASE("ProviderFactory - Kimi OAuth global region uses api.kimi.ai",
+          "[kimi][factory][oauth][region]") {
+    const ScopedKimiProcessEnv env;
+    const ScopedEnvVar region("KIMI_CODE_REGION", "global");
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3";
+    cfg.auth_type = "oauth_kimi";
+
+    const auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.ai/coding/v1");
+    CHECK(metadata->service_id == "kimi:code");
+}
+
+TEST_CASE("ProviderFactory - Kimi Code preset follows global region",
+          "[kimi][factory][oauth][region]") {
+    const ScopedKimiProcessEnv env;
+    const ScopedEnvVar region("KIMI_CODE_REGION", "global");
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3";
+    cfg.auth_type = "oauth_kimi";
+    cfg.base_url = "https://api.kimi.com/coding/v1";
+
+    const auto provider =
+        core::llm::ProviderFactory::create_provider("kimi-code", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.ai/coding/v1");
+}
+
+TEST_CASE("ProviderFactory - persisted oauth host selects global coding endpoint",
+          "[kimi][factory][oauth][region]") {
+    const ScopedKimiProcessEnv env;
+    core::auth::KimiOAuthFlow::persist_oauth_host("https://auth.kimi.ai");
+    core::config::ProviderConfig cfg;
+    cfg.model = "k3";
+    cfg.auth_type = "oauth_kimi";
+
+    const auto provider = core::llm::ProviderFactory::create_provider("kimi", cfg);
+    REQUIRE(provider != nullptr);
+    const auto metadata = provider->metadata();
+    REQUIRE(metadata.has_value());
+    CHECK(metadata->base_url == "https://api.kimi.ai/coding/v1");
 }
 
 TEST_CASE("ProviderFactory - public Kimi K3 uses current Moonshot API endpoint", "[kimi][factory][k3]") {

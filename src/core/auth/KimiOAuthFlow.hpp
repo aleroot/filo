@@ -11,14 +11,16 @@ namespace core::auth {
  * @brief Kimi Code OAuth2 device flow implementation.
  *
  * This implements the OAuth2 device authorization grant flow used by the
- * official Kimi CLI. It requires special headers for device identification
- * and uses the Kimi authentication server at auth.kimi.com.
+ * official Kimi Code CLI. It requires special headers for device identification
+ * and talks to the regional auth host (`auth.kimi.ai` internationally,
+ * `auth.kimi.com` in mainland China).
  *
  * The flow:
- *   1. Request device authorization from auth.kimi.com
- *   2. Display user_code and verification_uri to user
- *   3. Poll token endpoint until user authorizes or timeout
- *   4. Store access_token and refresh_token
+ *   1. Resolve the Kimi Code region (env, persisted host, locale)
+ *   2. Request device authorization from that auth host
+ *   3. Display user_code and verification_uri to user
+ *   4. Poll token endpoint until user authorizes or timeout
+ *   5. Store access_token, refresh_token, and the oauth host (token.issuer)
  *
  * login() is blocking and may throw std::runtime_error on failure or timeout.
  * refresh() is blocking and may throw std::runtime_error on HTTP error.
@@ -34,7 +36,7 @@ public:
     static std::string generateDeviceId();
     static std::string getDeviceModel();
     static std::string getUserAgent();
-    
+
     /**
      * @brief Generate common Kimi metadata headers.
      *
@@ -54,6 +56,15 @@ public:
     static std::unordered_map<std::string, std::string> getCommonHeaders(
         std::string_view device_id);
 
+    /// Last oauth host written by login(), if any.
+    static std::string persisted_oauth_host();
+    static void persist_oauth_host(std::string_view oauth_host);
+
+    /// Region-resolved auth host for a new device-code login.
+    static std::string resolved_oauth_host_for_login();
+    /// Region-resolved auth host for token refresh / API routing.
+    static std::string resolved_oauth_host_for_session();
+
 private:
     struct DeviceAuthorization {
         std::string user_code;
@@ -65,13 +76,14 @@ private:
     };
 
     std::string device_id_;
+    std::string oauth_host_;
 
     static std::string loadOrCreatePersistentDeviceId();
 
     DeviceAuthorization requestDeviceAuthorization();
     OAuthToken pollForToken(const DeviceAuthorization& auth);
     OAuthToken exchangeRefreshToken(std::string_view refresh_token);
-    
+
     std::string getDeviceName() const;
 };
 

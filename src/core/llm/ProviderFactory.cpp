@@ -21,6 +21,7 @@
 #include "OpenAIEndpointUtils.hpp"
 #include "../auth/ApiKeyCredentialSource.hpp"
 #include "../auth/AuthenticationManager.hpp"
+#include "../auth/KimiOAuthFlow.hpp"
 #include "../auth/GoogleCodeAssist.hpp"
 #include "../auth/SecretInput.hpp"
 #include "../logging/Logger.hpp"
@@ -175,21 +176,24 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     const std::string normalized_auth_type =
         core::utils::str::to_lower_ascii_copy(config.auth_type);
 
-    // Kimi OAuth uses the managed coding endpoint. Both the current global
-    // Moonshot host and the legacy China host remain valid API-key endpoints.
-    if (cred
-        && canonical_type == "kimi"
-        && kimi_service_for_endpoint(base_url) == KimiService::PublicApi) {
-        base_url = "https://api.kimi.com/coding/v1";
-        core::logging::debug("Using Kimi OAuth endpoint: {}", base_url);
-    }
-
-    // The official Kimi Code model is served by the Kimi Code endpoint.
-    if (canonical_type == "kimi"
-        && kimi_service_for_endpoint(base_url) == KimiService::PublicApi
-        && is_kimi_code_model(config.model)) {
-        base_url = "https://api.kimi.com/coding/v1";
-        core::logging::debug("Using Kimi Code endpoint for model '{}': {}", config.model, base_url);
+    // Kimi Code subscriptions are regional (api.kimi.ai vs api.kimi.com).
+    // Public Moonshot API hosts stay valid for API keys; OAuth and Kimi Code
+    // model ids are rewritten onto the managed coding endpoint for the
+    // resolved region (env, persisted oauth host, then international).
+    if (canonical_type == "kimi") {
+        if (auto override = kimi_managed_endpoint_override(
+                base_url,
+                config.model,
+                static_cast<bool>(cred)
+                    && normalized_auth_type == "oauth_kimi",
+                core::auth::KimiOAuthFlow::persisted_oauth_host());
+            override.has_value()) {
+            base_url = std::move(*override);
+            core::logging::debug(
+                "Using Kimi Code endpoint for model '{}': {}",
+                config.model,
+                base_url);
+        }
     }
 
     // ChatGPT OAuth credentials are valid only for the managed Codex backend.
