@@ -30,6 +30,16 @@ public:
                       bool allow_interactive_login = true);
 
     OAuthToken get_valid_token();
+
+    /**
+     * @brief Whether a saved session exists on disk, without refreshing it.
+     *
+     * Expired-but-refreshable tokens count as present: the refresh is a
+     * background detail of get_valid_token(), not a missing credential.
+     * Used by presentation code that must not trigger an interactive login.
+     */
+    [[nodiscard]] bool has_stored_token();
+
     void save_token(const OAuthToken& token);
     void force_refresh();
     void login();

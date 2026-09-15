@@ -36,6 +36,8 @@ struct ModelProviderPickerRow {
     std::string name;
     std::string description;
     bool active = false;
+    /// No usable credential was found for any service in this provider group.
+    bool credentials_missing = false;
 };
 
 struct ModelPickerRow {
@@ -45,6 +47,8 @@ struct ModelPickerRow {
     std::string description;
     bool active = false;
     bool provider_default = false;
+    /// The endpoint serving this row has no usable credential configured.
+    bool credentials_missing = false;
 };
 
 struct OptionPickerRow {

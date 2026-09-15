@@ -273,9 +273,18 @@ inline SkillTurnResolution resolve_skill_turn(
             !preferred_provider.has_value())) {
         return resolution;
     }
-    if (!resolution.warning.empty()) {
-        return resolution;
-    }
+    // Built-in plans ship a configured default model, so a hint can exact-match
+    // a provider the user never authenticated. That must not shadow the wider
+    // family search, which may still find a registered provider that serves the
+    // model. Keep the more specific warning only if nothing better turns up.
+    std::string exact_match_warning = std::move(resolution.warning);
+    resolution.warning.clear();
+
+    const auto restore_exact_match_warning = [&] {
+        if (resolution.warning.empty() && !exact_match_warning.empty()) {
+            resolution.warning = std::move(exact_match_warning);
+        }
+    };
 
     if (const auto model_info = core::llm::ModelRegistry::instance().get_info(trimmed_hint);
         model_info.has_value()) {
@@ -295,6 +304,11 @@ inline SkillTurnResolution resolve_skill_turn(
                 resolution)) {
             return resolution;
         }
+        if (!resolution.warning.empty()) {
+            return resolution;
+        }
+
+        restore_exact_match_warning();
         if (!resolution.warning.empty()) {
             return resolution;
         }
@@ -328,10 +342,20 @@ inline SkillTurnResolution resolve_skill_turn(
             return resolution;
         }
 
+        restore_exact_match_warning();
+        if (!resolution.warning.empty()) {
+            return resolution;
+        }
+
         resolution.warning = std::format(
             "Skill model '{}' is not available in the configured '{}' providers; using the current model.",
             trimmed_hint,
             hinted_family);
+        return resolution;
+    }
+
+    restore_exact_match_warning();
+    if (!resolution.warning.empty()) {
         return resolution;
     }
 

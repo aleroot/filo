@@ -1016,7 +1016,9 @@ Element render_model_provider_picker_panel(
             label,
             provider.description,
             selected_index == static_cast<int>(i),
-            ColorYellowDark));
+            provider.credentials_missing
+                ? Color{Color::GrayDark}
+                : static_cast<Color>(ColorYellowDark)));
     }
 
     return vbox({
@@ -1056,7 +1058,9 @@ Element render_provider_model_picker_panel(
             label,
             model.description,
             selected_index == static_cast<int>(i),
-            ColorYellowDark));
+            model.credentials_missing
+                ? Color{Color::GrayDark}
+                : static_cast<Color>(ColorYellowDark)));
     }
 
     return vbox({

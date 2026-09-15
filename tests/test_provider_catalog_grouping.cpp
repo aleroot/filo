@@ -3,6 +3,7 @@
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/KimiModelTraits.hpp"
+#include "core/llm/ModelRegistry.hpp"
 
 #include <string>
 #include <vector>
@@ -226,17 +227,62 @@ TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fal
     for (const auto model : {"qwen3.8-max", "qwen3.8-flash", "qwen3.7-max",
                              "qwen3.7-plus", "qwen3.6-flash"}) {
         CHECK(token_plan->includes_registry_model(model));
-        CHECK(public_api->includes_registry_model(model));
+        // Token Plan IDs are only served by the token-plan host. Offering them
+        // under the pay-as-you-go source made the picker bind them to a
+        // credential-less provider, which answered 401.
+        CHECK_FALSE(public_api->includes_registry_model(model));
     }
     CHECK_FALSE(token_plan->includes_registry_model("qwen4.0-max"));
     CHECK_FALSE(token_plan->includes_registry_model("qwen3-coder-plus"));
-    CHECK(public_api->includes_registry_model("qwen3-coder-plus"));
+    CHECK_FALSE(public_api->includes_registry_model("qwen3-coder-plus"));
+    CHECK(public_api->includes_registry_model("qwen3-max"));
+    CHECK(public_api->includes_registry_model("qwen3-vl-plus"));
     CHECK(token_plan->includes_api_model("qwen4.0-max"));
     CHECK(token_plan->includes_api_model("glm-5.2"));
     CHECK(token_plan->includes_api_model("deepseek-v5"));
     CHECK_FALSE(token_plan->includes_api_model("wan2.7-image"));
     CHECK_FALSE(token_plan->includes_api_model("qwen-audio-2"));
     CHECK(public_api->includes_api_model("qwen-image-2.0"));
+}
+
+TEST_CASE("Qwen catalog sources never offer the same registry model twice",
+          "[llm][provider-catalog][qwen][token-plan]") {
+    // Regression: making `qwen` and `qwen-coding` default providers gave the
+    // Qwen group three sources that share registry provider key "qwen". Only
+    // the Token Plan source filtered its models, so /model listed the whole
+    // Qwen registry once per endpoint and the first -- credential-less --
+    // copy shadowed the subscription the user had actually paid for.
+    const std::vector<std::string> providers{"qwen", "qwen-coding", "qwen-token-plan"};
+    const auto group = core::llm::provider_catalog_group_for("qwen", providers);
+
+    REQUIRE(group.sources.size() == 3);
+    CHECK(group.sources[0].provider_name == "qwen");
+    CHECK(group.sources[1].provider_name == "qwen-coding");
+    CHECK(group.sources[2].provider_name == "qwen-token-plan");
+
+    const auto registry_models =
+        core::llm::ModelRegistry::instance().get_by_provider("qwen");
+    REQUIRE_FALSE(registry_models.empty());
+
+    for (const auto& model : registry_models) {
+        int owners = 0;
+        for (const auto& source : group.sources) {
+            if (source.includes_registry_model(model.canonical_id)) {
+                ++owners;
+            }
+        }
+        INFO("model: " << model.canonical_id << " owners: " << owners);
+        CHECK(owners == 1);
+    }
+
+    const auto* coding = group.find_source("qwen-coding");
+    REQUIRE(coding != nullptr);
+    CHECK(coding->includes_registry_model("qwen3-coder-plus"));
+    CHECK(coding->includes_registry_model("qwen3-coder-flash"));
+    CHECK(coding->includes_registry_model("coder-model"));
+    CHECK_FALSE(coding->includes_registry_model("qwen3.8-max"));
+    CHECK_FALSE(coding->includes_registry_model("qwen3-max"));
+    CHECK_FALSE(coding->includes_api_model("qwen-image-2.0"));
 }
 
 TEST_CASE("Provider catalog family matching respects provider-name boundaries",

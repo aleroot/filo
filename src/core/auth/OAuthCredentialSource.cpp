@@ -77,6 +77,12 @@ AuthInfo OAuthCredentialSource::get_auth() {
     return auth;
 }
 
+CredentialAvailability OAuthCredentialSource::availability() {
+    return manager_->has_stored_token()
+        ? CredentialAvailability::Ready
+        : CredentialAvailability::Missing;
+}
+
 bool OAuthCredentialSource::refresh_on_auth_failure() {
     try {
         manager_->force_refresh();

@@ -597,7 +597,10 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "dashscope",
         "Qwen",
         "qwen",
-        "qwen3-coder-plus",
+        // The coder line belongs to the Coding Plan endpoint; defaulting the
+        // pay-as-you-go login to it would hand out a model this provider is
+        // not the catalog owner of.
+        "qwen3-max",
         std::vector<ApiKeyProviderSeed>{},
         "QWEN_API_KEY",
         "Uses the public DashScope compatible-mode API "

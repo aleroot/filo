@@ -17,6 +17,7 @@ class OAuthCredentialSource : public ICredentialSource {
 public:
     explicit OAuthCredentialSource(std::shared_ptr<OAuthTokenManager> manager);
     AuthInfo get_auth() override;
+    [[nodiscard]] CredentialAvailability availability() override;
     [[nodiscard]] bool uses_subscription_billing() const noexcept override { return true; }
     bool refresh_on_auth_failure() override;
 

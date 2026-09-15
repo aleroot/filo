@@ -63,6 +63,18 @@ OAuthToken OAuthTokenManager::get_valid_token() {
     return token;
 }
 
+bool OAuthTokenManager::has_stored_token() {
+    std::unique_lock lock(mutex_);
+    try {
+        const auto stored = store_->load(provider_id_);
+        return stored.has_value()
+            && (stored->is_valid() || stored->has_refresh_token());
+    } catch (const std::exception&) {
+        // A store that cannot be read is not evidence of a missing login.
+        return true;
+    }
+}
+
 void OAuthTokenManager::save_token(const OAuthToken& token) {
     std::unique_lock lock(mutex_);
     auto store_lock = store_->acquire_refresh_lock(provider_id_);

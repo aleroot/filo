@@ -225,6 +225,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelRegistry.cpp
     src/core/llm/ProviderCatalogGrouping.cpp
     src/core/llm/ProviderClientIdentity.cpp
+    src/core/llm/ProviderCredentialStatus.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
     src/core/llm/protocols/ZaiProtocol.cpp
@@ -598,6 +599,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp
     tests/test_provider_catalog_grouping.cpp
+    tests/test_provider_credential_status.cpp
     tests/test_grok_provider.cpp
     tests/test_grok_image.cpp
     tests/test_grok_enhanced.cpp
@@ -798,6 +800,7 @@ source_group(
         tests/test_openai_responses_protocol.cpp
         tests/test_model_catalog_provider.cpp
         tests/test_provider_catalog_grouping.cpp
+        tests/test_provider_credential_status.cpp
         tests/test_grok_provider.cpp
         tests/test_grok_image.cpp
         tests/test_grok_enhanced.cpp

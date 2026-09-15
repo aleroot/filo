@@ -489,7 +489,7 @@ TEST_CASE("ConfigManager defaults leave openai wire_api unset", "[config]") {
     REQUIRE(config.providers.contains("qwen-token-plan"));
     REQUIRE(config.providers.at("qwen-token-plan").wire_api.empty());
     REQUIRE(config.providers.contains("qwen"));
-    REQUIRE(config.providers.at("qwen").model == "qwen3-coder-plus");
+    REQUIRE(config.providers.at("qwen").model == "qwen3-max");
     REQUIRE(config.providers.contains("qwen-coding"));
     REQUIRE(config.providers.at("qwen-coding").model == "qwen3-coder-plus");
 

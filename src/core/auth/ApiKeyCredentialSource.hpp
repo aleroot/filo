@@ -18,6 +18,18 @@ namespace core::auth {
 class ApiKeyCredentialSource : public ICredentialSource {
 public:
     AuthInfo get_auth() override { return auth_info_; }
+
+    /**
+     * An empty AuthInfo means no key was configured: the factory functions
+     * drop the header or query parameter entirely for an empty key, so the
+     * request would go out unauthenticated.
+     */
+    [[nodiscard]] CredentialAvailability availability() override {
+        return auth_info_.headers.empty() && auth_info_.query_params.empty()
+            ? CredentialAvailability::Missing
+            : CredentialAvailability::Ready;
+    }
+
     [[nodiscard]] bool uses_subscription_billing() const noexcept override {
         return subscription_billing_;
     }

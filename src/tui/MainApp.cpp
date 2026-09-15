@@ -48,6 +48,7 @@
 #include "core/llm/ModelMetadata.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderCatalogGrouping.hpp"
+#include "core/llm/ProviderCredentialStatus.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
@@ -3441,7 +3442,8 @@ RunResult run(RunOptions opts) {
                            std::string source_provider,
                            std::string description,
                            bool provider_default,
-                           std::string_view category_label) {
+                           std::string_view category_label,
+                           bool credentials_missing) {
             if (id.empty()) {
                 id = "<provider default>";
             }
@@ -3473,22 +3475,35 @@ RunResult run(RunOptions opts) {
                 .description = std::move(description),
                 .active = active,
                 .provider_default = provider_default,
+                .credentials_missing = credentials_missing,
             });
         };
 
+        // Resolve every source before fetching any catalog. Credential state is
+        // a cheap local probe, and it decides both the order rows are emitted
+        // in and which service wins when two of them offer the same model ID:
+        // an endpoint we hold no key for must never shadow one we can use.
+        struct ResolvedCatalogSource {
+            const core::llm::ProviderCatalogSource* source = nullptr;
+            std::string provider_name;
+            const core::config::ProviderConfig* provider_config = nullptr;
+            std::shared_ptr<core::llm::LLMProvider> llm_provider;
+            core::llm::ProviderCredentialState credential_state =
+                core::llm::ProviderCredentialState::Unknown;
+        };
+
+        std::vector<ResolvedCatalogSource> resolved_sources;
+        resolved_sources.reserve(catalog_group.sources.size());
         for (const auto& source : catalog_group.sources) {
-            const auto& source_provider = source.provider_name;
-            const auto provider_it = config.providers.find(source_provider);
+            const auto provider_it = config.providers.find(source.provider_name);
             if (provider_it == config.providers.end()) {
                 continue;
             }
-            const auto& provider_cfg = provider_it->second;
-            const std::string configured_default = provider_cfg.model;
             std::shared_ptr<core::llm::LLMProvider> source_llm_provider;
             const core::llm::ProviderCatalogSource* effective_source = &source;
             try {
                 source_llm_provider =
-                    provider_manager.get_provider(source_provider);
+                    provider_manager.get_provider(source.provider_name);
                 if (const auto metadata = source_llm_provider->metadata()) {
                     if (const auto* resolved =
                             catalog_group.find_source_by_service_id(
@@ -3501,8 +3516,42 @@ RunResult run(RunOptions opts) {
             if (!seen_services.insert(effective_source->service_id).second) {
                 continue;
             }
-            const std::string_view category_label =
-                effective_source->category_label;
+            resolved_sources.push_back(ResolvedCatalogSource{
+                .source = effective_source,
+                .provider_name = source.provider_name,
+                .provider_config = &provider_it->second,
+                .llm_provider = source_llm_provider,
+                .credential_state =
+                    core::llm::provider_credential_state(source_llm_provider),
+            });
+        }
+
+        std::vector<core::llm::ProviderCredentialState> credential_states;
+        credential_states.reserve(resolved_sources.size());
+        for (const auto& resolved : resolved_sources) {
+            credential_states.push_back(resolved.credential_state);
+        }
+
+        for (const std::size_t source_index :
+             core::llm::order_by_credential_state(credential_states)) {
+            const auto& resolved_source = resolved_sources[source_index];
+            const auto& source_provider = resolved_source.provider_name;
+            const auto& provider_cfg = *resolved_source.provider_config;
+            const std::string configured_default = provider_cfg.model;
+            const auto& source_llm_provider = resolved_source.llm_provider;
+            const auto* effective_source = resolved_source.source;
+
+            std::string category_text{effective_source->category_label};
+            if (const std::string_view credential_note =
+                    core::llm::credential_state_note(
+                        resolved_source.credential_state);
+                !credential_note.empty()) {
+                if (!category_text.empty()) {
+                    category_text += " ";
+                }
+                category_text += credential_note;
+            }
+            const std::string_view category_label = category_text;
 
             const std::string catalog_id = source_llm_provider
                 ? source_llm_provider->metadata()
@@ -3555,16 +3604,30 @@ RunResult run(RunOptions opts) {
                         provider_models,
                         core::llm::ModelRegistry::instance().lookup(
                             configured_default));
+                std::string default_description = default_metadata.model
+                    ? compact_model_description(*default_metadata.model)
+                    : std::string{};
+                // The configured default is always offered so a user can get
+                // back to it, but when the endpoint published a live catalogue
+                // that omits it, say so instead of implying it will work.
+                if (resolved.origin == core::llm::ModelMetadataOrigin::ProviderApi
+                    && default_metadata.origin
+                        != core::llm::ModelMetadataOrigin::ProviderApi) {
+                    if (!default_description.empty()) {
+                        default_description += " ";
+                    }
+                    default_description += "Not listed by this endpoint.";
+                }
                 add_row(
                     effective_source->service_id,
                     configured_default,
                     configured_default,
                     source_provider,
-                    default_metadata.model
-                        ? compact_model_description(*default_metadata.model)
-                        : std::string{},
+                    std::move(default_description),
                     true,
-                    category_label);
+                    category_label,
+                    core::llm::credentials_missing(
+                        resolved_source.credential_state));
             }
             for (const auto& model : resolved.models) {
                 add_row(
@@ -3575,7 +3638,9 @@ RunResult run(RunOptions opts) {
                     compact_model_description(model),
                     models_equivalent(
                         configured_default, model.canonical_id),
-                    category_label);
+                    category_label,
+                    core::llm::credentials_missing(
+                        resolved_source.credential_state));
             }
         }
 
@@ -3587,7 +3652,8 @@ RunResult run(RunOptions opts) {
                     source_provider,
                     "Use the provider default configured by the backend.",
                     true,
-                    catalog_group.sources.front().category_label);
+                    catalog_group.sources.front().category_label,
+                    false);
         }
 
         return rows;
@@ -3606,6 +3672,10 @@ RunResult run(RunOptions opts) {
             std::vector<std::string> default_models;
             default_models.reserve(catalog_group.sources.size());
             std::unordered_set<std::string> known_model_ids;
+            // A group is usable as soon as one of its endpoints can
+            // authenticate, and only counts as unauthenticated when every
+            // endpoint explicitly reports a missing credential.
+            bool group_has_usable_source = false;
             for (const auto& source : catalog_group.sources) {
                 const auto& source_provider = source.provider_name;
                 const auto provider_it = config.providers.find(source_provider);
@@ -3619,11 +3689,17 @@ RunResult run(RunOptions opts) {
                 std::string catalog_id = source_provider;
                 try {
                     const auto provider = provider_manager.get_provider(source_provider);
+                    if (!core::llm::credentials_missing(
+                            core::llm::provider_credential_state(provider))) {
+                        group_has_usable_source = true;
+                    }
                     if (const auto metadata = provider->metadata();
                         metadata && !metadata->service_id.empty()) {
                         catalog_id = metadata->service_id;
                     }
                 } catch (const std::exception&) {
+                    // An unconstructible provider tells us nothing about its
+                    // credentials, so do not treat it as authenticated.
                 }
                 const auto snapshot =
                     core::llm::ModelCatalogAvailability::instance().snapshot(catalog_id);
@@ -3667,13 +3743,27 @@ RunResult run(RunOptions opts) {
             if (known_count > 0) {
                 description += std::format(" · {} known model{}", known_count, known_count == 1 ? "" : "s");
             }
+            if (!group_has_usable_source) {
+                description += std::format(
+                    " · {}",
+                    core::llm::credential_state_note(
+                        core::llm::ProviderCredentialState::Missing));
+            }
             rows.push_back(tui::ModelProviderPickerRow{
                 .name = catalog_group.provider_name,
                 .description = std::move(description),
                 .active = model_selection_mode == ModelSelectionMode::Manual
                     && catalog_group.contains_source_provider(manual_provider_name),
+                .credentials_missing = !group_has_usable_source,
             });
         }
+
+        // Rank providers we can actually talk to first. When nothing is
+        // authenticated this is a no-op, so a fresh install still sees the
+        // full catalogue in its original order.
+        std::ranges::stable_partition(rows, [](const auto& row) {
+            return !row.credentials_missing;
+        });
         return rows;
     };
 

@@ -22,6 +22,7 @@ public:
                                          std::string ide_type = "IDE_UNSPECIFIED");
 
     AuthInfo get_auth() override;
+    [[nodiscard]] CredentialAvailability availability() override;
     [[nodiscard]] bool uses_subscription_billing() const noexcept override { return true; }
     bool refresh_on_auth_failure() override;
 

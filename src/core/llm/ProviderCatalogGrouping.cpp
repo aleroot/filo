@@ -19,6 +19,11 @@ constexpr std::array<std::string_view, 5> kZaiCodingModels{{
     "glm-4.5-air",
 }};
 
+// The Qwen family is served by three mutually exclusive endpoints that share a
+// single registry provider key ("qwen"). Without disjoint model sets every
+// endpoint would offer every Qwen model, so the picker would list the same ID
+// under providers that cannot serve it -- and the first, usually
+// credential-less, copy wins.
 constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.8-max",
     "qwen3.8-flash",
@@ -26,6 +31,12 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.7-plus",
     "qwen3.6-plus",
     "qwen3.6-flash",
+}};
+
+constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
+    "qwen3-coder-plus",
+    "qwen3-coder-flash",
+    "coder-model",
 }};
 
 [[nodiscard]] std::string normalized(std::string_view value) {
@@ -91,6 +102,32 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
         kQwenTokenPlanTextModels);
 }
 
+[[nodiscard]] ProviderCatalogModelFilter qwen_coding_plan_filter() {
+    // coding.dashscope.aliyuncs.com only serves the coder line; "coder-model"
+    // is the endpoint's own subscription alias.
+    return model_filter(
+        ProviderCatalogModelRule::Include,
+        kQwenCodingPlanModels);
+}
+
+[[nodiscard]] ProviderCatalogModelFilter qwen_public_dashscope_filter() {
+    // Public DashScope keys are rejected by the Token Plan and Coding Plan
+    // hosts and vice versa, so the pay-as-you-go source claims exactly the
+    // models the other two do not.
+    std::vector<std::string_view> reserved;
+    reserved.reserve(
+        kQwenTokenPlanTextModels.size() + kQwenCodingPlanModels.size());
+    reserved.insert(
+        reserved.end(),
+        kQwenTokenPlanTextModels.begin(),
+        kQwenTokenPlanTextModels.end());
+    reserved.insert(
+        reserved.end(),
+        kQwenCodingPlanModels.begin(),
+        kQwenCodingPlanModels.end());
+    return model_filter(ProviderCatalogModelRule::Exclude, reserved);
+}
+
 [[nodiscard]] ProviderCatalogSource source_for_provider(std::string_view provider_name,
                                                         std::string_view group_name) {
     ProviderCatalogSource source{
@@ -124,8 +161,11 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen" && is_qwen_coding_source(provider_name)) {
         source.category_label = "Coding Plan endpoint.";
+        source.registry_model_filter = qwen_coding_plan_filter();
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen") {
         source.category_label = "DashScope API.";
+        source.registry_model_filter = qwen_public_dashscope_filter();
     }
 
     return source;

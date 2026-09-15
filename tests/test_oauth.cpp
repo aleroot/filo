@@ -1146,7 +1146,7 @@ TEST_CASE("AuthenticationManager login(dashscope) configures public DashScope AP
     const std::string overlay = buffer.str();
     REQUIRE(overlay.find(R"("default_provider":"qwen")") != std::string::npos);
     REQUIRE(overlay.find(
-        R"("qwen":{"model":"qwen3-coder-plus","api_key":"test-dashscope-key"})")
+        R"("qwen":{"model":"qwen3-max","api_key":"test-dashscope-key"})")
         != std::string::npos);
 }
 

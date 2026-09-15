@@ -355,6 +355,16 @@ TEST_CASE("summarize_tool_arguments — run_terminal_command", "[tui][conversati
     const auto result = summarize_tool_arguments(
         "run_terminal_command", R"({"command":"ls -la","working_dir":"/tmp"})");
     REQUIRE_THAT(result, ContainsSubstring("ls -la"));
+    REQUIRE_THAT(result, ContainsSubstring("cmd: "));
+}
+
+TEST_CASE("summarize_tool_arguments — run_terminal_command without working_dir",
+          "[tui][conversation][args]") {
+    // No cwd to disambiguate, so the "cmd:" label would be redundant noise;
+    // the command itself is the whole preview.
+    const auto result = summarize_tool_arguments(
+        "run_terminal_command", R"({"command":"ls -la"})");
+    REQUIRE(result == "ls -la");
 }
 
 TEST_CASE("summarize_tool_arguments — move_file", "[tui][conversation][args]") {

@@ -366,7 +366,7 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         return LoginProfileMapping{
             .provider_name = "qwen",
             .auth_type = "",
-            .default_model = "qwen3-coder-plus",
+            .default_model = "qwen3-max",
         };
     }
     if (normalized == "zai" || normalized == "z.ai" || normalized == "z-ai") {
@@ -581,7 +581,9 @@ AppConfig make_default_config() {
     add_provider("kimi-for-coding","kimi-for-coding", {}, {}, "https://api.kimi.ai/coding/v1");
     add_provider("kimi-32k",       "moonshot-v1-32k");
     add_provider("kimi-128k",      "moonshot-v1-128k");
-    add_provider("qwen",            "qwen3-coder-plus", "high");
+    // Public DashScope and Coding Plan are distinct billing endpoints that
+    // reject each other's keys, so they must not default to the same model.
+    add_provider("qwen",            "qwen3-max", "high");
     add_provider("qwen-coding",     "qwen3-coder-plus", "high");
     add_provider("qwen-token-plan", {}, "high");
     add_provider("zai",            "glm-5.1");
@@ -653,7 +655,7 @@ std::string default_config_json() {
         "kimi-for-coding":{ "model": "kimi-for-coding", "base_url": "https://api.kimi.ai/coding/v1" },
         "kimi-32k":       { "model": "moonshot-v1-32k" },
         "kimi-128k":      { "model": "moonshot-v1-128k" },
-        "qwen":           { "model": "qwen3-coder-plus", "reasoning_effort": "high" },
+        "qwen":           { "model": "qwen3-max", "reasoning_effort": "high" },
         "qwen-coding":    { "model": "qwen3-coder-plus", "reasoning_effort": "high" },
         "qwen-token-plan":{ "reasoning_effort": "high" },
         "zai":            { "model": "glm-5.1" },

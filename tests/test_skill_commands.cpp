@@ -336,8 +336,12 @@ TEST_CASE("resolve_skill_turn falls back safely when provider hints are unavaila
 
     core::config::ConfigManager::get_instance().load(project_dir);
 
+    // No test registers a Mistral provider, so neither the exact configured
+    // model match nor the family search can produce a live provider. Anthropic
+    // is unusable here: ProviderManager is a process-wide singleton and other
+    // cases in this file leave "claude" registered in it.
     const auto resolution = resolve_skill_turn(
-        "claude-sonnet-4-6",
+        "mistral-vibe-cli-latest",
         {"read"});
 
     CHECK(resolution.callbacks.provider_override == nullptr);
@@ -346,6 +350,37 @@ TEST_CASE("resolve_skill_turn falls back safely when provider hints are unavaila
     CHECK_THAT(
         resolution.warning,
         Catch::Matchers::ContainsSubstring("using the current model"));
+
+    core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
+    fs::remove_all(sandbox);
+}
+
+TEST_CASE("resolve_skill_turn looks past an exact model match it cannot load",
+          "[skill_commands][model_resolution]") {
+    // Built-in presets carry configured default models, so a hint can exact-match
+    // a preset the user never authenticated (here "claude-thinking"). That must
+    // not abort the search while a live sibling serves the same model.
+    const auto sandbox = make_temp_root("skill_turn_resolution_unloadable_exact");
+    const auto xdg_home = sandbox / "xdg";
+    const auto project_dir = sandbox / "project";
+    ScopedEnvVar xdg("XDG_CONFIG_HOME", xdg_home.string());
+
+    core::config::ConfigManager::get_instance().load(project_dir);
+    const auto& providers =
+        core::config::ConfigManager::get_instance().get_config().providers;
+    REQUIRE(providers.contains("claude-thinking"));
+    REQUIRE(providers.at("claude-thinking").model == "claude-sonnet-4-6");
+    REQUIRE_FALSE(core::llm::ProviderManager::get_instance().has_provider(
+        "claude-thinking"));
+
+    auto anthropic = std::make_shared<DummyProvider>();
+    core::llm::ProviderManager::get_instance().register_provider("claude", anthropic);
+
+    const auto resolution = resolve_skill_turn("claude-sonnet-4-6", {"read"});
+
+    CHECK(resolution.warning.empty());
+    CHECK(resolution.callbacks.provider_override == anthropic);
+    CHECK(resolution.callbacks.model_override == "claude-sonnet-4-6");
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     fs::remove_all(sandbox);
@@ -417,8 +452,10 @@ TEST_CASE("resolve_skill_turn prefers canonical qwen over Coding Plan",
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("resolve_skill_turn honours default_provider among Qwen family presets",
+TEST_CASE("resolve_skill_turn keeps Qwen model hints on the plan that serves them",
           "[skill_commands][model_resolution][qwen]") {
+    // The Qwen plans are disjoint catalogs, so default_provider must not drag
+    // a model hint onto an endpoint that would answer 401/404 for it.
     const auto sandbox = make_temp_root("skill_turn_resolution_qwen_default");
     const auto xdg_home = sandbox / "xdg";
     const auto project_dir = sandbox / "project";
@@ -435,11 +472,17 @@ TEST_CASE("resolve_skill_turn honours default_provider among Qwen family presets
     core::llm::ProviderManager::get_instance().register_provider("qwen", public_qwen);
     core::llm::ProviderManager::get_instance().register_provider("qwen-coding", coding);
 
-    const auto resolution = resolve_skill_turn("qwen3-max", {"read"});
+    const auto public_model = resolve_skill_turn("qwen3-max", {"read"});
 
-    CHECK(resolution.warning.empty());
-    CHECK(resolution.callbacks.provider_override == coding);
-    CHECK(resolution.callbacks.model_override == "qwen3-max");
+    CHECK(public_model.warning.empty());
+    CHECK(public_model.callbacks.provider_override == public_qwen);
+    CHECK(public_model.callbacks.model_override == "qwen3-max");
+
+    const auto coder_model = resolve_skill_turn("qwen3-coder-plus", {"read"});
+
+    CHECK(coder_model.warning.empty());
+    CHECK(coder_model.callbacks.provider_override == coding);
+    CHECK(coder_model.callbacks.model_override == "qwen3-coder-plus");
 
     core::config::ConfigManager::get_instance().load(std::filesystem::current_path());
     fs::remove_all(sandbox);

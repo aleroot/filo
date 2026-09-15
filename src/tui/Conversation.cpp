@@ -3005,7 +3005,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
             return std::format("cwd: {} | cmd: {}", *working_dir, *command);
         }
         if (command) {
-            return std::format("cmd: {}", *command);
+            return *command;
         }
     }
 

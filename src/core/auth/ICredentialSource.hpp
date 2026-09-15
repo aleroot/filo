@@ -30,6 +30,20 @@ struct AuthInfo {
 };
 
 /**
+ * @brief Whether a credential source can authenticate a request right now.
+ *
+ * This is a cheap, non-blocking capability probe for presentation code that
+ * must not trigger a token refresh or an interactive browser login. Sources
+ * that cannot answer without doing work report Unknown, and callers must treat
+ * Unknown as usable rather than as a failure.
+ */
+enum class CredentialAvailability {
+    Unknown,
+    Ready,
+    Missing,
+};
+
+/**
  * @brief Produces AuthInfo for an HTTP request. Implementations may block
  *        on the first call (e.g. to refresh an expired token or open a
  *        browser login flow).
@@ -38,6 +52,16 @@ class ICredentialSource {
 public:
     virtual ~ICredentialSource() = default;
     virtual AuthInfo get_auth() = 0;
+
+    /**
+     * @brief Report credential availability without performing network or
+     *        interactive work.
+     *
+     * Implementations must never refresh, log in, or block here.
+     */
+    [[nodiscard]] virtual CredentialAvailability availability() {
+        return CredentialAvailability::Unknown;
+    }
 
     /**
      * @brief Whether this credential source is backed by a subscription plan.

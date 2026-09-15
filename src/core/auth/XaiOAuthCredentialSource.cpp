@@ -20,6 +20,10 @@ AuthInfo XaiOAuthCredentialSource::get_auth() {
     return auth;
 }
 
+CredentialAvailability XaiOAuthCredentialSource::availability() {
+    return inner_->availability();
+}
+
 bool XaiOAuthCredentialSource::uses_subscription_billing() const noexcept {
     return inner_->uses_subscription_billing();
 }
