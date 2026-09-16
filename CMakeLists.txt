@@ -196,6 +196,7 @@ set(FILO_CORE_SOURCES
     src/tui/RewindPicker.cpp
     src/tui/RemoteActivityPanel.cpp
     src/tui/UsageDetailsPanel.cpp
+    src/tui/WorkspaceDetailsPanel.cpp
     src/tui/AgentsVisualizerPanel.cpp
     src/tui/SelectionClipboardCopier.cpp
     src/core/budget/TokenLedger.cpp
@@ -642,6 +643,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_budget_tracker.cpp
     tests/test_token_ledger.cpp
     tests/test_usage_details_panel.cpp
+    tests/test_workspace_details_panel.cpp
     tests/test_agents_visualizer_panel.cpp
     tests/test_agent_permissions.cpp
     tests/test_safety_policy.cpp

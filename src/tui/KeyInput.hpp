@@ -4,6 +4,9 @@
 
 namespace tui {
 
+/// Shared dismissal keys for read-only details panels.
+bool is_panel_dismiss_event(const ftxui::Event& event);
+
 bool is_ctrl_letter_event(const ftxui::Event& event, char letter);
 bool is_ctrl_x_event(const ftxui::Event& event);
 bool is_ctrl_o_event(const ftxui::Event& event);

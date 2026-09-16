@@ -25,6 +25,7 @@
 #include "RewindPicker.hpp"
 #include "RemoteActivityPanel.hpp"
 #include "UsageDetailsPanel.hpp"
+#include "WorkspaceDetailsPanel.hpp"
 #include "AgentsVisualizerPanel.hpp"
 #include "TuiTheme.hpp"
 #include "core/session/SessionData.hpp"
@@ -951,6 +952,8 @@ RunResult run(RunOptions opts) {
     Box remote_activity_pill_box{0, -1, 0, -1};
     bool usage_details_panel_active = false;
     Box usage_status_box{0, -1, 0, -1};
+    WorkspaceDetailsPanelState workspace_details_panel_state;
+    Box workspace_status_box{0, -1, 0, -1};
     bool agents_visualizer_panel_active = false;
     Box agents_status_box{0, -1, 0, -1};
     std::vector<Box> agents_tab_hitboxes;
@@ -7151,10 +7154,28 @@ RunResult run(RunOptions opts) {
         if (event.is_mouse()
             && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed
+            && workspace_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                workspace_details_panel_state = {
+                    .active = !workspace_details_panel_state.active,
+                };
+                usage_details_panel_active = false;
+                agents_visualizer_panel_active = false;
+                remote_activity_panel_state.active = false;
+            }
+            wake_ui();
+            return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
             && usage_status_box.Contain(event.mouse().x, event.mouse().y)) {
             {
                 std::lock_guard lock(ui_mutex);
                 usage_details_panel_active = !usage_details_panel_active;
+                workspace_details_panel_state.active = false;
             }
             wake_ui();
             return true;
@@ -7164,9 +7185,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             if (usage_details_panel_active) {
-                if (event == Event::Escape
-                    || event == Event::Character('q')
-                    || event == Event::Character('Q')) {
+                if (is_panel_dismiss_event(event)) {
                     usage_details_panel_active = false;
                     usage_panel_was_active = true;
                 }
@@ -7184,6 +7203,7 @@ RunResult run(RunOptions opts) {
             {
                 std::lock_guard lock(ui_mutex);
                 agents_visualizer_panel_active = !agents_visualizer_panel_active;
+                workspace_details_panel_state.active = false;
                 if (agents_visualizer_panel_active) {
                     const auto pol = agent ? agent->session_context_snapshot().steering_policy : agent_session_context.steering_policy;
                     reload_steering(pol);
@@ -7234,9 +7254,7 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             if (agents_visualizer_panel_active) {
-                if (event == Event::Escape
-                    || event == Event::Character('q')
-                    || event == Event::Character('Q')) {
+                if (is_panel_dismiss_event(event)) {
                     agents_visualizer_panel_active = false;
                     agents_panel_was_active = true;
                 } else if (event == Event::ArrowUp || event == Event::Character('k') || event == Event::Character('K')) {
@@ -7298,6 +7316,7 @@ RunResult run(RunOptions opts) {
                 std::lock_guard lock(ui_mutex);
                 closed = remote_activity_panel_state.active;
                 remote_activity_panel_state.active = !closed;
+                workspace_details_panel_state.active = false;
                 if (!closed) {
                     remote_activity_panel_state.selected = 0;
                 }
@@ -7305,6 +7324,20 @@ RunResult run(RunOptions opts) {
             if (closed) {
                 remote_activity_hub.acknowledge_errors();
             }
+            wake_ui();
+            return true;
+        }
+
+        bool workspace_event_handled = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (workspace_details_panel_state.active) {
+                workspace_event_handled = handle_workspace_details_event(
+                    workspace_details_panel_state, event,
+                    agent->workspace_snapshot().root_count());
+            }
+        }
+        if (workspace_event_handled) {
             wake_ui();
             return true;
         }
@@ -8911,6 +8944,7 @@ RunResult run(RunOptions opts) {
         bool                            remote_activity_panel_active = false;
         std::size_t                     remote_activity_panel_selected = 0;
         bool                            usage_panel_visible = false;
+        WorkspaceDetailsPanelState      workspace_panel_snapshot;
         bool                            agents_visualizer_visible = false;
         std::size_t                     agents_visualizer_selected = 0;
         int                             agents_visualizer_scroll = 0;
@@ -9010,6 +9044,7 @@ RunResult run(RunOptions opts) {
             remote_activity_panel_active = remote_activity_panel_state.active;
             remote_activity_panel_selected = remote_activity_panel_state.selected;
             usage_panel_visible = usage_details_panel_active;
+            workspace_panel_snapshot = workspace_details_panel_state;
             agents_visualizer_visible = agents_visualizer_panel_active;
             agents_visualizer_selected = agents_visualizer_selected_file;
             agents_visualizer_scroll = agents_visualizer_scroll_offset;
@@ -9111,6 +9146,8 @@ RunResult run(RunOptions opts) {
         const bool is_subscription = !llm_provider->should_estimate_cost()
             || !rate_limit_info.usage_windows.empty();
 
+        const auto visible_workspace = agent->workspace_snapshot();
+
         // ── Permission overlay ───────────────────────────────────────────
         Element bottom_el;
         if (!external_editor_status.empty()) {
@@ -9120,6 +9157,10 @@ RunResult run(RunOptions opts) {
                     text("Esc to cancel") | color(Color::GrayDark),
                 }),
                 {});
+        } else if (workspace_panel_snapshot.active) {
+            bottom_el = render_workspace_details_panel(
+                visible_workspace.snapshot(), workspace_panel_snapshot.selected,
+                std::clamp(Terminal::Size().dimy / 2 - 5, 1, 12));
         } else if (usage_panel_visible) {
             auto total = core::budget::BudgetTracker::get_instance().session_total(
                 visible_session_id);
@@ -9301,9 +9342,9 @@ RunResult run(RunOptions opts) {
         const bool response_in_progress = current_runtime->turn_active();
 
         // Format current working directory for display
-        auto format_cwd = [&agent]() -> std::string {
+        auto format_cwd = [&visible_workspace]() -> std::string {
             try {
-                auto cwd = agent->workspace_snapshot().primary();
+                auto cwd = visible_workspace.primary();
                 const char* home = std::getenv("HOME");
                 if (home != nullptr) {
                     std::string cwd_str = cwd.string();
@@ -9322,6 +9363,7 @@ RunResult run(RunOptions opts) {
         };
 
         // Build right side of status bar: current folder + context left
+        workspace_status_box = {0, -1, 0, -1};
         Element right_el;
         if (quit_confirm_active()) {
             right_el = text(" Press " + quit_confirm_key + " again to quit ")
@@ -9331,11 +9373,15 @@ RunResult run(RunOptions opts) {
             // Keep the workspace protection affordance quiet and colocated with its scope.
             std::string cwd_str = format_cwd();
             if (!cwd_str.empty()) {
+                if (visible_workspace.root_count() > 1) {
+                    cwd_str += std::format(" (+{})", visible_workspace.root_count() - 1);
+                }
                 right_items.push_back(
                     text(format_workspace_status_label(
                         cwd_str,
                         core::landrun::LandrunSettings::instance().enabled()))
-                    | color(Color::GrayLight));
+                    | color(workspace_panel_snapshot.active ? Color(ColorYellowBright) : Color::GrayLight)
+                    | reflect(workspace_status_box));
             }
             // Context left percentage
             if (ui_show_context_usage && ctx_pct >= 0) {
@@ -9537,6 +9583,7 @@ RunResult run(RunOptions opts) {
         const bool show_status_footer =
             ui_show_footer
             || usage_panel_visible
+            || workspace_panel_snapshot.active
             || agents_visualizer_visible
             || response_in_progress
             || review_activity_active

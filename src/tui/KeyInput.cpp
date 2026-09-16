@@ -8,6 +8,13 @@
 #include <utility>
 
 namespace tui {
+
+bool is_panel_dismiss_event(const ftxui::Event& event) {
+    return event == ftxui::Event::Escape
+        || event == ftxui::Event::Character('q')
+        || event == ftxui::Event::Character('Q');
+}
+
 namespace {
 
 bool parse_decimal(std::string_view token, int& out) {
