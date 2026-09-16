@@ -345,8 +345,16 @@ TEST_CASE("SteeringGuard matches aliases, not spellings", "[steering][guard]") {
     CHECK(guard.blocked_reason(resolved(workspace.path("NOTES.md"))).has_value());
     CHECK(guard.blocked_text_reason("cat NOTES.md", workspace.dir.path()).has_value());
 
-    // Case-insensitive filesystems must not become a way around the rule.
-    CHECK(guard.blocked_reason(resolved(workspace.path("agents.md"))).has_value());
+    // A different spelling is an alias only on a case-insensitive filesystem.
+    // On Linux the lowercase path does not exist and cannot read AGENTS.md.
+    const auto lowercase = workspace.path("agents.md");
+    if (fs::exists(lowercase)) {
+        REQUIRE(fs::equivalent(lowercase, workspace.path("AGENTS.md")));
+        CHECK(guard.blocked_reason(resolved(lowercase)).has_value());
+    } else {
+        CHECK_FALSE(guard.blocked_reason(resolved(lowercase)).has_value());
+    }
+    // The shell fallback remains conservative for an unresolved spelling.
     CHECK(guard.blocked_text_reason("cat agents.md", workspace.dir.path()).has_value());
 }
 
@@ -603,6 +611,84 @@ using Tier = Enforcement::Tier;
 }
 
 } // namespace
+
+TEST_CASE("a custom steering file exclusively supplies instructions across workspace roots",
+          "[steering][guard][enforcement][tools][regression]") {
+    SteeringWorkspace primary;
+    SteeringWorkspace secondary;
+    TempDir external{"custom"};
+    ScopedWorkspace scoped{primary.dir.path()};
+    write_text(primary.path("AGENTS.override.md"), "needle override steering\n");
+
+    fs::path custom;
+    SECTION("the supplied file is outside the workspace") {
+        custom = external.path() / "AGENTS.md";
+    }
+    SECTION("the supplied file is one of the workspace steering files") {
+        custom = primary.path(".filo/steering/chosen.md");
+    }
+    write_text(custom, "Explicit custom instructions\n");
+    const auto policy = core::context::parse_steering_policy(custom.string());
+    REQUIRE(policy.mode == core::context::SteeringMode::CustomFile);
+    const auto context = make_context(primary.dir.path(), policy, {secondary.dir.path()});
+    const auto roots = context.workspace_view().ordered_roots();
+    const auto selected = core::context::select_steering_files(roots, policy);
+    REQUIRE(selected.files.size() == 1);
+    CHECK(resolved(selected.files.front().path) == resolved(custom));
+
+    const auto prompt = core::context::ContextBuilder(context).with_mode("BUILD").build();
+    CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Explicit custom instructions"));
+    CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("needle agents steering"));
+    CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("needle override steering"));
+    CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("needle claude steering"));
+    CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("needle style steering"));
+
+    const auto guard = core::context::SteeringGuard::for_context(context);
+    REQUIRE_FALSE(guard.empty());
+    CHECK_FALSE(guard.blocked_reason(resolved(custom)).has_value());
+    const auto read = core::tools::with_path_visibility(std::make_shared<core::tools::ReadTool>());
+    for (const auto& file : core::context::enumerate_steering_files(roots)) {
+        const auto path = resolved(file.path);
+        const bool chosen = path == resolved(custom);
+        INFO("file: " << path);
+        CHECK(guard.blocked_reason(path).has_value() == !chosen);
+        const auto result = read->execute(
+            std::format(R"({{"path":"{}"}})", path.string()), context);
+        CHECK_THAT(result, Catch::Matchers::ContainsSubstring(
+            chosen ? "Explicit custom instructions" : "Access denied"));
+    }
+
+    for (const auto& root : roots) {
+        const auto matches = core::tools::with_path_visibility(
+            std::make_shared<core::tools::GrepSearchTool>())->execute(
+                std::format(R"({{"pattern":"needle","path":"{}"}})", root.string()), context);
+        CHECK_THAT(matches, Catch::Matchers::ContainsSubstring("needle readme"));
+        CHECK_THAT(matches, !Catch::Matchers::ContainsSubstring("needle agents steering"));
+        CHECK_THAT(matches, !Catch::Matchers::ContainsSubstring("needle style steering"));
+    }
+
+    // Both host strategies must enforce the custom policy. Only the supplied
+    // file is exempt; a same-named AGENTS.md in the workspace is still blocked.
+    for (const auto tier : {Tier::kernel, Tier::heuristic}) {
+        const auto enforcement = Enforcement::for_guard(guard, tier);
+        CHECK(enforcement.in_process_code_error().has_value());
+        CHECK_FALSE(enforcement.command_error(
+            "cat '" + custom.string() + "'", primary.dir.path()).has_value());
+        CHECK(enforcement.command_error("cat AGENTS.md", primary.dir.path()).has_value()
+              == (tier == Tier::heuristic));
+        const auto child = enforcement.child_policy({});
+        CHECK(child.enabled() == (tier == Tier::kernel));
+        CHECK_FALSE(child.confines());
+        CHECK(std::ranges::find(child.protected_read_paths, resolved(custom))
+              == child.protected_read_paths.end());
+        if (tier == Tier::kernel) {
+            CHECK(denies(child, "AGENTS.md"));
+            CHECK(denies(child, "AGENTS.override.md"));
+            CHECK(denies(child, "CLAUDE.md"));
+            CHECK(denies(child, "style.md"));
+        }
+    }
+}
 
 TEST_CASE("the enforcement tier follows what the policy withholds",
           "[steering][guard][enforcement]") {
