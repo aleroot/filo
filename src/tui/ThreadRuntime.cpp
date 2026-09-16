@@ -319,31 +319,28 @@ std::vector<ThreadRuntime::Ptr> ThreadRuntimeRegistry::ordered_snapshot(
     return runtimes;
 }
 
-void ThreadRuntimeRegistry::retitle_auto_named(std::string_view base_name,
-                                               std::string_view main_session_id) {
-    const auto runtimes = ordered_snapshot(main_session_id);
+void ThreadRuntimeRegistry::retitle_auto_named_thread(std::string_view session_id,
+                                                      std::string_view base_name) {
+    const auto target = find(session_id);
+    if (!target || !target->metadata().auto_thread_name) {
+        return;
+    }
 
     std::unordered_set<std::string> used_names;
-    for (const auto& runtime : runtimes) {
+    for (const auto& runtime : snapshot()) {
         if (const auto metadata = runtime->metadata();
-            !metadata.auto_thread_name && !metadata.thread_name.empty()) {
+            runtime != target && !metadata.thread_name.empty()) {
             used_names.insert(metadata.thread_name);
         }
     }
 
-    for (const auto& runtime : runtimes) {
-        if (!runtime->metadata().auto_thread_name) {
-            continue;
-        }
-        std::string next_name{base_name};
-        for (std::size_t ordinal = 2; used_names.contains(next_name); ++ordinal) {
-            next_name = std::format("{} {}", base_name, ordinal);
-        }
-        used_names.insert(next_name);
-        runtime->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
-            metadata.thread_name = next_name;
-        });
+    std::string next_name{base_name};
+    for (std::size_t ordinal = 2; used_names.contains(next_name); ++ordinal) {
+        next_name = std::format("{} {}", base_name, ordinal);
     }
+    target->mutate_metadata([&](ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = next_name;
+    });
 }
 
 void ThreadRuntimeRegistry::request_stop_all() {

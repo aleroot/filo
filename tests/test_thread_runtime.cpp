@@ -229,76 +229,92 @@ TEST_CASE("ThreadRuntimeRegistry ordered_snapshot puts the main thread first",
     CHECK(ordered[2] == newest);
 }
 
-TEST_CASE("ThreadRuntimeRegistry retitle_auto_named follows the workspace",
-          "[tui][thread_runtime][workspace]") {
-    tui::ThreadRuntimeRegistry registry;
-
-    auto main = make_runtime("aaaa1111");
-    main->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "oldproj";
-        metadata.auto_thread_name = true;
-        metadata.created_at = "2026-08-08T12:00:00Z";
-    });
-    auto first_auto = make_runtime("bbbb2222");
-    first_auto->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "oldproj";
-        metadata.auto_thread_name = true;
-        metadata.created_at = "2026-08-08T13:00:00Z";
-    });
-    auto second_auto = make_runtime("cccc3333");
-    second_auto->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "oldproj 2";
-        metadata.auto_thread_name = true;
-        metadata.created_at = "2026-08-08T14:00:00Z";
-    });
-    // A user-renamed thread already holds the new base name: auto titles must
-    // neither take it nor overwrite it.
-    auto user_named = make_runtime("dddd4444");
-    user_named->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "newproj";
-        metadata.created_at = "2026-08-08T15:00:00Z";
-    });
-    REQUIRE(registry.insert(main));
-    REQUIRE(registry.insert(first_auto));
-    REQUIRE(registry.insert(second_auto));
-    REQUIRE(registry.insert(user_named));
-
-    registry.retitle_auto_named("newproj", main->session_id());
-
-    CHECK(user_named->metadata().thread_name == "newproj");
-    CHECK(main->metadata().thread_name == "newproj 2");
-    CHECK(first_auto->metadata().thread_name == "newproj 3");
-    CHECK(second_auto->metadata().thread_name == "newproj 4");
-    CHECK(main->metadata().auto_thread_name);
-    CHECK(first_auto->metadata().auto_thread_name);
-    CHECK_FALSE(user_named->metadata().auto_thread_name);
-
-    // Retitling is idempotent when the workspace has not actually changed.
-    registry.retitle_auto_named("newproj", main->session_id());
-    CHECK(main->metadata().thread_name == "newproj 2");
-    CHECK(first_auto->metadata().thread_name == "newproj 3");
-    CHECK(second_auto->metadata().thread_name == "newproj 4");
-}
-
-TEST_CASE("the first auto-named thread takes the project name",
+TEST_CASE("workspace changes rename only the owning thread",
           "[tui][thread_runtime][workspace]") {
     tui::ThreadRuntimeRegistry registry;
     auto first = make_runtime("aaaa1111");
     first->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "oldproj";
+        metadata.thread_name = "mlx-llm";
         metadata.auto_thread_name = true;
-        metadata.created_at = "2026-08-08T12:00:00Z";
+        metadata.session_name = "saved-conversation";
     });
     auto second = make_runtime("bbbb2222");
     second->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.thread_name = "oldproj 2";
+        metadata.thread_name = "mlx-llm 2";
         metadata.auto_thread_name = true;
-        metadata.created_at = "2026-08-08T13:00:00Z";
     });
     REQUIRE(registry.insert(first));
     REQUIRE(registry.insert(second));
 
-    registry.retitle_auto_named("filo", first->session_id());
-    CHECK(first->metadata().thread_name == "filo");
-    CHECK(second->metadata().thread_name == "filo 2");
+    SECTION("changing the second tab leaves the first alone") {
+        REQUIRE(registry.select(second->session_id()) == second);
+        registry.retitle_auto_named_thread(second->session_id(), "filo");
+        CHECK(first->metadata().thread_name == "mlx-llm");
+        CHECK(second->metadata().thread_name == "filo");
+
+        // Repeating the change must not reserve the tab's own name.
+        registry.retitle_auto_named_thread(second->session_id(), "filo");
+        CHECK(first->metadata().thread_name == "mlx-llm");
+        CHECK(second->metadata().thread_name == "filo");
+
+        // Returning to the original project restores a unique suffix.
+        registry.retitle_auto_named_thread(second->session_id(), "mlx-llm");
+        CHECK(first->metadata().thread_name == "mlx-llm");
+        CHECK(second->metadata().thread_name == "mlx-llm 2");
+    }
+
+    SECTION("changing the first tab does not renumber the second") {
+        registry.retitle_auto_named_thread(first->session_id(), "filo");
+        CHECK(first->metadata().thread_name == "filo");
+        CHECK(second->metadata().thread_name == "mlx-llm 2");
+    }
+
+    SECTION("reapplying the workspace keeps the existing names") {
+        registry.retitle_auto_named_thread(second->session_id(), "mlx-llm");
+        CHECK(first->metadata().thread_name == "mlx-llm");
+        CHECK(second->metadata().thread_name == "mlx-llm 2");
+    }
+
+    SECTION("an unknown thread does not rename any tabs") {
+        registry.retitle_auto_named_thread("missing", "filo");
+        CHECK(first->metadata().thread_name == "mlx-llm");
+        CHECK(second->metadata().thread_name == "mlx-llm 2");
+    }
+
+    CHECK(first->metadata().auto_thread_name);
+    CHECK(second->metadata().auto_thread_name);
+    CHECK(first->metadata().session_name == "saved-conversation");
+}
+
+TEST_CASE("workspace tab names reserve all other titles and preserve custom names",
+          "[tui][thread_runtime][workspace]") {
+    tui::ThreadRuntimeRegistry registry;
+    auto existing = make_runtime("aaaa1111");
+    existing->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "filo";
+        metadata.auto_thread_name = true;
+    });
+    auto custom = make_runtime("bbbb2222");
+    custom->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "filo 2";
+    });
+    auto moving = make_runtime("cccc3333");
+    moving->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.thread_name = "mlx-llm";
+        metadata.auto_thread_name = true;
+    });
+    REQUIRE(registry.insert(existing));
+    REQUIRE(registry.insert(custom));
+    REQUIRE(registry.insert(moving));
+
+    registry.retitle_auto_named_thread(moving->session_id(), "filo");
+    CHECK(existing->metadata().thread_name == "filo");
+    CHECK(custom->metadata().thread_name == "filo 2");
+    CHECK(moving->metadata().thread_name == "filo 3");
+
+    registry.retitle_auto_named_thread(custom->session_id(), "new-project");
+    CHECK(existing->metadata().thread_name == "filo");
+    CHECK(custom->metadata().thread_name == "filo 2");
+    CHECK(moving->metadata().thread_name == "filo 3");
+    CHECK_FALSE(custom->metadata().auto_thread_name);
 }

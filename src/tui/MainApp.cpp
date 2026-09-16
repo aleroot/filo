@@ -615,7 +615,6 @@ RunResult run(RunOptions opts) {
     auto& config_manager     = core::config::ConfigManager::get_instance();
     auto config              = config_manager.get_config();
     auto& provider_manager   = core::llm::ProviderManager::get_instance();
-    const auto settings_working_dir = std::filesystem::current_path();
     const auto authentication_manager =
         core::auth::AuthenticationManager::create_with_defaults(
             config_manager.get_config_dir());
@@ -1053,22 +1052,40 @@ RunResult run(RunOptions opts) {
         std::lock_guard lock(mention_index_mutex);
         return mention_index;
     };
-    std::jthread mention_index_thread(
-        [root = std::filesystem::current_path(),
-         &mention_index,
-         &mention_index_mutex,
-         &wake_ui](std::stop_token stop_token) {
-            auto built = std::make_shared<const MentionIndex>(
-                build_mention_index(root, stop_token));
-            if (stop_token.stop_requested()) {
-                return;
-            }
-            {
-                std::lock_guard lock(mention_index_mutex);
-                mention_index = std::move(built);
-            }
-            wake_ui();
-        });
+    std::jthread mention_index_thread;
+    std::filesystem::path mention_index_root;
+    auto refresh_mention_index = [&]() {
+        const auto root = agent->workspace_snapshot().primary();
+        if (root == mention_index_root) {
+            return;
+        }
+        mention_index_thread.request_stop();
+        if (mention_index_thread.joinable()) {
+            mention_index_thread.join();
+        }
+        mention_index_root = root;
+        {
+            std::lock_guard lock(mention_index_mutex);
+            mention_index = std::make_shared<const MentionIndex>();
+        }
+        mention_index_thread = std::jthread(
+            [root,
+             &mention_index,
+             &mention_index_mutex,
+             &wake_ui](std::stop_token stop_token) {
+                auto built = std::make_shared<const MentionIndex>(
+                    build_mention_index(root, stop_token));
+                if (stop_token.stop_requested()) {
+                    return;
+                }
+                {
+                    std::lock_guard lock(mention_index_mutex);
+                    mention_index = std::move(built);
+                }
+                wake_ui();
+            });
+    };
+    refresh_mention_index();
     auto command_index = cmd_executor.describe_commands();
     if (opts.remote_mcp_server_enabled) {
         command_index.push_back(core::commands::CommandDescriptor{
@@ -1220,9 +1237,9 @@ RunResult run(RunOptions opts) {
         std::filesystem::temp_directory_path());
     CodeBlockRunServices code_block_run_services(CodeBlockRunDependencies{
         .runner = core::code::make_interactive_code_runner(),
-        .working_directory = [] { return std::filesystem::current_path(); },
+        .working_directory = [&agent] { return agent->workspace_snapshot().primary(); },
         .script_directory = code_run_script_directory,
-        .landrun_policy = [agent,
+        .landrun_policy = [&agent,
                            mode = opts.landrun_mode,
                            compiler = core::landrun::LandrunPolicyCompiler(
                                std::move(opts.landrun_environment))] {
@@ -1461,21 +1478,11 @@ RunResult run(RunOptions opts) {
     auto session_store = std::make_shared<core::session::SessionStore>(
         core::session::SessionStore::default_sessions_dir());
 
-    // Base for auto-generated thread tab names: the primary workspace's leaf
-    // directory. Mutable because /workspace change rebases it and retitles
-    // auto-named threads (see ThreadRuntimeRegistry::retitle_auto_named);
-    // user-renamed threads are never touched.
+    // Tab names derive from the owning thread's workspace.
     const auto project_base_name_for = [](const std::filesystem::path& root) {
         const auto leaf = root.filename().string();
         return leaf.empty() ? std::string{"thread"} : leaf;
     };
-    std::string project_thread_base_name = [&] {
-        try {
-            return project_base_name_for(std::filesystem::current_path());
-        } catch (...) {
-            return std::string{"thread"};
-        }
-    }();
 
     std::string session_id          = core::session::SessionStore::generate_id();
     std::string session_name;       // optional user-assigned name (/rename)
@@ -1565,7 +1572,7 @@ RunResult run(RunOptions opts) {
         // but tools will act on the current directory. This is almost never
         // intended, so surface it prominently instead of resuming silently.
         if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
-                data.working_dir, std::filesystem::current_path().string());
+                data.working_dir, agent->workspace_snapshot().primary().string());
             notice.has_value()) {
             append_ui_message(*selected_messages, make_warning_message(std::move(*notice)));
         }
@@ -1598,7 +1605,7 @@ RunResult run(RunOptions opts) {
     auto current_runtime = std::make_shared<ThreadRuntime>(
         ThreadRuntimeMetadata{
             .session_id = session_id,
-            .thread_name = project_thread_base_name,
+            .thread_name = project_base_name_for(agent->workspace_snapshot().primary()),
             .auto_thread_name = true,
             .session_name = session_name,
             .created_at = session_created_at,
@@ -1629,17 +1636,18 @@ RunResult run(RunOptions opts) {
     }
 
     auto allocate_project_thread_name = [&]() {
+        const auto base_name = project_base_name_for(agent->workspace_snapshot().primary());
         std::unordered_set<std::string> used_names;
         for (const auto& runtime : thread_runtimes.snapshot()) {
             if (const auto name = runtime->metadata().thread_name; !name.empty()) {
                 used_names.insert(name);
             }
         }
-        if (!used_names.contains(project_thread_base_name)) {
-            return project_thread_base_name;
+        if (!used_names.contains(base_name)) {
+            return base_name;
         }
         for (std::size_t ordinal = 2;; ++ordinal) {
-            auto candidate = std::format("{} {}", project_thread_base_name, ordinal);
+            auto candidate = std::format("{} {}", base_name, ordinal);
             if (!used_names.contains(candidate)) {
                 return candidate;
             }
@@ -2288,7 +2296,7 @@ RunResult run(RunOptions opts) {
         }
 
         auto context = core::context::make_session_context(
-            core::workspace::Workspace::get_instance().snapshot(),
+            agent->session_context_snapshot().effective_workspace(),
             core::context::SessionTransport::cli,
             data.session_id);
         context.steering_policy = agent ? agent->session_context_snapshot().steering_policy : opts.steering_policy;
@@ -2339,7 +2347,7 @@ RunResult run(RunOptions opts) {
         data.created_at = metadata.created_at;
         data.last_active_at =
             core::session::SessionStore::to_iso8601(runtime->last_activity());
-        data.working_dir = std::filesystem::current_path().string();
+        data.working_dir = runtime->agent()->workspace_snapshot().primary().string();
         data.provider = metadata.provider;
         data.model = metadata.model;
         data.mode = runtime->agent()->get_mode();
@@ -2374,7 +2382,7 @@ RunResult run(RunOptions opts) {
             auto next_messages = std::make_shared<std::vector<UiMessage>>(
                 build_resumed_ui_messages(data));
             if (auto notice = core::session::SessionStore::working_dir_mismatch_notice(
-                    data.working_dir, std::filesystem::current_path().string());
+                    data.working_dir, agent->workspace_snapshot().primary().string());
                 notice.has_value()) {
                 append_ui_message(*next_messages, make_warning_message(std::move(*notice)));
             }
@@ -2451,6 +2459,8 @@ RunResult run(RunOptions opts) {
             refresh_status_labels();
         }
         static_cast<void>(thread_runtimes.select(session_id));
+        reload_steering(agent->session_context_snapshot().steering_policy);
+        refresh_mention_index();
         sync_mcp_sampling_backend(
             agent->get_provider(),
             model_selection_mode == ModelSelectionMode::Manual
@@ -2472,7 +2482,7 @@ RunResult run(RunOptions opts) {
             live.created_at = metadata.created_at;
             live.last_active_at =
                 core::session::SessionStore::to_iso8601(runtime->last_activity());
-            live.working_dir = std::filesystem::current_path().string();
+            live.working_dir = runtime->agent()->workspace_snapshot().primary().string();
             live.provider = metadata.provider;
             live.model = metadata.model;
             live.mode = runtime->agent()->get_mode();
@@ -2532,7 +2542,7 @@ RunResult run(RunOptions opts) {
     };
 
     auto open_review_picker = [&](std::function<void(std::optional<std::string>)> on_select) {
-        auto base_refs = core::scm::ScmFactory::create(settings_working_dir)->list_branch_refs();
+        auto base_refs = core::scm::ScmFactory::create(agent->workspace_snapshot().primary())->list_branch_refs();
         {
             std::lock_guard lock(ui_mutex);
             review_picker_state.active = true;
@@ -2600,7 +2610,7 @@ RunResult run(RunOptions opts) {
         original.name            = old_session_name;
         original.created_at      = old_created_at;
         original.last_active_at  = core::session::SessionStore::now_iso8601();
-        original.working_dir     = std::filesystem::current_path().string();
+        original.working_dir     = agent->workspace_snapshot().primary().string();
         original.provider        = provider_name;
         original.model           = model_name;
         original.mode            = snap_mode;
@@ -2695,7 +2705,7 @@ RunResult run(RunOptions opts) {
         [runtime, runtime_agent, session_store, session_stats_registry,
          &thread_runtimes, &ui_mutex, &session_id, &session_name, &session_created_at,
          &session_file_path, &active_provider_name, &active_model_name,
-         &selected_messages, &wake_ui, &goal_manager,
+         &wake_ui, &goal_manager,
          &session_leases](const core::session::SessionEfficiencyDecision& decision) {
             // Rotation rewrites session identity and selected presentation
             // state. Defer it while this runtime is hidden; the next visible
@@ -2711,6 +2721,9 @@ RunResult run(RunOptions opts) {
             core::session::SessionData archived;
             {
                 std::lock_guard lock(ui_mutex);
+                if (session_id != runtime->session_id()) {
+                    return;
+                }
                 archived.session_id = session_id;
                 archived.name = session_name;
                 archived.created_at = session_created_at;
@@ -2720,7 +2733,7 @@ RunResult run(RunOptions opts) {
                 archived.todos = std::move(snap_todos);
             }
             archived.last_active_at = core::session::SessionStore::now_iso8601();
-            archived.working_dir = std::filesystem::current_path().string();
+            archived.working_dir = runtime_agent->workspace_snapshot().primary().string();
             archived.mode = snap_mode;
             archived.context_summary = snap_context;
             archived.messages = snap_messages;
@@ -2745,7 +2758,7 @@ RunResult run(RunOptions opts) {
                     save_error);
                 {
                     std::lock_guard lock(ui_mutex);
-                    append_ui_message(*selected_messages, make_warning_message(std::format(
+                    append_ui_message(*runtime->messages(), make_warning_message(std::format(
                         "Filo skipped an internal session rotation because it could not archive the current segment.\nSession: {}\nReason: {}\nYour full context is still intact and no history was compacted.",
                         archived.session_id,
                         save_error.empty() ? std::string("unknown archival error.") : save_error)));
@@ -2805,7 +2818,7 @@ RunResult run(RunOptions opts) {
                 const std::string reason = decision.reason.empty()
                     ? std::string("session growth exceeded the efficiency budget.")
                     : decision.reason;
-                append_ui_message(*selected_messages, make_system_disclosure_message(
+                append_ui_message(*runtime->messages(), make_system_disclosure_message(
                     "Internal session rotated to keep the working set lean (context preserved).",
                     std::format(
                         "Previous segment: {}\nNew segment: {}\nReason: {}",
@@ -4080,7 +4093,7 @@ RunResult run(RunOptions opts) {
         }
 
         std::string error;
-        if (!config_manager.persist_active_profile(next_profile, settings_working_dir, &error)) {
+        if (!config_manager.persist_active_profile(next_profile, agent->workspace_snapshot().primary(), &error)) {
             return std::format("Could not switch profile: {}", error);
         }
 
@@ -4451,7 +4464,7 @@ RunResult run(RunOptions opts) {
         if (!config_manager.persist_managed_setting(scope,
                                                     definition.key,
                                                     value,
-                                                    settings_working_dir,
+                                                    agent->workspace_snapshot().primary(),
                                                     &error)) {
             std::lock_guard lock(ui_mutex);
             settings_panel_state.status_message = std::format(
@@ -4537,7 +4550,7 @@ RunResult run(RunOptions opts) {
                 core::config::SettingsScope::Workspace,
                 core::config::ManagedSettingKey::ContextCompression,
                 *normalized,
-                settings_working_dir,
+                agent->workspace_snapshot().primary(),
                 &error)) {
             return std::format("Could not save compression mode: {}", error);
         }
@@ -4556,8 +4569,8 @@ RunResult run(RunOptions opts) {
     };
 
     // Replaces the primary working directory for /workspace change: chdirs
-    // the process, rebases the process-wide default workspace (so new
-    // threads inherit it), and rebases the active thread's session
+    // the process, rebases the process-wide default workspace, and rebases
+    // the active thread's session
     // workspace. Lives at the composition root because only it may touch
     // process-global state (cwd, the Workspace singleton); the agent itself
     // only owns its own SessionContext (see Agent::change_workspace_root).
@@ -4568,7 +4581,7 @@ RunResult run(RunOptions opts) {
         }
 
         std::error_code ec;
-        const auto resolved = core::workspace::SessionWorkspace::normalize_path(
+        const auto resolved = agent->workspace_snapshot().resolve_path(
             std::filesystem::path(requested_path));
         if (!std::filesystem::is_directory(resolved, ec)) {
             return {
@@ -4617,10 +4630,10 @@ RunResult run(RunOptions opts) {
             reload_steering(agent->session_context_snapshot().steering_policy);
         }
 
-        // Auto-generated tab names follow the new primary workspace.
-        project_thread_base_name = project_base_name_for(resolved);
-        thread_runtimes.retitle_auto_named(project_thread_base_name,
-                                           main_runtime->session_id());
+        // Only the active thread moved workspace; other tab names stay put.
+        thread_runtimes.retitle_auto_named_thread(current_runtime->session_id(),
+                                                  project_base_name_for(resolved));
+        refresh_mention_index();
 
         return {
             .ok = true,
@@ -4634,7 +4647,7 @@ RunResult run(RunOptions opts) {
     // do with the answer*; overlay bookkeeping and the keyboard contract are
     // handled once, here and in FileSystemPicker.
 
-    auto file_picker_quick_roots = [agent]() -> std::vector<FileSystemQuickRoot> {
+    auto file_picker_quick_roots = [&agent]() -> std::vector<FileSystemQuickRoot> {
         std::vector<FileSystemQuickRoot> roots;
         if (agent) {
             const auto workspace = agent->workspace_snapshot();
@@ -4961,10 +4974,10 @@ RunResult run(RunOptions opts) {
         const auto& effective = config_manager.get_config();
         const auto user_path = config_manager.get_settings_path(
             core::config::SettingsScope::User,
-            settings_working_dir);
+            agent->workspace_snapshot().primary());
         const auto workspace_path = config_manager.get_settings_path(
             core::config::SettingsScope::Workspace,
-            settings_working_dir);
+            agent->workspace_snapshot().primary());
 
         return std::format(
             "Effective settings\n"
@@ -5197,7 +5210,7 @@ RunResult run(RunOptions opts) {
         }
         const auto snap_mode = runtime_agent->get_mode();
         const auto snap_context = runtime_agent->get_context_summary();
-        const auto working_dir = std::filesystem::current_path().string();
+        const auto working_dir = runtime_agent->workspace_snapshot().primary().string();
 
         if (thread_runtimes.current() == runtime) {
             std::lock_guard lock(ui_mutex);
@@ -5946,7 +5959,7 @@ RunResult run(RunOptions opts) {
         if (!core::config::ConfigManager::get_instance().persist_mcp_server(
                 server,
                 scope,
-                std::filesystem::current_path(),
+                agent->workspace_snapshot().primary(),
                 &error)) {
             return {.ok = false, .message = error};
         }
@@ -6014,7 +6027,7 @@ RunResult run(RunOptions opts) {
         if (!core::config::ConfigManager::get_instance().remove_mcp_server(
                 server_name,
                 scope,
-                std::filesystem::current_path(),
+                agent->workspace_snapshot().primary(),
                 &error)) {
             return {.ok = false, .message = error};
         }
@@ -6481,7 +6494,7 @@ RunResult run(RunOptions opts) {
         runtime->begin_worker();
         try {
           std::thread([text = std::string(text),
-                     base_dir = std::filesystem::current_path(),
+                     base_dir = runtime->agent()->workspace_snapshot().primary(),
                      runtime,
                      effective_callbacks = std::move(effective_callbacks),
                      live_timeline,
@@ -6671,7 +6684,7 @@ RunResult run(RunOptions opts) {
         animation_cv.notify_one();
         wake_ui();
 
-        const std::string working_dir = std::filesystem::current_path().string();
+        const std::string working_dir = runtime->agent()->workspace_snapshot().primary().string();
         direct_shell_state->begin_worker();
         try {
           std::thread([command = std::move(command),
@@ -9036,9 +9049,7 @@ RunResult run(RunOptions opts) {
                 const auto& item = snapshots[i];
                 std::string label = item.metadata.thread_name;
                 if (label.empty()) {
-                    label = i == 0
-                        ? project_thread_base_name
-                        : std::format("{} {}", project_thread_base_name, i + 1);
+                    label = item.metadata.session_id;
                 }
                 thread_tabs.push_back(ThreadTab{
                     .label = std::move(label),
@@ -9158,7 +9169,7 @@ RunResult run(RunOptions opts) {
 
             bottom_el = render_settings_panel(
                 settings_scope_label(settings_panel_scope),
-                config_manager.get_settings_path(settings_panel_scope, settings_working_dir).string(),
+                config_manager.get_settings_path(settings_panel_scope, agent->workspace_snapshot().primary()).string(),
                 settings_rows,
                 settings_panel_selected,
                 settings_panel_status);
@@ -9290,9 +9301,9 @@ RunResult run(RunOptions opts) {
         const bool response_in_progress = current_runtime->turn_active();
 
         // Format current working directory for display
-        auto format_cwd = []() -> std::string {
+        auto format_cwd = [&agent]() -> std::string {
             try {
-                auto cwd = std::filesystem::current_path();
+                auto cwd = agent->workspace_snapshot().primary();
                 const char* home = std::getenv("HOME");
                 if (home != nullptr) {
                     std::string cwd_str = cwd.string();

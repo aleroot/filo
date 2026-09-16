@@ -2890,7 +2890,9 @@ public:
 
         }
 
-        const std::filesystem::path root = std::filesystem::current_path();
+        const std::filesystem::path root = ctx.agent
+            ? ctx.agent->workspace_snapshot().primary()
+            : std::filesystem::current_path();
         const std::filesystem::path filo_dir = root / ".filo";
         const std::filesystem::path config_path = filo_dir / "config.json";
         // Filo's own steering file is named once, in the steering tables: the

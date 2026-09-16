@@ -57,7 +57,8 @@ struct ThreadRuntimeMetadata {
     std::string thread_name;
     /// True when `thread_name` was auto-derived from the workspace directory
     /// name rather than chosen by the user. Auto-derived names follow the
-    /// primary workspace when it changes; user-assigned names never do.
+    /// owning thread's primary workspace when it changes; user-assigned names
+    /// never do.
     bool auto_thread_name = false;
     /// Name of the persisted conversation currently owned by this thread.
     std::string session_name;
@@ -172,20 +173,16 @@ public:
     [[nodiscard]] ThreadRuntime::Ptr current() const;
     [[nodiscard]] std::vector<ThreadRuntime::Ptr> snapshot() const;
     /// Snapshot in stable display order — the main thread first, then by
-    /// creation time — so the tab bar and any retitling pass always agree
-    /// on which thread comes first.
+    /// creation time.
     [[nodiscard]] std::vector<ThreadRuntime::Ptr> ordered_snapshot(
         std::string_view main_session_id) const;
     [[nodiscard]] std::unordered_set<std::string> running_session_ids() const;
     [[nodiscard]] bool erase(std::string_view session_id);
 
-    /// Re-derive the tab name of every auto-named thread (see
-    /// ThreadRuntimeMetadata::auto_thread_name) from a new workspace base
-    /// name, e.g. after a /workspace change. Threads are titled in stable
-    /// order (main thread first, then creation time); user-assigned names
-    /// are reserved so auto titles can never collide with or overwrite them.
-    void retitle_auto_named(std::string_view base_name,
-                            std::string_view main_session_id);
+    /// Update only this thread's auto-generated workspace name, reserving
+    /// every other thread's existing name. User-assigned names stay unchanged.
+    void retitle_auto_named_thread(std::string_view session_id,
+                                  std::string_view base_name);
 
     void request_stop_all();
     void wait_until_all_idle();
