@@ -319,6 +319,7 @@ set(FILO_CORE_SOURCES
     src/core/context/ContextWindowTracker.cpp
     src/core/context/MentionPathUtils.cpp
     src/core/context/SessionContext.cpp
+    src/core/context/SteeringGuard.cpp
     src/core/context/SteeringLoader.cpp
     src/core/code/CodeBlock.cpp
     src/core/code/InteractiveCodeRunner.cpp
@@ -327,6 +328,7 @@ set(FILO_CORE_SOURCES
     src/core/landrun/LandrunEnvironment.cpp
     src/core/landrun/LandrunHelper.cpp
     src/core/landrun/LandrunLaunch.cpp
+    src/core/landrun/LandrunPathProtection.cpp
     src/core/landrun/LandrunPolicyCompiler.cpp
     src/core/landrun/LandrunReadiness.cpp
     src/core/landrun/LandrunRuntime.cpp
@@ -334,6 +336,7 @@ set(FILO_CORE_SOURCES
     src/core/landrun/linux/LinuxLandlockDriver.cpp
     src/core/landrun/linux/LinuxSeccompHardening.cpp
     src/core/landrun/macos/MacOSSeatbeltDriver.cpp
+    src/core/tools/SteeringEnforcement.cpp
     src/core/tools/ShellTool.cpp
     src/core/tools/VerificationTool.cpp
     src/core/tools/ApplyPatchTool.cpp
@@ -591,6 +594,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_session_model_override.cpp
     tests/test_context_mentions.cpp
     tests/test_context_builder.cpp
+    tests/test_steering_guard.cpp
     tests/test_context_window.cpp
     tests/test_openai_provider.cpp
     tests/test_openai_stream_encoder.cpp

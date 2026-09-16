@@ -4,6 +4,7 @@
 #include "core/agent/Agent.hpp"
 #include "core/agent/ToolOutputHistory.hpp"
 #include "core/agent/ToolResultStore.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/tools/Tool.hpp"
@@ -616,6 +617,60 @@ TEST_CASE("ToolOutputHistory full mode never cache-stubs instruction files",
     CHECK(first == raw);
     CHECK(second == raw);
     CHECK_THAT(second, !Catch::Matchers::ContainsSubstring("[cached read]"));
+}
+
+/**
+ * Every name the steering tables define must be recognized here as well.
+ *
+ * This file used to keep its own list of instruction filenames, which is how
+ * CURSOR.md, COPILOT.md and AGENTS.override.md ended up summarized as ordinary
+ * output while the prompt and the read-side guard both treated them as
+ * steering. Deriving from the tables makes that divergence impossible; this
+ * test makes it loud if a local list is ever reintroduced.
+ */
+TEST_CASE("ToolOutputHistory treats every steering name as an instruction file",
+          "[agent][tool-history]") {
+    std::string instructions;
+    for (int i = 0; i < 160; ++i) {
+        instructions += "- Always preserve instruction line " + std::to_string(i) + "\n";
+    }
+    const std::string raw = std::string(R"({"content":")")
+        + core::utils::escape_json_string(instructions)
+        + R"("})";
+    const auto limits = core::agent::tool_output_history::Limits{
+        .max_chars = 1024,
+        .head_chars = 512,
+        .tail_chars = 256,
+    };
+
+    const auto preserved = [&](std::string_view name) {
+        // Context stores string_views, so both payloads have to outlive the
+        // call: binding them to temporaries here would leave the compressor
+        // reading freed bytes, and the failure would look like a misclassified
+        // filename rather than a dangling test.
+        const std::string arguments = std::format(R"({{"path":"{}"}})", name);
+        // A distinct session per name, so a repeat read can never be mistaken
+        // for the cache-stub path this test is asserting against.
+        const std::string session = std::format("steering-names-{}", name);
+        const auto context = core::agent::tool_output_history::Context{
+            .tool_arguments = arguments,
+            .session_id = session,
+        };
+        const auto result = core::agent::tool_output_history::clamp_for_history(
+            "read", raw, limits, "full", context);
+        INFO("steering name: " << name);
+        CHECK(result == raw);
+        CHECK_THAT(result, !Catch::Matchers::ContainsSubstring("[cached read]"));
+    };
+
+    for (const auto& name : core::context::hierarchical_steering_names()) {
+        preserved(name);
+    }
+    for (const auto& name : core::context::root_steering_names()) {
+        preserved(name);
+    }
+    // The steering directory counts whatever the file inside it is called.
+    preserved(".filo/steering/anything.md");
 }
 
 TEST_CASE("ToolOutputHistory light mode keeps instruction files exact",

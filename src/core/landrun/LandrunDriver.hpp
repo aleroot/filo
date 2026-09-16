@@ -25,6 +25,15 @@ public:
 
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
     [[nodiscard]] virtual LandrunProbe probe() const = 0;
+
+    /**
+     * Whether this backend can subtract `protected_*_paths` from a granted
+     * root. Allow-list-only mechanisms (Landlock) cannot and must fail closed
+     * in apply(); callers use this to decide whether a subtractive policy is
+     * even worth composing on this platform.
+     */
+    [[nodiscard]] virtual bool supports_protected_paths() const noexcept = 0;
+
     [[nodiscard]] virtual LandrunResult apply(const LandrunPolicy& policy) const = 0;
 };
 

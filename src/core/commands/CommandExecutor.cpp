@@ -1,4 +1,5 @@
 #include "CommandExecutor.hpp"
+#include "../context/SteeringLoader.hpp"
 #include <format>
 #include <thread>
 #include <array>
@@ -2892,7 +2893,11 @@ public:
         const std::filesystem::path root = std::filesystem::current_path();
         const std::filesystem::path filo_dir = root / ".filo";
         const std::filesystem::path config_path = filo_dir / "config.json";
-        const std::filesystem::path prompt_path = root / "FILO.md";
+        // Filo's own steering file is named once, in the steering tables: the
+        // path written here and the heading inside it both come from there, so
+        // the scaffold cannot create a file discovery would never load.
+        const std::filesystem::path prompt_path =
+            root / std::string(core::context::kPrimarySteeringFileName);
 
         std::error_code ec;
         std::filesystem::create_directories(filo_dir, ec);
@@ -2915,7 +2920,7 @@ public:
 }}
 )", default_provider);
 
-        constexpr std::string_view kPromptTemplate = R"(# FILO.md
+        const std::string prompt_template = std::format(R"(# {}
 
 Project-specific instructions for Filo.
 
@@ -2923,7 +2928,7 @@ Project-specific instructions for Filo.
 - Testing requirements:
 - Deployment or runtime constraints:
 - Preferred architecture patterns:
-)";
+)", core::context::kPrimarySteeringFileName);
 
         auto write_file = [&](const std::filesystem::path& path,
                               std::string_view content,
@@ -2957,7 +2962,7 @@ Project-specific instructions for Filo.
         outcomes.push_back(std::move(outcome));
 
         if (with_prompt) {
-            if (!write_file(prompt_path, kPromptTemplate, outcome)) {
+            if (!write_file(prompt_path, prompt_template, outcome)) {
                 ctx.append_history_fn(std::format("\n✗  {}\n", outcome));
                 return;
             }

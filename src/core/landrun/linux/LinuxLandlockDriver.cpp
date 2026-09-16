@@ -139,8 +139,9 @@ LandrunResult LinuxLandlockDriver::apply(const LandrunPolicy& policy) const {
             .detail = "build headers lack Landlock ABI 6 process scopes"};
 #else
     if (!policy.enabled()) return {.success = true};
-    if (!policy.protected_read_paths.empty()
-        || !policy.protected_write_paths.empty()) {
+    // Fail closed rather than silently ignore a subtraction the ruleset cannot
+    // express; supports_protected_paths() tells callers not to compose one.
+    if (policy.protects_paths()) {
         return {.success = false,
                 .detail = "Landlock cannot subtract protected paths from a granted workspace; "
                           "move sensitive files out of the workspace or use the strong Linux backend"};

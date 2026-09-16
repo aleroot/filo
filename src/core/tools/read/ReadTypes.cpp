@@ -1,5 +1,7 @@
 #include "ReadTypes.hpp"
 #include "../ToolArgumentUtils.hpp"
+#include "../../context/SteeringLoader.hpp"
+#include "../../utils/AsciiUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
@@ -62,8 +64,15 @@ std::string slice(const Resource& source, int first, int count) {
     return source.text.substr(start, end - start);
 }
 bool is_instruction_resource(std::string_view uri) {
-    const auto name = std::filesystem::path(uri).filename().string();
-    return name == "AGENTS.md" || name == "CLAUDE.md" || name == "SKILL.md";
+    const std::filesystem::path path(uri);
+    // Which files are steering is decided by the steering tables alone, so a
+    // file can never be steering for the prompt and yet ordinary for the reader
+    // (or get a different size cap than its peers). The *file* predicate, not
+    // the blocking one: `.filo/steering` itself is a directory that `read`
+    // lists, and claiming it here would divert the listing into the text path.
+    // SKILL.md is a skill manifest rather than steering, so it stays named here.
+    return core::context::is_steering_file_candidate(path)
+        || core::utils::ascii::iequals(path.filename().string(), "SKILL.md");
 }
 std::expected<Options, std::string> parse_options(std::string_view json) {
     simdjson::dom::parser parser;

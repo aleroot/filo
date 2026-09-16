@@ -176,6 +176,62 @@ int run_restricted_child(const std::filesystem::path& allowed,
     return 0;
 }
 
+/**
+ * Protection-only enforcement: no confinement mode, one subtracted path.
+ *
+ * This is the shape a withheld steering file needs, and the two halves are
+ * asserted separately because failing either is a different bug -- denying too
+ * little leaks the file, denying too much breaks the user's shell.
+ */
+int run_protection_child(const std::filesystem::path& allowed,
+                         const std::filesystem::path& denied_file)
+{
+    core::landrun::LandrunPolicy policy;
+    core::landrun::add_protected_read_path(policy, denied_file);
+    if (policy.confines() || !policy.protects_paths() || !policy.enabled()) {
+        return 30;
+    }
+
+    const auto driver = core::landrun::make_landrun_driver();
+    if (!driver->supports_protected_paths()) {
+        // Allow-list-only backend (Landlock). It must *refuse* the subtraction
+        // instead of quietly granting it: silently ignoring a deny is precisely
+        // how withheld steering would leak. apply() cannot confine anything
+        // here, because the refusal happens before any ruleset is built.
+        return driver->apply(policy).success ? 36 : 0;
+    }
+
+    if (const auto result = driver->apply(policy); !result.success) {
+        if (result.detail.contains(std::strerror(EPERM))) {
+            std::cerr << "SKIP: " << result.detail << '\n';
+            return 77;
+        }
+        std::cerr << result.detail << '\n';
+        return 31;
+    }
+
+    // The subtraction itself.
+    errno = 0;
+    int fd = ::open(denied_file.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        ::close(fd);
+        return 32;
+    }
+    if (errno != EPERM && errno != EACCES) return 33;
+
+    // ...and nothing else: a sibling still reads, and the host is still
+    // writable, because the user never asked for confinement.
+    fd = ::open((allowed / "protection-sibling").c_str(), O_RDONLY);
+    if (fd < 0) return 34;
+    ::close(fd);
+
+    fd = ::open((allowed / "protection-write").c_str(),
+                O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 35;
+    ::close(fd);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -184,6 +240,9 @@ int main(int argc, char** argv) {
     }
     if (argc == 5 && std::string_view(argv[1]) == "--restricted-child") {
         return run_restricted_child(argv[2], argv[3], argv[4]);
+    }
+    if (argc == 4 && std::string_view(argv[1]) == "--protection-child") {
+        return run_protection_child(argv[2], argv[3]);
     }
     if (std::getenv("FILO_LANDRUN") != nullptr) {
         std::cerr << "SKIP: native Seatbelt cannot be stacked inside an existing Filo sandbox\n";
@@ -237,6 +296,50 @@ int main(int argc, char** argv) {
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         std::filesystem::remove_all(base, ec);
         return WIFEXITED(status) ? WEXITSTATUS(status) : 25;
+    }
+
+    // Protection-only enforcement runs in its own child: an applied policy is
+    // irreversible, so it cannot share a process with the confinement checks.
+    {
+        const auto sibling = allowed / "protection-sibling";
+        const int sibling_fd =
+            ::open(sibling.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (sibling_fd < 0) {
+            std::filesystem::remove_all(base, ec);
+            return 29;
+        }
+        constexpr char sibling_content[] = "readable";
+        (void)::write(sibling_fd, sibling_content, sizeof(sibling_content) - 1);
+        ::close(sibling_fd);
+
+        char* protection_argv[] = {
+            executable.data(),
+            const_cast<char*>("--protection-child"),
+            allowed_text.data(),
+            denied_text.data(),
+            nullptr,
+        };
+        pid_t protection_child = -1;
+        const int protection_spawn = ::posix_spawn(
+            &protection_child, executable.c_str(), nullptr, nullptr,
+            protection_argv, environ);
+        int protection_status = 0;
+        if (protection_spawn != 0
+            || ::waitpid(protection_child, &protection_status, 0) != protection_child) {
+            std::filesystem::remove_all(base, ec);
+            return 29;
+        }
+        if (!WIFEXITED(protection_status) || WEXITSTATUS(protection_status) != 0) {
+            const int code =
+                WIFEXITED(protection_status) ? WEXITSTATUS(protection_status) : 29;
+            if (code != 77) {
+                std::filesystem::remove_all(base, ec);
+                return code;
+            }
+            // The host refused to stack another profile. Report it, but keep the
+            // remaining coverage rather than discarding the whole run.
+            std::cerr << "SKIP: protection-only enforcement is unavailable here\n";
+        }
     }
 
     core::landrun::LandrunRuntime runtime;

@@ -3,6 +3,7 @@
 #include "AgentIgnore.hpp"
 #include "SensitivePathPolicy.hpp"
 #include "../context/SessionContext.hpp"
+#include "../context/SteeringGuard.hpp"
 #include "../landrun/LandrunSettings.hpp"
 
 #include <memory>
@@ -128,6 +129,29 @@ public:
             return SessionWorkspace::is_subpath(normalized_root, excluded);
         });
 }
+
+/**
+ * Steering the session's policy kept out of the prompt, applied to a tree walk.
+ *
+ * Traversal is how a blocked file would otherwise leak in bulk: grep_search
+ * returns matching lines and file_search returns names, neither of which asks
+ * the per-path gate about each entry. The guard is derived from filesystem
+ * discovery, so it is built once per traversal rather than once per entry, and
+ * its per-entry test is an I/O-free filename filter followed by an identity
+ * comparison.
+ */
+class SteeringTraversalFilter {
+public:
+    explicit SteeringTraversalFilter(const core::context::SessionContext& context)
+        : guard_(core::context::SteeringGuard::for_context(context)) {}
+
+    [[nodiscard]] bool blocks(const std::filesystem::path& path) const {
+        return guard_.blocked_reason(path).has_value();
+    }
+
+private:
+    core::context::SteeringGuard guard_;
+};
 
 template<typename Visitor>
 void visit_visible_regular_file_entries(
@@ -329,11 +353,15 @@ std::vector<std::filesystem::directory_entry> collect_visible_directory_entries(
 std::vector<std::filesystem::directory_entry> collect_visible_directory_entries(
     const std::filesystem::path& directory,
     const core::context::SessionContext& context) {
+    const SteeringTraversalFilter steering(context);
     std::vector<std::filesystem::directory_entry> entries;
     for (const auto& entry : collect_visible_directory_entries(
              directory,
              context.path_visibility.get())) {
         if (!context.allows_read(entry.path())) {
+            continue;
+        }
+        if (steering.blocks(entry.path())) {
             continue;
         }
         entries.push_back(entry);
@@ -411,12 +439,19 @@ void visit_visible_regular_files(
         return;
     }
 
+    const SteeringTraversalFilter steering(context);
     const bool uniformly_readable = subtree_is_uniformly_readable(root, context);
     visit_visible_regular_file_entries(
         root,
         context.path_visibility.get(),
-        std::move(should_prune_directory),
+        [&](const std::filesystem::path& dir) {
+            // Pruning a fully blocked steering directory saves the descent and
+            // keeps its file names out of the results.
+            return steering.blocks(dir)
+                || (should_prune_directory && should_prune_directory(dir));
+        },
         [&](const std::filesystem::directory_entry& entry) {
+            if (steering.blocks(entry.path())) return true;
             if (!uniformly_readable) {
                 if (!context.allows_read(entry.path())) return true;
             } else {

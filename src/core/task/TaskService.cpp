@@ -307,10 +307,16 @@ void capture_apply_patch_paths(std::vector<std::string>& files,
         snapshot.primary = resolved;
         snapshot.enforce = true;
     }
-    return core::context::make_session_context(
+    auto worker_context = core::context::make_session_context(
         snapshot,
         parent_context.transport,
         std::string(session_id));
+    // A worker inherits the session's steering policy rather than the process
+    // default: delegating a task must not be the way around `--no-steering`,
+    // either for the worker's own prompt or for the tool-side denial that
+    // SteeringGuard derives from it.
+    worker_context.steering_policy = parent_context.steering_policy;
+    return worker_context;
 }
 
 [[nodiscard]] std::string build_result_json(const ParsedRequest& request,

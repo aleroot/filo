@@ -363,10 +363,14 @@ private:
 void apply_cached_workspace_context(StdioWorkspaceState& state,
                                     core::context::SessionContext& session_context) {
     if (!state.cached_workspace.has_value()) return;
+    // The workspace changes when the host sends new roots; the session's
+    // steering policy is not the workspace's business and survives the swap.
+    const auto steering_policy = session_context.steering_policy;
     session_context = core::context::make_session_context(
         *state.cached_workspace,
         core::context::SessionTransport::mcp_stdio,
         "stdio");
+    session_context.steering_policy = steering_policy;
 }
 
 void mark_stdio_roots_dirty(StdioWorkspaceState& state) {
@@ -461,7 +465,7 @@ void stop_server() {
     is_running = false;
 }
 
-void run_server() {
+void run_server(const core::context::SteeringPolicy& steering_policy) {
     is_running = true;
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
@@ -473,6 +477,7 @@ void run_server() {
         core::workspace::Workspace::get_instance().snapshot(),
         core::context::SessionTransport::mcp_stdio,
         "stdio");
+    session_context.steering_policy = steering_policy;
     StdioWorkspaceState workspace_state;
     SessionPhase phase = SessionPhase::awaiting_initialize;
     StdioLineReader reader;

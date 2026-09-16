@@ -2,6 +2,8 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/tools/ReadTool.hpp"
 #include "core/tools/read/ReaderProfile.hpp"
+#include "core/tools/read/ReadTypes.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include "core/tools/PathVisibilityToolDecorator.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
 #include "core/agent/ToolOutputHistory.hpp"
@@ -466,4 +468,58 @@ TEST_CASE("Reader profile reports both configuration paths when nothing resolves
     REQUIRE_FALSE(selection.has_value());
     CHECK_THAT(selection.error(), ContainsSubstring("subagents.reader"));
     CHECK_THAT(selection.error(), ContainsSubstring("fast-tier"));
+}
+
+/**
+ * Which files count as instructions is the steering tables' decision, not this
+ * tool's. `is_instruction_resource` used to name AGENTS.md and CLAUDE.md
+ * itself, so the other six steering names were treated as ordinary source:
+ * a different size cap, and eligibility for worker routing that the guard would
+ * then have to undo. Deriving from the tables removes the second list.
+ */
+TEST_CASE("read treats every steering name as an instruction resource", "[read][resources]") {
+    for (const auto& name : core::context::hierarchical_steering_names()) {
+        INFO("steering name: " << name);
+        CHECK(read::is_instruction_resource(name));
+    }
+    for (const auto& name : core::context::root_steering_names()) {
+        INFO("steering name: " << name);
+        CHECK(read::is_instruction_resource(name));
+    }
+
+    // The steering directory counts by location, whatever the file is called.
+    CHECK(read::is_instruction_resource("/repo/.filo/steering/style.md"));
+    // Case-insensitively, because discovery is.
+    CHECK(read::is_instruction_resource("agents.md"));
+    CHECK(read::is_instruction_resource("Agents.MD"));
+
+    // A skill manifest is an instruction resource but is *not* steering: the two
+    // concepts overlap without being equal, and neither may absorb the other.
+    CHECK(read::is_instruction_resource("SKILL.md"));
+    CHECK_FALSE(core::context::is_steering_candidate("SKILL.md"));
+
+    CHECK_FALSE(read::is_instruction_resource("src/main.cpp"));
+    CHECK_FALSE(read::is_instruction_resource("README.md"));
+}
+
+/**
+ * A steering *directory* is a location, not instruction text.
+ *
+ * `read` with the default view lists directories, while `is_instruction_resource`
+ * diverts a single path to the verbatim text reader — so claiming the directory
+ * itself turned `read .filo/steering` into "path is not a regular file" instead
+ * of a listing. The files inside it are unaffected: they stay verbatim.
+ */
+TEST_CASE("read lists the steering directory instead of treating it as a file", "[read][resources]") {
+    Fixture fixture;
+    std::filesystem::create_directories(fixture.root / ".filo" / "steering");
+    fixture.write(".filo/steering/style.md", "# Style\n");
+
+    CHECK_FALSE(read::is_instruction_resource(".filo/steering"));
+    CHECK(read::is_instruction_resource(".filo/steering/style.md"));
+
+    ReadTool tool;
+    const auto listing = tool.execute(R"({"path":".filo/steering","view":"auto"})", fixture.context());
+    CHECK(listing.find("not a regular file") == std::string::npos);
+    CHECK_THAT(listing, ContainsSubstring("style.md"));
 }

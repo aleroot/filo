@@ -1,6 +1,7 @@
 #include "ContextBuilder.hpp"
 #include "../landrun/LandrunSettings.hpp"
 
+#include "SteeringGuard.hpp"
 #include "SteeringLoader.hpp"
 #include "../scm/ScmFactory.hpp"
 #include "../tools/SkillRegistry.hpp"
@@ -102,6 +103,32 @@ void append_layer(std::vector<ContextLayer>& layers,
         .name = std::move(name),
         .content = std::move(content),
     });
+}
+
+/**
+ * The steering layer: whatever the policy loaded, plus an explicit statement of
+ * whatever it deliberately withheld.
+ *
+ * Naming the unreadable files is what keeps a model from spending turns
+ * rediscovering the restriction through rejected tool calls — and, worse, from
+ * concluding that the instructions merely went missing and fetching them back
+ * through the shell. The list comes from the same guard that enforces the rule,
+ * so the prompt can never promise access the tools would deny.
+ */
+[[nodiscard]] std::string build_steering_layer(
+    const std::vector<std::filesystem::path>& roots,
+    const SteeringPolicy& policy) {
+    auto content = load_workspace_steering_block(roots, policy);
+
+    const auto notice = SteeringGuard::for_roots(roots, policy).prompt_notice();
+    if (notice.empty()) {
+        return content;
+    }
+    if (content.empty()) {
+        return "\n\n[Project Steering]\n" + notice;
+    }
+    content += "\n" + notice;
+    return content;
 }
 
 } // namespace
@@ -243,7 +270,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
                 ContextLayerKind::ProjectSteering,
                 PromptStability::Workspace,
                 "project_steering",
-                load_workspace_steering_block(workspace_roots, session_context_.steering_policy));
+                build_steering_layer(workspace_roots, session_context_.steering_policy));
         }
 
         if (include_skill_catalog_ && !workspace_roots.empty()) {

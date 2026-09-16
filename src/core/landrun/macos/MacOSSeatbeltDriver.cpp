@@ -7,6 +7,7 @@
 #include <cstring>
 #include <format>
 #include <string>
+#include <string_view>
 #include <vector>
 #endif
 
@@ -34,25 +35,46 @@ LandrunProbe MacOSSeatbeltDriver::probe() const {
 #endif
 }
 
-LandrunResult MacOSSeatbeltDriver::apply(const LandrunPolicy& policy) const {
-#if !defined(__APPLE__)
-    (void)policy;
-    return {.success = false, .detail = "native Seatbelt is only available on macOS"};
-#else
-    using SandboxInitWithParameters = int (*)(
-        const char*, std::uint64_t, const char* const[], char**);
-    using SandboxFreeError = void (*)(char*);
+#if defined(__APPLE__)
+namespace {
 
-    const auto init = reinterpret_cast<SandboxInitWithParameters>(
-        ::dlsym(RTLD_DEFAULT, "sandbox_init_with_parameters"));
-    const auto free_error = reinterpret_cast<SandboxFreeError>(
-        ::dlsym(RTLD_DEFAULT, "sandbox_free_error"));
-    if (!init) {
-        return {.success = false,
-                .detail = "sandbox_init_with_parameters is unavailable"};
+/**
+ * SBPL parameters bound alongside a profile. Paths never enter the profile
+ * text: each is passed as a named parameter so no quoting rule can be gamed.
+ */
+class SeatbeltParameters {
+public:
+    /// Registers @p path under a fresh `<prefix>_<n>` name and returns that name.
+    [[nodiscard]] std::string bind(std::string_view prefix,
+                                   const std::filesystem::path& path) {
+        names_.push_back(std::format("{}_{}", prefix, names_.size()));
+        values_.push_back(path.string());
+        return names_.back();
     }
-    if (!policy.enabled()) return {.success = true};
 
+    /// NULL-terminated `name, value, name, value, ...` view for the SPI.
+    [[nodiscard]] std::vector<const char*> argv() const {
+        std::vector<const char*> parameters;
+        parameters.reserve(names_.size() * 2 + 1);
+        for (std::size_t i = 0; i < names_.size(); ++i) {
+            parameters.push_back(names_[i].c_str());
+            parameters.push_back(values_[i].c_str());
+        }
+        parameters.push_back(nullptr);
+        return parameters;
+    }
+
+private:
+    std::vector<std::string> names_;
+    std::vector<std::string> values_;
+};
+
+/**
+ * The confinement profile: default-deny, host readable, writes limited to the
+ * roots the policy grants, networking off unless allowed. Path rules are
+ * appended by append_path_rules() so both profiles share one binding scheme.
+ */
+[[nodiscard]] std::string confinement_profile(bool allow_network) {
     std::string profile = R"SBPL(
 (version 1)
 (deny default)
@@ -87,56 +109,77 @@ LandrunResult MacOSSeatbeltDriver::apply(const LandrunPolicy& policy) const {
   (regex #"/\.git/(config|hooks)(/|$)")
   (regex #"/\.(filo|codex)(/|$)"))
 )SBPL";
-    if (policy.allow_network) {
+    if (allow_network) {
         profile += "\n(allow network*)\n(allow system-socket)\n";
     }
+    return profile;
+}
 
-    std::vector<std::string> names;
-    std::vector<std::string> values;
-    const auto parameter_count = policy.readable_roots.size()
-        + policy.writable_roots.size()
-        + policy.protected_read_paths.size()
-        + policy.protected_write_paths.size();
-    names.reserve(parameter_count);
-    values.reserve(parameter_count);
-    const auto append_parameter = [&](std::string_view prefix,
-                                      const std::filesystem::path& path) {
-        names.push_back(std::format("{}_{}", prefix, names.size()));
-        values.push_back(path.string());
-        return names.back();
+/**
+ * The protection-only profile: the host exactly as the user left it, minus
+ * the protected paths. Nothing else is confined, so turning a steering file
+ * off never also turns off networking or moves HOME.
+ */
+[[nodiscard]] std::string protection_profile() {
+    return "(version 1)\n(allow default)\n";
+}
+
+/// Grants and subtractions, in that order: SBPL is last-match-wins, so the
+/// denies must follow every allow they carve into.
+void append_path_rules(std::string& profile,
+                       SeatbeltParameters& parameters,
+                       const LandrunPolicy& policy) {
+    const auto rule = [&](std::string_view verb, std::string_view operation,
+                          std::string_view prefix, const std::filesystem::path& path) {
+        profile += std::format("({} {} (subpath (param \"{}\")))\n",
+                               verb, operation, parameters.bind(prefix, path));
     };
     for (const auto& root : policy.readable_roots) {
-        const auto name = append_parameter("READABLE_ROOT", root);
-        profile += std::format(
-            "(allow file-read* (subpath (param \"{}\")))\n", name);
+        rule("allow", "file-read*", "READABLE_ROOT", root);
     }
-    for (std::size_t i = 0; i < policy.writable_roots.size(); ++i) {
-        const auto name = append_parameter("WRITABLE_ROOT", policy.writable_roots[i]);
-        profile += std::format(
-            "(allow file-write* (subpath (param \"{}\")))\n", name);
+    for (const auto& root : policy.writable_roots) {
+        rule("allow", "file-write*", "WRITABLE_ROOT", root);
     }
     for (const auto& path : policy.protected_read_paths) {
-        const auto name = append_parameter("PROTECTED_READ", path);
-        profile += std::format(
-            "(deny file-read* (subpath (param \"{}\")))\n", name);
+        rule("deny", "file-read*", "PROTECTED_READ", path);
     }
     for (const auto& path : policy.protected_write_paths) {
-        const auto name = append_parameter("PROTECTED_WRITE", path);
-        profile += std::format(
-            "(deny file-write* (subpath (param \"{}\")))\n", name);
+        rule("deny", "file-write*", "PROTECTED_WRITE", path);
     }
+}
 
-    std::vector<const char*> parameters;
-    parameters.reserve(names.size() * 2 + 1);
-    for (std::size_t i = 0; i < names.size(); ++i) {
-        parameters.push_back(names[i].c_str());
-        parameters.push_back(values[i].c_str());
+} // namespace
+#endif
+
+LandrunResult MacOSSeatbeltDriver::apply(const LandrunPolicy& policy) const {
+#if !defined(__APPLE__)
+    (void)policy;
+    return {.success = false, .detail = "native Seatbelt is only available on macOS"};
+#else
+    using SandboxInitWithParameters = int (*)(
+        const char*, std::uint64_t, const char* const[], char**);
+    using SandboxFreeError = void (*)(char*);
+
+    const auto init = reinterpret_cast<SandboxInitWithParameters>(
+        ::dlsym(RTLD_DEFAULT, "sandbox_init_with_parameters"));
+    const auto free_error = reinterpret_cast<SandboxFreeError>(
+        ::dlsym(RTLD_DEFAULT, "sandbox_free_error"));
+    if (!init) {
+        return {.success = false,
+                .detail = "sandbox_init_with_parameters is unavailable"};
     }
-    parameters.push_back(nullptr);
+    if (!policy.enabled()) return {.success = true};
+
+    std::string profile = policy.confines()
+        ? confinement_profile(policy.allow_network)
+        : protection_profile();
+    SeatbeltParameters parameters;
+    append_path_rules(profile, parameters, policy);
+    const auto parameter_argv = parameters.argv();
 
     char* error_buffer = nullptr;
     errno = 0;
-    if (init(profile.c_str(), 0, parameters.data(), &error_buffer) != 0) {
+    if (init(profile.c_str(), 0, parameter_argv.data(), &error_buffer) != 0) {
         std::string detail = error_buffer && *error_buffer
             ? std::string(error_buffer)
             : std::strerror(errno);

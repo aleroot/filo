@@ -61,6 +61,7 @@
 #include "core/tools/BuiltinToolRegistry.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/ShellTool.hpp"
+#include "core/tools/SteeringEnforcement.hpp"
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/FileSearchTool.hpp"
 #include "core/tools/ReadTool.hpp"
@@ -1225,7 +1226,12 @@ RunResult run(RunOptions opts) {
                            mode = opts.landrun_mode,
                            compiler = core::landrun::LandrunPolicyCompiler(
                                std::move(opts.landrun_environment))] {
-            return compiler.build(agent->workspace_snapshot(), mode);
+            // Code blocks are agent-authored, so they get the same subtraction
+            // the shell does: when the host can enforce it, the kernel decides
+            // what is off limits while steering is withheld.
+            return core::tools::SteeringEnforcement::for_context(
+                       agent->session_context_snapshot())
+                .child_policy(compiler.build(agent->workspace_snapshot(), mode));
         },
         .with_restored_terminal = [&screen](std::function<void()> task) {
             auto closure = screen.WithRestoredIO(std::move(task));

@@ -72,7 +72,7 @@ LandrunPolicy LandrunPolicyCompiler::build(
     LandrunMode mode) const
 {
     LandrunPolicy policy{.mode = mode};
-    if (!policy.enabled()) return policy;
+    if (!policy.confines()) return policy;
 
     const auto& excluded_paths = environment_.excluded_paths;
     const auto excluded_root = [&](const std::filesystem::path& root) {

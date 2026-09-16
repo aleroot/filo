@@ -1,4 +1,5 @@
 #include "ShellTool.hpp"
+#include "SteeringEnforcement.hpp"
 #include "ToolArgumentUtils.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
@@ -268,13 +269,28 @@ std::string ShellTool::execute_impl(
             core::utils::escape_json_string(*policy_error));
     }
 
+    // The shell is the escape hatch every path gate has: `cat AGENTS.md` reads
+    // a file no path-taking tool would hand over. How that is prevented depends
+    // on the host — the kernel subtracts the paths when it can, and only then is
+    // the command text left alone — so the decision lives in one place.
+    // Relative references resolve against the directory the command runs in,
+    // which is where the persistent session shell starts.
+    const auto steering = SteeringEnforcement::for_context(context);
+    if (const auto steering_error = steering.command_error(
+            command_view,
+            working_dir.empty() ? context.workspace_view().primary()
+                                : std::filesystem::path(working_dir))) {
+        return *steering_error;
+    }
+
     // Delegate to the platform executor.
     // Working-directory subshell logic is encapsulated inside the executor so
     // that ShellTool stays platform-agnostic.
     shell::IShellExecutor::Result result;
-    const auto landrun_policy = core::landrun::LandrunPolicyCompiler::compile(
-        context.workspace_view(),
-        core::landrun::LandrunSettings::instance().mode());
+    const auto landrun_policy = steering.child_policy(
+        core::landrun::LandrunPolicyCompiler::compile(
+            context.workspace_view(),
+            core::landrun::LandrunSettings::instance().mode()));
     const std::string_view session_id = context.session_id;
     if (session_id.empty()) {
         std::lock_guard<std::mutex> lock(executor_mutex_);

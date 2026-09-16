@@ -45,4 +45,25 @@ namespace core::utils::ascii {
             [](char a, char b) { return to_lower(a) == to_lower(b); });
 }
 
+/// Case-insensitive substring test. ASCII only, like the rest of this header:
+/// it exists for filename and flag matching, not for prose.
+[[nodiscard]] inline bool icontains(std::string_view value, std::string_view needle) noexcept {
+    if (needle.empty()) {
+        return true;
+    }
+    if (value.size() < needle.size()) {
+        return false;
+    }
+    const auto last = value.size() - needle.size();
+    for (std::size_t offset = 0; offset <= last; ++offset) {
+        if (std::ranges::equal(
+                value.substr(offset, needle.size()),
+                needle,
+                [](char a, char b) { return to_lower(a) == to_lower(b); })) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace core::utils::ascii

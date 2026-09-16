@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../context/SessionContext.hpp"
+#include "../context/SteeringGuard.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include "ToolNames.hpp"
 #include "ToolPolicy.hpp"
@@ -25,10 +26,49 @@ inline std::filesystem::path resolve_workspace_path(
 }
 
 /**
+ * The steering half of authorization for path-taking tools, as a tool error.
+ *
+ * Steering the active policy kept out of the prompt is also steering the agent
+ * may not fetch for itself; otherwise `--no-steering` is advisory and the first
+ * `read` of AGENTS.md puts it right back. The rule lives in
+ * core::context::SteeringGuard; this helper only shapes its answer into the
+ * JSON every tool returns.
+ *
+ * It is cheap when there is nothing to guard: an I/O-free filename test comes
+ * first, because a directory read calls this per entry, and the guard itself
+ * short-circuits on policies that load everything they discover.
+ *
+ * Tools whose argument is code rather than a path go through
+ * core::tools::SteeringEnforcement instead: there the mechanism depends on what
+ * the host can confine, which a path gate has no business deciding.
+ */
+inline std::optional<std::string> check_steering_access(
+    const std::filesystem::path& resolved_path,
+    const core::context::SessionContext& context)
+{
+    // The filename test is I/O-free and rejects the overwhelming majority of
+    // paths, which matters because a directory read calls this per entry. The
+    // guard itself short-circuits on any policy that loads what it discovers.
+    if (!core::context::is_steering_candidate(resolved_path)) {
+        return std::nullopt;
+    }
+
+    const auto reason =
+        core::context::SteeringGuard::for_context(context).blocked_reason(resolved_path);
+    if (!reason.has_value()) {
+        return std::nullopt;
+    }
+    return std::format(
+        R"({{"error":"{}"}})",
+        core::utils::escape_json_string(*reason));
+}
+
+/**
  * Single authorization gate for every path-taking tool.
  *
- * The order is uniform across tools: workspace scope, then path visibility
- * (agent-ignore and sensitive-path rules), then configured tool policy.
+ * The order is uniform across tools: workspace scope, then steering the session
+ * turned off, then path visibility (agent-ignore and sensitive-path rules),
+ * then configured tool policy.
  *
  * There is deliberately no per-tool escape hatch. Scope is a property of the
  * session (see core::workspace::FileAccessScope, carried in WorkspaceSnapshot),
@@ -59,6 +99,9 @@ inline std::optional<std::string> check_workspace_access(
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
             core::utils::escape_json_string(path_str));
+    }
+    if (const auto steering_error = check_steering_access(resolved, context)) {
+        return steering_error;
     }
     if (names::is_path_visibility_constrained_tool(tool_name)) {
         const auto* visibility = context.path_visibility.get();

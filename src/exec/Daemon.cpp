@@ -41,6 +41,14 @@ namespace exec::daemon {
 namespace {
 std::mutex g_server_mutex;
 std::shared_ptr<httplib::Server> g_svr;
+
+/// Startup steering policy for every session this daemon creates.
+///
+/// Written once by run_server() before the listener starts, so the reads below
+/// need no lock. A daemon has no per-connection steering: `--no-steering` on
+/// the command line has to mean the same thing over HTTP as it does in the TUI,
+/// including the tool-side denial that SteeringGuard derives from it.
+core::context::SteeringPolicy g_steering_policy;
 } // namespace
 
 void stop_server() {
@@ -722,6 +730,7 @@ take_pending_server_response(HttpSessionState& session,
         snapshot,
         core::context::SessionTransport::mcp_http,
         std::string(session_id));
+    session_context.steering_policy = g_steering_policy;
 
     result.body = core::mcp::McpDispatcher::get_instance().dispatch(body, session_context, mode);
     if (result.body.empty()) {
@@ -1386,13 +1395,15 @@ void handle_api_chat(
     }
 
     auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent_session_context = core::context::make_session_context(
+        core::workspace::Workspace::get_instance().snapshot(),
+        core::context::SessionTransport::unspecified,
+        core::session::SessionStore::generate_id());
+    agent_session_context.steering_policy = g_steering_policy;
     auto agent = std::make_shared<core::agent::Agent>(
         llm_provider,
         tool_manager,
-        core::context::make_session_context(
-            core::workspace::Workspace::get_instance().snapshot(),
-            core::context::SessionTransport::unspecified,
-            core::session::SessionStore::generate_id()),
+        std::move(agent_session_context),
         core::agent::ToolResultStore::default_root(),
         std::shared_ptr<core::power::SleepInhibitor>{},
         std::shared_ptr<core::session::SessionStatsRegistry>{},
@@ -1418,7 +1429,9 @@ void handle_api_chat(
 void run_server(int port,
                 const std::string& host,
                 bool enable_api_gateway,
-                bool enable_mcp_http) {
+                bool enable_mcp_http,
+                const core::context::SteeringPolicy& steering_policy) {
+    g_steering_policy = steering_policy;
     if (enable_mcp_http) {
         core::mcp::RemoteActivityHub::get_instance().server_starting();
     }

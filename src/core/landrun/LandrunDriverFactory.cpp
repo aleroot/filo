@@ -19,6 +19,10 @@ public:
                 .detail = "landrun is not implemented on this platform"};
     }
 
+    [[nodiscard]] bool supports_protected_paths() const noexcept override {
+        return false;
+    }
+
     [[nodiscard]] LandrunResult apply(const LandrunPolicy& policy) const override {
         if (!policy.enabled()) return {.success = true};
         return {.success = false,

@@ -1,5 +1,6 @@
 #include "ToolOutputHistory.hpp"
 
+#include "../context/SteeringLoader.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <format>
 #include <mutex>
 #include <optional>
@@ -528,16 +530,20 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
 }
 
 [[nodiscard]] bool is_instruction_file(std::string_view path) {
+    // What counts as steering is the steering tables' decision, not this file's:
+    // a locally retyped list is how CURSOR.md and AGENTS.override.md ended up
+    // summarized as ordinary output while the prompt treated them as steering.
+    // The *file* predicate: the tool argument may name the steering directory
+    // itself (a listing), which is not instruction text.
+    if (core::context::is_steering_file_candidate(std::filesystem::path(path))) {
+        return true;
+    }
+    // Instruction conventions belonging to other tools, which Filo never loads
+    // as steering but which are still worth summarizing structurally.
     const std::string lower = core::utils::str::to_lower_ascii_copy(path);
-    return lower.ends_with("agents.md")
-        || lower.ends_with("filo.md")
-        || lower.ends_with("skill.md")
+    return lower.ends_with("skill.md")
         || lower.ends_with("rules.md")
-        || lower.ends_with("gemini.md")
-        || lower.ends_with("claude.md")
-        || lower.ends_with("system.md")
         || lower.ends_with(".cursorrules")
-        || lower.contains("/.filo/steering/")
         || lower.contains("/skills/");
 }
 

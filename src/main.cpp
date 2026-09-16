@@ -1,6 +1,7 @@
 #include <thread>
 #include <CLI/CLI.hpp>
 #include "core/config/ConfigManager.hpp"
+#include "core/context/SteeringLoader.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 #include "core/auth/AuthLogin.hpp"
@@ -38,6 +39,11 @@
 #include <unistd.h>
 
 namespace {
+
+/// Token `--no-steering` substitutes, read from the mode table rather than
+/// retyped. Namespace scope so the flag callback can use it without a capture.
+constexpr auto kNoSteeringToken =
+    core::context::steering_mode_token(core::context::SteeringMode::None);
 
 [[nodiscard]] bool stdin_has_data() {
 #if defined(_WIN32)
@@ -91,7 +97,10 @@ int main(int argc, char** argv) {
     bool sandbox_status = false;
     std::vector<std::filesystem::path> sandbox_excluded_paths;
     std::unique_ptr<core::landrun::LandrunRuntime> landrun_runtime;
-    std::string steering_spec = "default";
+    // Spelled by the mode table, not retyped: a token written twice is a token
+    // that keeps parsing after the table renames it.
+    std::string steering_spec{
+        core::context::steering_mode_token(core::context::SteeringMode::Default)};
 
     auto* mcp_opt = app.add_option(
         "--mcp",
@@ -182,18 +191,24 @@ int main(int argc, char** argv) {
         "--sandbox-status",
         sandbox_status,
         "Verify and print the effective sandbox guarantees, then exit.");
-    auto* steering_opt = app.add_option(
-        "--steering",
-        steering_spec,
-        "Steering mode: default, fallback, none, or a custom file/folder path "
-        "(e.g. /tmp/AGENTS.md or ~/data/). 'fallback' walks the workspace roots "
-        "in order and uses the first one that has steering files. Overrides the "
-        "saved steering_mode setting.")
+    // Help text is generated from the same table the settings panel and the
+    // persisted `steering_mode` setting read, so --help can neither describe a
+    // mode that no longer parses nor omit one that does.
+    std::string steering_help =
+        "Steering mode, or a custom file/folder path (e.g. /tmp/AGENTS.md or ~/data/). "
+        "Overrides the saved steering_mode setting. Modes:";
+    for (const auto& steering_option : core::context::steering_mode_options()) {
+        steering_help += std::format("\n  {}: {}",
+                                     steering_option.token,
+                                     steering_option.description);
+    }
+    auto* steering_opt = app.add_option("--steering", steering_spec, steering_help)
         ->capture_default_str();
     auto* no_steering_opt = app.add_flag_callback(
         "--no-steering",
-        [&steering_spec]() { steering_spec = "none"; },
-        "Disable loading project steering files (alias for --steering none)");
+        [&steering_spec]() { steering_spec = std::string(kNoSteeringToken); },
+        std::format("Disable loading project steering files (alias for --steering {})",
+                    kNoSteeringToken));
 
     CLI11_PARSE(app, argc, argv);
 
@@ -565,8 +580,8 @@ int main(int argc, char** argv) {
     // JSON-RPC stream and extra text will corrupt it.
     std::thread mcp_stdio_thread;
     if (mcp_stdio_mode) {
-        mcp_stdio_thread = std::thread([]() {
-            exec::mcp::run_server();
+        mcp_stdio_thread = std::thread([startup_steering_policy]() {
+            exec::mcp::run_server(startup_steering_policy);
         });
     }
 
@@ -580,9 +595,11 @@ int main(int argc, char** argv) {
             core::logging::info("Starting Filo API gateway daemon on {}:{}...", host, port);
         }
 
-        http_daemon_thread = std::thread([port, host, enable_api_gateway, mcp_tcp_mode]() {
-            exec::daemon::run_server(port, host, enable_api_gateway, mcp_tcp_mode);
-        });
+        http_daemon_thread = std::thread(
+            [port, host, enable_api_gateway, mcp_tcp_mode, startup_steering_policy]() {
+                exec::daemon::run_server(
+                    port, host, enable_api_gateway, mcp_tcp_mode, startup_steering_policy);
+            });
     }
 
     if (!headless) {

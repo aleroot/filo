@@ -49,11 +49,13 @@ std::vector<std::string> build_landrun_environment(
         const std::string_view value(*entry);
         const auto name = variable_name(value);
         if (name == "HISTFILE" || name == "HISTSIZE") continue;
-        if (policy.enabled() && !is_safe_inherited_variable(name)) continue;
+        if (policy.confines() && !is_safe_inherited_variable(name)) continue;
         if (names.insert(std::string(name)).second) result.emplace_back(value);
     }
 
-    if (!policy.enabled()) {
+    // Scrubbing credentials and relocating HOME/TMPDIR are confinement
+    // behaviours. A protection-only policy leaves the environment alone.
+    if (!policy.confines()) {
         result.emplace_back("HISTFILE=/dev/null");
         result.emplace_back("HISTSIZE=0");
         return result;

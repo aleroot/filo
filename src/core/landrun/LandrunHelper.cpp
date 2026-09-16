@@ -45,9 +45,11 @@ int run_landrun_helper(int argc, char* const argv[]) {
                 std::cerr << "[landrun] --mode requires a sandbox mode\n";
                 return kLandrunHelperFailure;
             }
+            // `off` is legitimate here: a protection-only policy confines
+            // nothing and still needs the driver for its subtractions.
             const auto parsed = parse_landrun_mode(argv[index]);
-            if (!parsed.has_value() || !landrun_enabled(*parsed)) {
-                std::cerr << "[landrun] --mode requires an enabled sandbox mode\n";
+            if (!parsed.has_value()) {
+                std::cerr << "[landrun] --mode requires a known sandbox mode\n";
                 return kLandrunHelperFailure;
             }
             policy.mode = *parsed;
@@ -103,6 +105,10 @@ int run_landrun_helper(int argc, char* const argv[]) {
     }
     if (!mode_provided) {
         std::cerr << "[landrun] missing --mode\n";
+        return kLandrunHelperFailure;
+    }
+    if (!policy.enabled()) {
+        std::cerr << "[landrun] the policy confines nothing and protects nothing\n";
         return kLandrunHelperFailure;
     }
 

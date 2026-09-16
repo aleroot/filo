@@ -562,12 +562,18 @@ TEST_CASE("ContextBuilder integrates SteeringPolicy cleanly", "[context][builder
         CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("Filo clean rules"));
     }
 
-    SECTION("SteeringMode::None completely omits Project Steering layer") {
+    SECTION("SteeringMode::None withholds every file and says so") {
         auto context = make_context(workspace.path());
         context.steering_policy.mode = core::context::SteeringMode::None;
         const std::string prompt = build_prompt(context);
-        CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("[Project Steering]"));
         CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("Poisoned rules"));
+        CHECK_THAT(prompt, !Catch::Matchers::ContainsSubstring("Filo clean rules"));
+        // The layer is not simply dropped: the model is told the files exist and
+        // are unreadable, so it does not go fetching them through a tool. That
+        // notice comes from the same SteeringGuard that enforces the denial.
+        CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Project Steering]"));
+        CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("AGENTS.md"));
+        CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("NOT accessible through any tool"));
     }
 
     SECTION("Selectively unloading AGENTS.md omits only AGENTS.md from prompt") {
@@ -741,6 +747,37 @@ TEST_CASE("Fallback steering walks the workspace roots as a chain of responsibil
         CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Custom rules"));
         CHECK_THAT(result.block, !Catch::Matchers::ContainsSubstring("Secondary workspace rules"));
     }
+}
+
+/**
+ * AGENTS.override.md outranks a sibling AGENTS.md, and only the stronger one
+ * reaches the prompt.
+ *
+ * The shadowed file is not *absent* though — it is still a project instruction
+ * file on disk. That distinction is why the guard subtracts from
+ * enumerate_steering_files() rather than from the loader's view: a file the
+ * loader skips must still be withheld, or `--no-steering` leaks the single most
+ * important steering file whenever an override sits next to it.
+ */
+TEST_CASE("AGENTS.override.md shadows a sibling AGENTS.md in the prompt",
+          "[context][builder][steering]") {
+    auto workspace = make_temp_workspace("filo_steering_override");
+    write_text(workspace.path() / "AGENTS.md", "Shadowed agent rules\n");
+    write_text(workspace.path() / "AGENTS.override.md", "Override agent rules\n");
+    write_text(workspace.path() / "CLAUDE.md", "Claude rules\n");
+    const std::vector<std::filesystem::path> roots{resolved(workspace.path())};
+
+    const auto result = core::context::load_workspace_steering_context(roots);
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Override agent rules"));
+    CHECK_THAT(result.block, !Catch::Matchers::ContainsSubstring("Shadowed agent rules"));
+    // The override only outranks its own family: unrelated root-level steering
+    // is still loaded.
+    CHECK_THAT(result.block, Catch::Matchers::ContainsSubstring("Claude rules"));
+
+    // The loader's view omits the shadowed file...
+    CHECK(core::context::discover_steering_files(roots).size() == 2);
+    // ...while the presence set the guard subtracts from does not.
+    CHECK(core::context::enumerate_steering_files(roots).size() == 3);
 }
 
 TEST_CASE("ContextBuilder renders fallback steering from a secondary workspace root",

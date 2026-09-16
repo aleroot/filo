@@ -349,6 +349,78 @@ TEST_CASE("secure landrun environment strips credentials and selects allowed tem
     }));
 }
 
+/**
+ * Protection without confinement -- the shape a withheld steering file needs.
+ *
+ * Nothing else about the host view is narrowed, so credentials stay inherited
+ * and HOME stays HOME; the only difference is that one path becomes unreadable
+ * to the child. Both failure directions matter: scrubbing the environment here
+ * would break tooling the user never asked to sandbox, and skipping the helper
+ * here would silently drop the protection entirely.
+ */
+TEST_CASE("protection-only policy engages the kernel without confining the child",
+          "[landrun]") {
+    namespace landrun = core::landrun;
+
+    landrun::LandrunPolicy policy;
+    CHECK_FALSE(policy.enabled());
+    CHECK_FALSE(policy.confines());
+    CHECK_FALSE(policy.protects_paths());
+
+    landrun::add_protected_read_path(policy, "/workspace/AGENTS.md");
+    CHECK_FALSE(policy.confines());
+    CHECK(policy.protects_paths());
+    CHECK(policy.enabled());
+
+    // It still has to travel through the helper, or the deny never reaches a
+    // kernel. `--mode off` is what says "confine nothing, subtract this".
+    const auto launch = landrun::prepare_shell_launch(policy);
+    REQUIRE(launch.arguments.size() >= 5);
+    REQUIRE(launch.arguments[1] == "__landrun-exec");
+    CHECK(launch.arguments[2] == "--mode");
+    CHECK(launch.arguments[3] == "off");
+    CHECK(std::ranges::find(launch.arguments, std::string{"--deny-read"})
+          != launch.arguments.end());
+    CHECK(std::ranges::find(launch.arguments, std::string{"/workspace/AGENTS.md"})
+          != launch.arguments.end());
+
+    // ...and it must not confiscate the environment on the way.
+    char path[] = "PATH=/usr/bin:/bin";
+    char api_key[] = "OPENAI_API_KEY=inherited";
+    char home[] = "HOME=/Users/someone";
+    char* inherited[] = {path, api_key, home, nullptr};
+    const auto environment = landrun::build_landrun_environment(policy, inherited);
+    CHECK(std::ranges::find(environment, std::string{"OPENAI_API_KEY=inherited"})
+          != environment.end());
+    CHECK(std::ranges::find(environment, std::string{"HOME=/Users/someone"})
+          != environment.end());
+    CHECK(std::ranges::find(environment, std::string{"FILO_SANDBOX_NETWORK_DISABLED=1"})
+          == environment.end());
+}
+
+/**
+ * Whether a subtraction is expressible is a backend property, and callers must
+ * be able to ask before composing one: a policy an allow-list-only backend
+ * cannot represent is refused outright, so guessing would turn "protect this
+ * file" into "no commands run at all".
+ *
+ * Deliberately does not call apply() -- that would confine the test process
+ * irreversibly. End-to-end enforcement lives in tests/test_landrun_native.cpp.
+ */
+TEST_CASE("backends state whether they can subtract a protected path", "[landrun]") {
+    const auto driver = core::landrun::make_landrun_driver();
+    REQUIRE(driver);
+#if defined(__APPLE__)
+    // SBPL is last-match-wins, so a deny after a broad allow carves exactly one
+    // hierarchy out of the granted view.
+    CHECK(driver->supports_protected_paths());
+#else
+    // Landlock rules only ever grant; there is no rule that removes a file from
+    // an allowed directory.
+    CHECK_FALSE(driver->supports_protected_paths());
+#endif
+}
+
 TEST_CASE("landrun generic exclusions remove roots and protect nested paths", "[landrun]") {
     namespace landrun = core::landrun;
     auto& settings = landrun::LandrunSettings::instance();

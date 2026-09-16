@@ -3,6 +3,7 @@
 #include "RemoteActivity.hpp"
 #include "ToolCallResult.hpp"
 #include "../context/SessionContext.hpp"
+#include "../context/SteeringGuard.hpp"
 #include "../tools/BuiltinToolRegistry.hpp"
 #include "../tools/ToolManager.hpp"
 #include "../tools/ArgumentCoercion.hpp"
@@ -1205,6 +1206,13 @@ struct ParsedPromptGetRequest {
     if (const auto hidden_reason =
             visibility_context.path_visibility->hidden_reason(path.string(), path)) {
         return std::unexpected(RpcError{-32001, *hidden_reason});
+    }
+
+    // A resource read is the MCP client's `read`: steering the session's policy
+    // kept out of the prompt must not come back through this channel either.
+    if (const auto steering_reason =
+            core::context::SteeringGuard::for_context(context).blocked_reason(path)) {
+        return std::unexpected(RpcError{-32001, *steering_reason});
     }
 
     std::error_code status_ec;

@@ -1,6 +1,8 @@
 #include "PythonInterpreterTool.hpp"
+#include "SteeringEnforcement.hpp"
 #include "ToolNames.hpp"
 #include "PythonManager.hpp"
+#include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <format>
@@ -30,7 +32,7 @@ ToolDefinition PythonInterpreterTool::get_definition() const {
     };
 }
 
-std::string PythonInterpreterTool::execute(const std::string& json_args, [[maybe_unused]] const core::context::SessionContext& context) {
+std::string PythonInterpreterTool::execute(const std::string& json_args, const core::context::SessionContext& context) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
     if (parser.parse(json_args).get(doc) != simdjson::SUCCESS) {
@@ -40,6 +42,15 @@ std::string PythonInterpreterTool::execute(const std::string& json_args, [[maybe
     std::string_view code_view;
     if (doc["code"].get(code_view) != simdjson::SUCCESS || code_view.empty()) {
         return R"({"error":"Missing or empty 'code' argument."})";
+    }
+
+    // An embedded interpreter is a filesystem reader with no path argument, and
+    // it runs inside Filo, which no sandbox confines. So the code is not
+    // inspected and guessed about: while steering is withheld the interpreter is
+    // simply unavailable, and the sandboxed shell is the way to run code.
+    if (const auto steering_error =
+            SteeringEnforcement::for_context(context).in_process_code_error()) {
+        return *steering_error;
     }
 
     auto result = PythonManager::get_instance().execute(std::string(code_view));

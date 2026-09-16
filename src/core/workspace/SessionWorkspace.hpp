@@ -67,6 +67,12 @@ public:
         return core::workspace::ordered_roots(snapshot_);
     }
 
+    /// ordered_roots().size() without building the list, for callers that only
+    /// need to know how many roots a per-root rule has to consider.
+    [[nodiscard]] std::size_t root_count() const noexcept {
+        return (snapshot_.primary.empty() ? 0 : 1) + snapshot_.additional.size();
+    }
+
     [[nodiscard]] std::filesystem::path resolve_path(
         const std::filesystem::path& target_path) const
     {

@@ -58,6 +58,77 @@ struct SteeringModeOption {
     }};
 }
 
+/**
+ * Every filename Filo reads as project steering, split by how far it is searched.
+ *
+ * Single source of truth for the names: discovery, the I/O-free candidate
+ * filter, the read-side SteeringGuard, and every "is this an instruction file?"
+ * classifier in the read tool and the tool-output summarizer all consult these
+ * tables, so a file can never be loadable into the prompt yet freely readable
+ * through a tool (or the reverse). Adding a name here is what makes it steering
+ * everywhere — and removing one stops it being steering everywhere.
+ *
+ * Anything that needs to ask the question must call is_steering_filename() or
+ * is_steering_candidate() rather than spelling names out: a second list is a
+ * list that drifts.
+ */
+/// Searched in a steering root *and* in every directory above it up to the
+/// project root. Order is priority: the loader reads only the first name present
+/// in a directory and treats the rest as shadowed, but every one of them still
+/// exists, so enumerate_steering_files() reports them all.
+[[nodiscard]] constexpr std::array<std::string_view, 2> hierarchical_steering_names() noexcept {
+    return {{"AGENTS.override.md", "AGENTS.md"}};
+}
+
+/// Filo's own steering file: the one `/init` writes and the one read first.
+inline constexpr std::string_view kPrimarySteeringFileName = "FILO.md";
+
+/// Searched in a steering root itself, in this order.
+[[nodiscard]] constexpr std::array<std::string_view, 6> root_steering_names() noexcept {
+    return {{kPrimarySteeringFileName, "GEMINI.md", "CLAUDE.md", "SYSTEM.md",
+             "CURSOR.md", "COPILOT.md"}};
+}
+
+/// Directory under a steering root whose `.md` files are all steering.
+inline constexpr std::string_view kSteeringDirectoryName = ".filo/steering";
+
+/// True when @p filename (a bare name, matched case-insensitively because
+/// discovery does) is one of the steering filenames above.
+[[nodiscard]] bool is_steering_filename(std::string_view filename) noexcept;
+
+/// True when @p dir is a `.filo/steering` directory.
+[[nodiscard]] bool is_steering_directory(const std::filesystem::path& dir) noexcept;
+
+/**
+ * I/O-free necessary condition for "a steering *file* could live at this path".
+ *
+ * The directory rule is deliberately absent: `.filo/steering` is a location that
+ * contains steering, not instruction text itself. Consumers that classify the
+ * content behind a path (the reader's verbatim instruction path, output
+ * summarization) must use this, or they claim the directory and break listing it.
+ */
+[[nodiscard]] bool is_steering_file_candidate(const std::filesystem::path& path) noexcept;
+
+/**
+ * I/O-free necessary condition for "a steering policy could block this path".
+ *
+ * Lets the per-path authorization gate skip steering enforcement — and skip it
+ * without a single stat() — for the overwhelming majority of paths, including
+ * every entry of a large directory listing.
+ *
+ * Wider than is_steering_file_candidate() by exactly the steering directory:
+ * a fully blocked `.filo/steering` is itself denied, so that listing it cannot
+ * reveal the names inside.
+ */
+[[nodiscard]] bool is_steering_candidate(const std::filesystem::path& path) noexcept;
+
+/**
+ * On-disk identity of a steering file: fully symlink-resolved, so that two
+ * discovered entries pointing at the same file (the common
+ * `CLAUDE.md -> AGENTS.md` symlink) compare equal.
+ */
+[[nodiscard]] std::filesystem::path steering_file_identity(const std::filesystem::path& path);
+
 struct SteeringPolicy {
     SteeringMode mode = SteeringMode::Default;
     std::filesystem::path custom_path{};
@@ -71,6 +142,20 @@ struct SteeringPolicy {
 
     bool operator==(const SteeringPolicy&) const = default;
 };
+
+/**
+ * The persistable token for @p mode, or empty for the path-parameterized modes.
+ *
+ * Lets the CLI default, the `--no-steering` alias, and anything else that has
+ * to *name* a mode read the spelling from the table instead of restating it —
+ * a token typed twice is a token that can stop parsing after a rename.
+ */
+[[nodiscard]] constexpr std::string_view steering_mode_token(SteeringMode mode) noexcept {
+    for (const auto& option : steering_mode_options()) {
+        if (option.mode == mode) return option.token;
+    }
+    return {};
+}
 
 [[nodiscard]] SteeringPolicy parse_steering_policy(std::string_view spec);
 [[nodiscard]] inline std::string format_steering_policy(const SteeringPolicy& policy) {
@@ -100,6 +185,24 @@ struct SteeringLoadResult {
 };
 
 /**
+ * Which files a policy selects, without reading any of them.
+ *
+ * Same shape as the load result minus the rendered text: the selection is what
+ * SteeringGuard subtracts from discovery, and keeping it separate means the
+ * guard never has to read 48 KiB of instructions it is only trying to classify.
+ * `files[].content` is always empty here; `files[].enabled` already reflects
+ * `SteeringPolicy::disabled_sources`.
+ */
+struct SteeringSelection {
+    std::vector<SteeringFile> files;
+    SteeringMode mode = SteeringMode::Default;
+    std::filesystem::path root;
+    std::vector<std::filesystem::path> searched_roots;
+
+    [[nodiscard]] bool empty() const noexcept { return files.empty(); }
+};
+
+/**
  * Ordered steering roots for a workspace: the primary first, then each
  * additional root, empties dropped and CLI order preserved.
  *
@@ -109,6 +212,43 @@ struct SteeringLoadResult {
 [[nodiscard]] std::vector<std::filesystem::path> collect_steering_roots(
     const std::filesystem::path& primary,
     const std::vector<std::filesystem::path>& additional = {});
+
+/**
+ * Every steering file the loader would read under @p roots, in chain order.
+ *
+ * Deliberately policy-free and content-free. Note that "would read" is narrower
+ * than "exists": AGENTS.override.md shadows a sibling AGENTS.md, so the shadowed
+ * file is absent here. Anything deciding what to *load* wants this; anything
+ * deciding what to *deny* wants enumerate_steering_files().
+ */
+[[nodiscard]] std::vector<SteeringFile> discover_steering_files(
+    const std::vector<std::filesystem::path>& roots);
+
+/**
+ * Every steering file physically present under @p roots, in chain order and
+ * de-duplicated by on-disk identity.
+ *
+ * For an explicitly restrictive policy, the difference between this set and
+ * select_steering_files() is what SteeringGuard blocks. Automatic Default and
+ * Fallback selection alone does not restrict tool access. This set includes
+ * files the loader skips — a shadowed AGENTS.md is still a project
+ * instruction file on disk, and `--no-steering` has to withhold it too. Using
+ * discover_steering_files() here instead is how a shadowed file escapes every
+ * policy at once.
+ */
+[[nodiscard]] std::vector<SteeringFile> enumerate_steering_files(
+    const std::vector<std::filesystem::path>& roots);
+
+/**
+ * The steering files @p policy selects under @p roots, labelled but unread.
+ *
+ * `load_workspace_steering_context()` is this plus rendering; splitting them is
+ * what lets the read-side guard and the prompt agree on the selected set by
+ * construction instead of by duplicated mode logic.
+ */
+[[nodiscard]] SteeringSelection select_steering_files(
+    const std::vector<std::filesystem::path>& roots,
+    const SteeringPolicy& policy);
 
 /**
  * Load steering for a whole workspace.
