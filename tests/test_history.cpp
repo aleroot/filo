@@ -248,6 +248,36 @@ TEST_CASE("PersistentPromptHistory navigation", "[history]") {
     std::filesystem::remove(temp_path);
 }
 
+TEST_CASE("PersistentPromptHistory abandon_navigation does not leak saved input",
+          "[history]") {
+    auto temp_path = std::filesystem::temp_directory_path()
+        / "filo_test_history_abandon.json";
+    std::filesystem::remove(temp_path);
+
+    auto store = std::make_shared<PromptHistoryStore>(temp_path);
+    REQUIRE(store->load());
+    store->add("first prompt");
+    store->add("second prompt");
+
+    PersistentPromptHistory history(store);
+    std::string input = "thread A draft";
+    int cursor = static_cast<int>(input.size());
+
+    REQUIRE(history.navigate_prev(input, cursor));
+    CHECK(input == "second prompt");
+
+    history.abandon_navigation();
+    CHECK(history.navigate_next(input, cursor) == false);
+    CHECK(input == "second prompt");
+
+    REQUIRE(history.navigate_prev(input, cursor));
+    CHECK(input == "second prompt");
+    REQUIRE(history.navigate_next(input, cursor));
+    CHECK(input == "second prompt");
+
+    std::filesystem::remove(temp_path);
+}
+
 TEST_CASE("PersistentPromptHistory empty history navigation", "[history]") {
     auto temp_path = std::filesystem::temp_directory_path() / "filo_test_history_empty_nav.json";
     std::filesystem::remove(temp_path);

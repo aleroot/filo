@@ -318,3 +318,45 @@ TEST_CASE("workspace tab names reserve all other titles and preserve custom name
     CHECK(moving->metadata().thread_name == "filo 3");
     CHECK_FALSE(custom->metadata().auto_thread_name);
 }
+
+TEST_CASE("ThreadRuntime parks prompt drafts independently",
+          "[tui][thread_runtime][prompt]") {
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+
+    first->set_prompt_draft({.text = "from A", .cursor = 4});
+    CHECK(first->prompt_draft().text == "from A");
+    CHECK(first->prompt_draft().cursor == 4);
+    CHECK(second->prompt_draft().text.empty());
+    CHECK(second->prompt_draft().cursor == 0);
+
+    first->set_prompt_draft({.text = "hi", .cursor = 99});
+    CHECK(first->prompt_draft().text == "hi");
+    CHECK(first->prompt_draft().cursor == 2);
+}
+
+TEST_CASE("exchange_prompt_draft isolates the visible composer across tabs",
+          "[tui][thread_runtime][prompt]") {
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+    second->set_prompt_draft({.text = "from B", .cursor = 4});
+
+    std::string visible = "from A";
+    int cursor = 2;
+    tui::exchange_prompt_draft(*first, *second, visible, cursor);
+    CHECK(visible == "from B");
+    CHECK(cursor == 4);
+    CHECK(first->prompt_draft().text == "from A");
+    CHECK(first->prompt_draft().cursor == 2);
+    CHECK(second->prompt_draft().text == "from B");
+
+    tui::exchange_prompt_draft(*second, *first, visible, cursor);
+    CHECK(visible == "from A");
+    CHECK(cursor == 2);
+    CHECK(second->prompt_draft().text == "from B");
+    CHECK(second->prompt_draft().cursor == 4);
+
+    tui::exchange_prompt_draft(*first, *first, visible, cursor);
+    CHECK(visible == "from A");
+    CHECK(cursor == 2);
+}

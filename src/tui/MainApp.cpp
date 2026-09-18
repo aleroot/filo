@@ -903,6 +903,8 @@ RunResult run(RunOptions opts) {
         append_ui_message(*selected_messages, make_system_message(message));
     }
 
+    // Visible composer only. Hidden threads park their draft on ThreadRuntime
+    // (same split as ThreadModalHost overlays): one PromptInput, per-tab text.
     std::string input_text;
     int input_cursor_position = 0;
     DoubleEscapeState double_escape_state;
@@ -2362,6 +2364,24 @@ RunResult run(RunOptions opts) {
         return data;
     };
 
+    auto reset_composer_chrome = [&]() {
+        command_picker.clear();
+        mention_picker.clear();
+        prompt_history.abandon_navigation();
+        double_escape_state = {};
+        quit_confirm_key.clear();
+        quit_confirm_deadline = std::chrono::steady_clock::time_point::min();
+    };
+
+    auto adopt_thread_composer = [&](const ThreadRuntime::Ptr& hiding,
+                                     const ThreadRuntime::Ptr& showing) {
+        if (!hiding || !showing) {
+            return;
+        }
+        exchange_prompt_draft(*hiding, *showing, input_text, input_cursor_position);
+        reset_composer_chrome();
+    };
+
     auto resume_session = [&](const core::session::SessionData& data)
         -> std::optional<std::string> {
         if (data.session_id == session_id) {
@@ -2424,8 +2444,10 @@ RunResult run(RunOptions opts) {
         }
 
         const auto metadata = target_runtime->metadata();
+        const auto outgoing_runtime = current_runtime;
         {
             std::lock_guard lock(ui_mutex);
+            adopt_thread_composer(outgoing_runtime, target_runtime);
             current_runtime = target_runtime;
             agent = target_runtime->agent();
             llm_provider = agent->get_provider();
@@ -5422,6 +5444,7 @@ RunResult run(RunOptions opts) {
 
         {
             std::lock_guard lock(ui_mutex);
+            adopt_thread_composer(current_runtime, next_runtime);
             current_runtime = next_runtime;
             agent = next_runtime->agent();
             llm_provider = agent->get_provider();
@@ -7066,6 +7089,8 @@ RunResult run(RunOptions opts) {
     };
 
     auto input_component = PromptInput(&input_text, "Ask anything", input_option);
+    // One visible PromptInput, bound to the visible thread's composer. Drafts
+    // for hidden threads live on ThreadRuntime and are exchanged on tab switch.
     // Question editors live on ThreadModalHost and are dispatched manually.
     // Putting them in the FTXUI tree would leak a hidden thread's input
     // component into the visible session (the FTXUI Modal anti-pattern).

@@ -130,6 +130,11 @@ public:
     // Reload from disk (useful after external modifications).
     void reload();
 
+    // Drop in-progress Up/Down browsing without changing the store. Used when
+    // switching threads so a hidden tab cannot leak its saved_input_ into the
+    // newly visible composer.
+    void abandon_navigation();
+
     // Clear all history (both memory and disk).
     void clear();
 

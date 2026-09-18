@@ -308,6 +308,10 @@ void PersistentPromptHistory::reload() {
     if (store_) {
         static_cast<void>(store_->load(nullptr));
     }
+    abandon_navigation();
+}
+
+void PersistentPromptHistory::abandon_navigation() {
     idx_ = -1;
     saved_input_.clear();
 }

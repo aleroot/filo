@@ -55,6 +55,17 @@ void ThreadRuntime::mutate_metadata(
     mutation(metadata_);
 }
 
+void ThreadRuntime::set_prompt_draft(PromptDraft draft) {
+    draft.clamp_cursor();
+    std::lock_guard lock(prompt_draft_mutex_);
+    prompt_draft_ = std::move(draft);
+}
+
+PromptDraft ThreadRuntime::prompt_draft() const {
+    std::lock_guard lock(prompt_draft_mutex_);
+    return prompt_draft_;
+}
+
 void ThreadRuntime::touch() noexcept {
     last_activity_.store(std::chrono::system_clock::now(), std::memory_order_release);
 }
@@ -363,6 +374,23 @@ void ThreadRuntimeRegistry::wait_until_all_saved() {
     for (const auto& runtime : snapshot()) {
         runtime->wait_until_saved();
     }
+}
+
+void exchange_prompt_draft(ThreadRuntime& hiding,
+                           ThreadRuntime& showing,
+                           std::string& visible_text,
+                           int& visible_cursor) {
+    if (&hiding == &showing) {
+        return;
+    }
+    hiding.set_prompt_draft(PromptDraft{
+        .text = std::move(visible_text),
+        .cursor = visible_cursor,
+    });
+    auto next = showing.prompt_draft();
+    next.clamp_cursor();
+    visible_text = std::move(next.text);
+    visible_cursor = next.cursor;
 }
 
 } // namespace tui

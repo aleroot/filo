@@ -49,6 +49,25 @@ struct PendingAgentTurn {
     core::agent::Agent::TurnCallbacks callbacks;
 };
 
+/// Parked composer contents for a thread that is not the visible TUI page.
+/// The live PromptInput still binds to MainApp's visible string; switching
+/// threads exchanges that string with this draft. Never persisted — drafts are
+/// ephemeral TUI state, unlike session history.
+struct PromptDraft {
+    std::string text;
+    int cursor = 0;
+
+    void clamp_cursor() noexcept {
+        if (cursor < 0) {
+            cursor = 0;
+        }
+        const auto size = static_cast<int>(text.size());
+        if (cursor > size) {
+            cursor = size;
+        }
+    }
+};
+
 struct ThreadRuntimeMetadata {
     std::string session_id;
     /// User-facing label for this live runtime. This is intentionally not
@@ -76,7 +95,9 @@ struct ThreadRuntimeMetadata {
 
 // Owns every mutable resource whose lifetime must follow a conversation rather
 // than the currently visible TUI page. The TUI may switch away while this
-// object continues receiving agent callbacks.
+// object continues receiving agent callbacks. That includes the parked prompt
+// draft: one visible PromptInput, per-thread composer text, same contract as
+// ThreadModalHost overlays.
 class ThreadRuntime final {
 public:
     using Ptr = std::shared_ptr<ThreadRuntime>;
@@ -97,6 +118,9 @@ public:
     void update_metadata(ThreadRuntimeMetadata metadata);
     void mutate_metadata(
         const std::function<void(ThreadRuntimeMetadata&)>& mutation);
+
+    void set_prompt_draft(PromptDraft draft);
+    [[nodiscard]] PromptDraft prompt_draft() const;
 
     [[nodiscard]] bool begin_turn();
     [[nodiscard]] bool begin_or_queue(PendingAgentTurn& turn);
@@ -141,6 +165,8 @@ private:
     std::shared_ptr<core::agent::Agent> agent_;
     std::shared_ptr<Messages> messages_;
     core::session::ActiveSessionLease::Ptr lease_;
+    mutable std::mutex prompt_draft_mutex_;
+    PromptDraft prompt_draft_;
 
     std::atomic_bool turn_active_{false};
     std::atomic<TurnCompletionStatus> completion_status_{TurnCompletionStatus::None};
@@ -193,5 +219,13 @@ private:
     std::unordered_map<std::string, ThreadRuntime::Ptr> runtimes_;
     std::string current_session_id_;
 };
+
+/// Parks the visible composer onto `hiding` and loads `showing`'s parked draft.
+/// No-op when both arguments are the same runtime. The live PromptInput keeps
+/// its StringRef; only the bound string/cursor values change.
+void exchange_prompt_draft(ThreadRuntime& hiding,
+                           ThreadRuntime& showing,
+                           std::string& visible_text,
+                           int& visible_cursor);
 
 } // namespace tui
