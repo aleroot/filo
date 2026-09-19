@@ -232,6 +232,9 @@ bool ThreadRuntimeRegistry::insert(ThreadRuntime::Ptr runtime) {
     const std::string session_id = runtime->session_id();
     std::lock_guard lock(mutex_);
     const auto [_, inserted] = runtimes_.emplace(session_id, std::move(runtime));
+    if (inserted) {
+        queue_.push_back(session_id);
+    }
     return inserted;
 }
 
@@ -261,9 +264,14 @@ bool ThreadRuntimeRegistry::rekey(std::string_view old_session_id,
     if (old_it == runtimes_.end() || runtimes_.contains(std::string{new_session_id})) {
         return false;
     }
+    const auto queue_it = std::find(queue_.begin(), queue_.end(), std::string{old_session_id});
+    if (queue_it == queue_.end()) {
+        return false;
+    }
     auto runtime = std::move(old_it->second);
     runtimes_.erase(old_it);
     runtimes_.emplace(std::string{new_session_id}, std::move(runtime));
+    *queue_it = std::string{new_session_id};
     if (current_session_id_ == old_session_id) {
         current_session_id_ = std::string{new_session_id};
     }
@@ -274,6 +282,33 @@ ThreadRuntime::Ptr ThreadRuntimeRegistry::current() const {
     std::lock_guard lock(mutex_);
     const auto it = runtimes_.find(current_session_id_);
     return it == runtimes_.end() ? nullptr : it->second;
+}
+
+ThreadRuntime::Ptr ThreadRuntimeRegistry::primary() const {
+    std::lock_guard lock(mutex_);
+    for (const auto& id : queue_) {
+        if (const auto it = runtimes_.find(id); it != runtimes_.end()) {
+            return it->second;
+        }
+    }
+    return nullptr;
+}
+
+ThreadRuntime::Ptr ThreadRuntimeRegistry::successor(std::string_view session_id) const {
+    std::lock_guard lock(mutex_);
+    const auto pos = std::find(queue_.begin(), queue_.end(), std::string{session_id});
+    if (pos == queue_.end() || queue_.size() < 2) {
+        return nullptr;
+    }
+    const auto index = static_cast<std::size_t>(pos - queue_.begin());
+    const auto next_index = (index + 1 < queue_.size()) ? index + 1 : index - 1;
+    const auto it = runtimes_.find(queue_[next_index]);
+    return it == runtimes_.end() ? nullptr : it->second;
+}
+
+std::size_t ThreadRuntimeRegistry::size() const {
+    std::lock_guard lock(mutex_);
+    return runtimes_.size();
 }
 
 std::vector<ThreadRuntime::Ptr> ThreadRuntimeRegistry::snapshot() const {
@@ -307,27 +342,22 @@ bool ThreadRuntimeRegistry::erase(std::string_view session_id) {
         || it->second->workers_in_flight() > 0) {
         return false;
     }
+    const std::string erased{session_id};
     runtimes_.erase(it);
+    std::erase(queue_, erased);
     return true;
 }
 
-std::vector<ThreadRuntime::Ptr> ThreadRuntimeRegistry::ordered_snapshot(
-    std::string_view main_session_id) const {
-    auto runtimes = snapshot();
-    std::ranges::sort(runtimes, [&](const auto& lhs, const auto& rhs) {
-        const bool lhs_is_main = lhs->session_id() == main_session_id;
-        const bool rhs_is_main = rhs->session_id() == main_session_id;
-        if (lhs_is_main != rhs_is_main) {
-            return lhs_is_main;
+std::vector<ThreadRuntime::Ptr> ThreadRuntimeRegistry::ordered_snapshot() const {
+    std::lock_guard lock(mutex_);
+    std::vector<ThreadRuntime::Ptr> result;
+    result.reserve(queue_.size());
+    for (const auto& id : queue_) {
+        if (const auto it = runtimes_.find(id); it != runtimes_.end()) {
+            result.push_back(it->second);
         }
-        const auto lhs_meta = lhs->metadata();
-        const auto rhs_meta = rhs->metadata();
-        if (lhs_meta.created_at != rhs_meta.created_at) {
-            return lhs_meta.created_at < rhs_meta.created_at;
-        }
-        return lhs_meta.session_id < rhs_meta.session_id;
-    });
-    return runtimes;
+    }
+    return result;
 }
 
 void ThreadRuntimeRegistry::retitle_auto_named_thread(std::string_view session_id,

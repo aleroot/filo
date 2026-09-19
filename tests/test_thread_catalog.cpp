@@ -113,7 +113,7 @@ TEST_CASE("ThreadCatalog filter and grouping", "[session][thread]") {
     CHECK(sessions[groups.front().indices[0]].session_id == "aaa11111");
 }
 
-TEST_CASE("ThreadCatalog always pins main before more recently active threads",
+TEST_CASE("ThreadCatalog pins the given primary before more recently active threads",
           "[session][thread][ordering]") {
     std::vector<SessionInfo> threads{
         make_info("worker02", "filo 2", "2026-03-22T12:00:00Z"),

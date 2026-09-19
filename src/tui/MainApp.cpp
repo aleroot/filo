@@ -908,9 +908,9 @@ RunResult run(RunOptions opts) {
     std::string input_text;
     int input_cursor_position = 0;
     DoubleEscapeState double_escape_state;
-    // Double-press-to-quit confirmation for Ctrl+D on the main thread (with an
-    // empty prompt). Secondary threads use one empty-prompt press to close the
-    // tab. Stores the key label that armed app exit so the footer hint names
+    // Double-press-to-quit confirmation for Ctrl+D on the last remaining
+    // thread (empty prompt). Extra tabs close on one empty-prompt Ctrl+D.
+    // Stores the key label that armed app exit so the footer hint names
     // the right key, plus the expiry deadline. Ctrl+C quits immediately when idle.
     std::string quit_confirm_key;
     std::chrono::steady_clock::time_point quit_confirm_deadline =
@@ -1631,9 +1631,6 @@ RunResult run(RunOptions opts) {
         agent,
         selected_messages,
         session_leases.retain(session_id));
-    // Stable runtime identity for ordering. Labels and session ids can change
-    // independently, but the process's initial thread must always stay first.
-    const auto main_runtime = current_runtime;
     if (!thread_runtimes.insert(current_runtime)
         || !thread_runtimes.select(session_id)) {
         core::logging::error("Could not initialize the thread runtime registry.");
@@ -1808,27 +1805,47 @@ RunResult run(RunOptions opts) {
         return terminals;
     };
 
-    // Single source of truth for "is there anything Ctrl+C/Esc could stop?".
-    // Both stop_active_terminal() and the Ctrl+C quit-when-idle gate rely on
-    // this predicate so they can never disagree about what "idle" means.
-    auto has_stoppable_activity = [&]() -> bool {
-        // Account for hidden threads too: with parallel sessions, work can be
-        // running in a thread that is not currently selected, and Ctrl+C
-        // must never quit while any of it is active.
+    // Esc and /stop are scoped to the visible thread. Ctrl+C is the one
+    // process-wide exception: stop every running thread, or quit if idle.
+    auto current_thread_has_stoppable_activity = [&]() -> bool {
         return !list_active_terminals().empty()
+            || (current_runtime && current_runtime->turn_active());
+    };
+
+    auto any_thread_has_stoppable_activity = [&]() -> bool {
+        return current_thread_has_stoppable_activity()
             || !thread_runtimes.running_session_ids().empty();
     };
 
-    auto stop_active_terminal = [&]() -> core::commands::CommandOperationResult {
-        if (!has_stoppable_activity()) {
+    auto stop_current_thread = [&]() -> core::commands::CommandOperationResult {
+        if (!current_thread_has_stoppable_activity()) {
             return {.ok = false, .message = "Nothing is currently running."};
         }
         const bool had_terminal = !list_active_terminals().empty();
         const bool had_direct_shell =
             direct_shell_state && direct_shell_state->has_active_for(session_id);
 
-        // Stop the current thread's agent, plus every hidden thread that is
-        // still working, so a single stop gesture settles the whole session.
+        agent->request_stop();
+        if (had_direct_shell && direct_shell_state) {
+            [[maybe_unused]] const bool interrupted =
+                direct_shell_state->interrupt_active_for(session_id);
+        }
+        return {
+            .ok = true,
+            .message = had_terminal
+                ? "Stop requested for the active terminal command."
+                : "Stop requested for the active generation and any running subagents.",
+        };
+    };
+
+    auto stop_all_threads = [&]() -> core::commands::CommandOperationResult {
+        if (!any_thread_has_stoppable_activity()) {
+            return {.ok = false, .message = "Nothing is currently running."};
+        }
+        const bool had_terminal = !list_active_terminals().empty();
+        const bool had_direct_shell =
+            direct_shell_state && direct_shell_state->has_active_for(session_id);
+
         agent->request_stop();
         std::size_t hidden_stopped = 0;
         for (const auto& runtime : thread_runtimes.snapshot()) {
@@ -1852,6 +1869,9 @@ RunResult run(RunOptions opts) {
         }
         return {.ok = true, .message = message};
     };
+
+    // /stop keeps the historical name; it remains the visible-thread stop.
+    auto stop_active_terminal = stop_current_thread;
 
     auto append_assistant_output = [&](const std::string& str) {
         std::lock_guard lock(ui_mutex);
@@ -2499,7 +2519,7 @@ RunResult run(RunOptions opts) {
 
     auto active_thread_catalogue = [&]() {
         std::vector<core::session::SessionInfo> catalogue;
-        for (const auto& runtime : thread_runtimes.snapshot()) {
+        for (const auto& runtime : thread_runtimes.ordered_snapshot()) {
             const auto metadata = runtime->metadata();
             core::session::SessionInfo live;
             live.session_id = metadata.session_id;
@@ -2518,7 +2538,6 @@ RunResult run(RunOptions opts) {
             live.path = metadata.file_path;
             catalogue.push_back(std::move(live));
         }
-        core::session::order_active_threads(catalogue, main_runtime->session_id());
         return catalogue;
     };
 
@@ -2885,7 +2904,7 @@ RunResult run(RunOptions opts) {
         // Preserve the legacy provider instance in the ordinary one-thread
         // case. Once concurrent runtimes exist, every model switch must use a
         // private provider, just as a separate Filo process would.
-        if (thread_runtimes.snapshot().size() == 1) {
+        if (thread_runtimes.size() == 1) {
             return provider;
         }
         auto isolated = provider->fork_for_parallel_request();
@@ -3322,7 +3341,10 @@ RunResult run(RunOptions opts) {
             join_values(policy_names));
     };
 
-    auto persist_model_preferences = [&]() {
+    auto persist_model_preferences = [&]() -> core::config::ModelPersistenceResult {
+        if (current_runtime != thread_runtimes.primary()) {
+            return core::config::ModelPersistenceResult::non_primary();
+        }
         const std::string mode =
             model_selection_mode == ModelSelectionMode::Router ? "router" :
             model_selection_mode == ModelSelectionMode::Auto   ? "auto"   : "manual";
@@ -4302,7 +4324,9 @@ RunResult run(RunOptions opts) {
             remember_previous_model_selection(before);
             result = with_model_persistence_notice(
                 std::move(result),
-                model_defaults.persist_local(model_path_str, model_label));
+                current_runtime == thread_runtimes.primary()
+                    ? model_defaults.persist_local(model_path_str, model_label)
+                    : core::config::ModelPersistenceResult::non_primary());
         }
         return result;
     };
@@ -5493,24 +5517,34 @@ RunResult run(RunOptions opts) {
     };
 
     // Archive and release one live runtime without deleting its saved
-    // session. The process's main/current/running threads are intentionally
-    // protected so closing can never invalidate shared UI state or active
-    // callbacks.
+    // session. The last remaining thread cannot be closed (that is quit).
+    // Closing the queue head promotes the next living thread to primary.
     auto close_thread = [&](std::string_view target_session_id)
         -> std::optional<std::string> {
-        auto runtime = thread_runtimes.find(target_session_id);
+        const std::string target{target_session_id};
+        auto runtime = thread_runtimes.find(target);
         if (!runtime) {
             return std::format(
-                "Active thread {} is no longer available.", target_session_id);
+                "Active thread {} is no longer available.", target);
         }
-        if (runtime == main_runtime) {
-            return "The main thread cannot be closed.";
-        }
-        if (runtime == thread_runtimes.current()) {
-            return "Switch to another thread before closing the current one.";
+        if (thread_runtimes.size() <= 1) {
+            return "The last thread cannot be closed.";
         }
         if (thread_has_active_work(runtime)) {
             return "Stop the thread's active work before closing it.";
+        }
+        if (runtime == thread_runtimes.current()) {
+            auto next = thread_runtimes.successor(target);
+            if (!next) {
+                return "No other thread is available.";
+            }
+            const auto next_data = live_session_data(next);
+            if (!next_data.has_value()) {
+                return "The next thread is no longer available.";
+            }
+            if (const auto error = resume_session(*next_data); error.has_value()) {
+                return std::format("Could not switch threads: {}", *error);
+            }
         }
 
         if (!runtime->agent()->get_history().empty()) {
@@ -5526,44 +5560,31 @@ RunResult run(RunOptions opts) {
         // their runtime/lease until every writer has passed its completion
         // guard.
         runtime->wait_until_saved();
-        if (!thread_runtimes.erase(target_session_id)) {
+        if (!thread_runtimes.erase(target)) {
             return "The thread became active while it was being closed.";
         }
 
-        auto dismissed_overlay = thread_modals.erase_session(target_session_id);
+        auto dismissed_overlay = thread_modals.erase_session(target);
         if (dismissed_overlay.has_resolution()) {
             dismissed_overlay.resolve();
         }
 
         runtime->set_lease(nullptr);
-        session_leases.release(target_session_id);
-        session_stats_registry->reset(target_session_id);
-        core::budget::BudgetTracker::get_instance().reset_session(target_session_id);
+        session_leases.release(target);
+        session_stats_registry->reset(target);
+        core::budget::BudgetTracker::get_instance().reset_session(target);
         return std::nullopt;
     };
 
-    // Ctrl+D on an empty secondary thread behaves like closing a terminal tab:
-    // return to the persistent main runtime, then archive and release the tab
-    // that was visible. The normal close path remains the single authority for
-    // persistence, leases, stats, and budget cleanup.
-    auto close_current_secondary_thread = [&]() -> std::optional<std::string> {
+    // Ctrl+D on an empty prompt closes the visible tab, like a terminal.
+    // The last remaining thread is quit, not close. Closing the queue head
+    // promotes the successor, which then owns saved model defaults.
+    auto close_current_thread = [&]() -> std::optional<std::string> {
         auto closing_runtime = thread_runtimes.current();
-        if (!closing_runtime || closing_runtime == main_runtime) {
-            return "The main thread cannot be closed.";
+        if (!closing_runtime) {
+            return "No thread is currently selected.";
         }
-        if (thread_has_active_work(closing_runtime)) {
-            return "Stop the thread's active work before closing it.";
-        }
-
-        const std::string closing_session_id = closing_runtime->session_id();
-        const auto main_data = live_session_data(main_runtime);
-        if (!main_data.has_value()) {
-            return "The main thread is no longer available.";
-        }
-        if (const auto error = resume_session(*main_data); error.has_value()) {
-            return std::format("Could not return to the main thread: {}", *error);
-        }
-        return close_thread(closing_session_id);
+        return close_thread(closing_runtime->session_id());
     };
 
     auto latest_completed_assistant_output = [&]() {
@@ -8811,17 +8832,14 @@ RunResult run(RunOptions opts) {
             return true;
         }
         if (is_ctrl_c_event(event)) {
-            // Idle: quit immediately on a single press. Unlike Ctrl+D (which
-            // doubles as delete-right and needs a confirmation guard), Ctrl+C
-            // has no other meaning when nothing is running. The explicit
-            // predicate — rather than stop_active_terminal()'s failure flag —
-            // guarantees we can never quit while work is still active, even if
-            // stop_active_terminal() grows new failure modes.
-            if (!has_stoppable_activity()) {
+            // Process-wide interrupt. Esc and /stop stay on this tab; Ctrl+C
+            // is the global exception — stop every running thread, or quit
+            // immediately when the process is idle.
+            if (!any_thread_has_stoppable_activity()) {
                 screen.ExitLoopClosure()();
                 return true;
             }
-            const auto result = stop_active_terminal();
+            const auto result = stop_all_threads();
             reset_quit_confirm();
             append_history(std::format("\n»  {}\n", result.message));
             return true;
@@ -8835,7 +8853,7 @@ RunResult run(RunOptions opts) {
             return navigate_history_next();
         }
 
-        // ── Ctrl+D: delete-right; close a secondary tab or confirm app exit ─
+        // ── Ctrl+D: delete-right; close the visible tab or confirm app exit ─
         if (is_ctrl_d_event(event)) {
             if (!input_text.empty()) {
                 // Normalize terminal-specific Ctrl+D variants through PromptInput's
@@ -8845,9 +8863,9 @@ RunResult run(RunOptions opts) {
                 return true;
             }
 
-            if (current_runtime != main_runtime) {
+            if (thread_runtimes.size() > 1) {
                 reset_quit_confirm();
-                if (const auto error = close_current_secondary_thread();
+                if (const auto error = close_current_thread();
                     error.has_value()) {
                     append_history(std::format("\n✗  {}\n", *error));
                 }
@@ -9091,7 +9109,7 @@ RunResult run(RunOptions opts) {
 
         std::vector<ThreadTab> thread_tabs;
         thread_tab_session_ids.clear();
-        if (auto runtimes = thread_runtimes.ordered_snapshot(main_runtime->session_id());
+        if (auto runtimes = thread_runtimes.ordered_snapshot();
             runtimes.size() > 1) {
             struct RuntimeTabSnapshot {
                 ThreadRuntime::Ptr runtime;

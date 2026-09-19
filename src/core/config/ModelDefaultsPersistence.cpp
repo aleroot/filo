@@ -4,6 +4,13 @@
 
 namespace core::config {
 
+ModelPersistenceResult ModelPersistenceResult::non_primary() {
+    return {
+        .status = ModelPersistenceStatus::SessionOnly,
+        .detail = "Model changed for this thread only; the primary thread owns saved model defaults.",
+    };
+}
+
 ModelDefaultsPersistence::ModelDefaultsPersistence(ConfigManager& manager)
     : manager_(manager),
       owner_path_(std::filesystem::path(manager.get_config_dir())

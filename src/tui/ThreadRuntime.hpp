@@ -188,7 +188,8 @@ private:
 };
 
 // Registry and selection are deliberately separate: selecting a thread never
-// stops, clears, or replaces another runtime.
+// stops, clears, or replaces another runtime. Live threads are a queue:
+// insert appends, erase removes, and the front is the primary thread.
 class ThreadRuntimeRegistry final {
 public:
     [[nodiscard]] bool insert(ThreadRuntime::Ptr runtime);
@@ -197,11 +198,16 @@ public:
     [[nodiscard]] bool rekey(std::string_view old_session_id,
                              std::string_view new_session_id);
     [[nodiscard]] ThreadRuntime::Ptr current() const;
+    /// Oldest living thread. Owns saved model defaults; closing it promotes
+    /// the next queue entry.
+    [[nodiscard]] ThreadRuntime::Ptr primary() const;
+    /// Neighbor to switch to when closing @p session_id: the next thread,
+    /// or the previous one when closing the tail.
+    [[nodiscard]] ThreadRuntime::Ptr successor(std::string_view session_id) const;
+    [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::vector<ThreadRuntime::Ptr> snapshot() const;
-    /// Snapshot in stable display order — the main thread first, then by
-    /// creation time.
-    [[nodiscard]] std::vector<ThreadRuntime::Ptr> ordered_snapshot(
-        std::string_view main_session_id) const;
+    /// Snapshot in queue order (oldest / primary first).
+    [[nodiscard]] std::vector<ThreadRuntime::Ptr> ordered_snapshot() const;
     [[nodiscard]] std::unordered_set<std::string> running_session_ids() const;
     [[nodiscard]] bool erase(std::string_view session_id);
 
@@ -217,6 +223,7 @@ public:
 private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, ThreadRuntime::Ptr> runtimes_;
+    std::vector<std::string> queue_;
     std::string current_session_id_;
 };
 

@@ -219,13 +219,13 @@ std::vector<SessionInfo> filter_threads(
 }
 
 void order_active_threads(std::vector<SessionInfo>& threads,
-                          std::string_view main_session_id) {
-    std::ranges::sort(threads, [main_session_id](const SessionInfo& lhs,
+                          std::string_view primary_session_id) {
+    std::ranges::sort(threads, [primary_session_id](const SessionInfo& lhs,
                                                  const SessionInfo& rhs) {
-        const bool lhs_is_main = lhs.session_id == main_session_id;
-        const bool rhs_is_main = rhs.session_id == main_session_id;
-        if (lhs_is_main != rhs_is_main) {
-            return lhs_is_main;
+        const bool lhs_is_primary = lhs.session_id == primary_session_id;
+        const bool rhs_is_primary = rhs.session_id == primary_session_id;
+        if (lhs_is_primary != rhs_is_primary) {
+            return lhs_is_primary;
         }
         if (lhs.last_active_at != rhs.last_active_at) {
             return lhs.last_active_at > rhs.last_active_at;

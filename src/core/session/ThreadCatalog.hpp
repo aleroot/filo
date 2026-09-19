@@ -69,10 +69,10 @@ struct ThreadGroup {
     const std::vector<SessionInfo>& sessions,
     std::string_view query);
 
-/// Pin the process's main thread first, then order all other live threads by
-/// most recent activity. The main id is runtime identity, not a display name.
+/// Pin the current primary thread (queue head) first, then order the rest by
+/// most recent activity. The id is runtime identity, not a display name.
 void order_active_threads(std::vector<SessionInfo>& threads,
-                          std::string_view main_session_id);
+                          std::string_view primary_session_id);
 
 /// Group sessions (already sorted newest-first) into recency buckets.
 [[nodiscard]] std::vector<ThreadGroup> group_threads_by_recency(

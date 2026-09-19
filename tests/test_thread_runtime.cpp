@@ -122,6 +122,25 @@ TEST_CASE("ThreadRuntime keeps approval state isolated",
     CHECK(second->metadata().permission_rules.empty());
 }
 
+TEST_CASE("ThreadRuntime request_stop does not finish sibling turns",
+          "[tui][thread_runtime][stop]") {
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+
+    tui::PendingAgentTurn first_turn{.text = "first"};
+    tui::PendingAgentTurn second_turn{.text = "second"};
+    REQUIRE(first->begin_or_queue(first_turn));
+    REQUIRE(second->begin_or_queue(second_turn));
+
+    first->request_stop();
+    CHECK(second->turn_active());
+    CHECK(second->queued_turn_count() == 0);
+
+    CHECK_FALSE(second->finish_turn(true).has_value());
+    CHECK_FALSE(second->turn_active());
+    CHECK(first->turn_active());
+}
+
 TEST_CASE("ThreadRuntimeRegistry selection never stops another runtime",
           "[tui][thread_runtime][concurrency]") {
     tui::ThreadRuntimeRegistry registry;
@@ -203,30 +222,59 @@ TEST_CASE("ThreadRuntime save generations are scoped per thread",
     CHECK(second->is_latest_save(second_only));
 }
 
-TEST_CASE("ThreadRuntimeRegistry ordered_snapshot puts the main thread first",
+TEST_CASE("ThreadRuntimeRegistry is a birth-order queue",
           "[tui][thread_runtime][ordering]") {
     tui::ThreadRuntimeRegistry registry;
-    auto middle = make_runtime("bbbb2222");
-    auto newest = make_runtime("cccc3333");
-    auto main = make_runtime("aaaa1111");
-    middle->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.created_at = "2026-08-08T12:00:00Z";
-    });
-    newest->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.created_at = "2026-08-08T13:00:00Z";
-    });
-    main->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
-        metadata.created_at = "2026-08-08T14:00:00Z";
-    });
-    REQUIRE(registry.insert(middle));
-    REQUIRE(registry.insert(newest));
-    REQUIRE(registry.insert(main));
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+    auto third = make_runtime("cccc3333");
+    REQUIRE(registry.insert(first));
+    REQUIRE(registry.insert(second));
+    REQUIRE(registry.insert(third));
+    REQUIRE(registry.size() == 3);
 
-    const auto ordered = registry.ordered_snapshot(main->session_id());
+    const auto ordered = registry.ordered_snapshot();
     REQUIRE(ordered.size() == 3);
-    CHECK(ordered[0] == main);
-    CHECK(ordered[1] == middle);
-    CHECK(ordered[2] == newest);
+    CHECK(ordered[0] == first);
+    CHECK(ordered[1] == second);
+    CHECK(ordered[2] == third);
+    CHECK(registry.primary() == first);
+    CHECK(registry.successor(first->session_id()) == second);
+    CHECK(registry.successor(second->session_id()) == third);
+    CHECK(registry.successor(third->session_id()) == second);
+
+    // Closing the queue head while another tab is visible promotes the next
+    // oldest living thread, not the visible one.
+    REQUIRE(registry.select(third->session_id()) == third);
+    REQUIRE(registry.erase(first->session_id()));
+    CHECK(registry.primary() == second);
+    CHECK(registry.current() == third);
+    CHECK(registry.size() == 2);
+    CHECK(registry.ordered_snapshot()[0] == second);
+    CHECK(registry.ordered_snapshot()[1] == third);
+    CHECK(registry.successor(third->session_id()) == second);
+
+    REQUIRE(registry.erase(second->session_id()));
+    CHECK(registry.primary() == third);
+    CHECK(registry.size() == 1);
+    CHECK_FALSE(registry.erase(third->session_id()));
+}
+
+TEST_CASE("ThreadRuntimeRegistry rekey keeps queue position",
+          "[tui][thread_runtime][ordering]") {
+    tui::ThreadRuntimeRegistry registry;
+    auto first = make_runtime("old00001");
+    auto second = make_runtime("bbbb2222");
+    REQUIRE(registry.insert(first));
+    REQUIRE(registry.insert(second));
+    REQUIRE(registry.rekey("old00001", "new00001"));
+    CHECK(first->session_id() == "old00001");
+    first->mutate_metadata([](tui::ThreadRuntimeMetadata& metadata) {
+        metadata.session_id = "new00001";
+    });
+    CHECK(registry.primary() == first);
+    CHECK(registry.primary()->session_id() == "new00001");
+    CHECK(registry.ordered_snapshot()[1] == second);
 }
 
 TEST_CASE("workspace changes rename only the owning thread",

@@ -77,3 +77,32 @@ TEST_CASE("Only the earliest live instance persists model defaults",
     std::error_code ignored;
     std::filesystem::remove_all(sandbox, ignored);
 }
+
+TEST_CASE("Secondary thread model changes do not call persist",
+          "[config][model][thread]") {
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto sandbox = std::filesystem::temp_directory_path()
+        / ("filo_model_thread_" + std::to_string(nonce));
+    std::filesystem::create_directories(sandbox);
+    ScopedEnvironmentVariable xdg_config_home("XDG_CONFIG_HOME", sandbox.string());
+
+    auto& manager = core::config::ConfigManager::get_instance();
+    core::config::ModelDefaultsPersistence owner(manager);
+
+    REQUIRE(owner.persist("zai", "manual", "glm-5.1").status
+            == core::config::ModelPersistenceStatus::Saved);
+
+    // The TUI must return this instead of calling persist() on a non-primary
+    // thread. persist() itself has no "please don't write" switch.
+    const auto secondary =
+        core::config::ModelPersistenceResult::non_primary();
+    CHECK(secondary.status == core::config::ModelPersistenceStatus::SessionOnly);
+    CHECK(secondary.detail.contains("this thread only"));
+
+    const auto saved = read_file(sandbox / "filo" / "model_defaults.json");
+    CHECK(saved.contains("glm-5.1"));
+    CHECK_FALSE(saved.contains("this thread only"));
+
+    std::error_code ignored;
+    std::filesystem::remove_all(sandbox, ignored);
+}

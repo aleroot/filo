@@ -19,10 +19,14 @@ enum class ModelPersistenceStatus {
 struct ModelPersistenceResult {
     ModelPersistenceStatus status = ModelPersistenceStatus::Saved;
     std::string detail;
+
+    /// Visible thread is not the queue head. Callers must not invoke persist().
+    [[nodiscard]] static ModelPersistenceResult non_primary();
 };
 
 // Owns the process-lifetime lease governing model-default persistence. The
 // earliest interactive process saves defaults; followers remain session-only.
+// persist() always means "try to write"; thread policy lives at the call site.
 class ModelDefaultsPersistence {
 public:
     explicit ModelDefaultsPersistence(ConfigManager& manager);
