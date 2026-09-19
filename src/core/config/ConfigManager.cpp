@@ -380,9 +380,9 @@ std::optional<LoginProfileMapping> resolve_login_profile(std::string_view login_
         || normalized == "zai_coding" || normalized == "z.ai-coding"
         || normalized == "z-ai-coding" || normalized == "zai-coding-plan") {
         return LoginProfileMapping{
-            .provider_name = "zai",
+            .provider_name = "zai-coding",
             .auth_type = "",
-            .default_model = "glm-5.1",
+            .default_model = "glm-5.3",
         };
     }
 

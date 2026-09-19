@@ -11,8 +11,10 @@
 namespace core::llm {
 namespace {
 
-constexpr std::array<std::string_view, 5> kZaiCodingModels{{
+constexpr std::array<std::string_view, 7> kZaiCodingModels{{
     "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.3-flashx",
     "glm-5.2",
     "glm-5-turbo",
     "glm-4.7",
@@ -135,16 +137,22 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
         .service_id = std::string(provider_name),
         .category_label = {},
         .registry_model_filter = {},
+        .api_model_filter = {},
         .api_model_policy = ProviderCatalogApiModelPolicy::All,
     };
 
+    // Z.ai's General and Coding hosts publish identical /models catalogs.
+    // Membership has to be claimed on both origins or glm-5.3 is offered
+    // under General API and a Coding Plan key returns HTTP 429 / error 1113.
     if (group_name == "zai" && is_zai_coding_source(provider_name)) {
-        source.category_label = "Coding endpoint.";
+        source.category_label = "GLM Coding Plan.";
         source.registry_model_filter = zai_coding_filter();
+        source.api_model_filter = source.registry_model_filter;
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "zai") {
         source.category_label = "General API.";
         source.registry_model_filter = zai_regular_filter();
+        source.api_model_filter = source.registry_model_filter;
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "kimi" && is_kimi_code_source(provider_name)) {
         source.service_id = std::string(kimi_service_id(KimiService::Code));
@@ -178,6 +186,28 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
     });
 }
 
+template <typename Predicate>
+void append_first_matching_source(
+    ProviderCatalogGroup& group,
+    std::string_view group_name,
+    std::span<const std::string> configured_provider_names,
+    Predicate predicate,
+    std::string_view preferred) {
+    if (!preferred.empty() && contains_name(configured_provider_names, preferred)) {
+        group.sources.push_back(source_for_provider(preferred, group_name));
+        return;
+    }
+    const auto it = std::ranges::find_if(
+        configured_provider_names,
+        [&](const std::string& configured) {
+            return provider_catalog_group_name(configured) == group_name
+                && predicate(configured);
+        });
+    if (it != configured_provider_names.end()) {
+        group.sources.push_back(source_for_provider(*it, group_name));
+    }
+}
+
 } // namespace
 
 bool ProviderCatalogModelFilter::matches(std::string_view model_id) const {
@@ -197,6 +227,10 @@ bool ProviderCatalogSource::includes_registry_model(std::string_view model_id) c
 }
 
 bool ProviderCatalogSource::includes_api_model(std::string_view model_id) const {
+    if (!api_model_filter.matches(model_id)) {
+        return false;
+    }
+
     if (api_model_policy == ProviderCatalogApiModelPolicy::All) {
         return true;
     }
@@ -297,33 +331,41 @@ ProviderCatalogGroup provider_catalog_group_for(
         return group;
     }
 
+    if (group_name == "zai") {
+        // Coding Plan is the subscribed product. List it first so its models
+        // sit at the top even when a historical login overlay copied the same
+        // key onto General API (those keys cannot bill pay-as-you-go).
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return is_zai_coding_source(configured); },
+            "zai-coding");
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return !is_zai_coding_source(configured); },
+            "zai");
+        return group;
+    }
+
     if (group_name == "kimi") {
         // Filo keeps several Kimi presets for direct selectors and backwards
         // compatibility. They are routing aliases, not user-facing services.
         // Present one public API source and one managed Kimi Code source, just
         // like the official client models Kimi Code as a single provider whose
         // available models come from its authenticated /models endpoint.
-        const auto add_first_matching = [&](auto&& predicate,
-                                            std::string_view preferred) {
-            if (!preferred.empty() && contains_name(configured_provider_names, preferred)) {
-                group.sources.push_back(source_for_provider(preferred, group_name));
-                return;
-            }
-            const auto it = std::ranges::find_if(
-                configured_provider_names,
-                [&](const std::string& configured) {
-                    return provider_catalog_group_name(configured) == group_name
-                        && predicate(configured);
-                });
-            if (it != configured_provider_names.end()) {
-                group.sources.push_back(source_for_provider(*it, group_name));
-            }
-        };
-
-        add_first_matching(
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
             [](std::string_view configured) { return !is_kimi_code_source(configured); },
             "kimi");
-        add_first_matching(
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
             [](std::string_view configured) { return is_kimi_code_source(configured); },
             "kimi-code");
         return group;

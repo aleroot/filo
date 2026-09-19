@@ -52,7 +52,8 @@ struct BuiltinProviderDefinition {
 inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
         "zai-coding", "zai", "zai", config::ApiType::OpenAI,
-        "https://api.z.ai/api/coding/paas/v4", { "ZAI_API_KEY" },
+        "https://api.z.ai/api/coding/paas/v4",
+        { "ZAI_CODING_API_KEY", "ZAI_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
     },
     BuiltinProviderDefinition{

@@ -48,8 +48,8 @@ std::string normalize_login_provider(std::string_view provider) {
     }
     if (requested == "z.ai-coding" || requested == "z-ai-coding"
         || requested == "zai_coding" || requested == "zai-coding-plan"
-        || requested == "z.aicodingplan") {
-        return "zai";
+        || requested == "z.aicodingplan" || requested == "zaicoding") {
+        return "zai-coding";
     }
     if (requested == "gemini") {
         return "google";
@@ -607,17 +607,24 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "(dashscope-intl.aliyuncs.com). DASHSCOPE_API_KEY is also accepted. "
         "For Coding Plan use `filo --auth qwen-coding` instead."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        "zai-coding",
+        "Z.AI Coding Plan",
+        "zai-coding",
+        "glm-5.3",
+        std::vector<ApiKeyProviderSeed>{},
+        "ZAI_CODING_API_KEY",
+        "Uses the GLM Coding Plan endpoint at "
+        "https://api.z.ai/api/coding/paas/v4. ZAI_API_KEY is also accepted. "
+        "This is not a General API pay-as-you-go key."));
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",
         "Z.AI",
         "zai",
         "glm-5.1",
-        std::vector<ApiKeyProviderSeed>{{
-            .provider_name = "zai-coding",
-            .model = "glm-5.3",
-        }},
+        std::vector<ApiKeyProviderSeed>{},
         "ZAI_API_KEY",
-        "The same key is also saved for the Coding Plan endpoint "
-        "with account-scoped models discovered automatically."));
+        "Uses the General API at https://api.z.ai/api/paas/v4. "
+        "For a GLM Coding Plan subscription use `filo --auth zai-coding` instead."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "mistral",
         "Mistral",

@@ -666,7 +666,7 @@ std::string ZaiProtocol::format_error_message(const HttpResponse& response) cons
     if (name() == "zai"
         && (error->code == 1113 || error->code == 1311 || error->code == 1315)) {
         message += " This request used the General API. If your API key is for "
-                   "the GLM Coding Plan, select the model under Coding endpoint.";
+                   "the GLM Coding Plan, pick a model listed under GLM Coding Plan.";
     }
     return message;
 }

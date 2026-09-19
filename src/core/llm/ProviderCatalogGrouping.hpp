@@ -30,6 +30,9 @@ struct ProviderCatalogSource {
     std::string service_id;
     std::string category_label;
     ProviderCatalogModelFilter registry_model_filter;
+    // Live /models membership. Defaults to All: the host's catalog is
+    // authoritative. Set this when a host republishes IDs it cannot serve.
+    ProviderCatalogModelFilter api_model_filter;
     ProviderCatalogApiModelPolicy api_model_policy =
         ProviderCatalogApiModelPolicy::All;
 

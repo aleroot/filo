@@ -22,26 +22,38 @@ TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
 
     REQUIRE(groups[1].provider_name == "zai");
     REQUIRE(groups[1].sources.size() == 2);
-    REQUIRE(groups[1].sources[0].provider_name == "zai");
-    REQUIRE(groups[1].sources[0].category_label == "General API.");
-    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.1"));
-    REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.3"));
-    REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.2"));
+    REQUIRE(groups[1].sources[0].provider_name == "zai-coding");
+    REQUIRE(groups[1].sources[0].category_label == "GLM Coding Plan.");
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3-flash"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3-flashx"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.2"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5-turbo"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-4.7"));
+    REQUIRE(groups[1].sources[0].includes_registry_model("glm-4.5-air"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.1"));
+    REQUIRE(groups[1].sources[0].includes_api_model("glm-5.3"));
+    REQUIRE(groups[1].sources[0].includes_api_model("glm-5.3-flash"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_api_model("glm-5.1"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_api_model("glm-future-live"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_api_model("embedding-4"));
 
-    REQUIRE(groups[1].sources[1].provider_name == "zai-coding");
-    REQUIRE(groups[1].sources[1].category_label == "Coding endpoint.");
-    REQUIRE(groups[1].sources[1].includes_registry_model("glm-5.3"));
-    REQUIRE(groups[1].sources[1].includes_registry_model("glm-5.2"));
-    REQUIRE(groups[1].sources[1].includes_registry_model("glm-5-turbo"));
-    REQUIRE(groups[1].sources[1].includes_registry_model("glm-4.7"));
-    REQUIRE(groups[1].sources[1].includes_registry_model("glm-4.5-air"));
-    REQUIRE_FALSE(groups[1].sources[1].includes_registry_model("glm-5.1"));
-    REQUIRE(groups[1].sources[1].includes_api_model("glm-future-live"));
-    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("embedding-4"));
+    REQUIRE(groups[1].sources[1].provider_name == "zai");
+    REQUIRE(groups[1].sources[1].category_label == "General API.");
+    REQUIRE(groups[1].sources[1].includes_registry_model("glm-5.1"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_registry_model("glm-5.3"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_registry_model("glm-5.2"));
+    // Z.ai's General and Coding /models catalogs are identical, so the
+    // exclude list must apply to live IDs too. Otherwise glm-5.3 is offered
+    // under General API and a Coding Plan key returns HTTP 429 / error 1113.
+    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.3"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.3-flash"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.2"));
+    REQUIRE(groups[1].sources[1].includes_api_model("glm-5.1"));
 
-    const auto general_key = core::llm::provider_catalog_selection_key(
-        groups[1].sources[0].service_id, "GLM-5.3");
     const auto coding_key = core::llm::provider_catalog_selection_key(
+        groups[1].sources[0].service_id, "GLM-5.3");
+    const auto general_key = core::llm::provider_catalog_selection_key(
         groups[1].sources[1].service_id, "glm-5.3");
     REQUIRE(general_key != coding_key);
     REQUIRE(general_key == core::llm::provider_catalog_selection_key(
@@ -243,6 +255,10 @@ TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fal
     CHECK_FALSE(token_plan->includes_api_model("wan2.7-image"));
     CHECK_FALSE(token_plan->includes_api_model("qwen-audio-2"));
     CHECK(public_api->includes_api_model("qwen-image-2.0"));
+    // DashScope hosts do not republish each other's catalogs, so the
+    // registry exclude partitions the static snapshot only. Live /models
+    // stays host-authoritative.
+    CHECK(public_api->includes_api_model("qwen3.8-max"));
 }
 
 TEST_CASE("Qwen catalog sources never offer the same registry model twice",
@@ -317,6 +333,8 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     CHECK(zai_coding->prefix == "zai-coding");
     CHECK(zai_coding->registry_provider == "zai");
     CHECK(zai_coding->catalog_group == "zai");
+    CHECK(zai_coding->env_var() == "ZAI_CODING_API_KEY");
+    CHECK(zai_coding->env_vars[1] == "ZAI_API_KEY");
 
     const auto* token_plan =
         find_builtin_provider_definition("qwen-token-plan-team");

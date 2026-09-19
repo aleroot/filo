@@ -1064,7 +1064,7 @@ TEST_CASE("GoogleAntigravityOAuthFlow uses distinct client credentials from gemi
     REQUIRE_NOTHROW(flow.revoke(empty_token)); // no-op: nothing to revoke
 }
 
-TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and coding endpoints",
+TEST_CASE("AuthenticationManager login(zai) stores only the General API key",
           "[AuthenticationManager][zai]") {
     TempDir tmp;
     {
@@ -1102,8 +1102,32 @@ TEST_CASE("AuthenticationManager login(zai) stores one API key for regular and c
             != std::string::npos);
     REQUIRE(overlay.find(R"("zai":{"model":"glm-5.1","api_key":"test-zai-key"})")
             != std::string::npos);
-    REQUIRE(overlay.find(R"("zai-coding":{"model":"glm-5.3","api_key":"test-zai-key"})")
+    REQUIRE(overlay.find("zai-coding") == std::string::npos);
+}
+
+TEST_CASE("AuthenticationManager login(zai-coding) stores only the Coding Plan key",
+          "[AuthenticationManager][zai][coding]") {
+    TempDir tmp;
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("test-coding-plan-key\n");
+    ScopedCinRedirect redirect(input);
+
+    auto result = manager.login("zai-coding");
+
+    REQUIRE(result.provider == "Z.AI Coding Plan");
+    REQUIRE(result.login_provider == "zai-coding");
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+
+    REQUIRE(overlay.find(R"("default_provider":"zai-coding")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("zai-coding":{"model":"glm-5.3","api_key":"test-coding-plan-key"})")
             != std::string::npos);
+    REQUIRE(overlay.find(R"("zai":{"model")") == std::string::npos);
 }
 
 TEST_CASE("AuthenticationManager login(qwen-coding) configures Coding Plan API key",
@@ -1379,7 +1403,7 @@ TEST_CASE("AuthenticationManager exposes openai login provider without legacy al
     const auto providers = manager.available_login_providers();
     REQUIRE(std::find(providers.begin(), providers.end(), "openai") != providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "zai") != providers.end());
-    REQUIRE(std::find(providers.begin(), providers.end(), "zai-coding") == providers.end());
+    REQUIRE(std::find(providers.begin(), providers.end(), "zai-coding") != providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-pkce") == providers.end());
     REQUIRE(std::find(providers.begin(), providers.end(), "openai-api-key") == providers.end());
 }

@@ -174,7 +174,7 @@ TEST_CASE("Z.ai protocol distinguishes 429 business errors",
         general.format_error_message(insufficient_balance);
     CHECK(balance_message.find("Z.ai Error 1113") != std::string::npos);
     CHECK(balance_message.find("General API") != std::string::npos);
-    CHECK(balance_message.find("Coding endpoint") != std::string::npos);
+    CHECK(balance_message.find("GLM Coding Plan") != std::string::npos);
 
     const HttpResponse request_throttle{
         429,
