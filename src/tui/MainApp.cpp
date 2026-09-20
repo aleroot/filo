@@ -4854,7 +4854,10 @@ RunResult run(RunOptions opts) {
                 roots.push_back({.label = "Workspace", .path = workspace.primary()});
             }
             for (const auto& extra : workspace.additional()) {
-                roots.push_back({.label = extra.filename().string(), .path = extra});
+                std::error_code ec;
+                if (std::filesystem::is_directory(extra, ec) && !ec) {
+                    roots.push_back({.label = extra.filename().string(), .path = extra});
+                }
             }
         }
         if (const auto home = core::utils::path::home_directory(); !home.empty()) {
@@ -7593,7 +7596,8 @@ RunResult run(RunOptions opts) {
             if (workspace_details_panel_state.active) {
                 workspace_event_handled = handle_workspace_details_event(
                     workspace_details_panel_state, event,
-                    agent->workspace_snapshot().root_count());
+                    workspace_details_entry_count(
+                        agent->workspace_snapshot().snapshot()));
             }
         }
         if (workspace_event_handled) {
@@ -9664,8 +9668,10 @@ RunResult run(RunOptions opts) {
             // Keep the workspace protection affordance quiet and colocated with its scope.
             std::string cwd_str = format_cwd();
             if (!cwd_str.empty()) {
-                if (visible_workspace.root_count() > 1) {
-                    cwd_str += std::format(" (+{})", visible_workspace.root_count() - 1);
+                const auto workspace_count = workspace_details_workspace_count(
+                    visible_workspace.snapshot());
+                if (workspace_count > 1) {
+                    cwd_str += std::format(" (+{})", workspace_count - 1);
                 }
                 right_items.push_back(
                     text(format_workspace_status_label(
