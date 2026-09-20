@@ -195,6 +195,7 @@ set(FILO_CORE_SOURCES
     src/tui/RewindActions.cpp
     src/tui/RewindPicker.cpp
     src/tui/RemoteActivityPanel.cpp
+    src/tui/ReviewCard.cpp
     src/tui/UsageDetailsPanel.cpp
     src/tui/WorkspaceDetailsPanel.cpp
     src/tui/AgentsVisualizerPanel.cpp
@@ -383,6 +384,12 @@ set(FILO_CORE_SOURCES
     src/core/commands/CommandExecutor.cpp
     src/core/commands/GoalExecutor.cpp
     src/core/commands/ReviewExecutor.cpp
+    src/core/review/Git.cpp
+    src/core/review/Plan.cpp
+    src/core/review/Prompt.cpp
+    src/core/review/Findings.cpp
+    src/core/review/TurnRunners.cpp
+    src/core/review/Engine.cpp
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp
@@ -588,6 +595,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_agent_ignore.cpp
     tests/test_workspace.cpp
     tests/test_commands.cpp
+    tests/test_review.cpp
+    tests/test_review_card.cpp
     tests/test_history.cpp
     tests/test_history_compaction_planner.cpp
     tests/test_config_manager.cpp
@@ -795,6 +804,8 @@ source_group(
         tests/test_memory_store.cpp
         tests/test_memory_system.cpp
         tests/test_commands.cpp
+        tests/test_review.cpp
+        tests/test_review_card.cpp
         tests/test_history.cpp
         tests/test_config_manager.cpp
         tests/test_model_defaults_persistence.cpp

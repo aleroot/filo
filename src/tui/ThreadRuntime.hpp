@@ -68,6 +68,19 @@ struct PromptDraft {
     }
 };
 
+/// Live /review mailbox for this conversation. Same contract as PromptDraft:
+/// the TUI may switch away while the campaign keeps mutating this object.
+struct ReviewActivity {
+    bool active = false;
+    /// True when this campaign called begin_turn() so finish_turn() is ours.
+    bool owns_turn = false;
+    std::string hint;
+    std::chrono::steady_clock::time_point started_at =
+        std::chrono::steady_clock::time_point::min();
+    std::string card_message_id;
+    ReviewProgressView view;
+};
+
 struct ThreadRuntimeMetadata {
     std::string session_id;
     /// User-facing label for this live runtime. This is intentionally not
@@ -122,6 +135,9 @@ public:
     void set_prompt_draft(PromptDraft draft);
     [[nodiscard]] PromptDraft prompt_draft() const;
 
+    [[nodiscard]] ReviewActivity review_activity() const;
+    void mutate_review_activity(const std::function<void(ReviewActivity&)>& mutation);
+
     [[nodiscard]] bool begin_turn();
     [[nodiscard]] bool begin_or_queue(PendingAgentTurn& turn);
     void queue_turn(PendingAgentTurn turn);
@@ -167,6 +183,8 @@ private:
     core::session::ActiveSessionLease::Ptr lease_;
     mutable std::mutex prompt_draft_mutex_;
     PromptDraft prompt_draft_;
+    mutable std::mutex review_mutex_;
+    ReviewActivity review_activity_;
 
     std::atomic_bool turn_active_{false};
     std::atomic<TurnCompletionStatus> completion_status_{TurnCompletionStatus::None};

@@ -68,6 +68,32 @@ std::size_t message_fingerprint(const UiMessage& msg) {
     add_text(msg.reasoning_elapsed);
     add_value(static_cast<std::size_t>(msg.activity_recorded));
     add_text(msg.timestamp);
+    // Review cards mutate in place while the review runs (unit rows, counters,
+    // outcome). Without hashing them the raster cache would serve the first
+    // frame of the review for the whole campaign.
+    if (msg.type == MessageType::Review) {
+        const auto& review = msg.review;
+        add_text(review.hint);
+        add_value(review.total_groups);
+        add_value(static_cast<std::size_t>(review.files));
+        add_value(static_cast<std::size_t>(review.changed_lines));
+        add_value(static_cast<std::size_t>(review.skipped_files));
+        add_value(static_cast<std::size_t>(review.risk_passes));
+        add_value(static_cast<std::size_t>(review.planned));
+        add_value(static_cast<std::size_t>(review.finished));
+        add_value(static_cast<std::size_t>(review.interrupted));
+        add_text(review.failure);
+        add_text(review.elapsed);
+        add_value(review.rows.size());
+        for (const auto& row : review.rows) {
+            add_text(row.label);
+            add_value(static_cast<std::size_t>(row.state));
+            add_value(static_cast<std::size_t>(row.findings));
+            add_value(static_cast<std::size_t>(row.blocking));
+            add_text(row.elapsed);
+            add_text(row.note);
+        }
+    }
     add_value(static_cast<std::size_t>(msg.tool_group_border_top));
     add_value(static_cast<std::size_t>(msg.tool_group_border_bottom));
     add_value(msg.tools.size());

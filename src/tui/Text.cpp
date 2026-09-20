@@ -157,6 +157,7 @@ std::string search_role_label(MessageType type) {
         case MessageType::ToolGroup: return "Tool";
         case MessageType::ShellCommand: return "Shell";
         case MessageType::System: return "System";
+        case MessageType::Review: return "Review";
     }
     return "Message";
 }

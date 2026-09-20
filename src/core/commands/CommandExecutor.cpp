@@ -825,7 +825,7 @@ std::optional<std::string> choose_review_menu_request() {
                 std::cout << "Base branch cannot be empty.\n";
                 continue;
             }
-            return std::format("--base {}", std::string(trimmed_branch));
+            return std::format("base {}", std::string(trimmed_branch));
         }
         if (input == "3") {
             std::cout << "Custom review prompt: ";
@@ -1460,7 +1460,7 @@ public:
             "  /usage              Show token usage, cost, and tool payload breakdown\n"
             "  /copy [target]      Copy response, prompt, or full transcript to clipboard\n"
             "  /history            Show or manage input history (use 'clear' to erase)\n"
-            "  /review [target]    Open review menu or run Codex-style AI code review\n"
+            "  /review [target]    Open review menu or review uncommitted/staged/base/commit\n"
             "  /export [file]      Export the current conversation to Markdown\n"
             "  /fork               Branch the current conversation into a new session\n"
             "  /rewind             Restore and branch from an earlier prompt\n"
@@ -2652,7 +2652,7 @@ class ReviewCommand : public Command {
 public:
     std::string get_name() const override { return "/review"; }
     std::string get_description() const override {
-        return "Open the review menu or run Codex-style review (/review [--uncommitted|--base|--commit|custom])";
+        return "Open the review menu or run a review (/review uncommitted|staged|base|commit|custom)";
     }
     bool accepts_arguments() const override { return true; }
 

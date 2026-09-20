@@ -688,6 +688,64 @@ TEST_CASE("scroll anchor survives provisional FTXUI layout height",
     REQUIRE(anchor->focus_y == 90);
 }
 
+TEST_CASE("HistoryComponent re-renders a review card as the review progresses",
+          "[tui][history_component][render_cache][review_card]") {
+    std::atomic<size_t> tick{0};
+
+    tui::ReviewProgressView view;
+    view.hint = "staged changes";
+    view.planned = true;
+    view.total_groups = 2;
+    view.files = 2;
+    view.rows.push_back(tui::ReviewGroupRow{
+        .label = "a.py",
+        .state = tui::ReviewGroupRow::State::Running,
+    });
+
+    std::vector<tui::UiMessage> messages;
+    messages.push_back(tui::make_review_message(view));
+
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        mock_options);
+
+    const auto first = render_history_text(history);
+    REQUIRE_THAT(first, Catch::Matchers::ContainsSubstring("0/2"));
+    REQUIRE_THAT(first, Catch::Matchers::ContainsSubstring("reviewing"));
+
+    // The engine mutates the card in place. Nothing else about the transcript
+    // changes, so only the card's own content can invalidate the raster cache.
+    messages.front().review.rows.front().state = tui::ReviewGroupRow::State::Done;
+    messages.front().review.rows.front().findings = 1;
+    messages.front().review.rows.push_back(tui::ReviewGroupRow{
+        .label = "b.py",
+        .state = tui::ReviewGroupRow::State::Running,
+    });
+
+    const auto second = render_history_text(history);
+    CHECK_THAT(second, Catch::Matchers::ContainsSubstring("1/2"));
+    CHECK_THAT(second, Catch::Matchers::ContainsSubstring("b.py"));
+    CHECK_THAT(second, Catch::Matchers::ContainsSubstring("1 finding(s)"));
+}
+
+TEST_CASE("Review cards stay static while running or finished",
+          "[tui][history_component][review_card]") {
+    tui::ReviewProgressView view;
+    view.rows.push_back(tui::ReviewGroupRow{
+        .label = "a.py",
+        .state = tui::ReviewGroupRow::State::Running,
+    });
+    auto running = tui::make_review_message(view);
+    CHECK_FALSE(tui::message_uses_animation(running, true));
+    CHECK_FALSE(tui::message_uses_animation(running, false));
+
+    view.rows.front().state = tui::ReviewGroupRow::State::Done;
+    view.finished = true;
+    auto finished = tui::make_review_message(view);
+    CHECK_FALSE(tui::message_uses_animation(finished, true));
+}
+
 TEST_CASE("HistoryComponent render cache is stable across identical frames",
           "[tui][history_component][render_cache]") {
     std::atomic<size_t> tick{0};

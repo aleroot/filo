@@ -2,6 +2,7 @@
 
 #include "DiffPreview.hpp"
 #include "Constants.hpp"
+#include "ReviewCard.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 #include <atomic>
@@ -103,6 +104,7 @@ enum class MessageType {
     ToolGroup,      // Group of tool calls (bordered container)
     ShellCommand,   // User-submitted ! command and local output
     System,         // Generic system message
+    Review,         // Live /review progress card
 };
 
 // ============================================================================
@@ -153,6 +155,9 @@ struct UiMessage {
     // ToolGroup-specific
     bool tool_group_border_top = true;
     bool tool_group_border_bottom = true;
+
+    // Review-specific: per-file progress of a running or finished /review.
+    ReviewProgressView review;
     
     // Metadata
     std::string timestamp;
@@ -350,6 +355,9 @@ UiMessage make_error_message(std::string text);
 UiMessage make_tool_group_message(std::vector<ToolActivity> tools,
                                    bool border_top = true,
                                    bool border_bottom = true);
+
+// Review progress card
+UiMessage make_review_message(ReviewProgressView review);
 
 // System message
 UiMessage make_system_message(std::string text);

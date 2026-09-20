@@ -442,6 +442,39 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
 
 Agent::~Agent() = default;
 
+std::shared_ptr<Agent> Agent::make_isolated_agent(
+    std::shared_ptr<core::llm::LLMProvider> provider) const {
+    if (!provider) {
+        return {};
+    }
+
+    auto session_context = session_context_snapshot();
+    std::string provider_name;
+    std::string model;
+    std::string mode;
+    {
+        std::lock_guard lock(history_mutex_);
+        provider_name = active_provider_name_;
+        model = active_model_;
+        mode = std::string(to_string(current_mode_));
+    }
+
+    auto isolated = std::make_shared<Agent>(
+        std::move(provider),
+        skill_manager_,
+        std::move(session_context),
+        ToolResultStore::default_root(),
+        sleep_inhibitor_,
+        session_stats_registry_,
+        budget_tracker_,
+        memory_system_,
+        workspace_leases_);
+    isolated->set_active_provider_name(std::move(provider_name));
+    isolated->set_active_model(std::move(model));
+    isolated->set_mode(mode);
+    return isolated;
+}
+
 // ---------------------------------------------------------------------------
 // Cancellation support
 // ---------------------------------------------------------------------------
@@ -1459,7 +1492,8 @@ void Agent::send_message(core::llm::Message user_message,
         history_.push_back(std::move(user_message));
         refresh_context_window_snapshot_unlocked();
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
-        turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
+        turn_state->max_steps = sanitize_max_steps_per_turn(
+            turn_callbacks.max_steps_override.value_or(loop_limits_.max_steps_per_turn));
     }
     if (auto_context.has_value()) {
       turn_state->auto_turn = auto_turn_coordinator_.start(
@@ -1538,7 +1572,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     if (!turn_state) {
         turn_state = std::make_shared<TurnState>();
         std::lock_guard lock(history_mutex_);
-        turn_state->max_steps = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
+        turn_state->max_steps = sanitize_max_steps_per_turn(
+            turn_callbacks.max_steps_override.value_or(loop_limits_.max_steps_per_turn));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
     }
 
@@ -2096,10 +2131,12 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             self->run_efficiency_rotation_if_needed(
                 turn_callbacks.min_context_utilization_for_rotation);
           }
-          self->run_memory_background_review(
-              provider ? provider->get_last_rate_limit_info()
-                       : core::llm::protocols::RateLimitInfo{},
-              turn_callbacks.on_status_log);
+          if (turn_callbacks.allow_background_memory_review) {
+              self->run_memory_background_review(
+                  provider ? provider->get_last_rate_limit_info()
+                           : core::llm::protocols::RateLimitInfo{},
+                  turn_callbacks.on_status_log);
+          }
           self->check_auto_compact(turn_callbacks.on_status_log
                                        ? turn_callbacks.on_status_log
                                        : text_callback);

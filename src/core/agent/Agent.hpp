@@ -94,10 +94,15 @@ public:
         std::string model_override{};
         std::string effort_override{};
         std::optional<int> max_tokens_override{};
+        // Optional per-turn cap for bounded workflows such as code review.
+        // An unset value preserves the session's configured default; zero is
+        // the existing explicit value for an unlimited turn.
+        std::optional<int> max_steps_override{};
         std::optional<core::llm::ResponseFormat> response_format_override{};
         std::vector<std::string> allowed_tools{};
         std::string ledger_actor = "agent";
         bool allow_efficiency_rotation = true;
+        bool allow_background_memory_review = true;
         // Rotate only when current context usage reaches this fraction [0.0, 1.0].
         double min_context_utilization_for_rotation = 0.0;
     };
@@ -317,6 +322,13 @@ public:
         std::lock_guard lock(history_mutex_);
         return provider_;
     }
+
+    /// Build a clean agent that shares this session's read-only execution
+    /// substrate but owns its own conversation and provider turn. Review and
+    /// exploration callers use this when independent requests can overlap;
+    /// the provider must already be an isolated/forked instance.
+    [[nodiscard]] std::shared_ptr<Agent> make_isolated_agent(
+        std::shared_ptr<core::llm::LLMProvider> provider) const;
 
     void set_active_provider_name(std::string provider_name) {
         std::lock_guard lock(history_mutex_);

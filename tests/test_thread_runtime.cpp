@@ -367,6 +367,34 @@ TEST_CASE("workspace tab names reserve all other titles and preserve custom name
     CHECK_FALSE(custom->metadata().auto_thread_name);
 }
 
+TEST_CASE("ThreadRuntime keeps review activity isolated per thread",
+          "[tui][thread_runtime][review]") {
+    auto first = make_runtime("aaaa1111");
+    auto second = make_runtime("bbbb2222");
+
+    first->mutate_review_activity([](tui::ReviewActivity& state) {
+        state.active = true;
+        state.hint = "staged changes";
+        state.view.total_groups = 17;
+    });
+
+    CHECK(first->review_activity().active);
+    CHECK(first->review_activity().hint == "staged changes");
+    CHECK(first->review_activity().view.total_groups == 17);
+    CHECK_FALSE(second->review_activity().active);
+    CHECK(second->review_activity().view.total_groups == 0);
+
+    REQUIRE(first->begin_turn());
+    CHECK(first->turn_active());
+    CHECK_FALSE(second->turn_active());
+
+    tui::PendingAgentTurn other{.text = "work on the other thread"};
+    REQUIRE(second->begin_or_queue(other));
+    CHECK(second->turn_active());
+    CHECK(first->turn_active());
+    CHECK(first->review_activity().active);
+}
+
 TEST_CASE("ThreadRuntime parks prompt drafts independently",
           "[tui][thread_runtime][prompt]") {
     auto first = make_runtime("aaaa1111");

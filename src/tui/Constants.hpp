@@ -99,15 +99,15 @@ struct AnimationCadence {
 };
 
 // Select the cheapest cadence that preserves every visible behavior.
-// Spinner frames run at the established 150 ms rhythm. When spinners are
-// hidden, assistant/review elapsed labels need only a one-second refresh.
+// Review progress is deliberately static; it only needs a one-second refresh
+// for the elapsed label. Spinner frames remain reserved for live chat/tool
+// activity.
 [[nodiscard]] constexpr std::optional<AnimationCadence> select_animation_cadence(
     bool show_spinner,
     bool assistant_active,
     bool review_active,
     bool conversation_animation_active) noexcept {
-    if (show_spinner
-        && (assistant_active || review_active || conversation_animation_active)) {
+    if (show_spinner && (assistant_active || conversation_animation_active)) {
         return AnimationCadence{
             .period = std::chrono::milliseconds(kAnimationIntervalMs),
             .advance_frame = true,

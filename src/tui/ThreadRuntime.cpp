@@ -66,6 +66,17 @@ PromptDraft ThreadRuntime::prompt_draft() const {
     return prompt_draft_;
 }
 
+ReviewActivity ThreadRuntime::review_activity() const {
+    std::lock_guard lock(review_mutex_);
+    return review_activity_;
+}
+
+void ThreadRuntime::mutate_review_activity(
+    const std::function<void(ReviewActivity&)>& mutation) {
+    std::lock_guard lock(review_mutex_);
+    mutation(review_activity_);
+}
+
 void ThreadRuntime::touch() noexcept {
     last_activity_.store(std::chrono::system_clock::now(), std::memory_order_release);
 }

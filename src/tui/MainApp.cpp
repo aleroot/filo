@@ -147,7 +147,6 @@ constexpr std::string_view kDisableTerminalInputModes =
     "\x1B[>4;0m";
 
 constexpr auto kExitConfirmWindow = std::chrono::milliseconds(3000);
-constexpr int kReviewActivitySpinnerCharset = 12; // Compact circle spinner (single-cell frames).
 constexpr std::size_t kMaxStderrPanelLines = 20;
 
 std::string join_context_source_labels(const std::vector<std::string>& source_labels) {
@@ -954,6 +953,10 @@ RunResult run(RunOptions opts) {
     Box remote_activity_pill_box{0, -1, 0, -1};
     bool usage_details_panel_active = false;
     Box usage_status_box{0, -1, 0, -1};
+    // The review pill shows review (N/M); its detail opens as a footer popover,
+    // the same affordance as the usage and workspace pills.
+    bool review_details_panel_active = false;
+    Box review_status_box{0, -1, 0, -1};
     WorkspaceDetailsPanelState workspace_details_panel_state;
     Box workspace_status_box{0, -1, 0, -1};
     bool agents_visualizer_panel_active = false;
@@ -1203,13 +1206,9 @@ RunResult run(RunOptions opts) {
         }
     };
 
-    struct ReviewActivityState {
-        bool active = false;
-        std::string hint;
-        std::chrono::steady_clock::time_point started_at =
-            std::chrono::steady_clock::time_point::min();
-    };
-    ReviewActivityState review_activity_state;
+    // /review live state lives on ThreadRuntime (ReviewActivity), the same
+    // mailbox as prompt drafts and turn_active. The footer popover is visible-
+    // thread chrome and closes when the user leaves that thread.
 
     struct LocalModelPickerState {
         bool active = false;
@@ -1715,9 +1714,10 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             selected_messages->clear();
-            review_activity_state.active = false;
-            review_activity_state.hint.clear();
-            review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
+            current_runtime->mutate_review_activity([](ReviewActivity& state) {
+                state = {};
+            });
+            review_details_panel_active = false;
             if (const auto message = startup_history_message(); !message.empty()) {
                 append_ui_message(*selected_messages, make_system_message(message));
             }
@@ -1809,7 +1809,8 @@ RunResult run(RunOptions opts) {
     // process-wide exception: stop every running thread, or quit if idle.
     auto current_thread_has_stoppable_activity = [&]() -> bool {
         return !list_active_terminals().empty()
-            || (current_runtime && current_runtime->turn_active());
+            || (current_runtime && current_runtime->turn_active())
+            || (current_runtime && current_runtime->review_activity().active);
     };
 
     auto any_thread_has_stoppable_activity = [&]() -> bool {
@@ -1849,7 +1850,8 @@ RunResult run(RunOptions opts) {
         agent->request_stop();
         std::size_t hidden_stopped = 0;
         for (const auto& runtime : thread_runtimes.snapshot()) {
-            if (runtime->turn_active() && runtime->agent() != agent) {
+            if ((runtime->turn_active() || runtime->review_activity().active)
+                && runtime->agent() != agent) {
                 runtime->agent()->request_stop();
                 ++hidden_stopped;
             }
@@ -1872,14 +1874,6 @@ RunResult run(RunOptions opts) {
 
     // /stop keeps the historical name; it remains the visible-thread stop.
     auto stop_active_terminal = stop_current_thread;
-
-    auto append_assistant_output = [&](const std::string& str) {
-        std::lock_guard lock(ui_mutex);
-        append_ui_message(
-            *selected_messages,
-            make_assistant_message(str, current_time_str(), false));
-        wake_ui();
-    };
 
     auto animation_cadence = [&]() -> std::optional<AnimationCadence> {
         // Race fix: this lambda runs on the animation thread while thread
@@ -1914,21 +1908,23 @@ RunResult run(RunOptions opts) {
             }
         }
         std::lock_guard lock(ui_mutex);
-        const bool review_active = review_activity_state.active;
-        bool conversation_animation_active =
+        const bool review_active =
+            runtime_snapshot && runtime_snapshot->review_activity().active;
+        const bool conversation_animation_active =
             direct_shell_animation_count.load(std::memory_order_relaxed) > 0
             || remote_activity_active;
-        if (!assistant_active && !review_active && !conversation_animation_active) {
+        bool fallback_animation_active = conversation_animation_active;
+        if (!assistant_active && !review_active && !fallback_animation_active) {
             // Defensive fallback for restored or externally-updated activity
             // cards that are not owned by the normal assistant/shell counters.
-            conversation_animation_active = messages_snapshot
+            fallback_animation_active = messages_snapshot
                 && conversation_uses_animation(*messages_snapshot, true);
         }
         const auto cadence = select_animation_cadence(
             ui_show_spinner.load(std::memory_order_relaxed),
             assistant_active,
             review_active,
-            conversation_animation_active);
+            fallback_animation_active);
         if (!cadence.has_value() && remote_completion_fresh) {
             return AnimationCadence{
                 .period = std::chrono::seconds(1),
@@ -2475,6 +2471,7 @@ RunResult run(RunOptions opts) {
             router_provider = std::dynamic_pointer_cast<
                 core::llm::providers::RouterProvider>(llm_provider);
             selected_messages = target_runtime->messages();
+            review_details_panel_active = false;
             session_id         = metadata.session_id;
             session_name       = metadata.session_name;
             session_created_at = metadata.created_at;
@@ -2601,17 +2598,165 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
-    auto set_review_activity = [&](bool active, const std::string& hint) {
+    // Locates the live review card by id. Returns nullptr once the card has
+    // been finalized, cleared, or the user switched to another thread.
+    auto find_review_card = [](std::vector<UiMessage>& messages,
+                               std::string_view card_id) -> UiMessage* {
+        if (card_id.empty()) return nullptr;
+        for (auto& message : std::ranges::reverse_view(messages)) {
+            if (message.type == MessageType::Review && message.id == card_id) {
+                return &message;
+            }
+        }
+        return nullptr;
+    };
+
+    auto apply_review_activity = [&](const ThreadRuntime::Ptr& runtime,
+                                    bool active,
+                                    const std::string& hint) {
+        if (!runtime) return;
+        bool should_begin_turn = false;
         {
             std::lock_guard lock(ui_mutex);
-            review_activity_state.active = active;
-            if (active) {
-                review_activity_state.hint = hint;
-                review_activity_state.started_at = std::chrono::steady_clock::now();
-            } else {
-                review_activity_state.hint.clear();
-                review_activity_state.started_at = std::chrono::steady_clock::time_point::min();
+            runtime->mutate_review_activity([&](ReviewActivity& state) {
+                const bool was_active = state.active;
+                state.active = active;
+                if (active) {
+                    state.hint = hint;
+                    if (!was_active) {
+                        state.started_at = std::chrono::steady_clock::now();
+                        should_begin_turn = true;
+                    }
+                } else {
+                    state.hint.clear();
+                    state.started_at = std::chrono::steady_clock::time_point::min();
+                    if (runtime == current_runtime) {
+                        review_details_panel_active = false;
+                    }
+                }
+            });
+        }
+        if (should_begin_turn) {
+            const bool owns = runtime->begin_turn();
+            runtime->mutate_review_activity([&](ReviewActivity& state) {
+                state.owns_turn = owns;
+            });
+        }
+        animation_cv.notify_one();
+        wake_ui();
+    };
+
+    // Translates engine progress into the transcript's review card. Runs on
+    // the review worker thread, so every mutation happens under ui_mutex and
+    // ends with a UI wake — the same contract as the tool-activity callbacks.
+    auto apply_review_progress = [&](const ThreadRuntime::Ptr& runtime,
+                                    const core::review::Progress& progress) {
+        if (!runtime) return;
+        using core::review::ProgressPhase;
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed_since = [&now](std::chrono::steady_clock::time_point since) {
+            if (since == std::chrono::steady_clock::time_point::min()) {
+                return std::string{};
             }
+            return format_elapsed_compact(
+                std::chrono::duration_cast<std::chrono::seconds>(now - since));
+        };
+        {
+            std::lock_guard lock(ui_mutex);
+            auto messages = runtime->messages();
+            runtime->mutate_review_activity([&](ReviewActivity& state) {
+                auto* card = find_review_card(*messages, state.card_message_id);
+                auto& view = state.view;
+                const auto row_for_group = [&view](std::size_t group_index)
+                    -> ReviewGroupRow* {
+                    for (auto& row : view.rows) {
+                        if (row.group_index == group_index) return &row;
+                    }
+                    return nullptr;
+                };
+
+                switch (progress.phase) {
+                    case ProgressPhase::Planned: {
+                        view = ReviewProgressView{};
+                        view.hint = state.hint;
+                        view.planned = true;
+                        view.total_groups = progress.group_total;
+                        view.files = progress.files;
+                        view.changed_lines = progress.changed_lines;
+                        view.skipped_files = progress.skipped_files;
+                        view.risk_passes = progress.risk_passes;
+                        for (const auto& path : progress.skipped_paths) {
+                            view.rows.push_back(ReviewGroupRow{
+                                .label = path,
+                                .state = ReviewGroupRow::State::Skipped,
+                                .note = "diff too large",
+                            });
+                        }
+                        append_ui_message(*messages, make_review_message(view));
+                        state.card_message_id = messages->back().id;
+                        card = &messages->back();
+                        break;
+                    }
+                    case ProgressPhase::GroupStarted: {
+                        ReviewGroupRow row{
+                            .label = progress.label,
+                            .state = ReviewGroupRow::State::Running,
+                            .group_index = progress.group_index,
+                            .started_at = now,
+                        };
+                        const auto skipped = std::ranges::find_if(
+                            view.rows,
+                            [](const ReviewGroupRow& existing) {
+                                return existing.state == ReviewGroupRow::State::Skipped;
+                            });
+                        view.rows.insert(skipped, std::move(row));
+                        break;
+                    }
+                    case ProgressPhase::RiskPass: {
+                        if (auto* row = row_for_group(progress.group_index); row != nullptr) {
+                            row->state = ReviewGroupRow::State::RiskPass;
+                        }
+                        break;
+                    }
+                    case ProgressPhase::GroupFinished: {
+                        if (auto* row = row_for_group(progress.group_index); row != nullptr) {
+                            row->state = ReviewGroupRow::State::Done;
+                            row->findings = progress.findings;
+                            row->blocking = progress.blocking_findings;
+                            row->elapsed = elapsed_since(row->started_at);
+                        }
+                        break;
+                    }
+                    case ProgressPhase::GroupFailed: {
+                        if (auto* row = row_for_group(progress.group_index); row != nullptr) {
+                            row->state = ReviewGroupRow::State::Failed;
+                            row->note = compact_single_line(progress.failure, 96);
+                            row->elapsed = elapsed_since(row->started_at);
+                        }
+                        break;
+                    }
+                    case ProgressPhase::Finished: {
+                        view.finished = true;
+                        view.interrupted = progress.interrupted;
+                        view.failure = progress.failure;
+                        view.skipped_files = progress.skipped_files;
+                        view.elapsed = elapsed_since(state.started_at);
+                        for (auto& row : view.rows) {
+                            if (row.state == ReviewGroupRow::State::Running
+                                || row.state == ReviewGroupRow::State::RiskPass) {
+                                row.state = ReviewGroupRow::State::Skipped;
+                                row.note = "not reviewed";
+                            }
+                        }
+                        state.card_message_id.clear();
+                        break;
+                    }
+                }
+
+                if (card != nullptr) {
+                    card->review = view;
+                }
+            });
         }
         animation_cv.notify_one();
         wake_ui();
@@ -5476,10 +5621,9 @@ RunResult run(RunOptions opts) {
             router_provider = std::dynamic_pointer_cast<
                 core::llm::providers::RouterProvider>(llm_provider);
             selected_messages = next_runtime->messages();
-            review_activity_state.active = false;
-            review_activity_state.hint.clear();
-            review_activity_state.started_at =
-                std::chrono::steady_clock::time_point::min();
+            // Review state is on the runtime, not the visible page. Closing
+            // the popover is the only visible-thread chrome to reset.
+            review_details_panel_active = false;
             session_picker_state = {};
             goal_manager.clear();
             goal_engine.reset();
@@ -5509,6 +5653,7 @@ RunResult run(RunOptions opts) {
                 return command.session_id == target_session_id;
             });
         return runtime->turn_active()
+            || runtime->review_activity().active
             || runtime->queued_turn_count() > 0
             || runtime->workers_in_flight() > 0
             || has_active_shell
@@ -6853,12 +6998,21 @@ RunResult run(RunOptions opts) {
             return;
         }
 
+        const auto origin_runtime = current_runtime;
         core::commands::CommandContext ctx{
             .text             = text,
             .clear_input_fn   = []() {},
-            .append_history_fn = append_history,
-            .append_assistant_output_fn = append_assistant_output,
-            .agent            = agent,
+            .append_history_fn = [origin_runtime, &append_runtime_history](const std::string& str) {
+                append_runtime_history(origin_runtime, str);
+            },
+            .append_assistant_output_fn = [origin_runtime, &ui_mutex, &wake_ui](const std::string& str) {
+                std::lock_guard lock(ui_mutex);
+                append_ui_message(
+                    *origin_runtime->messages(),
+                    make_assistant_message(str, current_time_str(), false));
+                wake_ui();
+            },
+            .agent            = origin_runtime->agent(),
             .session_stats_registry = session_stats_registry,
             .clear_screen_fn  = clear_screen,
             .quit_fn          = screen.ExitLoopClosure(),
@@ -6972,7 +7126,29 @@ RunResult run(RunOptions opts) {
             .send_user_message_fn = [&](const std::string& message) {
                 submit_or_queue_agent_turn(message, {});
             },
-            .set_review_activity_fn = set_review_activity,
+            .set_review_activity_fn = [origin_runtime, &apply_review_activity, &submit_agent_turn](
+                                         bool active, const std::string& hint) {
+                bool should_finish_turn = false;
+                if (!active) {
+                    const auto snap = origin_runtime->review_activity();
+                    should_finish_turn = snap.active && snap.owns_turn;
+                }
+                apply_review_activity(origin_runtime, active, hint);
+                if (should_finish_turn) {
+                    origin_runtime->mutate_review_activity([](ReviewActivity& state) {
+                        state.owns_turn = false;
+                    });
+                    if (auto next = origin_runtime->finish_turn(true); next.has_value()) {
+                        submit_agent_turn(origin_runtime,
+                                          std::move(next->text),
+                                          std::move(next->callbacks));
+                    }
+                }
+            },
+            .review_progress_fn = [origin_runtime, &apply_review_progress](
+                                      const core::review::Progress& progress) {
+                apply_review_progress(origin_runtime, progress);
+            },
             .send_user_skill_message_fn = submit_skill_turn,
             .list_todos_fn = list_todos,
             .add_todo_fn = add_todo,
@@ -7222,7 +7398,39 @@ RunResult run(RunOptions opts) {
                 std::lock_guard lock(ui_mutex);
                 usage_details_panel_active = !usage_details_panel_active;
                 workspace_details_panel_state.active = false;
+                review_details_panel_active = false;
             }
+            wake_ui();
+            return true;
+        }
+
+        if (event.is_mouse()
+            && event.mouse().button == Mouse::Left
+            && event.mouse().motion == Mouse::Pressed
+            && review_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            {
+                std::lock_guard lock(ui_mutex);
+                review_details_panel_active = !review_details_panel_active;
+                usage_details_panel_active = false;
+                workspace_details_panel_state.active = false;
+                agents_visualizer_panel_active = false;
+                remote_activity_panel_state.active = false;
+            }
+            wake_ui();
+            return true;
+        }
+
+        bool review_panel_was_active = false;
+        {
+            std::lock_guard lock(ui_mutex);
+            if (review_details_panel_active) {
+                if (is_panel_dismiss_event(event)) {
+                    review_details_panel_active = false;
+                    review_panel_was_active = true;
+                }
+            }
+        }
+        if (review_panel_was_active) {
             wake_ui();
             return true;
         }
@@ -7759,12 +7967,12 @@ RunResult run(RunOptions opts) {
                                 0,
                                 static_cast<int>(review_picker_state.filtered_base_refs.size()) - 1);
                             review_picker_request = std::format(
-                                "--base {}",
+                                "base {}",
                                 review_picker_state.filtered_base_refs[static_cast<std::size_t>(selected_ref)].name);
                             review_picker_on_select = std::move(review_picker_state.on_select);
                             review_picker_state.active = false;
                         } else if (!trimmed.empty()) {
-                            review_picker_request = std::format("--base {}", std::string(trimmed));
+                            review_picker_request = std::format("base {}", std::string(trimmed));
                             review_picker_on_select = std::move(review_picker_state.on_select);
                             review_picker_state.active = false;
                         }
@@ -8920,6 +9128,8 @@ RunResult run(RunOptions opts) {
         bool                   provider_picker_active = false;
         bool                   review_picker_active = false;
         bool                   review_activity_active = false;
+        bool                   review_details_panel_visible = false;
+        ReviewProgressView     review_view_snapshot;
         bool                   settings_panel_active = false;
         bool                   authentication_recovery_active = false;
         std::string            perm_tool, perm_args, perm_allow_label;
@@ -9030,9 +9240,15 @@ RunResult run(RunOptions opts) {
             review_picker_input = review_picker_state.input_text;
             review_picker_base_refs = review_picker_state.filtered_base_refs;
             review_picker_base_ref_selected = review_picker_state.selected_base_ref;
-            review_activity_active = review_activity_state.active;
-            review_activity_hint = review_activity_state.hint;
-            review_activity_started_at = review_activity_state.started_at;
+            {
+                const auto review = current_runtime->review_activity();
+                review_activity_active = review.active;
+                review_activity_hint = review.hint;
+                review_activity_started_at = review.started_at;
+                review_view_snapshot = review.view;
+            }
+            review_details_panel_visible =
+                review_details_panel_active && review_activity_active;
             settings_panel_active = settings_panel_state.active;
             settings_panel_selected = settings_panel_state.selected;
             settings_panel_scope = settings_panel_state.scope;
@@ -9218,6 +9434,23 @@ RunResult run(RunOptions opts) {
                 total,
                 cost,
                 ctx_pct);
+        } else if (review_details_panel_visible) {
+            auto review_view = review_view_snapshot;
+            if (review_view.elapsed.empty()
+                && review_activity_started_at
+                    != std::chrono::steady_clock::time_point::min()) {
+                review_view.elapsed = format_elapsed_compact(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - review_activity_started_at));
+            }
+            if (review_view.hint.empty()) {
+                review_view.hint = review_activity_hint;
+            }
+            bottom_el = render_review_details_panel(
+                review_view,
+                animation_tick.load(std::memory_order_relaxed),
+                ui_show_spinner.load(std::memory_order_relaxed),
+                std::clamp(Terminal::Size().dimy / 2 - 6, 1, 12));
         } else if (agents_visualizer_visible) {
             bottom_el = render_agents_visualizer_panel(
                 steering_context.files,
@@ -9542,26 +9775,17 @@ RunResult run(RunOptions opts) {
 
         Element review_activity_el = text("");
         if (review_activity_active) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto elapsed = review_activity_started_at == std::chrono::steady_clock::time_point::min()
-                ? std::chrono::seconds::zero()
-                : std::chrono::duration_cast<std::chrono::seconds>(now - review_activity_started_at);
-            const std::string hint = review_activity_hint.empty()
-                ? std::string("current changes")
-                : compact_single_line(review_activity_hint, 44);
-            const std::string label = std::format(" reviewing {} ({})", hint, format_elapsed_compact(elapsed));
-            const std::size_t spinner_frame =
-                ui_show_spinner.load(std::memory_order_relaxed) ? (tick / 2) : 0;
-            Element spinner_el = spinner(kReviewActivitySpinnerCharset, spinner_frame)
-                               | color(ColorYellowBright)
-                               | ftxui::bold
-                               | size(WIDTH, EQUAL, 1);
+            // The status-bar review widget is deliberately static. Progress
+            // events update its count; activity animation belongs elsewhere.
             review_activity_el = hbox({
                 text(" "),
-                std::move(spinner_el),
-                text(label + " ")
-                    | color(Color::GrayLight),
-            });
+                text(" " + review_status_pill_label(review_view_snapshot) + " ")
+                    | color(review_details_panel_visible
+                                ? Color(ColorYellowBright)
+                                : Color(Color::GrayLight)),
+            }) | reflect(review_status_box);
+        } else {
+            review_status_box = {0, -1, 0, -1};
         }
 
         Element queued_steering_el = text("");

@@ -2003,6 +2003,15 @@ UiMessage make_tool_group_message(std::vector<ToolActivity> tools,
     return msg;
 }
 
+UiMessage make_review_message(ReviewProgressView review) {
+    UiMessage msg;
+    msg.type = MessageType::Review;
+    msg.id = generate_message_id();
+    msg.review = std::move(review);
+    msg.margin_top = 1;
+    return msg;
+}
+
 UiMessage make_system_message(std::string text) {
     UiMessage msg;
     msg.type = MessageType::System;
@@ -2798,6 +2807,10 @@ Element render_history_message(const UiMessage& message,
         case MessageType::System:
             card = render_system_message(message, options);
             break;
+        case MessageType::Review:
+            card = render_review_card(message.review, tick, options.show_spinner);
+            trailing_space = true;
+            break;
     }
     if (!trailing_space) {
         return card;
@@ -2901,6 +2914,14 @@ bool message_uses_animation(const UiMessage& message, bool show_spinner) {
 
     if (message.type == MessageType::ShellCommand) {
         return message.pending;
+    }
+
+    if (message.type == MessageType::Review) {
+        // Review progress arrives as explicit state changes and wakes the UI.
+        // The footer owns the single live activity spinner; the transcript
+        // card is intentionally static and must not schedule a redraw every
+        // animation tick while a model request is pending.
+        return false;
     }
 
     return false;

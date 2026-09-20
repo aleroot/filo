@@ -13,6 +13,7 @@
 #include "../../core/history/PromptHistoryStore.hpp"
 #include "../../core/memory/MemoryPolicy.hpp"
 #include "../../core/memory/MemoryStore.hpp"
+#include "../../core/review/Types.hpp"
 #include "../../core/session/SessionData.hpp"
 #include "../../core/session/SessionStats.hpp"
 
@@ -107,6 +108,10 @@ struct CommandContext {
     std::function<void(const std::string&)> send_user_message_fn = {};
     // Toggle and describe long-running /review activity in the TUI.
     std::function<void(bool, const std::string&)> set_review_activity_fn = {};
+    /// Structured per-file review progress. Hosts that supply this render a
+    /// live review card; hosts that do not (tests, prompter, daemon) still get
+    /// the plain-text progress lines through append_history_fn.
+    std::function<void(const core::review::Progress&)> review_progress_fn = {};
     std::function<void(const std::string&,
                        const std::string&,
                        const std::vector<std::string>&)> send_user_skill_message_fn = {};

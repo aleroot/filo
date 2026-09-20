@@ -574,8 +574,8 @@ TEST_CASE("animation cadence covers review and hidden elapsed indicators",
 
     const auto review = select_animation_cadence(true, false, true, false);
     REQUIRE(review.has_value());
-    REQUIRE(review->period == 150ms);
-    REQUIRE(review->advance_frame);
+    REQUIRE(review->period == 1s);
+    REQUIRE_FALSE(review->advance_frame);
 
     const auto hidden_assistant = select_animation_cadence(false, true, false, true);
     REQUIRE(hidden_assistant.has_value());

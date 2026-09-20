@@ -1549,7 +1549,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(review_activity_events->back().second.empty());
     }
 
-    SECTION("/review --uncommitted sends precomputed patch without tools") {
+    SECTION("/review uncommitted sends precomputed patch without tools") {
         namespace fs = std::filesystem;
         struct CwdGuard {
             fs::path old;
@@ -1592,7 +1592,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             provider,
             core::tools::ToolManager::get_instance(),
             test_support::make_workspace_session_context());
-        ctx.text = "/review --uncommitted";
+        ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
@@ -1621,7 +1621,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         fs::remove_all(temp_dir, ec);
     }
 
-    SECTION("/review --uncommitted includes untracked file contents") {
+    SECTION("/review uncommitted includes untracked file contents") {
         namespace fs = std::filesystem;
         struct CwdGuard {
             fs::path old;
@@ -1660,7 +1660,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             provider,
             core::tools::ToolManager::get_instance(),
             test_support::make_workspace_session_context());
-        ctx.text = "/review --uncommitted";
+        ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
@@ -1680,7 +1680,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         fs::remove_all(temp_dir, ec);
     }
 
-    SECTION("/review --uncommitted works before the first commit") {
+    SECTION("/review uncommitted works before the first commit") {
         namespace fs = std::filesystem;
         struct CwdGuard {
             fs::path old;
@@ -1712,7 +1712,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             provider,
             core::tools::ToolManager::get_instance(),
             test_support::make_workspace_session_context());
-        ctx.text = "/review --uncommitted";
+        ctx.text = "/review uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
@@ -1727,19 +1727,21 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         fs::remove_all(temp_dir, ec);
     }
 
-    SECTION("/review --help shows usage without needing an agent") {
+    SECTION("/review help shows usage without needing an agent") {
         *mock_history = "";
         ctx.agent = nullptr;
-        ctx.text = "/review --help";
+        ctx.text = "/review help";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /review"));
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("--base <branch>"));
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("--commit <sha>"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("base <branch>"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("commit <sha>"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/review uncommitted"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("/review staged"));
     }
 
-    SECTION("/review validates unknown option before agent execution") {
+    SECTION("/review rejects unknown dashed flags") {
         *mock_history = "";
         ctx.agent = nullptr;
         ctx.text = "/review --nope";
@@ -1747,17 +1749,39 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Unknown /review option"));
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /review"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("uncommitted, staged"));
     }
 
-    SECTION("/review validates missing option value before agent execution") {
+    SECTION("/review accepts the legacy dashed target alias") {
         *mock_history = "";
         ctx.agent = nullptr;
-        ctx.text = "/review --base";
+        ctx.text = "/review --uncommitted";
 
         const bool handled = executor.try_execute(ctx.text, ctx);
         REQUIRE(handled == true);
-        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Missing value for --base"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring(
+            "Review requires an active agent session"));
+        REQUIRE(mock_history->find("Unknown /review option") == std::string::npos);
+    }
+
+    SECTION("/review validates missing base branch before agent execution") {
+        *mock_history = "";
+        ctx.agent = nullptr;
+        ctx.text = "/review base";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Missing branch for base"));
+    }
+
+    SECTION("/review uncommitted extra is not a custom prompt") {
+        *mock_history = "";
+        ctx.agent = nullptr;
+        ctx.text = "/review uncommitted extra";
+
+        const bool handled = executor.try_execute(ctx.text, ctx);
+        REQUIRE(handled == true);
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Cannot combine custom instructions"));
     }
 
     SECTION("/export requires an active agent") {
