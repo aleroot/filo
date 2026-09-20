@@ -32,6 +32,7 @@
 #include "core/utils/PathUtils.hpp"
 #include "GoalExecutor.hpp"
 #include "ReviewExecutor.hpp"
+#include "core/review/ReviewTargets.hpp"
 
 namespace core::commands {
 
@@ -790,13 +791,14 @@ void wait_for_enter() {
 }
 
 std::optional<std::string> choose_review_menu_request() {
+    const auto options = core::review::review_menu_options();
     while (true) {
-        std::cout
-            << "\nReview Targets\n"
-            << "  1. Uncommitted changes\n"
-            << "  2. Base branch\n"
-            << "  3. Customised\n"
-            << "Select an option [1-3] or press Enter to cancel: ";
+        std::cout << "\nReview Targets\n";
+        for (std::size_t i = 0; i < options.size(); ++i) {
+            std::cout << std::format("  {}. {}\n", i + 1, options[i].label);
+        }
+        std::cout << std::format(
+            "Select an option [1-{}] or press Enter to cancel: ", options.size());
         std::cout.flush();
 
         std::string line;
@@ -809,41 +811,49 @@ std::optional<std::string> choose_review_menu_request() {
             return std::nullopt;
         }
 
-        if (input == "1") {
-            return std::string{};
-        }
-        if (input == "2") {
-            std::cout << "Base branch: ";
-            std::cout.flush();
-
-            std::string branch;
-            if (!std::getline(std::cin, branch)) {
-                return std::nullopt;
-            }
-            const std::string_view trimmed_branch = trim(branch);
-            if (trimmed_branch.empty()) {
-                std::cout << "Base branch cannot be empty.\n";
-                continue;
-            }
-            return std::format("base {}", std::string(trimmed_branch));
-        }
-        if (input == "3") {
-            std::cout << "Custom review prompt: ";
-            std::cout.flush();
-
-            std::string prompt;
-            if (!std::getline(std::cin, prompt)) {
-                return std::nullopt;
-            }
-            const std::string_view trimmed_prompt = trim(prompt);
-            if (trimmed_prompt.empty()) {
-                std::cout << "Custom review prompt cannot be empty.\n";
-                continue;
-            }
-            return std::string(trimmed_prompt);
+        unsigned index = 0;
+        const auto [ptr, ec] = std::from_chars(input.data(), input.data() + input.size(), index);
+        if (ec != std::errc{} || ptr != input.data() + input.size()
+            || index < 1 || index > options.size()) {
+            std::cout << std::format("Invalid selection. Choose 1-{}.\n", options.size());
+            continue;
         }
 
-        std::cout << "Invalid selection. Choose 1, 2, or 3.\n";
+        const auto& option = options[index - 1];
+        switch (option.follow_up) {
+            case core::review::ReviewMenuFollowUp::None:
+                return std::string(option.request);
+            case core::review::ReviewMenuFollowUp::BaseBranch: {
+                std::cout << "Base branch: ";
+                std::cout.flush();
+
+                std::string branch;
+                if (!std::getline(std::cin, branch)) {
+                    return std::nullopt;
+                }
+                const std::string_view trimmed_branch = trim(branch);
+                if (trimmed_branch.empty()) {
+                    std::cout << "Base branch cannot be empty.\n";
+                    continue;
+                }
+                return std::format("base {}", std::string(trimmed_branch));
+            }
+            case core::review::ReviewMenuFollowUp::CustomPrompt: {
+                std::cout << "Custom review prompt: ";
+                std::cout.flush();
+
+                std::string prompt;
+                if (!std::getline(std::cin, prompt)) {
+                    return std::nullopt;
+                }
+                const std::string_view trimmed_prompt = trim(prompt);
+                if (trimmed_prompt.empty()) {
+                    std::cout << "Custom review prompt cannot be empty.\n";
+                    continue;
+                }
+                return std::string(trimmed_prompt);
+            }
+        }
     }
 }
 

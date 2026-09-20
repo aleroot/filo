@@ -573,6 +573,22 @@ TEST_CASE("render_permission_prompt_panel — keeps file header visible with lon
     REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("@@ -1,3 +1,40 @@"));
 }
 
+TEST_CASE("render_review_picker_panel — target menu includes staged changes",
+          "[tui][picker][review]") {
+    auto panel = render_review_picker_panel(
+        ReviewPickerMode::SelectTarget, 1, "");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fixed(18));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Uncommitted changes"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Staged changes"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Base branch"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Customised"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("1-4: quick choose"));
+}
+
 TEST_CASE("render_review_picker_panel — base branch mode renders selectable refs",
           "[tui][picker][review]") {
     std::vector<ReviewBaseRef> refs = {
@@ -587,7 +603,7 @@ TEST_CASE("render_review_picker_panel — base branch mode renders selectable re
         refs,
         0);
     auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
-                                        ftxui::Dimension::Fixed(18));
+                                        ftxui::Dimension::Fixed(24));
     ftxui::Render(screen, panel);
 
     const auto output = strip_ansi(screen.ToString());

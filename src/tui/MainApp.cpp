@@ -97,6 +97,7 @@
 #include "core/context/SteeringLoader.hpp"
 #include "core/commands/CommandExecutor.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
+#include "core/review/ReviewTargets.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
 #include "core/utils/StringUtils.hpp"
 #include <atomic>
@@ -2735,6 +2736,10 @@ RunResult run(RunOptions opts) {
                         }
                         break;
                     }
+                    case ProgressPhase::Summarizing:
+                        // Groups are already sealed. Keep the live card open
+                        // while the optional synthesizer rewrites the summary.
+                        break;
                     case ProgressPhase::Finished: {
                         view.finished = true;
                         view.interrupted = progress.interrupted;
@@ -7901,38 +7906,48 @@ RunResult run(RunOptions opts) {
                 review_picker_was_active = true;
 
                 if (review_picker_state.mode == ReviewPickerMode::SelectTarget) {
-                    if (event == Event::ArrowUp) {
-                        review_picker_state.selected = (review_picker_state.selected + 2) % 3;
-                    } else if (event == Event::ArrowDown) {
-                        review_picker_state.selected = (review_picker_state.selected + 1) % 3;
-                    } else if (event == Event::Character('1')) {
-                        review_picker_request = std::string{};
-                        review_picker_on_select = std::move(review_picker_state.on_select);
-                        review_picker_state.active = false;
-                    } else if (event == Event::Character('2')) {
-                        review_picker_state.selected = 1;
-                        review_picker_state.mode = ReviewPickerMode::EnterBaseBranch;
-                        review_picker_state.input_text.clear();
-                    } else if (event == Event::Character('3')) {
-                        review_picker_state.selected = 2;
-                        review_picker_state.mode = ReviewPickerMode::EnterCustomPrompt;
-                        review_picker_state.input_text.clear();
-                    } else if (event == Event::Return) {
-                        if (review_picker_state.selected == 0) {
-                            review_picker_request = std::string{};
-                            review_picker_on_select = std::move(review_picker_state.on_select);
-                            review_picker_state.active = false;
-                        } else if (review_picker_state.selected == 1) {
-                            review_picker_state.mode = ReviewPickerMode::EnterBaseBranch;
-                            review_picker_state.input_text.clear();
-                        } else {
-                            review_picker_state.mode = ReviewPickerMode::EnterCustomPrompt;
-                            review_picker_state.input_text.clear();
+                    const auto apply_review_option = [&](int index) {
+                        const auto options = core::review::review_menu_options();
+                        if (index < 0 || index >= static_cast<int>(options.size())) {
+                            return;
                         }
+                        review_picker_state.selected = index;
+                        const auto& option = options[static_cast<std::size_t>(index)];
+                        switch (option.follow_up) {
+                            case core::review::ReviewMenuFollowUp::None:
+                                review_picker_request = std::string(option.request);
+                                review_picker_on_select =
+                                    std::move(review_picker_state.on_select);
+                                review_picker_state.active = false;
+                                break;
+                            case core::review::ReviewMenuFollowUp::BaseBranch:
+                                review_picker_state.mode = ReviewPickerMode::EnterBaseBranch;
+                                review_picker_state.input_text.clear();
+                                break;
+                            case core::review::ReviewMenuFollowUp::CustomPrompt:
+                                review_picker_state.mode = ReviewPickerMode::EnterCustomPrompt;
+                                review_picker_state.input_text.clear();
+                                break;
+                        }
+                    };
+
+                    if (event == Event::ArrowUp) {
+                        review_picker_state.selected = core::review::step_review_menu_index(
+                            review_picker_state.selected, -1);
+                    } else if (event == Event::ArrowDown) {
+                        review_picker_state.selected = core::review::step_review_menu_index(
+                            review_picker_state.selected, 1);
+                    } else if (event == Event::Return) {
+                        apply_review_option(review_picker_state.selected);
                     } else if (event == Event::Escape) {
                         review_picker_cancelled = true;
                         review_picker_on_select = std::move(review_picker_state.on_select);
                         review_picker_state.active = false;
+                    } else if (event.is_character() && event.character().size() == 1) {
+                        const char ch = event.character().front();
+                        if (ch >= '1' && ch <= '9') {
+                            apply_review_option(ch - '1');
+                        }
                     }
                 } else if (event == Event::Escape) {
                     review_picker_state.mode = ReviewPickerMode::SelectTarget;

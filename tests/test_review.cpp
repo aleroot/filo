@@ -8,6 +8,9 @@
 #include "core/review/Findings.hpp"
 #include "core/review/Plan.hpp"
 #include "core/review/Prompt.hpp"
+#include "core/review/ReviewSteering.hpp"
+#include "core/review/ReviewTargets.hpp"
+#include "core/review/SummaryPrompt.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
 
@@ -15,7 +18,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <ranges>
 #include <string>
@@ -26,6 +31,35 @@ using namespace core::review;
 using Catch::Matchers::ContainsSubstring;
 
 namespace {
+
+class TempReviewWorkspace {
+public:
+    TempReviewWorkspace()
+        : path_(std::filesystem::temp_directory_path()
+                / std::format(
+                    "filo_review_steering_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count())) {
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TempReviewWorkspace() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+[[nodiscard]] bool is_summary_request(std::string_view prompt) {
+    return prompt.find("final campaign-level code review summary")
+        != std::string_view::npos;
+}
+
+inline constexpr std::string_view kSummaryJson =
+    R"({"overall_explanation":"The reviewed changes have no actionable findings."})";
 
 class CapturingJsonProvider : public core::llm::LLMProvider {
 public:
@@ -38,6 +72,8 @@ public:
             content.content = "{}";
         } else if (request.messages.back().content.find("analysing risk") != std::string::npos) {
             content.content = R"({"risks":[{"title":"null deref","why":"pointer may be null","path":"big.cpp"}]})";
+        } else if (is_summary_request(request.messages.back().content)) {
+            content.content = kSummaryJson;
         } else {
             content.content =
                 R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"No blocking issues found in the supplied patch.","overall_confidence_score":0.9})";
@@ -74,6 +110,10 @@ public:
         Response response;
         if (request.prompt.find("analysing risk") != std::string::npos) {
             response.text = R"({"risks":[]})";
+        } else if (is_summary_request(request.prompt)) {
+            response.text = request.prompt.find("Finding [") != std::string::npos
+                ? R"({"overall_explanation":"The merged review identified actionable issues in the changed code."})"
+                : std::string(kSummaryJson);
         } else {
             response.text = review_json;
         }
@@ -151,6 +191,10 @@ public:
             response.text = R"({"risks":[]})";
             return response;
         }
+        if (is_summary_request(request.prompt)) {
+            response.text = R"({"overall_explanation":"One file group could not be reviewed; the other completed."})";
+            return response;
+        }
         if (request.prompt.find(failing_path) != std::string::npos) {
             response.error = "provider returned an error";
             return response;
@@ -174,6 +218,10 @@ public:
             response.text = R"({"risks":[]})";
             return response;
         }
+        if (is_summary_request(request.prompt)) {
+            response.text = R"({"overall_explanation":"The change was reviewed with no actionable findings."})";
+            return response;
+        }
         if (!request.allowed_tools.empty()) {
             response.text = "I looked at the diff and everything seems fine to me.";
             return response;
@@ -195,7 +243,7 @@ public:
     explicit ForkingRunner(std::shared_ptr<State> state)
         : state_(std::move(state)) {}
 
-    Response run(const Request&) override {
+    Response run(const Request& request) override {
         const int active = state_->active.fetch_add(1, std::memory_order_acq_rel) + 1;
         int observed = state_->max_active.load(std::memory_order_acquire);
         while (active > observed
@@ -210,8 +258,9 @@ public:
         state_->runs.fetch_add(1, std::memory_order_release);
 
         Response response;
-        response.text =
-            R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok"})";
+        response.text = is_summary_request(request.prompt)
+            ? std::string(kSummaryJson)
+            : R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"ok"})";
         return response;
     }
 
@@ -467,11 +516,12 @@ TEST_CASE("engine reviews each file group as its own JSON turn", "[review][engin
     const auto result = engine.run(input);
     REQUIRE(result.error.empty());
     REQUIRE_FALSE(result.interrupted);
-    CHECK(provider->requests.size() == 2);
+    REQUIRE(provider->requests.size() == 3);
     CHECK(result.report.groups_reviewed == 2);
     CHECK(result.report.plan_passes == 0);
 
-    for (const auto& request : provider->requests) {
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto& request = provider->requests[i];
         CHECK(request.tools.empty());
         CHECK(request.effort == "off");
         CHECK(request.max_tokens == kReviewMaxOutputTokens);
@@ -484,12 +534,47 @@ TEST_CASE("engine reviews each file group as its own JSON turn", "[review][engin
         CHECK_THAT(prompt, ContainsSubstring("Review only the git context supplied below"));
     }
 
-    const auto& first_prompt = provider->requests.front().messages.back().content;
-    const auto& second_prompt = provider->requests.back().messages.back().content;
+    const auto& first_prompt = provider->requests[0].messages.back().content;
+    const auto& second_prompt = provider->requests[1].messages.back().content;
     CHECK_THAT(first_prompt, ContainsSubstring("alpha.cpp"));
     CHECK_THAT(second_prompt, ContainsSubstring("beta.cpp"));
     CHECK(first_prompt.find("beta.cpp") == std::string::npos);
     CHECK(second_prompt.find("alpha.cpp") == std::string::npos);
+    CHECK(provider->requests[2].max_tokens == 1024);
+    CHECK(provider->requests[2].response_format.type
+          == core::llm::ResponseFormat::Type::JsonObject);
+    CHECK_THAT(provider->requests[2].messages.back().content,
+               ContainsSubstring("<review_evidence>"));
+    CHECK_THAT(result.report.overall_explanation,
+               ContainsSubstring("no actionable findings"));
+}
+
+TEST_CASE("engine keeps its deterministic summary when summary JSON is invalid",
+          "[review][engine][summary]") {
+    class InvalidSummaryRunner final : public TurnRunner {
+    public:
+        Response run(const Request& request) override {
+            Response response;
+            response.text = is_summary_request(request.prompt)
+                ? "not json"
+                : R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks fine."})";
+            return response;
+        }
+    };
+
+    Engine engine({.runner = std::make_unique<InvalidSummaryRunner>()});
+    CampaignInput input;
+    input.snapshot.patch = two_isolated_file_patch();
+
+    const auto result = engine.run(input);
+
+    CHECK(result.error.empty());
+    CHECK(result.report.groups_reviewed == 2);
+    CHECK_THAT(result.report.overall_explanation,
+               ContainsSubstring("Combined 2 file-group review"));
+    REQUIRE_FALSE(result.report.warnings.empty());
+    CHECK_THAT(result.report.warnings.back(),
+               ContainsSubstring("group summaries"));
 }
 
 TEST_CASE("engine runs a risk pass before reviewing a large file", "[review][engine]") {
@@ -519,10 +604,12 @@ TEST_CASE("engine runs a risk pass before reviewing a large file", "[review][eng
     CHECK_THAT(provider->requests.front().messages.back().content,
                ContainsSubstring("analysing risk"));
     CHECK(provider->requests.front().max_tokens == kPlanMaxOutputTokens);
-    CHECK_THAT(provider->requests.back().messages.back().content,
+    CHECK_THAT(provider->requests[1].messages.back().content,
                ContainsSubstring("Prior risk analysis"));
-    CHECK_THAT(provider->requests.back().messages.back().content,
+    CHECK_THAT(provider->requests[1].messages.back().content,
                ContainsSubstring("null deref"));
+    CHECK(provider->requests[1].messages.back().content.find("<review_evidence>")
+          == std::string::npos);
 }
 
 TEST_CASE("engine reports progress for planning and each group", "[review][engine][progress]") {
@@ -563,6 +650,10 @@ TEST_CASE("engine reports progress for planning and each group", "[review][engin
     CHECK(last_group.front().group_index == 2);
     CHECK(last_group.front().group_total == 2);
     CHECK_FALSE(last_group.front().label.empty());
+
+    CHECK(std::ranges::count_if(events, [](const Progress& p) {
+        return p.phase == ProgressPhase::Summarizing;
+    }) == 1);
 
     // Exactly one terminal event, always last, so a live view can settle.
     CHECK(events.back().phase == ProgressPhase::Finished);
@@ -677,7 +768,7 @@ TEST_CASE("engine keeps reviewing after one group fails", "[review][engine]") {
     // The healthy unit still produced a review.
     CHECK(result.error.empty());
     CHECK(result.report.groups_reviewed == 1);
-    CHECK(runner_view->requests.size() == 2);
+    CHECK(runner_view->requests.size() == 3);
 
     REQUIRE(result.report.failed_groups.size() == 1);
     CHECK(result.report.failed_groups.front().label == "alpha.cpp");
@@ -783,12 +874,13 @@ TEST_CASE("engine retries a tool-enabled group without tools when no JSON arrive
     CHECK_THAT(result.report.overall_explanation,
                ContainsSubstring("retried without tools"));
 
-    // Risk pass, tool-enabled review, then the JSON-only retry.
+    // Risk pass, tool-enabled review, JSON-only retry. A one-group review with
+    // no verified citations does not pay for a campaign synthesizer.
     REQUIRE(runner_view->requests.size() == 3);
     CHECK_FALSE(runner_view->requests[1].allowed_tools.empty());
     CHECK(runner_view->requests[2].allowed_tools.empty());
     CHECK(runner_view->requests[2].json_object);
-    // Prose is never reported as a review.
+    CHECK_FALSE(is_summary_request(runner_view->requests[2].prompt));
     CHECK(result.report.overall_explanation.find("seems fine to me") == std::string::npos);
 }
 
@@ -822,7 +914,7 @@ TEST_CASE("engine reviews independent groups concurrently with forked runners",
 
     CHECK(result.error.empty());
     CHECK(result.report.groups_reviewed == 4);
-    CHECK(state->runs.load(std::memory_order_acquire) == 4);
+    CHECK(state->runs.load(std::memory_order_acquire) == 5);
     CHECK(state->max_active.load(std::memory_order_acquire) >= 2);
 }
 
@@ -862,6 +954,260 @@ TEST_CASE("parse_review_json rejects prose and accepts embedded JSON", "[review]
 {"findings":[],"overall_correctness":"patch is correct"})");
     REQUIRE(parsed.has_value());
     CHECK(parsed->overall_correctness == "patch is correct");
+}
+
+TEST_CASE("steering references require a real quote scoped to the finding path",
+          "[review][steering]") {
+    ReviewSteeringContext steering;
+    steering.sources = {
+        ReviewSteeringSource{
+            .id = "S1",
+            .label = "src/AGENTS.md",
+            .content = "Keep public APIs backward compatible when changing protocol messages.",
+            .applies_to = {"src/a.cpp"},
+        },
+        ReviewSteeringSource{
+            .id = "S2",
+            .label = "docs/AGENTS.md",
+            .content = "Keep documentation examples executable.",
+            .applies_to = {"docs/b.cpp"},
+        },
+    };
+
+    ReviewGroup group;
+    group.files.push_back(FileChange{.path = "src/a.cpp"});
+
+    Finding finding;
+    finding.title = "Breaking the protocol contract";
+    finding.body = "The new message name breaks existing clients.";
+    finding.absolute_file_path = "/tmp/repo/src/a.cpp";
+    finding.steering_references = {
+        SteeringReference{
+            .source_id = "S1",
+            .rule_excerpt = "Keep public APIs backward compatible",
+        },
+        SteeringReference{
+            .source_id = "S1",
+            .rule_excerpt = "Keep public APIs compatible",
+        },
+        SteeringReference{
+            .source_id = "S2",
+            .rule_excerpt = "Keep documentation examples executable",
+        },
+        SteeringReference{
+            .source_id = "S9",
+            .rule_excerpt = "Keep public APIs backward compatible",
+        },
+    };
+    Report report;
+    report.findings.push_back(std::move(finding));
+
+    CHECK(validate_steering_references(report, group, steering, "/tmp/repo") == 3);
+    REQUIRE(report.findings.front().steering_references.size() == 1);
+    CHECK(report.findings.front().steering_references.front().source_id == "S1");
+    CHECK_THAT(render_report(report),
+               ContainsSubstring("Project guidance [S1] (src/AGENTS.md)"));
+}
+
+TEST_CASE("review steering loader scopes nested AGENTS files by changed path",
+          "[review][steering]") {
+    TempReviewWorkspace workspace;
+    const auto root = workspace.path();
+    std::filesystem::create_directories(root / ".git");
+    std::filesystem::create_directories(root / "src/cache");
+    std::filesystem::create_directories(root / "docs");
+    {
+        std::ofstream root_guidance(root / "AGENTS.md");
+        root_guidance << "Keep public interfaces backward compatible.";
+        std::ofstream source_guidance(root / "src/AGENTS.md");
+        source_guidance << "Keep storage access behind the repository interface.";
+    }
+
+    GitSnapshot snapshot;
+    snapshot.worktree_root = root.string();
+    snapshot.patch =
+        "diff --git a/src/cache/a.cpp b/src/cache/a.cpp\n"
+        "--- a/src/cache/a.cpp\n"
+        "+++ b/src/cache/a.cpp\n"
+        "@@ -0,0 +1 @@\n"
+        "+int cache = 1;\n"
+        "diff --git a/docs/b.cpp b/docs/b.cpp\n"
+        "--- a/docs/b.cpp\n"
+        "+++ b/docs/b.cpp\n"
+        "@@ -0,0 +1 @@\n"
+        "+int docs = 1;\n";
+
+    const auto steering = load_review_steering_guidance(
+        snapshot, {root}, core::context::SteeringPolicy{});
+
+    REQUIRE(steering.sources.size() == 2);
+    CHECK(steering.sources[0].label == "AGENTS.md");
+    CHECK(steering.sources[0].applies_to
+          == std::vector<std::string>{"src/cache/a.cpp", "docs/b.cpp"});
+    CHECK(steering.sources[1].label == "src/AGENTS.md");
+    CHECK(steering.sources[1].applies_to
+          == std::vector<std::string>{"src/cache/a.cpp"});
+    CHECK(steering.sources[1].content
+          == "Keep storage access behind the repository interface.");
+
+    CampaignInput campaign;
+    campaign.task = "Review the patch.";
+    campaign.snapshot.worktree_root = root.string();
+    campaign.steering = steering;
+    ReviewGroup source_group;
+    source_group.files.push_back(FileChange{.path = "src/cache/a.cpp"});
+    ReviewGroup docs_group;
+    docs_group.files.push_back(FileChange{.path = "docs/b.cpp"});
+    const auto source_prompt = build_review_prompt(campaign, source_group, {}, false);
+    const auto docs_prompt = build_review_prompt(campaign, docs_group, {}, false);
+    CHECK_THAT(source_prompt,
+               ContainsSubstring("Keep storage access behind the repository interface."));
+    CHECK(docs_prompt.find("Keep storage access behind the repository interface.")
+          == std::string::npos);
+}
+
+TEST_CASE("summary prompt uses project steering with a generic fallback",
+          "[review][steering]") {
+    CampaignInput input;
+    input.task = "Review the patch.";
+    input.snapshot.worktree_root = "/tmp/repo";
+    input.steering.sources.push_back(ReviewSteeringSource{
+        .id = "S1",
+        .label = "AGENTS.md",
+        .content = "Keep public APIs backward compatible.",
+        .applies_to = {"src/a.cpp"},
+    });
+
+    Report report;
+    report.overall_correctness = "patch is incorrect";
+    Finding finding;
+    finding.title = "Breaking the protocol contract";
+    finding.body = "The new message name breaks existing clients.";
+    finding.absolute_file_path = "/tmp/repo/src/a.cpp";
+    finding.steering_references.push_back(SteeringReference{
+        .source_id = "S1",
+        .source_label = "AGENTS.md",
+        .rule_excerpt = "Keep public APIs backward compatible",
+    });
+    report.findings.push_back(std::move(finding));
+
+    const auto prompt = build_summary_prompt(input, report);
+    CHECK_THAT(prompt, ContainsSubstring("Keep public APIs backward compatible."));
+    CHECK_THAT(prompt, ContainsSubstring("Verified steering reference [S1]"));
+    CHECK_THAT(prompt, ContainsSubstring("not proof that every rule was satisfied"));
+    CHECK(prompt.find("SOLID") == std::string::npos);
+    CHECK(prompt.find("sound responsibility boundaries") == std::string::npos);
+
+    input.steering = {};
+    const auto fallback_prompt = build_summary_prompt(input, report);
+    CHECK_THAT(fallback_prompt,
+               ContainsSubstring("No active path-scoped project steering was loaded"));
+    CHECK_THAT(fallback_prompt, ContainsSubstring("No project steering applies"));
+    CHECK(fallback_prompt.find("SOLID") == std::string::npos);
+    CHECK(fallback_prompt.find("use this fallback rubric") == std::string::npos);
+}
+
+TEST_CASE("review menu catalog includes staged as an immediate target",
+          "[review][menu]") {
+    const auto options = review_menu_options();
+    REQUIRE(options.size() == 4);
+    CHECK(options[0].target == ReviewMenuTarget::Uncommitted);
+    CHECK(options[1].target == ReviewMenuTarget::Staged);
+    CHECK(options[1].request == "staged");
+    CHECK(options[1].follow_up == ReviewMenuFollowUp::None);
+    CHECK(step_review_menu_index(0, -1) == 3);
+    CHECK(step_review_menu_index(3, 1) == 0);
+}
+
+TEST_CASE("campaign_needs_summary is reserved for multi-group or cited reviews",
+          "[review][summary]") {
+    Report report;
+    report.groups_reviewed = 1;
+    CHECK_FALSE(campaign_needs_summary(report));
+
+    report.groups_reviewed = 2;
+    CHECK(campaign_needs_summary(report));
+
+    report.groups_reviewed = 1;
+    report.failed_groups.push_back(FailedGroup{.label = "a.cpp", .reason = "error"});
+    CHECK(campaign_needs_summary(report));
+
+    report.failed_groups.clear();
+    report.skipped_paths.emplace_back("huge.cpp");
+    CHECK(campaign_needs_summary(report));
+
+    report.skipped_paths.clear();
+    Finding finding;
+    finding.steering_references.push_back(SteeringReference{.source_id = "S1"});
+    report.findings.push_back(std::move(finding));
+    CHECK(campaign_needs_summary(report));
+}
+
+TEST_CASE("parse_summary_response accepts extra keys and markdown fences",
+          "[review][summary]") {
+    CHECK_FALSE(parse_summary_response("not json").has_value());
+    CHECK_FALSE(parse_summary_response(R"({"overall_explanation":""})").has_value());
+
+    const auto extra_keys = parse_summary_response(
+        R"({"overall_explanation":"Looks correct.","overall_correctness":"patch is correct"})");
+    REQUIRE(extra_keys.has_value());
+    CHECK(*extra_keys == "Looks correct.");
+
+    const auto fenced = parse_summary_response(
+        "```json\n{\"overall_explanation\":\"Looks correct.\"}\n```");
+    REQUIRE(fenced.has_value());
+    CHECK(*fenced == "Looks correct.");
+}
+
+TEST_CASE("engine skips the campaign summary for a single group without citations",
+          "[review][engine][summary]") {
+    auto runner = std::make_unique<ScriptedRunner>();
+    auto* scripted = runner.get();
+    Engine engine({.runner = std::move(runner)});
+
+    CampaignInput input;
+    input.snapshot.patch =
+        "diff --git a/alpha.cpp b/alpha.cpp\n"
+        "--- a/alpha.cpp\n"
+        "+++ b/alpha.cpp\n"
+        "@@ -1,1 +1,2 @@\n"
+        " int a = 1;\n"
+        "+int b = 2;\n";
+
+    const auto result = engine.run(input);
+    REQUIRE(result.error.empty());
+    CHECK(scripted->requests.size() == 1);
+    CHECK_FALSE(is_summary_request(scripted->requests.front().prompt));
+    CHECK(result.report.overall_explanation == "ok");
+}
+
+TEST_CASE("engine does not mark a completed review interrupted when summary is cancelled",
+          "[review][engine][summary]") {
+    class InterruptSummaryRunner final : public TurnRunner {
+    public:
+        Response run(const Request& request) override {
+            Response response;
+            if (is_summary_request(request.prompt)) {
+                response.interrupted = true;
+                return response;
+            }
+            response.text =
+                R"({"findings":[],"overall_correctness":"patch is correct","overall_explanation":"Looks fine."})";
+            return response;
+        }
+    };
+
+    Engine engine({.runner = std::make_unique<InterruptSummaryRunner>()});
+    CampaignInput input;
+    input.snapshot.patch = two_isolated_file_patch();
+
+    const auto result = engine.run(input);
+    CHECK_FALSE(result.interrupted);
+    CHECK(result.error.empty());
+    CHECK(result.report.groups_reviewed == 2);
+    CHECK_THAT(result.report.overall_explanation, ContainsSubstring("Looks fine."));
+    REQUIRE_FALSE(result.report.warnings.empty());
+    CHECK_THAT(result.report.warnings.back(), ContainsSubstring("group summaries"));
 }
 
 TEST_CASE("file_family_key strips test prefixes and suffixes", "[review][plan]") {
@@ -1036,7 +1382,7 @@ TEST_CASE("engine grants read-only tools on large groups", "[review][engine]") {
     CHECK(scripted->requests.front().allowed_tools.empty());
     CHECK(scripted->requests.front().json_object);
 
-    const auto& review = scripted->requests.back();
+    const auto& review = scripted->requests[1];
     CHECK_FALSE(review.json_object);
     REQUIRE(review.allowed_tools.size() == 3);
     CHECK(std::ranges::find(review.allowed_tools, "read") != review.allowed_tools.end());

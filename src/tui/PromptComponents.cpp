@@ -9,6 +9,7 @@
 #include "core/session/SessionStore.hpp"
 #include "core/session/ThreadCatalog.hpp"
 #include "core/tools/ToolNames.hpp"
+#include "core/review/ReviewTargets.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/PathUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -1725,39 +1726,28 @@ Element render_review_picker_panel(ReviewPickerMode mode,
                                    std::string_view input_text,
                                    const std::vector<ReviewBaseRef>& base_refs,
                                    int selected_base_ref) {
-    const auto uncommitted_option = make_selection_row(
-        "Uncommitted changes",
-        "Review the current staged, unstaged, and untracked changes.",
-        selected_index == 0,
-        ColorYellowDark);
-
-    const auto base_option = make_selection_row(
-        "Base branch",
-        "Review the current branch against a base branch you choose.",
-        selected_index == 1,
-        ColorYellowDark);
-
-    const auto custom_option = make_selection_row(
-        "Customised",
-        "Write your own review instructions for the model to follow.",
-        selected_index == 2,
-        ColorYellowDark);
-
+    const auto options = core::review::review_menu_options();
     Elements children;
     children.push_back(hbox({
         text(" REVIEW ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
         filler(),
         text(mode == ReviewPickerMode::SelectTarget
-                 ? "Up/Down: select  Enter: confirm  1/2/3: quick choose  Esc: cancel"
-                 : "Type to edit  Enter: start review  Esc: back")
+                 ? std::format(
+                       "Up/Down: select  Enter: confirm  1-{}: quick choose  Esc: cancel",
+                       options.size())
+                 : std::string("Type to edit  Enter: start review  Esc: back"))
             | color(Color::GrayDark)
     }));
     children.push_back(separator());
     children.push_back(text("Choose how /review should run.") | color(Color::White));
     children.push_back(filler());
-    children.push_back(uncommitted_option);
-    children.push_back(base_option);
-    children.push_back(custom_option);
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        children.push_back(make_selection_row(
+            std::string(options[i].label),
+            std::string(options[i].description),
+            selected_index == static_cast<int>(i),
+            ColorYellowDark));
+    }
     children.push_back(filler());
 
     if (mode == ReviewPickerMode::EnterBaseBranch) {

@@ -127,6 +127,12 @@ struct RiskItem {
     std::string path;
 };
 
+struct SteeringReference {
+    std::string source_id;
+    std::string source_label;
+    std::string rule_excerpt;
+};
+
 struct Finding {
     std::string title;
     std::string body;
@@ -137,6 +143,7 @@ struct Finding {
     std::string absolute_file_path;
     int line_start = 0;
     int line_end = 0;
+    std::vector<SteeringReference> steering_references;
 };
 
 struct FailedGroup {
@@ -158,6 +165,19 @@ struct Report {
     int plan_passes = 0;
 };
 
+struct ReviewSteeringSource {
+    std::string id;
+    std::string label;
+    std::string identity;
+    std::string content;
+    std::vector<std::string> applies_to;
+};
+
+struct ReviewSteeringContext {
+    std::vector<ReviewSteeringSource> sources;
+    bool truncated = false;
+};
+
 // Domain-level lifecycle events. The engine reports what it is doing; how it
 // is displayed (status pill, transcript line, log) belongs to the adapter.
 enum class ProgressPhase {
@@ -169,6 +189,10 @@ enum class ProgressPhase {
     /// that never became JSON). The campaign keeps going: one bad file must
     /// not throw away every other file's review.
     GroupFailed,
+    /// Optional campaign synthesizer. Findings and the verdict are already
+    /// sealed; this turn only rewrites overall_explanation. A live view must
+    /// keep the card open instead of looking finished while the runner blocks.
+    Summarizing,
     Finished,
 };
 
@@ -197,6 +221,7 @@ struct CampaignInput {
     std::string task;
     std::string user_facing_hint;
     GitSnapshot snapshot;
+    ReviewSteeringContext steering;
 };
 
 struct CampaignResult {

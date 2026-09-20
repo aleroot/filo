@@ -4,6 +4,8 @@
 #include "../review/Findings.hpp"
 #include "../review/Git.hpp"
 #include "../review/Prompt.hpp"
+#include "../review/ReviewSteering.hpp"
+#include "../context/SteeringLoader.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <cctype>
@@ -482,6 +484,7 @@ make_progress_renderer(const CommandContext& ctx, std::string hint) {
             }
             case ProgressPhase::GroupStarted:
             case ProgressPhase::RiskPass:
+            case ProgressPhase::Summarizing:
                 keep_pill_alive();
                 return;
             case ProgressPhase::GroupFailed: {
@@ -734,6 +737,12 @@ void ReviewExecutor::execute(const CommandContext& ctx, std::string_view raw_arg
             break;
     }
 
+    const auto session = ctx.agent->session_context_snapshot();
+    const auto workspace = ctx.agent->workspace_snapshot();
+    const auto steering_roots = core::context::collect_steering_roots(
+        workspace.primary(), workspace.additional());
+    input.steering = core::review::load_review_steering_guidance(
+        input.snapshot, steering_roots, session.steering_policy);
     run_grouped_review(ctx, std::move(input));
 }
 

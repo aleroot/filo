@@ -2,6 +2,8 @@
 
 #include "Findings.hpp"
 #include "Prompt.hpp"
+#include "ReviewSteering.hpp"
+#include "SummaryPrompt.hpp"
 
 #include "../tools/ToolNames.hpp"
 #include "../utils/StringUtils.hpp"
@@ -17,8 +19,6 @@
 
 namespace core::review {
 namespace {
-
-using core::utils::str::trim_ascii_copy;
 
 [[nodiscard]] bool cancelled(const std::function<bool()>& cancellation_requested) {
     return cancellation_requested && cancellation_requested();
@@ -78,13 +78,7 @@ CampaignResult Engine::run(const CampaignInput& input) const {
     const auto finish = [&report_progress](CampaignResult result) {
         Progress done{.phase = ProgressPhase::Finished};
         done.findings = static_cast<int>(result.report.findings.size());
-        done.blocking_findings = 0;
-        for (const auto& finding : result.report.findings) {
-            const auto severity = effective_severity(finding);
-            if (severity == Severity::Critical || severity == Severity::High) {
-                ++done.blocking_findings;
-            }
-        }
+        done.blocking_findings = count_blocking(result.report);
         done.skipped_files = static_cast<int>(result.report.skipped_paths.size());
         done.skipped_paths = result.report.skipped_paths;
         done.failed_groups = static_cast<int>(result.report.failed_groups.size());
@@ -137,6 +131,10 @@ CampaignResult Engine::run(const CampaignInput& input) const {
             out.report.warnings = std::move(warnings);
             out.report.failed_groups = failed_groups;
             out.report.plan_passes = plan_passes;
+            out.report.overall_explanation = !failed_groups.empty()
+                ? std::format("No file groups completed review; {} group(s) could not be reviewed.",
+                              failed_groups.size())
+                : "Review stopped before any file group completed.";
             if (!interrupted && !failed_groups.empty()) {
                 out.error = failed_groups.front().reason;
             }
@@ -145,13 +143,6 @@ CampaignResult Engine::run(const CampaignInput& input) const {
 
         out.report = aggregate_reports(group_reports, plan.skipped_paths, warnings);
         out.report.plan_passes = plan_passes;
-        if (trim_ascii_copy(out.report.overall_explanation).empty()
-            && out.report.findings.empty()) {
-            out.report.overall_explanation =
-                std::format("No blocking issues found across {} reviewed file-group(s).",
-                            out.report.groups_reviewed);
-            out.report.overall_correctness = "patch is correct";
-        }
         if (!failed_groups.empty()) {
             out.report.overall_explanation += std::format(
                 " {} file-group(s) could not be reviewed.", failed_groups.size());
@@ -164,6 +155,39 @@ CampaignResult Engine::run(const CampaignInput& input) const {
                 plan.groups.size());
         }
         out.report.failed_groups = failed_groups;
+
+        // Findings and the verdict are already sealed. A synthesizer turn is
+        // optional: skip it for a one-group review that already has a staff
+        // summary, and never relabel a completed findings pass as interrupted
+        // just because the synthesizer was cancelled or returned junk.
+        if (!interrupted
+            && campaign_needs_summary(out.report)
+            && !cancelled(options_.cancellation_requested)) {
+            Progress summarizing{.phase = ProgressPhase::Summarizing};
+            summarizing.group_total = plan.groups.size();
+            summarizing.findings = static_cast<int>(out.report.findings.size());
+            summarizing.blocking_findings = count_blocking(out.report);
+            summarizing.label = "campaign summary";
+            report_progress(summarizing);
+
+            const auto response = options_.runner->run(TurnRunner::Request{
+                .prompt = build_summary_prompt(input, out.report),
+                .max_tokens = 1024,
+                .json_object = true,
+            });
+            bool summary_applied = false;
+            if (!response.interrupted && response.error.empty()) {
+                if (auto summary = parse_summary_response(response.text);
+                    summary.has_value()) {
+                    out.report.overall_explanation = std::move(*summary);
+                    summary_applied = true;
+                }
+            }
+            if (!summary_applied) {
+                out.report.warnings.push_back(
+                    "The campaign summary could not be generated; using the group summaries.");
+            }
+        }
         return finish(std::move(out));
     };
 
@@ -287,6 +311,16 @@ CampaignResult Engine::run(const CampaignInput& input) const {
                 dropped));
         }
         resolve_finding_paths(parsed, input.snapshot.worktree_root);
+        const auto rejected_steering_references = validate_steering_references(
+            parsed,
+            group,
+            input.steering,
+            input.snapshot.worktree_root);
+        if (rejected_steering_references > 0) {
+            parsed.warnings.push_back(std::format(
+                "Dropped {} steering reference(s) without a matching applicable source quote.",
+                rejected_steering_references));
+        }
         parsed.groups_reviewed = 1;
 
         auto finished = base_progress(ProgressPhase::GroupFinished);

@@ -159,6 +159,28 @@ void apply_defaults(Finding& finding) {
             if (const auto value = object_string_field(finding_object, "category"); value.has_value()) {
                 finding.category = category_from_string(to_lower_ascii_copy(*value));
             }
+            simdjson::dom::array steering_references;
+            if (finding_object["steering_references"].get(steering_references)
+                == simdjson::SUCCESS) {
+                constexpr std::size_t kMaxSteeringReferencesPerFinding = 4;
+                for (const auto reference_value : steering_references) {
+                    if (finding.steering_references.size()
+                        >= kMaxSteeringReferencesPerFinding) {
+                        break;
+                    }
+                    simdjson::dom::object reference_object;
+                    if (reference_value.get(reference_object) != simdjson::SUCCESS) {
+                        continue;
+                    }
+                    const auto source_id = object_string_field(reference_object, "source_id");
+                    const auto rule_excerpt = object_string_field(reference_object, "rule_excerpt");
+                    if (!source_id.has_value() || !rule_excerpt.has_value()) continue;
+                    finding.steering_references.push_back(SteeringReference{
+                        .source_id = *source_id,
+                        .rule_excerpt = *rule_excerpt,
+                    });
+                }
+            }
 
             simdjson::dom::object location_object;
             if (finding_object["code_location"].get(location_object) == simdjson::SUCCESS) {
@@ -202,6 +224,18 @@ void apply_defaults(Finding& finding) {
         finding.line_start,
         finding.line_end,
         to_lower_ascii_copy(trim_ascii_copy(finding.title)));
+}
+
+void merge_steering_references(Finding& target, const Finding& source) {
+    for (const auto& reference : source.steering_references) {
+        const bool present = std::ranges::any_of(
+            target.steering_references,
+            [&](const SteeringReference& existing) {
+                return existing.source_id == reference.source_id
+                    && existing.rule_excerpt == reference.rule_excerpt;
+            });
+        if (!present) target.steering_references.push_back(reference);
+    }
 }
 
 [[nodiscard]] bool is_incorrect(std::string_view verdict) noexcept {
@@ -248,6 +282,13 @@ void apply_defaults(Finding& finding) {
                 if (end == std::string_view::npos) break;
                 cursor = end + 1;
             }
+        }
+        for (const auto& reference : finding.steering_references) {
+            lines.push_back(std::format(
+                "Project guidance [{}] ({}): “{}”",
+                reference.source_id,
+                reference.source_label,
+                reference.rule_excerpt));
         }
     }
     return join("\n", lines);
@@ -358,6 +399,13 @@ Report aggregate_reports(std::span<const Report> reports,
         single.skipped_paths = out.skipped_paths;
         single.warnings = out.warnings;
         single.groups_reviewed = 1;
+        if (trim_ascii_copy(single.overall_explanation).empty()) {
+            single.overall_explanation = single.findings.empty()
+                ? "No actionable findings were reported across 1 reviewed file-group."
+                : std::format(
+                    "{} actionable finding(s) were reported across 1 reviewed file-group.",
+                    single.findings.size());
+        }
         return single;
     }
 
@@ -375,8 +423,8 @@ Report aggregate_reports(std::span<const Report> reports,
             confidence_sum += *report.overall_confidence;
             ++confidence_count;
         }
-        const auto explanation = trim_ascii_copy(report.overall_explanation);
-        if (!explanation.empty()) {
+        if (const auto explanation = trim_ascii_copy(report.overall_explanation);
+            !explanation.empty()) {
             explanations.push_back(explanation);
         }
         for (const auto& finding : report.findings) {
@@ -401,7 +449,10 @@ Report aggregate_reports(std::span<const Report> reports,
         auto& existing = deduped[slot->second];
         if (severity_rank(effective_severity(finding))
             < severity_rank(effective_severity(existing))) {
+            merge_steering_references(finding, existing);
             existing = std::move(finding);
+        } else {
+            merge_steering_references(existing, finding);
         }
     }
 
@@ -430,17 +481,22 @@ Report aggregate_reports(std::span<const Report> reports,
     }
     if (!explanations.empty()) {
         out.overall_explanation = explanations.front();
-        if (out.groups_reviewed > 1) {
+        out.overall_explanation += std::format(
+            " Combined {} file-group review(s)", out.groups_reviewed);
+        if (!out.skipped_paths.empty()) {
             out.overall_explanation += std::format(
-                " Combined {} file-group review(s)",
-                out.groups_reviewed);
-            if (!out.skipped_paths.empty()) {
-                out.overall_explanation += std::format(
-                    "; skipped {} oversized file(s)",
-                    out.skipped_paths.size());
-            }
-            out.overall_explanation += ".";
+                "; skipped {} oversized file(s)", out.skipped_paths.size());
         }
+        out.overall_explanation += ".";
+    } else if (out.findings.empty()) {
+        out.overall_explanation = std::format(
+            "No actionable findings were reported across {} reviewed file-group(s).",
+            out.groups_reviewed);
+    } else {
+        out.overall_explanation = std::format(
+            "{} actionable finding(s) were reported across {} reviewed file-group(s).",
+            out.findings.size(),
+            out.groups_reviewed);
     }
     return out;
 }

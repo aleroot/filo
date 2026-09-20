@@ -387,9 +387,12 @@ set(FILO_CORE_SOURCES
     src/core/review/Git.cpp
     src/core/review/Plan.cpp
     src/core/review/Prompt.cpp
+    src/core/review/PromptSupport.cpp
     src/core/review/Findings.cpp
     src/core/review/TurnRunners.cpp
     src/core/review/Engine.cpp
+    src/core/review/ReviewSteering.cpp
+    src/core/review/SummaryPrompt.cpp
     src/core/commands/SkillCommandLoader.cpp
     src/core/tools/SkillLoader.cpp
     src/core/tools/TaskTool.cpp

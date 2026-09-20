@@ -1,4 +1,5 @@
 #include "Prompt.hpp"
+#include "PromptSupport.hpp"
 
 #include "../utils/StringUtils.hpp"
 
@@ -85,6 +86,8 @@ GUIDELINES:
 - In every ```suggestion block, preserve the exact leading whitespace of the replaced lines (spaces vs tabs, number of spaces).
 - Do NOT introduce or remove outer indentation levels unless that is the actual fix.
 
+When a finding directly identifies a violation of active project steering, include a `steering_references` array with up to four of the strongest applicable source IDs shown in the steering block and an exact, contiguous 12-240 character quote from each source. Include an empty array when no specific steering rule supports the finding. Never paraphrase a rule as a quote, and do not cite a rule merely because it is present.
+
 The comments will be presented in the code review as inline comments. You should avoid providing unnecessary location details in the comment body. Always keep the line range as short as possible for interpreting the issue. Avoid ranges longer than 5-10 lines; instead, choose the most suitable subrange that pinpoints the problem.
 
 At the beginning of the finding title, tag the bug with priority level. For example "[P1] Un-padding slices along wrong tensor dimensions". [P0] - Drop everything to fix. Blocking release, operations, or major usage. Only use for universal issues that do not depend on any assumptions about the inputs. [P1] - Urgent. Should be addressed in the next cycle [P2] - Normal. To be fixed eventually [P3] - Low. Nice to have.
@@ -93,9 +96,6 @@ Additionally, include a numeric priority field in the JSON output for each findi
 
 Set "severity" to one of: critical, high, medium, low (matching P0-P3).
 Set "category" to one of: bug, security, performance, maintainability, test, style, documentation, other.
-
-OVERALL SUMMARY:
-The overall_explanation is the Summary shown to the user. Write it as a brief technical-architect/staff-engineer assessment of the changed code's overall quality and structure: design choices, appropriate design patterns, clean-code principles, SOLID/DRY where relevant, maintainability, testability, and performance. Mention the most important architectural strength or weakness and keep it to 1-3 sentences. Do not turn generic preferences into findings; actionable issues belong in findings.
 
 At the end of your findings, output an "overall correctness" verdict of whether or not the patch should be considered "correct".
 Correct implies that existing code and tests will not break, and the patch is free of bugs and other blocking issues.
@@ -118,6 +118,7 @@ OUTPUT FORMAT:
       "priority": <int 0-3, optional>,
       "severity": "critical" | "high" | "medium" | "low",
       "category": "bug" | "security" | "performance" | "maintainability" | "test" | "style" | "documentation" | "other",
+      "steering_references": [{"source_id":"S1","rule_excerpt":"exact quote from the selected source"}],
       "code_location": {
         "absolute_file_path": "<file path>",
         "line_range": {"start": <int>, "end": <int>}
@@ -389,6 +390,7 @@ std::string build_review_prompt(const CampaignInput& input,
     if (group.files.empty()) {
         prompt += "There are no git changes in the selected review target.\n";
     }
+    prompt_detail::append_steering_context(prompt, input, &group);
     prompt += "\n";
     prompt += git_context_block(input, group);
     prompt += "\n";
