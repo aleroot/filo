@@ -30,6 +30,8 @@ WorkspaceDetailsEntries split_workspace_details_entries(
     }
 
     for (const auto& path : workspace.additional) {
+        if (path.empty()) continue;
+
         std::error_code ec;
         if (std::filesystem::is_regular_file(path, ec) && !ec) {
             entries.attachments.push_back(path);
@@ -141,7 +143,7 @@ ftxui::Element render_workspace_details_panel(
     }
     if (workspace_entries.empty()) {
         workspace_entries.push_back(
-            text(" No workspace folders loaded.") | color(Color::GrayLight));
+            text(" No workspaces loaded") | color(Color::GrayLight));
     }
 
     Elements groups;

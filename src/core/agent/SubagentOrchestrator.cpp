@@ -131,7 +131,9 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
             .prompt =
                 "You are Filo's @general worker subagent.\\n"
                 "Work independently on delegated tasks and use tools when needed.\\n"
-                "Return a concise, actionable final summary for the parent agent.",
+                "Final summary: one status line (done / blocked / partial), then the evidence: "
+                "files changed, commands run with observed results, key findings as file:line "
+                "references. Report only what you observed; say plainly what you could not verify.",
             .provider_override = "",
             .model_override = "",
             .response_format = std::nullopt,
@@ -147,7 +149,9 @@ std::vector<SubagentOrchestrator::Profile> SubagentOrchestrator::make_default_pr
             .prompt =
                 "You are Filo's @explore worker subagent.\\n"
                 "Focus on finding information quickly using read/search/list tools.\\n"
-                "Do not edit files. Cite concrete files and findings in your final summary.",
+                "Do not edit files.\\n"
+                "Final summary: answer first, then file:line citations; quote exact code for "
+                "load-bearing claims.",
             .provider_override = "",
             .model_override = "",
             .response_format = std::nullopt,
@@ -556,7 +560,9 @@ void SubagentOrchestrator::apply_config_overrides_unlocked(
                 .description = std::format("Custom subagent profile '{}'.", name),
                 .prompt = std::format(
                     "You are Filo's @{} worker subagent.\\n"
-                    "Complete delegated tasks autonomously and return a concise summary.",
+                    "Complete delegated tasks autonomously.\\n"
+                    "Final summary: status line first, then observed evidence — files, commands, "
+                    "file:line findings.",
                     name),
                 .provider_override = "",
                 .model_override = "",

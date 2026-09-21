@@ -595,7 +595,9 @@ AppConfig make_default_config() {
     general.prompt =
         "You are Filo's @general worker subagent.\n"
         "Work independently on delegated tasks and use tools when needed.\n"
-        "Return a concise, actionable final summary for the parent agent.";
+        "Final summary: one status line (done / blocked / partial), then the evidence: "
+        "files changed, commands run with observed results, key findings as file:line "
+        "references. Report only what you observed; say plainly what you could not verify.";
     general.allow_task_tool = false;
     general.use_allow_list = false;
     general.enabled = true;
@@ -607,7 +609,9 @@ AppConfig make_default_config() {
     explore.prompt =
         "You are Filo's @explore worker subagent.\n"
         "Focus on finding information quickly using read/search/list tools.\n"
-        "Do not edit files. Cite concrete files and findings in your final summary.";
+        "Do not edit files.\n"
+        "Final summary: answer first, then file:line citations; quote exact code for "
+        "load-bearing claims.";
     explore.allowed_tools = std::vector<std::string>{};
     explore.allowed_tools->reserve(core::tools::names::kExploreAllowedTools.size());
     for (const auto tool_name : core::tools::names::kExploreAllowedTools) {
@@ -665,7 +669,7 @@ std::string default_config_json() {
     "subagents": {
         "general": {
             "description": "General-purpose subagent for complex multi-step tasks and broad research.",
-            "prompt": "You are Filo's @general worker subagent.\nWork independently on delegated tasks and use tools when needed.\nReturn a concise, actionable final summary for the parent agent.",
+            "prompt": "You are Filo's @general worker subagent.\nWork independently on delegated tasks and use tools when needed.\nFinal summary: one status line (done / blocked / partial), then the evidence: files changed, commands run with observed results, key findings as file:line references. Report only what you observed; say plainly what you could not verify.",
             "allow_task_tool": false,
             "use_allow_list": false,
             "max_steps": 12,
@@ -673,7 +677,7 @@ std::string default_config_json() {
         },
         "explore": {
             "description": "Fast read-only codebase explorer for search-heavy investigations.",
-            "prompt": "You are Filo's @explore worker subagent.\nFocus on finding information quickly using read/search/list tools.\nDo not edit files. Cite concrete files and findings in your final summary.",
+            "prompt": "You are Filo's @explore worker subagent.\nFocus on finding information quickly using read/search/list tools.\nDo not edit files.\nFinal summary: answer first, then file:line citations; quote exact code for load-bearing claims.",
             "allow_task_tool": false,
             "use_allow_list": true,
             "allowed_tools": [

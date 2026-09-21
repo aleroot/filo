@@ -122,11 +122,34 @@ TEST_CASE("ContextBuilder renders runtime prompt without project context",
           "You are Filo, an advanced AI coding assistant running in BUILD mode.\n\n"
           "Build software methodically. Search, read, edit, and run commands. "
           "Verify your changes where possible. Ask clarifying questions only when truly needed."
+          "\n\n[Working rules]\n"
+          "- Bias to action. Before ending a turn, check your last message: if it is a plan, "
+          "a promise of future work, or a question one tool call could answer, do the work instead.\n"
+          "- Prefer one stated assumption over a blocking question; ask only when the answer "
+          "would change your approach. Persistence requests authorize effort, never broader permissions.\n"
+          "- If the user describes a problem without asking for a change, investigate and "
+          "report findings; do not edit unless asked.\n"
+          "- \"Done\", \"fixed\", or \"verified\" requires evidence observed this session: "
+          "tool output, the file as it now reads, a passing command. If you did not check, "
+          "say so. Failures and skipped steps go in the first sentence; never present a "
+          "workaround as a fix.\n"
+          "- Batch independent tool calls in one block; sequence only real dependencies. "
+          "Prefer dedicated tools over shell (read, grep_search, apply_patch, python); "
+          "search before reading; read the smallest range that answers the question.\n"
+          "- Make the smallest correct change, in the file's existing style. No drive-by "
+          "refactors, speculative comments, or defensive code for states that cannot happen.\n"
+          "- Lead replies with the outcome and keep them as short as the task allows; end "
+          "real work with a short recap that stands alone. Correct yourself only when the "
+          "error would change the user's code or decisions.\n"
+          "- Never stage, commit, push, or discard git state unless asked; never revert "
+          "changes you did not make. Never print, log, or commit secrets."
           "\n\nYou can delegate complex background work via the `task` tool."
           " Use the `subagent_type` values listed in the task tool schema/description."
           " Default profiles are `general` (broad multi-step work) and"
           " `explore` (fast read-only codebase search)."
-          " If the user asks with `@general` or `@explore`, map that request to a `task` call.");
+          " If the user asks with `@general` or `@explore`, map that request to a `task` call."
+          " Never predict or fabricate a pending subagent's results; treat surprising claims"
+          " from workers as unverified until checked.");
     CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("[Workspace]"));
     CHECK_THAT(
         prompt,
@@ -147,6 +170,66 @@ TEST_CASE("ContextBuilder gives AUTO a controller-owned execution contract",
                          "fan out independent read-only"));
   CHECK_THAT(prompt,
              Catch::Matchers::ContainsSubstring("fresh verification evidence"));
+}
+
+TEST_CASE("ContextBuilder keeps the shared doctrine compact in every mode",
+          "[context][builder][doctrine]") {
+  auto workspace = make_temp_workspace("filo_context_builder_doctrine");
+  const auto context = make_context(workspace.path());
+
+  // Filo's positioning is a token-lean system prompt. This ceiling locks that
+  // in: new doctrine must displace old doctrine, not accumulate.
+  constexpr std::size_t kMaxRuntimeLayerBytes = 2600;
+
+  for (const std::string_view mode :
+       {"BUILD", "AUTO", "PLAN", "RESEARCH", "EXECUTE", "DEBUG"}) {
+    CAPTURE(mode);
+    const auto layers =
+        core::context::ContextBuilder(context).with_mode(mode).build_layers();
+    REQUIRE_FALSE(layers.empty());
+    CHECK(layers[0].name == "runtime");
+    CHECK_THAT(layers[0].content,
+               Catch::Matchers::ContainsSubstring("[Working rules]"));
+    CHECK_THAT(layers[0].content,
+               Catch::Matchers::ContainsSubstring(
+                   "evidence observed this session"));
+    CHECK_THAT(layers[0].content,
+               Catch::Matchers::ContainsSubstring(
+                   "Never predict or fabricate a pending subagent's results"));
+    CHECK(layers[0].content.size() <= kMaxRuntimeLayerBytes);
+  }
+}
+
+TEST_CASE("ContextBuilder PLAN doctrine demands exploration and decision-complete plans",
+          "[context][builder][plan]") {
+  auto workspace = make_temp_workspace("filo_context_builder_plan");
+  const auto context = make_context(workspace.path());
+  const std::string prompt = build_prompt(context, "PLAN");
+
+  CHECK_THAT(prompt,
+             Catch::Matchers::ContainsSubstring("Explore before asking"));
+  CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring(
+                         "Planning the work is not doing the work"));
+  CHECK_THAT(prompt, Catch::Matchers::ContainsSubstring("decision-complete"));
+
+  const std::string research = build_prompt(context, "RESEARCH");
+  CHECK_THAT(research, Catch::Matchers::ContainsSubstring("decision-complete"));
+}
+
+TEST_CASE("ContextBuilder EXECUTE and DEBUG close with observed verification",
+          "[context][builder][verify]") {
+  auto workspace = make_temp_workspace("filo_context_builder_verify");
+  const auto context = make_context(workspace.path());
+
+  const std::string execute = build_prompt(context, "EXECUTE");
+  CHECK_THAT(execute, Catch::Matchers::ContainsSubstring(
+                          "verification evidence you actually observed"));
+
+  const std::string debug = build_prompt(context, "DEBUG");
+  CHECK_THAT(debug, Catch::Matchers::ContainsSubstring(
+                        "root causes, not symptoms"));
+  CHECK_THAT(debug, Catch::Matchers::ContainsSubstring(
+                        "may have a different cause"));
 }
 
 TEST_CASE("ContextBuilder renders ordered additional workspace directories",
