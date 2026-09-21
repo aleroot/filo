@@ -213,6 +213,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelCatalogDiscovery.cpp
     src/core/llm/ModelCatalogProvider.cpp
     src/core/llm/ModelMetadata.cpp
+    src/core/llm/ReasoningEffortResolution.cpp
     src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
     src/core/llm/catalog/CompatibleModelMetadata.cpp
     src/core/llm/catalog/CodexModelCatalogProvider.cpp

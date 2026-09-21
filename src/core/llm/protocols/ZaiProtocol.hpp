@@ -38,6 +38,8 @@ public:
 
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
     [[nodiscard]] ParseResult parse_event(std::string_view raw_event) override;
+    [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
+        std::string_view model) const noexcept override;
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] bool is_retryable(
         const HttpResponse& response) const noexcept override;

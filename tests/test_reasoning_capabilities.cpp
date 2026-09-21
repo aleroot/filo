@@ -6,6 +6,7 @@
 #include "core/llm/protocols/MistralProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 
 using namespace core::llm;
 using namespace core::llm::protocols;
@@ -118,4 +119,60 @@ TEST_CASE("Anthropic protocol reports per-family effort levels",
     CHECK_FALSE(supports(protocol, "claude-sonnet-4-6", ReasoningCapability::XHighEffort));
     CHECK_FALSE(supports(protocol, "claude-haiku-4-5", ReasoningCapability::Effort));
     CHECK_FALSE(supports(protocol, "claude-3-5-sonnet", ReasoningCapability::Effort));
+}
+
+TEST_CASE("effective reasoning effort is resolved from model capabilities",
+          "[llm][effort][resolution]") {
+    using Kind = ReasoningEffortResolutionKind;
+
+    CHECK(resolve_reasoning_effort("", {}).kind == Kind::ProviderDefault);
+
+    const auto off_supported = resolve_reasoning_effort(
+        "off", ReasoningCapabilities{ReasoningCapability::Disable});
+    CHECK(off_supported.effective == "off");
+    CHECK(off_supported.kind == Kind::Exact);
+
+    const auto off_required = resolve_reasoning_effort(
+        "none", ReasoningCapability::Required | ReasoningCapability::Effort);
+    CHECK(off_required.effective == "low");
+    CHECK(off_required.kind == Kind::RequiredMinimum);
+
+    const auto off_unknown = resolve_reasoning_effort("off", {});
+    CHECK(off_unknown.effective == "provider default");
+    CHECK(off_unknown.kind == Kind::UnsupportedProviderDefault);
+
+    const auto low_mapped = resolve_reasoning_effort(
+        "low", ReasoningCapabilities{ReasoningCapability::MapsLowToHigh});
+    CHECK(low_mapped.effective == "high");
+    CHECK(low_mapped.kind == Kind::Mapped);
+
+    const auto minimal_prefers_low = resolve_reasoning_effort(
+        "minimal",
+        ReasoningCapability::MapsMinimalToLow | ReasoningCapability::MapsMinimalToOff);
+    CHECK(minimal_prefers_low.effective == "low");
+    CHECK(minimal_prefers_low.kind == Kind::Mapped);
+
+    const auto minimal_maps_off = resolve_reasoning_effort(
+        "minimal", ReasoningCapabilities{ReasoningCapability::MapsMinimalToOff});
+    CHECK(minimal_maps_off.effective == "off");
+    CHECK(minimal_maps_off.kind == Kind::Mapped);
+
+    const auto xhigh_maps_max = resolve_reasoning_effort(
+        "xhigh",
+        ReasoningCapability::XHighEffort | ReasoningCapability::MapsXHighToMax);
+    CHECK(xhigh_maps_max.effective == "max");
+    CHECK(xhigh_maps_max.kind == Kind::Mapped);
+
+    const auto max_fallback = resolve_reasoning_effort("max", {});
+    CHECK(max_fallback.effective == "high");
+    CHECK(max_fallback.kind == Kind::UnsupportedFallback);
+
+    const auto ultra_to_max = resolve_reasoning_effort(
+        "ultra", ReasoningCapabilities{ReasoningCapability::MaxEffort});
+    CHECK(ultra_to_max.effective == "max");
+    CHECK(ultra_to_max.kind == Kind::UnsupportedFallback);
+
+    const auto ultra_to_high = resolve_reasoning_effort("ultra", {});
+    CHECK(ultra_to_high.effective == "high");
+    CHECK(ultra_to_high.kind == Kind::UnsupportedFallback);
 }

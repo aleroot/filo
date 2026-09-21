@@ -50,6 +50,7 @@
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/ProviderCatalogGrouping.hpp"
 #include "core/llm/ProviderCredentialStatus.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 #include "core/llm/ProviderManager.hpp"
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/providers/RouterProvider.hpp"
@@ -3983,9 +3984,8 @@ RunResult run(RunOptions opts) {
         return rows;
     };
 
-    // The active wire protocol owns model-specific effort policy. UI code
-    // consumes the provider-neutral capability value and never switches on
-    // provider names or API families.
+    // Resolve model capabilities in the LLM layer. The TUI only renders the
+    // resulting effective value and its explanation.
     auto reasoning_capabilities = [&](std::string_view provider_name,
                                       std::string_view model_name) {
         try {
@@ -3996,25 +3996,32 @@ RunResult run(RunOptions opts) {
         }
     };
 
-    auto resolve_effective_effort = [&](std::string_view configured,
-                                        const core::llm::ReasoningCapabilities& capabilities)
-        -> std::string {
-        if (configured.empty()) return "high (auto default)";
-        if (configured == "max"
-            && !capabilities.supports(core::llm::ReasoningCapability::MaxEffort)) {
-            return "high (max unsupported on current model)";
+    auto format_effective_effort = [](
+        std::string_view configured,
+        const core::llm::ReasoningEffortResolution& resolution) -> std::string {
+        using Kind = core::llm::ReasoningEffortResolutionKind;
+        switch (resolution.kind) {
+        case Kind::ProviderDefault:
+            return "provider default";
+        case Kind::Exact:
+            return resolution.effective;
+        case Kind::UnsupportedProviderDefault:
+            return "provider default (off unsupported or unknown)";
+        case Kind::RequiredMinimum:
+            return "low (reasoning required on current model)";
+        case Kind::Mapped:
+            return std::format(
+                "{} ({} maps to {} on current model)",
+                resolution.effective,
+                configured,
+                resolution.effective);
+        case Kind::UnsupportedFallback:
+            return std::format(
+                "{} ({} unsupported on current model)",
+                resolution.effective,
+                configured);
         }
-        if (configured == "xhigh"
-            && !capabilities.supports(core::llm::ReasoningCapability::XHighEffort)) {
-            return "high (xhigh unsupported on current model)";
-        }
-        if (configured == "ultra"
-            && !capabilities.supports(core::llm::ReasoningCapability::UltraEffort)) {
-            return capabilities.supports(core::llm::ReasoningCapability::MaxEffort)
-                ? "max (ultra unsupported on current model)"
-                : "high (ultra unsupported on current model)";
-        }
-        return std::string(configured);
+        return resolution.effective;
     };
 
     auto describe_effort = [&]() -> std::string {
@@ -4030,9 +4037,10 @@ RunResult run(RunOptions opts) {
             : (active_provider_name.empty() ? manual_provider_name : active_provider_name);
         const auto capabilities = reasoning_capabilities(
             provider_for_status, model_for_status);
-        const std::string effective = resolve_effective_effort(
-            session_effort_value,
-            capabilities);
+        const auto resolution = core::llm::resolve_reasoning_effort(
+            session_effort_value, capabilities);
+        const std::string effective = format_effective_effort(
+            session_effort_value, resolution);
 
         std::string applies_note =
             "Applies when the active provider protocol supports effort for this model.";
@@ -4085,13 +4093,14 @@ RunResult run(RunOptions opts) {
             || normalized == "default") {
             session_effort_value.clear();
             agent->set_effort_level(session_effort_value);
-            return "Set effort to auto (provider default, typically high).";
+            return "Set effort to auto (provider default).";
         }
 
         if (normalized == "off" || normalized == "none" || normalized == "disabled") {
             session_effort_value = "none";
             agent->set_effort_level(session_effort_value);
-            return "Disabled reasoning for providers with switchable thinking.";
+            return "Set effort to off where supported; models with forced reasoning "
+                   "use their minimum available effort.";
         }
 
         if (normalized != "low" && normalized != "medium"

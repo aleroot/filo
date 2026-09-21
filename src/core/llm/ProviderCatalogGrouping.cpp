@@ -11,10 +11,23 @@
 namespace core::llm {
 namespace {
 
-constexpr std::array<std::string_view, 7> kZaiCodingModels{{
+constexpr std::array<std::string_view, 7> kZaiPlanSeparatedModels{{
     "glm-5.3",
     "glm-5.3-flash",
     "glm-5.3-flashx",
+    "glm-5.2",
+    "glm-5-turbo",
+    "glm-4.7",
+    "glm-4.5-air",
+}};
+
+// The live /models response is shared by Z.ai's General and Coding hosts, but
+// FlashX is not currently included with the Coding Plan. Keep it reserved from
+// General to avoid routing an aliased Coding Plan key there, while omitting it
+// from the plan source itself.
+constexpr std::array<std::string_view, 6> kZaiCodingPlanModels{{
+    "glm-5.3",
+    "glm-5.3-flash",
     "glm-5.2",
     "glm-5-turbo",
     "glm-4.7",
@@ -74,11 +87,12 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
 }
 
 [[nodiscard]] ProviderCatalogModelFilter zai_regular_filter() {
-    return model_filter(ProviderCatalogModelRule::Exclude, kZaiCodingModels);
+    return model_filter(
+        ProviderCatalogModelRule::Exclude, kZaiPlanSeparatedModels);
 }
 
 [[nodiscard]] ProviderCatalogModelFilter zai_coding_filter() {
-    return model_filter(ProviderCatalogModelRule::Include, kZaiCodingModels);
+    return model_filter(ProviderCatalogModelRule::Include, kZaiCodingPlanModels);
 }
 
 [[nodiscard]] ProviderCatalogModelFilter kimi_regular_filter() {

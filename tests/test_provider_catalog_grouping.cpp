@@ -26,7 +26,7 @@ TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
     REQUIRE(groups[1].sources[0].category_label == "GLM Coding Plan.");
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3"));
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3-flash"));
-    REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.3-flashx"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.3-flashx"));
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-5.2"));
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-5-turbo"));
     REQUIRE(groups[1].sources[0].includes_registry_model("glm-4.7"));
@@ -34,6 +34,7 @@ TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
     REQUIRE_FALSE(groups[1].sources[0].includes_registry_model("glm-5.1"));
     REQUIRE(groups[1].sources[0].includes_api_model("glm-5.3"));
     REQUIRE(groups[1].sources[0].includes_api_model("glm-5.3-flash"));
+    REQUIRE_FALSE(groups[1].sources[0].includes_api_model("glm-5.3-flashx"));
     REQUIRE_FALSE(groups[1].sources[0].includes_api_model("glm-5.1"));
     REQUIRE_FALSE(groups[1].sources[0].includes_api_model("glm-future-live"));
     REQUIRE_FALSE(groups[1].sources[0].includes_api_model("embedding-4"));
@@ -48,6 +49,7 @@ TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
     // under General API and a Coding Plan key returns HTTP 429 / error 1113.
     REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.3"));
     REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.3-flash"));
+    REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.3-flashx"));
     REQUIRE_FALSE(groups[1].sources[1].includes_api_model("glm-5.2"));
     REQUIRE(groups[1].sources[1].includes_api_model("glm-5.1"));
 

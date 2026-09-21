@@ -13,6 +13,12 @@ enum class ReasoningCapability : std::uint16_t {
     FixedMax = 1U << 5,
     UltraEffort = 1U << 6,
     MinimalEffort = 1U << 7,
+    MapsLowToHigh = 1U << 8,
+    MapsMediumToHigh = 1U << 9,
+    MapsXHighToMax = 1U << 10,
+    MapsMinimalToLow = 1U << 11,
+    MapsMinimalToOff = 1U << 12,
+    MapsXHighToHigh = 1U << 13,
 };
 
 class ReasoningCapabilities {

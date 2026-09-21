@@ -1,7 +1,9 @@
 #include "ZaiProtocol.hpp"
 
+#include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
+#include "../../utils/AsciiUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/TimeUtils.hpp"
 
@@ -10,7 +12,6 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cctype>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -34,14 +35,6 @@ struct CachedUsageSnapshot {
 struct ApiError {
     int code = 0;
     std::string message;
-};
-
-struct StreamParseResult {
-    std::string content;
-    std::string reasoning_content;
-    std::vector<ToolCall> tools;
-    int32_t prompt_tokens = 0;
-    int32_t completion_tokens = 0;
 };
 
 [[nodiscard]] std::optional<float> parse_float_header(
@@ -490,68 +483,152 @@ subscription_end_cache() {
 }
 
 [[nodiscard]] bool is_glm_model(std::string_view model) {
-    return core::utils::str::to_lower_ascii_copy(
-        core::utils::str::trim_ascii_view(model)).starts_with("glm-");
+    return core::utils::ascii::istarts_with(
+        core::utils::str::trim_ascii_view(model), "glm-");
 }
 
-[[nodiscard]] std::string normalize_effort(std::string_view raw_effort) {
-    std::string effort = core::utils::str::to_lower_ascii_copy(raw_effort);
-    std::erase_if(effort, [](unsigned char ch) { return std::isspace(ch); });
-    if (effort == "auto" || effort == "unset" || effort == "default") return {};
-    if (effort == "off" || effort == "disabled" || effort == "disable") return "off";
-    if (effort == "low" || effort == "medium" || effort == "high" || effort == "max") {
-        return effort;
+[[nodiscard]] bool is_model_family(
+    std::string_view model,
+    std::string_view family) {
+    const std::string_view normalized = core::utils::str::trim_ascii_view(model);
+    if (!core::utils::ascii::istarts_with(normalized, family)) return false;
+    if (normalized.size() == family.size()) return true;
+    const char suffix = normalized[family.size()];
+    return suffix == '-' || suffix == '.' || suffix == ':'
+        || suffix == '/' || suffix == '[';
+}
+
+[[nodiscard]] bool is_glm_53_model(std::string_view model) {
+    return is_model_family(model, "glm-5.3");
+}
+
+[[nodiscard]] bool is_glm_52_model(std::string_view model) {
+    return is_model_family(model, "glm-5.2");
+}
+
+[[nodiscard]] bool supports_tool_stream(std::string_view model) {
+    return is_model_family(model, "glm-5")
+        || is_model_family(model, "glm-4.7")
+        || is_model_family(model, "glm-4.6");
+}
+
+enum class ZaiReasoningEffort {
+    ProviderDefault,
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+};
+
+[[nodiscard]] ZaiReasoningEffort parse_reasoning_effort(
+    std::string_view raw_effort) noexcept {
+    const std::string_view effort = core::utils::str::trim_ascii_view(raw_effort);
+    using core::utils::ascii::iequals;
+    if (effort.empty() || iequals(effort, "auto") || iequals(effort, "unset")
+        || iequals(effort, "default")) {
+        return ZaiReasoningEffort::ProviderDefault;
+    }
+    if (iequals(effort, "off") || iequals(effort, "none")
+        || iequals(effort, "disabled") || iequals(effort, "disable")) {
+        return ZaiReasoningEffort::Off;
+    }
+    if (iequals(effort, "minimal")) return ZaiReasoningEffort::Minimal;
+    if (iequals(effort, "low")) return ZaiReasoningEffort::Low;
+    if (iequals(effort, "medium")) return ZaiReasoningEffort::Medium;
+    if (iequals(effort, "high")) return ZaiReasoningEffort::High;
+    if (iequals(effort, "xhigh")) return ZaiReasoningEffort::XHigh;
+    if (iequals(effort, "max")) return ZaiReasoningEffort::Max;
+    if (iequals(effort, "ultra")) return ZaiReasoningEffort::Ultra;
+    return ZaiReasoningEffort::ProviderDefault;
+}
+
+[[nodiscard]] ZaiReasoningEffort effort_for_model(
+    ZaiReasoningEffort effort,
+    std::string_view model) noexcept {
+    if (is_glm_53_model(model)) {
+        switch (effort) {
+        case ZaiReasoningEffort::Minimal:
+        case ZaiReasoningEffort::Off:
+        case ZaiReasoningEffort::Low:
+            return ZaiReasoningEffort::Low;
+        case ZaiReasoningEffort::Medium:
+        case ZaiReasoningEffort::XHigh:
+        case ZaiReasoningEffort::High:
+            return ZaiReasoningEffort::High;
+        case ZaiReasoningEffort::Ultra:
+        case ZaiReasoningEffort::Max:
+            return ZaiReasoningEffort::Max;
+        case ZaiReasoningEffort::ProviderDefault:
+            return effort;
+        }
+    }
+    if (is_glm_52_model(model)) {
+        switch (effort) {
+        case ZaiReasoningEffort::Low:
+        case ZaiReasoningEffort::Medium:
+            return ZaiReasoningEffort::High;
+        case ZaiReasoningEffort::XHigh:
+        case ZaiReasoningEffort::Ultra:
+            return ZaiReasoningEffort::Max;
+        default:
+            return effort;
+        }
+    }
+    return effort;
+}
+
+[[nodiscard]] std::string_view reasoning_effort_name(
+    ZaiReasoningEffort effort) noexcept {
+    switch (effort) {
+    case ZaiReasoningEffort::Minimal: return "minimal";
+    case ZaiReasoningEffort::Low: return "low";
+    case ZaiReasoningEffort::Medium: return "medium";
+    case ZaiReasoningEffort::High: return "high";
+    case ZaiReasoningEffort::XHigh: return "xhigh";
+    case ZaiReasoningEffort::Max: return "max";
+    case ZaiReasoningEffort::Ultra: return "ultra";
+    case ZaiReasoningEffort::ProviderDefault:
+    case ZaiReasoningEffort::Off:
+        return {};
     }
     return {};
 }
 
-[[nodiscard]] bool read_usage_object(
-    simdjson::dom::object usage,
-    int32_t& prompt_tokens,
-    int32_t& completion_tokens) {
-    int64_t prompt = 0;
-    int64_t completion = 0;
-    const bool has_prompt = usage["prompt_tokens"].get(prompt) == simdjson::SUCCESS;
-    const bool has_completion =
-        usage["completion_tokens"].get(completion) == simdjson::SUCCESS;
-    if (!has_prompt && !has_completion) return false;
-    prompt_tokens = static_cast<int32_t>(prompt);
-    completion_tokens = static_cast<int32_t>(completion);
-    return prompt > 0 || completion > 0;
-}
-
-[[nodiscard]] StreamParseResult parse_stream_chunk(std::string_view json) {
+[[nodiscard]] ParseResult parse_stream_chunk(std::string_view json) {
     thread_local simdjson::dom::parser parser;
     simdjson::padded_string padded(json);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) return {};
 
-    StreamParseResult result;
+    ParseResult result;
     simdjson::dom::object usage;
     bool has_usage = document["usage"].get(usage) == simdjson::SUCCESS
-        && read_usage_object(
-            usage, result.prompt_tokens, result.completion_tokens);
+        && parse_openai_usage(usage, result);
 
     simdjson::dom::array choices;
     if (document["choices"].get(choices) != simdjson::SUCCESS) return result;
+    StreamChunk chunk;
     for (simdjson::dom::element choice : choices) {
         if (!has_usage) {
             simdjson::dom::object choice_usage;
             has_usage = choice["usage"].get(choice_usage) == simdjson::SUCCESS
-                && read_usage_object(
-                    choice_usage, result.prompt_tokens, result.completion_tokens);
+                && parse_openai_usage(choice_usage, result);
         }
 
         simdjson::dom::object delta;
         if (choice["delta"].get(delta) != simdjson::SUCCESS) continue;
         std::string_view content;
         if (delta["content"].get(content) == simdjson::SUCCESS) {
-            result.content = std::string(content);
+            chunk.content = content;
         }
         std::string_view reasoning;
         if (delta["reasoning_content"].get(reasoning) == simdjson::SUCCESS
             && !reasoning.empty()) {
-            result.reasoning_content.append(reasoning);
+            chunk.reasoning_content.append(reasoning);
         }
 
         simdjson::dom::array tool_calls;
@@ -574,8 +651,12 @@ subscription_end_cache() {
                     call.function.arguments = value;
                 }
             }
-            result.tools.push_back(std::move(call));
+            chunk.tools.push_back(std::move(call));
         }
+    }
+    if (!chunk.content.empty() || !chunk.reasoning_content.empty()
+        || !chunk.tools.empty()) {
+        result.chunks.push_back(std::move(chunk));
     }
     return result;
 }
@@ -592,6 +673,9 @@ std::string ZaiProtocol::serialize(const ChatRequest& req) const {
     if (payload.ends_with('}')) {
         payload.pop_back();
         append_extra_fields(payload, req);
+        if (req.stream && !req.tools.empty() && supports_tool_stream(req.model)) {
+            payload += R"(,"tool_stream":true)";
+        }
         if ((stream_usage_ || req.stream_include_usage) && req.stream) {
             payload += R"(,"stream_options":{"include_usage":true})";
         }
@@ -605,21 +689,11 @@ ParseResult ZaiProtocol::parse_event(std::string_view raw_event) {
     if (!sse::parse_event_payload(raw_event, parsed)) return {};
     if (parsed.is_done) return {.done = true};
 
-    ParseResult result;
-    auto parsed_chunk = parse_stream_chunk(parsed.data);
-    result.prompt_tokens = parsed_chunk.prompt_tokens;
-    result.completion_tokens = parsed_chunk.completion_tokens;
-    if (!parsed_chunk.content.empty()
-        || !parsed_chunk.reasoning_content.empty()
-        || !parsed_chunk.tools.empty()) {
-        StreamChunk chunk;
-        chunk.content = std::move(parsed_chunk.content);
-        chunk.reasoning_content = std::move(parsed_chunk.reasoning_content);
+    ParseResult result = parse_stream_chunk(parsed.data);
+    for (auto& chunk : result.chunks) {
         if (!chunk.reasoning_content.empty()) {
             chunk.reasoning_protocol = std::string(name());
         }
-        chunk.tools = std::move(parsed_chunk.tools);
-        result.chunks.push_back(std::move(chunk));
     }
     return result;
 }
@@ -758,17 +832,66 @@ void ZaiProtocol::append_extra_fields(
     std::string& payload,
     const ChatRequest& req) const {
     if (!is_glm_model(req.model)) return;
-    const std::string effort = normalize_effort(req.effort);
-    if (effort == "off") {
-        payload += R"(,"thinking":{"type":"disabled"})";
-        return;
+    const ReasoningCapabilities capabilities = reasoning_capabilities(req.model);
+    ZaiReasoningEffort effort = parse_reasoning_effort(req.effort);
+
+    const bool skip_glm_52_thinking = is_glm_52_model(req.model)
+        && effort == ZaiReasoningEffort::Minimal;
+    if (effort == ZaiReasoningEffort::Off || skip_glm_52_thinking) {
+        if (capabilities.supports(ReasoningCapability::Disable)) {
+            payload += R"(,"thinking":{"type":"disabled"})";
+            return;
+        }
+        if (capabilities.supports(ReasoningCapability::Required)
+            && capabilities.supports_effort()) {
+            // GLM-5.3 and Flash require reasoning, so use the lowest supported
+            // effort instead of sending a request that the API rejects.
+            effort = ZaiReasoningEffort::Low;
+        } else {
+            effort = ZaiReasoningEffort::ProviderDefault;
+        }
     }
+
     payload += R"(,"thinking":{"type":"enabled","clear_thinking":false})";
-    if (!effort.empty()) {
+    if (effort != ZaiReasoningEffort::ProviderDefault
+        && capabilities.supports_effort()) {
+        effort = effort_for_model(effort, req.model);
+        const std::string_view effort_name = reasoning_effort_name(effort);
+        if (effort_name.empty()) return;
         payload += R"(,"reasoning_effort":")";
-        payload += core::utils::escape_json_string(effort);
+        payload += effort_name;
         payload += '"';
     }
+}
+
+ReasoningCapabilities ZaiProtocol::reasoning_capabilities(
+    std::string_view model) const noexcept {
+    if (!is_glm_model(model)) return {};
+    if (is_glm_53_model(model)) {
+        return ReasoningCapability::Effort
+            | ReasoningCapability::MaxEffort
+            | ReasoningCapability::Required
+            | ReasoningCapability::MapsMediumToHigh
+            | ReasoningCapability::MapsMinimalToLow
+            | ReasoningCapability::MapsXHighToHigh;
+    }
+    if (is_glm_52_model(model)) {
+        return ReasoningCapability::Effort
+            | ReasoningCapability::MaxEffort
+            | ReasoningCapability::XHighEffort
+            | ReasoningCapability::Disable
+            | ReasoningCapability::MapsLowToHigh
+            | ReasoningCapability::MapsMediumToHigh
+            | ReasoningCapability::MapsXHighToMax
+            | ReasoningCapability::MapsMinimalToOff;
+    }
+    if (is_model_family(model, "glm-5")
+        || is_model_family(model, "glm-4.7")
+        || is_model_family(model, "glm-4.6")
+        || is_model_family(model, "glm-4.5")) {
+        return ReasoningCapabilities{ReasoningCapability::Disable};
+    }
+    return {};
 }
 
 void ZaiCodingProtocol::prepare_request(ChatRequest& req) {

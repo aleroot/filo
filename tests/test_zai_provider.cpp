@@ -8,6 +8,11 @@
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/llm/protocols/ZaiProtocol.hpp"
 
+#include <array>
+#include <format>
+#include <string_view>
+#include <utility>
+
 using namespace core::llm;
 using namespace core::llm::protocols;
 
@@ -81,6 +86,111 @@ TEST_CASE("Z.ai protocol serializes Z.ai reasoning effort",
     const std::string payload = protocol.serialize(request);
 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"max")"));
+}
+
+TEST_CASE("Z.ai protocol maps effort to supported GLM-5.3 levels",
+          "[zai][protocol][effort]") {
+    ZaiProtocol protocol;
+    const std::array<std::pair<std::string_view, std::string_view>, 5> cases{{
+        {"minimal", "low"},
+        {"low", "low"},
+        {"medium", "high"},
+        {"xhigh", "high"},
+        {"ultra", "max"},
+    }};
+
+    for (const auto& [configured, expected] : cases) {
+        ChatRequest request;
+        request.model = "glm-5.3-flash";
+        request.effort = configured;
+        request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+        const std::string payload = protocol.serialize(request);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            std::format(R"("reasoning_effort":"{}")", expected)));
+    }
+}
+
+TEST_CASE("Z.ai protocol maps effort to supported GLM-5.2 levels",
+          "[zai][protocol][effort]") {
+    ZaiProtocol protocol;
+    const std::array<std::pair<std::string_view, std::string_view>, 3> cases{{
+        {"low", "high"},
+        {"medium", "high"},
+        {"xhigh", "max"},
+    }};
+
+    for (const auto& [configured, expected] : cases) {
+        ChatRequest request;
+        request.model = "glm-5.2";
+        request.effort = configured;
+        request.messages.push_back(Message{.role = "user", .content = "hi"});
+
+        const std::string payload = protocol.serialize(request);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            std::format(R"("reasoning_effort":"{}")", expected)));
+    }
+
+    ChatRequest minimal_request;
+    minimal_request.model = "glm-5.2";
+    minimal_request.effort = "minimal";
+    minimal_request.messages.push_back(Message{.role = "user", .content = "hi"});
+    const std::string minimal_payload = protocol.serialize(minimal_request);
+    REQUIRE_THAT(minimal_payload,
+                 Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"disabled"})"));
+    REQUIRE_THAT(minimal_payload,
+                 !Catch::Matchers::ContainsSubstring("reasoning_effort"));
+}
+
+TEST_CASE("Z.ai protocol enables streamed tool deltas on supported models",
+          "[zai][protocol][tools]") {
+    ChatRequest request;
+    request.model = "glm-5.3";
+    request.stream = true;
+    request.messages.push_back(Message{.role = "user", .content = "hi"});
+    Tool tool;
+    tool.function.name = "lookup";
+    tool.function.description = "Look up a value";
+    request.tools.push_back(std::move(tool));
+
+    const std::string payload = ZaiProtocol{}.serialize(request);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("tool_stream":true)"));
+
+    request.model = "glm-5-turbo";
+    const std::string glm_5_family_payload = ZaiProtocol{}.serialize(request);
+    REQUIRE_THAT(glm_5_family_payload,
+                 Catch::Matchers::ContainsSubstring(R"("tool_stream":true)"));
+
+    request.model = "glm-4.5-air";
+    const std::string unsupported_model_payload = ZaiProtocol{}.serialize(request);
+    REQUIRE_THAT(unsupported_model_payload,
+                 !Catch::Matchers::ContainsSubstring("tool_stream"));
+
+    request.model = "glm-5.3";
+    request.stream = false;
+    const std::string non_stream_payload = ZaiProtocol{}.serialize(request);
+    REQUIRE_THAT(non_stream_payload, !Catch::Matchers::ContainsSubstring("tool_stream"));
+}
+
+TEST_CASE("Z.ai protocol parses cached and reasoning usage from stream events",
+          "[zai][protocol][usage]") {
+    const auto result = ZaiProtocol{}.parse_event(
+        R"(data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":35,"prompt_tokens_details":{"cached_tokens":80},"completion_tokens_details":{"reasoning_tokens":22}}})");
+
+    REQUIRE(result.prompt_tokens == 120);
+    REQUIRE(result.completion_tokens == 35);
+    REQUIRE(result.cached_prompt_tokens == 80);
+    REQUIRE(result.reasoning_tokens == 22);
+    REQUIRE(result.chunks.empty());
+}
+
+TEST_CASE("Z.ai stream usage falls back when top-level usage is empty",
+          "[zai][protocol][usage]") {
+    const auto result = ZaiProtocol{}.parse_event(
+        R"(data: {"usage":{},"choices":[{"usage":{"prompt_tokens":7,"completion_tokens":4},"delta":{}}]})");
+
+    REQUIRE(result.prompt_tokens == 7);
+    REQUIRE(result.completion_tokens == 4);
 }
 
 TEST_CASE("Z.ai protocol can disable thinking per turn",
