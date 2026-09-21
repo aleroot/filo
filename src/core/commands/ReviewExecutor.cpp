@@ -8,6 +8,7 @@
 #include "../context/SteeringLoader.hpp"
 #include "../utils/StringUtils.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <format>
 #include <memory>
@@ -357,11 +358,49 @@ std::string build_custom_submission_prompt(std::string_view task) {
     return prompt;
 }
 
+using AssistantOutputCallback = std::function<void(const std::string&)>;
+using AssistantDisclosureOutputCallback =
+    std::function<void(const std::string&, const std::string&, const std::string&)>;
+
+void append_review_report(const std::function<void(const std::string&)>& append_history,
+                          const AssistantOutputCallback& append_assistant,
+                          const AssistantDisclosureOutputCallback& append_disclosure,
+                          const core::review::Report& report,
+                          std::string_view extra_text = {}) {
+    std::string full_output = core::review::render_report(report);
+    full_output += extra_text;
+
+    const std::string low_notes =
+        core::review::render_low_severity_findings(report);
+    if (!low_notes.empty() && append_disclosure) {
+        std::string display = core::review::render_report(report, false);
+        display += extra_text;
+        const auto low_count = std::count_if(
+            report.findings.begin(), report.findings.end(), [](const auto& finding) {
+                return core::review::effective_severity(finding)
+                    == core::review::Severity::Low;
+            });
+        const std::string summary = low_count == 1
+            ? "1 low-severity note omitted"
+            : std::format("{} low-severity notes omitted", low_count);
+        append_disclosure(
+            display,
+            summary,
+            low_notes);
+    } else if (append_assistant) {
+        append_assistant(full_output);
+    } else {
+        append_history(std::format("\n{}\n", full_output));
+    }
+}
+
 void run_agent_review_turn(const CommandContext& ctx,
                            std::string prompt,
                            bool allow_tools) {
     const auto set_review_activity_fn = ctx.set_review_activity_fn;
     const auto append_assistant_output_fn = ctx.append_assistant_output_fn;
+    const auto append_assistant_disclosure_output_fn =
+        ctx.append_assistant_disclosure_output_fn;
     auto append_fn = ctx.append_history_fn;
     auto collected_output = std::make_shared<std::string>();
     auto interrupted = std::make_shared<bool>(false);
@@ -392,7 +431,8 @@ void run_agent_review_turn(const CommandContext& ctx,
          collected_output,
          interrupted,
          set_review_activity_fn,
-         append_assistant_output_fn]() {
+         append_assistant_output_fn,
+         append_assistant_disclosure_output_fn]() {
             const std::string raw = trim_ascii_copy(*collected_output);
             if (*interrupted || raw.find(core::review::kStopMarker) != std::string::npos) {
                 append_fn(
@@ -404,12 +444,10 @@ void run_agent_review_turn(const CommandContext& ctx,
             }
 
             const auto output = core::review::parse_review_output(raw);
-            const std::string rendered = core::review::render_report(output);
-            if (append_assistant_output_fn) {
-                append_assistant_output_fn(rendered);
-            } else {
-                append_fn(std::format("\n{}\n", rendered));
-            }
+            append_review_report(append_fn,
+                                 append_assistant_output_fn,
+                                 append_assistant_disclosure_output_fn,
+                                 output);
             if (set_review_activity_fn) {
                 set_review_activity_fn(false, "");
             }
@@ -554,24 +592,26 @@ void run_grouped_review(const CommandContext& ctx,
 
     auto result = engine.run(input);
 
-    const auto publish_report = [&](std::string rendered, bool persist) {
+    const auto publish_report = [&](std::string extra_text, bool persist) {
+        std::string rendered = core::review::render_report(result.report);
+        rendered += extra_text;
         if (persist) {
             persist_review_summary(ctx, hint, rendered);
         }
-        if (ctx.append_assistant_output_fn) {
-            ctx.append_assistant_output_fn(rendered);
-        } else {
-            ctx.append_history_fn(std::format("\n{}\n", rendered));
-        }
+        append_review_report(ctx.append_history_fn,
+                             ctx.append_assistant_output_fn,
+                             ctx.append_assistant_disclosure_output_fn,
+                             result.report,
+                             extra_text);
     };
 
     if (result.interrupted) {
         const bool has_partial = result.report.groups_reviewed > 0
             || !result.report.findings.empty();
         if (has_partial) {
-            std::string rendered = core::review::render_report(result.report);
-            rendered += "\n\nReview was interrupted. Findings above cover the units that finished.";
-            publish_report(std::move(rendered), true);
+            publish_report(
+                "\n\nReview was interrupted. Findings above cover the units that finished.",
+                true);
         } else {
             ctx.append_history_fn(
                 "\nℹ  Review was interrupted. Re-run /review and wait for it to complete.\n");
@@ -589,7 +629,7 @@ void run_grouped_review(const CommandContext& ctx,
         return;
     }
 
-    publish_report(core::review::render_report(result.report), true);
+    publish_report({}, true);
     if (set_review_activity_fn) {
         set_review_activity_fn(false, "");
     }

@@ -2323,6 +2323,46 @@ namespace {
     return !msg.reasoning_text.empty();
 }
 
+[[nodiscard]] std::string assistant_disclosure_key(std::string_view message_id) {
+    return std::string(message_id) + ":assistant-disclosure";
+}
+
+[[nodiscard]] Element render_assistant_disclosure(
+    const UiMessage& msg,
+    const ConversationRenderOptions& options) {
+    const std::string key = assistant_disclosure_key(msg.id);
+    bool expanded = options.expand_system_details;
+    if (options.system_disclosure_expanded != nullptr) {
+        if (const auto it = options.system_disclosure_expanded->find(key);
+            it != options.system_disclosure_expanded->end()) {
+            expanded = expanded || it->second;
+        }
+    }
+
+    Element header = hbox({
+        ftxui::text("  "),
+        ftxui::text(expanded ? "▼ " : "▶ ")
+            | ftxui::color(ColorYellowDark),
+        ftxui::text(msg.disclosure_summary)
+            | ftxui::color(ColorYellowDark)
+            | dim,
+    });
+    if (options.system_disclosure_hitboxes != nullptr) {
+        auto& box = (*options.system_disclosure_hitboxes)[key];
+        header = std::move(header) | reflect(box);
+    }
+
+    std::vector<Element> rows;
+    rows.push_back(std::move(header));
+    if (expanded) {
+        rows.push_back(hbox({
+            ftxui::text("  │ ") | ftxui::color(Color::GrayDark) | dim,
+            render_markdown(msg.disclosure_text, Color::GrayLight) | xflex,
+        }) | xflex);
+    }
+    return vbox(std::move(rows)) | xflex;
+}
+
 // Renders the provider-supplied reasoning disclosure for an assistant turn.
 //
 // States, one code path:
@@ -2474,6 +2514,13 @@ Element render_assistant_message(const UiMessage& msg,
             elements.push_back(ftxui::text(""));
         }
         elements.push_back(render_markdown(msg.text, Color::White));
+    }
+
+    if (!msg.disclosure_summary.empty() && !msg.disclosure_text.empty()) {
+        if (!msg.text.empty()) {
+            elements.push_back(ftxui::text(""));
+        }
+        elements.push_back(render_assistant_disclosure(msg, options));
     }
 
     // Tool calls belong to this provider step and follow its narration.

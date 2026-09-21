@@ -54,6 +54,10 @@ struct CommandContext {
     std::function<void()> clear_input_fn;
     std::function<void(const std::string&)> append_history_fn;
     std::function<void(const std::string&)> append_assistant_output_fn = {};
+    /// Optional assistant output with a collapsed, interactive detail section.
+    std::function<void(const std::string&,
+                       const std::string&,
+                       const std::string&)> append_assistant_disclosure_output_fn = {};
     std::shared_ptr<core::agent::Agent> agent;
     /// Session metrics registry injected by the execution root; /usage reads
     /// the current thread's stats from here (never from a global singleton).

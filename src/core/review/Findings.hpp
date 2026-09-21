@@ -24,6 +24,11 @@ namespace core::review {
                                        std::span<const std::string> skipped_paths = {},
                                        std::span<const std::string> warnings = {});
 
-[[nodiscard]] std::string render_report(const Report& report);
+[[nodiscard]] std::string render_report(
+    const Report& report,
+    bool include_omitted_low_count = true);
+
+/// Render low-severity findings for an optional expanded report disclosure.
+[[nodiscard]] std::string render_low_severity_findings(const Report& report);
 
 } // namespace core::review

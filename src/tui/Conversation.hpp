@@ -120,6 +120,7 @@ struct UiMessage {
     std::string text;                    // Primary text content
     std::string secondary_text;          // Secondary/subtitle text
     std::string disclosure_text;         // Optional expandable details (collapsed by default)
+    std::string disclosure_summary;      // Label for an assistant-message disclosure
     std::string icon;                    // Custom icon override
     std::size_t repeat_count = 1;        // Number of collapsed consecutive duplicates
     

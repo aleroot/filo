@@ -501,7 +501,7 @@ Report aggregate_reports(std::span<const Report> reports,
     return out;
 }
 
-std::string render_report(const Report& report) {
+std::string render_report(const Report& report, bool include_omitted_low_count) {
     std::vector<std::string> sections;
     sections.emplace_back("# Review");
 
@@ -534,7 +534,7 @@ std::string render_report(const Report& report) {
     } else {
         sections.push_back(format_findings_block(visible));
     }
-    if (hidden_low > 0) {
+    if (hidden_low > 0 && include_omitted_low_count) {
         sections.push_back(std::format(
             "{} low-severity note(s) omitted.", hidden_low));
     }
@@ -548,6 +548,16 @@ std::string render_report(const Report& report) {
         sections.push_back(std::move(notes));
     }
     return join("\n\n", sections);
+}
+
+std::string render_low_severity_findings(const Report& report) {
+    std::vector<Finding> low;
+    for (const auto& finding : report.findings) {
+        if (effective_severity(finding) == Severity::Low) {
+            low.push_back(finding);
+        }
+    }
+    return format_findings_block(low);
 }
 
 } // namespace core::review

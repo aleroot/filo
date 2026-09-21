@@ -7020,6 +7020,17 @@ RunResult run(RunOptions opts) {
                     make_assistant_message(str, current_time_str(), false));
                 wake_ui();
             },
+            .append_assistant_disclosure_output_fn =
+                [origin_runtime, &ui_mutex, &wake_ui](const std::string& text,
+                                                      const std::string& summary,
+                                                      const std::string& details) {
+                    std::lock_guard lock(ui_mutex);
+                    auto message = make_assistant_message(text, current_time_str(), false);
+                    message.disclosure_summary = summary;
+                    message.disclosure_text = details;
+                    append_ui_message(*origin_runtime->messages(), std::move(message));
+                    wake_ui();
+                },
             .agent            = origin_runtime->agent(),
             .session_stats_registry = session_stats_registry,
             .clear_screen_fn  = clear_screen,
