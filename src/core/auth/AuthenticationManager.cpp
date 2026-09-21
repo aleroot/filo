@@ -613,8 +613,8 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
         "glm-5.3",
         std::vector<ApiKeyProviderSeed>{},
         "ZAI_CODING_API_KEY",
-        "Uses the GLM Coding Plan endpoint at "
-        "https://api.z.ai/api/coding/paas/v4. ZAI_API_KEY is also accepted. "
+        "Uses the GLM Coding Plan Anthropic endpoint at "
+        "https://api.z.ai/api/anthropic. ZAI_API_KEY is also accepted. "
         "This is not a General API pay-as-you-go key."));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "zai",

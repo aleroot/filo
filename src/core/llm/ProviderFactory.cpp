@@ -249,6 +249,16 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         model_catalog_selector = providers::make_qwen_model_catalog_selector();
     }
 
+    // Billing relationship: the provider definition declares it (subscription
+    // plans settle against plan quota, not per-token metering). User-defined
+    // providers pointing at the managed Qwen plan hosts are classified by
+    // endpoint shape, which a static definition cannot know.
+    core::auth::BillingKind billing_kind =
+        builtin != nullptr ? builtin->billing_kind : core::auth::BillingKind::Metered;
+    if (qwen_token_plan || qwen_coding_plan) {
+        billing_kind = core::auth::BillingKind::Subscription;
+    }
+
     if (!cred) {
         const std::string key = resolve_key(config.api_key, env_vars);
         switch (auth_style) {
@@ -257,18 +267,15 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                 && openai_endpoint::is_azure_openai_base_url(base_url)) {
                 cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "api-key");
             } else {
-                cred = core::auth::ApiKeyCredentialSource::as_bearer(
-                    key,
-                    canonical_type == "zai-coding"
-                        || qwen_token_plan
-                        || qwen_coding_plan);
+                cred = core::auth::ApiKeyCredentialSource::as_bearer(key, billing_kind);
             }
             break;
         case ProviderAuthStyle::QueryParam:
             cred = core::auth::ApiKeyCredentialSource::as_query_param(key);
             break;
         case ProviderAuthStyle::XApiKey:
-            cred = core::auth::ApiKeyCredentialSource::as_custom_header(key, "x-api-key");
+            cred = core::auth::ApiKeyCredentialSource::as_custom_header(
+                key, "x-api-key", billing_kind);
             break;
         case ProviderAuthStyle::None:
             cred = core::auth::ApiKeyCredentialSource::none();
@@ -317,10 +324,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         } else {
             // Grok uses a thin OpenAI-compatible extension for xAI headers,
             // errors, rate limits, and optional reasoning effort.
-            if (canonical_type == "zai-coding") {
-                protocol = std::make_unique<protocols::ZaiCodingProtocol>(
-                    config.stream_usage);
-            } else if (canonical_type == "zai") {
+            if (canonical_type == "zai") {
                 protocol = std::make_unique<protocols::ZaiProtocol>(
                     config.stream_usage);
             } else if (canonical_type.starts_with("grok")) {
@@ -375,6 +379,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         }
         break;
     case ApiType::Anthropic: {
+        if (canonical_type == "zai-coding") {
+            protocol = std::make_unique<protocols::ZaiCodingProtocol>();
+            break;
+        }
         protocols::AnthropicThinkingConfig thinking;
         if (config.thinking_budget > 0) {
             thinking.enabled       = true;

@@ -187,3 +187,28 @@ TEST_CASE("Only a missing credential is annotated in the picker",
         core::llm::credential_state_note(ProviderCredentialState::Missing)
             .empty());
 }
+
+TEST_CASE("BillingKind separates metered keys from subscription-plan keys",
+          "[auth][billing]") {
+    namespace auth = core::auth;
+    using core::auth::ApiKeyCredentialSource;
+
+    // Plain pay-as-you-go keys default to Metered on every factory.
+    CHECK(ApiKeyCredentialSource::as_bearer("k")->billing_kind()
+          == auth::BillingKind::Metered);
+    CHECK(ApiKeyCredentialSource::as_query_param("k")->billing_kind()
+          == auth::BillingKind::Metered);
+    CHECK(ApiKeyCredentialSource::as_custom_header("k", "x-api-key")->billing_kind()
+          == auth::BillingKind::Metered);
+    CHECK(ApiKeyCredentialSource::none()->billing_kind()
+          == auth::BillingKind::Metered);
+
+    // Subscription-plan keys declare it explicitly at the call site.
+    CHECK(ApiKeyCredentialSource::as_bearer("k", auth::BillingKind::Subscription)
+              ->billing_kind()
+          == auth::BillingKind::Subscription);
+    CHECK(ApiKeyCredentialSource::as_custom_header(
+              "k", "x-api-key", auth::BillingKind::Subscription)
+              ->billing_kind()
+          == auth::BillingKind::Subscription);
+}

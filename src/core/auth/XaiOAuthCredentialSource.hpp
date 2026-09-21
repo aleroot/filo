@@ -13,7 +13,7 @@ public:
 
     AuthInfo get_auth() override;
     [[nodiscard]] CredentialAvailability availability() override;
-    [[nodiscard]] bool uses_subscription_billing() const noexcept override;
+    [[nodiscard]] BillingKind billing_kind() const noexcept override;
     bool refresh_on_auth_failure() override;
 
 private:

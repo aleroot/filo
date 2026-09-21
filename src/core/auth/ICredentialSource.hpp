@@ -6,6 +6,18 @@
 namespace core::auth {
 
 /**
+ * @brief How a credential's plan bills for model usage.
+ *
+ * Subscription plans (Coding Plans, OAuth account sessions, token plans)
+ * settle usage against the plan's quota, so per-token USD estimation does
+ * not apply. Metered credentials pay as they go and are cost-estimable.
+ */
+enum class BillingKind {
+    Metered,
+    Subscription,
+};
+
+/**
  * @brief Auth information to inject into an HTTP request.
  *
  * Providers apply headers directly and append query_params to the URL.
@@ -64,13 +76,13 @@ public:
     }
 
     /**
-     * @brief Whether this credential source is backed by a subscription plan.
+     * @brief The billing relationship this credential's plan establishes.
      *
      * Subscription/OAuth credentials do not map cleanly to per-token USD
      * billing, so callers should disable synthetic token-cost estimation.
      */
-    [[nodiscard]] virtual bool uses_subscription_billing() const noexcept {
-        return false;
+    [[nodiscard]] virtual BillingKind billing_kind() const noexcept {
+        return BillingKind::Metered;
     }
 
     /**

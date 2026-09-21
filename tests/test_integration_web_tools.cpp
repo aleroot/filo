@@ -90,7 +90,8 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
     for (const auto& model : models) {
         auto provider = std::make_shared<core::llm::HttpLLMProvider>(
             std::format("http://127.0.0.1:{}", port),
-            core::auth::ApiKeyCredentialSource::as_bearer("test-oauth-token", true),
+            core::auth::ApiKeyCredentialSource::as_bearer(
+                "test-oauth-token", core::auth::BillingKind::Subscription),
             model, std::make_unique<core::llm::protocols::AnthropicProtocol>(),
             core::config::ApiType::Anthropic, "claude");
         const auto response = backend->search(web::SearchRequest{.query = "reference \"quoted\""},

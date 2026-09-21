@@ -24,8 +24,8 @@ CredentialAvailability XaiOAuthCredentialSource::availability() {
     return inner_->availability();
 }
 
-bool XaiOAuthCredentialSource::uses_subscription_billing() const noexcept {
-    return inner_->uses_subscription_billing();
+BillingKind XaiOAuthCredentialSource::billing_kind() const noexcept {
+    return inner_->billing_kind();
 }
 
 bool XaiOAuthCredentialSource::refresh_on_auth_failure() {

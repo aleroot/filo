@@ -14,6 +14,10 @@ namespace core::auth {
  *   as_query_param("my-key")            → appends ?key=my-key to the URL
  *   as_bearer("my-key")                 → Authorization: Bearer my-key
  *   as_custom_header("my-key", "x-key") → x-key: my-key
+ *
+ * Credentials for subscription plans (Coding Plans, token plans) declare
+ * BillingKind::Subscription; plain pay-as-you-go keys stay Metered (the
+ * default).
  */
 class ApiKeyCredentialSource : public ICredentialSource {
 public:
@@ -30,8 +34,8 @@ public:
             : CredentialAvailability::Ready;
     }
 
-    [[nodiscard]] bool uses_subscription_billing() const noexcept override {
-        return subscription_billing_;
+    [[nodiscard]] BillingKind billing_kind() const noexcept override {
+        return billing_kind_;
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
@@ -44,22 +48,25 @@ public:
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
-    as_bearer(std::string key, bool subscription_billing = false) {
+    as_bearer(std::string key, BillingKind billing_kind = BillingKind::Metered) {
         AuthInfo ai;
         if (!key.empty()) {
             ai.headers["Authorization"] = "Bearer " + std::move(key);
         }
         return std::shared_ptr<ApiKeyCredentialSource>(
-            new ApiKeyCredentialSource(std::move(ai), subscription_billing));
+            new ApiKeyCredentialSource(std::move(ai), billing_kind));
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
-    as_custom_header(std::string key, std::string header_name) {
+    as_custom_header(std::string key,
+                     std::string header_name,
+                     BillingKind billing_kind = BillingKind::Metered) {
         AuthInfo ai;
         if (!key.empty()) {
             ai.headers[std::move(header_name)] = std::move(key);
         }
-        return std::shared_ptr<ApiKeyCredentialSource>(new ApiKeyCredentialSource(std::move(ai)));
+        return std::shared_ptr<ApiKeyCredentialSource>(
+            new ApiKeyCredentialSource(std::move(ai), billing_kind));
     }
 
     static std::shared_ptr<ApiKeyCredentialSource>
@@ -68,11 +75,11 @@ public:
     }
 
 private:
-    explicit ApiKeyCredentialSource(AuthInfo ai, bool subscription_billing = false)
+    explicit ApiKeyCredentialSource(AuthInfo ai, BillingKind billing_kind = BillingKind::Metered)
         : auth_info_(std::move(ai))
-        , subscription_billing_(subscription_billing) {}
+        , billing_kind_(billing_kind) {}
     AuthInfo auth_info_;
-    bool subscription_billing_ = false;
+    BillingKind billing_kind_ = BillingKind::Metered;
 };
 
 } // namespace core::auth

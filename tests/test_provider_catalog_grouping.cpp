@@ -337,6 +337,9 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     CHECK(zai_coding->catalog_group == "zai");
     CHECK(zai_coding->env_var() == "ZAI_CODING_API_KEY");
     CHECK(zai_coding->env_vars[1] == "ZAI_API_KEY");
+    CHECK(zai_coding->api_type == core::config::ApiType::Anthropic);
+    CHECK(zai_coding->base_url == "https://api.z.ai/api/anthropic");
+    CHECK(zai_coding->auth_style == core::llm::ProviderAuthStyle::XApiKey);
 
     const auto* token_plan =
         find_builtin_provider_definition("qwen-token-plan-team");

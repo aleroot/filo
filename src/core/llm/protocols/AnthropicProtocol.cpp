@@ -712,9 +712,11 @@ namespace {
 // AnthropicSerializer
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::string AnthropicSerializer::serialize(const ChatRequest& req,
-                                            int default_max_tokens,
-                                            const AnthropicThinkingConfig& thinking) {
+std::string AnthropicSerializer::serialize(
+    const ChatRequest& req,
+    int default_max_tokens,
+    const AnthropicThinkingConfig& thinking,
+    const AnthropicReasoningEmitter& reasoning_emitter) {
     std::string payload;
     payload.reserve(8192);
 
@@ -736,6 +738,9 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         payload += R"(,"cache_control":{"type":"ephemeral"})";
     }
 
+    if (reasoning_emitter) {
+        reasoning_emitter(payload, req);
+    } else {
     // Effort can reduce output/token spend for tool-heavy sessions.
     // Anthropic docs (Apr 2026): generally available, no beta header needed.
     const std::optional<AnthropicReasoningPolicy> reasoning_policy =
@@ -804,6 +809,7 @@ std::string AnthropicSerializer::serialize(const ChatRequest& req,
         payload += '}';
     } else if (use_adaptive_thinking) {
         payload += R"(,"thinking":{"type":"adaptive"})";
+    }
     }
 
     // Claude Code-style attribution is carried in the top-level system field.
@@ -1185,7 +1191,12 @@ void AnthropicProtocol::prepare_request(ChatRequest& request) {
 }
 
 std::string AnthropicProtocol::serialize(const ChatRequest& req) const {
-    return AnthropicSerializer::serialize(req, default_max_tokens_, thinking_);
+    return AnthropicSerializer::serialize(
+        req, default_max_tokens_, thinking_, reasoning_emitter());
+}
+
+AnthropicReasoningEmitter AnthropicProtocol::reasoning_emitter() const {
+    return {};
 }
 
 ReasoningCapabilities AnthropicProtocol::reasoning_capabilities(

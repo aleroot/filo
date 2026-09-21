@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../auth/ICredentialSource.hpp"
 #include "core/config/ConfigManager.hpp"
 
 #include <algorithm>
@@ -35,6 +36,10 @@ struct BuiltinProviderDefinition {
     std::array<std::string_view, 2> env_vars{};
     ProviderAuthStyle auth_style;
     std::string_view default_wire_api;
+    /// Billing relationship of this provider's credentials. Subscription
+    /// plans settle usage against plan quota, so per-token cost estimation
+    /// is disabled for them. Providers not listed here are Metered.
+    core::auth::BillingKind billing_kind = core::auth::BillingKind::Metered;
 
     [[nodiscard]] constexpr bool matches(
         std::string_view provider_name) const noexcept {
@@ -51,22 +56,25 @@ struct BuiltinProviderDefinition {
 
 inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
-        "zai-coding", "zai", "zai", config::ApiType::OpenAI,
-        "https://api.z.ai/api/coding/paas/v4",
+        "zai-coding", "zai", "zai", config::ApiType::Anthropic,
+        "https://api.z.ai/api/anthropic",
         { "ZAI_CODING_API_KEY", "ZAI_API_KEY" },
-        ProviderAuthStyle::Bearer, "chat_completions",
+        ProviderAuthStyle::XApiKey, {},
+        core::auth::BillingKind::Subscription,
     },
     BuiltinProviderDefinition{
         "qwen-token-plan", "qwen", "qwen", config::ApiType::DashScope,
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
         { "QWEN_TOKEN_PLAN_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
     },
     BuiltinProviderDefinition{
         "qwen-coding", "qwen", "qwen", config::ApiType::DashScope,
         "https://coding.dashscope.aliyuncs.com/v1",
         { "QWEN_CODING_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
     },
     BuiltinProviderDefinition{
         "grok", "grok", "grok", config::ApiType::OpenAI,

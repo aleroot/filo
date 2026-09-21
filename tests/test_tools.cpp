@@ -1698,6 +1698,16 @@ TEST_CASE("Z.ai web backends support GLM API endpoints only",
     REQUIRE(search_backend->supports(zai_context));
     REQUIRE(fetch_backend->supports(zai_context));
 
+    const core::tools::ToolInvocationContext zai_anthropic_context{
+        .session_context = make_tool_test_context("zai-web-backend-anthropic"),
+        .model_name = "glm-5.3",
+        .provider = make_metadata_provider(
+            core::config::ApiType::Anthropic,
+            "https://api.z.ai/api/anthropic"),
+    };
+    REQUIRE(search_backend->supports(zai_anthropic_context));
+    REQUIRE(fetch_backend->supports(zai_anthropic_context));
+
     const core::tools::ToolInvocationContext compatible_context{
         .session_context = make_tool_test_context("zai-web-backend-compatible"),
         .model_name = "mistral-large",

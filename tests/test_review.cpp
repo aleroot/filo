@@ -1245,9 +1245,9 @@ TEST_CASE("plan_review bundles src, header and test instead of packing by size",
             CHECK(group.needs_plan);
             std::vector<std::string> paths;
             for (const auto& file : group.files) paths.push_back(file.path);
-            CHECK(std::ranges::find(paths, "src/foo.cpp") != paths.end());
-            CHECK(std::ranges::find(paths, "src/foo.hpp") != paths.end());
-            CHECK(std::ranges::find(paths, "tests/test_foo.cpp") != paths.end());
+            CHECK(std::ranges::find(paths, std::string("src/foo.cpp")) != paths.end());
+            CHECK(std::ranges::find(paths, std::string("src/foo.hpp")) != paths.end());
+            CHECK(std::ranges::find(paths, std::string("tests/test_foo.cpp")) != paths.end());
         }
         if (group.files.size() == 1 && group.files.front().path == "src/unrelated.cpp") {
             saw_unrelated = true;
@@ -1385,9 +1385,9 @@ TEST_CASE("engine grants read-only tools on large groups", "[review][engine]") {
     const auto& review = scripted->requests[1];
     CHECK_FALSE(review.json_object);
     REQUIRE(review.allowed_tools.size() == 3);
-    CHECK(std::ranges::find(review.allowed_tools, "read") != review.allowed_tools.end());
-    CHECK(std::ranges::find(review.allowed_tools, "grep_search") != review.allowed_tools.end());
-    CHECK(std::ranges::find(review.allowed_tools, "file_search") != review.allowed_tools.end());
+    CHECK(std::ranges::find(review.allowed_tools, std::string("read")) != review.allowed_tools.end());
+    CHECK(std::ranges::find(review.allowed_tools, std::string("grep_search")) != review.allowed_tools.end());
+    CHECK(std::ranges::find(review.allowed_tools, std::string("file_search")) != review.allowed_tools.end());
     CHECK_THAT(review.prompt, ContainsSubstring("After any tool use"));
     CHECK_THAT(review.prompt, ContainsSubstring("Changed ranges"));
     CHECK_THAT(review.prompt, ContainsSubstring("big.cpp: 1-60"));

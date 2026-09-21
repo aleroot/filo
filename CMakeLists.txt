@@ -208,6 +208,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/providers/QwenModelCatalogSelector.cpp
     src/core/llm/KimiModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
+    src/core/llm/ZaiModelTraits.cpp
     src/core/llm/HttpLLMProvider.cpp
     src/core/llm/transport/StreamResilience.cpp
     src/core/llm/ModelCatalogDiscovery.cpp

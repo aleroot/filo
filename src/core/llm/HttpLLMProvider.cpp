@@ -459,7 +459,8 @@ double HttpLLMProvider::estimate_cost(int input_tokens, int output_tokens) const
 }
 
 bool HttpLLMProvider::should_estimate_cost() const {
-    return !cred_source_ || !cred_source_->uses_subscription_billing();
+    return !cred_source_
+        || cred_source_->billing_kind() != core::auth::BillingKind::Subscription;
 }
 
 ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(

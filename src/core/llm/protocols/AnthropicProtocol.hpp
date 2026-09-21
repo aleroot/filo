@@ -22,6 +22,7 @@
  */
 
 #include "ApiProtocol.hpp"
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -131,10 +132,22 @@ private:
  *
  * Fully testable without network or I/O.
  */
+/**
+ * Vendor extension seam for the reasoning/sampling envelope of a serialized
+ * Anthropic-style request. Derived protocols whose reasoning contract differs
+ * from the built-in Claude envelope return an emitter from
+ * `AnthropicProtocol::reasoning_emitter()`; it fully replaces the Claude
+ * reasoning block. An empty emitter keeps the generic Claude behavior, so the
+ * generic serializer never branches on model families.
+ */
+using AnthropicReasoningEmitter = std::function<void(std::string& payload, const ChatRequest& req)>;
+
 struct AnthropicSerializer {
-    static std::string serialize(const ChatRequest& req,
-                                 int default_max_tokens          = 8096,
-                                 const AnthropicThinkingConfig& thinking = {});
+    static std::string serialize(
+        const ChatRequest& req,
+        int default_max_tokens          = 8096,
+        const AnthropicThinkingConfig& thinking = {},
+        const AnthropicReasoningEmitter& reasoning_emitter = {});
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +255,17 @@ public:
      */
     [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override { return last_rate_limit_; }
     void reset_state() override;
+
+protected:
+    /**
+     * @brief Vendor reasoning emitter for serialized requests.
+     *
+     * Template-method seam: the generic serializer emits the built-in Claude
+     * reasoning envelope unless a derived protocol overrides this and returns
+     * its own emitter. Derived vendor protocols override it instead of
+     * branching the generic implementation on model families.
+     */
+    [[nodiscard]] virtual AnthropicReasoningEmitter reasoning_emitter() const;
 
 private:
     AnthropicThinkingConfig thinking_;

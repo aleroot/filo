@@ -32,9 +32,11 @@ constexpr std::string_view kMcpProtocolVersion = "2024-11-05";
 
 [[nodiscard]] bool is_zai_endpoint(const core::llm::ProviderMetadata& metadata) {
     const auto host = core::utils::uri::extract_http_host(metadata.base_url);
+    if (!host.has_value() || !core::utils::ascii::iequals(*host, "api.z.ai")) {
+        return false;
+    }
     return metadata.api_type == core::config::ApiType::OpenAI
-        && host.has_value()
-        && core::utils::ascii::iequals(*host, "api.z.ai");
+        || metadata.api_type == core::config::ApiType::Anthropic;
 }
 
 void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
@@ -74,9 +76,10 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     if (base_url.ends_with("/chat/completions")) {
         base_url.resize(base_url.size() - std::string_view("/chat/completions").size());
     }
-    const std::array<std::string_view, 2> suffixes{
+    const std::array<std::string_view, 3> suffixes{
         "/api/coding/paas/v4",
         "/api/paas/v4",
+        "/api/anthropic",
     };
     for (const auto suffix : suffixes) {
         if (base_url.size() >= suffix.size()
