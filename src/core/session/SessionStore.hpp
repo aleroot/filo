@@ -117,6 +117,15 @@ public:
     }
 
 private:
+    // Resume and name lookup need only the small, stable header fields that
+    // precede the conversation in the session JSON. Keeping this path separate
+    // from list() avoids materializing every saved conversation to find one.
+    [[nodiscard]] std::vector<SessionInfo> list_session_headers() const;
+    [[nodiscard]] std::optional<SessionInfo> read_session_header(
+        const std::filesystem::path& path) const;
+    [[nodiscard]] std::optional<SessionData> load_by_path(
+        const std::filesystem::path& path) const;
+
     [[nodiscard]] static std::string    to_json(const SessionData& data);
     [[nodiscard]] static std::optional<SessionData> from_json(std::string_view json);
     bool ensure_dir(std::string* error = nullptr) const;

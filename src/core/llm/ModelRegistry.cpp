@@ -185,6 +185,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // xAI Grok Models
     // -----------------------------------------------------------------------
+    { "grok-4.7",         500000 },
     { "grok-4.6",         500000 },
     { "grok-4.3",         1000000 },
     { "grok-4.20",        1000000 },
@@ -1186,6 +1187,28 @@ std::vector<ModelInfo> build_gemini_catalog() {
 // Grok models (xAI)
 std::vector<ModelInfo> build_grok_catalog() {
     return {
+        {
+            // Grok 4.7 (released 2026-09-21): 500k context, text+image input,
+            // Responses-API effort menu low/medium/high/xhigh. Cached-input
+            // pricing is not published yet, so it stays unknown here.
+            .canonical_id = "grok-4.7",
+            .aliases = {"grok-4-7", "grok-4.7-latest"},
+            .display_name = "Grok 4.7",
+            .provider = "grok",
+            .context_window = 500000,
+            .max_output_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PromptCaching),
+            .reasoning = {
+                .effort = ReasoningCapability::Effort
+                    | ReasoningCapability::XHighEffort,
+            },
+            .tier = ModelTier::Powerful,
+            .pricing = {2.0, 6.0, -1.0, -1.0},
+            .knowledge_cutoff = "",
+            .constraints = kStandardConstraints,
+        },
         {
             .canonical_id = "grok-4.6",
             .aliases = {"grok-4-6", "grok-4.6-latest"},

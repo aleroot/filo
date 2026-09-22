@@ -71,6 +71,11 @@ void append_escaped_utf8_safe(std::string& out, std::string_view sv);
 
 namespace json {
 
+/// JSON permits exactly these four whitespace characters between tokens.
+[[nodiscard]] constexpr bool is_whitespace(unsigned char ch) noexcept {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
+}
+
 // ---------------------------------------------------------------------------
 // ignore_error — deliberately discard an optional simdjson lookup.
 //

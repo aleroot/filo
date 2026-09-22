@@ -1,7 +1,8 @@
 #include "ToolCallAssembly.hpp"
 
+#include "core/utils/JsonUtils.hpp"
+
 #include <algorithm>
-#include <cctype>
 
 namespace core::llm {
 namespace {
@@ -11,7 +12,7 @@ namespace {
     bool seen_open = false;
     bool seen_close = false;
     for (const unsigned char ch : payload) {
-        if (std::isspace(ch) != 0) continue;
+        if (core::utils::json::is_whitespace(ch)) continue;
         if (ch == '{' && !seen_open) { seen_open = true; continue; }
         if (ch == '}' && seen_open && !seen_close) { seen_close = true; continue; }
         return false;

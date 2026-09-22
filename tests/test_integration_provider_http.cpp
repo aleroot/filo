@@ -1095,7 +1095,7 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
         CHECK(doc["model"].get_string().value() == "claude-fable-5-1");
         CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
-        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.255"));
+        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.280"));
     }
     simdjson::dom::parser parser;
     const auto doc = parser.parse(received.back().body);

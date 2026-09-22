@@ -2,6 +2,7 @@
 
 #include "../tools/ToolNames.hpp"
 #include "../tools/read/ReadTypes.hpp"
+#include "core/utils/JsonUtils.hpp"
 
 #include <algorithm>
 #include <format>
@@ -192,7 +193,7 @@ std::string ToolCallDeduplicator::canonicalize_arguments(std::string_view argume
             out.push_back(ch);
             continue;
         }
-        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+        if (core::utils::json::is_whitespace(ch)) {
             continue;
         }
         out.push_back(ch);

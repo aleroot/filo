@@ -112,7 +112,7 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
         const auto choice = doc["tool_choice"]["type"].get_string().value();
         CHECK(choice == (i < 3 ? "auto" : "tool"));
         if (i < 3) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
-        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.255"));
+        CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.280"));
         CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring(actual.get_header_value("x-anthropic-billing-header")));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("web-search-2025-03-05"));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("oauth-2025-04-20"));

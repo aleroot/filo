@@ -81,8 +81,8 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
  *        `reasoning:{effort:...}` control.
  *
  * Unlike the Chat Completions `reasoning_effort` top-level field (which Grok 4
- * rejects), the nested Responses-API object is supported by Grok 4.6, 4.5,
- * 4.3, and the Grok Build coding model. Other Grok reasoning models are
+ * rejects), the nested Responses-API object is supported by Grok 4.7, 4.6,
+ * 4.5, 4.3, and the Grok Build coding model. Other Grok reasoning models are
  * always-on and do not expose a knob.
  */
 [[nodiscard]] bool grok_responses_supports_effort(std::string_view model) noexcept;

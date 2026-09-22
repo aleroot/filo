@@ -560,18 +560,18 @@ TEST_CASE("Z.ai Coding Plan stamps thinking continuations with the producing mod
     bound.model = "glm-5.3";
     protocol.prepare_request(bound);
 
-    protocol.parse_event(
+    static_cast<void>(protocol.parse_event(
         "event: content_block_start\n"
         "data: {\"type\":\"content_block_start\",\"index\":0,"
-        "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n");
-    protocol.parse_event(
+        "\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"));
+    static_cast<void>(protocol.parse_event(
         "event: content_block_delta\n"
         "data: {\"type\":\"content_block_delta\",\"index\":0,"
-        "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"step one\"}}\n\n");
-    protocol.parse_event(
+        "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"step one\"}}\n\n"));
+    static_cast<void>(protocol.parse_event(
         "event: content_block_delta\n"
         "data: {\"type\":\"content_block_delta\",\"index\":0,"
-        "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-glm53\"}}\n\n");
+        "\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-glm53\"}}\n\n"));
     const auto stopped = protocol.parse_event(
         "event: content_block_stop\n"
         "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n");

@@ -21,6 +21,180 @@
 
 namespace core::session {
 
+namespace {
+
+// SessionStore::to_json emits all catalogue fields before `messages`. Read
+// only through that top-level key when selecting a session to resume. This is
+// deliberately a small JSON lexer rather than a substring search: summaries
+// and goal snapshots are strings that may themselves contain the word
+// "messages" or JSON-looking text.
+[[nodiscard]] bool read_session_header_prefix(
+    std::istream& input,
+    std::string& header) {
+    enum class KeySuffix { None, Colon, Array };
+
+    std::string prefix;
+    bool in_string = false;
+    bool escaped = false;
+    std::size_t object_depth = 0;
+    std::size_t array_depth = 0;
+    std::size_t string_start = std::string::npos;
+    std::size_t last_top_level_comma = std::string::npos;
+    KeySuffix key_suffix = KeySuffix::None;
+
+    char ch = '\0';
+    while (input.get(ch)) {
+        const std::size_t position = prefix.size();
+        prefix.push_back(ch);
+
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+                if (object_depth == 1 && array_depth == 0
+                    && string_start != std::string::npos
+                    && std::string_view(prefix).substr(
+                           string_start, position - string_start) == "messages") {
+                    key_suffix = KeySuffix::Colon;
+                }
+            }
+            continue;
+        }
+
+        if (key_suffix == KeySuffix::Colon) {
+            if (core::utils::json::is_whitespace(ch)) continue;
+            if (ch == ':') {
+                key_suffix = KeySuffix::Array;
+                continue;
+            }
+            key_suffix = KeySuffix::None;
+        } else if (key_suffix == KeySuffix::Array) {
+            if (core::utils::json::is_whitespace(ch)) continue;
+            if (ch == '[' && last_top_level_comma != std::string::npos) {
+                prefix.resize(last_top_level_comma);
+                prefix.push_back('}');
+                header = std::move(prefix);
+                return true;
+            }
+            key_suffix = KeySuffix::None;
+        }
+
+        if (ch == '"') {
+            string_start = object_depth == 1 && array_depth == 0
+                ? prefix.size()
+                : std::string::npos;
+            in_string = true;
+            escaped = false;
+            continue;
+        }
+
+        if (ch == ',' && object_depth == 1 && array_depth == 0) {
+            last_top_level_comma = position;
+        } else if (ch == '{') {
+            ++object_depth;
+        } else if (ch == '}') {
+            if (object_depth > 0) --object_depth;
+        } else if (ch == '[') {
+            ++array_depth;
+        } else if (ch == ']') {
+            if (array_depth > 0) --array_depth;
+        }
+    }
+
+    // A legacy or externally generated session may order fields differently.
+    // The caller falls back to the full decoder for that uncommon case.
+    header = std::move(prefix);
+    return false;
+}
+
+[[nodiscard]] std::optional<SessionInfo> parse_session_header(
+    std::string_view json,
+    const std::filesystem::path& path) {
+    const auto parse = [&](std::string_view input) -> std::optional<SessionInfo> {
+        simdjson::padded_string padded(input);
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document document;
+        if (parser.iterate(padded).get(document) != simdjson::SUCCESS) {
+            return std::nullopt;
+        }
+
+        simdjson::ondemand::object fields;
+        if (document.get_object().get(fields) != simdjson::SUCCESS) {
+            return std::nullopt;
+        }
+
+        SessionInfo info;
+        info.path = path;
+        int64_t version = 1;
+        for (auto field : fields) {
+            std::string_view key;
+            if (field.unescaped_key().get(key) != simdjson::SUCCESS) {
+                return std::nullopt;
+            }
+
+            if (key == "version") {
+                int64_t parsed_version = 1;
+                if (field.value().get_int64().get(parsed_version) == simdjson::SUCCESS) {
+                    version = parsed_version;
+                }
+                continue;
+            }
+
+            std::string* target = nullptr;
+            if (key == "session_id") target = &info.session_id;
+            else if (key == "name") target = &info.name;
+            else if (key == "created_at") target = &info.created_at;
+            else if (key == "last_active_at") target = &info.last_active_at;
+            else if (key == "working_dir") target = &info.working_dir;
+            else if (key == "provider") target = &info.provider;
+            else if (key == "model") target = &info.model;
+            else if (key == "mode") target = &info.mode;
+            if (target == nullptr) continue;
+
+            std::string_view value;
+            if (field.value().get_string().get(value) == simdjson::SUCCESS) {
+                *target = value;
+            }
+        }
+
+        if (version > SessionData::kVersion) return std::nullopt;
+        return info;
+    };
+
+    if (auto info = parse(json); info.has_value()) return info;
+    if (simdjson::validate_utf8(json)) return std::nullopt;
+    return parse(core::utils::repair_utf8(json));
+}
+
+[[nodiscard]] bool more_recent(const SessionInfo& lhs, const SessionInfo& rhs) {
+    const auto& lhs_time = lhs.last_active_at.empty() ? lhs.created_at : lhs.last_active_at;
+    const auto& rhs_time = rhs.last_active_at.empty() ? rhs.created_at : rhs.last_active_at;
+    return lhs_time > rhs_time;
+}
+
+[[nodiscard]] SessionInfo session_info_from_data(
+    const SessionData& data,
+    const std::filesystem::path& path) {
+    SessionInfo info;
+    info.session_id = data.session_id;
+    info.name = data.name;
+    info.created_at = data.created_at;
+    info.last_active_at = data.last_active_at;
+    info.working_dir = data.working_dir;
+    info.provider = data.provider;
+    info.model = data.model;
+    info.mode = data.mode;
+    info.preview = first_user_message_preview(data.messages);
+    info.turn_count = data.stats.turn_count;
+    info.path = path;
+    return info;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -339,33 +513,9 @@ std::string SessionStore::to_json(const SessionData& data) {
     core::utils::append_escaped(out, data.model);
     out += "\",\"mode\":\"";
     core::utils::append_escaped(out, data.mode);
-    out += "\",\"context_summary\":\"";
-    core::utils::append_escaped(out, data.context_summary);
-    out += "\",\"handoff_summary\":\"";
-    core::utils::append_escaped(out, data.handoff_summary);
-    out += '"';
-    if (data.goal.has_value()) {
-        out += ",\"goal\":";
-        append_goal_json(out, *data.goal);
-    }
-    if (data.goal_graph.has_value()) {
-        out += ",\"goal_graph\":";
-        append_goal_graph_json(out, *data.goal_graph);
-    }
-    out += ",\"messages\":[";
-
-    for (std::size_t i = 0; i < data.messages.size(); ++i) {
-        if (i > 0) out += ',';
-        append_message_json(out, data.messages[i]);
-    }
-
-    out += "],\"todos\":[";
-    for (std::size_t i = 0; i < data.todos.size(); ++i) {
-        if (i > 0) out += ',';
-        append_todo_json(out, data.todos[i]);
-    }
-
-    out += "],\"stats\":{";
+    // Keep catalogue data ahead of the conversation and opaque summaries so
+    // resume scans can stop at `messages` without reading large payloads.
+    out += "\",\"stats\":{";
     out += "\"prompt_tokens\":";
     out += std::to_string(data.stats.prompt_tokens);
     out += ",\"completion_tokens\":";
@@ -378,7 +528,35 @@ std::string SessionStore::to_json(const SessionData& data) {
     out += std::to_string(data.stats.tool_calls_total);
     out += ",\"tool_calls_success\":";
     out += std::to_string(data.stats.tool_calls_success);
-    out += "}}";
+    out += '}';
+    out += ",\"messages\":[";
+
+    for (std::size_t i = 0; i < data.messages.size(); ++i) {
+        if (i > 0) out += ',';
+        append_message_json(out, data.messages[i]);
+    }
+
+    out += "],\"context_summary\":\"";
+    core::utils::append_escaped(out, data.context_summary);
+    out += "\",\"handoff_summary\":\"";
+    core::utils::append_escaped(out, data.handoff_summary);
+    out += '"';
+    if (data.goal.has_value()) {
+        out += ",\"goal\":";
+        append_goal_json(out, *data.goal);
+    }
+    if (data.goal_graph.has_value()) {
+        out += ",\"goal_graph\":";
+        append_goal_graph_json(out, *data.goal_graph);
+    }
+
+    out += ",\"todos\":[";
+    for (std::size_t i = 0; i < data.todos.size(); ++i) {
+        if (i > 0) out += ',';
+        append_todo_json(out, data.todos[i]);
+    }
+
+    out += "]}";
 
     return out;
 }
@@ -654,6 +832,66 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
 // list
 // ---------------------------------------------------------------------------
 
+std::optional<SessionInfo> SessionStore::read_session_header(
+    const std::filesystem::path& path) const {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+
+    std::string header;
+    const bool has_header_prefix = read_session_header_prefix(in, header);
+    if (has_header_prefix) {
+        if (auto info = parse_session_header(header, path); info.has_value()) return info;
+
+        // Preserve the existing UTF-8 repair and schema compatibility behavior
+        // if the lightweight header parser cannot handle this file.
+        if (auto data = load_by_path(path); data.has_value()) {
+            return session_info_from_data(*data, path);
+        }
+        return std::nullopt;
+    }
+
+    // Old or externally produced files may put `messages` somewhere other than
+    // the serialized header position. Their full JSON is already in `header`,
+    // so use the canonical decoder instead of reopening the file.
+    if (auto data = from_json(header); data.has_value()) {
+        return session_info_from_data(*data, path);
+    }
+    return std::nullopt;
+}
+
+std::vector<SessionInfo> SessionStore::list_session_headers() const {
+    std::vector<SessionInfo> result;
+    std::error_code ec;
+    if (!std::filesystem::exists(sessions_dir_, ec)) return result;
+
+    for (const auto& entry : std::filesystem::directory_iterator(sessions_dir_, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file()) continue;
+        const auto& path = entry.path();
+        if (path.extension() != ".json"
+            || !path.filename().string().starts_with("session-")) {
+            continue;
+        }
+
+        if (auto info = read_session_header(path); info.has_value()) {
+            result.push_back(std::move(*info));
+        }
+    }
+
+    std::ranges::sort(result, more_recent);
+    return result;
+}
+
+std::optional<SessionData> SessionStore::load_by_path(
+    const std::filesystem::path& path) const {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    const std::string content{
+        std::istreambuf_iterator<char>(in),
+        std::istreambuf_iterator<char>()};
+    return from_json(content);
+}
+
 std::vector<SessionInfo> SessionStore::list() const {
     std::vector<SessionInfo> result;
     std::error_code ec;
@@ -671,31 +909,14 @@ std::vector<SessionInfo> SessionStore::list() const {
         const std::string content{
             std::istreambuf_iterator<char>(in),
             std::istreambuf_iterator<char>()};
-        auto data_opt = from_json(content);
-        if (!data_opt.has_value()) continue;
+        auto data = from_json(content);
+        if (!data.has_value()) continue;
 
-        const auto& d = *data_opt;
-        SessionInfo info;
-        info.session_id     = d.session_id;
-        info.name           = d.name;
-        info.created_at     = d.created_at;
-        info.last_active_at = d.last_active_at;
-        info.working_dir    = d.working_dir;
-        info.provider       = d.provider;
-        info.model          = d.model;
-        info.mode           = d.mode;
-        info.preview        = first_user_message_preview(d.messages);
-        info.turn_count     = d.stats.turn_count;
-        info.path           = p;
-        result.push_back(std::move(info));
+        result.push_back(session_info_from_data(*data, p));
     }
 
     // Most recently active first (ISO 8601 sorts lexicographically correctly).
-    std::ranges::sort(result, [](const SessionInfo& a, const SessionInfo& b) {
-        const auto& ta = a.last_active_at.empty() ? a.created_at : a.last_active_at;
-        const auto& tb = b.last_active_at.empty() ? b.created_at : b.last_active_at;
-        return ta > tb;
-    });
+    std::ranges::sort(result, more_recent);
     return result;
 }
 
@@ -720,20 +941,21 @@ std::optional<SessionData> SessionStore::load_by_id(std::string_view session_id)
             std::string_view(fname).substr(dash_pos + 1, dot_pos - dash_pos - 1);
         if (file_id != session_id) continue;
 
-        std::ifstream in(p, std::ios::binary);
-        if (!in) continue;
-        const std::string content{
-            std::istreambuf_iterator<char>(in),
-            std::istreambuf_iterator<char>()};
-        return from_json(content);
+        return load_by_path(p);
     }
     return std::nullopt;
 }
 
 std::optional<SessionData> SessionStore::load_by_index(int index) const {
-    const auto infos = list();
-    if (index < 1 || index > static_cast<int>(infos.size())) return std::nullopt;
-    return load_by_id(infos[static_cast<std::size_t>(index - 1)].session_id);
+    if (index < 1) return std::nullopt;
+
+    int valid_session_index = 0;
+    for (const auto& info : list_session_headers()) {
+        auto data = load_by_path(info.path);
+        if (!data.has_value()) continue;
+        if (++valid_session_index == index) return data;
+    }
+    return std::nullopt;
 }
 
 std::optional<SessionData> SessionStore::load_most_recent() const {
@@ -748,12 +970,10 @@ std::optional<SessionData> SessionStore::load_most_recent_for_project(
     // and relative paths don't cause spurious mismatches against stored sessions.
     const std::filesystem::path target = canonicalize_working_dir(working_dir);
 
-    for (const auto& info : list()) {   // sorted most-recent first
-        auto data_opt = load_by_id(info.session_id);
-        if (!data_opt.has_value()) continue;
-
-        if (canonicalize_working_dir(data_opt->working_dir) == target) {
-            return data_opt;
+    for (const auto& info : list_session_headers()) {
+        if (canonicalize_working_dir(info.working_dir) != target) continue;
+        if (auto data = load_by_path(info.path); data.has_value()) {
+            return data;
         }
     }
     return std::nullopt;
@@ -777,9 +997,10 @@ std::optional<SessionData> SessionStore::load(std::string_view id_or_index) cons
 std::optional<SessionData> SessionStore::load_by_name(std::string_view name) const {
     if (name.empty()) return std::nullopt;
     // list() is sorted most-recent first, so the first match wins.
-    for (const auto& info : list()) {
-        if (info.name == name) {
-            return load_by_id(info.session_id);
+    for (const auto& info : list_session_headers()) {
+        if (info.name != name) continue;
+        if (auto data = load_by_path(info.path); data.has_value()) {
+            return data;
         }
     }
     return std::nullopt;

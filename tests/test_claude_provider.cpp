@@ -85,7 +85,7 @@ TEST_CASE("Fable 5.1 requests pair binding controls with current client headers"
             auth.headers["anthropic-beta"] = "custom-beta,thinking-binding-controls-2026-08-01";
             const auto headers = protocol.build_headers(auth);
             CHECK_THAT(headers.at("x-anthropic-billing-header"),
-                       Catch::Matchers::StartsWith("cc_version=2.1.255"));
+                       Catch::Matchers::StartsWith("cc_version=2.1.280"));
             CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(headers.at("x-anthropic-billing-header")));
             CHECK(headers.at("Authorization") == "Bearer test-token");
             const auto& beta = headers.at("anthropic-beta");

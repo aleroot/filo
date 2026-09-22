@@ -6,7 +6,7 @@
 
 namespace core::llm::anthropic {
 
-inline constexpr std::string_view kBillingHeader = "cc_version=2.1.255.13b; cc_entrypoint=cli; cch=0;";
+inline constexpr std::string_view kBillingHeader = "cc_version=2.1.280.13b; cc_entrypoint=cli; cch=0;";
 inline constexpr std::string_view kDefaultFable = "claude-fable-5-1";
 inline constexpr std::string_view kThinkingBindingBeta =
     "thinking-binding-controls-2026-08-01";

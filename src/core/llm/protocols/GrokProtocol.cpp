@@ -228,9 +228,10 @@ bool grok_supports_reasoning_effort(std::string_view model) noexcept {
 bool grok_responses_supports_effort(std::string_view model) noexcept {
     using core::utils::ascii::istarts_with;
     // The Responses-API `reasoning:{effort:...}` object is supported by the
-    // Grok 4.6, 4.5, and 4.3 families and by the Grok Build session model.
+    // Grok 4.7, 4.6, 4.5, and 4.3 families and by the Grok Build session model.
     // Grok 4 / 4.1 and the non-reasoning variants are always-on or always-off
     // and reject the control.
+    if (grok_id_in_family(model, "grok-4.7")) return true;
     if (grok_id_in_family(model, "grok-4.6")) return true;
     if (grok_id_in_family(model, "grok-4.5")) return true;
     if (grok_id_in_family(model, "grok-4.3")) return true;
@@ -243,14 +244,23 @@ bool grok_responses_supports_effort(std::string_view model) noexcept {
 }
 
 bool grok_responses_supports_xhigh_effort(std::string_view model) noexcept {
-    // grok-build advertises xhigh for grok-4.6. xAI's current grok-4.3 model
-    // page also lists xhigh; grok-4.5 stays high-max to match grok-build's
-    // bundled catalog, which still omits the extra-high tier there.
-    return grok_id_in_family(model, "grok-4.6")
+    // grok-build's 4.7 test catalog advertises the "Extra High" (xhigh) tier
+    // for grok-4.7, and grok-build ships xhigh for grok-4.6. xAI's current
+    // grok-4.3 model page also lists xhigh; grok-4.5 stays high-max to match
+    // grok-build's bundled catalog, which still omits the extra-high tier
+    // there.
+    return grok_id_in_family(model, "grok-4.7")
+        || grok_id_in_family(model, "grok-4.6")
         || grok_id_in_family(model, "grok-4.3");
 }
 
 bool grok_responses_supports_hosted_search(std::string_view model) noexcept {
+    // grok-build does not hard-code this list: its remote catalog rows carry a
+    // per-model `supportsBackendSearch` flag (true for grok-4.6, false for
+    // grok-4.5) and xAI has not published the flag for grok-4.7. Keep the
+    // static allowlist at grok-4.6 — sending `web_search`/`x_search` to a
+    // model whose deployment rejects them 400s the whole request, while
+    // withholding them only leaves Filo's local search tools in place.
     return grok_id_in_family(model, "grok-4.6");
 }
 

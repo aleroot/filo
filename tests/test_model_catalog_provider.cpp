@@ -423,6 +423,113 @@ TEST_CASE("xAI session catalog retains the Codex-style proxy schema",
     CHECK(result.models.front().context_window == 200000);
 }
 
+TEST_CASE("xAI session catalog decodes the grok-build proxy data[] rows",
+          "[llm][model-catalog][xai]") {
+    // Mirrors xai-org/grok-build remote/client.rs parse_remote_model_value:
+    // the proxy serves {"data":[...]} with rich camelCase "models-v2" rows.
+    XaiModelCatalogProvider provider("grok", true);
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "grok-4.7",
+          "model": "grok-4.7",
+          "name": "Grok 4.7",
+          "contextWindow": 500000,
+          "maxCompletionTokens": 131072,
+          "supportsReasoningEffort": true,
+          "reasoningEfforts": [
+            {"value": "xhigh", "label": "Extra High Effort"},
+            {"value": "high", "label": "High Effort", "default": true},
+            {"value": "medium", "label": "Medium Effort"},
+            {"value": "low", "label": "Low Effort"}
+          ],
+          "supportsBackendSearch": true,
+          "apiBackend": "responses"
+        },
+        {
+          "id": "grok-account-legacy",
+          "model": "grok-account-legacy",
+          "contextWindow": 256000
+        },
+        {
+          "id": "grok-hidden-plan-model",
+          "model": "grok-hidden-plan-model",
+          "hidden": true
+        },
+        {
+          "id": "grok-web-only-model",
+          "model": "grok-web-only-model",
+          "supportedInApi": false
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 2);
+
+    const auto& grok47 = result.models[0];
+    CHECK(grok47.canonical_id == "grok-4.7");
+    CHECK(grok47.display_name == "Grok 4.7");
+    CHECK(grok47.context_window == 500000);
+    CHECK(grok47.max_output_tokens == 131072);
+    CHECK(grok47.supports(ModelCapability::Reasoning));
+    CHECK(grok47.supports(ModelCapability::FunctionCalling));
+    CHECK(grok47.reasoning.effort.supports_effort());
+    CHECK(grok47.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+
+    const auto& legacy = result.models[1];
+    CHECK(legacy.canonical_id == "grok-account-legacy");
+    CHECK(legacy.context_window == 256000);
+    // No effort menu and no flag: the profile stays empty and the model is
+    // still listed (the registry baseline decides reasoning elsewhere).
+    CHECK(legacy.reasoning.effort.empty());
+}
+
+TEST_CASE("xAI public catalog reads the capabilities reasoning-effort menu",
+          "[llm][model-catalog][xai]") {
+    // Mirrors the public /v1/models row from grok-build's client tests: the
+    // effort menu arrives under capabilities.reasoning_effort as bare strings.
+    XaiModelCatalogProvider provider("grok");
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "object": "list",
+      "data": [
+        {
+          "id": "grok-4.7",
+          "object": "model",
+          "owned_by": "xai",
+          "context_length": 500000,
+          "capabilities": {
+            "reasoning_effort": ["low", "medium", "high", "xhigh"],
+            "default_reasoning_effort": "high"
+          },
+          "prompt_text_token_price": 20000,
+          "completion_text_token_price": 60000
+        },
+        {
+          "id": "grok-imagine-image",
+          "context_length": 1024,
+          "image_price": 200000000
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+
+    const auto& grok47 = result.models.front();
+    CHECK(grok47.canonical_id == "grok-4.7");
+    CHECK(grok47.context_window == 500000);
+    CHECK(grok47.supports(ModelCapability::Reasoning));
+    CHECK(grok47.reasoning.effort.supports_effort());
+    CHECK(grok47.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+    CHECK(grok47.pricing.input_per_mtok == 2.0);
+    CHECK(grok47.pricing.output_per_mtok == 6.0);
+}
+
 TEST_CASE("Mistral catalog loads its capability matrix and context limit",
           "[llm][model-catalog][mistral]") {
     MistralModelCatalogProvider provider;

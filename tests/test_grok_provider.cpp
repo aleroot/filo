@@ -911,6 +911,9 @@ TEST_CASE("parse_openai_sse_chunk - handles unicode in content", "[grok][parser]
 
 TEST_CASE("grok_responses_supports_effort flags current reasoning families",
           "[grok][reasoning]") {
+    CHECK(grok_responses_supports_effort("grok-4.7"));
+    CHECK(grok_responses_supports_effort("grok-4-7"));
+    CHECK(grok_responses_supports_effort("grok-4.7-latest"));
     CHECK(grok_responses_supports_effort("grok-4.6"));
     CHECK(grok_responses_supports_effort("grok-4-6"));
     CHECK(grok_responses_supports_effort("grok-4.5"));
@@ -923,7 +926,12 @@ TEST_CASE("grok_responses_supports_effort flags current reasoning families",
     CHECK_FALSE(grok_responses_supports_effort("grok-3-mini"));
     CHECK_FALSE(grok_responses_supports_effort("grok-code-fast-1"));
     CHECK_FALSE(grok_responses_supports_effort("grok-build-0.1"));
+    CHECK(grok_responses_supports_xhigh_effort("grok-4.7"));
+    CHECK(grok_responses_supports_xhigh_effort("grok-4-7"));
     CHECK(grok_responses_supports_hosted_search("grok-4.6"));
+    // xAI has not published the grok-build `supportsBackendSearch` flag for
+    // grok-4.7; hosted tools stay off until the catalog confirms them.
+    CHECK_FALSE(grok_responses_supports_hosted_search("grok-4.7"));
     CHECK_FALSE(grok_responses_supports_hosted_search("grok-4.5"));
     CHECK_FALSE(grok_responses_supports_hosted_search("grok-build"));
 }
@@ -934,6 +942,9 @@ TEST_CASE("GrokResponsesProtocol reports effort capability for 4.5",
     const auto grok46 = proto.reasoning_capabilities("grok-4.6");
     CHECK(grok46.supports_effort());
     CHECK(grok46.supports(ReasoningCapability::XHighEffort));
+    const auto grok47 = proto.reasoning_capabilities("grok-4.7");
+    CHECK(grok47.supports_effort());
+    CHECK(grok47.supports(ReasoningCapability::XHighEffort));
     CHECK(proto.reasoning_capabilities("grok-4.3").supports(
         ReasoningCapability::XHighEffort));
     CHECK_FALSE(proto.reasoning_capabilities("grok-4.5").supports(
@@ -1055,6 +1066,25 @@ TEST_CASE("GrokResponsesProtocol maps maximum effort to Grok 4.6 xhigh",
     const auto legacy_payload = GrokResponsesProtocol{}.serialize(req);
     REQUIRE_THAT(legacy_payload, Catch::Matchers::ContainsSubstring(
         R"("reasoning":{"effort":"high"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol sends the full effort ladder for Grok 4.7",
+          "[grok][serializer][responses][reasoning]") {
+    auto req = make_simple_request("grok-4.7");
+    req.effort = "xhigh";
+    const auto payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"xhigh"})"));
+
+    req.effort = "max";
+    const auto mapped_payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(mapped_payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"xhigh"})"));
+
+    req.effort = "low";
+    const auto low_payload = GrokResponsesProtocol{}.serialize(req);
+    REQUIRE_THAT(low_payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"low"})"));
 }
 
 TEST_CASE("GrokResponsesProtocol normalizes configured xhigh by model",

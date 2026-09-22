@@ -300,8 +300,8 @@ TEST_CASE("AnthropicProtocol::format_error_message - 400 mentions invalid reques
 TEST_CASE("AnthropicProtocol preserves actionable invalid request details", "[lifecycle][anthropic][fable51]") {
     AnthropicProtocol protocol;
     const auto message = protocol.format_error_message({400,
-        R"({"error":{"type":"invalid_request_error","message":"Claude Code 2.1.78 does not support this model; version 2.1.255 or newer is required."}})", {}});
-    CHECK_THAT(message, ContainsSubstring("version 2.1.255 or newer is required"));
+        R"({"error":{"type":"invalid_request_error","message":"Claude Code 2.1.78 does not support this model; version 2.1.280 or newer is required."}})", {}});
+    CHECK_THAT(message, ContainsSubstring("version 2.1.280 or newer is required"));
     CHECK_THAT(protocol.format_error_message({400, "not JSON", {}}), ContainsSubstring("Invalid request"));
 }
 

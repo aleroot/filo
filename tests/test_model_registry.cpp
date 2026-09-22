@@ -58,6 +58,8 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("gemini-1.5-pro") == 2097152);
     
     // Grok (via new registry + aliases)
+    REQUIRE(get_max_context_size("grok-4.7") == 500000);
+    REQUIRE(get_max_context_size("grok-4-7") == 500000);
     REQUIRE(get_max_context_size("grok-4.6") == 500000);
     REQUIRE(get_max_context_size("grok-4.5") == 500000);
     REQUIRE(get_max_context_size("grok-4.3") == 1000000);
@@ -218,6 +220,22 @@ TEST_CASE("ModelRegistry::lookup - knows Grok 4.6 model metadata", "[llm][regist
     CHECK(info->reasoning.effort.supports_effort());
     CHECK(info->reasoning.effort.supports(
         ReasoningCapability::XHighEffort));
+}
+
+TEST_CASE("ModelRegistry::lookup - knows Grok 4.7 model metadata", "[llm][registry][grok]") {
+    const auto info = ModelRegistry::instance().get_info("grok-4.7");
+    REQUIRE(info.has_value());
+    CHECK(info->display_name == "Grok 4.7");
+    CHECK(info->provider == "grok");
+    CHECK(info->context_window == 500'000);
+    CHECK(info->pricing.input_per_mtok == Catch::Approx(2.0));
+    CHECK(info->pricing.output_per_mtok == Catch::Approx(6.0));
+    CHECK(info->supports(ModelCapability::Reasoning));
+    CHECK(info->reasoning.effort.supports_effort());
+    CHECK(info->reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+    CHECK(ModelRegistry::instance().get_info("grok-4-7").has_value());
+    CHECK(ModelRegistry::instance().get_info("grok-4.7-latest").has_value());
 }
 
 TEST_CASE("ModelRegistry::lookup - Fable 5.1 aliases and cache pricing preserve pinned Fable 5", "[llm][registry][fable51]") {
