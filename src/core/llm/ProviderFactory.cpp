@@ -11,6 +11,7 @@
 #include "protocols/ZaiProtocol.hpp"
 #include "protocols/OpenAIResponsesProtocol.hpp"
 #include "protocols/MistralProtocol.hpp"
+#include "protocols/MimoProtocol.hpp"
 #include "protocols/KimiProtocol.hpp"
 #include "protocols/GrokProtocol.hpp"
 #include "protocols/DashScopeProtocol.hpp"
@@ -336,6 +337,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
                     effort, config.stream_usage);
             } else if (canonical_type == "mistral") {
                 protocol = std::make_unique<protocols::MistralProtocol>();
+            } else if (canonical_type.starts_with("mimo")) {
+                // Covers every preset prefix: mimo and the three regional
+                // mimo-token-plan gateways, which all share this contract.
+                protocol = std::make_unique<protocols::MimoProtocol>();
             } else {
                 protocol = std::make_unique<protocols::OpenAIProtocol>(config.stream_usage);
             }

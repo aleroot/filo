@@ -588,6 +588,10 @@ AppConfig make_default_config() {
     add_provider("qwen-token-plan", {}, "high");
     add_provider("zai",            "glm-5.1");
     add_provider("zai-coding",     "glm-5.3");
+    add_provider("mimo",                "mimo-v2.6-pro");
+    add_provider("mimo-token-plan",     "mimo-v2.6-pro");
+    add_provider("mimo-token-plan-sgp", "mimo-v2.6-pro");
+    add_provider("mimo-token-plan-cn",  "mimo-v2.6-pro");
     add_provider("ollama",         "llama3", {}, {}, "http://localhost:11434");
 
     SubagentConfig general;
@@ -664,6 +668,10 @@ std::string default_config_json() {
         "qwen-token-plan":{ "reasoning_effort": "high" },
         "zai":            { "model": "glm-5.1" },
         "zai-coding":     { "model": "glm-5.3" },
+        "mimo":                { "model": "mimo-v2.6-pro" },
+        "mimo-token-plan":     { "model": "mimo-v2.6-pro" },
+        "mimo-token-plan-sgp": { "model": "mimo-v2.6-pro" },
+        "mimo-token-plan-cn":  { "model": "mimo-v2.6-pro" },
         "ollama":         { "model": "llama3", "base_url": "http://localhost:11434" }
     },
     "subagents": {

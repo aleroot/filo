@@ -108,7 +108,9 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
             return;
         }
 
-        const std::string code = req.get_param_value("code");
+        const std::string& code_param = impl_->options.code_param;
+        const std::string code = req.get_param_value(
+            code_param.empty() ? "code" : code_param.c_str());
         std::string validation_error;
         if (code.empty()) {
             validation_error = "authorization callback did not include a code";

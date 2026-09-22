@@ -154,6 +154,16 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     // -----------------------------------------------------------------------
     // Mistral Models
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Xiaomi MiMo Models
+    // -----------------------------------------------------------------------
+    { "mimo-v2.6",         1048576 },
+    { "mimo-v2.5",         1048576 },
+    { "mimo-v2-pro",       1048576 },
+    { "mimo-v2-omni",       262144 },
+    { "mimo-v2-flash",      262144 },
+    { "mimo-",             1048576 },
+
     { "mistral-vibe-cli-latest", 256000 },
     { "mistral-medium-3.5", 256000 },
     { "mistral-medium-3-5", 256000 },
@@ -596,6 +606,155 @@ std::vector<ModelInfo> build_mistral_catalog() {
             .capabilities = CAP_TOOLS | CAP_JSON,
             .tier = ModelTier::Fast,
             .pricing = {0.30, 0.90, -1.0, -1.0},
+            .constraints = kStandardConstraints,
+        },
+    };
+}
+
+// Xiaomi MiMo models (updated September 2026)
+std::vector<ModelInfo> build_mimo_catalog() {
+    // Every MiMo model reasons by default and streams `reasoning_content`.
+    constexpr ModelCapabilities CAP_MIMO_TEXT =
+        CAP_TOOLS | CAP_JSON
+        | static_cast<uint32_t>(ModelCapability::Reasoning)
+        | static_cast<uint32_t>(ModelCapability::PromptCaching);
+
+    // The omni/flash lines additionally accept image, audio, video and PDF.
+    constexpr ModelCapabilities CAP_MIMO_MULTIMODAL =
+        CAP_MIMO_TEXT
+        | static_cast<uint32_t>(ModelCapability::Vision)
+        | static_cast<uint32_t>(ModelCapability::VideoInput)
+        | static_cast<uint32_t>(ModelCapability::PdfInput);
+
+    return {
+        {
+            .canonical_id = "mimo-v2.6-pro",
+            .aliases = {"mimo-v2-6-pro", "mimo"},
+            .display_name = "MiMo V2.6 Pro",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_MULTIMODAL,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.435, 0.87, 0.0036, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2.6-flash",
+            .aliases = {"mimo-v2-6-flash"},
+            .display_name = "MiMo V2.6 Flash",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_MULTIMODAL,
+            .tier = ModelTier::Fast,
+            .pricing = {0.14, 0.28, 0.0028, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2.6-pro-ultraspeed",
+            .aliases = {"mimo-v2-6-pro-ultraspeed"},
+            .display_name = "MiMo V2.6 Pro UltraSpeed",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_TEXT
+                | static_cast<uint32_t>(ModelCapability::Vision)
+                | static_cast<uint32_t>(ModelCapability::VideoInput),
+            .tier = ModelTier::Reasoning,
+            .pricing = {4.35, 8.70, 0.036, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2.5-pro",
+            .aliases = {"mimo-v2-5-pro"},
+            .display_name = "MiMo V2.5 Pro",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_TEXT,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.435, 0.87, 0.0036, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2.5-pro-ultraspeed",
+            .aliases = {"mimo-v2-5-pro-ultraspeed"},
+            .display_name = "MiMo V2.5 Pro UltraSpeed",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_TEXT,
+            .tier = ModelTier::Reasoning,
+            .pricing = {1.305, 2.61, 0.0108, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2.5",
+            .aliases = {"mimo-v2-5"},
+            .display_name = "MiMo V2.5",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_TEXT
+                | static_cast<uint32_t>(ModelCapability::Vision)
+                | static_cast<uint32_t>(ModelCapability::VideoInput),
+            .tier = ModelTier::Balanced,
+            .pricing = {0.14, 0.28, 0.0028, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2-pro",
+            .aliases = {},
+            .display_name = "MiMo V2 Pro",
+            .provider = "mimo",
+            .context_window = 1'048'576,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_TEXT,
+            .tier = ModelTier::Reasoning,
+            .pricing = {0.435, 0.87, 0.0036, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2-omni",
+            .aliases = {},
+            .display_name = "MiMo V2 Omni",
+            .provider = "mimo",
+            .context_window = 262'144,
+            .max_output_tokens = 131'072,
+            .max_reasoning_tokens = 131'072,
+            .capabilities = CAP_MIMO_MULTIMODAL,
+            .tier = ModelTier::Balanced,
+            .pricing = {0.14, 0.28, 0.0028, -1.0},
+            .knowledge_cutoff = "2024-12",
+            .constraints = kStandardConstraints,
+        },
+        {
+            .canonical_id = "mimo-v2-flash",
+            .aliases = {},
+            .display_name = "MiMo V2 Flash",
+            .provider = "mimo",
+            .context_window = 262'144,
+            .max_output_tokens = 65'536,
+            .max_reasoning_tokens = 65'536,
+            .capabilities = CAP_MIMO_TEXT,
+            .tier = ModelTier::Fast,
+            .pricing = {0.14, 0.28, 0.0028, -1.0},
+            .knowledge_cutoff = "2024-12",
             .constraints = kStandardConstraints,
         },
     };
@@ -1491,6 +1650,7 @@ void ModelRegistry::load_defaults() {
     register_all(build_anthropic_catalog());
     register_all(build_openai_catalog());
     register_all(build_mistral_catalog());
+    register_all(build_mimo_catalog());
     register_all(build_kimi_catalog());
     register_all(build_zai_catalog());
     register_all(build_gemini_catalog());

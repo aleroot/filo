@@ -226,6 +226,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/catalog/OllamaModelCatalogProvider.cpp
     src/core/llm/catalog/OpenAICompatibleModelCatalogProvider.cpp
     src/core/llm/catalog/XaiModelCatalogProvider.cpp
+    src/core/llm/MimoModelTraits.cpp
     src/core/llm/ModelRegistry.cpp
     src/core/llm/ProviderCatalogGrouping.cpp
     src/core/llm/ProviderClientIdentity.cpp
@@ -236,6 +237,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/OpenAIUsage.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
     src/core/llm/protocols/MistralProtocol.cpp
+    src/core/llm/protocols/MimoProtocol.cpp
     src/core/llm/protocols/KimiProtocol.cpp
     src/core/llm/protocols/GrokBillingUsage.cpp
     src/core/llm/protocols/GrokImage.cpp
@@ -266,6 +268,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/OAuthTokenEndpoint.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp
+    src/core/auth/MimoOAuthFlow.cpp
     src/core/auth/QwenOAuthFlow.cpp
     src/core/auth/XaiOAuthFlow.cpp
     src/core/auth/OAuthTokenManager.cpp
@@ -302,6 +305,7 @@ set(FILO_CORE_SOURCES
     src/core/scm/GitWorkspaceCoordinator.cpp
     src/core/scm/ScmFactory.cpp
     src/core/utils/Base64.cpp
+    src/core/utils/Crypto.cpp
     src/core/utils/InterprocessFile.cpp
     src/core/utils/FileSystemUtils.cpp
     src/core/hooks/HookManager.cpp
@@ -625,6 +629,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_gemini_provider.cpp
     tests/test_claude_provider.cpp
     tests/test_mistral_provider.cpp
+    tests/test_mimo_provider.cpp
     tests/test_kimi_provider.cpp
     tests/test_qwen_provider.cpp
     tests/test_qwen_oauth.cpp
@@ -636,6 +641,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_remote_activity.cpp
     tests/test_mcp_tasks.cpp
     tests/test_oauth.cpp
+    tests/test_crypto.cpp
     tests/test_logger.cpp
     tests/test_hook_manager.cpp
     tests/test_tier1.cpp
@@ -803,6 +809,7 @@ source_group(
         tests/test_read_resources.cpp
         tests/test_ascii_utils.cpp
         tests/test_base64_utils.cpp
+        tests/test_crypto.cpp
         tests/test_mime_utils.cpp
         tests/test_uri_utils.cpp
         tests/test_json_writer.cpp
@@ -829,6 +836,7 @@ source_group(
         tests/test_gemini_provider.cpp
         tests/test_claude_provider.cpp
         tests/test_mistral_provider.cpp
+        tests/test_mimo_provider.cpp
         tests/test_kimi_provider.cpp
         tests/test_qwen_provider.cpp
         tests/test_qwen_oauth.cpp

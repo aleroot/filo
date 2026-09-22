@@ -64,6 +64,9 @@ namespace core::budget {
     if (model.find("gpt-4-turbo")      != std::string_view::npos) return   128'000;
     if (model.find("gpt-4")            != std::string_view::npos) return     8'192;
     if (model.find("gpt-3.5")          != std::string_view::npos) return    16'385;
+    if (model.find("mimo-v2-omni")     != std::string_view::npos) return   262'144;
+    if (model.find("mimo-v2-flash")    != std::string_view::npos) return   262'144;
+    if (model.find("mimo-")            != std::string_view::npos) return 1'048'576;
     if (model == "mistral-vibe-cli-latest"
         || model.find("mistral-medium-3.5") != std::string_view::npos
         || model.find("mistral-medium-3-5") != std::string_view::npos
@@ -123,6 +126,16 @@ struct ModelRates {
     if (model.find("gpt-4o")      != std::string_view::npos) return { 2.50, 10.00 };
     if (model.find("gpt-4")       != std::string_view::npos) return {30.00, 60.00 };
     if (model.find("gpt-3.5")     != std::string_view::npos) return { 0.50,  1.50 };
+    if (model.find("mimo-v2.6-pro-ultraspeed") != std::string_view::npos
+        || model.find("mimo-v2-6-pro-ultraspeed") != std::string_view::npos) return { 4.35, 8.70 };
+    if (model.find("mimo-v2.5-pro-ultraspeed") != std::string_view::npos
+        || model.find("mimo-v2-5-pro-ultraspeed") != std::string_view::npos) return { 1.305, 2.61 };
+    if (model.find("mimo-v2.6-pro") != std::string_view::npos
+        || model.find("mimo-v2-6-pro") != std::string_view::npos
+        || model.find("mimo-v2.5-pro") != std::string_view::npos
+        || model.find("mimo-v2-5-pro") != std::string_view::npos
+        || model.find("mimo-v2-pro") != std::string_view::npos) return { 0.435, 0.87 };
+    if (model.find("mimo-")         != std::string_view::npos) return { 0.14, 0.28 };
     if (model == "mistral-vibe-cli-latest"
         || model.find("mistral-medium-3.5") != std::string_view::npos
         || model.find("mistral-medium-3-5") != std::string_view::npos

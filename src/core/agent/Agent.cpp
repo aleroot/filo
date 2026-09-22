@@ -20,6 +20,7 @@
 #include "../tools/ToolSchema.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
+#include "../utils/Uuid.hpp"
 #include "PermissionGate.hpp"
 #include "RepositoryContextMessage.hpp"
 #include "SemanticHistoryEditor.hpp"
@@ -2184,6 +2185,14 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     return;
                 }
                 auto& tc = (*tool_calls_accum)[i];
+
+                // OpenAI-compatible streams may omit a tool-call id on every
+                // delta (the model emits arguments first and an id late, or
+                // never). An empty tool_call_id is invalid on that wire, so
+                // synthesize one before the call is persisted or answered.
+                if (tc.id.empty()) {
+                    tc.id = "call_" + core::utils::random_uuid_v4();
+                }
 
                 // Resolve the contract and settle the argument payload before
                 // any gate runs, so the hook, the permission prompt, the

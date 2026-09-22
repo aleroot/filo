@@ -56,6 +56,7 @@ inline std::string provider_family_key(
         case core::config::ApiType::OpenAI:
             if (lowered.starts_with("grok")) return "grok";
             if (lowered.starts_with("mistral")) return "mistral";
+            if (lowered.starts_with("mimo")) return "mimo";
             return "openai";
         case core::config::ApiType::Unknown:
             break;
@@ -70,6 +71,7 @@ inline std::string provider_family_key(
     if (lowered.starts_with("qwen") || lowered.starts_with("dashscope")) return "qwen";
     if (lowered == "local" || lowered.starts_with("llama")) return "local";
     if (lowered.starts_with("mistral")) return "mistral";
+    if (lowered.starts_with("mimo")) return "mimo";
     return {};
 }
 
@@ -81,6 +83,7 @@ inline std::string model_family_key(std::string_view model_hint) {
     if (lowered.starts_with("kimi") || lowered.starts_with("moonshot")) return "kimi";
     if (lowered.starts_with("qwen")) return "qwen";
     if (lowered.starts_with("mistral") || lowered.starts_with("devstral")) return "mistral";
+    if (lowered.starts_with("mimo")) return "mimo";
     if (lowered.starts_with("gpt") || lowered.starts_with("o1")
         || lowered.starts_with("o3") || lowered.starts_with("o4")) {
         return "openai";

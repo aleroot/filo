@@ -13,6 +13,7 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/ProviderFactory.hpp"
+#include "core/llm/ToolCallAssembly.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 #include "core/llm/protocols/GrokProtocol.hpp"
@@ -214,6 +215,114 @@ TEST_CASE("Qwen Token Plan completes a streamed HTTP tool round trip",
         CHECK(std::string_view(body["metadata"]["sessionId"]) == request.session_id);
         CHECK(std::string_view(body["tools"].at(0)["cache_control"]["type"]) == "ephemeral");
     }
+    CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(
+        R"("reasoning_content":"Inspect the file.")"));
+    CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(
+        R"("tool_call_id":"call_read")"));
+}
+
+TEST_CASE("MiMo Token Plan completes a streamed HTTP tool round trip",
+          "[integration][http][mimo][tools]") {
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex received_mutex;
+    server.Post("/v1/chat/completions",
+                [&](const httplib::Request& request, httplib::Response& response) {
+        std::lock_guard lock(received_mutex);
+        received.push_back(request);
+        // Turn 1 replays the stream shape Xiaomi patched their SDK for:
+        // reasoning first, then a tool call whose arguments stream before any
+        // id or name arrives, and the usage frame the include_usage opt-in
+        // requests.
+        const std::string body = received.size() == 1
+            ? "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect the file.\"}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"pa\"}}]}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_read\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"th\\\":\\\"README.md\\\"}\"}}]}}]}\r\n\r\n"
+              "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\r\n\r\n"
+              "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":24,\"completion_tokens_details\":{\"reasoning_tokens\":8}}}\r\n\r\n"
+              "data: [DONE]\r\n\r\n"
+            : "data: {\"choices\":[{\"delta\":{\"content\":\"Verified.\"},\"finish_reason\":\"stop\"}]}\n\n"
+              "data: [DONE]\n\n";
+        response.set_chunked_content_provider("text/event-stream",
+            [body](std::size_t offset, httplib::DataSink& sink) {
+                const auto size = std::min(std::size_t{13}, body.size() - offset);
+                if (!sink.write(body.data() + offset, size)) return false;
+                if (offset + size == body.size()) sink.done();
+                return true;
+            });
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    core::config::ProviderConfig config;
+    config.api_key = "test-mimo-plan-key";
+    config.base_url = std::format("http://127.0.0.1:{}/v1", port);
+    config.model = "mimo-v2.6-pro";
+    auto provider = ProviderFactory::create_provider("mimo-token-plan", config);
+    REQUIRE(provider);
+    CHECK_FALSE(provider->should_estimate_cost());
+    ChatRequest request;
+    request.model = config.model;
+    request.stream = true;
+    request.messages = {Message{.role = "system", .content = "Inspect requested files."},
+                        Message{.role = "user", .content = "Read README.md"}};
+    Tool tool;
+    tool.function.name = "read";
+    tool.function.description = "Read a file";
+    tool.function.input_schema = R"({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})";
+    request.tools.push_back(tool);
+
+    Message assistant;
+    assistant.role = "assistant";
+    ToolCall call;
+    bool had_error = false;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        had_error |= chunk.is_error;
+        assistant.reasoning_content += chunk.reasoning_content;
+        if (!chunk.reasoning_protocol.empty()) assistant.reasoning_protocol = chunk.reasoning_protocol;
+        for (const auto& delta : chunk.tools) {
+            merge_tool_call_fragment(assistant.tool_calls, delta);
+        }
+    });
+    REQUIRE_FALSE(had_error);
+    REQUIRE(assistant.tool_calls.size() == 1);
+    REQUIRE(assistant.tool_calls[0].id == "call_read");
+    REQUIRE(assistant.tool_calls[0].function.name == "read");
+    REQUIRE(assistant.tool_calls[0].function.arguments == R"({"path":"README.md"})");
+    REQUIRE(assistant.reasoning_content == "Inspect the file.");
+    CHECK(assistant.reasoning_protocol == "mimo");
+    const auto usage = provider->get_last_usage();
+    CHECK(usage.prompt_tokens == 120);
+    CHECK(usage.completion_tokens == 24);
+    CHECK(usage.reasoning_tokens == 8);
+    request.messages.push_back(assistant);
+    request.messages.push_back(Message{
+        .role = "tool", .content = "# Filo", .tool_call_id = "call_read"});
+    std::string answer;
+    provider->stream_response(request, [&](const StreamChunk& chunk) {
+        had_error |= chunk.is_error;
+        answer += chunk.content;
+    });
+    CHECK_FALSE(had_error);
+    CHECK(answer == "Verified.");
+
+    std::lock_guard lock(received_mutex);
+    REQUIRE(received.size() == 2);
+    for (const auto& wire : received) {
+        CHECK(wire.get_header_value("Authorization") == "Bearer test-mimo-plan-key");
+        CHECK(wire.get_header_value("X-Mimo-Source") == "mimocode-cli");
+        simdjson::dom::parser parser;
+        const auto body = parser.parse(wire.body);
+        CHECK(bool(body["stream_options"]["include_usage"]));
+        CHECK(body["reasoning_effort"].error() != simdjson::SUCCESS);
+    }
+    CHECK_THAT(received.front().body,
+               Catch::Matchers::ContainsSubstring(R"("temperature":1)"));
+    // The reference client replays assistant reasoning on follow-up turns,
+    // present even when empty.
     CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(
         R"("reasoning_content":"Inspect the file.")"));
     CHECK_THAT(received.back().body, Catch::Matchers::ContainsSubstring(

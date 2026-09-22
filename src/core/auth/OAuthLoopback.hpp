@@ -44,6 +44,10 @@ struct OAuthLoopbackOptions {
     std::vector<int> candidate_ports;
     std::string callback_path = "/callback";
     std::vector<std::string> extra_paths;
+    /// Query parameter carrying the authorization payload. Almost always the
+    /// RFC 6749 `code`; providers that deliver an encrypted blob under their
+    /// own parameter name (MiMo's `u`) set this rather than forking the server.
+    std::string code_param = "code";
     /// When set, reject mismatched callbacks before displaying success.
     std::optional<std::string> expected_state;
     std::chrono::seconds timeout{std::chrono::minutes(5)};

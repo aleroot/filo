@@ -62,6 +62,30 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         ProviderAuthStyle::XApiKey, {},
         core::auth::BillingKind::Subscription,
     },
+    // MiMo Token Plan is one subscription served by three regional gateways.
+    // The bare "mimo-token-plan" name is the Europe (Amsterdam) gateway, so
+    // "mimo-token-plan-ams" falls through to it and resolves identically.
+    BuiltinProviderDefinition{
+        "mimo-token-plan-cn", "mimo", "xiaomi", config::ApiType::OpenAI,
+        "https://token-plan-cn.xiaomimimo.com/v1",
+        { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
+        ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
+    },
+    BuiltinProviderDefinition{
+        "mimo-token-plan-sgp", "mimo", "xiaomi", config::ApiType::OpenAI,
+        "https://token-plan-sgp.xiaomimimo.com/v1",
+        { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
+        ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
+    },
+    BuiltinProviderDefinition{
+        "mimo-token-plan", "mimo", "xiaomi", config::ApiType::OpenAI,
+        "https://token-plan-ams.xiaomimimo.com/v1",
+        { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
+        ProviderAuthStyle::Bearer, "chat_completions",
+        core::auth::BillingKind::Subscription,
+    },
     BuiltinProviderDefinition{
         "qwen-token-plan", "qwen", "qwen", config::ApiType::DashScope,
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
@@ -113,6 +137,12 @@ inline constexpr std::array kBuiltinProviderDefinitions{
     BuiltinProviderDefinition{
         "zai", "zai", "zai", config::ApiType::OpenAI,
         "https://api.z.ai/api/paas/v4", { "ZAI_API_KEY" },
+        ProviderAuthStyle::Bearer, "chat_completions",
+    },
+    BuiltinProviderDefinition{
+        "mimo", "mimo", "xiaomi", config::ApiType::OpenAI,
+        "https://api.xiaomimimo.com/v1",
+        { "XIAOMI_API_KEY", "MIMO_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
     },
     BuiltinProviderDefinition{

@@ -4,6 +4,7 @@
 #include "GoogleAntigravityOAuthFlow.hpp"
 #include "GoogleOAuthCredentialSource.hpp"
 #include "KimiOAuthFlow.hpp"
+#include "MimoOAuthFlow.hpp"
 #include "QwenOAuthFlow.hpp"
 #include "XaiOAuthFlow.hpp"
 #include "XaiOAuthCredentialSource.hpp"
@@ -11,6 +12,7 @@
 #include "OAuthCredentialSource.hpp"
 #include "OAuthTokenManager.hpp"
 #include "ui/ConsoleAuthUI.hpp"
+#include "core/llm/MimoModelTraits.hpp"
 #include "core/logging/Logger.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include <simdjson.h>
@@ -66,6 +68,17 @@ std::string normalize_login_provider(std::string_view provider) {
     if (requested == "qwen-api" || requested == "qwen_api"
         || requested == "qwen-dashscope") {
         return "dashscope";
+    }
+    // One Xiaomi login serves every regional gateway and the pay-as-you-go
+    // endpoint; the grant itself says which preset to seed. `mimo` stays an
+    // alias so `filo --auth mimo` still works.
+    if (requested == "xiaomi" || requested == "mimo" || requested == "mimocode"
+        || requested == "mimo-code" || requested == "mimo_code"
+        || requested == "xiaomi-mimo" || requested == "mimo-token-plan"
+        || requested == "mimo-token-plan-sgp"
+        || requested == "mimo-token-plan-cn"
+        || requested == "mimo-token-plan-ams") {
+        return "xiaomi";
     }
     return requested;
 }
@@ -277,6 +290,109 @@ private:
     std::vector<ApiKeyProviderSeed> additional_provider_seeds_;
     std::string env_var_;
     std::string docs_hint_;
+};
+
+/**
+ * @brief Xiaomi MiMo login — browser sign-in with an API-key fallback.
+ *
+ * The console seals a provisioned API key to a one-shot X25519 key (see
+ * MimoOAuthFlow), so the result is a plain credential rather than a
+ * refreshable token: it is persisted through the same API-key overlay every
+ * other key-based provider uses, and no token store is involved.
+ *
+ * The grant names the gateway it was issued for, so the matching regional
+ * Token Plan preset (or the pay-as-you-go preset) is the one seeded. A plan
+ * key must never be copied onto the pay-as-you-go provider, which rejects it.
+ */
+class MimoAuthStrategy final : public IAuthStrategy {
+public:
+    std::string_view login_provider() const noexcept override { return "xiaomi"; }
+    std::string_view display_name() const noexcept override {
+        return "Xiaomi MiMo";
+    }
+
+    bool supports(std::string_view /*provider_type*/,
+                  std::string_view /*auth_type*/) const noexcept override {
+        return false;
+    }
+
+    std::shared_ptr<ICredentialSource> create_credential_source(
+        const core::config::ProviderConfig& /*provider_config*/,
+        std::string_view /*config_dir*/) const override {
+        return nullptr;
+    }
+
+    void login(std::string_view config_dir) const override {
+        ui::ConsoleAuthUI ui;
+        ui.show_header("Xiaomi MiMo Login");
+        ui.show_instructions(
+            "Sign in at platform.xiaomimimo.com to provision an API key for "
+            "Filo. The key is returned encrypted to this session and saved in "
+            "Filo's auth_defaults.json overlay.");
+
+        MimoOAuthFlow flow;
+        flow.set_key_name(MimoOAuthFlow::key_name(config_dir));
+
+        std::string api_key;
+        std::string granted_base_url;
+        try {
+            const MimoAuthorizationGrant grant = flow.login(ui);
+            api_key = grant.api_key;
+            granted_base_url = grant.base_url;
+        } catch (const std::exception& error) {
+            ui.show_error(error.what());
+            ui.show_instructions(
+                "You can paste an API key from platform.xiaomimimo.com "
+                "instead.");
+            api_key = ui.prompt_secret("API key:");
+        }
+
+        const std::string provider_name = provider_for_grant(granted_base_url);
+        write_api_key_overlay(
+            config_dir,
+            provider_name,
+            std::vector<ApiKeyProviderSeed>{
+                ApiKeyProviderSeed{
+                    .provider_name = provider_name,
+                    .model = "mimo-v2.6-pro",
+                },
+            },
+            api_key);
+        ui.show_success("Xiaomi MiMo credential saved for '" + provider_name
+                        + "'.");
+    }
+
+    std::vector<std::string> post_login_hints() const override {
+        return {
+            "Default provider is set to the MiMo endpoint your key was issued "
+            "for, with model 'mimo-v2.6-pro'.",
+            "For CI or one-off use, you can also export "
+            "MIMO_TOKEN_PLAN_API_KEY (Token Plan) or XIAOMI_API_KEY "
+            "(pay-as-you-go).",
+            "Token Plan regions: mimo-token-plan (Europe), "
+            "mimo-token-plan-sgp (Singapore), mimo-token-plan-cn (China). "
+            "Set MIMO_REGION to change the region assumed at login.",
+        };
+    }
+
+private:
+    /// Preset that owns @p base_url, falling back to the resolved region.
+    [[nodiscard]] static std::string provider_for_grant(
+        std::string_view base_url) {
+        if (!base_url.empty()) {
+            if (const auto region =
+                    core::llm::mimo_region_for_endpoint(base_url)) {
+                return std::string(
+                    core::llm::mimo_region_provider_name(*region));
+            }
+            if (core::llm::is_mimo_endpoint(base_url)) {
+                // A MiMo host that is not a plan gateway is pay-as-you-go.
+                return "mimo";
+            }
+        }
+        return std::string(core::llm::mimo_region_provider_name(
+            core::llm::resolve_mimo_region()));
+    }
 };
 
 /**
@@ -573,6 +689,7 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
     manager.register_strategy(std::make_shared<XaiOAuthStrategy>());
+    manager.register_strategy(std::make_shared<MimoAuthStrategy>());
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
         "qwen",
         "Qwen Cloud Token Plan",

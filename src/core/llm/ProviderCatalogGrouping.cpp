@@ -54,6 +54,18 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
     "coder-model",
 }};
 
+// The MiMo Token Plan gateways and the pay-as-you-go host share one model
+// family but not one catalog: the plan does not serve the UltraSpeed tiers,
+// the omni line, or mimo-v2-flash. Claiming the plan models on both origins
+// keeps a plan key from being routed to api.xiaomimimo.com, which rejects it.
+constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
+    "mimo-v2.6-pro",
+    "mimo-v2.6-flash",
+    "mimo-v2.5-pro",
+    "mimo-v2.5",
+    "mimo-v2-pro",
+}};
+
 [[nodiscard]] std::string normalized(std::string_view value) {
     return core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(value));
@@ -73,6 +85,10 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
 
 [[nodiscard]] bool is_qwen_coding_source(std::string_view provider_name) {
     return normalized(provider_name).starts_with("qwen-coding");
+}
+
+[[nodiscard]] bool is_mimo_token_plan_source(std::string_view provider_name) {
+    return normalized(provider_name).starts_with("mimo-token-plan");
 }
 
 [[nodiscard]] ProviderCatalogModelFilter model_filter(
@@ -126,6 +142,16 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
         kQwenCodingPlanModels);
 }
 
+[[nodiscard]] ProviderCatalogModelFilter mimo_token_plan_filter() {
+    return model_filter(
+        ProviderCatalogModelRule::Include, kMimoTokenPlanModels);
+}
+
+[[nodiscard]] ProviderCatalogModelFilter mimo_pay_as_you_go_filter() {
+    return model_filter(
+        ProviderCatalogModelRule::Exclude, kMimoTokenPlanModels);
+}
+
 [[nodiscard]] ProviderCatalogModelFilter qwen_public_dashscope_filter() {
     // Public DashScope keys are rejected by the Token Plan and Coding Plan
     // hosts and vice versa, so the pay-as-you-go source claims exactly the
@@ -177,6 +203,16 @@ constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
             std::string(kimi_service_id(KimiService::PublicApi));
         source.category_label = "Kimi API.";
         source.registry_model_filter = kimi_regular_filter();
+    } else if (group_name == "xiaomi" && is_mimo_token_plan_source(provider_name)) {
+        source.category_label = "Token Plan endpoint.";
+        source.registry_model_filter = mimo_token_plan_filter();
+        source.api_model_filter = source.registry_model_filter;
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
+    } else if (group_name == "xiaomi") {
+        source.category_label = "MiMo API.";
+        source.registry_model_filter = mimo_pay_as_you_go_filter();
+        source.api_model_filter = source.registry_model_filter;
+        source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen" && is_qwen_token_plan_source(provider_name)) {
         source.category_label = "Token Plan endpoint.";
         source.registry_model_filter = qwen_token_plan_filter();
@@ -361,6 +397,24 @@ ProviderCatalogGroup provider_catalog_group_for(
             configured_provider_names,
             [](std::string_view configured) { return !is_zai_coding_source(configured); },
             "zai");
+        return group;
+    }
+
+    if (group_name == "xiaomi") {
+        // Token Plan is the subscribed product; list it above pay-as-you-go so
+        // its models sit at the top of the picker.
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return is_mimo_token_plan_source(configured); },
+            "mimo-token-plan");
+        append_first_matching_source(
+            group,
+            group_name,
+            configured_provider_names,
+            [](std::string_view configured) { return !is_mimo_token_plan_source(configured); },
+            "mimo");
         return group;
     }
 
