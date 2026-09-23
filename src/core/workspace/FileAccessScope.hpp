@@ -74,6 +74,12 @@ public:
     [[nodiscard]] bool allows_read(const std::filesystem::path& path) const;
     [[nodiscard]] bool allows_write(const std::filesystem::path& path) const;
 
+    /// Same containment test as allows_read/allows_write, with no filesystem
+    /// access. @p normalized must already be absolute and symlink-free
+    /// (weakly_canonical output, or a non-symlink child of one).
+    [[nodiscard]] bool allows_read_normalized(const std::filesystem::path& normalized) const;
+    [[nodiscard]] bool allows_write_normalized(const std::filesystem::path& normalized) const;
+
     /// Normalizes the root sets in place; invoked by
     /// SessionWorkspace::normalize_snapshot() so a snapshot's roots and later
     /// probes stay on the same footing.

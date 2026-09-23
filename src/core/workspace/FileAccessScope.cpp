@@ -143,13 +143,19 @@ FileAccessScope FileAccessScope::host_temp_directories() {
 }
 
 bool FileAccessScope::allows_read(const std::filesystem::path& path) const {
-    const auto normalized = normalize_probe(path);
+    return allows_read_normalized(normalize_probe(path));
+}
+
+bool FileAccessScope::allows_write(const std::filesystem::path& path) const {
+    return allows_write_normalized(normalize_probe(path));
+}
+
+bool FileAccessScope::allows_read_normalized(const std::filesystem::path& normalized) const {
     return !contains_normalized(excluded_roots_, normalized)
         && contains_normalized(readable_roots_, normalized);
 }
 
-bool FileAccessScope::allows_write(const std::filesystem::path& path) const {
-    const auto normalized = normalize_probe(path);
+bool FileAccessScope::allows_write_normalized(const std::filesystem::path& normalized) const {
     return !contains_normalized(excluded_roots_, normalized)
         && contains_normalized(writable_roots_, normalized);
 }

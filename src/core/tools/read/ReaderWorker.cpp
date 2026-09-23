@@ -139,10 +139,12 @@ std::expected<Answer, std::string> ReaderWorker::answer(
         std::unique_lock lock(stream->mutex);
         settled = stream->finished.wait_for(lock, grace, [&] { return stream->done; });
     }
-    // Only a settled stream may be observed: the provider and its state stay
-    // alive through the detached thread's own copies of these handles.
+    // Only a settled stream may touch the provider. should_estimate_cost()
+    // reads state stream_response updates (RouterProvider), so calling it
+    // after detach races the orphaned request. A detached call has no usage
+    // yet, and an empty usage records no cost either way.
     core::llm::TokenUsage usage{};
-    bool failed = false, terminal = false;
+    bool failed = false, terminal = false, estimate_cost = false;
     std::string output;
     if (settled) {
         worker.join();
@@ -150,13 +152,13 @@ std::expected<Answer, std::string> ReaderWorker::answer(
         failed = stream->failed;
         terminal = stream->terminal;
         output = std::move(stream->output);
+        estimate_cost = provider->should_estimate_cost();
     } else {
         worker.detach();
     }
     if (invocation.session_stats) {
         invocation.session_stats->record_api_call(invocation.session_context.session_id, !cancelled && !failed && terminal);
-        invocation.session_stats->record_turn(invocation.session_context.session_id, profile.model, usage,
-            profile.provider->should_estimate_cost());
+        invocation.session_stats->record_turn(invocation.session_context.session_id, profile.model, usage, estimate_cost);
     }
     core::budget::BudgetTracker::get_instance().record_event({
         .source = core::budget::TokenLedgerSource::Subagent,
@@ -169,8 +171,8 @@ std::expected<Answer, std::string> ReaderWorker::answer(
         .tool_name = std::string(names::kRead),
         .note = cancelled ? "cancelled" : failed ? "failed" : "evidence reader",
         .usage = usage,
-        .should_estimate_cost = profile.provider->should_estimate_cost(),
-        .billable = profile.provider->should_estimate_cost(),
+        .should_estimate_cost = estimate_cost,
+        .billable = estimate_cost,
     });
     if (cancelled) return std::unexpected("Reader cancelled or timed out.");
     if (failed || !terminal) return std::unexpected("Reader failed to return a complete bounded answer.");

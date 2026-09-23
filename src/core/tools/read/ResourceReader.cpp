@@ -3,7 +3,9 @@
 #include "../ToolPolicy.hpp"
 #include <fstream>
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
+#include <system_error>
 
 namespace core::tools::read {
 std::expected<Resource, std::string> ResourceReader::read(
@@ -53,7 +55,13 @@ std::expected<Resource, std::string> ResourceReader::read(
         resource.uri = resolved.string();
         std::error_code ec;
         const auto status = std::filesystem::status(resolved, ec);
-        if (ec || !std::filesystem::exists(status)) return std::unexpected("Cannot read path: path does not exist.");
+        if (ec || status.type() == std::filesystem::file_type::not_found) {
+            if (!ec || ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory
+                || status.type() == std::filesystem::file_type::not_found) {
+                return std::unexpected("Cannot read path: path does not exist.");
+            }
+            return std::unexpected("Cannot read path: failed to inspect path (" + ec.message() + ").");
+        }
         if (std::filesystem::is_directory(status)) {
             resource.kind = "directory";
             std::vector<std::string> entries;
@@ -66,26 +74,58 @@ std::expected<Resource, std::string> ResourceReader::read(
                 if (invocation.cancellation_requested && invocation.cancellation_requested())
                     return std::unexpected("Read cancelled.");
                 const auto& entry = *iterator;
-                if (detail::check_workspace_access(entry.path(), entry.path().string(), context, nullptr, names::kRead)) continue;
+                std::error_code link_ec;
+                const bool symlink = entry.is_symlink(link_ec);
+                // A non-symlink child of an already-canonical directory cannot
+                // escape the scope, so skip the per-entry realpath. Symlinks
+                // still take the full check: their target might leave the workspace.
+                const bool canonical_child = !link_ec && !symlink;
+                if (detail::check_workspace_access(
+                        entry.path(), entry.path().string(), context, nullptr, names::kRead,
+                        canonical_child, canonical_child ? &entry : nullptr)) continue;
                 std::error_code type_ec;
                 const bool directory = entry.is_directory(type_ec);
                 entries.push_back(entry.path().filename().string() + (directory ? "/\n" : "\n"));
             }
             if (ec) return std::unexpected("Cannot complete directory listing: " + ec.message());
             std::ranges::sort(entries);
+            std::size_t listing_bytes = 0;
+            for (const auto& entry : entries) listing_bytes += entry.size();
+            resource.text.reserve(std::min(listing_bytes, kMaxSourceBytes));
             for (const auto& entry : entries) {
                 if (resource.text.size() + entry.size() > kMaxSourceBytes) { resource.truncated = true; break; }
                 resource.text += entry;
             }
         } else if (std::filesystem::is_regular_file(status)) {
+            errno = 0;
             std::ifstream input(resolved, std::ios::binary);
-            if (!input) return std::unexpected("Cannot open resource.");
-            resource.text = read_prefix(input, kMaxSourceBytes + 1);
+            if (!input) {
+                const int open_errno = errno;
+                const std::string why = open_errno != 0
+                    ? std::error_code(open_errno, std::generic_category()).message()
+                    : std::string("unknown reason");
+                return std::unexpected("Cannot open resource (" + why + ").");
+            }
+            // Size from the open descriptor so the allocation matches the bytes
+            // this fd will actually yield; see read_text_file.
+            input.seekg(0, std::ios::end);
+            const std::streamoff end = input.tellg();
+            input.seekg(0);
+            if (end > 0) {
+                const std::size_t request = static_cast<std::size_t>(
+                    std::min<std::streamoff>(end, static_cast<std::streamoff>(kMaxSourceBytes) + 1));
+                resource.text = read_prefix(input, request);
+            } else if (end < 0) {
+                resource.text = read_prefix(input, kMaxSourceBytes + 1);
+            }
             if (input.bad()) return std::unexpected("Resource read failed.");
             resource.truncated = resource.text.size() > kMaxSourceBytes;
         } else return std::unexpected("Resource is not a regular file or directory.");
     }
-    if (resource.text.size() > kMaxSourceBytes) resource.text.resize(kMaxSourceBytes);
+    if (resource.text.size() > kMaxSourceBytes) {
+        resource.text = bounded_prefix(resource.text, kMaxSourceBytes);
+        resource.truncated = true;
+    }
     const std::string source_digest = digest(resource.text);
     const auto& resolved_uri = resource.uri;
     const auto ext = std::filesystem::path(http

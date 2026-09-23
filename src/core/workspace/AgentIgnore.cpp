@@ -394,8 +394,15 @@ bool AgentIgnoreMatcher::is_ignored(const std::filesystem::path& path,
     if (policies_.empty() || path.empty()) {
         return false;
     }
+    return is_ignored_normalized(SessionWorkspace::normalize_path(path), kind);
+}
 
-    const auto normalized = SessionWorkspace::normalize_path(path);
+bool AgentIgnoreMatcher::is_ignored_normalized(const std::filesystem::path& normalized,
+                                               AgentIgnorePathKind kind) const {
+    if (policies_.empty() || normalized.empty()) {
+        return false;
+    }
+
     for (const auto& policy : policies_) {
         if (!path_has_prefix(policy.root, normalized)) {
             continue;

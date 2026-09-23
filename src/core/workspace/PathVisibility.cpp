@@ -64,6 +64,20 @@ public:
         return format_agent_ignore_error(display_path);
     }
 
+    [[nodiscard]] std::optional<std::string> hidden_reason_canonical(
+        std::string_view display_path,
+        const std::filesystem::path& canonical,
+        PathVisibilityKind kind) const override {
+        if (const auto upstream = wrapped().hidden_reason_canonical(
+                display_path, canonical, kind)) {
+            return upstream;
+        }
+        if (!matcher_.is_ignored_normalized(canonical, to_agent_ignore_kind(kind))) {
+            return std::nullopt;
+        }
+        return format_agent_ignore_error(display_path);
+    }
+
     [[nodiscard]] bool should_prune_directory(
         const std::filesystem::path& path) const override {
         return PathVisibilityDecorator::should_prune_directory(path)
@@ -307,6 +321,13 @@ std::optional<std::string> PathVisibility::hidden_reason(
     std::string_view display_path,
     const std::filesystem::path& path) const {
     return policy_->hidden_reason(display_path, path, classify_path_kind(path));
+}
+
+std::optional<std::string> PathVisibility::hidden_reason_canonical(
+    std::string_view display_path,
+    const std::filesystem::directory_entry& entry) const {
+    return policy_->hidden_reason_canonical(
+        display_path, entry.path(), classify_entry_kind(entry));
 }
 
 bool PathVisibility::should_prune_directory(

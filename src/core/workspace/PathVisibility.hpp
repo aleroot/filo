@@ -30,6 +30,16 @@ public:
         const std::filesystem::path& path,
         PathVisibilityKind kind) const = 0;
 
+    /// @p canonical is already symlink-free. The default re-enters hidden_reason,
+    /// which is correct but may canonicalize again; policies that stat or
+    /// realpath override this.
+    [[nodiscard]] virtual std::optional<std::string> hidden_reason_canonical(
+        std::string_view display_path,
+        const std::filesystem::path& canonical,
+        PathVisibilityKind kind) const {
+        return hidden_reason(display_path, canonical, kind);
+    }
+
     [[nodiscard]] virtual bool should_prune_directory(
         const std::filesystem::path& path) const;
 };
@@ -90,6 +100,12 @@ public:
     [[nodiscard]] std::optional<std::string> hidden_reason(
         std::string_view display_path,
         const std::filesystem::path& path) const;
+
+    /// `entry` is a non-symlink child of an already-canonical directory, so
+    /// kind comes from the dirent cache and ignore rules do not realpath.
+    [[nodiscard]] std::optional<std::string> hidden_reason_canonical(
+        std::string_view display_path,
+        const std::filesystem::directory_entry& entry) const;
 
     [[nodiscard]] bool should_prune_directory(
         const std::filesystem::path& path) const;

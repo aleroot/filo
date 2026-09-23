@@ -523,3 +523,72 @@ TEST_CASE("read lists the steering directory instead of treating it as a file", 
     CHECK(listing.find("not a regular file") == std::string::npos);
     CHECK_THAT(listing, ContainsSubstring("style.md"));
 }
+
+TEST_CASE("Unified read slices keep line endings and bound a single huge line", "[read][resources]") {
+    Fixture fixture;
+    fixture.write("lines.txt", "alpha\r\nbeta\nlast");
+    ReadTool tool;
+    CHECK(field(tool.execute(R"({"path":"lines.txt","offset_line":1,"limit_lines":1})", fixture.context()), "content")
+        == "alpha\r\n");
+
+    fixture.write("wide-line.txt", std::string(2 * 1024 * 1024, 'x'));
+    const auto wide = field(tool.execute(
+        R"({"path":"wide-line.txt","offset_line":1,"limit_lines":1})", fixture.context()), "content");
+    CHECK(wide.size() < read::kMaxSliceChars + 80);
+    CHECK_THAT(wide, ContainsSubstring("TRUNCATED"));
+    CHECK(wide.find(std::string(read::kMaxSliceChars + 1, 'x')) == std::string::npos);
+
+    std::string skipped(1024 * 1024, 'y');
+    skipped += "\nwanted\n";
+    fixture.write("skipped-line.txt", skipped);
+    CHECK(field(tool.execute(
+        R"({"path":"skipped-line.txt","offset_line":2,"limit_lines":1})", fixture.context()), "content")
+        == "wanted\n");
+}
+
+TEST_CASE("Unified read truncates whole files on a UTF-8 boundary", "[read][resources]") {
+    Fixture fixture;
+    std::string data(1024 * 1024 - 1, 'a');
+    data += "\xC3\xA9";
+    data += "TAIL";
+    fixture.write("utf8.txt", data);
+    ReadTool tool;
+    const auto content = field(tool.execute(R"({"path":"utf8.txt"})", fixture.context()), "content");
+    CHECK_THAT(content, ContainsSubstring("TRUNCATED"));
+    CHECK(content.find("TAIL") == std::string::npos);
+    CHECK(content.find("\xEF\xBF\xBD") == std::string::npos);
+    CHECK(content.find('\xC3') == std::string::npos);
+}
+
+TEST_CASE("Unified read prefers a numeric notebook cell id over the same index", "[read][resources]") {
+    Fixture fixture;
+    fixture.write("ids.ipynb", R"({"cells":[{"id":"other","cell_type":"markdown","source":"INDEX1\n"},{"id":"1","cell_type":"code","source":"BYID\n"}]})");
+    ReadTool tool;
+    const auto by_id = tool.execute(R"({"path":"ids.ipynb","select":{"cell":"1"}})", fixture.context());
+    CHECK_THAT(field(by_id, "content"), ContainsSubstring("BYID"));
+    CHECK(field(by_id, "content").find("INDEX1") == std::string::npos);
+
+    fixture.write("order.ipynb", R"({"cells":[{"id":"a","cell_type":"markdown","source":"FIRST\n"},{"id":"b","cell_type":"code","source":"SECOND\n"}]})");
+    CHECK_THAT(field(tool.execute(R"({"path":"order.ipynb","select":{"cell":"2"}})", fixture.context()), "content"),
+        ContainsSubstring("SECOND"));
+}
+
+TEST_CASE("Unified read directory listings hide symlinks that leave the workspace", "[read][resources]") {
+    Fixture fixture;
+    fixture.write("visible.txt", "visible\n");
+    std::filesystem::create_directory(fixture.root / "nested");
+#ifndef _WIN32
+    std::error_code ec;
+    std::filesystem::create_symlink("/etc/passwd", fixture.root / "escape", ec);
+    if (ec) SKIP("Symlink creation is unavailable in this environment");
+#endif
+    ReadTool tool;
+    const auto listing = tool.execute(R"({"path":".","view":"auto"})", fixture.context());
+    CHECK_THAT(listing, ContainsSubstring("visible.txt"));
+    CHECK_THAT(listing, ContainsSubstring("nested/"));
+#ifndef _WIN32
+    CHECK(listing.find("escape") == std::string::npos);
+#endif
+    CHECK_THAT(tool.execute(R"({"path":"missing.txt","view":"auto"})", fixture.context()),
+        ContainsSubstring("does not exist"));
+}

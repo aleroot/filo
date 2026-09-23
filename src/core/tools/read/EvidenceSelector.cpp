@@ -64,9 +64,12 @@ Evidence select_evidence(std::span<const Resource> sources, std::string_view que
             for (const auto& term : terms)
                 if (lowered.find(term) != std::string::npos) ++score;
             if (!score) continue;
-            if (best.size() == 24 && !better({line, score}, best.back())) continue;
-            best.push_back({line, score});
-            std::ranges::sort(best, better);
+            const Candidate incoming{line, score};
+            if (best.size() == 24 && !better(incoming, best.back())) continue;
+            const auto it = std::find_if(best.begin(), best.end(), [&](const Candidate& existing) {
+                return better(incoming, existing);
+            });
+            best.insert(it, incoming);
             if (best.size() > 24) best.pop_back();
         }
         for (const auto& match : best) {

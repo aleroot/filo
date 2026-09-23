@@ -21,12 +21,22 @@ std::expected<Resource, std::string> decode_notebook(Resource resource, const Op
     const auto [end, number_error] = std::from_chars(options.cell.data(), options.cell.data() + options.cell.size(), selected_index);
     const bool numeric = !options.cell.empty() && number_error == std::errc{} && end == options.cell.data() + options.cell.size();
     if (cells.size() > 10000) return std::unexpected("Notebook exceeds the 10000-cell budget.");
+    // A numeric selector is an index only when no cell uses that string as its
+    // id. Otherwise id "1" would be unreachable whenever it is not also cell 1.
+    bool match_by_id = !options.cell.empty() && !numeric;
+    if (!options.cell.empty() && numeric) {
+        for (auto cell : cells) {
+            std::string_view id;
+            core::utils::json::ignore_error(cell["id"].get(id));
+            if (id == options.cell) { match_by_id = true; break; }
+        }
+    }
     for (auto cell : cells) {
         ++index;
         std::string_view id, type;
         core::utils::json::ignore_error(cell["id"].get(id));
         if (cell["cell_type"].get(type)) return std::unexpected("Invalid notebook cell type.");
-        if (!options.cell.empty() && (numeric ? selected_index != index : options.cell != id)) continue;
+        if (!options.cell.empty() && (match_by_id ? options.cell != id : selected_index != index)) continue;
         if (!options.cell.empty() && found) return std::unexpected("Notebook contains ambiguous cell ids.");
         found = true;
         const std::string locator = std::to_string(index);

@@ -81,9 +81,15 @@ inline std::optional<std::string> check_workspace_access(
     const std::string& path_str,
     const core::context::SessionContext& context,
     std::filesystem::path* resolved_out = nullptr,
-    std::string_view tool_name = {})
+    std::string_view tool_name = {},
+    bool path_is_canonical = false,
+    const std::filesystem::directory_entry* canonical_entry = nullptr)
 {
-    const auto resolved = context.resolve_path(path);
+    // `path_is_canonical` is only for a non-symlink child of a directory this
+    // function already resolved. Anything else still goes through realpath so
+    // a symlink cannot escape the workspace by skipping it.
+    const bool trusted = path_is_canonical && path.is_absolute();
+    const auto resolved = trusted ? path : context.resolve_path(path);
     if (resolved_out) {
         *resolved_out = resolved;
     }
@@ -92,9 +98,10 @@ inline std::optional<std::string> check_workspace_access(
     // read. The two differ for scratch directories under a read-only sandbox,
     // where the shell may read /tmp but not write it.
     const bool mutates = names::is_file_modification_tool(tool_name);
-    const bool permitted = mutates
-        ? context.allows_write(resolved)
-        : context.allows_read(resolved);
+    const bool permitted = trusted
+        ? (mutates ? context.workspace_view().allows_canonical_write(resolved)
+                   : context.workspace_view().allows_canonical_read(resolved))
+        : (mutates ? context.allows_write(resolved) : context.allows_read(resolved));
     if (!permitted) {
         return std::format(
             R"({{"error": "Access denied: Path '{}' is outside the allowed workspace scope."}})",
@@ -106,8 +113,10 @@ inline std::optional<std::string> check_workspace_access(
     if (names::is_path_visibility_constrained_tool(tool_name)) {
         const auto* visibility = context.path_visibility.get();
         if (visibility != nullptr) {
-            if (const auto hidden_reason =
-                    visibility->hidden_reason(path_str, resolved)) {
+            const auto hidden_reason = trusted && canonical_entry != nullptr
+                ? visibility->hidden_reason_canonical(path_str, *canonical_entry)
+                : visibility->hidden_reason(path_str, resolved);
+            if (hidden_reason) {
                 return std::format(
                     R"({{"error":"{}."}})",
                     *hidden_reason);

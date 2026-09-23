@@ -5,25 +5,32 @@
 #include "../../utils/StringUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <format>
 
 namespace core::tools::read {
+std::size_t utf8_prefix_end(std::string_view text, std::size_t bytes) {
+    if (bytes >= text.size()) return text.size();
+    // `bytes` indexes the first excluded byte. Walk off a trailing continuation
+    // so the cut never splits a code point; stop on the lead byte and exclude it.
+    while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0U) == 0x80U) --bytes;
+    return bytes;
+}
 std::string read_prefix(std::istream& stream, std::size_t bytes) {
-    std::array<char, 16384> buffer;
-    std::string result;
-    while (result.size() < bytes && stream) {
-        const auto count = std::min(buffer.size(), bytes - result.size());
-        stream.read(buffer.data(), static_cast<std::streamsize>(count));
-        result.append(buffer.data(), static_cast<std::size_t>(stream.gcount()));
-    }
+    if (bytes == 0) return {};
+    // One allocation and one read. Callers pass the file size when they know
+    // it, so a small file never reserves the whole cap. A short read (EOF)
+    // shrinks to the bytes actually obtained; gcount == 0 ends the call even
+    // if the stream forgets to set failbit.
+    std::string result(bytes, '\0');
+    stream.read(result.data(), static_cast<std::streamsize>(bytes));
+    const auto got = stream.gcount();
+    if (got <= 0) return {};
+    result.resize(static_cast<std::size_t>(got));
     return result;
 }
 std::string bounded_prefix(std::string_view text, std::size_t bytes) {
-    if (text.size() <= bytes) return std::string(text);
-    while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0U) == 0x80U) --bytes;
-    return std::string(text.substr(0, bytes));
+    return std::string(text.substr(0, utf8_prefix_end(text, bytes)));
 }
 std::string digest(std::string_view text) {
     uint64_t hash = 1469598103934665603ULL;

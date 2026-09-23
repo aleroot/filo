@@ -124,6 +124,24 @@ public:
             || snapshot_.scratch.allows_write(resolved_target);
     }
 
+    /// Lexical scope check for a path that is already weakly_canonical (or a
+    /// non-symlink child of one). Skips the realpath that allows_read pays.
+    [[nodiscard]] bool allows_canonical_read(const std::filesystem::path& canonical) const {
+        if (!snapshot_.enforce) {
+            return true;
+        }
+        return is_within_project_roots(canonical)
+            || snapshot_.scratch.allows_read_normalized(canonical);
+    }
+
+    [[nodiscard]] bool allows_canonical_write(const std::filesystem::path& canonical) const {
+        if (!snapshot_.enforce) {
+            return true;
+        }
+        return is_within_project_roots(canonical)
+            || snapshot_.scratch.allows_write_normalized(canonical);
+    }
+
     /**
      * True when @p target_path is in scope only because of the scratch scope.
      *

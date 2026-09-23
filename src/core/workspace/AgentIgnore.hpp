@@ -50,6 +50,12 @@ public:
         const std::filesystem::path& path,
         AgentIgnorePathKind kind) const;
 
+    /// @p normalized is already symlink-free. Directory listings use this so
+    /// each child does not pay weakly_canonical again.
+    [[nodiscard]] bool is_ignored_normalized(
+        const std::filesystem::path& normalized,
+        AgentIgnorePathKind kind) const;
+
     [[nodiscard]] bool can_prune_directory(
         const std::filesystem::path& path) const;
 
