@@ -64,8 +64,15 @@ std::string build_call_tool_result_from_payload(
     ToolCallResultClassification classification,
     std::string_view related_task_id) {
     const bool is_error = classification.is_error;
+    const bool embeds_structured = !is_error && classification.is_structured_object;
 
-    core::utils::JsonWriter writer(payload.size() + related_task_id.size() + 192);
+    // The payload is written twice when it is also the structured content,
+    // and escaping a JSON payload as text grows it by its quotes and
+    // backslashes. Reserving for both avoids regrowing a multi-megabyte buffer
+    // (a copy, and a block twice the size); untouched capacity costs nothing.
+    core::utils::JsonWriter writer(
+        payload.size() + payload.size() / 8 + (embeds_structured ? payload.size() : 0)
+        + related_task_id.size() + 192);
     {
         auto root = writer.object();
         writer.key("content");
@@ -75,7 +82,7 @@ std::string build_call_tool_result_from_payload(
             writer.kv_str("type", "text").comma().kv_str("text", payload);
         }
         writer.comma().kv_bool("isError", is_error);
-        if (!is_error && classification.is_structured_object) {
+        if (embeds_structured) {
             writer.comma().kv_raw("structuredContent", payload);
         }
         if (!related_task_id.empty()) {

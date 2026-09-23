@@ -1,4 +1,5 @@
 #include "SearchReplaceTool.hpp"
+#include "shell/FsUtils.hpp"
 #include "ToolArgumentUtils.hpp"
 #include "ToolDiffUtils.hpp"
 #include "ToolNames.hpp"
@@ -6,7 +7,6 @@
 #include <simdjson.h>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -260,16 +260,11 @@ std::string SearchReplaceTool::execute(const std::string& json_args, const core:
                            core::utils::escape_json_string(path_str));
 
     // Read file.
-    std::string file_content;
-    {
-        std::ifstream ifs(resolved_path, std::ios::binary);
-        if (!ifs)
-            return std::format(R"({{"error":"Cannot open file for reading: {}"}})",
-                               core::utils::escape_json_string(path_str));
-        std::ostringstream ss;
-        ss << ifs.rdbuf();
-        file_content = ss.str();
-    }
+    auto file = detail::read_whole_file(resolved_path);
+    if (!file)
+        return std::format(R"({{"error":"Cannot open file for reading: {}"}})",
+                           core::utils::escape_json_string(path_str));
+    const std::string file_content = std::move(*file);
 
     const int original_lines = static_cast<int>(
         std::count(file_content.begin(), file_content.end(), '\n'));

@@ -13,7 +13,6 @@
 #include <cstdio>
 #include <iostream>
 #include <optional>
-#include <print>
 #include <string>
 #include <string_view>
 #include <atomic>
@@ -54,6 +53,10 @@ struct ParsedJsonRpcMessage {
     Kind kind = Kind::request;
     ResponseId id;
     std::string method;
+    /// Requests only: params._meta["io.modelcontextprotocol/protocolVersion"].
+    std::optional<std::string> protocol_version;
+    /// Requests only: params._meta carries a clientCapabilities object.
+    bool has_client_capabilities = false;
 };
 
 enum class SessionPhase {
@@ -146,6 +149,41 @@ void write_response_id(JsonWriter& w, const ResponseId& id) {
     return std::move(w).take();
 }
 
+// Reads the MCP 2026-07-28 request metadata in the same pass that classifies
+// the message. Keys are compared unescaped, so a client that writes "\/" for
+// "/" is still recognised; the first occurrence of a key wins.
+void read_request_meta(simdjson::ondemand::object& root, ParsedJsonRpcMessage& parsed) {
+    simdjson::ondemand::object params;
+    simdjson::ondemand::object meta;
+    if (root["params"].get_object().get(params) != simdjson::SUCCESS
+        || params["_meta"].get_object().get(meta) != simdjson::SUCCESS) {
+        return;
+    }
+
+    bool seen_version = false;
+    bool seen_capabilities = false;
+    for (auto field : meta) {
+        std::string_view key;
+        simdjson::ondemand::value value;
+        if (field.unescaped_key().get(key) != simdjson::SUCCESS
+            || field.value().get(value) != simdjson::SUCCESS) {
+            return;
+        }
+        if (key == "io.modelcontextprotocol/protocolVersion" && !seen_version) {
+            seen_version = true;
+            std::string_view version;
+            if (value.get_string().get(version) == simdjson::SUCCESS) {
+                parsed.protocol_version.emplace(version);
+            }
+        } else if (key == "io.modelcontextprotocol/clientCapabilities" && !seen_capabilities) {
+            seen_capabilities = true;
+            simdjson::ondemand::json_type type;
+            parsed.has_client_capabilities = value.type().get(type) == simdjson::SUCCESS
+                && type == simdjson::ondemand::json_type::object;
+        }
+    }
+}
+
 [[nodiscard]] std::optional<ParsedJsonRpcMessage>
 parse_jsonrpc_message(std::string_view json_body) {
     simdjson::ondemand::parser parser;
@@ -189,6 +227,9 @@ parse_jsonrpc_message(std::string_view json_body) {
         parsed.kind = parsed.id.kind == ResponseId::Kind::none
             ? ParsedJsonRpcMessage::Kind::notification
             : ParsedJsonRpcMessage::Kind::request;
+        if (parsed.kind == ParsedJsonRpcMessage::Kind::request) {
+            read_request_meta(root, parsed);
+        }
         return parsed;
     }
 
@@ -202,30 +243,6 @@ parse_jsonrpc_message(std::string_view json_body) {
     return std::nullopt;
 }
 
-[[nodiscard]] std::optional<std::string> request_protocol_version(
-    std::string_view json_body) {
-    simdjson::dom::parser parser;
-    simdjson::padded_string padded{std::string(json_body)};
-    simdjson::dom::element document;
-    std::string_view version;
-    if (parser.parse(padded).get(document) != simdjson::SUCCESS
-        || document["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"]
-               .get(version) != simdjson::SUCCESS) {
-        return std::nullopt;
-    }
-    return std::string(version);
-}
-
-[[nodiscard]] bool has_modern_client_capabilities(std::string_view json_body) {
-    simdjson::dom::parser parser;
-    simdjson::padded_string padded{std::string(json_body)};
-    simdjson::dom::element document;
-    simdjson::dom::object capabilities;
-    return parser.parse(padded).get(document) == simdjson::SUCCESS
-        && document["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
-               .get(capabilities) == simdjson::SUCCESS;
-}
-
 [[nodiscard]] bool response_id_equals(const ResponseId& id, std::string_view expected) {
     return id.kind == ResponseId::Kind::string && id.string_value == expected;
 }
@@ -237,7 +254,10 @@ parse_jsonrpc_message(std::string_view json_body) {
 
 void emit_response(std::string_view response) {
     if (response.empty()) return;
-    std::println(stdout, "{}", response);
+    // Written directly: std::println formats into a temporary string first,
+    // one more copy of what can be a multi-megabyte response.
+    std::fwrite(response.data(), 1, response.size(), stdout);
+    std::fputc('\n', stdout);
     std::fflush(stdout);
 }
 
@@ -300,13 +320,12 @@ public:
                 return {.status = Status::eof};
             }
 
-            char chunk[4096];
+            char chunk[kReadChunkBytes];
             const ssize_t bytes_read = ::read(STDIN_FILENO, chunk, sizeof(chunk));
             if (bytes_read == 0) {
                 if (buffer_offset_ < buffer_.size()) {
                     std::string line = buffer_.substr(buffer_offset_);
-                    buffer_.clear();
-                    buffer_offset_ = 0;
+                    release_buffer();
                     trim_cr(line);
                     return {.status = Status::line, .line = std::move(line)};
                 }
@@ -326,14 +345,33 @@ public:
     }
 
 private:
+    /// Bytes read from stdin per syscall.
+    static constexpr std::size_t kReadChunkBytes = 64 * 1024;
+    /// Buffer capacity kept between messages. One large request (a big
+    /// write_file) must not pin its size for the rest of a days-long session.
+    static constexpr std::size_t kMaxRetainedBufferBytes = 256 * 1024;
+
     [[nodiscard]] std::optional<std::string> take_buffered_line() {
-        const auto newline = buffer_.find('\n', buffer_offset_);
+        // Resume the newline search where the previous one stopped; rescanning
+        // the whole partial line after every chunk is quadratic in its size.
+        const auto newline = buffer_.find('\n', std::max(buffer_offset_, scan_offset_));
         if (newline == std::string::npos) {
+            scan_offset_ = buffer_.size();
             return std::nullopt;
         }
-        std::string line = buffer_.substr(buffer_offset_, newline - buffer_offset_);
-        buffer_offset_ = newline + 1;
-        compact_buffer_if_needed();
+        std::string line;
+        if (buffer_offset_ == 0 && newline + 1 == buffer_.size()
+            && buffer_.size() > kMaxRetainedBufferBytes) {
+            // A large message alone in the buffer: hand the storage over
+            // instead of copying it, which also releases it from the reader.
+            line = std::move(buffer_);
+            line.pop_back();
+            release_buffer();
+        } else {
+            line = buffer_.substr(buffer_offset_, newline - buffer_offset_);
+            buffer_offset_ = newline + 1;
+            compact_buffer_if_needed();
+        }
         trim_cr(line);
         return line;
     }
@@ -346,16 +384,28 @@ private:
 
     std::string buffer_;
     std::size_t buffer_offset_ = 0;
+    /// Everything in [buffer_offset_, scan_offset_) is known to hold no newline.
+    std::size_t scan_offset_ = 0;
+
+    void release_buffer() {
+        if (buffer_.capacity() > kMaxRetainedBufferBytes) {
+            buffer_ = std::string{};
+        } else {
+            buffer_.clear();
+        }
+        buffer_offset_ = 0;
+        scan_offset_ = 0;
+    }
 
     void compact_buffer_if_needed() {
         if (buffer_offset_ == 0) return;
         if (buffer_offset_ == buffer_.size()) {
-            buffer_.clear();
-            buffer_offset_ = 0;
+            release_buffer();
             return;
         }
         if (buffer_offset_ < 4096 || buffer_offset_ * 2 < buffer_.size()) return;
         buffer_.erase(0, buffer_offset_);
+        scan_offset_ = 0;
         buffer_offset_ = 0;
     }
 };
@@ -521,10 +571,10 @@ void run_server(const core::context::SteeringPolicy& steering_policy) {
             }
 
             if (parsed->kind == ParsedJsonRpcMessage::Kind::request) {
-                if (const auto version = request_protocol_version(line)) {
+                if (const auto& version = parsed->protocol_version) {
                     if (*version != "2026-07-28") {
                         emit_response(make_unsupported_protocol_error_body(parsed->id, *version));
-                    } else if (!has_modern_client_capabilities(line)) {
+                    } else if (!parsed->has_client_capabilities) {
                         emit_response(make_jsonrpc_error_body(
                             parsed->id,
                             -32602,

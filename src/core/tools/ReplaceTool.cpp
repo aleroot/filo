@@ -1,11 +1,11 @@
 #include "ReplaceTool.hpp"
+#include "shell/FsUtils.hpp"
 #include "ToolArgumentUtils.hpp"
 #include "ToolDiffUtils.hpp"
 #include "ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <fstream>
-#include <sstream>
 #include <format>
 #include <filesystem>
 
@@ -64,17 +64,12 @@ std::string ReplaceTool::execute(const std::string& json_args, const core::conte
     }
 
     // Read entire file.
-    std::string content;
-    {
-        std::ifstream ifs(resolved_path, std::ios::binary);
-        if (!ifs) {
-            return std::format(R"({{"error":"Failed to open file for reading: '{}'."}})",
-                               core::utils::escape_json_string(path_str));
-        }
-        std::ostringstream ss;
-        ss << ifs.rdbuf();
-        content = ss.str();
+    auto file = detail::read_whole_file(resolved_path);
+    if (!file) {
+        return std::format(R"({{"error":"Failed to open file for reading: '{}'."}})",
+                           core::utils::escape_json_string(path_str));
     }
+    std::string content = std::move(*file);
 
     const std::string old_str(old_string);
     const std::size_t pos = content.find(old_str);

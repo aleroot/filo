@@ -600,15 +600,19 @@ struct PromptTemplate {
 static std::string make_response(const RequestId& id,
                                  std::string_view result,
                                  McpProtocolMode mode) {
-    const std::string modern_result = mode == McpProtocolMode::stateless
-        ? modernize_result(result)
-        : std::string(result);
-    JsonWriter w(64 + modern_result.size());
+    // Only the stateless protocol rewrites the result; the legacy one embeds
+    // it as is. Results can be megabytes, so no copy is made for nothing.
+    std::string modern_result;
+    if (mode == McpProtocolMode::stateless) {
+        modern_result = modernize_result(result);
+        result = modern_result;
+    }
+    JsonWriter w(64 + result.size());
     {
         auto _obj = w.object();
         w.kv_str("jsonrpc", "2.0").comma();
         write_response_id(w, id);
-        w.comma().kv_raw("result", modern_result);
+        w.comma().kv_raw("result", result);
     }
     return std::move(w).take();
 }

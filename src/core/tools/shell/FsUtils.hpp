@@ -1,6 +1,10 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
 #include <string_view>
 
 namespace core::tools::detail {
@@ -36,6 +40,27 @@ inline bool should_skip_dir(const std::filesystem::path& p) {
         if (name == d) return true;
     }
     return false;
+}
+
+// Reads a whole file in one allocation sized from the file itself. Streaming
+// into an ostringstream and copying out with str() instead holds about three
+// times the file at once. Bytes appended after the size was taken are still
+// read. nullopt only when the file cannot be opened.
+[[nodiscard]] inline std::optional<std::string> read_whole_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+
+    std::string content;
+    std::error_code ec;
+    if (const auto size = std::filesystem::file_size(path, ec); !ec) content.resize(size);
+    in.read(content.data(), static_cast<std::streamsize>(content.size()));
+    content.resize(static_cast<std::size_t>(in.gcount()));
+
+    std::array<char, 16 * 1024> chunk;
+    while (in.read(chunk.data(), chunk.size()) || in.gcount() > 0) {
+        content.append(chunk.data(), static_cast<std::size_t>(in.gcount()));
+    }
+    return content;
 }
 
 } // namespace core::tools::detail
