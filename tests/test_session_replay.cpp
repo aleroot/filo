@@ -4,6 +4,8 @@
 #include "tui/Conversation.hpp"
 #include "tui/SessionReplay.hpp"
 
+#include <algorithm>
+
 TEST_CASE("Session replay rebuilds UI transcript and tool status", "[tui][session_replay]") {
     core::session::SessionData data;
     data.session_id = "sess_123";
@@ -281,8 +283,11 @@ TEST_CASE("Session replay restores the diff of a past edit",
     const auto& diff = messages[1].tools[0].diff_preview;
     REQUIRE_FALSE(diff.empty());
     CHECK(diff.title == "notes.md");
-    CHECK(diff.deleted_count == 2);
-    CHECK(diff.added_count == 3);
+    CHECK(diff.deleted_count == 1);
+    CHECK(diff.added_count == 2);
+    CHECK(std::ranges::any_of(diff.lines(), [](const auto& line) {
+        return line.kind == tui::DiffLineKind::Context && line.content == "alpha";
+    }));
     // Short enough to open on its own, exactly as it did in the live session.
     CHECK(tui::tool_disclosure_defaults_expanded(messages[1].tools[0]));
 }

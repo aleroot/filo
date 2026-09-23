@@ -64,6 +64,11 @@ private:
 ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
                                         std::string_view tool_args_json);
 
+/// Builds the transcript preview from the exact unified diff returned by a
+/// completed tool call. This keeps the UI's report aligned with what the tool
+/// result communicates to the model and to external clients.
+ToolDiffPreview build_tool_diff_preview_from_unified_diff(std::string_view patch);
+
 /// Display clamp: keeps at most `max_lines` and reports the rest through
 /// `hidden_line_count`. `max_lines == 0` means "no clamp". Stats are preserved.
 [[nodiscard]] ToolDiffPreview clamp_diff_preview(const ToolDiffPreview& preview,
@@ -72,4 +77,3 @@ ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
 std::size_t diff_line_number_width(const ToolDiffPreview& preview);
 
 } // namespace tui
-

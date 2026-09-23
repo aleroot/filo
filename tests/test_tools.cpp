@@ -1065,6 +1065,8 @@ TEST_CASE("ReplaceTool includes bounded unified diff for text edits", "[tools]")
     REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("--- a/"));
     REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("-Line 2"));
     REQUIRE_THAT(replace_res, Catch::Matchers::ContainsSubstring("+Replaced Line"));
+    CHECK(replace_res.find("-Line 1") == std::string::npos);
+    CHECK(replace_res.find("+Line 1") == std::string::npos);
 
     std::filesystem::remove(test_file);
 }
@@ -2677,6 +2679,8 @@ TEST_CASE("SearchReplaceTool includes bounded unified diff for text edits", "[to
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("+ALPHA"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("-gamma"));
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("+GAMMA"));
+    CHECK(res.find("-beta") == std::string::npos);
+    CHECK(res.find("+beta") == std::string::npos);
 
     std::filesystem::remove(path);
 }

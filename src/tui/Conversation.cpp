@@ -2149,6 +2149,16 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
     bool success = false;
     if (object["success"].get(success) == simdjson::SUCCESS) {
         tool.status = success ? ToolActivity::Status::Succeeded : ToolActivity::Status::Failed;
+        if (success
+            && (core::tools::names::is_replace_tool(tool.name)
+                || tool.name == core::tools::names::kSearchReplace)) {
+            if (const auto diff = core::utils::json::first_string_field(object, {"diff"})) {
+                auto preview = build_tool_diff_preview_from_unified_diff(*diff);
+                if (!preview.empty()) {
+                    tool.diff_preview = std::move(preview);
+                }
+            }
+        }
         set_result_summary(success ? "Done" : "Tool reported failure.");
         return;
     }

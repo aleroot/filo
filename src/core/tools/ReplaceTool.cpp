@@ -23,7 +23,7 @@ ToolDefinition ReplaceTool::get_definition() const {
             {"new_string", "string", "Replacement text.", true}
         },
         .output_schema =
-            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the replacement completed successfully."},"file_path":{"type":"string","description":"The modified file path."},"replaced_at_line":{"type":"integer","description":"1-based line number where the replacement began."},"diff":{"type":"string","description":"Bounded unified diff of the file before and after the replacement, omitted for very large or binary-like content."}},"required":["success","file_path","replaced_at_line"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether the replacement completed successfully."},"file_path":{"type":"string","description":"The modified file path."},"replaced_at_line":{"type":"integer","description":"1-based line number where the replacement began."},"diff":{"type":"string","description":"Minimal contextual unified diff. Omitted for oversized, binary-like, or computationally expensive changes."}},"required":["success","file_path","replaced_at_line"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies file content on disk
         },
@@ -109,7 +109,7 @@ std::string ReplaceTool::execute(const std::string& json_args, const core::conte
         R"({{"success":true,"file_path":"{}","replaced_at_line":{})",
         core::utils::escape_json_string(resolved_path.string()),
         replaced_at_line);
-    if (const auto diff = detail::build_full_content_unified_diff(
+    if (const auto diff = detail::build_unified_diff(
             resolved_path.string(),
             previous_content,
             content)) {

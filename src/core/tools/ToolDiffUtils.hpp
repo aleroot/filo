@@ -2,7 +2,6 @@
 
 #include "../utils/JsonUtils.hpp"
 
-#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -11,6 +10,7 @@
 namespace core::tools::detail {
 
 inline constexpr std::size_t kMaxToolDiffInputBytes = 512 * 1024;
+inline constexpr std::size_t kMaxToolDiffOutputBytes = 512 * 1024;
 
 [[nodiscard]] inline bool is_text_like_for_diff(std::string_view value) noexcept {
     const auto is_continuation = [](unsigned char byte) noexcept {
@@ -84,79 +84,14 @@ inline constexpr std::size_t kMaxToolDiffInputBytes = 512 * 1024;
     return true;
 }
 
-[[nodiscard]] inline std::size_t line_count_for_unified_hunk(std::string_view value) noexcept {
-    if (value.empty()) {
-        return 0;
-    }
-
-    return static_cast<std::size_t>(std::ranges::count(value, '\n'))
-        + (value.back() == '\n' ? 0 : 1);
-}
-
-inline void append_prefixed_unified_lines(
-    std::string& output,
-    char prefix,
-    std::string_view value)
-{
-    std::size_t start = 0;
-    while (start < value.size()) {
-        const auto next = value.find('\n', start);
-        const auto end = next == std::string_view::npos ? value.size() : next;
-        output.push_back(prefix);
-        output.append(value.substr(start, end - start));
-        output.push_back('\n');
-
-        if (next == std::string_view::npos) {
-            output += "\\ No newline at end of file\n";
-            break;
-        }
-        start = next + 1;
-    }
-}
-
-[[nodiscard]] inline std::optional<std::string> build_full_content_unified_diff(
+/// Builds a bounded, line-based unified diff. Returns no value when either
+/// input is unsuitable for a text diff or the bounded Myers search exceeds its
+/// work limit. In particular, a failed diff is never replaced with a
+/// whole-file remove/add hunk.
+[[nodiscard]] std::optional<std::string> build_unified_diff(
     std::string_view file_path,
     std::string_view old_content,
-    std::string_view new_content)
-{
-    if (old_content == new_content) {
-        return std::nullopt;
-    }
-
-    if (old_content.size() + new_content.size() > kMaxToolDiffInputBytes) {
-        return std::nullopt;
-    }
-
-    if (!is_text_like_for_diff(old_content) || !is_text_like_for_diff(new_content)) {
-        return std::nullopt;
-    }
-
-    const auto old_lines = line_count_for_unified_hunk(old_content);
-    const auto new_lines = line_count_for_unified_hunk(new_content);
-
-    std::string diff;
-    diff.reserve(old_content.size() + new_content.size() + file_path.size() * 2 + 96);
-    diff += "--- a/";
-    diff += file_path;
-    diff += '\n';
-    diff += "+++ b/";
-    diff += file_path;
-    diff += '\n';
-    diff += "@@ -1,";
-    diff += std::to_string(old_lines);
-    diff += " +1,";
-    diff += std::to_string(new_lines);
-    diff += " @@\n";
-
-    append_prefixed_unified_lines(diff, '-', old_content);
-    append_prefixed_unified_lines(diff, '+', new_content);
-
-    if (!diff.empty() && diff.back() == '\n') {
-        diff.pop_back();
-    }
-
-    return diff;
-}
+    std::string_view new_content);
 
 [[nodiscard]] inline std::string json_diff_field(std::string_view diff) {
     return std::string{R"(,"diff":")"}

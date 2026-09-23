@@ -204,7 +204,7 @@ ToolDefinition SearchReplaceTool::get_definition() const {
             },
         },
         .output_schema =
-            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether all edits were applied successfully."},"file_path":{"type":"string","description":"The modified file path."},"blocks_applied":{"type":"integer","description":"Number of search-and-replace blocks applied."},"lines_changed":{"type":"integer","description":"Net line-count change after applying the edits."},"diff":{"type":"string","description":"Bounded unified diff of the file before and after all edits, omitted for very large or binary-like content."},"warnings":{"type":"array","items":{"type":"string"},"description":"Optional non-fatal warnings about ambiguous or repeated matches."}},"required":["success","file_path","blocks_applied","lines_changed"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"success":{"type":"boolean","description":"Whether all edits were applied successfully."},"file_path":{"type":"string","description":"The modified file path."},"blocks_applied":{"type":"integer","description":"Number of search-and-replace blocks applied."},"lines_changed":{"type":"integer","description":"Net line-count change after applying the edits."},"diff":{"type":"string","description":"Minimal contextual unified diff. Omitted for oversized, binary-like, or computationally expensive changes."},"warnings":{"type":"array","items":{"type":"string"},"description":"Optional non-fatal warnings about ambiguous or repeated matches."}},"required":["success","file_path","blocks_applied","lines_changed"],"additionalProperties":false})",
         .annotations = {
             .destructive_hint = true,  // modifies file content on disk
         },
@@ -306,7 +306,7 @@ std::string SearchReplaceTool::execute(const std::string& json_args, const core:
         core::utils::escape_json_string(resolved_path.string()),
         result.applied,
         new_lines - original_lines);
-    if (const auto diff = detail::build_full_content_unified_diff(
+    if (const auto diff = detail::build_unified_diff(
             resolved_path.string(),
             file_content,
             result.content)) {

@@ -1,6 +1,7 @@
 #include "DiffPreview.hpp"
 
 #include "Constants.hpp"
+#include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -8,6 +9,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -18,8 +21,12 @@ namespace {
 
 template <typename Fn>
 void for_each_line(std::string_view text, Fn&& fn) {
+    if (text.empty()) {
+        fn(std::string_view{});
+        return;
+    }
     std::size_t start = 0;
-    while (start <= text.size()) {
+    while (start < text.size()) {
         const std::size_t end = text.find('\n', start);
         if (end == std::string_view::npos) {
             fn(text.substr(start));
@@ -27,25 +34,16 @@ void for_each_line(std::string_view text, Fn&& fn) {
         }
         fn(text.substr(start, end - start));
         start = end + 1;
-        if (start == text.size()) {
-            fn(std::string_view{});
-            break;
-        }
     }
 }
 
-/// Splits `text` into lines, preserving interior blanks. A single trailing
-/// newline is treated as a terminator rather than the start of another line, so
-/// "alpha\nbeta\n" is two lines — matching how editors count them and keeping the
-/// transcript's "+N -M" stats and the rendered diff free of a phantom last line.
+/// Splits `text` into lines, preserving blank lines. A trailing newline is a
+/// terminator rather than an extra line, so "alpha\nbeta\n" is two lines.
 std::vector<std::string> split_lines_keep_empty(std::string_view text) {
     std::vector<std::string> lines;
     for_each_line(text, [&](std::string_view line) {
         lines.emplace_back(line);
     });
-    if (lines.size() > 1 && lines.back().empty()) {
-        lines.pop_back();
-    }
     if (lines.empty()) {
         lines.emplace_back();
     }
@@ -59,14 +57,22 @@ bool parse_positive_int(std::string_view text, std::size_t& pos, int& out) {
 
     int value = 0;
     while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
-        value = value * 10 + static_cast<int>(text[pos] - '0');
+        const int digit = static_cast<int>(text[pos] - '0');
+        if (value > (std::numeric_limits<int>::max() - digit) / 10) {
+            return false;
+        }
+        value = value * 10 + digit;
         ++pos;
     }
     out = value;
     return true;
 }
 
-bool parse_hunk_header(std::string_view line, int& old_start, int& new_start) {
+bool parse_hunk_header(std::string_view line,
+                       int& old_start,
+                       int& old_count,
+                       int& new_start,
+                       int& new_count) {
     if (!line.starts_with("@@ -")) {
         return false;
     }
@@ -76,10 +82,10 @@ bool parse_hunk_header(std::string_view line, int& old_start, int& new_start) {
         return false;
     }
 
+    old_count = 1;
     if (pos < line.size() && line[pos] == ',') {
         ++pos;
-        int ignored = 0;
-        if (!parse_positive_int(line, pos, ignored)) {
+        if (!parse_positive_int(line, pos, old_count)) {
             return false;
         }
     }
@@ -96,6 +102,14 @@ bool parse_hunk_header(std::string_view line, int& old_start, int& new_start) {
 
     if (!parse_positive_int(line, pos, new_start)) {
         return false;
+    }
+
+    new_count = 1;
+    if (pos < line.size() && line[pos] == ',') {
+        ++pos;
+        if (!parse_positive_int(line, pos, new_count)) {
+            return false;
+        }
     }
 
     return true;
@@ -177,29 +191,42 @@ std::vector<DiffLinePreview> parse_patch_lines(std::string_view patch) {
 
     int old_line = 0;
     int new_line = 0;
+    int old_remaining = 0;
+    int new_remaining = 0;
     bool in_hunk = false;
 
-    for_each_line(patch, [&](std::string_view line) {
+    const auto consume_line = [&](std::string_view raw_line) {
+        // Unified diff records are LF-delimited even when their source file
+        // uses CRLF. Keep source bytes in the tool response, but avoid handing
+        // a carriage return to the terminal text renderer.
+        std::string_view line = raw_line;
+        if (line.ends_with('\r')) {
+            line.remove_suffix(1);
+        }
         if (line.empty()) {
-            if (in_hunk) {
-                ++old_line;
-                ++new_line;
-                lines.push_back(make_diff_line(DiffLineKind::Context, {}, old_line, new_line));
-            }
+            lines.push_back(make_diff_line(DiffLineKind::Other, {}));
             return;
         }
 
         int parsed_old = 0;
+        int parsed_old_count = 0;
         int parsed_new = 0;
-        if (parse_hunk_header(line, parsed_old, parsed_new)) {
+        int parsed_new_count = 0;
+        if (parse_hunk_header(line,
+                              parsed_old,
+                              parsed_old_count,
+                              parsed_new,
+                              parsed_new_count)) {
             old_line = std::max(0, parsed_old - 1);
             new_line = std::max(0, parsed_new - 1);
-            in_hunk = true;
+            old_remaining = parsed_old_count;
+            new_remaining = parsed_new_count;
+            in_hunk = old_remaining > 0 || new_remaining > 0;
             lines.push_back(make_diff_line(DiffLineKind::Hunk, std::string(line)));
             return;
         }
 
-        if (is_patch_metadata_line(line)) {
+        if (!in_hunk && is_patch_metadata_line(line)) {
             if (line.starts_with("*** Update File: ")
                     || line.starts_with("*** Add File: ")
                     || line.starts_with("*** Delete File: ")
@@ -220,36 +247,48 @@ std::vector<DiffLinePreview> parse_patch_lines(std::string_view patch) {
             DiffLinePreview out = make_diff_line(DiffLineKind::Add, std::string(line.substr(1)));
             if (in_hunk) {
                 ++new_line;
+                --new_remaining;
                 out.new_line = new_line;
             }
             lines.push_back(std::move(out));
-            return;
-        }
-
-        if (marker == '-') {
+        } else if (marker == '-') {
             DiffLinePreview out = make_diff_line(DiffLineKind::Delete, std::string(line.substr(1)));
             if (in_hunk) {
                 ++old_line;
+                --old_remaining;
                 out.old_line = old_line;
             }
             lines.push_back(std::move(out));
-            return;
-        }
-
-        if (marker == ' ') {
+        } else if (marker == ' ') {
             DiffLinePreview out = make_diff_line(DiffLineKind::Context, std::string(line.substr(1)));
             if (in_hunk) {
                 ++old_line;
                 ++new_line;
+                --old_remaining;
+                --new_remaining;
                 out.old_line = old_line;
                 out.new_line = new_line;
             }
             lines.push_back(std::move(out));
-            return;
+        } else {
+            lines.push_back(make_diff_line(DiffLineKind::Other, std::string(line)));
         }
 
-        lines.push_back(make_diff_line(DiffLineKind::Other, std::string(line)));
-    });
+        if (in_hunk && old_remaining <= 0 && new_remaining <= 0) {
+            in_hunk = false;
+        }
+    };
+
+    std::size_t start = 0;
+    while (start < patch.size()) {
+        const std::size_t end = patch.find('\n', start);
+        if (end == std::string_view::npos) {
+            consume_line(patch.substr(start));
+            break;
+        }
+        consume_line(patch.substr(start, end - start));
+        start = end + 1;
+    }
 
     return lines;
 }
@@ -292,35 +331,73 @@ DiffBuildResult build_replace_preview(const simdjson::dom::object& object) {
         return preview;
     }
 
-    preview.title = *file_path;
-    preview.lines.push_back(make_diff_line(
-        DiffLineKind::Header,
-        std::string("--- a/") + *file_path));
-    preview.lines.push_back(make_diff_line(
-        DiffLineKind::Header,
-        std::string("+++ b/") + *file_path));
-    preview.lines.push_back(make_diff_line(
-        DiffLineKind::Hunk,
-        "@@ replacement @@"));
-
-    int old_line = 0;
-    for (const auto& line : split_lines_keep_empty(*old_string)) {
-        ++old_line;
-        preview.lines.push_back(make_diff_line(
-            DiffLineKind::Delete,
-            line,
-            old_line,
-            std::nullopt));
+    if (const auto diff = core::tools::detail::build_unified_diff(
+            *file_path, *old_string, *new_string)) {
+        preview.title = *file_path;
+        preview.lines = parse_patch_lines(*diff);
     }
 
-    int new_line = 0;
-    for (const auto& line : split_lines_keep_empty(*new_string)) {
-        ++new_line;
-        preview.lines.push_back(make_diff_line(
-            DiffLineKind::Add,
-            line,
-            std::nullopt,
-            new_line));
+    return preview;
+}
+
+DiffBuildResult build_search_replace_preview(const simdjson::dom::object& object) {
+    DiffBuildResult preview;
+    const auto file_path = core::utils::json::first_string_field(object, {"file_path", "path"});
+    if (!file_path) {
+        return preview;
+    }
+
+    simdjson::dom::array edits;
+    if (object["edits"].get(edits) != simdjson::SUCCESS) {
+        return preview;
+    }
+
+    preview.title = *file_path;
+    std::size_t edit_number = 0;
+    for (const simdjson::dom::element edit : edits) {
+        simdjson::dom::object edit_object;
+        if (edit.get(edit_object) != simdjson::SUCCESS) {
+            continue;
+        }
+        const auto old_string = core::utils::json::first_string_field(
+            edit_object, {"old_string"});
+        const auto new_string = core::utils::json::first_string_field(
+            edit_object, {"new_string"});
+        if (!old_string || !new_string) {
+            continue;
+        }
+        const auto diff = core::tools::detail::build_unified_diff(
+            *file_path, *old_string, *new_string);
+        if (!diff) {
+            continue;
+        }
+
+        auto snippet = parse_patch_lines(*diff);
+        if (snippet.empty()) {
+            continue;
+        }
+        ++edit_number;
+
+        if (preview.lines.empty()) {
+            // The first two patch lines identify the file. Later edits share
+            // those headers and get their own clearly scoped preview hunk.
+            preview.lines.push_back(snippet[0]);
+            if (snippet.size() > 1) {
+                preview.lines.push_back(snippet[1]);
+            }
+        }
+        std::string hunk_header = snippet.size() > 2
+            ? snippet[2].content
+            : "@@ -0,0 +0,0 @@";
+        hunk_header += std::format(" (edit {}; location determined at apply time)",
+                                   edit_number);
+        preview.lines.push_back(make_diff_line(DiffLineKind::Hunk,
+                                                std::move(hunk_header)));
+        const auto body_start = std::min<std::size_t>(3, snippet.size());
+        preview.lines.insert(
+            preview.lines.end(),
+            std::make_move_iterator(snippet.begin() + static_cast<std::ptrdiff_t>(body_start)),
+            std::make_move_iterator(snippet.end()));
     }
 
     return preview;
@@ -399,11 +476,46 @@ ToolDiffPreview build_tool_diff_preview(std::string_view tool_name,
         return finish_preview(build_replace_preview(object));
     }
 
+    if (tool_name == core::tools::names::kSearchReplace) {
+        return finish_preview(build_search_replace_preview(object));
+    }
+
     if (tool_name == core::tools::names::kWriteFile) {
         return finish_preview(build_write_file_preview(object));
     }
 
     return {};
+}
+
+ToolDiffPreview build_tool_diff_preview_from_unified_diff(std::string_view patch) {
+    if (patch.empty()) {
+        return {};
+    }
+
+    const std::size_t first_line_end = patch.find('\n');
+    if (first_line_end == std::string_view::npos
+        || !patch.substr(0, first_line_end).starts_with("--- ")) {
+        return {};
+    }
+    const std::size_t second_line_start = first_line_end + 1;
+    const std::size_t second_line_end = patch.find('\n', second_line_start);
+    if (second_line_end == std::string_view::npos
+        || !patch.substr(second_line_start,
+                         second_line_end - second_line_start).starts_with("+++ ")) {
+        return {};
+    }
+
+    auto preview = finish_preview({
+        .title = first_non_empty_path_from_patch(patch),
+        .lines = parse_patch_lines(patch),
+    });
+    const bool has_hunk = std::ranges::any_of(preview.lines(), [](const auto& line) {
+        return line.kind == DiffLineKind::Hunk;
+    });
+    if (!has_hunk || (preview.added_count == 0 && preview.deleted_count == 0)) {
+        return {};
+    }
+    return preview;
 }
 
 ToolDiffPreview clamp_diff_preview(const ToolDiffPreview& preview, std::size_t max_lines) {

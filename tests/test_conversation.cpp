@@ -1172,6 +1172,60 @@ TEST_CASE("tool activity prepares its transcript diff preview",
     CHECK(tool.diff_preview.title == "notes.md");
 }
 
+TEST_CASE("edit previews use contextual diffs and completed tool results",
+          "[tui][conversation][tool][diff][regression]") {
+    auto tool = make_tool_activity(
+        "search-replace-1",
+        "search_replace",
+        R"({"file_path":"src.cpp","edits":[{"old_string":"before\nold\nafter",)"
+        R"("new_string":"before\nnew\nafter"}]})",
+        "src.cpp");
+
+    REQUIRE_FALSE(tool.diff_preview.empty());
+    CHECK(tool.diff_preview.deleted_count == 1);
+    CHECK(tool.diff_preview.added_count == 1);
+    CHECK(std::ranges::any_of(tool.diff_preview.lines(), [](const auto& line) {
+        return line.kind == DiffLineKind::Context && line.content == "before";
+    }));
+
+    // The completed card must show the tool's canonical, file-positioned diff,
+    // replacing the approximate argument preview used before execution.
+    apply_tool_result(
+        tool,
+        R"({"success":true,"file_path":"src.cpp","diff":"--- a/src.cpp\n+++ b/src.cpp\n@@ -40,3 +40,3 @@\n before\n-old\n+new\n after"})");
+
+    CHECK(tool.diff_preview.title == "src.cpp");
+    CHECK(tool.diff_preview.deleted_count == 1);
+    CHECK(tool.diff_preview.added_count == 1);
+    CHECK(std::ranges::any_of(tool.diff_preview.lines(), [](const auto& line) {
+        return line.kind == DiffLineKind::Delete
+            && line.content == "old"
+            && line.old_line == 41;
+    }));
+}
+
+TEST_CASE("completed edit previews parse diff content that resembles file headers",
+          "[tui][conversation][tool][diff][regression]") {
+    CHECK(build_tool_diff_preview_from_unified_diff("not a patch").empty());
+    const auto preview = build_tool_diff_preview_from_unified_diff(
+        "--- a/src.cpp\n"
+        "+++ b/src.cpp\n"
+        "@@ -1,1 +1,1 @@\n"
+        "--- old line\n"
+        "+++ new line\n");
+
+    CHECK(preview.title == "src.cpp");
+    CHECK(preview.deleted_count == 1);
+    CHECK(preview.added_count == 1);
+    CHECK(preview.total_line_count == 5);
+    CHECK(std::ranges::any_of(preview.lines(), [](const auto& line) {
+        return line.kind == DiffLineKind::Delete && line.content == "-- old line";
+    }));
+    CHECK(std::ranges::any_of(preview.lines(), [](const auto& line) {
+        return line.kind == DiffLineKind::Add && line.content == "++ new line";
+    }));
+}
+
 namespace {
 
 /// Renders the transcript content without the scroll viewport, so that a card

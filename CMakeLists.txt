@@ -359,6 +359,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/read/ReaderProfile.cpp
     src/core/tools/read/EvidenceSelector.cpp
     src/core/tools/WriteFileTool.cpp
+    src/core/tools/ToolDiffUtils.cpp
     src/core/tools/ListDirectoryTool.cpp
     src/core/tools/ReplaceTool.cpp
     src/core/tools/GrepSearchTool.cpp
@@ -591,6 +592,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_reasoning_capabilities.cpp
     tests/test_goal_graph.cpp
     tests/test_tools.cpp
+    tests/test_tool_diff_utils.cpp
     tests/test_read_resources.cpp
     tests/test_ascii_utils.cpp
     tests/test_base64_utils.cpp
