@@ -15,6 +15,7 @@
 #include <chrono>
 #include <filesystem>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -123,10 +124,14 @@ ShellTool::ShellTool(std::unique_ptr<shell::IShellExecutor> executor)
 void ShellTool::clear_mcp_session(std::string_view session_id) {
     if (session_id.empty()) return;
 
+    // Destroyed after the lock is released: shutting a shell down blocks for
+    // up to two seconds, which must not stall every other session's command.
+    std::shared_ptr<SessionShellState> removed;
     {
         std::lock_guard<std::mutex> lock(g_session_shells_mutex);
         auto it = g_session_shells.find(std::string(session_id));
         if (it != g_session_shells.end()) {
+            removed = std::move(it->second);
             g_session_shells.erase(it);
         }
     }
@@ -138,6 +143,31 @@ void ShellTool::clear_mcp_session(std::string_view session_id) {
 
 void ShellTool::clear_session_state(std::string_view session_id) {
     clear_mcp_session(session_id);
+}
+
+std::optional<std::chrono::steady_clock::time_point> ShellTool::reap_idle_mcp_sessions(
+    std::span<const std::string> session_ids,
+    std::chrono::steady_clock::duration idle_timeout) {
+    std::vector<std::shared_ptr<SessionShellState>> reaped;
+    std::optional<std::chrono::steady_clock::time_point> next_deadline;
+    {
+        std::lock_guard<std::mutex> lock(g_session_shells_mutex);
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& session_id : session_ids) {
+            auto it = g_session_shells.find(session_id);
+            if (it == g_session_shells.end()) continue;
+            const auto deadline = it->second->last_used + idle_timeout;
+            // A running command holds its own reference, and new references
+            // are only taken under this mutex, so a sole owner is idle.
+            if (deadline <= now && it->second.use_count() == 1) {
+                reaped.push_back(std::move(it->second));
+                g_session_shells.erase(it);
+                continue;
+            }
+            if (!next_deadline || deadline < *next_deadline) next_deadline = deadline;
+        }
+    }
+    return next_deadline;  // `reaped` shuts the shells down outside the lock.
 }
 
 bool ShellTool::interrupt_mcp_session(std::string_view session_id) {
@@ -317,9 +347,15 @@ std::string ShellTool::execute_impl(
         mark_session_shell_used(state);
     }
 
-    const std::string escaped = core::utils::escape_json_string_utf8_safe(result.output);
     // Field is named "output" because both stdout and stderr are captured.
-    return std::format(R"({{"output":"{}","exit_code":{}}})", escaped, result.exit_code);
+    // Escaped straight into the reply: output can be megabytes, and an
+    // intermediate escaped copy would double the peak for nothing.
+    std::string json;
+    json.reserve(result.output.size() + result.output.size() / 8 + 40);
+    json += R"({"output":")";
+    core::utils::append_escaped_utf8_safe(json, result.output);
+    std::format_to(std::back_inserter(json), R"(","exit_code":{}}})", result.exit_code);
+    return json;
 }
 
 } // namespace core::tools

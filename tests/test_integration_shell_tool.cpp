@@ -13,6 +13,7 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <future>
 #include <string>
 #include <string_view>
@@ -132,6 +133,65 @@ TEST_CASE("ShellTool clear_mcp_session resets that session shell state",
         auto echo_res = tool.execute(R"({"command":"echo $FILO_SESSION_CLEAR_VAR"})", session);
         REQUIRE_THAT(echo_res, !Catch::Matchers::ContainsSubstring(std::string(kToken)));
     }
+#define execute(...) execute(__VA_ARGS__, make_tool_test_context())
+}
+
+TEST_CASE("ShellTool reap_idle_mcp_sessions retires only idle shells of listed sessions",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+    const std::string idle_id = "session-reap-idle";
+    const std::string busy_id = "session-reap-busy";
+    const std::string unlisted_id = "session-reap-unlisted";
+    const auto idle = make_tool_test_context(idle_id);
+    const auto busy = make_tool_test_context(busy_id);
+    const auto unlisted = make_tool_test_context(unlisted_id);
+
+#undef execute
+    REQUIRE_THAT(tool.execute(R"({"command":"export FILO_REAP_VAR=idle_token"})", idle),
+                 Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+    REQUIRE_THAT(tool.execute(R"({"command":"export FILO_REAP_VAR=unlisted_token"})", unlisted),
+                 Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+
+    // A shell that has not been idle long enough survives and reports when it
+    // will become reapable.
+    const std::array<std::string, 1> idle_only{idle_id};
+    const auto deadline = ShellTool::reap_idle_mcp_sessions(idle_only, std::chrono::hours{1});
+    REQUIRE(deadline.has_value());
+    CHECK(*deadline > std::chrono::steady_clock::now());
+    CHECK_THAT(tool.execute(R"({"command":"echo $FILO_REAP_VAR"})", idle),
+               Catch::Matchers::ContainsSubstring("idle_token"));
+
+    // A shell that is running a command is never reaped, however old.
+    auto running = std::async(std::launch::async, [&] {
+        return tool.execute(R"({"command":"sleep 1; echo busy_done"})", busy);
+    });
+    const std::array<std::string, 1> busy_only{busy_id};
+    for (int i = 0; i < 100; ++i) {
+        const auto active = ShellTool::active_commands();
+        if (std::ranges::any_of(active, [&](const auto& command) {
+                return command.session_id == busy_id;
+            })) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    CHECK(ShellTool::reap_idle_mcp_sessions(busy_only, std::chrono::seconds{0}).has_value());
+    CHECK_THAT(running.get(), Catch::Matchers::ContainsSubstring("busy_done"));
+
+    // An idle shell is reaped; the next command starts a fresh one.
+    const std::array<std::string, 2> both{idle_id, busy_id};
+    CHECK_FALSE(ShellTool::reap_idle_mcp_sessions(both, std::chrono::seconds{0}).has_value());
+    const auto after = tool.execute(R"({"command":"echo \"[$FILO_REAP_VAR]\""})", idle);
+    CHECK_THAT(after, Catch::Matchers::ContainsSubstring("[]"));
+    CHECK_THAT(after, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+
+    // Sessions that were not listed are left alone.
+    CHECK_THAT(tool.execute(R"({"command":"echo $FILO_REAP_VAR"})", unlisted),
+               Catch::Matchers::ContainsSubstring("unlisted_token"));
+
+    ShellTool::clear_mcp_session(idle_id);
+    ShellTool::clear_mcp_session(busy_id);
+    ShellTool::clear_mcp_session(unlisted_id);
 #define execute(...) execute(__VA_ARGS__, make_tool_test_context())
 }
 
@@ -369,6 +429,30 @@ TEST_CASE("ShellTool recovers after output truncation drains to sentinel",
     auto next = tool.execute(R"({"command":"echo recovered_after_truncation"})");
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("recovered_after_truncation"));
     REQUIRE_THAT(next, Catch::Matchers::ContainsSubstring("\"exit_code\":0"));
+}
+
+TEST_CASE("ShellTool does not wait for a sentinel read together with the output that crosses the cap",
+          "[integration][tools][shell]") {
+    ShellTool tool;
+
+    // Output that ends just past the cap: the final read usually carries the
+    // last bytes and the sentinel together. The drain must notice it instead
+    // of waiting for the command's timeout.
+    for (const int overshoot : {1, 64, 1024, 16 * 1024}) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto res = tool.execute(std::format(
+            R"({{"command":"head -c {} /dev/zero | tr '\\0' x","timeout_seconds":20}})",
+            4 * 1024 * 1024 + overshoot));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        INFO("overshoot " << overshoot);
+        CHECK(res.find("OUTPUT TRUNCATED AT 4MB") != std::string::npos);
+        CHECK(res.find("TIMEOUT") == std::string::npos);
+        CHECK(elapsed < std::chrono::seconds{5});
+
+        const auto next = tool.execute(R"({"command":"echo clean_after_cap"})");
+        CHECK(next == R"({"output":"clean_after_cap\n","exit_code":0})");
+    }
 }
 
 TEST_CASE("ShellTool timeout applies while draining truncated output",

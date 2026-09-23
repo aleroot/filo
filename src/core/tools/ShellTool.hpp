@@ -6,6 +6,8 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -71,6 +73,14 @@ public:
 
     static void clear_mcp_session(std::string_view session_id);
     static bool interrupt_mcp_session(std::string_view session_id);
+    /// Terminates the persistent shells of @p session_ids that have been idle
+    /// for at least @p idle_timeout and are not running a command; the next
+    /// command in such a session starts a fresh shell. Returns when the
+    /// earliest remaining shell of those sessions becomes reapable, or nullopt
+    /// when none remain.
+    static std::optional<std::chrono::steady_clock::time_point> reap_idle_mcp_sessions(
+        std::span<const std::string> session_ids,
+        std::chrono::steady_clock::duration idle_timeout);
     static std::vector<ActiveCommand> active_commands();
 
     ToolDefinition get_definition() const override;
