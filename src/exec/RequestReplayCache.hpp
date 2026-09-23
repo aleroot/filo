@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,6 +21,8 @@ struct McpDispatchResult {
 
 // Keeps recently completed request responses for a short time so that retries
 // (same session + id + payload) are replayed without re-executing tools.
+// Bounded by age, entry count and total bytes: tool results can be megabytes,
+// and a long-running daemon must not pin a burst of them.
 class RequestReplayCache {
 public:
     enum class DecisionKind {
@@ -44,9 +47,11 @@ public:
 
     explicit RequestReplayCache(
         std::chrono::steady_clock::duration replay_ttl = std::chrono::minutes{2},
-        std::size_t max_completed_entries = 1024)
+        std::size_t max_completed_entries = 1024,
+        std::size_t max_completed_bytes = 8 * 1024 * 1024)
         : replay_ttl_(replay_ttl),
-          max_completed_entries_(max_completed_entries) {}
+          max_completed_entries_(max_completed_entries),
+          max_completed_bytes_(max_completed_bytes) {}
 
     // Stable, delimiter-safe representation of a session id for replay keys.
     // Hex encoding guarantees no '|' characters so key parsing remains unambiguous.
@@ -117,16 +122,36 @@ public:
             inflight_.erase(inflight_it);
         }
         if (!cache_result || max_completed_entries_ == 0) return;
+        // A response larger than the whole budget is not kept: a retry of it
+        // executes again rather than evicting everything else.
+        if (result.body.size() > max_completed_bytes_) return;
         const std::string session_id = session_from_key(key);
         if (entry->generation != session_generation_locked(session_id)) return;
 
-        completed_[key] = CompletedEntry{
+        if (auto existing = completed_.find(key); existing != completed_.end()) {
+            erase_completed_locked(existing);
+        }
+        completed_.emplace(key, CompletedEntry{
             .result = result,
             .stored_at = std::chrono::steady_clock::now(),
-        };
-        if (completed_.size() > max_completed_entries_) {
+        });
+        completed_bytes_ += result.body.size();
+        while (completed_.size() > max_completed_entries_
+               || completed_bytes_ > max_completed_bytes_) {
             evict_oldest_locked();
         }
+    }
+
+    /// Drops expired responses now. Expiry is otherwise only checked when the
+    /// next request begins, which an idle server may not see for hours.
+    void prune_expired() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        prune_expired_locked();
+    }
+
+    [[nodiscard]] std::size_t completed_bytes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return completed_bytes_;
     }
 
     void clear_session(std::string_view session_id) {
@@ -140,9 +165,11 @@ public:
             // Invalidate stale in-flight completions for this logical session.
             ++session_generations_[canonical_session];
 
-            std::erase_if(completed_, [&](const auto& pair) {
-                return pair.first.starts_with(canonical_prefix);
-            });
+            for (auto it = completed_.begin(); it != completed_.end();) {
+                it = it->first.starts_with(canonical_prefix)
+                    ? erase_completed_locked(it)
+                    : std::next(it);
+            }
 
             for (auto it = inflight_.begin(); it != inflight_.end();) {
                 if (it->first.starts_with(canonical_prefix)) {
@@ -172,13 +199,20 @@ private:
         std::chrono::steady_clock::time_point stored_at;
     };
 
+    using CompletedMap = std::unordered_map<std::string, CompletedEntry>;
+
+    CompletedMap::iterator erase_completed_locked(CompletedMap::iterator it) {
+        completed_bytes_ -= it->second.result.body.size();
+        return completed_.erase(it);
+    }
+
     void prune_expired_locked() {
         const auto now = std::chrono::steady_clock::now();
-        std::erase_if(
-            completed_,
-            [&](const auto& pair) {
-                return (now - pair.second.stored_at) > replay_ttl_;
-            });
+        for (auto it = completed_.begin(); it != completed_.end();) {
+            it = (now - it->second.stored_at) > replay_ttl_
+                ? erase_completed_locked(it)
+                : std::next(it);
+        }
     }
 
     void evict_oldest_locked() {
@@ -190,7 +224,7 @@ private:
                 oldest_it = it;
             }
         }
-        completed_.erase(oldest_it);
+        erase_completed_locked(oldest_it);
     }
 
     [[nodiscard]] static std::string session_from_key(std::string_view key) {
@@ -209,8 +243,10 @@ private:
 
     std::chrono::steady_clock::duration replay_ttl_;
     std::size_t max_completed_entries_;
+    std::size_t max_completed_bytes_;
+    std::size_t completed_bytes_ = 0;
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, CompletedEntry> completed_;
+    CompletedMap completed_;
     std::unordered_map<std::string, std::shared_ptr<InflightEntry>> inflight_;
     std::unordered_map<std::string, uint64_t> session_generations_;
 };

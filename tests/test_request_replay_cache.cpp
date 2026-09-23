@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -110,6 +111,59 @@ TEST_CASE("RequestReplayCache bounds memory by max entries", "[daemon][cache]") 
     auto again_c = cache.begin("c");
     REQUIRE(again_c.kind == RequestReplayCache::DecisionKind::replay_completed);
     REQUIRE(again_c.replay_result.body == "c");
+}
+
+TEST_CASE("RequestReplayCache bounds memory by total bytes", "[daemon][cache]") {
+    RequestReplayCache cache(std::chrono::minutes{5}, 16, 10);
+    const auto store = [&](const std::string& key, std::string body) {
+        auto decision = cache.begin(key);
+        REQUIRE(decision.kind == RequestReplayCache::DecisionKind::execute);
+        cache.finish(key, decision.inflight,
+                     McpDispatchResult{.status = 200, .body = std::move(body)}, true);
+    };
+
+    store("a", "aaaa");
+    store("b", "bbbb");
+    CHECK(cache.completed_bytes() == 8);
+
+    // Over budget: the oldest response is evicted to make room.
+    store("c", "cccc");
+    CHECK(cache.completed_bytes() == 8);
+    CHECK(cache.begin("a").kind == RequestReplayCache::DecisionKind::execute);
+    CHECK(cache.begin("b").kind == RequestReplayCache::DecisionKind::replay_completed);
+    CHECK(cache.begin("c").kind == RequestReplayCache::DecisionKind::replay_completed);
+
+    // A response larger than the whole budget is not kept, and evicts nothing.
+    store("huge", std::string(11, 'x'));
+    CHECK(cache.begin("huge").kind == RequestReplayCache::DecisionKind::execute);
+    CHECK(cache.begin("c").kind == RequestReplayCache::DecisionKind::replay_completed);
+    CHECK(cache.completed_bytes() == 8);
+}
+
+TEST_CASE("RequestReplayCache accounts bytes across replacement, sessions and expiry",
+          "[daemon][cache]") {
+    RequestReplayCache cache(std::chrono::milliseconds{20}, 16, 1024);
+    const auto key = replay_key("session-bytes", "1");
+
+    auto first = cache.begin(key);
+    cache.finish(key, first.inflight, McpDispatchResult{.status = 200, .body = "12345"}, true);
+    CHECK(cache.completed_bytes() == 5);
+
+    // A stale duplicate completion replaces the entry rather than adding to it.
+    auto duplicate = std::make_shared<RequestReplayCache::InflightEntry>();
+    cache.finish(key, duplicate, McpDispatchResult{.status = 200, .body = "123"}, true);
+    CHECK(cache.completed_bytes() == 3);
+
+    cache.clear_session("session-bytes");
+    CHECK(cache.completed_bytes() == 0);
+
+    // Expiry releases memory without waiting for another request.
+    auto other = cache.begin("other");
+    cache.finish("other", other.inflight, McpDispatchResult{.status = 200, .body = "abcd"}, true);
+    CHECK(cache.completed_bytes() == 4);
+    std::this_thread::sleep_for(std::chrono::milliseconds{40});
+    cache.prune_expired();
+    CHECK(cache.completed_bytes() == 0);
 }
 
 TEST_CASE("RequestReplayCache disables completed storage when max entries is zero",

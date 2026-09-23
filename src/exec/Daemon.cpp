@@ -11,6 +11,7 @@
 #include "../core/mcp/McpDispatcher.hpp"
 #include "../core/mcp/McpRoots.hpp"
 #include "../core/mcp/RemoteActivity.hpp"
+#include "../core/tools/ShellTool.hpp"
 #include "../core/tools/ToolManager.hpp"
 #include "../core/context/SessionContext.hpp"
 #include "../core/session/SessionStore.hpp"
@@ -21,7 +22,9 @@
 #include "../core/workspace/Workspace.hpp"
 #include "../core/logging/Logger.hpp"
 #include <simdjson.h>
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -33,8 +36,10 @@
 #include <optional>
 #include <random>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace exec::daemon {
 
@@ -172,13 +177,30 @@ struct HttpSessionState {
     std::unordered_map<std::string, std::shared_ptr<PendingServerResponse>> pending_server_responses;
     std::uint64_t next_server_request_id = 1;
     std::deque<std::chrono::steady_clock::time_point> recent_tool_calls;
-    std::chrono::steady_clock::time_point last_used{std::chrono::steady_clock::now()};
+    /// Atomic so the session reaper can read it without taking `mutex`.
+    std::atomic<std::chrono::steady_clock::time_point> last_used{
+        std::chrono::steady_clock::now()};
     std::condition_variable roots_cv;
     std::mutex mutex;
 };
 
 std::mutex g_http_sessions_mutex;
 std::unordered_map<std::string, std::shared_ptr<HttpSessionState>> g_http_sessions;
+/// Wakes the session reaper when the first session of an idle server appears.
+std::condition_variable g_http_sessions_cv;
+
+// Clients routinely disconnect without DELETE, so a long-running daemon has to
+// retire abandoned sessions itself. The map holds the only reference to an
+// idle session: request handlers keep theirs for the whole request and only
+// take one under g_http_sessions_mutex, so use_count() == 1 under that mutex
+// means no request is in flight.
+constexpr auto kHttpSessionIdleTimeout = std::chrono::hours{24};
+constexpr std::size_t kMaxHttpSessions = 256;
+/// Persistent shells are the expensive part of a session (a bash process
+/// each); they are retired much sooner than the session that owns them.
+constexpr auto kSessionShellIdleTimeout = std::chrono::minutes{60};
+/// Upper bound on how long the reaper sleeps while any session exists.
+constexpr auto kSessionReaperMaxSleep = std::chrono::minutes{5};
 
 constexpr std::size_t kMaxToolCallsPerWindow = 512;
 constexpr auto kToolRateWindow = std::chrono::minutes{1};
@@ -615,32 +637,67 @@ extract_request_id_for_replay(std::string_view json_body) {
                .get(capabilities) == simdjson::SUCCESS;
 }
 
+/// Everything a session owns outside g_http_sessions. Shared by DELETE,
+/// idle expiry and capacity eviction.
+void release_http_session_resources(std::string_view session_id) {
+    core::mcp::RemoteActivityHub::get_instance().client_closed(session_id);
+    replay_cache().clear_session(session_id);
+    core::tools::ToolManager::get_instance().clear_session_state(session_id);
+}
+
 [[nodiscard]] std::pair<std::string, std::shared_ptr<HttpSessionState>>
 create_http_session(std::string protocol_version) {
     static std::random_device rd;
     static constexpr std::string_view kHex = "0123456789abcdef";
 
-    std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
-    for (;;) {
-        std::array<unsigned char, 16> bytes{};
-        for (auto& byte : bytes) {
-            byte = static_cast<unsigned char>(rd());
+    std::string evicted_id;
+    std::shared_ptr<HttpSessionState> evicted;
+    std::pair<std::string, std::shared_ptr<HttpSessionState>> created;
+    {
+        std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+        for (;;) {
+            std::array<unsigned char, 16> bytes{};
+            for (auto& byte : bytes) {
+                byte = static_cast<unsigned char>(rd());
+            }
+
+            std::string session_id;
+            session_id.reserve(bytes.size() * 2);
+            for (const unsigned char byte : bytes) {
+                session_id.push_back(kHex[byte >> 4]);
+                session_id.push_back(kHex[byte & 0x0f]);
+            }
+
+            if (g_http_sessions.contains(session_id)) continue;
+
+            auto state = std::make_shared<HttpSessionState>();
+            state->protocol_version = std::move(protocol_version);
+            g_http_sessions.emplace(session_id, state);
+            created = {std::move(session_id), std::move(state)};
+            break;
         }
 
-        std::string session_id;
-        session_id.reserve(bytes.size() * 2);
-        for (const unsigned char byte : bytes) {
-            session_id.push_back(kHex[byte >> 4]);
-            session_id.push_back(kHex[byte & 0x0f]);
+        if (g_http_sessions.size() > kMaxHttpSessions) {
+            // Evict the least recently used idle session. When every session
+            // is busy the map briefly exceeds the cap instead.
+            auto victim = g_http_sessions.end();
+            for (auto it = g_http_sessions.begin(); it != g_http_sessions.end(); ++it) {
+                if (it->second == created.second || it->second.use_count() != 1) continue;
+                if (victim == g_http_sessions.end()
+                    || it->second->last_used.load() < victim->second->last_used.load()) {
+                    victim = it;
+                }
+            }
+            if (victim != g_http_sessions.end()) {
+                evicted_id = victim->first;
+                evicted = std::move(victim->second);
+                g_http_sessions.erase(victim);
+            }
         }
-
-        if (g_http_sessions.contains(session_id)) continue;
-
-        auto state = std::make_shared<HttpSessionState>();
-        state->protocol_version = std::move(protocol_version);
-        g_http_sessions.emplace(session_id, state);
-        return {session_id, std::move(state)};
     }
+    g_http_sessions_cv.notify_all();
+    if (evicted) release_http_session_resources(evicted_id);
+    return created;
 }
 
 [[nodiscard]] std::shared_ptr<HttpSessionState> find_http_session(std::string_view session_id) {
@@ -659,6 +716,84 @@ void clear_http_sessions() {
     std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
     g_http_sessions.clear();
 }
+
+/// Guarded by g_http_sessions_mutex.
+bool g_http_session_reaper_stop = false;
+
+/// Retires sessions idle for kHttpSessionIdleTimeout, shells idle for
+/// kSessionShellIdleTimeout and expired replay responses. Sleeps without
+/// waking while no session exists (replay entries belong to sessions).
+void run_http_session_reaper() {
+    std::unique_lock<std::mutex> lock(g_http_sessions_mutex);
+    while (!g_http_session_reaper_stop) {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<std::pair<std::string, std::shared_ptr<HttpSessionState>>> expired;
+        std::vector<std::string> live_session_ids;
+        live_session_ids.reserve(g_http_sessions.size());
+        for (auto it = g_http_sessions.begin(); it != g_http_sessions.end();) {
+            if (it->second.use_count() == 1
+                && now - it->second->last_used.load() >= kHttpSessionIdleTimeout) {
+                expired.emplace_back(it->first, std::move(it->second));
+                it = g_http_sessions.erase(it);
+            } else {
+                live_session_ids.push_back(it->first);
+                ++it;
+            }
+        }
+        lock.unlock();
+
+        for (const auto& [session_id, session] : expired) {
+            release_http_session_resources(session_id);
+        }
+        expired.clear();
+        replay_cache().prune_expired();
+        const auto next_shell_deadline = core::tools::ShellTool::reap_idle_mcp_sessions(
+            live_session_ids, kSessionShellIdleTimeout);
+
+        lock.lock();
+        if (g_http_session_reaper_stop) break;
+        if (g_http_sessions.empty()) {
+            g_http_sessions_cv.wait(lock);
+            continue;
+        }
+        auto wake_at = std::chrono::steady_clock::now() + kSessionReaperMaxSleep;
+        if (next_shell_deadline.has_value()) {
+            // A shell whose deadline passed while it was busy is retried later
+            // instead of spinning.
+            wake_at = std::min(
+                wake_at,
+                std::max(*next_shell_deadline, now + std::chrono::seconds{1}));
+        }
+        g_http_sessions_cv.wait_until(lock, wake_at);
+    }
+}
+
+/// Owns the reaper thread for the lifetime of one daemon run.
+class HttpSessionReaperThread {
+public:
+    HttpSessionReaperThread() {
+        {
+            std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+            g_http_session_reaper_stop = false;
+        }
+        thread_ = std::thread(run_http_session_reaper);
+    }
+
+    HttpSessionReaperThread(const HttpSessionReaperThread&) = delete;
+    HttpSessionReaperThread& operator=(const HttpSessionReaperThread&) = delete;
+
+    ~HttpSessionReaperThread() {
+        {
+            std::lock_guard<std::mutex> lock(g_http_sessions_mutex);
+            g_http_session_reaper_stop = true;
+        }
+        g_http_sessions_cv.notify_all();
+        thread_.join();
+    }
+
+private:
+    std::thread thread_;
+};
 
 [[nodiscard]] bool consume_tool_call_budget(HttpSessionState& session) {
     const auto now = std::chrono::steady_clock::now();
@@ -744,10 +879,12 @@ take_pending_server_response(HttpSessionState& session,
     return result;
 }
 
-void write_mcp_result(httplib::Response& res, const detail::McpDispatchResult& result) {
+// Takes the result by value so the body, which can be megabytes, is moved
+// into the response rather than copied.
+void write_mcp_result(httplib::Response& res, detail::McpDispatchResult result) {
     res.status = result.status;
     if (!result.body.empty()) {
-        res.set_content(result.body, "application/json");
+        res.set_content(std::move(result.body), "application/json");
     }
 }
 
@@ -877,9 +1014,7 @@ void handle_mcp_delete(const std::string& host,
         return;
     }
 
-    core::mcp::RemoteActivityHub::get_instance().client_closed(session_id);
-    replay_cache().clear_session(session_id);
-    core::tools::ToolManager::get_instance().clear_session_state(session_id);
+    release_http_session_resources(session_id);
     res.status = 204;
 }
 
@@ -971,11 +1106,20 @@ void handle_mcp_post(const std::string& host,
         } else if (result.body.find(R"("code":-32021)") != std::string::npos) {
             result.status = 400;
         }
-        write_mcp_result(res, result);
+        write_mcp_result(res, std::move(result));
         return;
     }
 
     std::shared_ptr<HttpSessionState> session;
+    // Idle time counts from the end of a session's last request, so it is
+    // stamped on the way out as well: otherwise a long tool call would make
+    // its session look idle the moment it returned.
+    struct TouchSessionOnExit {
+        const std::shared_ptr<HttpSessionState>& session;
+        ~TouchSessionOnExit() {
+            if (session) session->last_used.store(std::chrono::steady_clock::now());
+        }
+    } touch_session_on_exit{session};
     std::string session_id;
     std::optional<core::workspace::WorkspaceSnapshot> workspace_override;
     bool should_refresh_roots = false;
@@ -1014,7 +1158,7 @@ void handle_mcp_post(const std::string& host,
                     res.set_header("MCP-Session-Id", new_session_id);
                 }
             }
-            write_mcp_result(res, init_result);
+            write_mcp_result(res, std::move(init_result));
             return;
         }
 
@@ -1154,13 +1298,13 @@ void handle_mcp_post(const std::string& host,
             execution_result.status = 500;
             execution_result.body = R"({"error":"Internal server error"})";
         }
-        write_mcp_result(res, execution_result);
+        write_mcp_result(res, std::move(execution_result));
         return;
     }
 
     auto decision = replay_cache().begin(*replay_key);
     if (decision.kind == detail::RequestReplayCache::DecisionKind::replay_completed) {
-        write_mcp_result(res, decision.replay_result);
+        write_mcp_result(res, std::move(decision.replay_result));
         return;
     }
     if (decision.kind == detail::RequestReplayCache::DecisionKind::wait_inflight) {
@@ -1208,6 +1352,9 @@ void handle_mcp_post(const std::string& host,
 
                 auto finish_and_stream =
                     [&](const detail::McpDispatchResult& result, bool cache_result) -> bool {
+                        // This runs after the handler returned; see
+                        // TouchSessionOnExit.
+                        session_ptr->last_used.store(std::chrono::steady_clock::now());
                         const std::string payload = build_sse_message(result.body);
                         const bool wrote = sink.write(payload.data(), payload.size());
                         sink.done();
@@ -1352,7 +1499,7 @@ void handle_mcp_post(const std::string& host,
 
     const bool cache_result = execution_result.status == 200 || execution_result.status == 202;
     replay_cache().finish(*replay_key, decision.inflight, execution_result, cache_result);
-    write_mcp_result(res, execution_result);
+    write_mcp_result(res, std::move(execution_result));
 }
 
 void handle_api_chat(
@@ -1449,6 +1596,8 @@ void run_server(int port,
     init_providers(enable_api_gateway ? &provider_catalog : nullptr);
 
     clear_http_sessions();
+    std::optional<HttpSessionReaperThread> session_reaper;
+    if (enable_mcp_http) session_reaper.emplace();
 
     // Pre-construct the McpDispatcher singleton so tools are registered once,
     // at startup, before any request arrives.  Concurrent HTTP handler threads
