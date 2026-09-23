@@ -1,6 +1,7 @@
 #include "ToolCallResult.hpp"
 
 #include "../utils/JsonWriter.hpp"
+#include "../utils/JsonUtils.hpp"
 
 #include <simdjson.h>
 
@@ -15,6 +16,7 @@ ToolCallResultClassification classify_tool_call_payload(std::string_view payload
     }
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(payload);
     simdjson::dom::element doc;
     if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {

@@ -7,6 +7,7 @@
 #include "../StrictToolPolicy.hpp"
 #include "../../logging/Logger.hpp"
 #include "core/utils/TimeUtils.hpp"
+#include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <cctype>
@@ -177,6 +178,7 @@ parse_openai_sse_chunk(std::string_view json_str) {
     }
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_str);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -320,6 +322,7 @@ ParseResult OpenAIProtocol::parse_event(std::string_view raw_event) {
     // Extract usage from stream_options chunk (choices array will be empty).
     {
         thread_local simdjson::dom::parser usage_parser;
+        const core::utils::json::ParserRetentionGuard usage_parser_guard{usage_parser};
         simdjson::padded_string ps(json_sv);
         simdjson::dom::element doc;
         if (usage_parser.parse(ps).get(doc) == simdjson::SUCCESS) {

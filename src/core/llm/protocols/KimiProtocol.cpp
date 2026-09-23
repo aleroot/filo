@@ -991,6 +991,7 @@ struct KimiParseResult {
 
 [[nodiscard]] KimiParseResult parse_kimi_sse_chunk(std::string_view json_str) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_str);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -1266,6 +1267,7 @@ std::string KimiProtocol::format_error_message(const HttpResponse& response) con
     std::string kimi_message;
     if (!response.body.empty()) {
         thread_local simdjson::dom::parser parser;
+        const core::utils::json::ParserRetentionGuard parser_guard{parser};
         simdjson::padded_string ps(response.body);
         simdjson::dom::element doc;
         if (parser.parse(ps).get(doc) == simdjson::SUCCESS) {

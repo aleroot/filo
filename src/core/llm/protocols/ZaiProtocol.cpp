@@ -495,6 +495,7 @@ subscription_end_cache() {
 
 [[nodiscard]] ParseResult parse_stream_chunk(std::string_view json) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(json);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) return {};
@@ -562,6 +563,7 @@ subscription_end_cache() {
 [[nodiscard]] std::optional<ParseResult> parse_zai_stream_error_frame(
     std::string_view data) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(data);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) {

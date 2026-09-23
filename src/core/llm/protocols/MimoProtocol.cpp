@@ -3,6 +3,7 @@
 #include "../MimoModelTraits.hpp"
 #include "../StrictToolPolicy.hpp"
 #include "core/version/Version.hpp"
+#include "../../utils/JsonUtils.hpp"
 
 #include <simdjson.h>
 
@@ -36,6 +37,7 @@ struct MimoGatewayError {
     if (body.empty()) return parsed;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(body);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) return parsed;

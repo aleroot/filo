@@ -10,6 +10,7 @@
 #include "core/mcp/McpClientSession.hpp"
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "core/utils/JsonUtils.hpp"
 
 #include <cpr/cpr.h>
 #include <simdjson.h>
@@ -146,6 +147,7 @@ select_scopes(const std::vector<std::string>& preferred,
 [[nodiscard]] McpOAuthMeta parse_protected_resource(std::string_view body,
                                                     const std::string& fallback_resource) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(body);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -189,6 +191,7 @@ select_scopes(const std::vector<std::string>& preferred,
 
 void apply_authorization_server_metadata(McpOAuthMeta& meta, std::string_view body) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(body);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -351,6 +354,7 @@ struct RegisteredClient {
     }
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(r.text);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {

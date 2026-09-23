@@ -8,6 +8,7 @@
 #include "core/utils/Base64.hpp"
 #include "core/utils/Crypto.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "core/utils/JsonUtils.hpp"
 
 #include <simdjson.h>
 
@@ -30,6 +31,7 @@ constexpr std::size_t kMinimumSealedBytes =
 [[nodiscard]] std::optional<MimoAuthorizationGrant> parse_grant_json(
     std::string_view json) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(json);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) {

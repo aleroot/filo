@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -86,6 +87,38 @@ namespace json {
 // valid outcome; check the code explicitly when it is not.
 // ---------------------------------------------------------------------------
 inline void ignore_error(simdjson::error_code) noexcept {}
+
+// ---------------------------------------------------------------------------
+// ParserRetentionGuard — bound what a reused simdjson parser keeps resident.
+//
+// A simdjson parser sizes its buffers to the largest document it has parsed
+// (about 13x the input for dom, 5x for ondemand) and never shrinks them. A
+// thread_local parser therefore pins its high-water mark for the life of the
+// thread: one 5 MB tool result left 75 MB resident in a long-running server.
+//
+// Declare the guard immediately after the parser. When the scope ends, a
+// parser that grew past kMaxRetainedCapacity is replaced by a fresh one, which
+// releases its buffers. Documents under the limit keep reusing the warm
+// buffers, so the common path allocates nothing. Only valid when nothing the
+// scope returns still refers into the parser's memory.
+// ---------------------------------------------------------------------------
+template <typename Parser>
+class ParserRetentionGuard {
+public:
+    /// Input bytes whose buffers may stay resident between parses.
+    static constexpr std::size_t kMaxRetainedCapacity = 64 * 1024;
+
+    explicit ParserRetentionGuard(Parser& parser) noexcept : parser_(parser) {}
+    ParserRetentionGuard(const ParserRetentionGuard&) = delete;
+    ParserRetentionGuard& operator=(const ParserRetentionGuard&) = delete;
+
+    ~ParserRetentionGuard() {
+        if (parser_.capacity() > kMaxRetainedCapacity) parser_ = Parser{};
+    }
+
+private:
+    Parser& parser_;
+};
 
 [[nodiscard]] inline bool bool_field(simdjson::dom::object object,
                                      std::string_view key,

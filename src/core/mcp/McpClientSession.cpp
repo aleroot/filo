@@ -116,6 +116,7 @@ void set_cloexec(int fd) noexcept {
 // Extract the "result" field from a JSON-RPC response, or throw on error.
 [[nodiscard]] std::string extract_result(std::string_view json) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -146,6 +147,7 @@ void set_cloexec(int fd) noexcept {
 
 [[nodiscard]] bool is_json_rpc_response_message(std::string_view json) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return false;
@@ -294,6 +296,7 @@ struct ParsedServerCapabilities {
 {
     ParsedServerCapabilities out;
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(initialize_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return out;
@@ -321,6 +324,7 @@ struct ParsedServerCapabilities {
 
 [[nodiscard]] std::optional<std::string> parse_next_cursor(std::string_view json_result) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return std::nullopt;
@@ -366,6 +370,7 @@ struct ParsedServerCapabilities {
 
 [[nodiscard]] std::string flatten_tool_result(std::string_view result_json) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(result_json);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -438,6 +443,7 @@ std::vector<McpToolDef> parse_tools_list(std::string_view json_result) {
     std::vector<McpToolDef> tools;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return tools;
@@ -534,6 +540,7 @@ std::vector<McpResourceDef> parse_resources_list(std::string_view json_result) {
     std::vector<McpResourceDef> resources;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return resources;
@@ -580,6 +587,7 @@ std::vector<McpResourceTemplateDef> parse_resource_templates_list(
     std::vector<McpResourceTemplateDef> templates;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return templates;
@@ -624,6 +632,7 @@ std::vector<McpPromptDef> parse_prompts_list(std::string_view json_result) {
     std::vector<McpPromptDef> prompts;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return prompts;
@@ -888,6 +897,7 @@ void StdioMcpSession::reader_loop() {
 
     auto dispatch_line = [this, &write_response](std::string_view line) {
         thread_local simdjson::dom::parser parser;
+        const core::utils::json::ParserRetentionGuard parser_guard{parser};
         simdjson::padded_string ps(line);
         simdjson::dom::element doc;
         if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return;
@@ -1337,6 +1347,7 @@ void HttpMcpSession::update_server_capabilities(std::string_view initialize_resu
 
 void HttpMcpSession::update_negotiated_protocol_version(std::string_view initialize_result) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(initialize_result);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) return;

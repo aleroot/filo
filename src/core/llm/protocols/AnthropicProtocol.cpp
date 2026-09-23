@@ -169,6 +169,7 @@ namespace {
 
     [[nodiscard]] std::string infer_anthropic_event_type(std::string_view payload) {
         thread_local simdjson::dom::parser parser;
+        const core::utils::json::ParserRetentionGuard parser_guard{parser};
         simdjson::padded_string padded(payload);
         simdjson::dom::element doc;
         if (parser.parse(padded).get(doc) != simdjson::SUCCESS) return {};
@@ -978,6 +979,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     if (event_type == "ping") return result;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string input(json_str);
     simdjson::dom::element doc;
     if (parser.parse(input).get(doc) != simdjson::SUCCESS) return result;

@@ -4,6 +4,7 @@
 #include "../StrictToolPolicy.hpp"
 #include "core/utils/AsciiUtils.hpp"
 #include "core/version/Version.hpp"
+#include "core/utils/JsonUtils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -62,6 +63,7 @@ namespace {
     if (body.empty()) return {};
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(body);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) return {};
@@ -181,6 +183,7 @@ ParseResult MistralProtocol::parse_event(std::string_view raw_event) {
     if (!sse::parse_event_payload(raw_event, parsed) || parsed.is_done) return result;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(parsed.data);
     simdjson::dom::element document;
     if (parser.parse(padded).get(document) != simdjson::SUCCESS) return result;

@@ -1,12 +1,16 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/catch_template_test_macros.hpp>
 
 #include "core/utils/JsonWriter.hpp"
 #include "core/utils/JsonUtils.hpp"
 
 #include <cmath>
+#include <format>
 #include <limits>
 #include <simdjson.h>
+#include <string>
+#include <type_traits>
 
 using namespace core::utils;
 
@@ -40,6 +44,47 @@ TEST_CASE("JsonWriter: boolean() writes true/false", "[json_writer]") {
     JsonWriter w2;
     w2.boolean(false);
     CHECK(w2.view() == "false");
+}
+
+TEMPLATE_TEST_CASE("ParserRetentionGuard keeps small buffers warm and releases large ones",
+                   "[json_utils]",
+                   simdjson::dom::parser,
+                   simdjson::ondemand::parser) {
+    using Guard = core::utils::json::ParserRetentionGuard<TestType>;
+    TestType parser;
+    const auto parse = [&](const std::string& json) {
+        const simdjson::padded_string padded(json);
+        if constexpr (std::is_same_v<TestType, simdjson::dom::parser>) {
+            simdjson::dom::element doc;
+            REQUIRE(parser.parse(padded).get(doc) == simdjson::SUCCESS);
+        } else {
+            simdjson::ondemand::document doc;
+            REQUIRE(parser.iterate(padded).get(doc) == simdjson::SUCCESS);
+        }
+    };
+
+    {
+        const Guard guard{parser};
+        parse(R"({"small":true})");
+    }
+    const auto warm_capacity = parser.capacity();
+    CHECK(warm_capacity > 0);
+    CHECK(warm_capacity <= Guard::kMaxRetainedCapacity);
+
+    {
+        const Guard guard{parser};
+        parse(std::format(R"({{"text":"{}"}})",
+                          std::string(Guard::kMaxRetainedCapacity * 4, 'x')));
+        CHECK(parser.capacity() > Guard::kMaxRetainedCapacity);
+    }
+    CHECK(parser.capacity() == 0);
+
+    // A released parser is still usable.
+    {
+        const Guard guard{parser};
+        parse(R"({"small":true})");
+    }
+    CHECK(parser.capacity() == warm_capacity);
 }
 
 TEST_CASE("JsonUtils: typed field accessors return fallbacks for missing fields",

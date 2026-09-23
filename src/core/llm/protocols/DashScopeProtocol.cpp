@@ -5,6 +5,7 @@
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
 #include "core/utils/TimeUtils.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include <algorithm>
 #include <array>
 #include <simdjson.h>
@@ -189,6 +190,7 @@ struct DashScopeErrorDetails {
     if (body.empty()) return details;
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(body);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
@@ -590,6 +592,7 @@ ParseResult DashScopeTokenPlanProtocol::parse_event(
             error_type = error.code.empty() ? "error" : error.code;
         } else {
             thread_local simdjson::dom::parser parser;
+            const core::utils::json::ParserRetentionGuard parser_guard{parser};
             simdjson::padded_string json(parsed.data);
             simdjson::dom::element doc;
             if (parser.parse(json).get(doc) == simdjson::SUCCESS) {

@@ -1145,6 +1145,7 @@ ParseResult CodexResponsesProtocol::parse_event(std::string_view raw_event) {
         event_type = std::string(parsed.event);
         if (!parsed.is_done) {
             thread_local simdjson::dom::parser parser;
+            const core::utils::json::ParserRetentionGuard parser_guard{parser};
             simdjson::padded_string padded(parsed.data);
             simdjson::dom::element doc;
             if (parser.parse(padded).get(doc) == simdjson::SUCCESS) {
@@ -1300,6 +1301,7 @@ ParseResult OpenAIResponsesProtocol::parse_event(std::string_view raw_event) {
     }
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(payload_sv);
     simdjson::dom::element doc;
     if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {

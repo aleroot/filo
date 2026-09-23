@@ -7,6 +7,7 @@
 #include "core/utils/StringUtils.hpp"
 #include "core/utils/Uuid.hpp"
 #include "../Models.hpp"
+#include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
 #include <algorithm>
 #include <array>
@@ -44,6 +45,7 @@ parse_grok_responses_stream_error(std::string_view raw_event) {
     }
 
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string padded(parsed.data);
     simdjson::dom::element doc;
     if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
@@ -443,6 +445,7 @@ std::string GrokProtocol::format_error_message(const HttpResponse& response) con
     std::string xai_message;
     if (!response.body.empty()) {
         thread_local simdjson::dom::parser parser;
+        const core::utils::json::ParserRetentionGuard parser_guard{parser};
         simdjson::padded_string ps(response.body);
         simdjson::dom::element doc;
         if (parser.parse(ps).get(doc) == simdjson::SUCCESS) {

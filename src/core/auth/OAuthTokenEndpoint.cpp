@@ -1,6 +1,7 @@
 #include "OAuthTokenEndpoint.hpp"
 
 #include "OAuthErrors.hpp"
+#include "../utils/JsonUtils.hpp"
 
 #include <cpr/cpr.h>
 #include <simdjson.h>
@@ -57,6 +58,7 @@ OAuthToken parse_oauth_token_response(std::string_view json,
                                       std::string_view client_id,
                                       std::string_view issuer) {
     thread_local simdjson::dom::parser parser;
+    const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string ps(json);
     simdjson::dom::element doc;
     if (parser.parse(ps).get(doc) != simdjson::SUCCESS) {
