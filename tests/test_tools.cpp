@@ -28,6 +28,7 @@
 #include "core/workspace/FileAccessScope.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
+#include "core/utils/JsonUtils.hpp"
 #include "TestSessionContext.hpp"
 #ifdef FILO_ENABLE_PYTHON
 #include "core/tools/PythonManager.hpp"
@@ -2602,6 +2603,157 @@ TEST_CASE("GrepSearchTool produces identical output on repeated calls", "[tools]
     const std::string first = tool.execute(args);
     for (int i = 0; i < 5; ++i) {
         REQUIRE(tool.execute(args) == first);
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool returns the first 100 matches deterministically past the cap",
+          "[tools][grep]") {
+    const std::string dir = "test_grep_determinism_capped";
+    std::filesystem::create_directories(dir);
+    // Far more matches than the cap, spread over enough files that every
+    // worker thread finds some: which 100 come back must not depend on which
+    // thread happened to run first.
+    for (int i = 0; i < 200; ++i) {
+        std::ofstream file(std::format("{}/f{:03}.txt", dir, i));
+        for (int line = 0; line < 50; ++line) file << "needle\n";
+    }
+
+    GrepSearchTool tool;
+    const auto args = grep_args("needle", dir);
+    const std::string first = tool.execute(args);
+    for (int i = 0; i < 20; ++i) {
+        REQUIRE(tool.execute(args) == first);
+    }
+
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(first).get(doc) == simdjson::SUCCESS);
+    simdjson::dom::array matches;
+    REQUIRE(doc["matches"].get(matches) == simdjson::SUCCESS);
+    REQUIRE(matches.size() == 100);
+    std::size_t index = 0;
+    for (const auto match : matches) {
+        std::string_view path;
+        int64_t line = 0;
+        REQUIRE(match["path"].get(path) == simdjson::SUCCESS);
+        REQUIRE(match["line"].get(line) == simdjson::SUCCESS);
+        CHECK(path.ends_with(index < 50 ? "f000.txt" : "f001.txt"));
+        CHECK(line == static_cast<int64_t>(index % 50) + 1);
+        ++index;
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool regex prefilter never drops a matching line", "[tools][grep]") {
+    // The regex path skips lines without the pattern's leading literal. Every
+    // pattern here has a matching line that lacks some naive literal, so an
+    // over-eager prefilter would lose it.
+    const std::string dir = "test_grep_regex_prefilter";
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream(dir + "/a.txt")
+            << "color\n"        // 1
+            << "colour\n"       // 2
+            << "ac\n"           // 3
+            << "abc\n"          // 4
+            << "bar only\n"     // 5
+            << "Hello World\n"  // 6
+            << "std::string_view\n" // 7
+            << "xyz\n"          // 8
+            << "stdXstring\n"   // 9
+            << "a TODO here\n"  // 10
+            << "a FIXME here\n" // 11
+            << "the parser.\n"  // 12
+            << "parsers\n"      // 13
+            << "fooa\n"         // 14
+            << "barbaz\n"       // 15
+            << "pipe | x\n";    // 16
+    }
+
+    struct Case {
+        std::string pattern;
+        bool ignore_case;
+        std::vector<int64_t> lines;
+    };
+    const std::vector<Case> cases{
+        {"colou?r", false, {1, 2}},           // quantified 'u': literal is "colo"
+        {"ab?c", false, {3, 4}},              // quantified 'b': literal is "a"
+        {"a{0}c", false, {1, 2, 3, 4}},       // zero-count 'a' is just "c": lines 1-2 lack 'a'
+        {"foo|bar", false, {5, 14, 15}},      // one literal per alternative
+        {"^col", false, {1, 2}},              // anchor is not part of the literal
+        {"hello w[a-z]+", true, {6}},         // icase regex, literal "hello w"
+        {"std::[a-z_]+view", false, {7}},
+        {"std.string", false, {9}},           // '.' ends the literal at "std"
+        {"x*yz", false, {8}},                 // leading quantifier: no literal
+        {"nomatch[0-9]", false, {}},
+        {"TODO|FIXME", false, {10, 11}},      // one literal per alternative
+        {"todo|fixme", true, {10, 11}},
+        {"\\bparser\\b", false, {12}},        // zero-width \b is skipped
+        {"foo(a|b)", false, {14}},            // nested alternation keeps "foo"
+        {"(foo|bar)baz", false, {15}},        // leading group: no prefilter
+        {"TODO|", false, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+        {"[|] x", false, {16}},               // '|' inside a class is literal
+    };
+
+    GrepSearchTool tool;
+    for (const auto& c : cases) {
+        INFO("pattern " << c.pattern);
+        const std::string args = std::format(
+            R"({{"pattern":"{}","path":"{}","ignore_case":{}}})",
+            core::utils::escape_json_string(c.pattern), dir, c.ignore_case ? "true" : "false");
+        const auto res = tool.execute(args);
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(res).get(doc) == simdjson::SUCCESS);
+        simdjson::dom::array matches;
+        REQUIRE(doc["matches"].get(matches) == simdjson::SUCCESS);
+        std::vector<int64_t> lines;
+        for (const auto match : matches) {
+            int64_t line = 0;
+            REQUIRE(match["line"].get(line) == simdjson::SUCCESS);
+            lines.push_back(line);
+        }
+        CHECK(lines == c.lines);
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("GrepSearchTool clips overlong lines around the match", "[tools][grep]") {
+    const std::string dir = "test_grep_long_line";
+    std::filesystem::create_directories(dir);
+    // A minified-style file: one multi-megabyte line with the match deep inside.
+    const std::string before(3'000'000, 'a');
+    const std::string after(3'000'000, 'b');
+    { std::ofstream(dir + "/min.js") << before << "NEEDLE_HERE" << after << "\n"; }
+    { std::ofstream(dir + "/short.txt") << "short NEEDLE_HERE line\n"; }
+
+    GrepSearchTool tool;
+    for (const auto* pattern : {"NEEDLE_HERE", "NEEDLE_[A-Z]+"}) {
+        const auto res = tool.execute(grep_args(pattern, dir));
+        CHECK(res.size() < 4096);
+
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        REQUIRE(parser.parse(res).get(doc) == simdjson::SUCCESS);
+        simdjson::dom::array matches;
+        REQUIRE(doc["matches"].get(matches) == simdjson::SUCCESS);
+        REQUIRE(matches.size() == 2);
+
+        std::string_view clipped;
+        REQUIRE(matches.at(0)["text"].get(clipped) == simdjson::SUCCESS);
+        CHECK(clipped.find("NEEDLE_HERE") != std::string_view::npos);
+        CHECK(clipped.starts_with("\u2026a"));
+        CHECK(clipped.ends_with("b\u2026"));
+        CHECK(clipped.size() <= 1024 + 2 * std::string_view("\u2026").size());
+
+        // Ordinary lines are returned whole.
+        std::string_view whole;
+        REQUIRE(matches.at(1)["text"].get(whole) == simdjson::SUCCESS);
+        CHECK(whole == "short NEEDLE_HERE line");
     }
 
     std::filesystem::remove_all(dir);

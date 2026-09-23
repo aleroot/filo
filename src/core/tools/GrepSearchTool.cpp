@@ -11,10 +11,14 @@
 #include <regex>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <optional>
 #include <format>
 #include <system_error>
@@ -33,10 +37,42 @@ using detail::should_skip_dir;
 namespace {
 
 struct MatchResult {
-    std::string path;
+    std::size_t file_index{};
     int64_t     line{};
     std::string text;
 };
+
+/// Longest text returned for one matching line. Minified and generated files
+/// put megabytes on a single line; returned whole, one match cost megabytes of
+/// memory and of response. Longer lines are clipped to a window around the
+/// match, so ordinary source lines are never affected.
+constexpr std::size_t kMaxMatchTextBytes = 1024;
+constexpr std::string_view kClipMarker = "\u2026";
+
+[[nodiscard]] bool is_utf8_continuation(char c) noexcept {
+    return (static_cast<unsigned char>(c) & 0xC0u) == 0x80u;
+}
+
+[[nodiscard]] std::string match_text(std::string_view line, std::size_t match_offset) {
+    if (line.size() <= kMaxMatchTextBytes) return std::string(line);
+
+    // Keep a little context before the match and the rest after it.
+    std::size_t begin = match_offset > kMaxMatchTextBytes / 4
+        ? match_offset - kMaxMatchTextBytes / 4
+        : 0;
+    begin = std::min(begin, line.size() - kMaxMatchTextBytes);
+    std::size_t end = begin + kMaxMatchTextBytes;
+    // Snap inwards to code point boundaries so the clip never splits one.
+    while (begin < end && is_utf8_continuation(line[begin])) ++begin;
+    while (end > begin && end < line.size() && is_utf8_continuation(line[end])) --end;
+
+    std::string out;
+    out.reserve(end - begin + 2 * kClipMarker.size());
+    if (begin > 0) out += kClipMarker;
+    out.append(line.substr(begin, end - begin));
+    if (end < line.size()) out += kClipMarker;
+    return out;
+}
 
 struct SearchScope {
     std::filesystem::path traversal_root;
@@ -167,7 +203,187 @@ struct SearchScope {
 }
 
 // Searches one file for matches of either a literal string or a compiled regex.
-// Results are appended to 'out'. Returns early once total_found >= max_results.
+/// The first max_results matches in sorted-file order are the answer, so a
+/// file only matters while the files before it hold fewer than that. Match
+/// counts per file live in a Fenwick tree of atomics: counts only grow, so any
+/// prefix sum read is a lower bound on what those files will finally hold.
+/// Once it reaches max_results for the files before j, file j is skipped or
+/// abandoned mid-search. A file that can still contribute is always searched
+/// in full, which keeps the result identical however the threads were
+/// scheduled, while stopping as early as the scheduling allows.
+class MatchCounts {
+public:
+    MatchCounts(std::size_t file_count, std::size_t max_results)
+        : tree_(file_count + 1), max_results_(max_results) {}
+
+    void record(std::size_t file_index) noexcept {
+        for (std::size_t i = file_index + 1; i < tree_.size(); i += i & (~i + 1)) {
+            tree_[i].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    /// False once the files before @p file_index already hold max_results.
+    [[nodiscard]] bool can_contribute(std::size_t file_index) const noexcept {
+        std::size_t found = 0;
+        for (std::size_t i = file_index; i > 0; i -= i & (~i + 1)) {
+            found += tree_[i].load(std::memory_order_relaxed);
+        }
+        return found < max_results_;
+    }
+
+private:
+    std::vector<std::atomic<std::uint32_t>> tree_;
+    const std::size_t max_results_;
+};
+
+/// Literals of which every match contains at least one, found with a
+/// vectorised substring search before any per-line work. Literal mode holds
+/// the pattern itself; a regex holds one literal per top-level alternative.
+class NeedleSet {
+public:
+    static constexpr std::size_t kMaxNeedles = 8;
+
+    NeedleSet() = default;
+    NeedleSet(std::vector<std::string_view> texts, bool ignore_case) : texts_(std::move(texts)) {
+        if (ignore_case) {
+            caseless_.reserve(texts_.size());
+            for (const auto text : texts_) caseless_.emplace_back(text);
+        }
+    }
+
+    [[nodiscard]] bool empty() const noexcept { return texts_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return texts_.size(); }
+    [[nodiscard]] std::string_view text(std::size_t i) const noexcept { return texts_[i]; }
+
+    [[nodiscard]] std::size_t find(std::size_t i, std::string_view data, std::size_t from) const noexcept {
+        return caseless_.empty() ? data.find(texts_[i], from) : caseless_[i].find(data, from);
+    }
+
+private:
+    std::vector<std::string_view> texts_;
+    std::vector<core::utils::str::CaseInsensitiveAsciiSearcher> caseless_;
+};
+
+/// Earliest occurrence of any needle in one file. Each needle's next position
+/// is cached, so the buffer is scanned once per needle rather than once per
+/// needle per candidate line.
+class NeedleCursor {
+public:
+    NeedleCursor(const NeedleSet& needles, std::string_view data) : needles_(needles), data_(data) {
+        for (std::size_t i = 0; i < needles_.size(); ++i) next_[i] = needles_.find(i, data_, 0);
+    }
+
+    /// Position of the earliest needle at or after @p from, and which one.
+    [[nodiscard]] std::pair<std::size_t, std::size_t> find(std::size_t from) noexcept {
+        std::size_t best = std::string_view::npos;
+        std::size_t which = 0;
+        for (std::size_t i = 0; i < needles_.size(); ++i) {
+            if (next_[i] != std::string_view::npos && next_[i] < from) {
+                next_[i] = needles_.find(i, data_, from);
+            }
+            if (next_[i] < best) {
+                best = next_[i];
+                which = i;
+            }
+        }
+        return {best, which};
+    }
+
+private:
+    const NeedleSet& needles_;
+    std::string_view data_;
+    std::array<std::size_t, NeedleSet::kMaxNeedles> next_{};
+};
+
+[[nodiscard]] bool is_plain_regex_char(char c) noexcept {
+    const auto uc = static_cast<unsigned char>(c);
+    if (uc >= 0x80) return false;
+    if (std::isalnum(uc) != 0) return true;
+    return std::string_view(" _:,-=<>!@#%&~'\";/`").find(c) != std::string_view::npos;
+}
+
+/// The literal every match of one alternative must contain: its leading run of
+/// plain characters after any zero-width `^`, `\b` or `\B`. A quantifier on
+/// the run's last character drops that character. Empty when none is proven.
+[[nodiscard]] std::string_view required_branch_literal(std::string_view branch) {
+    std::size_t begin = 0;
+    for (;;) {
+        if (branch.substr(begin).starts_with('^')) {
+            begin += 1;
+        } else if (branch.substr(begin).starts_with("\\b") || branch.substr(begin).starts_with("\\B")) {
+            begin += 2;
+        } else {
+            break;
+        }
+    }
+    std::size_t end = begin;
+    while (end < branch.size() && is_plain_regex_char(branch[end])) ++end;
+    if (end < branch.size() && std::string_view("*+?{").find(branch[end]) != std::string_view::npos) {
+        if (end == begin) return {};
+        --end;
+    }
+    return branch.substr(begin, end - begin);
+}
+
+/// Splits @p pattern at alternations outside groups, classes and escapes, and
+/// returns the literal each alternative requires. Empty when any alternative
+/// has none or the pattern does not parse cleanly, so the result is
+/// conservative: a line containing none of the literals cannot match. This
+/// lets std::regex, which allocates on every call, run only on candidates.
+[[nodiscard]] std::vector<std::string_view> required_regex_literals(std::string_view pattern) {
+    std::vector<std::string_view> literals;
+    int depth = 0;
+    bool in_class = false;
+    std::size_t branch_start = 0;
+    const auto close_branch = [&](std::size_t branch_end) {
+        const auto literal = required_branch_literal(
+            pattern.substr(branch_start, branch_end - branch_start));
+        if (literal.empty() || literals.size() == NeedleSet::kMaxNeedles) return false;
+        literals.push_back(literal);
+        branch_start = branch_end + 1;
+        return true;
+    };
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        const char c = pattern[i];
+        if (c == '\\') {
+            ++i;
+        } else if (in_class) {
+            if (c == ']') in_class = false;
+        } else if (c == '[') {
+            // Whether a leading ']' closes the class or belongs to it is
+            // exactly where a misreading could hide an alternation.
+            if (pattern.substr(i + 1).starts_with(']') || pattern.substr(i + 1).starts_with("^]")) {
+                return {};
+            }
+            in_class = true;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            if (--depth < 0) return {};
+        } else if (c == '|' && depth == 0) {
+            if (!close_branch(i)) return {};
+        }
+    }
+    if (in_class || depth != 0 || !close_branch(pattern.size())) return {};
+    return literals;
+}
+
+/// Where @p re matches in @p line, or nullopt. The exact position is only
+/// computed for overlong lines, which are clipped around it.
+[[nodiscard]] std::optional<std::size_t> regex_match_offset(std::string_view line,
+                                                            const std::regex& re) {
+    // regex_search on const regex is thread-safe per the C++ standard.
+    if (!std::regex_search(line.cbegin(), line.cend(), re)) return std::nullopt;
+    if (line.size() <= kMaxMatchTextBytes) return 0;
+    std::match_results<std::string_view::const_iterator> found;
+    if (std::regex_search(line.cbegin(), line.cend(), found, re)) {
+        return static_cast<std::size_t>(found.position(0));
+    }
+    return 0;
+}
+
+// Results are appended to 'out'. A file stops as soon as it and the files
+// before it are known to hold enough matches; see MatchCounts.
 //
 // Uses mmap for file reading:
 //   - Avoids userspace buffering overhead of ifstream / getline.
@@ -175,12 +391,11 @@ struct SearchScope {
 //   - MADV_SEQUENTIAL hints the kernel to prefetch pages ahead of the cursor.
 void search_file(
     const std::filesystem::path& fpath,
+    std::size_t                  file_index,
     bool                         literal_mode,
-    std::string_view             literal_str,
-    const core::utils::str::CaseInsensitiveAsciiSearcher* caseless_literal,
+    const NeedleSet&             needles,
     const std::regex&            re,
-    size_t                       max_results,
-    std::atomic<size_t>&         total_found,
+    MatchCounts&                 counts,
     std::vector<MatchResult>&    out
 ) {
     const int fd = ::open(fpath.c_str(), O_RDONLY | O_CLOEXEC);
@@ -207,32 +422,32 @@ void search_file(
         return;
     }
 
-    const char* p     = buf;
-    const char* end   = buf + sz;
-    int64_t     lineno = 0;
-    std::string path_str = fpath.string();
+    // True while this file's matches can still be among the results. Counts
+    // include this file's own, so this also caps a single file.
+    const auto wanted = [&counts, file_index] { return counts.can_contribute(file_index + 1); };
+    const auto record = [&](int64_t lineno, std::string_view line, std::size_t offset) {
+        out.push_back({file_index, lineno, match_text(line, offset)});
+        counts.record(file_index);
+    };
 
-    // Search literal needles across the mapped buffer instead of restarting a
-    // substring search for every line.  Matches are normally sparse, so this
-    // avoids both newline discovery and matcher setup for every non-matching
-    // line.  A literal containing a newline could never match the old
-    // line-oriented implementation, either.
-    if (literal_mode && !literal_str.empty()) {
-        if (literal_str.find('\n') != std::string_view::npos) {
+    // Search the needles across the mapped buffer instead of restarting a
+    // search for every line. Matches are normally sparse, so this avoids both
+    // newline discovery and matcher setup for every non-matching line. A
+    // literal containing a newline could never match a line, either.
+    if (!needles.empty()) {
+        if (literal_mode && needles.text(0).find('\n') != std::string_view::npos) {
             ::munmap(raw, sz);
             return;
         }
 
         const std::string_view data(buf, sz);
+        NeedleCursor cursor(needles, data);
         size_t search_from = 0;
         size_t line_start = 0;
-        lineno = 1;
+        int64_t lineno = 1;
 
-        while (search_from < sz
-               && total_found.load(std::memory_order_relaxed) < max_results) {
-            const size_t match = caseless_literal != nullptr
-                ? caseless_literal->find(data, search_from)
-                : data.find(literal_str, search_from);
+        while (search_from < sz && wanted()) {
+            const auto [match, which] = cursor.find(search_from);
             if (match == std::string_view::npos) break;
 
             while (line_start < match) {
@@ -247,18 +462,23 @@ void search_file(
                 ::memchr(buf + match, '\n', sz - match));
             size_t line_end = nl == nullptr ? sz : static_cast<size_t>(nl - buf);
 
-            // A literal containing CR can still begin before the CR in a CRLF
+            // A needle containing CR can still begin before the CR in a CRLF
             // line.  Match against the same CR-stripped view as the general
             // line path below.
             size_t text_end = line_end;
             if (text_end > line_start && buf[text_end - 1] == '\r') --text_end;
-            if (match + literal_str.size() <= text_end) {
-                out.push_back({
-                    path_str,
-                    lineno,
-                    std::string(buf + line_start, text_end - line_start),
-                });
-                total_found.fetch_add(1, std::memory_order_relaxed);
+            const std::string_view line(buf + line_start, text_end - line_start);
+
+            std::optional<std::size_t> offset;
+            if (literal_mode) {
+                if (match + needles.text(which).size() <= text_end) offset = match - line_start;
+            } else {
+                offset = regex_match_offset(line, re);
+            }
+            if (offset.has_value()) record(lineno, line, *offset);
+
+            // A regex has judged the whole line; a literal only this occurrence.
+            if (offset.has_value() || !literal_mode) {
                 if (line_end == sz) break;
                 search_from = line_end + 1;
                 line_start = search_from;
@@ -272,7 +492,12 @@ void search_file(
         return;
     }
 
-    while (p < end && total_found.load(std::memory_order_relaxed) < max_results) {
+    const char* p     = buf;
+    const char* end   = buf + sz;
+    int64_t     lineno = 0;
+    while (p < end) {
+        // Checked every 64 lines: the prefix sum costs a few atomic loads.
+        if ((lineno & 63) == 0 && !wanted()) break;
         const char* nl       = static_cast<const char*>(::memchr(p, '\n', static_cast<size_t>(end - p)));
         const char* line_end = nl ? nl : end;
         ++lineno;
@@ -281,18 +506,16 @@ void search_file(
         // Strip trailing CR for CRLF line endings.
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
 
-        bool matched;
+        std::optional<std::size_t> offset;
         if (literal_mode) {
-            // string_view::find on modern libc gets SIMD-optimised (SSE4.2 / AVX2).
-            matched = (line.find(literal_str) != std::string_view::npos);
+            // Only an empty literal reaches this loop; it matches every line.
+            offset = 0;
         } else {
-            // regex_search on const regex is thread-safe per the C++ standard.
-            matched = std::regex_search(line.cbegin(), line.cend(), re);
+            offset = regex_match_offset(line, re);
         }
-
-        if (matched) {
-            out.push_back({path_str, lineno, std::string(line)});
-            total_found.fetch_add(1, std::memory_order_relaxed);
+        if (offset.has_value()) {
+            record(lineno, line, *offset);
+            if (!wanted()) break;
         }
 
         p = nl ? nl + 1 : end;
@@ -404,8 +627,14 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     const bool literal_mode = is_literal_pattern(pattern)
         && (!ignore_case || core::utils::ascii::is_ascii(pattern));
     const std::string literal_str(pattern);
-    std::optional<core::utils::str::CaseInsensitiveAsciiSearcher> caseless_literal;
-    if (literal_mode && ignore_case) caseless_literal.emplace(literal_str);
+    // Literal mode searches for the pattern itself; a regex for the literals
+    // one of which each of its matches must contain, when they can be proven.
+    const NeedleSet needles(
+        literal_mode
+            ? (literal_str.empty() ? std::vector<std::string_view>{}
+                                   : std::vector<std::string_view>{literal_str})
+            : required_regex_literals(literal_str),
+        ignore_case);
 
     std::regex re;
     if (!literal_mode) {
@@ -460,17 +689,22 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
         }
     }
 
-    // Sort once so output order is deterministic regardless of thread scheduling.
-    std::sort(files.begin(), files.end());
+    // Sort once so output order is deterministic regardless of thread
+    // scheduling. Plain string order: it is the order results are reported
+    // in, and it avoids re-parsing path components on every comparison.
+    std::sort(files.begin(), files.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.native() < rhs.native();
+    });
 
     // ── Phase 2: parallel search ─────────────────────────────────────────────
     // Each thread grabs the next unprocessed file via an atomic index (work-stealing).
     // Per-thread result vectors avoid any mutex on the hot path.
     constexpr size_t kMaxResults = 100;
-    std::atomic<size_t> total_found{0};
+    MatchCounts counts(files.size(), kMaxResults);
     std::atomic<size_t> next_idx{0};
 
-    const size_t N = std::clamp<size_t>(std::thread::hardware_concurrency(), 1u, 16u);
+    const size_t N = std::clamp<size_t>(
+        std::min<size_t>(std::thread::hardware_concurrency(), files.size()), 1u, 16u);
     std::vector<std::vector<MatchResult>> per_thread(N);
 
     {
@@ -481,11 +715,10 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
                 auto& local = per_thread[tid];
                 for (;;) {
                     const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
-                    if (idx >= files.size()) break;
-                    if (total_found.load(std::memory_order_relaxed) >= kMaxResults) break;
-                    search_file(files[idx], literal_mode, literal_str,
-                                caseless_literal ? &*caseless_literal : nullptr, re,
-                                kMaxResults, total_found, local);
+                    // Claims and counts only grow, so once a file cannot
+                    // contribute no later claim can either.
+                    if (idx >= files.size() || !counts.can_contribute(idx)) break;
+                    search_file(files[idx], idx, literal_mode, needles, re, counts, local);
                 }
             });
         }
@@ -504,7 +737,7 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
     }
 
     std::sort(all.begin(), all.end(), [](const MatchResult* a, const MatchResult* b) {
-        if (a->path != b->path) return a->path < b->path;
+        if (a->file_index != b->file_index) return a->file_index < b->file_index;
         return a->line < b->line;
     });
     if (all.size() > kMaxResults) all.resize(kMaxResults);
@@ -520,7 +753,7 @@ std::string GrepSearchTool::execute(const std::string& json_args, const core::co
                 if (!first) w.comma();
                 first = false;
                 auto _item = w.object();
-                w.kv_str("path", r->path).comma()
+                w.kv_str("path", files[r->file_index].native()).comma()
                  .kv_num("line", r->line).comma()
                  .kv_str("text", r->text);
             }
