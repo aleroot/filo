@@ -620,6 +620,77 @@ TEST_CASE("SessionStore list returns sessions sorted most-recent first", "[sessi
     CHECK(infos[2].session_id == "aaaaaaaa");
 }
 
+TEST_CASE("SessionStore list reads legacy layouts without decoding conversations",
+          "[session][store][catalog]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_legacy_list"};
+    core::session::SessionStore store{tmp.path};
+
+    // Pre-reordering layout: summaries before messages, stats as the last
+    // member, and a synthetic user turn before the real first prompt.
+    std::string huge_output(200000, 'x');
+    std::ofstream(tmp.path / "session-20260301-100000-1e9ac7aa.json")
+        << R"({"version":4,"session_id":"1e9ac7aa","name":"legacy",)"
+        << R"("created_at":"2026-03-01T10:00:00Z","last_active_at":"2026-03-01T11:00:00Z",)"
+        << R"("working_dir":"/tmp/p","provider":"grok","model":"grok-4","mode":"BUILD",)"
+        << R"("context_summary":"mentions \"messages\":[ and {\"stats\":{}}","handoff_summary":"",)"
+        << R"("messages":[{"role":"user","content":"synthetic","synthetic":true},)"
+        << R"({"role":"user","content":"  real   first\nprompt "},)"
+        << R"({"role":"tool","content":")" << huge_output << R"("}],)"
+        << R"("todos":[{"id":"t1","text":"has } and { braces"}],)"
+        << R"("stats":{"prompt_tokens":1,"completion_tokens":2,"cost_usd":0.000000,)"
+        << R"("turn_count":7,"tool_calls_total":0,"tool_calls_success":0}})" << "\n";
+
+    const auto infos = store.list();
+    REQUIRE(infos.size() == 1);
+    CHECK(infos[0].session_id == "1e9ac7aa");
+    CHECK(infos[0].name == "legacy");
+    CHECK(infos[0].working_dir == "/tmp/p");
+    CHECK(infos[0].preview == "real first prompt");
+    CHECK(infos[0].turn_count == 7);
+}
+
+TEST_CASE("SessionStore list serves unchanged sessions from a stat-validated cache",
+          "[session][store][catalog]") {
+    TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_catalog"};
+    core::session::SessionStore store{tmp.path};
+
+    auto data = make_test_session("ca7a1060");
+    data.name = "original";
+    REQUIRE(store.save(data));
+    const auto path = store.compute_path(data);
+    // Files modified within the racy window are never cached.
+    const auto settled = std::filesystem::file_time_type::clock::now() - std::chrono::minutes(5);
+    std::filesystem::last_write_time(path, settled);
+
+    REQUIRE(store.list().front().name == "original");
+    REQUIRE(std::filesystem::exists(tmp.path / ".catalog-cache"));
+
+    // Same size and mtime: the cached row is trusted without reading the file.
+    data.name = "renamed!";
+    REQUIRE(store.save(data));
+    std::filesystem::last_write_time(path, settled);
+    CHECK(store.list().front().name == "original");
+
+    // Any size or mtime change invalidates the row.
+    data.name = "renamed and longer";
+    REQUIRE(store.save(data));
+    std::filesystem::last_write_time(path, settled);
+    CHECK(store.list().front().name == "renamed and longer");
+
+    data.name = "renamed and LONGER";  // same size, different mtime
+    REQUIRE(store.save(data));
+    std::filesystem::last_write_time(path, settled + std::chrono::seconds(1));
+    CHECK(store.list().front().name == "renamed and LONGER");
+
+    REQUIRE(store.remove("ca7a1060"));
+    CHECK(store.list().empty());
+
+    // A damaged cache is ignored and rebuilt.
+    std::ofstream(tmp.path / ".catalog-cache", std::ios::trunc) << "garbage";
+    REQUIRE(store.save(make_test_session("0dd0dd00")));
+    CHECK(store.list().size() == 1);
+}
+
 TEST_CASE("SessionStore load_by_index resolves 1-based index", "[session][store]") {
     TempDir tmp{std::filesystem::temp_directory_path() / "filo_test_session_idx"};
     core::session::SessionStore store{tmp.path};

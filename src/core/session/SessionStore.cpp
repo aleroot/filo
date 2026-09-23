@@ -7,6 +7,8 @@
 #include <simdjson.h>
 #include <algorithm>
 #include <charconv>
+#include <cstdint>
+#include <cstring>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -18,155 +20,24 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 
 namespace core::session {
 
 namespace {
 
-// SessionStore::to_json emits all catalogue fields before `messages`. Read
-// only through that top-level key when selecting a session to resume. This is
-// deliberately a small JSON lexer rather than a substring search: summaries
-// and goal snapshots are strings that may themselves contain the word
-// "messages" or JSON-looking text.
-[[nodiscard]] bool read_session_header_prefix(
-    std::istream& input,
-    std::string& header) {
-    enum class KeySuffix { None, Colon, Array };
-
-    std::string prefix;
-    bool in_string = false;
-    bool escaped = false;
-    std::size_t object_depth = 0;
-    std::size_t array_depth = 0;
-    std::size_t string_start = std::string::npos;
-    std::size_t last_top_level_comma = std::string::npos;
-    KeySuffix key_suffix = KeySuffix::None;
-
-    char ch = '\0';
-    while (input.get(ch)) {
-        const std::size_t position = prefix.size();
-        prefix.push_back(ch);
-
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (ch == '\\') {
-                escaped = true;
-            } else if (ch == '"') {
-                in_string = false;
-                if (object_depth == 1 && array_depth == 0
-                    && string_start != std::string::npos
-                    && std::string_view(prefix).substr(
-                           string_start, position - string_start) == "messages") {
-                    key_suffix = KeySuffix::Colon;
-                }
-            }
-            continue;
-        }
-
-        if (key_suffix == KeySuffix::Colon) {
-            if (core::utils::json::is_whitespace(ch)) continue;
-            if (ch == ':') {
-                key_suffix = KeySuffix::Array;
-                continue;
-            }
-            key_suffix = KeySuffix::None;
-        } else if (key_suffix == KeySuffix::Array) {
-            if (core::utils::json::is_whitespace(ch)) continue;
-            if (ch == '[' && last_top_level_comma != std::string::npos) {
-                prefix.resize(last_top_level_comma);
-                prefix.push_back('}');
-                header = std::move(prefix);
-                return true;
-            }
-            key_suffix = KeySuffix::None;
-        }
-
-        if (ch == '"') {
-            string_start = object_depth == 1 && array_depth == 0
-                ? prefix.size()
-                : std::string::npos;
-            in_string = true;
-            escaped = false;
-            continue;
-        }
-
-        if (ch == ',' && object_depth == 1 && array_depth == 0) {
-            last_top_level_comma = position;
-        } else if (ch == '{') {
-            ++object_depth;
-        } else if (ch == '}') {
-            if (object_depth > 0) --object_depth;
-        } else if (ch == '[') {
-            ++array_depth;
-        } else if (ch == ']') {
-            if (array_depth > 0) --array_depth;
-        }
-    }
-
-    // A legacy or externally generated session may order fields differently.
-    // The caller falls back to the full decoder for that uncommon case.
-    header = std::move(prefix);
-    return false;
-}
-
-[[nodiscard]] std::optional<SessionInfo> parse_session_header(
-    std::string_view json,
-    const std::filesystem::path& path) {
-    const auto parse = [&](std::string_view input) -> std::optional<SessionInfo> {
-        simdjson::padded_string padded(input);
-        simdjson::ondemand::parser parser;
-        simdjson::ondemand::document document;
-        if (parser.iterate(padded).get(document) != simdjson::SUCCESS) {
-            return std::nullopt;
-        }
-
-        simdjson::ondemand::object fields;
-        if (document.get_object().get(fields) != simdjson::SUCCESS) {
-            return std::nullopt;
-        }
-
-        SessionInfo info;
-        info.path = path;
-        int64_t version = 1;
-        for (auto field : fields) {
-            std::string_view key;
-            if (field.unescaped_key().get(key) != simdjson::SUCCESS) {
-                return std::nullopt;
-            }
-
-            if (key == "version") {
-                int64_t parsed_version = 1;
-                if (field.value().get_int64().get(parsed_version) == simdjson::SUCCESS) {
-                    version = parsed_version;
-                }
-                continue;
-            }
-
-            std::string* target = nullptr;
-            if (key == "session_id") target = &info.session_id;
-            else if (key == "name") target = &info.name;
-            else if (key == "created_at") target = &info.created_at;
-            else if (key == "last_active_at") target = &info.last_active_at;
-            else if (key == "working_dir") target = &info.working_dir;
-            else if (key == "provider") target = &info.provider;
-            else if (key == "model") target = &info.model;
-            else if (key == "mode") target = &info.mode;
-            if (target == nullptr) continue;
-
-            std::string_view value;
-            if (field.value().get_string().get(value) == simdjson::SUCCESS) {
-                *target = value;
-            }
-        }
-
-        if (version > SessionData::kVersion) return std::nullopt;
-        return info;
-    };
-
-    if (auto info = parse(json); info.has_value()) return info;
-    if (simdjson::validate_utf8(json)) return std::nullopt;
-    return parse(core::utils::repair_utf8(json));
+/// One bulk read. istreambuf_iterator costs several calls per byte, which
+/// dominates loading a multi-megabyte session in unoptimized builds.
+[[nodiscard]] std::optional<std::string> read_whole_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) return std::nullopt;
+    const std::streamoff size = in.tellg();
+    if (size < 0) return std::nullopt;
+    std::string content(static_cast<std::size_t>(size), '\0');
+    in.seekg(0);
+    in.read(content.data(), size);
+    content.resize(static_cast<std::size_t>(std::max<std::streamsize>(in.gcount(), 0)));
+    return content;
 }
 
 [[nodiscard]] bool more_recent(const SessionInfo& lhs, const SessionInfo& rhs) {
@@ -489,6 +360,101 @@ void append_goal_graph_json(std::string& out,
     out += "\"}";
 }
 
+[[nodiscard]] core::llm::Message decode_message(simdjson::dom::element msg_el) {
+    core::llm::Message msg;
+    std::string_view sv;
+    if (msg_el["role"].get(sv)         == simdjson::SUCCESS) msg.role         = std::string(sv);
+    if (msg_el["content"].get(sv)      == simdjson::SUCCESS) msg.content      = std::string(sv);
+    if (msg_el["name"].get(sv)         == simdjson::SUCCESS) msg.name         = std::string(sv);
+    if (msg_el["tool_call_id"].get(sv) == simdjson::SUCCESS) msg.tool_call_id = std::string(sv);
+    bool synthetic = false;
+    if (msg_el["synthetic"].get(synthetic) == simdjson::SUCCESS) {
+        msg.synthetic = synthetic;
+    }
+    if (msg_el["input_text"].get(sv) == simdjson::SUCCESS) {
+        msg.input_text = std::string(sv);
+    }
+    if (msg_el["reasoning_content"].get(sv) == simdjson::SUCCESS) {
+        msg.reasoning_content = std::string(sv);
+    }
+    if (msg_el["reasoning_protocol"].get(sv) == simdjson::SUCCESS) {
+        msg.reasoning_protocol = std::string(sv);
+    }
+    if (msg_el["reasoning_elapsed"].get(sv) == simdjson::SUCCESS) {
+        msg.reasoning_elapsed = std::string(sv);
+    }
+    simdjson::dom::array continuation_arr;
+    if (msg_el["continuation_items"].get(continuation_arr)
+        == simdjson::SUCCESS) {
+        for (simdjson::dom::element item_el : continuation_arr) {
+            core::llm::ContinuationItem item;
+            if (item_el["provider"].get(sv) == simdjson::SUCCESS) {
+                item.provider = std::string(sv);
+            }
+            if (item_el["kind"].get(sv) == simdjson::SUCCESS) {
+                item.kind = std::string(sv);
+            }
+            if (item_el["payload"].get(sv) == simdjson::SUCCESS) {
+                item.payload = std::string(sv);
+            }
+            if (!item.payload.empty()) {
+                msg.continuation_items.push_back(std::move(item));
+            }
+        }
+    }
+
+    simdjson::dom::array tc_arr;
+    if (msg_el["tool_calls"].get(tc_arr) == simdjson::SUCCESS) {
+        for (simdjson::dom::element tc_el : tc_arr) {
+            core::llm::ToolCall tc;
+            if (tc_el["id"].get(sv)   == simdjson::SUCCESS) tc.id   = std::string(sv);
+            if (tc_el["type"].get(sv) == simdjson::SUCCESS) tc.type = std::string(sv);
+            simdjson::dom::object fn_obj;
+            if (tc_el["function"].get(fn_obj) == simdjson::SUCCESS) {
+                if (fn_obj["name"].get(sv)      == simdjson::SUCCESS)
+                    tc.function.name      = std::string(sv);
+                if (fn_obj["arguments"].get(sv) == simdjson::SUCCESS)
+                    tc.function.arguments = std::string(sv);
+            }
+            msg.tool_calls.push_back(std::move(tc));
+        }
+    }
+
+    simdjson::dom::array parts_arr;
+    if (msg_el["content_parts"].get(parts_arr) == simdjson::SUCCESS) {
+        for (simdjson::dom::element part_el : parts_arr) {
+            core::llm::ContentPart part;
+            if (part_el["type"].get(sv) == simdjson::SUCCESS) {
+                if (sv == "image") {
+                    part.type = core::llm::ContentPartType::Image;
+                } else if (sv == "video") {
+                    part.type = core::llm::ContentPartType::Video;
+                }
+            }
+            if (part_el["text"].get(sv) == simdjson::SUCCESS) {
+                part.text = std::string(sv);
+            }
+            if (part_el["path"].get(sv) == simdjson::SUCCESS) {
+                part.path = std::string(sv);
+            }
+            if (part_el["url"].get(sv) == simdjson::SUCCESS) {
+                part.url = std::string(sv);
+            }
+            if (part_el["media_id"].get(sv) == simdjson::SUCCESS) {
+                part.media_id = std::string(sv);
+            }
+            if (part_el["mime_type"].get(sv) == simdjson::SUCCESS) {
+                part.mime_type = std::string(sv);
+            }
+            if (part_el["detail"].get(sv) == simdjson::SUCCESS) {
+                part.detail = std::string(sv);
+            }
+            msg.content_parts.push_back(std::move(part));
+        }
+    }
+    return msg;
+}
+
 } // namespace
 
 std::string SessionStore::to_json(const SessionData& data) {
@@ -655,98 +621,7 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
         simdjson::dom::array messages_arr;
         if (doc["messages"].get(messages_arr) == simdjson::SUCCESS) {
             for (simdjson::dom::element msg_el : messages_arr) {
-                core::llm::Message msg;
-                std::string_view sv;
-                if (msg_el["role"].get(sv)         == simdjson::SUCCESS) msg.role         = std::string(sv);
-                if (msg_el["content"].get(sv)      == simdjson::SUCCESS) msg.content      = std::string(sv);
-                if (msg_el["name"].get(sv)         == simdjson::SUCCESS) msg.name         = std::string(sv);
-                if (msg_el["tool_call_id"].get(sv) == simdjson::SUCCESS) msg.tool_call_id = std::string(sv);
-                bool synthetic = false;
-                if (msg_el["synthetic"].get(synthetic) == simdjson::SUCCESS) {
-                    msg.synthetic = synthetic;
-                }
-                if (msg_el["input_text"].get(sv) == simdjson::SUCCESS) {
-                    msg.input_text = std::string(sv);
-                }
-                if (msg_el["reasoning_content"].get(sv) == simdjson::SUCCESS) {
-                    msg.reasoning_content = std::string(sv);
-                }
-                if (msg_el["reasoning_protocol"].get(sv) == simdjson::SUCCESS) {
-                    msg.reasoning_protocol = std::string(sv);
-                }
-                if (msg_el["reasoning_elapsed"].get(sv) == simdjson::SUCCESS) {
-                    msg.reasoning_elapsed = std::string(sv);
-                }
-                simdjson::dom::array continuation_arr;
-                if (msg_el["continuation_items"].get(continuation_arr)
-                    == simdjson::SUCCESS) {
-                    for (simdjson::dom::element item_el : continuation_arr) {
-                        core::llm::ContinuationItem item;
-                        if (item_el["provider"].get(sv) == simdjson::SUCCESS) {
-                            item.provider = std::string(sv);
-                        }
-                        if (item_el["kind"].get(sv) == simdjson::SUCCESS) {
-                            item.kind = std::string(sv);
-                        }
-                        if (item_el["payload"].get(sv) == simdjson::SUCCESS) {
-                            item.payload = std::string(sv);
-                        }
-                        if (!item.payload.empty()) {
-                            msg.continuation_items.push_back(std::move(item));
-                        }
-                    }
-                }
-
-                simdjson::dom::array tc_arr;
-                if (msg_el["tool_calls"].get(tc_arr) == simdjson::SUCCESS) {
-                    for (simdjson::dom::element tc_el : tc_arr) {
-                        core::llm::ToolCall tc;
-                        if (tc_el["id"].get(sv)   == simdjson::SUCCESS) tc.id   = std::string(sv);
-                        if (tc_el["type"].get(sv) == simdjson::SUCCESS) tc.type = std::string(sv);
-                        simdjson::dom::object fn_obj;
-                        if (tc_el["function"].get(fn_obj) == simdjson::SUCCESS) {
-                            if (fn_obj["name"].get(sv)      == simdjson::SUCCESS)
-                                tc.function.name      = std::string(sv);
-                            if (fn_obj["arguments"].get(sv) == simdjson::SUCCESS)
-                                tc.function.arguments = std::string(sv);
-                        }
-                        msg.tool_calls.push_back(std::move(tc));
-                    }
-                }
-
-                simdjson::dom::array parts_arr;
-                if (msg_el["content_parts"].get(parts_arr) == simdjson::SUCCESS) {
-                    for (simdjson::dom::element part_el : parts_arr) {
-                        core::llm::ContentPart part;
-                        if (part_el["type"].get(sv) == simdjson::SUCCESS) {
-                            if (sv == "image") {
-                                part.type = core::llm::ContentPartType::Image;
-                            } else if (sv == "video") {
-                                part.type = core::llm::ContentPartType::Video;
-                            }
-                        }
-                        if (part_el["text"].get(sv) == simdjson::SUCCESS) {
-                            part.text = std::string(sv);
-                        }
-                        if (part_el["path"].get(sv) == simdjson::SUCCESS) {
-                            part.path = std::string(sv);
-                        }
-                        if (part_el["url"].get(sv) == simdjson::SUCCESS) {
-                            part.url = std::string(sv);
-                        }
-                        if (part_el["media_id"].get(sv) == simdjson::SUCCESS) {
-                            part.media_id = std::string(sv);
-                        }
-                        if (part_el["mime_type"].get(sv) == simdjson::SUCCESS) {
-                            part.mime_type = std::string(sv);
-                        }
-                        if (part_el["detail"].get(sv) == simdjson::SUCCESS) {
-                            part.detail = std::string(sv);
-                        }
-                        msg.content_parts.push_back(std::move(part));
-                    }
-                }
-                data.messages.push_back(std::move(msg));
+                data.messages.push_back(decode_message(msg_el));
             }
         }
 
@@ -832,64 +707,451 @@ bool SessionStore::save(const SessionData& data, std::string* error) const {
 // list
 // ---------------------------------------------------------------------------
 
-std::optional<SessionInfo> SessionStore::read_session_header(
-    const std::filesystem::path& path) const {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return std::nullopt;
+namespace {
 
-    std::string header;
-    const bool has_header_prefix = read_session_header_prefix(in, header);
-    if (has_header_prefix) {
-        if (auto info = parse_session_header(header, path); info.has_value()) return info;
+// ── Bounded catalogue-row extraction ────────────────────────────────────────
+//
+// A catalogue row needs the header scalars, stats.turn_count and the first
+// real user message. Current files store header and stats before `messages`;
+// legacy files store stats as their final member. Either way the row comes
+// from a bounded prefix (plus a small tail for legacy stats), so listing never
+// decodes whole conversations.
 
-        // Preserve the existing UTF-8 repair and schema compatibility behavior
-        // if the lightweight header parser cannot handle this file.
-        if (auto data = load_by_path(path); data.has_value()) {
-            return session_info_from_data(*data, path);
+constexpr std::size_t kInitialReadChunk = 16 * 1024;
+constexpr std::size_t kLegacyStatsTailBytes = 4096;
+
+/// Buffered prefix of a stream that grows on demand.
+class FilePrefix {
+public:
+    explicit FilePrefix(std::istream& input) : input_(input) {}
+
+    /// Makes bytes [0, size) available; false when the stream is shorter.
+    [[nodiscard]] bool ensure(std::size_t size) {
+        while (data_.size() < size && !eof_) {
+            const std::size_t old_size = data_.size();
+            const std::size_t chunk = std::max(kInitialReadChunk, old_size);
+            data_.resize(old_size + chunk);
+            input_.read(data_.data() + old_size, static_cast<std::streamsize>(chunk));
+            const auto got = static_cast<std::size_t>(
+                std::max<std::streamsize>(input_.gcount(), 0));
+            data_.resize(old_size + got);
+            if (got < chunk) eof_ = true;
         }
-        return std::nullopt;
+        return data_.size() >= size;
     }
 
-    // Old or externally produced files may put `messages` somewhere other than
-    // the serialized header position. Their full JSON is already in `header`,
-    // so use the canonical decoder instead of reopening the file.
-    if (auto data = from_json(header); data.has_value()) {
+    [[nodiscard]] const std::string& data() const noexcept { return data_; }
+
+private:
+    std::istream& input_;
+    std::string data_;
+    bool eof_ = false;
+};
+
+/// Minimal JSON cursor: it understands only enough structure to step over
+/// values, and skipped payloads are scanned with memchr, never decoded.
+class PrefixCursor {
+public:
+    explicit PrefixCursor(FilePrefix& prefix) : prefix_(prefix) {}
+
+    [[nodiscard]] std::size_t position() const noexcept { return pos_; }
+    [[nodiscard]] std::string_view slice(std::size_t begin, std::size_t end) const {
+        return std::string_view(prefix_.data()).substr(begin, end - begin);
+    }
+
+    /// Next non-whitespace byte without consuming it; '\0' at end of input.
+    [[nodiscard]] char peek() {
+        while (prefix_.ensure(pos_ + 1)) {
+            const char ch = prefix_.data()[pos_];
+            if (!core::utils::json::is_whitespace(static_cast<unsigned char>(ch))) return ch;
+            ++pos_;
+        }
+        return '\0';
+    }
+
+    [[nodiscard]] bool consume(char expected) {
+        if (peek() != expected) return false;
+        ++pos_;
+        return true;
+    }
+
+    /// Reads `"key":` and returns the raw key text.
+    [[nodiscard]] std::optional<std::string> key() {
+        if (peek() != '"') return std::nullopt;
+        const std::size_t begin = pos_ + 1;
+        if (!skip_string()) return std::nullopt;
+        std::string key{slice(begin, pos_ - 1)};
+        if (!consume(':')) return std::nullopt;
+        return key;
+    }
+
+    /// Steps over one value (string, scalar, object or array).
+    [[nodiscard]] bool skip_value() {
+        const char first = peek();
+        if (first == '"') return skip_string();
+        if (first != '{' && first != '[') return skip_scalar();
+
+        std::size_t depth = 0;
+        while (prefix_.ensure(pos_ + 1)) {
+            const char ch = prefix_.data()[pos_];
+            if (ch == '"') {
+                if (!skip_string()) return false;
+                continue;
+            }
+            ++pos_;
+            if (ch == '{' || ch == '[') {
+                ++depth;
+            } else if (ch == '}' || ch == ']') {
+                if (--depth == 0) return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    [[nodiscard]] bool skip_string() {
+        ++pos_;  // opening quote
+        while (prefix_.ensure(pos_ + 1)) {
+            const std::string& data = prefix_.data();
+            const char* begin = data.data() + pos_;
+            const std::size_t available = data.size() - pos_;
+            const auto* quote = static_cast<const char*>(std::memchr(begin, '"', available));
+            const std::size_t span = quote != nullptr
+                ? static_cast<std::size_t>(quote - begin)
+                : available;
+            if (const auto* escape = static_cast<const char*>(std::memchr(begin, '\\', span))) {
+                pos_ += static_cast<std::size_t>(escape - begin) + 2;
+                continue;
+            }
+            pos_ += span;
+            if (quote != nullptr) {
+                ++pos_;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool skip_scalar() {
+        const std::size_t begin = pos_;
+        while (prefix_.ensure(pos_ + 1)) {
+            const char ch = prefix_.data()[pos_];
+            if (ch == ',' || ch == '}' || ch == ']'
+                || core::utils::json::is_whitespace(static_cast<unsigned char>(ch))) {
+                break;
+            }
+            ++pos_;
+        }
+        return pos_ > begin;
+    }
+
+    FilePrefix& prefix_;
+    std::size_t pos_ = 0;
+};
+
+[[nodiscard]] simdjson::error_code parse_repairing(simdjson::dom::parser& parser,
+                                                   std::string_view json,
+                                                   std::string& repaired,
+                                                   simdjson::dom::element& out) {
+    const auto error = parser.parse(json.data(), json.size()).get(out);
+    if (error == simdjson::SUCCESS || simdjson::validate_utf8(json)) return error;
+    repaired = core::utils::repair_utf8(json);
+    return parser.parse(repaired).get(out);
+}
+
+[[nodiscard]] bool is_catalogue_header_key(std::string_view key) noexcept {
+    return key == "version" || key == "session_id" || key == "name"
+        || key == "created_at" || key == "last_active_at" || key == "working_dir"
+        || key == "provider" || key == "model" || key == "mode" || key == "stats";
+}
+
+/// Legacy files end with `,"stats":{...}}`. Stats holds only numbers, so the
+/// last '{' before the closing braces opens it.
+[[nodiscard]] std::optional<std::string> read_legacy_trailing_stats(std::istream& input) {
+    input.clear();
+    input.seekg(0, std::ios::end);
+    const auto end = static_cast<std::streamoff>(input.tellg());
+    if (end <= 0) return std::nullopt;
+    const auto tail_size = std::min<std::streamoff>(end, kLegacyStatsTailBytes);
+    input.seekg(end - tail_size);
+    std::string tail(static_cast<std::size_t>(tail_size), '\0');
+    input.read(tail.data(), tail_size);
+    tail.resize(static_cast<std::size_t>(std::max<std::streamsize>(input.gcount(), 0)));
+
+    std::string_view view = tail;
+    const auto strip = [&view](std::string_view suffix) {
+        while (!view.empty()
+               && core::utils::json::is_whitespace(static_cast<unsigned char>(view.back()))) {
+            view.remove_suffix(1);
+        }
+        if (!view.ends_with(suffix)) return false;
+        view.remove_suffix(suffix.size());
+        return true;
+    };
+    if (!strip("}") || !strip("}")) return std::nullopt;  // root, then stats
+    const std::size_t open = view.rfind('{');
+    if (open == std::string_view::npos) return std::nullopt;
+    std::string stats{view.substr(open)};
+    stats.push_back('}');
+    view = view.substr(0, open);
+    if (!strip(":") || !strip("\"stats\"") || !strip(",")) return std::nullopt;
+    return stats;
+}
+
+/// Builds a catalogue row from a bounded read of @p input. nullopt means the
+/// layout was not recognised and the caller should use the full decoder.
+[[nodiscard]] std::optional<SessionInfo> scan_catalogue_row(std::istream& input) {
+    FilePrefix prefix(input);
+    PrefixCursor cursor(prefix);
+    if (!cursor.consume('{')) return std::nullopt;
+
+    simdjson::dom::parser parser;
+    std::string repaired;
+    std::string header = "{";
+    const auto append_member = [&header](std::string_view key, std::string_view raw) {
+        if (header.size() > 1) header.push_back(',');
+        header.push_back('"');
+        header.append(key);
+        header.append("\":");
+        header.append(raw);
+    };
+
+    bool stats_seen = false;
+    bool preview_seen = false;
+    std::string preview;
+    while (!(preview_seen && stats_seen)) {
+        const char next = cursor.peek();
+        if (next == '}') break;
+        if (next == ',') {
+            static_cast<void>(cursor.consume(','));
+            continue;
+        }
+        const auto key = cursor.key();
+        if (!key.has_value()) return std::nullopt;
+
+        if (*key == "messages") {
+            if (!cursor.consume('[')) return std::nullopt;
+            while (!preview_seen) {
+                const char ch = cursor.peek();
+                if (ch == ']') {
+                    static_cast<void>(cursor.consume(']'));
+                    break;
+                }
+                if (ch == ',') {
+                    static_cast<void>(cursor.consume(','));
+                    continue;
+                }
+                const std::size_t begin = cursor.position();
+                if (!cursor.skip_value()) return std::nullopt;
+                simdjson::dom::element element;
+                if (parse_repairing(parser, cursor.slice(begin, cursor.position()),
+                                    repaired, element) != simdjson::SUCCESS) {
+                    return std::nullopt;
+                }
+                const auto message = decode_message(element);
+                if (message.role != "user" || message.synthetic) continue;
+                preview = collapse_preview(core::llm::message_text_for_display(message));
+                preview_seen = !preview.empty();
+            }
+            if (preview_seen && !stats_seen) {
+                // Legacy layout: stats trail the conversation. The tail read
+                // moves the stream, so any failure must use the full decoder.
+                auto stats = read_legacy_trailing_stats(input);
+                if (!stats.has_value()) return std::nullopt;
+                append_member("stats", *stats);
+                stats_seen = true;
+            }
+            continue;
+        }
+
+        static_cast<void>(cursor.peek());
+        const std::size_t begin = cursor.position();
+        if (!cursor.skip_value()) return std::nullopt;
+        if (is_catalogue_header_key(*key)) {
+            append_member(*key, cursor.slice(begin, cursor.position()));
+            stats_seen = stats_seen || *key == "stats";
+        }
+    }
+    header.push_back('}');
+
+    simdjson::dom::element doc;
+    if (parse_repairing(parser, header, repaired, doc) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    int64_t version = 1;
+    if (doc["version"].get(version) != simdjson::SUCCESS) version = 1;
+    if (version > SessionData::kVersion) return std::nullopt;
+
+    SessionInfo info;
+    const auto get_str = [&doc](const char* key, std::string& out) {
+        std::string_view sv;
+        if (doc[key].get(sv) == simdjson::SUCCESS) out = std::string(sv);
+    };
+    get_str("session_id",     info.session_id);
+    get_str("name",           info.name);
+    get_str("created_at",     info.created_at);
+    get_str("last_active_at", info.last_active_at);
+    get_str("working_dir",    info.working_dir);
+    get_str("provider",       info.provider);
+    get_str("model",          info.model);
+    get_str("mode",           info.mode);
+    // Unusual layouts may carry identity after the conversation.
+    if (info.session_id.empty()) return std::nullopt;
+    int64_t turns = 0;
+    if (doc["stats"]["turn_count"].get(turns) == simdjson::SUCCESS) {
+        info.turn_count = static_cast<int32_t>(turns);
+    }
+    info.preview = std::move(preview);
+    return info;
+}
+
+// ── Persistent catalogue cache ──────────────────────────────────────────────
+//
+// Rows are keyed by file name and validated against (size, mtime) on every
+// listing, like git's index: unchanged files cost one stat(), changed files
+// one bounded scan. The cache is derived data — any damage just rebuilds it.
+
+constexpr std::string_view kCatalogueCacheName = ".catalog-cache";
+constexpr std::string_view kCatalogueMagic = "FILOCAT1";
+// A file modified within the timestamp granularity of our read could change
+// again without changing its mtime; such rows are served but not cached.
+constexpr auto kRacyWindow = std::chrono::seconds(2);
+
+struct CatalogueRow {
+    std::uint64_t size = 0;
+    std::int64_t mtime_ns = 0;
+    bool valid = false;
+    SessionInfo info;
+};
+using CatalogueCache = std::unordered_map<std::string, CatalogueRow>;
+
+void put_u64(std::string& out, std::uint64_t value) {
+    char bytes[sizeof(value)];
+    std::memcpy(bytes, &value, sizeof(value));
+    out.append(bytes, sizeof(value));
+}
+
+void put_string(std::string& out, std::string_view value) {
+    put_u64(out, value.size());
+    out.append(value);
+}
+
+class ByteReader {
+public:
+    explicit ByteReader(std::string_view data) : data_(data) {}
+
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+
+    std::uint64_t u64() {
+        std::uint64_t value = 0;
+        if (!ok_ || data_.size() - pos_ < sizeof(value)) {
+            ok_ = false;
+            return 0;
+        }
+        std::memcpy(&value, data_.data() + pos_, sizeof(value));
+        pos_ += sizeof(value);
+        return value;
+    }
+
+    std::string string() {
+        const std::uint64_t size = u64();
+        if (!ok_ || data_.size() - pos_ < size) {
+            ok_ = false;
+            return {};
+        }
+        std::string value{data_.substr(pos_, static_cast<std::size_t>(size))};
+        pos_ += static_cast<std::size_t>(size);
+        return value;
+    }
+
+private:
+    std::string_view data_;
+    std::size_t pos_ = 0;
+    bool ok_ = true;
+};
+
+[[nodiscard]] std::string encode_catalogue_cache(const CatalogueCache& cache) {
+    std::string out;
+    out.reserve(64 + cache.size() * 384);
+    out.append(kCatalogueMagic);
+    put_u64(out, static_cast<std::uint64_t>(SessionData::kVersion));
+    put_u64(out, cache.size());
+    for (const auto& [file_name, row] : cache) {
+        put_string(out, file_name);
+        put_u64(out, row.size);
+        put_u64(out, static_cast<std::uint64_t>(row.mtime_ns));
+        put_u64(out, row.valid ? 1U : 0U);
+        put_string(out, row.info.session_id);
+        put_string(out, row.info.name);
+        put_string(out, row.info.created_at);
+        put_string(out, row.info.last_active_at);
+        put_string(out, row.info.working_dir);
+        put_string(out, row.info.provider);
+        put_string(out, row.info.model);
+        put_string(out, row.info.mode);
+        put_string(out, row.info.preview);
+        put_u64(out, static_cast<std::uint64_t>(static_cast<std::int64_t>(row.info.turn_count)));
+    }
+    return out;
+}
+
+[[nodiscard]] CatalogueCache read_catalogue_cache(const std::filesystem::path& path) {
+    const auto file = read_whole_file(path);
+    if (!file.has_value()) return {};
+    const std::string& content = *file;
+    if (!std::string_view(content).starts_with(kCatalogueMagic)) return {};
+
+    ByteReader reader(std::string_view(content).substr(kCatalogueMagic.size()));
+    if (reader.u64() != static_cast<std::uint64_t>(SessionData::kVersion)) return {};
+    const std::uint64_t count = reader.u64();
+    CatalogueCache cache;
+    for (std::uint64_t i = 0; reader.ok() && i < count; ++i) {
+        std::string file_name = reader.string();
+        CatalogueRow row;
+        row.size = reader.u64();
+        row.mtime_ns = static_cast<std::int64_t>(reader.u64());
+        row.valid = reader.u64() != 0;
+        row.info.session_id = reader.string();
+        row.info.name = reader.string();
+        row.info.created_at = reader.string();
+        row.info.last_active_at = reader.string();
+        row.info.working_dir = reader.string();
+        row.info.provider = reader.string();
+        row.info.model = reader.string();
+        row.info.mode = reader.string();
+        row.info.preview = reader.string();
+        row.info.turn_count = static_cast<int32_t>(static_cast<std::int64_t>(reader.u64()));
+        cache.insert_or_assign(std::move(file_name), std::move(row));
+    }
+    if (!reader.ok()) return {};
+    return cache;
+}
+
+} // namespace
+
+std::optional<SessionInfo> SessionStore::read_session_header(
+    const std::filesystem::path& path) const {
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return std::nullopt;
+        if (auto info = scan_catalogue_row(in); info.has_value()) {
+            info->path = path;
+            return info;
+        }
+    }
+    // Unusual layouts and damaged files keep the canonical decoder's
+    // compatibility and UTF-8 repair behavior.
+    if (auto data = load_by_path(path); data.has_value()) {
         return session_info_from_data(*data, path);
     }
     return std::nullopt;
 }
 
-std::vector<SessionInfo> SessionStore::list_session_headers() const {
-    std::vector<SessionInfo> result;
-    std::error_code ec;
-    if (!std::filesystem::exists(sessions_dir_, ec)) return result;
-
-    for (const auto& entry : std::filesystem::directory_iterator(sessions_dir_, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file()) continue;
-        const auto& path = entry.path();
-        if (path.extension() != ".json"
-            || !path.filename().string().starts_with("session-")) {
-            continue;
-        }
-
-        if (auto info = read_session_header(path); info.has_value()) {
-            result.push_back(std::move(*info));
-        }
-    }
-
-    std::ranges::sort(result, more_recent);
-    return result;
-}
-
 std::optional<SessionData> SessionStore::load_by_path(
     const std::filesystem::path& path) const {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return std::nullopt;
-    const std::string content{
-        std::istreambuf_iterator<char>(in),
-        std::istreambuf_iterator<char>()};
-    return from_json(content);
+    const auto content = read_whole_file(path);
+    if (!content.has_value()) return std::nullopt;
+    return from_json(*content);
 }
 
 std::vector<SessionInfo> SessionStore::list() const {
@@ -897,22 +1159,64 @@ std::vector<SessionInfo> SessionStore::list() const {
     std::error_code ec;
     if (!std::filesystem::exists(sessions_dir_, ec)) return result;
 
+    const auto cache_path = sessions_dir_ / kCatalogueCacheName;
+    CatalogueCache cached = read_catalogue_cache(cache_path);
+    CatalogueCache fresh;
+    fresh.reserve(cached.size() + 8);
+    std::size_t cache_hits = 0;
+    bool changed = false;
+    const auto racy_after = std::filesystem::file_time_type::clock::now() - kRacyWindow;
+
     for (const auto& entry : std::filesystem::directory_iterator(sessions_dir_, ec)) {
         if (ec) break;
-        if (!entry.is_regular_file()) continue;
-        const auto& p  = entry.path();
-        if (p.extension() != ".json") continue;
-        if (!p.filename().string().starts_with("session-")) continue;
+        const auto& path = entry.path();
+        std::string file_name = path.filename().string();
+        if (path.extension() != ".json" || !file_name.starts_with("session-")) continue;
 
-        std::ifstream in(p, std::ios::binary);
-        if (!in) continue;
-        const std::string content{
-            std::istreambuf_iterator<char>(in),
-            std::istreambuf_iterator<char>()};
-        auto data = from_json(content);
-        if (!data.has_value()) continue;
+        std::error_code stat_ec;
+        const std::filesystem::directory_entry file{path, stat_ec};
+        if (stat_ec || !file.is_regular_file(stat_ec)) continue;
+        const std::uint64_t size = file.file_size(stat_ec);
+        if (stat_ec) continue;
+        const auto mtime = file.last_write_time(stat_ec);
+        if (stat_ec) continue;
+        const auto mtime_ns = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                mtime.time_since_epoch()).count());
 
-        result.push_back(session_info_from_data(*data, p));
+        CatalogueRow row;
+        bool cacheable = true;
+        if (auto it = cached.find(file_name);
+            it != cached.end() && it->second.size == size
+            && it->second.mtime_ns == mtime_ns) {
+            row = std::move(it->second);
+            ++cache_hits;
+        } else {
+            row.size = size;
+            row.mtime_ns = mtime_ns;
+            if (auto info = read_session_header(path); info.has_value()) {
+                row.valid = true;
+                row.info = std::move(*info);
+            }
+            cacheable = mtime <= racy_after;
+            changed = changed || cacheable;
+        }
+
+        if (row.valid) {
+            SessionInfo info = row.info;
+            info.path = path;
+            result.push_back(std::move(info));
+        }
+        if (cacheable) {
+            row.info.path.clear();
+            fresh.insert_or_assign(std::move(file_name), std::move(row));
+        }
+    }
+
+    // Deleted files leave unmatched cached rows behind.
+    if (changed || cache_hits != cached.size()) {
+        static_cast<void>(core::utils::atomic_write_file(
+            cache_path, encode_catalogue_cache(fresh)));
     }
 
     // Most recently active first (ISO 8601 sorts lexicographically correctly).
@@ -950,7 +1254,7 @@ std::optional<SessionData> SessionStore::load_by_index(int index) const {
     if (index < 1) return std::nullopt;
 
     int valid_session_index = 0;
-    for (const auto& info : list_session_headers()) {
+    for (const auto& info : list()) {
         auto data = load_by_path(info.path);
         if (!data.has_value()) continue;
         if (++valid_session_index == index) return data;
@@ -970,7 +1274,7 @@ std::optional<SessionData> SessionStore::load_most_recent_for_project(
     // and relative paths don't cause spurious mismatches against stored sessions.
     const std::filesystem::path target = canonicalize_working_dir(working_dir);
 
-    for (const auto& info : list_session_headers()) {
+    for (const auto& info : list()) {
         if (canonicalize_working_dir(info.working_dir) != target) continue;
         if (auto data = load_by_path(info.path); data.has_value()) {
             return data;
@@ -997,7 +1301,7 @@ std::optional<SessionData> SessionStore::load(std::string_view id_or_index) cons
 std::optional<SessionData> SessionStore::load_by_name(std::string_view name) const {
     if (name.empty()) return std::nullopt;
     // list() is sorted most-recent first, so the first match wins.
-    for (const auto& info : list_session_headers()) {
+    for (const auto& info : list()) {
         if (info.name != name) continue;
         if (auto data = load_by_path(info.path); data.has_value()) {
             return data;

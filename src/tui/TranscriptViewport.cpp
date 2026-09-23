@@ -172,13 +172,31 @@ int layout_at(ftxui::Element& element, int width, int x, int y) {
     return height;
 }
 
+/// Cheap height guess for a card that has not been laid out at this width.
+/// It only positions off-screen cards (scrollbar, page jumps); every visible
+/// card is measured exactly before it is drawn.
+int estimate_height(const UiMessage& message, int width) {
+    width = std::max(width, 1);
+    int lines = 0;
+    std::string_view text = message.text;
+    while (true) {
+        const auto newline = text.find('\n');
+        const auto line = text.substr(0, newline);
+        lines += 1 + static_cast<int>(line.size()) / width;
+        if (newline == std::string_view::npos) break;
+        text.remove_prefix(newline + 1);
+    }
+    lines += 2 * static_cast<int>(message.tools.size());
+    return std::max(lines + message.margin_top + message.margin_bottom + 1, 1);
+}
+
 } // namespace
 
 struct TranscriptViewport::State {
     struct Entry {
         std::string id;
         std::size_t fingerprint = 0;
-        int height = 1;
+        int height = 0;   // exact when measured, otherwise an estimate (0 = none yet)
         int offset = 0;
         bool measured = false;
     };
@@ -221,38 +239,120 @@ struct TranscriptViewport::State {
         invalidate_frame();
     }
 
-    bool ensure_measurements(int width,
-                             std::size_t tick,
-                             ConversationRenderOptions options) {
-        width = std::max(width, 1);
-        const int previous_total = total_height;
-        if (measured_width != width) {
-            for (auto& entry : entries) {
-                entry.measured = false;
-            }
-            measured_width = width;
-            measurements_dirty = true;
-        }
-        if (!measurements_dirty) {
-            return false;
-        }
-
-        options.system_disclosure_hitboxes = nullptr;
+    /// Offsets from exact heights where known and estimates elsewhere.
+    void layout_offsets(int width) {
         int offset = 0;
         for (std::size_t i = 0; i < entries.size(); ++i) {
             auto& entry = entries[i];
-            if (!entry.measured) {
-                auto element = render_history_message((*snapshot)[i], tick, options);
-                entry.height = layout_at(element, width, 0, 0);
-                entry.measured = true;
-                ++message_measure_count;
+            if (!entry.measured && entry.height == 0) {
+                entry.height = estimate_height((*snapshot)[i], width);
             }
             entry.offset = offset;
             offset += entry.height;
         }
         total_height = std::max(offset, 1);
         measurements_dirty = false;
-        return total_height != previous_total;
+    }
+
+    /// Exact layout of one card. Returns the height delta versus its estimate.
+    int measure(std::size_t index,
+                int width,
+                std::size_t tick,
+                const ConversationRenderOptions& options) {
+        auto& entry = entries[index];
+        const int previous = entry.height;
+        auto element = render_history_message((*snapshot)[index], tick, options);
+        entry.height = layout_at(element, width, 0, 0);
+        entry.measured = true;
+        ++message_measure_count;
+        measurements_dirty = true;
+        return entry.height - previous;
+    }
+
+    /// Measures only the cards that intersect the viewport — O(viewport), not
+    /// O(transcript) — so resuming a long session or resizing the terminal
+    /// costs the same as drawing one screen. Off-screen cards keep estimates
+    /// until they scroll into view. When the user is reading history, height
+    /// corrections above the focus line shift focus_y by the same amount so
+    /// the content on screen does not move (scroll anchoring).
+    void ensure_visible_measurements(int width,
+                                     int viewport_height,
+                                     std::size_t tick,
+                                     ConversationRenderOptions options,
+                                     ConversationScrollAnchor& anchor) {
+        width = std::max(width, 1);
+        if (measured_width != width) {
+            // Previous heights remain as estimates for the new width.
+            for (auto& entry : entries) {
+                entry.measured = false;
+            }
+            measured_width = width;
+            measurements_dirty = true;
+        }
+        if (measurements_dirty) {
+            layout_offsets(width);
+        }
+
+        options.system_disclosure_hitboxes = nullptr;
+        if (anchor.follow_bottom) {
+            // Measure upward from the last card until the screen is covered,
+            // plus the neighbor above: estimates must never decide that a card
+            // poking into the viewport stays hidden.
+            for (std::size_t pass = 0; pass < entries.size(); ++pass) {
+                int covered = 0;
+                std::size_t top = entries.size();
+                bool measured_any = false;
+                for (std::size_t i = entries.size(); i-- > 0 && covered < viewport_height;) {
+                    if (!entries[i].measured) {
+                        static_cast<void>(measure(i, width, tick, options));
+                        measured_any = true;
+                    }
+                    top = i;
+                    covered += entries[i].height;
+                }
+                if (top > 0 && !entries[top - 1].measured) {
+                    static_cast<void>(measure(top - 1, width, tick, options));
+                    measured_any = true;
+                }
+                if (measurements_dirty) {
+                    layout_offsets(width);
+                }
+                if (!measured_any) break;
+            }
+            return;
+        }
+
+        // Each pass measures at least one new card, so this terminates; the
+        // bound only guards against pathological estimate oscillation.
+        for (std::size_t pass = 0; pass < entries.size(); ++pass) {
+            anchor.focus_y = std::clamp(anchor.focus_y, 0, total_height);
+            const int scroll_top = std::clamp(
+                anchor.focus_y - (viewport_height - 1) / 2,
+                0,
+                std::max(total_height - viewport_height, 0));
+
+            auto targets = visible_entries(scroll_top, viewport_height);
+            if (!targets.empty()) {
+                if (targets.front() > 0) targets.push_back(targets.front() - 1);
+                if (targets.back() + 1 < entries.size()) targets.push_back(targets.back() + 1);
+            } else if (!entries.empty()) {
+                targets.push_back(entries.size() - 1);
+            }
+
+            int focus_shift = 0;
+            bool measured_any = false;
+            for (const std::size_t index : targets) {
+                if (entries[index].measured) continue;
+                const bool above_focus =
+                    entries[index].offset + entries[index].height <= anchor.focus_y;
+                const int delta = measure(index, width, tick, options);
+                if (above_focus) focus_shift += delta;
+                measured_any = true;
+            }
+            if (!measured_any) break;
+            layout_offsets(width);
+            anchor.focus_y += focus_shift;
+        }
     }
 
     std::vector<std::size_t> visible_entries(int scroll_top, int viewport_height) const {
@@ -276,7 +376,14 @@ struct TranscriptViewport::State {
                  std::size_t tick,
                  ConversationRenderOptions options,
                  const std::shared_ptr<ConversationScrollAnchor>& anchor) {
-        const bool height_changed = ensure_measurements(width, tick, options);
+        viewport_height = std::max(viewport_height, 1);
+        const int previous_total = total_height;
+        const std::size_t previous_measures = message_measure_count;
+        ensure_visible_measurements(width, viewport_height, tick, options, *anchor);
+        if (message_measure_count != previous_measures) {
+            invalidate_frame();  // offsets moved under the cached raster
+        }
+        const bool height_changed = total_height != previous_total;
         anchor->content_height = total_height;
         if (anchor->follow_bottom) {
             anchor->focus_y = total_height;
@@ -284,7 +391,6 @@ struct TranscriptViewport::State {
             anchor->focus_y = std::clamp(anchor->focus_y, 0, total_height);
         }
 
-        viewport_height = std::max(viewport_height, 1);
         const int max_scroll = std::max(total_height - viewport_height, 0);
         const int scroll_top = std::clamp(
             anchor->focus_y - (viewport_height - 1) / 2,

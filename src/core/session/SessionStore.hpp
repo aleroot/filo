@@ -66,6 +66,8 @@ public:
     [[nodiscard]] std::optional<SessionData> load(std::string_view id_or_index) const;
 
     // List all sessions sorted by last-active time (most recent first).
+    // Rows come from a stat-validated catalogue cache in sessions_dir, so
+    // unchanged sessions are never re-read.
     [[nodiscard]] std::vector<SessionInfo> list() const;
 
     // Delete a session file by ID (returns true even when not found).
@@ -117,10 +119,8 @@ public:
     }
 
 private:
-    // Resume and name lookup need only the small, stable header fields that
-    // precede the conversation in the session JSON. Keeping this path separate
-    // from list() avoids materializing every saved conversation to find one.
-    [[nodiscard]] std::vector<SessionInfo> list_session_headers() const;
+    // Builds one catalogue row from a bounded read of the file (header, first
+    // user message, legacy trailing stats) without decoding the conversation.
     [[nodiscard]] std::optional<SessionInfo> read_session_header(
         const std::filesystem::path& path) const;
     [[nodiscard]] std::optional<SessionData> load_by_path(

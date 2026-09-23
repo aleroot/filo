@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -67,6 +68,17 @@ std::string render_history_viewport(tui::HistoryComponent& history,
                                         ftxui::Dimension::Fixed(height));
     ftxui::Render(screen, panel);
     return strip_ansi(screen.ToString());
+}
+
+// Off-screen cards are positioned by estimate until they scroll into view, so
+// the scrollbar thumb is approximate; compare the transcript content itself.
+std::string without_scrollbar(std::string screen) {
+    for (const std::string_view glyph : {"┃", "╹", "╻"}) {
+        for (auto at = screen.find(glyph); at != std::string::npos; at = screen.find(glyph, at)) {
+            screen.replace(at, glyph.size(), " ");
+        }
+    }
+    return screen;
 }
 
 std::string render_reference_viewport(const std::vector<tui::UiMessage>& messages,
@@ -926,7 +938,9 @@ TEST_CASE("cached transcript frames perform no transcript-sized work",
     static_cast<void>(render_history_viewport(history, 100, 20));
     const auto measured = history.MessageMeasureCount();
     const auto viewport_builds = history.ViewportBuildCount();
-    REQUIRE(measured == messages->size());
+    // Only the cards covering the bottom viewport are laid out.
+    REQUIRE(measured > 0);
+    REQUIRE(measured <= 20);
     REQUIRE(viewport_builds == 1);
 
     for (int frame = 0; frame < 30; ++frame) {
@@ -963,7 +977,7 @@ TEST_CASE("virtualized viewport matches the canonical FTXUI transcript layout",
 
     const auto reference = render_reference_viewport(source, 72, 14);
     const auto virtualized = render_history_viewport(history, 72, 14);
-    REQUIRE(virtualized == reference);
+    REQUIRE(without_scrollbar(virtualized) == without_scrollbar(reference));
 }
 
 TEST_CASE("viewport raster composes with outer FTXUI decorators",
@@ -1016,7 +1030,8 @@ TEST_CASE("scrolling rebuilds only the bounded viewport",
     history.ScrollPageUp();
     static_cast<void>(render_history_viewport(history, 80, 10));
 
-    REQUIRE(history.MessageMeasureCount() == measured);
+    // Newly exposed cards are measured on demand, bounded by the viewport.
+    REQUIRE(history.MessageMeasureCount() <= measured + 10);
     REQUIRE(history.ViewportBuildCount() == viewport_builds + 1);
 }
 
@@ -1041,11 +1056,13 @@ TEST_CASE("terminal resize remeasures once and then returns to bounded frames",
         mock_options);
 
     static_cast<void>(render_history_viewport(history, 100, 12));
-    REQUIRE(history.MessageMeasureCount() == messages->size());
+    const auto first_layout = history.MessageMeasureCount();
+    REQUIRE(first_layout <= 12);
 
     const auto resized = render_history_viewport(history, 52, 12);
-    REQUIRE(history.MessageMeasureCount() == 2 * messages->size());
-    REQUIRE(resized == render_reference_viewport(source, 52, 12));
+    REQUIRE(history.MessageMeasureCount() - first_layout <= 12);
+    REQUIRE(without_scrollbar(resized)
+            == without_scrollbar(render_reference_viewport(source, 52, 12)));
 
     const auto measured = history.MessageMeasureCount();
     static_cast<void>(render_history_viewport(history, 52, 12));
@@ -1078,6 +1095,321 @@ TEST_CASE("streaming update remeasures only the changed message",
 
     REQUIRE(history.CacheBuildCount() == 2);
     REQUIRE(history.MessageMeasureCount() == measured + 1);
+}
+
+// ── Differential fuzz vs the canonical renderer ─────────────────────────────
+//
+// The virtualized viewport must be byte-identical (modulo the approximate
+// scrollbar) to render_history_panel's full layout for every card that is on
+// screen. These tests fuzz content mixes, terminal sizes, and streaming
+// autoscroll frames with a deterministic PRNG so any failure reproduces.
+
+struct FuzzRng {
+    std::uint64_t state;
+    std::uint64_t next() {
+        state += 0x9e3779b97f4a7c15ULL;
+        std::uint64_t z = state;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+        return z ^ (z >> 31);
+    }
+    std::size_t pick(std::size_t bound) { return static_cast<std::size_t>(next() % bound); }
+    std::string words(std::size_t count) {
+        static constexpr std::string_view vocabulary[] = {
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+            "long-ish-token", "ok", "no", "'quoted'", "`code`", "**bold**",
+            "Überstraße", "日本語のテキスト", "emoji 🎉 mix", "tab\there",
+            "path/to/file.cpp", "a-very-long-unbreakable-identifier-name",
+        };
+        std::string out;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (i > 0) out += ' ';
+            out += vocabulary[pick(std::size(vocabulary))];
+        }
+        return out;
+    }
+};
+
+std::vector<tui::UiMessage> random_transcript(FuzzRng& rng, std::size_t count) {
+    std::vector<tui::UiMessage> source;
+    source.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        switch (rng.pick(8)) {
+        case 0:
+            source.push_back(tui::make_user_message(
+                rng.words(1 + rng.pick(30)),
+                rng.pick(2) ? "12:34" : ""));
+            break;
+        case 1:
+            source.push_back(tui::make_assistant_message(
+                "## Header " + rng.words(2) + "\n\n" + rng.words(5 + rng.pick(60))
+                    + "\n\n- " + rng.words(3) + "\n- " + rng.words(3),
+                rng.pick(2) ? "12:35" : "",
+                rng.pick(4) == 0));
+            break;
+        case 2:
+            source.push_back(tui::make_info_message(rng.words(2 + rng.pick(20))));
+            break;
+        case 3:
+            source.push_back(tui::make_warning_message(rng.words(2 + rng.pick(12))));
+            break;
+        case 4:
+            source.push_back(tui::make_error_message(rng.words(2 + rng.pick(12))));
+            break;
+        case 5: {
+            std::vector<tui::ToolActivity> tools;
+            const std::size_t tool_count = 1 + rng.pick(3);
+            for (std::size_t t = 0; t < tool_count; ++t) {
+                auto tool = tui::make_tool_activity(
+                    "tool-" + std::to_string(i) + "-" + std::to_string(t),
+                    rng.pick(2) ? "read" : "search",
+                    "{\"path\":\"" + rng.words(1) + ".cpp\"}",
+                    rng.words(2 + rng.pick(10)));
+                tool.status = static_cast<tui::ToolActivity::Status>(rng.pick(4));
+                tool.result.summary = rng.words(1 + rng.pick(40));
+                if (rng.pick(2)) tool.result.exit_code = 0;
+                tools.push_back(std::move(tool));
+            }
+            source.push_back(tui::make_tool_group_message(std::move(tools),
+                                                           rng.pick(2) == 0,
+                                                           rng.pick(2) == 0));
+            break;
+        }
+        case 6:
+            source.push_back(tui::make_shell_command_message(
+                rng.words(1 + rng.pick(6)), "12:36", rng.pick(2) == 0));
+            break;
+        default:
+            source.push_back(tui::make_system_message(rng.words(4 + rng.pick(30))));
+            break;
+        }
+    }
+    return source;
+}
+
+std::string render_reference_viewport_at(const std::vector<tui::UiMessage>& messages,
+                                         int width,
+                                         int height,
+                                         float scroll_pos,
+                                         std::size_t tick = 0) {
+    auto options = mock_options();
+    options.scroll_pos = scroll_pos;
+    auto panel = tui::render_history_panel(messages, tick, options);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
+                                        ftxui::Dimension::Fixed(height));
+    ftxui::Render(screen, panel);
+    return strip_ansi(screen.ToString());
+}
+
+TEST_CASE("virtualized transcript matches the canonical renderer across fuzzed content",
+          "[tui][history_component][render_cache][layout][fuzz]") {
+    const std::pair<int, int> sizes[] = {
+        {160, 50}, {80, 24}, {72, 14}, {52, 12}, {40, 9}, {200, 8},
+    };
+    for (std::uint64_t seed = 1; seed <= 24; ++seed) {
+        FuzzRng rng{seed * 0x2545F4914F6CDD1DULL};
+        const auto source = random_transcript(rng, 30 + rng.pick(50));
+        CAPTURE(seed, source.size());
+        auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+        std::atomic<size_t> tick{0};
+        tui::HistoryComponent history(
+            std::function<tui::HistoryComponent::MessageSnapshot()>{
+                [messages]() { return messages; }
+            },
+            tick,
+            mock_options);
+
+        for (const auto& [width, height] : sizes) {
+            const auto virtualized = render_history_viewport(history, width, height);
+            const auto reference = render_reference_viewport_at(source, width, height, 1.0f);
+            INFO("seed=" << seed << " size=" << width << "x" << height);
+            CHECK(without_scrollbar(virtualized) == without_scrollbar(reference));
+        }
+    }
+}
+
+TEST_CASE("virtualized transcript matches the canonical renderer at the top anchor",
+          "[tui][history_component][render_cache][layout][fuzz]") {
+    for (std::uint64_t seed = 25; seed <= 32; ++seed) {
+        FuzzRng rng{seed * 0x2545F4914F6CDD1DULL};
+        const auto source = random_transcript(rng, 30 + rng.pick(50));
+        CAPTURE(seed, source.size());
+        auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+        std::atomic<size_t> tick{0};
+        tui::HistoryComponent history(
+            std::function<tui::HistoryComponent::MessageSnapshot()>{
+                [messages]() { return messages; }
+            },
+            tick,
+            mock_options);
+
+        // A rendered transcript first: JumpToMessage consults content_height,
+        // which is still the initial 1 before any frame.
+        static_cast<void>(render_history_viewport(history, 72, 14));
+        history.JumpToMessage(0, messages->size());
+        {
+            const auto virtualized = render_history_viewport(history, 72, 14);
+            const auto reference = render_reference_viewport_at(source, 72, 14, 0.0f);
+            INFO("seed=" << seed);
+            CHECK(without_scrollbar(virtualized) == without_scrollbar(reference));
+        }
+    }
+}
+
+TEST_CASE("streaming autoscroll frames match the canonical renderer",
+          "[tui][history_component][render_cache][fuzz][regression]") {
+    for (std::uint64_t seed = 101; seed <= 106; ++seed) {
+        FuzzRng rng{seed * 0x2545F4914F6CDD1DULL};
+        auto source = random_transcript(rng, 20 + rng.pick(40));
+        std::atomic<size_t> tick{0};
+        auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+        tui::HistoryComponent history(
+            std::function<tui::HistoryComponent::MessageSnapshot()>{
+                [&messages]() { return messages; }
+            },
+            tick,
+            mock_options);
+
+        // Simulate a live turn: tokens append to the streaming card, whole
+        // cards finish, and new cards appear — every frame is auto-scrolled.
+        for (int frame = 0; frame < 24; ++frame) {
+            tick.store(static_cast<size_t>(frame), std::memory_order_relaxed);
+            switch (rng.pick(5)) {
+            case 0:
+                source.back().text += " " + rng.words(1 + rng.pick(8));
+                break;
+            case 1:
+                source.back().pending = false;
+                source.back().text += "\n\n" + rng.words(4 + rng.pick(20));
+                break;
+            case 2:
+                source.push_back(tui::make_user_message(rng.words(2 + rng.pick(20))));
+                break;
+            case 3:
+                source.push_back(tui::make_assistant_message(rng.words(1 + rng.pick(10)),
+                                                             "", true));
+                break;
+            default:
+                source.push_back(tui::make_info_message(rng.words(1 + rng.pick(6))));
+                break;
+            }
+            messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+
+            const auto virtualized = render_history_viewport(history, 100, 24);
+            const auto reference = render_reference_viewport_at(
+                source, 100, 24, 1.0f, tick.load(std::memory_order_relaxed));
+            INFO("seed=" << seed << " frame=" << frame);
+            CHECK(without_scrollbar(virtualized) == without_scrollbar(reference));
+        }
+    }
+}
+
+TEST_CASE("scrolling through the transcript measures every card exactly once",
+          "[tui][history_component][render_cache][performance][regression]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(120);
+    for (int i = 0; i < 120; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "message " + std::to_string(i) + "\n" + FuzzRng{static_cast<std::uint64_t>(i)}.words(30),
+            "", false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 80, 15));
+    history.JumpToMessage(0, messages->size());
+    for (int page = 0; page < 200 && history.MessageMeasureCount() < messages->size();
+         ++page) {
+        history.ScrollPageDown();
+        static_cast<void>(render_history_viewport(history, 80, 15));
+    }
+    REQUIRE(history.MessageMeasureCount() == messages->size());
+
+    // Fully measured state must agree with the canonical layout again.
+    history.ResetToBottom();
+    const auto virtualized = render_history_viewport(history, 80, 15);
+    CHECK(without_scrollbar(virtualized)
+          == without_scrollbar(render_reference_viewport_at(source, 80, 15, 1.0f)));
+}
+
+TEST_CASE("resuming a long transcript lays out only the visible cards",
+          "[tui][history_component][render_cache][performance][regression]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(3000);
+    for (int i = 0; i < 3000; ++i) {
+        source.push_back(tui::make_assistant_message(
+            "## Turn " + std::to_string(i)
+                + "\n\nA paragraph with **formatting** and `code` that wraps.",
+            "",
+            false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    const auto rendered = render_history_viewport(history, 100, 30);
+    REQUIRE(history.MessageMeasureCount() <= 30);
+    REQUIRE_THAT(rendered, Catch::Matchers::ContainsSubstring("Turn 2999"));
+
+    // The bottom of a partially measured transcript is still pixel-exact.
+    std::vector<tui::UiMessage> tail(source.end() - 40, source.end());
+    tui::HistoryComponent tail_history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [tail = std::make_shared<const std::vector<tui::UiMessage>>(tail)]() {
+                return tail;
+            }
+        },
+        tick,
+        mock_options);
+    REQUIRE(without_scrollbar(rendered)
+            == without_scrollbar(render_history_viewport(tail_history, 100, 30)));
+}
+
+TEST_CASE("lazy measurement keeps the reading position anchored",
+          "[tui][history_component][render_cache][layout][regression]") {
+    std::atomic<size_t> tick{0};
+    std::vector<tui::UiMessage> source;
+    source.reserve(300);
+    for (int i = 0; i < 300; ++i) {
+        // Heights far from the estimate force large corrections.
+        std::string text = "ANCHOR_" + std::to_string(i) + "\n\n";
+        for (int line = 0; line < i % 7; ++line) {
+            text += "- item " + std::to_string(line) + "\n";
+        }
+        source.push_back(tui::make_assistant_message(std::move(text), "", false));
+    }
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(source);
+    tui::HistoryComponent history(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    static_cast<void>(render_history_viewport(history, 80, 20));
+    for (int page = 0; page < 5; ++page) {
+        history.ScrollPageUp();
+    }
+    const auto reading = render_history_viewport(history, 80, 20);
+    // Re-rendering must not move content even though more cards got measured.
+    REQUIRE(render_history_viewport(history, 80, 20) == reading);
+    REQUIRE(render_history_viewport(history, 80, 20) == reading);
+
+    history.JumpToMessage(0, messages->size());
+    const auto top = render_history_viewport(history, 80, 20);
+    REQUIRE_THAT(top, Catch::Matchers::ContainsSubstring("ANCHOR_0"));
+    REQUIRE(history.MessageMeasureCount() < messages->size());
 }
 
 TEST_CASE("transcript selection keeps native visible-card semantics",
