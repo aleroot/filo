@@ -357,8 +357,14 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     options.reasoning_content_policy =
         Serializer::ReasoningContentPolicy::NonEmptyOwned;
     options.reasoning_protocol = std::string(name());
+    // Qwen requires content to be an empty string, rather than null, for
+    // tool-call-only assistant messages. This matters when history originated
+    // from another provider (for example Claude), whose tool turn has no
+    // visible text. Third-party models on DashScope retain the shared default.
     options.empty_assistant_content_policy =
-        Serializer::EmptyAssistantContentPolicy::EmptyStringWhenReasoning;
+        qwen_model_requires_nonnull_assistant_content(req.model)
+        ? Serializer::EmptyAssistantContentPolicy::EmptyString
+        : Serializer::EmptyAssistantContentPolicy::EmptyStringWhenReasoning;
     if (supports_dashscope_structured_cache_content(req)) {
         options.prompt_cache = {
             .first_system_message = true,

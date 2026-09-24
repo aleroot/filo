@@ -704,6 +704,7 @@ struct Serializer {
     enum class EmptyAssistantContentPolicy {
         Null,
         EmptyStringWhenReasoning,
+        EmptyString,
     };
 
     struct PromptCacheAnchors {
@@ -723,7 +724,8 @@ struct Serializer {
             ReasoningContentLayout::SiblingField;
         std::string reasoning_protocol;
         // OpenAI-compatible endpoints disagree on the representation of an
-        // assistant turn that contains reasoning but no visible text.
+        // assistant turn that has no visible text. Some require an empty
+        // string for every assistant turn, including tool-call-only turns.
         EmptyAssistantContentPolicy empty_assistant_content_policy =
             EmptyAssistantContentPolicy::Null;
         // OpenAI-compatible providers do not all agree on completion-budget
@@ -978,9 +980,11 @@ struct Serializer {
                         + "\"";
                 }
             } else if (req.messages[i].role == "assistant"
-                       && options.empty_assistant_content_policy
-                           == EmptyAssistantContentPolicy::EmptyStringWhenReasoning
-                       && !req.messages[i].reasoning_content.empty()) {
+                       && (options.empty_assistant_content_policy
+                               == EmptyAssistantContentPolicy::EmptyString
+                           || (options.empty_assistant_content_policy
+                                   == EmptyAssistantContentPolicy::EmptyStringWhenReasoning
+                               && !req.messages[i].reasoning_content.empty()))) {
                 payload += R"(,"content":"")";
             } else {
                 // `content` is nullable for an assistant tool call, but the

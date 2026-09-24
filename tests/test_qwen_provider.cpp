@@ -465,18 +465,94 @@ TEST_CASE("DashScopeProtocol - steering after reasoning-only assistant keeps req
         R"("role":"assistant","content":"","reasoning_content":"I was planning the next edit.")"));
 }
 
-TEST_CASE("DashScopeProtocol - tool-call-only assistant keeps nullable content field",
+TEST_CASE("DashScopeProtocol - tool-call-only assistant keeps required empty content",
           "[qwen][serializer][tools]") {
-    auto req = make_simple_request("qwen3.7-plus");
-    Message assistant;
-    assistant.role = "assistant";
-    assistant.tool_calls.push_back(ToolCall{
-        .id = "call_1",
-        .function = {.name = "read", .arguments = R"({"path":"README.md"})"},
-    });
-    req.messages.insert(req.messages.begin(), std::move(assistant));
+    for (const auto model : {"qwen3.7-plus", "qwen3.8-max", "coder-model"}) {
+        CAPTURE(model);
+        auto req = make_simple_request(model);
+        Message assistant;
+        assistant.role = "assistant";
+        assistant.tool_calls.push_back(ToolCall{
+            .id = "call_1",
+            .function = {.name = "read", .arguments = R"({"path":"README.md"})"},
+        });
+        req.messages.insert(req.messages.begin(), std::move(assistant));
 
-    const auto payload = DashScopeProtocol(0, "high").serialize(req);
+        const auto payload = DashScopeProtocol(0, "high").serialize(req);
+        require_valid_json(payload);
+        REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+            R"("role":"assistant","content":"","tool_calls")"));
+    }
+}
+
+TEST_CASE("Token Plan replays Claude tool-only history with required empty content",
+          "[qwen][token-plan][serializer][tools][cross-provider]") {
+    ChatRequest req;
+    req.model = "qwen3.8-max";
+    req.stream = true;
+    req.messages = {
+        Message{.role = "user", .content = "Inspect the project."},
+        Message{
+            .role = "assistant",
+            .tool_calls = {ToolCall{
+                .id = "toolu_claude_1",
+                .function = {.name = "read_file", .arguments = R"({"path":"README.md"})"},
+            }, ToolCall{
+                .id = "toolu_claude_2",
+                .function = {.name = "grep", .arguments = R"({"pattern":"TODO"})"},
+            }},
+            // An Anthropic continuation may accompany a tool turn, but it is
+            // deliberately not replayed through the DashScope wire format.
+            .continuation_items = {ContinuationItem{
+                .provider = "claude-sonnet-4-6",
+                .kind = "thinking",
+                .payload = R"({"type":"thinking","thinking":"inspect first"})",
+            }},
+        },
+        Message{
+            .role = "tool",
+            .content = "# Filo",
+            .tool_call_id = "toolu_claude_1",
+        },
+        Message{
+            .role = "tool",
+            .content = "src/main.cpp: TODO",
+            .tool_call_id = "toolu_claude_2",
+        },
+        Message{.role = "user", .content = "Continue."},
+    };
+
+    const auto payload = DashScopeTokenPlanProtocol{}.serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"assistant","content":"","tool_calls")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("id":"toolu_claude_2")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("role":"assistant","content":null,"tool_calls")"));
+}
+
+TEST_CASE("Token Plan keeps third-party model tool history unchanged",
+          "[qwen][token-plan][serializer][tools][third-party]") {
+    ChatRequest req;
+    req.model = "glm-5.2";
+    req.messages = {
+        Message{
+            .role = "assistant",
+            .tool_calls = {ToolCall{
+                .id = "call_glm_1",
+                .function = {.name = "read_file", .arguments = R"({"path":"README.md"})"},
+            }},
+        },
+        Message{
+            .role = "tool",
+            .content = "# Filo",
+            .tool_call_id = "call_glm_1",
+        },
+        Message{.role = "user", .content = "Continue."},
+    };
+
+    const auto payload = DashScopeTokenPlanProtocol{}.serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("role":"assistant","content":null,"tool_calls")"));
@@ -723,13 +799,17 @@ TEST_CASE("Qwen Token Plan hosted tools are selected by model generation",
         "deepseek-v4-pro"));
 }
 
-TEST_CASE("Qwen preserve_thinking and vision traits match Qwen Code",
+TEST_CASE("Qwen model traits match Qwen Code",
           "[qwen][traits]") {
     CHECK(core::llm::qwen_model_supports_preserve_thinking("qwen3-coder-plus"));
     CHECK(core::llm::qwen_model_supports_preserve_thinking("qwen3.5-plus"));
     CHECK(core::llm::qwen_model_supports_preserve_thinking("coder-model"));
     CHECK_FALSE(core::llm::qwen_model_supports_preserve_thinking("glm-5.2"));
     CHECK_FALSE(core::llm::qwen_model_supports_preserve_thinking("qwen-image-2.0"));
+
+    CHECK(core::llm::qwen_model_requires_nonnull_assistant_content("qwen3.8-max"));
+    CHECK(core::llm::qwen_model_requires_nonnull_assistant_content("coder-model"));
+    CHECK_FALSE(core::llm::qwen_model_requires_nonnull_assistant_content("glm-5.2"));
 
     CHECK(core::llm::qwen_model_supports_vision("qwen3.5-plus"));
     CHECK(core::llm::qwen_model_supports_vision("qwen3.6-plus"));

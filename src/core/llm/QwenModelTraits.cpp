@@ -7,6 +7,16 @@
 
 namespace core::llm {
 
+namespace {
+
+[[nodiscard]] bool is_qwen_chat_model(std::string_view model_id) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+        core::utils::str::trim_ascii_view(model_id));
+    return is_qwen_text_model(model_id) || lowered == "coder-model";
+}
+
+} // namespace
+
 std::vector<int> qwen_model_generation(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(model_id));
@@ -45,9 +55,16 @@ bool qwen_model_supports_preserve_thinking(std::string_view model_id) {
     // the Qwen family (including coder-model). Restricting it to 3.6+/3.7+
     // left qwen3-coder-plus and qwen3.5-plus unable to keep reasoning across
     // tool turns, which is the common Coding Plan / public DashScope path.
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(
-        core::utils::str::trim_ascii_view(model_id));
-    return is_qwen_text_model(model_id) || lowered == "coder-model";
+    return is_qwen_chat_model(model_id);
+}
+
+bool qwen_model_requires_nonnull_assistant_content(
+    std::string_view model_id) {
+    // Qwen's documented Chat Completions function-calling transcript uses
+    // `content:""` alongside assistant `tool_calls`. The Qwen chat family
+    // includes Qwen Code's `coder-model` alias and excludes third-party
+    // models served by DashScope.
+    return is_qwen_chat_model(model_id);
 }
 
 bool qwen_model_supports_vision(std::string_view model_id) {
