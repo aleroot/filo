@@ -2083,12 +2083,24 @@ private:
         const auto workspace = ctx.agent->workspace_snapshot();
 
         std::string body = std::format("Primary: {}", workspace.primary().string());
-        if (workspace.additional().empty()) {
+        std::vector<std::filesystem::path> additional;
+        std::vector<std::filesystem::path> attachments;
+        for (const auto& path : workspace.additional()) {
+            (core::workspace::is_attached_file(workspace.snapshot(), path)
+                ? attachments : additional).push_back(path);
+        }
+        if (additional.empty()) {
             body += "\n        Additional: <none>";
         } else {
             body += "\n        Additional:";
-            for (const auto& dir : workspace.additional()) {
+            for (const auto& dir : additional) {
                 body += "\n          - " + dir.string();
+            }
+        }
+        if (!attachments.empty()) {
+            body += "\n        Attached files:";
+            for (const auto& file : attachments) {
+                body += "\n          - " + file.string();
             }
         }
         const auto steering = ctx.agent->session_context_snapshot().steering_policy;

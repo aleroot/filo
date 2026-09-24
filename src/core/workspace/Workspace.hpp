@@ -10,6 +10,12 @@ namespace core::workspace {
 struct WorkspaceSnapshot {
     std::filesystem::path primary;
     std::vector<std::filesystem::path> additional;
+    /// The entries of `additional` that were granted as single files (e.g. an
+    /// @-mentioned screenshot). They widen path scope like any root but are
+    /// attachments, not workspaces. Recorded at grant time because the file
+    /// may later be moved or deleted, after which the filesystem can no
+    /// longer tell a file from an unavailable directory.
+    std::vector<std::filesystem::path> attached_files;
     bool enforce{false};
     std::uint64_t version{0};
 

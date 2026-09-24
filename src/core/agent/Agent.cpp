@@ -817,8 +817,15 @@ void Agent::set_session_id(std::string session_id) {
 std::size_t Agent::grant_workspace_paths(
     const std::vector<std::filesystem::path>& paths) {
     std::lock_guard lock(history_mutex_);
+    const auto directories_before =
+        session_context_.workspace_view().additional_directories();
     const auto added = session_context_.extend_workspace(paths);
-    if (added > 0) {
+    // Attached files widen path scope but never reach the system prompt, so
+    // attaching one must not rebuild the stable prefix (a rebuild also
+    // re-projects memory, whose recall order moves between turns).
+    if (added > 0
+        && session_context_.workspace_view().additional_directories()
+            != directories_before) {
         refresh_stable_prompt_state_unlocked();
     }
     return added;

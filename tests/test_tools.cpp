@@ -19,6 +19,7 @@
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/ToolArgumentUtils.hpp"
 #include "core/tools/GetTimeTool.hpp"
+#include "core/tools/GetWorkspaceConfigTool.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
 #include "core/tools/WebFetchTool.hpp"
@@ -2952,3 +2953,39 @@ TEST_CASE("PythonManager execute works correctly", "[tools][python]") {
     REQUIRE_THAT(result.output, Catch::Matchers::ContainsSubstring("hello from python"));
 }
 #endif // FILO_ENABLE_PYTHON
+
+TEST_CASE("get_workspace_config reports attached files apart from directories",
+          "[tools][workspace][attachments]") {
+    namespace fs = std::filesystem;
+    const fs::path sandbox = fs::temp_directory_path()
+        / std::format("filo_workspace_config_attach_{}_{}", ::getpid(),
+                      std::chrono::steady_clock::now().time_since_epoch().count());
+    fs::create_directories(sandbox / "project");
+    fs::create_directories(sandbox / "library");
+    { std::ofstream(sandbox / "shot.png", std::ios::binary) << "png-bytes"; }
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{sandbox};
+
+    auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{
+        .primary = sandbox / "project", .enforce = true});
+    core::tools::GetWorkspaceConfigTool tool;
+    const auto library = core::workspace::SessionWorkspace::normalize_path(sandbox / "library");
+    const auto shot = core::workspace::SessionWorkspace::normalize_path(sandbox / "shot.png");
+
+    // No attachments: the optional key is omitted entirely.
+    CHECK_THAT(tool.execute("{}", context),
+               !Catch::Matchers::ContainsSubstring("attached_files"));
+
+    REQUIRE(context.extend_workspace({sandbox / "library", sandbox / "shot.png"}) == 2);
+    fs::remove(sandbox / "shot.png");  // still an attachment once the file is gone
+    const auto output = tool.execute("{}", context);
+    const auto escaped = [](const fs::path& path) {
+        return core::utils::escape_json_string(path.string());
+    };
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring(
+        std::format(R"("additional_directories":["{}"])", escaped(library))));
+    CHECK_THAT(output, Catch::Matchers::ContainsSubstring(
+        std::format(R"("attached_files":["{}"])", escaped(shot))));
+}

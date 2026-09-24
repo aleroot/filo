@@ -1,8 +1,17 @@
 #include "tui/WorkspaceDetailsPanel.hpp"
+#include "core/workspace/SessionWorkspace.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <atomic>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <random>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <unistd.h>
 
 namespace {
 
@@ -14,6 +23,30 @@ std::string render_panel(const core::workspace::WorkspaceSnapshot& workspace,
         ftxui::Dimension::Fixed(width), ftxui::Dimension::Fit(element));
     ftxui::Render(screen, element);
     return screen.ToString();
+}
+
+// Unique per process and per call: ctest runs each test case as its own
+// process in parallel, and Catch re-enters a TEST_CASE once per SECTION.
+struct TempDir {
+    std::filesystem::path path;
+    explicit TempDir(std::string_view label) {
+        static std::atomic<unsigned> counter{0};
+        path = std::filesystem::temp_directory_path()
+            / std::format("{}_{}_{}_{}", label, ::getpid(), std::random_device{}(),
+                          counter.fetch_add(1));
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+};
+
+void write_file(const std::filesystem::path& path) {
+    std::ofstream(path, std::ios::binary) << "png-bytes";
+    REQUIRE(std::filesystem::is_regular_file(path));
 }
 
 } // namespace
@@ -112,4 +145,79 @@ TEST_CASE("Workspace details navigation stays in bounds and dismisses consistent
         CHECK(tui::handle_workspace_details_event(state, event, 0));
         CHECK_FALSE(state.active);
     }
+}
+
+TEST_CASE("Attached files never count as workspaces, even after the file is gone",
+          "[workspace_details][tui][attachments]") {
+    namespace fs = std::filesystem;
+    const TempDir sandbox{"filo_workspace_attachments"};
+    fs::create_directories(sandbox.path / "project");
+    fs::create_directories(sandbox.path / "library");
+    fs::create_directories(sandbox.path / "shots");
+    const fs::path screenshot = sandbox.path / "shots" / "Screenshot.png";
+    const fs::path second = sandbox.path / "shots" / "second.png";
+    write_file(screenshot);
+    write_file(second);
+
+    core::workspace::SessionWorkspace workspace{core::workspace::WorkspaceSnapshot{
+        .primary = sandbox.path / "project",
+        .enforce = true,
+    }};
+    REQUIRE(workspace.add_additional_paths({screenshot, second, sandbox.path / "library"}) == 3);
+    REQUIRE(workspace.snapshot().attached_files.size() == 2);
+    CHECK(tui::workspace_details_workspace_count(workspace.snapshot()) == 2);
+    CHECK(tui::workspace_details_entry_count(workspace.snapshot()) == 4);
+
+    SECTION("a moved or deleted attachment stays an attachment") {
+        // macOS screenshot thumbnails are temporary files deleted right after
+        // the drop; a filesystem probe then reported them as workspaces.
+        REQUIRE(fs::remove(screenshot));
+        CHECK(tui::workspace_details_workspace_count(workspace.snapshot()) == 2);
+        const auto output = render_panel(workspace.snapshot());
+        CHECK(output.find("Workspaces (2)") != std::string::npos);
+        CHECK(output.find("Attachments (2)") != std::string::npos);
+    }
+
+    SECTION("re-attaching the same file does not duplicate it") {
+        CHECK(workspace.add_additional_paths({screenshot}) == 0);
+        CHECK(workspace.snapshot().attached_files.size() == 2);
+        CHECK(tui::workspace_details_entry_count(workspace.snapshot()) == 4);
+    }
+
+    SECTION("granting the containing directory absorbs its attachments") {
+        REQUIRE(workspace.add_additional_paths({sandbox.path / "shots"}) == 1);
+        CHECK(workspace.snapshot().attached_files.empty());
+        CHECK(tui::workspace_details_workspace_count(workspace.snapshot()) == 3);
+        CHECK(tui::workspace_details_entry_count(workspace.snapshot()) == 3);
+    }
+
+    SECTION("changing the primary to a parent drops nested attachments") {
+        REQUIRE(workspace.set_primary(sandbox.path));
+        CHECK(workspace.snapshot().additional.empty());
+        CHECK(workspace.snapshot().attached_files.empty());
+        CHECK(tui::workspace_details_workspace_count(workspace.snapshot()) == 1);
+    }
+
+    SECTION("copied and re-normalized snapshots keep the grant-time record") {
+        REQUIRE(fs::remove(screenshot));
+        const core::workspace::SessionWorkspace copy{workspace.snapshot()};
+        CHECK(copy.snapshot().attached_files.size() == 2);
+        CHECK(tui::workspace_details_workspace_count(copy.snapshot()) == 2);
+    }
+}
+
+TEST_CASE("Unrecorded roots are classified by probing the filesystem",
+          "[workspace_details][tui][attachments]") {
+    const TempDir sandbox{"filo_workspace_unrecorded"};
+    write_file(sandbox.path / "notes.txt");
+
+    // Roots composed outside SessionWorkspace carry no grant-time record: an
+    // existing file is still an attachment, while an unavailable root stays a
+    // workspace because it may be an unmounted directory.
+    const core::workspace::WorkspaceSnapshot snapshot{
+        .primary = sandbox.path / "project",
+        .additional = {sandbox.path / "notes.txt", sandbox.path / "unmounted" / "repo"},
+    };
+    CHECK(tui::workspace_details_workspace_count(snapshot) == 2);
+    CHECK(tui::workspace_details_entry_count(snapshot) == 3);
 }

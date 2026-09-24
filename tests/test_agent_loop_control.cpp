@@ -1509,6 +1509,58 @@ TEST_CASE("Agent keeps stable prompt prefix cached across turns", "[agent][promp
           == third_payload.substr(0, third_messages));
 }
 
+TEST_CASE("Agent keeps attached files out of the stable prompt prefix",
+          "[agent][prompt][attachments]") {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    TempDir tmp{std::filesystem::temp_directory_path()
+                / std::format("filo_prompt_attach_project_{}", stamp)};
+    TempDir outside{std::filesystem::temp_directory_path()
+                    / std::format("filo_prompt_attach_outside_{}", stamp)};
+    ScopedCurrentPath scoped_cwd(tmp.path());
+    const auto screenshot = outside.path() / "Screenshot.png";
+    {
+        std::ofstream out(screenshot, std::ios::binary);
+        out << "png-bytes";
+    }
+    std::filesystem::create_directories(outside.path() / "library");
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        core::tools::ToolManager::get_instance(),
+        test_support::make_session_context(
+            core::workspace::WorkspaceSnapshot{
+                .primary = tmp.path(),
+                .enforce = true,
+                .version = 1,
+            },
+            core::context::SessionTransport::cli,
+            "prompt-attach-session"));
+
+    send_and_wait(agent, "first");
+    REQUIRE(agent->grant_workspace_paths({screenshot}) == 1);
+    REQUIRE(agent->workspace_snapshot().allows_read(screenshot));
+    send_and_wait(agent, "second");
+    REQUIRE(agent->grant_workspace_paths({outside.path() / "library"}) == 1);
+    send_and_wait(agent, "third");
+
+    const auto requests = provider->requests_snapshot();
+    REQUIRE(requests.size() == 3);
+    const auto first = requests[0].prompt_plan.render();
+    const auto second = requests[1].prompt_plan.render();
+    const auto third = requests[2].prompt_plan.render();
+
+    // Attaching a file leaves the cached prefix byte-identical ...
+    CHECK(first == second);
+    CHECK(second.find("Screenshot.png") == std::string::npos);
+    CHECK(second.find("Additional directories:") == std::string::npos);
+    // ... while granting a real directory still reaches the prompt.
+    CHECK(third != second);
+    CHECK_THAT(third, Catch::Matchers::ContainsSubstring("Additional directories:"));
+    CHECK_THAT(third, Catch::Matchers::ContainsSubstring("library"));
+    CHECK(third.find("Screenshot.png") == std::string::npos);
+}
+
 TEST_CASE("Agent exposes write_todos and injects its current plan", "[agent][prompt][todos]") {
     auto provider = std::make_shared<CapturingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();

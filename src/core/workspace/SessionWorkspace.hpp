@@ -49,6 +49,40 @@ namespace core::workspace {
     return ordered_roots(snapshot.primary, snapshot.additional);
 }
 
+/**
+ * True when the additional entry @p path is an attached file rather than a
+ * workspace root. The grant-time record is authoritative, so an attachment
+ * stays one after its file disappears; entries without a record (roots
+ * composed outside SessionWorkspace) fall back to probing the filesystem.
+ */
+[[nodiscard]] inline bool is_attached_file(const WorkspaceSnapshot& snapshot,
+                                           const std::filesystem::path& path) {
+    if (std::ranges::contains(snapshot.attached_files, path)) {
+        return true;
+    }
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) && !ec;
+}
+
+/**
+ * The additional entries that are workspace roots, in grant order, i.e.
+ * `additional` without attached files. Prompt text and workspace discovery
+ * use this: an attachment is already named in the message that carried it,
+ * and repeating it in the system prompt would change the cached prefix on
+ * every attachment.
+ */
+[[nodiscard]] inline std::vector<std::filesystem::path> additional_directories(
+    const WorkspaceSnapshot& snapshot) {
+    std::vector<std::filesystem::path> directories;
+    directories.reserve(snapshot.additional.size());
+    for (const auto& path : snapshot.additional) {
+        if (!path.empty() && !is_attached_file(snapshot, path)) {
+            directories.push_back(path);
+        }
+    }
+    return directories;
+}
+
 class SessionWorkspace {
 public:
     explicit SessionWorkspace(WorkspaceSnapshot snapshot)
@@ -58,6 +92,10 @@ public:
     [[nodiscard]] const std::filesystem::path& primary() const noexcept { return snapshot_.primary; }
     [[nodiscard]] const std::vector<std::filesystem::path>& additional() const noexcept {
         return snapshot_.additional;
+    }
+    /// See the free additional_directories().
+    [[nodiscard]] std::vector<std::filesystem::path> additional_directories() const {
+        return core::workspace::additional_directories(snapshot_);
     }
     [[nodiscard]] bool enforce() const noexcept { return snapshot_.enforce; }
     [[nodiscard]] std::uint64_t version() const noexcept { return snapshot_.version; }
@@ -185,10 +223,14 @@ public:
                 });
             }
             snapshot_.additional.push_back(normalized);
+            if (is_file) {
+                snapshot_.attached_files.push_back(normalized);
+            }
             ++added;
         }
 
         if (added > 0) {
+            prune_attached_files(snapshot_);
             ++snapshot_.version;
         }
         return added;
@@ -219,6 +261,7 @@ public:
         std::erase_if(snapshot_.additional, [&](const auto& existing) {
             return is_subpath(normalized, existing);
         });
+        prune_attached_files(snapshot_);
         ++snapshot_.version;
         return true;
     }
@@ -283,6 +326,13 @@ public:
                 snapshot.additional.end());
         }
 
+        for (auto& file : snapshot.attached_files) {
+            if (!file.empty()) {
+                file = normalize_path(file);
+            }
+        }
+        prune_attached_files(snapshot);
+
         // The scratch roots are normalized but *not* resolved through the
         // filesystem. Several of them (the sandbox's runtime root, the host
         // TMPDIR) may not exist yet when the snapshot is built, and
@@ -311,6 +361,19 @@ public:
     }
 
 private:
+    // Keeps attached_files a duplicate-free subset of additional, so every
+    // path that stops being a root also stops being an attachment.
+    static void prune_attached_files(WorkspaceSnapshot& snapshot) {
+        std::vector<std::filesystem::path> kept;
+        for (auto& file : snapshot.attached_files) {
+            if (std::ranges::contains(snapshot.additional, file)
+                && !std::ranges::contains(kept, file)) {
+                kept.push_back(std::move(file));
+            }
+        }
+        snapshot.attached_files = std::move(kept);
+    }
+
     [[nodiscard]] bool is_within_project_roots(
         const std::filesystem::path& resolved_target) const {
         if (!snapshot_.primary.empty() && is_subpath(snapshot_.primary, resolved_target)) {

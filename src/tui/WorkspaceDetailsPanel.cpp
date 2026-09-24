@@ -10,7 +10,6 @@
 #include <filesystem>
 #include <format>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -31,13 +30,9 @@ WorkspaceDetailsEntries split_workspace_details_entries(
 
     for (const auto& path : workspace.additional) {
         if (path.empty()) continue;
-
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(path, ec) && !ec) {
+        if (core::workspace::is_attached_file(workspace, path)) {
             entries.attachments.push_back(path);
         } else {
-            // Workspace roots can be temporarily unavailable, so only paths
-            // known to be files are classified as attachments.
             entries.workspaces.push_back(path);
         }
     }

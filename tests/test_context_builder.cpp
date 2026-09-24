@@ -966,3 +966,21 @@ Additional instructions.
                    !Catch::Matchers::ContainsSubstring("secondary-skill"));
     }
 }
+
+TEST_CASE("ContextBuilder omits attached files from the workspace facts",
+          "[context][builder][workspace][attachments]") {
+    auto primary = make_temp_workspace("filo_context_builder_attach_primary");
+    auto outside = make_temp_workspace("filo_context_builder_attach_outside");
+    write_text(outside.path() / "shot.png", "png-bytes");
+
+    auto context = make_context(primary.path());
+    const std::string before = build_prompt(context);
+    REQUIRE(context.extend_workspace({outside.path() / "shot.png"}) == 1);
+    const std::string with_attachment = build_prompt(context);
+
+    // Byte-identical: an attachment costs no system-prompt tokens and keeps
+    // the provider's cached prefix valid.
+    CHECK(with_attachment == before);
+    CHECK(with_attachment.find("shot.png") == std::string::npos);
+    CHECK(with_attachment.find("Additional directories:") == std::string::npos);
+}

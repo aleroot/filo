@@ -107,9 +107,12 @@ namespace {
 
     std::string context_section = "\n\n[Workspace]\n";
     context_section += "Primary: " + workspace.primary().string() + "\n";
-    if (!workspace.additional().empty()) {
+    // Attached files are named in the message that carried them; listing them
+    // here would spend tokens and invalidate the cached prefix per attachment.
+    if (const auto directories = workspace.additional_directories();
+        !directories.empty()) {
         context_section += "Additional directories:\n";
-        for (const auto& dir : workspace.additional()) {
+        for (const auto& dir : directories) {
             context_section += "- " + dir.string() + "\n";
         }
     }
@@ -301,7 +304,7 @@ std::vector<ContextLayer> ContextBuilder::build_layers() const
         // discovery is the last-wins consumer, which is what lets the primary
         // override a secondary root's skill of the same name.
         const auto workspace_roots = core::workspace::ordered_roots(
-            project_root, session_context_.workspace_view().additional());
+            project_root, session_context_.workspace_view().additional_directories());
         const auto steering_mode = session_context_.steering_policy.mode;
         if (!workspace_roots.empty()
             || steering_mode == SteeringMode::CustomFile
