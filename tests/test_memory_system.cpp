@@ -123,6 +123,9 @@ TEST_CASE("MemorySystem semantic prompt is projected from the owned store",
 
     core::memory::MemorySystem system{
         store, std::make_shared<core::memory::NullToolRecoveryMemory>()};
+    const auto projection = system.semantic_prompt_projection(context);
+    CHECK_THAT(projection.block, ContainsSubstring("[Memory]"));
+    CHECK(projection.recalled_entry_ids.size() == 1);
     const auto with_capture = system.semantic_prompt_block(context);
     CHECK_THAT(with_capture, ContainsSubstring("[Memory]"));
     CHECK_THAT(with_capture,
@@ -137,6 +140,8 @@ TEST_CASE("MemorySystem semantic prompt is projected from the owned store",
         core::workspace::WorkspaceSnapshot{.primary = dir.path / "other-project"});
     const auto other_prompt = system.semantic_prompt_block(other_context);
     CHECK(other_prompt.find("Prefer concise engineering summaries.") == std::string::npos);
+    CHECK(system.semantic_prompt_projection(other_context)
+              .recalled_entry_ids.empty());
     other_context.memory_policy.use_memories = false;
     CHECK(system.semantic_prompt_block(other_context).empty());
 }

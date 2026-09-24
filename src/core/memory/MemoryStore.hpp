@@ -67,6 +67,15 @@ public:
     [[nodiscard]] MemoryStore for_context(const core::context::SessionContext& context) const;
 
     [[nodiscard]] MemoryState load(std::string* error = nullptr) const;
+    /// Selects the active entries that fit in a prompt. The returned state
+    /// contains only entries that the prompt projection may include.
+    [[nodiscard]] MemoryState load_for_prompt(std::size_t max_entries = 24,
+                                              std::string* error = nullptr) const;
+    /// Records one user-turn recall for ids that were actually included in a
+    /// submitted prompt. Inactive or out-of-scope entries are left untouched.
+    [[nodiscard]] bool record_prompt_recall(
+        const std::vector<std::string>& entry_ids,
+        std::string* error = nullptr) const;
     [[nodiscard]] bool save(const MemoryState& state, std::string* error = nullptr) const;
 
     [[nodiscard]] MemorySettings settings(std::string* error = nullptr) const;

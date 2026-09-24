@@ -73,6 +73,98 @@ TEST_CASE("MemoryStore deduplicates identical remembered content", "[memory]") {
     CHECK(entries[0].use_count == 2);
 }
 
+TEST_CASE("MemoryStore recall updates only entries included in the prompt",
+          "[memory][recall]") {
+    TempDir dir{"filo_memory_store_recall_usage"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto context_a = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path / "project-a"});
+    const auto context_b = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path / "project-b"});
+    const auto a = store.for_context(context_a);
+    const auto b = store.for_context(context_b);
+
+    REQUIRE(a.remember("Older project memory.").ok);
+    REQUIRE(a.remember("Recently used project memory.").ok);
+    REQUIRE(b.remember("Other project's memory.").ok);
+
+    auto initial = store.load();
+    for (auto& entry : initial.entries) {
+        if (entry.content == "Older project memory.") {
+            entry.last_used_at = "2026-01-01T00:00:00Z";
+            entry.use_count = 3;
+        } else if (entry.content == "Recently used project memory.") {
+            entry.last_used_at = "2026-02-01T00:00:00Z";
+            entry.use_count = 7;
+        } else if (entry.content == "Other project's memory.") {
+            entry.last_used_at = "2026-03-01T00:00:00Z";
+            entry.use_count = 11;
+        }
+    }
+    REQUIRE(store.save(initial));
+
+    const auto recalled = a.load_for_prompt(1);
+    REQUIRE(recalled.entries.size() == 1);
+    CHECK(recalled.entries.front().content == "Recently used project memory.");
+    CHECK(recalled.entries.front().use_count == 7);
+    CHECK(recalled.entries.front().last_used_at == "2026-02-01T00:00:00Z");
+    REQUIRE(a.record_prompt_recall(
+        std::vector<std::string>{recalled.entries.front().id}));
+
+    const auto persisted = store.load();
+    REQUIRE(persisted.entries.size() == 3);
+    for (const auto& entry : persisted.entries) {
+        if (entry.content == "Older project memory.") {
+            CHECK(entry.use_count == 3);
+            CHECK(entry.last_used_at == "2026-01-01T00:00:00Z");
+        } else if (entry.content == "Recently used project memory.") {
+            CHECK(entry.use_count == 8);
+            CHECK(entry.last_used_at != "2026-02-01T00:00:00Z");
+        } else if (entry.content == "Other project's memory.") {
+            CHECK(entry.use_count == 11);
+            CHECK(entry.last_used_at == "2026-03-01T00:00:00Z");
+        }
+    }
+}
+
+TEST_CASE("MemoryStore enforces max active entries without evicting memories",
+          "[memory][limit]") {
+    TempDir dir{"filo_memory_store_active_limit"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 2;
+    REQUIRE(store.save_settings(settings));
+
+    REQUIRE(store.remember("First active memory.").ok);
+    REQUIRE(store.remember("Second active memory.").ok);
+    const auto rejected = store.remember("Third active memory.");
+    CHECK_FALSE(rejected.ok);
+    CHECK_THAT(rejected.message, Catch::Matchers::ContainsSubstring("Memory limit reached"));
+    REQUIRE(store.list().size() == 2);
+
+    // Updating an existing active entry remains allowed at the limit.
+    CHECK(store.remember("First active memory.").ok);
+    REQUIRE(store.forget("m1").ok);
+    REQUIRE(store.remember("Third active memory.").ok);
+
+    // Restoring an archived entry cannot push the scope over its configured cap.
+    const auto restore_rejected = store.remember("First active memory.");
+    CHECK_FALSE(restore_rejected.ok);
+    CHECK_THAT(restore_rejected.message,
+               Catch::Matchers::ContainsSubstring("Memory limit reached"));
+
+    auto oversized = store.load();
+    oversized.entries.push_back(core::memory::MemoryEntry{
+        .id = "m99",
+        .content = "Bypass through whole-store save.",
+        .scope = "global",
+    });
+    std::string error;
+    CHECK_FALSE(store.save(oversized, &error));
+    CHECK_THAT(error, Catch::Matchers::ContainsSubstring("max_active_entries"));
+    CHECK(store.list().size() == 2);
+}
+
 TEST_CASE("MemoryStore serializes concurrent remembers for the same file", "[memory][concurrency]") {
     TempDir dir{"filo_memory_store_concurrent"};
     const auto memory_path = dir.path / "memory.json";

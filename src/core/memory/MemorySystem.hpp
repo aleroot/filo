@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace core::memory {
 
@@ -17,6 +18,11 @@ namespace core::memory {
  */
 struct MemoryConfig {
     bool tool_recovery = true;
+};
+
+struct SemanticPromptProjection {
+    std::string block;
+    std::vector<std::string> recalled_entry_ids;
 };
 
 /**
@@ -77,6 +83,21 @@ public:
 
     /// Prompt projection of semantic memories. ContextBuilder (and any other
     /// prompt assembler) should call this rather than constructing a store.
+    [[nodiscard]] SemanticPromptProjection semantic_prompt_projection(
+        const core::context::SessionContext& context,
+        std::size_t max_entries = 24,
+        bool allow_auto_capture = true) const;
+
+    /// Counts one recall for the ids a submitted request actually carried
+    /// (SemanticPromptProjection::recalled_entry_ids), keeping recall
+    /// bookkeeping paired with the projection that produced the ids.
+    [[nodiscard]] bool record_prompt_recall(
+        const core::context::SessionContext& context,
+        const std::vector<std::string>& entry_ids,
+        std::string* error = nullptr) const;
+
+    /// Text-only convenience for callers that do not need to record which
+    /// memories were included in a submitted model request.
     [[nodiscard]] std::string semantic_prompt_block(
         const core::context::SessionContext& context,
         std::size_t max_entries = 24,

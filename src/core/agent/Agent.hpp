@@ -374,6 +374,12 @@ private:
             pending_runtime_recoveries;
         std::mutex recovery_mutex;
         bool final_response_after_repeat_stop_requested = false;
+        // Counts at most one memory recall per user turn; guarded by
+        // history_mutex alongside the stable prompt projection.
+        bool memory_recall_recorded = false;
+        // IDs match the frozen prompt plan for this turn, even if memory is
+        // refreshed while tool calls are in flight.
+        std::vector<std::string> memory_entry_ids;
         // Destructive history replacement invalidates callbacks from every
         // older turn. Ordinary appends and in-turn compaction keep this stable.
         std::uint64_t conversation_generation = 0;
@@ -538,6 +544,7 @@ private:
     std::optional<core::context::ProjectFactsSnapshot> project_facts_snapshot_;
     core::context::PromptPlan stable_prompt_plan_;
     std::string stable_prompt_prefix_;
+    std::vector<std::string> stable_memory_entry_ids_;
     std::size_t stable_prompt_prefix_tokens_ = 0;
     bool stable_prompt_prefix_dirty_ = true;
     core::context::ContextWindowSnapshot context_window_snapshot_;

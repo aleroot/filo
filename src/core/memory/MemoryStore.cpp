@@ -16,6 +16,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -191,6 +193,53 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
     return *it->second;
 }
 
+[[nodiscard]] std::size_t active_entry_limit(const MemorySettings& settings) noexcept {
+    return static_cast<std::size_t>(std::max(1, settings.max_active_entries));
+}
+
+/// True when the project/scope/session bucket already holds the configured
+/// maximum of active entries, so activating one more would exceed it.
+[[nodiscard]] bool active_bucket_full(const MemoryState& state,
+                                      std::string_view project_root,
+                                      std::string_view scope,
+                                      std::string_view session_id) {
+    const auto active = static_cast<std::size_t>(std::ranges::count_if(
+        state.entries, [&](const MemoryEntry& entry) {
+            return !entry.archived
+                && entry.project_root == project_root
+                && entry.scope == scope
+                && entry.session_id == session_id;
+        }));
+    return active >= active_entry_limit(state.settings);
+}
+
+[[nodiscard]] MemoryMutationResult active_limit_reached(const MemorySettings& settings,
+                                                        std::string_view remedy) {
+    return {.ok = false, .message = std::format(
+        "Memory limit reached: this scope already has the configured maximum "
+        "of {} active entries. Archive or forget an entry before {}.",
+        active_entry_limit(settings), remedy)};
+}
+
+/// Prompt precedence: most recently used first, then newest, then id so the
+/// projected block is deterministic across rebuilds.
+[[nodiscard]] bool prompt_precedes(const MemoryEntry& lhs, const MemoryEntry& rhs) {
+    if (lhs.last_used_at != rhs.last_used_at) return lhs.last_used_at > rhs.last_used_at;
+    if (lhs.created_at != rhs.created_at) return lhs.created_at > rhs.created_at;
+    return lhs.id < rhs.id;
+}
+
+[[nodiscard]] bool memory_state_within_active_limit(const MemoryState& state) {
+    const auto limit = active_entry_limit(state.settings);
+    std::map<std::tuple<std::string, std::string, std::string>, std::size_t> counts;
+    for (const auto& entry : state.entries) {
+        if (entry.archived) continue;
+        const auto key = std::tuple{entry.project_root, entry.scope, entry.session_id};
+        if (++counts[key] > limit) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 MemoryStore::MemoryStore(std::filesystem::path path)
@@ -262,6 +311,81 @@ MemoryState MemoryStore::load(std::string* error) const {
     auto state = load_unlocked(error);
     std::erase_if(state.entries, [this](const auto& entry) { return !visible(entry); });
     return state;
+}
+
+MemoryState MemoryStore::load_for_prompt(std::size_t max_entries,
+                                         std::string* error) const {
+    if (error) error->clear();
+    std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return {};
+    }
+
+    std::string local_error;
+    std::string& read_error = error ? *error : local_error;
+    auto state = load_unlocked(&read_error);
+    if (!read_error.empty()) return state;
+    MemoryState prompt_state;
+    prompt_state.version = state.version;
+    prompt_state.settings = state.settings;
+
+    if (!state.settings.enabled || max_entries == 0) return prompt_state;
+
+    std::vector<std::size_t> selected;
+    selected.reserve(state.entries.size());
+    for (std::size_t i = 0; i < state.entries.size(); ++i) {
+        const auto& entry = state.entries[i];
+        if (visible(entry) && !entry.archived && !entry.content.empty()) {
+            selected.push_back(i);
+        }
+    }
+    std::ranges::sort(selected, [&](std::size_t lhs, std::size_t rhs) {
+        return prompt_precedes(state.entries[lhs], state.entries[rhs]);
+    });
+    if (selected.size() > max_entries) selected.resize(max_entries);
+
+    for (const std::size_t index : selected) {
+        prompt_state.entries.push_back(state.entries[index]);
+    }
+    return prompt_state;
+}
+
+bool MemoryStore::record_prompt_recall(
+    const std::vector<std::string>& entry_ids,
+    std::string* error) const {
+    if (error) error->clear();
+    if (entry_ids.empty()) return true;
+
+    std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) {
+        if (error) *error = lock_error;
+        return false;
+    }
+
+    std::string local_error;
+    std::string& read_error = error ? *error : local_error;
+    auto state = load_unlocked(&read_error);
+    if (!read_error.empty()) return false;
+
+    bool changed = false;
+    const std::string recalled_at = now_iso8601();
+    for (auto& entry : state.entries) {
+        if (entry.archived || !visible(entry)
+            || !std::ranges::contains(entry_ids, entry.id)) {
+            continue;
+        }
+        entry.last_used_at = recalled_at;
+        if (entry.use_count < std::numeric_limits<int>::max()) ++entry.use_count;
+        changed = true;
+    }
+    return !changed || save_unlocked(state, error);
 }
 
 MemoryState MemoryStore::load_unlocked(std::string* error) const {
@@ -342,6 +466,14 @@ bool MemoryStore::save(const MemoryState& state, std::string* error) const {
         core::utils::lock_path_for(path_), &lock_error);
     if (!file_lock) {
         if (error) *error = lock_error;
+        return false;
+    }
+    if (!memory_state_within_active_limit(state)) {
+        if (error) {
+            *error = std::format(
+                "Memory state exceeds max_active_entries ({}) for a project/session scope.",
+                active_entry_limit(state.settings));
+        }
         return false;
     }
     return save_unlocked(state, error);
@@ -464,6 +596,10 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
         if (entry.project_root != project_root_ || entry.scope != clean_scope
             || entry.session_id != entry_session_id) continue;
         if (normalize_for_match(entry.content) != fingerprint) continue;
+        if (entry.archived
+            && active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
+            return active_limit_reached(state.settings, "restoring this one");
+        }
         entry.archived = false;
         entry.updated_at = now;
         entry.last_used_at = now;
@@ -473,6 +609,10 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
             return {.ok = false, .message = error};
         }
         return {.ok = true, .message = std::format("Updated memory {{{}}}.", entry.id), .entry = entry};
+    }
+
+    if (active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
+        return active_limit_reached(state.settings, "adding another");
     }
 
     std::erase_if(tags, [](const std::string& tag) {
@@ -710,8 +850,7 @@ std::string build_memory_prompt_block(const MemoryState& state,
         }
     }
     std::ranges::sort(active, [](const MemoryEntry* lhs, const MemoryEntry* rhs) {
-        if (lhs->last_used_at != rhs->last_used_at) return lhs->last_used_at > rhs->last_used_at;
-        return lhs->created_at > rhs->created_at;
+        return prompt_precedes(*lhs, *rhs);
     });
 
     std::string out;

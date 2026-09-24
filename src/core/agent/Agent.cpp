@@ -1050,13 +1050,22 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     if (!stable_prompt_prefix_dirty_ && !stable_prompt_prefix_.empty()) {
         return;
     }
+    auto memory_projection = memory_system_->semantic_prompt_projection(
+        session_context_);
     stable_prompt_plan_ =
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
-            .with_memory_prompt(memory_system_->semantic_prompt_block(
-                session_context_))
+            .with_memory_prompt(std::move(memory_projection.block))
             .include_project_facts(false)
             .build_plan();
+    const bool memory_layer_included = std::ranges::any_of(
+        stable_prompt_plan_.layers(), [](const auto& layer) {
+            return layer.kind == core::context::ContextLayerKind::Memory
+                && !layer.content.empty();
+        });
+    stable_memory_entry_ids_ = memory_layer_included
+        ? std::move(memory_projection.recalled_entry_ids)
+        : std::vector<std::string>{};
     stable_prompt_prefix_ = stable_prompt_plan_.render();
     if (stable_prompt_prefix_.empty()) {
         stable_prompt_prefix_tokens_ = 0;
@@ -1620,6 +1629,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
     std::string mode_snapshot;
     std::string provider_name_snapshot;
     std::string dynamic_prompt_suffix;
+    std::vector<std::string> request_memory_entry_ids;
     bool stale_turn = false;
     {
         std::lock_guard lock(history_mutex_);
@@ -1657,6 +1667,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
             if (!turn_state->prompt_plan.has_value()) {
                 auto plan = stable_prompt_plan_;
+                turn_state->memory_entry_ids = stable_memory_entry_ids_;
                 plan.append(core::context::ContextLayer{
                     .kind = core::context::ContextLayerKind::ConversationState,
                     .stability = core::context::PromptStability::Dynamic,
@@ -1665,6 +1676,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                 });
                 turn_state->prompt_plan = std::move(plan);
             }
+            request_memory_entry_ids = turn_state->memory_entry_ids;
             request.prompt_plan = *turn_state->prompt_plan;
             provider_name_snapshot = turn_state->provider_name;
         }
@@ -2768,6 +2780,24 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
         }).detach();
     };
+
+    std::vector<std::string> recalled_memory_entry_ids;
+    {
+        std::lock_guard lock(history_mutex_);
+        if (!turn_state->memory_recall_recorded
+            && !request_memory_entry_ids.empty()) {
+            turn_state->memory_recall_recorded = true;
+            recalled_memory_entry_ids = std::move(request_memory_entry_ids);
+        }
+    }
+    if (!recalled_memory_entry_ids.empty()) {
+        std::string recall_error;
+        if (!memory_system_->record_prompt_recall(
+                step_session_context, recalled_memory_entry_ids, &recall_error)) {
+            core::logging::warn(
+                "[Memory] Could not record prompt recall metadata: {}", recall_error);
+        }
+    }
 
     try {
         provider->stream_response(request, on_stream_chunk);
