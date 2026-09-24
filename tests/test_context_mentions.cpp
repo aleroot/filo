@@ -117,7 +117,7 @@ TEST_CASE("Context mentions expand directories, preserve punctuation, and trunca
     fs::remove_all(sandbox);
 }
 
-TEST_CASE("Context mentions attach image files without inlining binary content", "[context]") {
+TEST_CASE("Context mentions pin image bytes for durable conversation replay", "[context][image]") {
     const fs::path sandbox = make_temp_dir("filo_context_image");
     const fs::path image = sandbox / "screenshots" / "error.png";
     write_text(image, "png-bytes");
@@ -133,6 +133,7 @@ TEST_CASE("Context mentions attach image files without inlining binary content",
     REQUIRE(expanded.content_parts[0].type == core::llm::ContentPartType::Text);
     REQUIRE(expanded.content_parts[1].type == core::llm::ContentPartType::Image);
     REQUIRE(expanded.content_parts[1].path == image.string());
+    REQUIRE(expanded.content_parts[1].url == "data:image/png;base64,cG5nLWJ5dGVz");
     REQUIRE(expanded.content_parts[2].text == ".");
 
     const std::string text_only = core::context::expand_mentions(

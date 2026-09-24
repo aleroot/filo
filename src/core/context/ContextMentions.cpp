@@ -264,6 +264,19 @@ void append_text_part(std::vector<core::llm::ContentPart>& parts, std::string_vi
     parts.push_back(core::llm::ContentPart::make_text(std::string(text)));
 }
 
+// Pins the image bytes as a data URL at mention time so replaying the
+// conversation (resume, later turns) never depends on the file still existing.
+[[nodiscard]] core::llm::ContentPart make_pinned_image_attachment(
+    const std::filesystem::path& path) {
+    auto attachment = core::llm::ContentPart::make_image(
+        path.string(), core::utils::mime::guess_type(path, false));
+    if (const auto encoded = core::llm::encode_image_part(attachment);
+        encoded.has_value()) {
+        attachment.url = encoded->data_url();
+    }
+    return attachment;
+}
+
 } // namespace
 
 std::optional<ActiveMention> find_active_mention(std::string_view input,
@@ -468,9 +481,7 @@ ExpandedPrompt expand_prompt(std::string_view input,
         if (is_image_file(resolved)) {
             output.display_text += core::llm::describe_image_attachment(raw_path);
             output.display_text += trailing_suffix;
-            output.content_parts.push_back(core::llm::ContentPart::make_image(
-                resolved.string(),
-                core::utils::mime::guess_type(resolved, false)));
+            output.content_parts.push_back(make_pinned_image_attachment(resolved));
             append_text_part(output.content_parts, trailing_suffix);
             i = cursor;
             continue;

@@ -9,6 +9,7 @@
 #include "core/llm/QwenModelTraits.hpp"
 #include "core/llm/providers/QwenModelCatalogSelector.hpp"
 #include "core/config/ConfigManager.hpp"
+#include "core/context/ContextMentions.hpp"
 #include "core/llm/Models.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
 
@@ -67,6 +68,16 @@ static std::filesystem::path make_temp_qwen_image_file() {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out << "fake-image";
     return path;
+}
+
+static std::size_t count_occurrences(std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    std::size_t position = 0;
+    while ((position = haystack.find(needle, position)) != std::string_view::npos) {
+        ++count;
+        position += needle.size();
+    }
+    return count;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1030,6 +1041,55 @@ TEST_CASE("Token Plan sends local images as Chat Completions data URLs",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"input_image")"));
     REQUIRE(protocol.build_url("https://example.test/v1", req.model)
             == "https://example.test/v1/chat/completions");
+}
+
+TEST_CASE("Token Plan replays a screenshot after its original file is removed",
+          "[qwen][token-plan][routing][vision][history]") {
+    const auto image = make_temp_qwen_image_file();
+    const auto expanded = core::context::expand_prompt(
+        "Read this screenshot @\"" + image.string() + "\".",
+        std::filesystem::current_path());
+
+    REQUIRE(expanded.content_parts.size() == 3);
+    REQUIRE(expanded.content_parts[1].type == ContentPartType::Image);
+    REQUIRE_THAT(expanded.content_parts[1].url,
+                 Catch::Matchers::StartsWith("data:image/png;base64,"));
+    std::filesystem::remove(image);
+
+    ChatRequest req;
+    req.model = "qwen3.8-max";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = expanded.display_text,
+        .content_parts = expanded.content_parts,
+    });
+
+    const std::string payload = DashScopeTokenPlanProtocol{}.serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"image_url")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("ZmFrZS1pbWFnZQ=="));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("[Attached image unavailable:"));
+}
+
+TEST_CASE("Token Plan caps replayed image history below DashScope's hard limit",
+          "[qwen][token-plan][vision][history]") {
+    ChatRequest req;
+    req.model = "qwen3.8-max";
+    Message message{.role = "user"};
+    for (int i = 0; i < 251; ++i) {
+        message.content_parts.push_back(
+            ContentPart::make_image_url("data:image/png;base64,ZmFrZS1pbWFnZQ=="));
+    }
+    req.messages.push_back(std::move(message));
+
+    const std::string payload = DashScopeTokenPlanProtocol{}.serialize(req);
+    require_valid_json(payload);
+    REQUIRE(count_occurrences(payload, R"("type":"image_url")") == 250);
+    REQUIRE_THAT(payload,
+                 Catch::Matchers::ContainsSubstring(
+                     "[Attached image omitted from this request to stay within the provider image limit]"));
+    REQUIRE(req.messages[0].content_parts.size() == 251);
+    REQUIRE(req.messages[0].content_parts[0].type == ContentPartType::Image);
 }
 
 TEST_CASE("Token Plan routes third-party models through Chat Completions",

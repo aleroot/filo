@@ -8,6 +8,7 @@
 #include "../../utils/JsonUtils.hpp"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <simdjson.h>
 
 namespace core::llm::protocols {
@@ -366,7 +367,18 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
         };
     }
 
-    std::string payload = Serializer::serialize(req, options);
+    // Qwen's OpenAI-compatible endpoint rejects a request at 256 images.
+    // Match Qwen Code's 250-image margin while leaving the caller's durable
+    // history intact: only an outbound copy is compacted, and only when needed.
+    constexpr std::size_t kMaxRequestImages = 250;
+    std::string payload;
+    if (const auto images = count_image_inputs(req); images > kMaxRequestImages) {
+        ChatRequest bounded = req;
+        evict_oldest_image_inputs(bounded, images - kMaxRequestImages);
+        payload = Serializer::serialize(bounded, options);
+    } else {
+        payload = Serializer::serialize(req, options);
+    }
     if (payload.ends_with('}')) {
         payload.pop_back();
         append_extra_fields(payload, req);

@@ -656,6 +656,36 @@ inline void degrade_historical_video_inputs(ChatRequest& req) {
     degrade_historical_media_inputs(req, {.images = false, .videos = true});
 }
 
+[[nodiscard]] inline std::size_t count_image_inputs(const ChatRequest& req) noexcept {
+    std::size_t count = 0;
+    for (const auto& message : req.messages) {
+        for (const auto& part : message.content_parts) {
+            if (part.type == ContentPartType::Image) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+/// Replaces the `count` oldest image parts with a text placeholder so a
+/// request fits a provider's per-request image limit.
+inline void evict_oldest_image_inputs(ChatRequest& req, std::size_t count) {
+    for (auto& message : req.messages) {
+        for (auto& part : message.content_parts) {
+            if (count == 0) {
+                return;
+            }
+            if (part.type != ContentPartType::Image) {
+                continue;
+            }
+            part = ContentPart::make_text(
+                "[Attached image omitted from this request to stay within the provider image limit]");
+            --count;
+        }
+    }
+}
+
 struct Serializer {
     enum class ReasoningContentPolicy {
         Omit,
