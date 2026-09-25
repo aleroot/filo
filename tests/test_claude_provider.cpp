@@ -229,6 +229,20 @@ TEST_CASE("ClaudeSerializer - Opus 5 does not fall back to the unknown-model bud
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("max_tokens":8096)"));
 }
 
+TEST_CASE("ClaudeSerializer - Opus 5.5 has the full response budget",
+          "[claude][serializer][regression]") {
+    auto request = make_simple_request("claude-opus-5-5");
+    request.effort = "max";
+
+    const auto payload = AnthropicSerializer::serialize(request);
+    simdjson::dom::parser parser;
+    const auto document = parser.parse(payload);
+
+    REQUIRE(document["max_tokens"].get_int64().value() == 128'000);
+    REQUIRE(document["output_config"]["effort"].get_string().value() == "max");
+    REQUIRE(document["thinking"]["type"].get_string().value() == "adaptive");
+}
+
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {
     auto req = make_simple_request();
     req.max_tokens = 2048;

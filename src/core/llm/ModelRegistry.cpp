@@ -317,6 +317,30 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             .constraints = kClaudeConstraints,
             .max_tool_calls = 32
         },
+        // Claude Opus 5.5
+        {
+            .canonical_id = "claude-opus-5-5",
+            .aliases = {"opus-5-5", "opus-5.5"},
+            .display_name = "Claude Opus 5.5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .max_reasoning_tokens = 0,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning) |
+                static_cast<uint32_t>(ModelCapability::PdfInput) |
+                static_cast<uint32_t>(ModelCapability::Citations) |
+                static_cast<uint32_t>(ModelCapability::CodeExecution) |
+                static_cast<uint32_t>(ModelCapability::Batch) |
+                static_cast<uint32_t>(ModelCapability::ContextManagement),
+            .tier = ModelTier::Powerful,
+            .pricing = {4.0, 20.0, 0.20, 5.0},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
         // Claude Sonnet 5
         {
             .canonical_id = "claude-sonnet-5",

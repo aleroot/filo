@@ -533,6 +533,17 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             protocol_.get());
         ensure_model_metadata(metadata_model);
         const auto metadata_info = resolved_model_info(metadata_model);
+        // Model discovery is intentionally provider-scoped: a model ID exposed
+        // by one configured endpoint must not overwrite the global registry
+        // card for another endpoint. Copy its concrete output limit onto this
+        // request instead, so serializers that require or honor max_tokens do
+        // not fall back to their generic, often much smaller, default.
+        if (!effective_request.max_tokens.has_value() && metadata_info.has_value()) {
+            const int32_t max_output_tokens = metadata_info->max_output_tokens;
+            if (max_output_tokens > 0) {
+                effective_request.max_tokens = max_output_tokens;
+            }
+        }
         if (metadata_info.has_value()
             && metadata_info->capabilities != 0) {
             degrade_historical_media_inputs(

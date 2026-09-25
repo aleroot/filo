@@ -1103,6 +1103,89 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
     CHECK(doc["messages"].at(2)["content"].at(0)["tool_use_id"].get_string().value() == "read-1");
 }
 
+TEST_CASE("HttpLLMProvider forwards a live output limit to the Anthropic wire request",
+          "[integration][claude][model-catalog][max-tokens]") {
+    constexpr std::string_view provider_name = "live-output-limit-metadata-provider";
+    constexpr std::string_view model_id = "claude-live-output-limit-model";
+
+    ModelInfo live_model;
+    live_model.canonical_id = std::string(model_id);
+    live_model.provider = std::string(provider_name);
+    live_model.context_window = 1'000'000;
+    live_model.max_output_tokens = 128'000;
+
+    ModelCatalogDiscoveryResult discovery;
+    discovery.attempted = true;
+    discovery.fetched = 1;
+    ModelCatalogAvailability::instance().record_result(
+        provider_name, discovery, {std::move(live_model)});
+
+    httplib::Server server;
+    std::vector<httplib::Request> received;
+    std::mutex received_mutex;
+    server.Post("/v1/messages", [&](const httplib::Request& request,
+                                     httplib::Response& response) {
+        {
+            std::lock_guard lock(received_mutex);
+            received.push_back(request);
+        }
+        response.set_content(
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n"
+            "event: content_block_start\n"
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"
+            "event: content_block_delta\n"
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"
+            "event: content_block_stop\n"
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+            "event: message_delta\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"
+            "event: message_stop\n"
+            "data: {\"type\":\"message_stop\"}\n\n",
+            "text/event-stream");
+    });
+
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread server_thread([&server]() { server.listen_after_bind(); });
+    ScopedServerStop stop_server(server);
+    wait_until_running(server);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", port),
+        core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+        std::string(model_id),
+        std::make_unique<AnthropicProtocol>(),
+        core::config::ApiType::Anthropic,
+        std::string(provider_name));
+
+    auto request = make_claude_request(std::string(model_id));
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    REQUIRE_FALSE(chunks.empty());
+    INFO(chunks.front().content);
+    REQUIRE_FALSE(chunks.front().is_error);
+
+    request.max_tokens = 2'048;
+    chunks.clear();
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+    REQUIRE_FALSE(chunks.empty());
+    INFO(chunks.front().content);
+    REQUIRE_FALSE(chunks.front().is_error);
+
+    std::lock_guard lock(received_mutex);
+    REQUIRE(received.size() == 2);
+    simdjson::dom::parser parser;
+    const auto discovered_limit_request = parser.parse(received[0].body);
+    CHECK(discovered_limit_request["max_tokens"].get_int64().value() == 128'000);
+    const auto explicit_limit_request = parser.parse(received[1].body);
+    CHECK(explicit_limit_request["max_tokens"].get_int64().value() == 2'048);
+}
+
 TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
           "[integration][claude][sse][error][http]") {
     httplib::Server server;
