@@ -1,10 +1,11 @@
 #include "AuthenticationManager.hpp"
+#include "ApiKeyPromptStrategy.hpp"
 #include "ClaudeOAuthFlow.hpp"
 #include "FileTokenStore.hpp"
 #include "GoogleAntigravityOAuthFlow.hpp"
 #include "GoogleOAuthCredentialSource.hpp"
 #include "KimiOAuthFlow.hpp"
-#include "MimoOAuthFlow.hpp"
+#include "MimoAuthenticationStrategy.hpp"
 #include "QwenOAuthFlow.hpp"
 #include "XaiOAuthFlow.hpp"
 #include "XaiOAuthCredentialSource.hpp"
@@ -12,21 +13,18 @@
 #include "OAuthCredentialSource.hpp"
 #include "OAuthTokenManager.hpp"
 #include "ui/ConsoleAuthUI.hpp"
-#include "core/llm/MimoModelTraits.hpp"
 #include "core/logging/Logger.hpp"
-#include "core/utils/JsonWriter.hpp"
-#include <simdjson.h>
+
 #include <algorithm>
 #include <cctype>
-#include <filesystem>
-#include <fstream>
 #include <stdexcept>
-#include <unordered_map>
 
 namespace core::auth {
 
 namespace {
 
+// Command identifiers are matched case-insensitively against each
+// strategy's login_provider() and login_aliases().
 std::string normalize(std::string_view value) {
     std::string out;
     out.reserve(value.size());
@@ -36,51 +34,17 @@ std::string normalize(std::string_view value) {
     return out;
 }
 
-std::string normalize_login_provider(std::string_view provider) {
-    std::string requested = normalize(provider);
-    if (requested == "openai-pkce" || requested == "openai_pkce"
-        || requested == "openaipkce") {
-        return "openai";
+bool matches_login_provider(const IAuthStrategy& strategy,
+                            std::string_view requested) {
+    if (normalize(strategy.login_provider()) == requested) {
+        return true;
     }
-    if (requested == "xai" || requested == "x.ai" || requested == "x-ai") {
-        return "grok";
+    for (const std::string_view alias : strategy.login_aliases()) {
+        if (normalize(alias) == requested) {
+            return true;
+        }
     }
-    if (requested == "z.ai" || requested == "z-ai" || requested == "zai-api") {
-        return "zai";
-    }
-    if (requested == "z.ai-coding" || requested == "z-ai-coding"
-        || requested == "zai_coding" || requested == "zai-coding-plan"
-        || requested == "z.aicodingplan" || requested == "zaicoding") {
-        return "zai-coding";
-    }
-    if (requested == "gemini") {
-        return "google";
-    }
-    if (requested == "qwen-token-plan" || requested == "qwen_token_plan"
-        || requested == "qwencloud" || requested == "qwen-cloud") {
-        return "qwen";
-    }
-    if (requested == "qwen_coding" || requested == "qwencoding"
-        || requested == "qwen-coding-plan" || requested == "coding-plan"
-        || requested == "codingplan" || requested == "bailian") {
-        return "qwen-coding";
-    }
-    if (requested == "qwen-api" || requested == "qwen_api"
-        || requested == "qwen-dashscope") {
-        return "dashscope";
-    }
-    // One Xiaomi login serves every regional gateway and the pay-as-you-go
-    // endpoint; the grant itself says which preset to seed. `mimo` stays an
-    // alias so `filo --auth mimo` still works.
-    if (requested == "xiaomi" || requested == "mimo" || requested == "mimocode"
-        || requested == "mimo-code" || requested == "mimo_code"
-        || requested == "xiaomi-mimo" || requested == "mimo-token-plan"
-        || requested == "mimo-token-plan-sgp"
-        || requested == "mimo-token-plan-cn"
-        || requested == "mimo-token-plan-ams") {
-        return "xiaomi";
-    }
-    return requested;
+    return false;
 }
 
 std::string join(const std::vector<std::string>& values) {
@@ -91,309 +55,6 @@ std::string join(const std::vector<std::string>& values) {
     }
     return out;
 }
-
-struct AuthOverlayProvider {
-    std::string model;
-    std::string auth_type;
-    std::string api_key;
-};
-
-struct ApiKeyProviderSeed {
-    std::string provider_name;
-    std::string model;
-};
-
-void write_api_key_overlay(std::string_view config_dir,
-                           std::string_view default_provider,
-                           const std::vector<ApiKeyProviderSeed>& provider_seeds,
-                           std::string_view api_key) {
-    if (api_key.empty()) {
-        throw std::runtime_error("API key cannot be empty.");
-    }
-    if (default_provider.empty() || provider_seeds.empty()) {
-        throw std::runtime_error("Provider login is not configured correctly.");
-    }
-
-    const std::filesystem::path dir(config_dir);
-    std::filesystem::create_directories(dir);
-    const std::filesystem::path path = dir / "auth_defaults.json";
-
-    std::unordered_map<std::string, AuthOverlayProvider> providers;
-    if (std::filesystem::exists(path)) {
-        try {
-            simdjson::padded_string json =
-                simdjson::padded_string::load(path.string());
-            simdjson::dom::parser parser;
-            simdjson::dom::element doc = parser.parse(json);
-            simdjson::dom::object providers_obj;
-            if (doc["providers"].get(providers_obj) == simdjson::SUCCESS) {
-                for (auto field : providers_obj) {
-                    simdjson::dom::object provider_obj;
-                    if (field.value.get(provider_obj) != simdjson::SUCCESS) {
-                        continue;
-                    }
-                    AuthOverlayProvider saved;
-                    std::string_view value;
-                    if (provider_obj["model"].get(value) == simdjson::SUCCESS) {
-                        saved.model = std::string(value);
-                    }
-                    if (provider_obj["auth_type"].get(value) == simdjson::SUCCESS) {
-                        saved.auth_type = std::string(value);
-                    }
-                    if (provider_obj["api_key"].get(value) == simdjson::SUCCESS) {
-                        saved.api_key = std::string(value);
-                    }
-                    providers[std::string(field.key)] = std::move(saved);
-                }
-            }
-        } catch (...) {
-            providers.clear();
-        }
-    }
-
-    for (const auto& seed : provider_seeds) {
-        if (seed.provider_name.empty()) continue;
-        AuthOverlayProvider& selected = providers[seed.provider_name];
-        selected.model = seed.model;
-        selected.auth_type.clear();
-        selected.api_key = std::string(api_key);
-    }
-
-    std::vector<std::string> names;
-    names.reserve(providers.size());
-    for (const auto& [name, provider] : providers) {
-        if (!provider.model.empty()
-            || !provider.auth_type.empty()
-            || !provider.api_key.empty()) {
-            names.push_back(name);
-        }
-    }
-    std::sort(names.begin(), names.end());
-
-    core::utils::JsonWriter writer(512);
-    {
-        auto root = writer.object();
-        writer.kv_str("default_provider", default_provider).comma();
-        writer.kv_str("default_model_selection", "manual").comma();
-        writer.key("providers");
-        auto providers_object = writer.object();
-        for (std::size_t i = 0; i < names.size(); ++i) {
-            if (i > 0) writer.comma();
-            writer.key(names[i]);
-            auto provider_object = writer.object();
-            const auto& provider = providers.at(names[i]);
-            bool has_field = false;
-            if (!provider.model.empty()) {
-                writer.kv_str("model", provider.model);
-                has_field = true;
-            }
-            if (!provider.auth_type.empty()) {
-                if (has_field) writer.comma();
-                writer.kv_str("auth_type", provider.auth_type);
-                has_field = true;
-            }
-            if (!provider.api_key.empty()) {
-                if (has_field) writer.comma();
-                writer.kv_str("api_key", provider.api_key);
-            }
-        }
-    }
-
-    std::string payload = std::move(writer).take();
-    payload.push_back('\n');
-
-    const std::filesystem::path tmp = path.string() + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("Failed to open auth overlay for writing.");
-        }
-        out << payload;
-        if (!out) {
-            throw std::runtime_error("Failed to write auth overlay.");
-        }
-    }
-    std::filesystem::rename(tmp, path);
-}
-
-class ApiKeyPromptStrategy final : public IAuthStrategy {
-public:
-    ApiKeyPromptStrategy(std::string login_provider,
-                         std::string display_name,
-                         std::string provider_name,
-                         std::string default_model,
-                         std::vector<ApiKeyProviderSeed> additional_provider_seeds,
-                         std::string env_var,
-                         std::string docs_hint)
-        : login_provider_(std::move(login_provider))
-        , display_name_(std::move(display_name))
-        , provider_name_(std::move(provider_name))
-        , default_model_(std::move(default_model))
-        , additional_provider_seeds_(std::move(additional_provider_seeds))
-        , env_var_(std::move(env_var))
-        , docs_hint_(std::move(docs_hint)) {}
-
-    std::string_view login_provider() const noexcept override { return login_provider_; }
-    std::string_view display_name() const noexcept override { return display_name_; }
-
-    bool supports(std::string_view /*provider_type*/,
-                  std::string_view /*auth_type*/) const noexcept override {
-        return false;
-    }
-
-    std::shared_ptr<ICredentialSource> create_credential_source(
-        const core::config::ProviderConfig& /*provider_config*/,
-        std::string_view /*config_dir*/) const override {
-        return nullptr;
-    }
-
-    void login(std::string_view config_dir) const override {
-        ui::ConsoleAuthUI ui;
-        ui.show_header(display_name_ + " API Key Login");
-        ui.show_instructions(
-            "Paste an API key for this provider. It will be saved in Filo's "
-            "auth_defaults.json overlay and used as the default provider.");
-        const std::string key = ui.prompt_secret("API key:");
-        auto seeds = additional_provider_seeds_;
-        seeds.insert(seeds.begin(), ApiKeyProviderSeed{
-            .provider_name = provider_name_,
-            .model = default_model_,
-        });
-        write_api_key_overlay(config_dir, provider_name_, seeds, key);
-        ui.show_success(display_name_ + " credential saved.");
-    }
-
-    std::vector<std::string> post_login_hints() const override {
-        std::vector<std::string> hints;
-        if (default_model_.empty()) {
-            hints.push_back("Default provider is set to '" + provider_name_
-                            + "'; Filo will select the newest model from its live catalog.");
-        } else {
-            hints.push_back("Default provider is set to '" + provider_name_
-                            + "' with model '" + default_model_ + "'.");
-        }
-        if (!env_var_.empty()) {
-            hints.push_back("For CI or one-off use, you can also export "
-                            + env_var_ + ".");
-        }
-        if (!docs_hint_.empty()) {
-            hints.push_back(docs_hint_);
-        }
-        return hints;
-    }
-
-private:
-    std::string login_provider_;
-    std::string display_name_;
-    std::string provider_name_;
-    std::string default_model_;
-    std::vector<ApiKeyProviderSeed> additional_provider_seeds_;
-    std::string env_var_;
-    std::string docs_hint_;
-};
-
-/**
- * @brief Xiaomi MiMo login — browser sign-in with an API-key fallback.
- *
- * The console seals a provisioned API key to a one-shot X25519 key (see
- * MimoOAuthFlow), so the result is a plain credential rather than a
- * refreshable token: it is persisted through the same API-key overlay every
- * other key-based provider uses, and no token store is involved.
- *
- * The grant names the gateway it was issued for, so the matching regional
- * Token Plan preset (or the pay-as-you-go preset) is the one seeded. A plan
- * key must never be copied onto the pay-as-you-go provider, which rejects it.
- */
-class MimoAuthStrategy final : public IAuthStrategy {
-public:
-    std::string_view login_provider() const noexcept override { return "xiaomi"; }
-    std::string_view display_name() const noexcept override {
-        return "Xiaomi MiMo";
-    }
-
-    bool supports(std::string_view /*provider_type*/,
-                  std::string_view /*auth_type*/) const noexcept override {
-        return false;
-    }
-
-    std::shared_ptr<ICredentialSource> create_credential_source(
-        const core::config::ProviderConfig& /*provider_config*/,
-        std::string_view /*config_dir*/) const override {
-        return nullptr;
-    }
-
-    void login(std::string_view config_dir) const override {
-        ui::ConsoleAuthUI ui;
-        ui.show_header("Xiaomi MiMo Login");
-        ui.show_instructions(
-            "Sign in at platform.xiaomimimo.com to provision an API key for "
-            "Filo. The key is returned encrypted to this session and saved in "
-            "Filo's auth_defaults.json overlay.");
-
-        MimoOAuthFlow flow;
-        flow.set_key_name(MimoOAuthFlow::key_name(config_dir));
-
-        std::string api_key;
-        std::string granted_base_url;
-        try {
-            const MimoAuthorizationGrant grant = flow.login(ui);
-            api_key = grant.api_key;
-            granted_base_url = grant.base_url;
-        } catch (const std::exception& error) {
-            ui.show_error(error.what());
-            ui.show_instructions(
-                "You can paste an API key from platform.xiaomimimo.com "
-                "instead.");
-            api_key = ui.prompt_secret("API key:");
-        }
-
-        const std::string provider_name = provider_for_grant(granted_base_url);
-        write_api_key_overlay(
-            config_dir,
-            provider_name,
-            std::vector<ApiKeyProviderSeed>{
-                ApiKeyProviderSeed{
-                    .provider_name = provider_name,
-                    .model = "mimo-v2.6-pro",
-                },
-            },
-            api_key);
-        ui.show_success("Xiaomi MiMo credential saved for '" + provider_name
-                        + "'.");
-    }
-
-    std::vector<std::string> post_login_hints() const override {
-        return {
-            "Default provider is set to the MiMo endpoint your key was issued "
-            "for, with model 'mimo-v2.6-pro'.",
-            "For CI or one-off use, you can also export "
-            "MIMO_TOKEN_PLAN_API_KEY (Token Plan) or XIAOMI_API_KEY "
-            "(pay-as-you-go).",
-            "Token Plan regions: mimo-token-plan (Europe), "
-            "mimo-token-plan-sgp (Singapore), mimo-token-plan-cn (China). "
-            "Set MIMO_REGION to change the region assumed at login.",
-        };
-    }
-
-private:
-    /// Preset that owns @p base_url, falling back to the resolved region.
-    [[nodiscard]] static std::string provider_for_grant(
-        std::string_view base_url) {
-        if (!base_url.empty()) {
-            if (const auto region =
-                    core::llm::mimo_region_for_endpoint(base_url)) {
-                return std::string(
-                    core::llm::mimo_region_provider_name(*region));
-            }
-            if (core::llm::is_mimo_endpoint(base_url)) {
-                // A MiMo host that is not a plan gateway is pay-as-you-go.
-                return "mimo";
-            }
-        }
-        return std::string(core::llm::mimo_region_provider_name(
-            core::llm::resolve_mimo_region()));
-    }
-};
 
 /**
  * @brief Google (Gemini) OAuth strategy — subscription (Google AI Pro/Ultra)
@@ -419,6 +80,9 @@ public:
     std::string_view display_name() const noexcept override {
         return "Google / Gemini (unofficial — ToS risk)";
     }
+    std::vector<std::string_view> login_aliases() const override {
+        return {"gemini"};
+    }
     std::string_view token_store_key() const noexcept override { return "google"; }
 
     std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
@@ -442,16 +106,13 @@ public:
             std::move(manager), /*ide_type=*/"ANTIGRAVITY");
     }
 
-    void login(std::string_view config_dir) const override {
+    std::vector<std::string> login(std::string_view config_dir) const override {
         auto flow = std::make_shared<GoogleAntigravityOAuthFlow>(
             std::make_shared<ui::ConsoleAuthUI>());
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "google", std::move(flow), std::move(store));
         manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
         return {
             "\xE2\x9A\xA0  Unofficial: this uses Google's Antigravity IDE OAuth client, "
             "not a supported integration. Google's Antigravity ToS prohibit this and "
@@ -488,16 +149,13 @@ public:
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
-    void login(std::string_view config_dir) const override {
+    std::vector<std::string> login(std::string_view config_dir) const override {
         // For explicit login command, we provide the Console UI.
         auto flow = std::make_shared<ClaudeOAuthFlow>(std::make_shared<ui::ConsoleAuthUI>());
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "claude", std::move(flow), std::move(store));
         manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
         return {
             "Set \"auth_type\": \"oauth_claude\" on a Claude provider in "
             "~/.config/filo/config.json to use the stored Claude OAuth token.",
@@ -510,6 +168,9 @@ class OpenAIPkceStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "openai"; }
     std::string_view display_name() const noexcept override { return "OpenAI (ChatGPT login)"; }
+    std::vector<std::string_view> login_aliases() const override {
+        return {"openai-pkce", "openai_pkce", "openaipkce"};
+    }
     std::string_view token_store_key() const noexcept override { return "openai-pkce"; }
 
     std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
@@ -532,15 +193,12 @@ public:
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
-    void login(std::string_view config_dir) const override {
+    std::vector<std::string> login(std::string_view config_dir) const override {
         auto flow    = std::make_shared<OpenAIOAuthFlow>();
         auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "openai-pkce", std::move(flow), std::move(store));
         manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
         return {
             "Set \"auth_type\": \"oauth_openai_pkce\" on an OpenAI provider in "
             "~/.config/filo/config.json to use your ChatGPT Plus/Pro plan.",
@@ -573,15 +231,12 @@ public:
         return std::make_shared<OAuthCredentialSource>(std::move(manager));
     }
 
-    void login(std::string_view config_dir) const override {
+    std::vector<std::string> login(std::string_view config_dir) const override {
         auto flow    = std::make_shared<KimiOAuthFlow>();
         auto store   = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "kimi", std::move(flow), std::move(store));
         manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
         return {
             "Set \"auth_type\": \"oauth_kimi\" on a Kimi provider in "
             "~/.config/filo/config.json to use the stored OAuth token.",
@@ -618,17 +273,10 @@ public:
             "for Token Plan.");
     }
 
-    void login(std::string_view /*config_dir*/) const override {
+    std::vector<std::string> login(std::string_view /*config_dir*/) const override {
         throw std::runtime_error(
             "Qwen OAuth was discontinued on 2026-04-15 and does not support "
             "current Qwen Cloud APIs. Use an API key instead.");
-    }
-
-    std::vector<std::string> post_login_hints() const override {
-        return {
-            "Run `filo --auth qwen-coding` for Coding Plan, "
-            "`filo --auth dashscope` for DashScope, or `filo --auth qwen` for Token Plan.",
-        };
     }
 };
 
@@ -636,6 +284,9 @@ class XaiOAuthStrategy final : public IAuthStrategy {
 public:
     std::string_view login_provider() const noexcept override { return "grok"; }
     std::string_view display_name() const noexcept override { return "Grok"; }
+    std::vector<std::string_view> login_aliases() const override {
+        return {"xai", "x.ai", "x-ai"};
+    }
     std::string_view token_store_key() const noexcept override { return "grok"; }
 
     std::shared_ptr<IOAuthTokenRevoker> logout_revocation_flow() const override {
@@ -660,15 +311,12 @@ public:
         return std::make_shared<XaiOAuthCredentialSource>(std::move(oauth));
     }
 
-    void login(std::string_view config_dir) const override {
+    std::vector<std::string> login(std::string_view config_dir) const override {
         auto flow = std::make_shared<XaiOAuthFlow>();
         auto store = std::make_shared<FileTokenStore>(std::string(config_dir));
         auto manager = std::make_shared<OAuthTokenManager>(
             "grok", std::move(flow), std::move(store));
         manager->login();
-    }
-
-    std::vector<std::string> post_login_hints() const override {
         return {
             "Grok OAuth is active through the Grok Build session endpoint.",
             "Export XAI_API_KEY or set auth_type to api_key to use public API billing instead.",
@@ -689,70 +337,107 @@ AuthenticationManager AuthenticationManager::create_with_defaults(std::string co
     manager.register_strategy(std::make_shared<KimiOAuthStrategy>());
     manager.register_strategy(std::make_shared<QwenOAuthStrategy>());
     manager.register_strategy(std::make_shared<XaiOAuthStrategy>());
-    manager.register_strategy(std::make_shared<MimoAuthStrategy>());
+    manager.register_strategy(make_mimo_authentication_strategy());
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "qwen",
-        "Qwen Cloud Token Plan",
-        "qwen-token-plan",
-        "",
-        std::vector<ApiKeyProviderSeed>{},
-        "QWEN_TOKEN_PLAN_API_KEY",
-        "Uses the Token Plan Chat Completions API with Qwen reasoning and "
-        "subscription billing. Manage usage at "
-        "https://home.qwencloud.com/token-plan."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "qwen",
+            .login_aliases = {
+                "qwen-token-plan", "qwen_token_plan", "qwencloud", "qwen-cloud",
+            },
+            .display_name = "Qwen Cloud Token Plan",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "qwen-token-plan",
+                .default_model = "",
+            }},
+            .env_var = "QWEN_TOKEN_PLAN_API_KEY",
+            .docs_hint =
+                "Uses the Token Plan Chat Completions API with Qwen reasoning and "
+                "subscription billing. Manage usage at "
+                "https://home.qwencloud.com/token-plan.",
+        }));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "qwen-coding",
-        "Qwen Coding Plan",
-        "qwen-coding",
-        "qwen3-coder-plus",
-        std::vector<ApiKeyProviderSeed>{},
-        "QWEN_CODING_PLAN_API_KEY",
-        "Uses the Qwen Coding Plan endpoint at "
-        "https://coding.dashscope.aliyuncs.com/v1. BAILIAN_CODING_PLAN_API_KEY "
-        "is also accepted. This is not the Token Plan or public DashScope key."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "qwen-coding",
+            .login_aliases = {
+                "qwen_coding", "qwencoding", "qwen-coding-plan",
+                "coding-plan", "codingplan", "bailian",
+            },
+            .display_name = "Qwen Coding Plan",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "qwen-coding",
+                .default_model = "qwen3-coder-plus",
+            }},
+            .env_var = "QWEN_CODING_PLAN_API_KEY",
+            .docs_hint =
+                "Uses the Qwen Coding Plan endpoint at "
+                "https://coding.dashscope.aliyuncs.com/v1. BAILIAN_CODING_PLAN_API_KEY "
+                "is also accepted. This is not the Token Plan or public DashScope key.",
+        }));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "dashscope",
-        "Qwen",
-        "qwen",
-        // The coder line belongs to the Coding Plan endpoint; defaulting the
-        // pay-as-you-go login to it would hand out a model this provider is
-        // not the catalog owner of.
-        "qwen3-max",
-        std::vector<ApiKeyProviderSeed>{},
-        "QWEN_API_KEY",
-        "Uses the public DashScope compatible-mode API "
-        "(dashscope-intl.aliyuncs.com). DASHSCOPE_API_KEY is also accepted. "
-        "For Coding Plan use `filo --auth qwen-coding` instead."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "dashscope",
+            .login_aliases = {"qwen-api", "qwen_api", "qwen-dashscope"},
+            .display_name = "Qwen",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "qwen",
+                // The coder line belongs to the Coding Plan endpoint; defaulting
+                // the pay-as-you-go login to it would hand out a model this
+                // provider is not the catalog owner of.
+                .default_model = "qwen3-max",
+            }},
+            .env_var = "QWEN_API_KEY",
+            .docs_hint =
+                "Uses the public DashScope compatible-mode API "
+                "(dashscope-intl.aliyuncs.com). DASHSCOPE_API_KEY is also accepted. "
+                "For Coding Plan use `filo --auth qwen-coding` instead.",
+        }));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "zai-coding",
-        "Z.AI Coding Plan",
-        "zai-coding",
-        "glm-5.3",
-        std::vector<ApiKeyProviderSeed>{},
-        "ZAI_CODING_API_KEY",
-        "Uses the GLM Coding Plan Anthropic endpoint at "
-        "https://api.z.ai/api/anthropic. ZAI_API_KEY is also accepted. "
-        "This is not a General API pay-as-you-go key."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "zai-coding",
+            .login_aliases = {
+                "z.ai-coding", "z-ai-coding", "zai_coding", "zai-coding-plan",
+                "z.aicodingplan", "zaicoding",
+            },
+            .display_name = "Z.AI Coding Plan",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "zai-coding",
+                .default_model = "glm-5.3",
+            }},
+            .env_var = "ZAI_CODING_API_KEY",
+            .docs_hint =
+                "Uses the GLM Coding Plan Anthropic endpoint at "
+                "https://api.z.ai/api/anthropic. ZAI_API_KEY is also accepted. "
+                "This is not a General API pay-as-you-go key.",
+        }));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "zai",
-        "Z.AI",
-        "zai",
-        "glm-5.1",
-        std::vector<ApiKeyProviderSeed>{},
-        "ZAI_API_KEY",
-        "Uses the General API at https://api.z.ai/api/paas/v4. "
-        "For a GLM Coding Plan subscription use `filo --auth zai-coding` instead."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "zai",
+            .login_aliases = {"z.ai", "z-ai", "zai-api"},
+            .display_name = "Z.AI",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "zai",
+                .default_model = "glm-5.1",
+            }},
+            .env_var = "ZAI_API_KEY",
+            .docs_hint =
+                "Uses the General API at https://api.z.ai/api/paas/v4. "
+                "For a GLM Coding Plan subscription use `filo --auth zai-coding` instead.",
+        }));
     manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
-        "mistral",
-        "Mistral",
-        "mistral",
-        "mistral-vibe-cli-latest",
-        std::vector<ApiKeyProviderSeed>{},
-        "MISTRAL_API_KEY",
-        "Uses api.mistral.ai. A Vibe or Studio key from console.mistral.ai "
-        "works with your subscription plan's included monthly usage. "
-        "mistral-vibe browser sign-in stores the same key as MISTRAL_API_KEY "
-        "in ~/.vibe/.env."));
+        ApiKeyPromptStrategySpec{
+            .login_provider = "mistral",
+            .display_name = "Mistral",
+            .profiles = {ApiKeyLoginProfile{
+                .provider_name = "mistral",
+                .default_model = "mistral-vibe-cli-latest",
+            }},
+            .env_var = "MISTRAL_API_KEY",
+            .docs_hint =
+                "Uses api.mistral.ai. A Vibe or Studio key from console.mistral.ai "
+                "works with your subscription plan's included monthly usage. "
+                "mistral-vibe browser sign-in stores the same key as MISTRAL_API_KEY "
+                "in ~/.vibe/.env.",
+        }));
     return manager;
 }
 
@@ -764,15 +449,14 @@ void AuthenticationManager::register_strategy(std::shared_ptr<IAuthStrategy> str
 }
 
 LoginResult AuthenticationManager::login(std::string_view provider) const {
-    const std::string requested = normalize_login_provider(provider);
+    const std::string requested = normalize(provider);
 
     for (const auto& strategy : strategies_) {
-        if (normalize(strategy->login_provider()) == requested) {
-            strategy->login(config_dir_);
+        if (matches_login_provider(*strategy, requested)) {
             return {
                 .provider = std::string(strategy->display_name()),
                 .login_provider = std::string(strategy->login_provider()),
-                .hints = strategy->post_login_hints(),
+                .hints = strategy->login(config_dir_),
             };
         }
     }
@@ -785,15 +469,12 @@ LoginResult AuthenticationManager::login(std::string_view provider) const {
 
 std::optional<AuthenticationProviderDescriptor>
 AuthenticationManager::describe_provider(std::string_view provider) const {
-    const std::string login_identifier = normalize_login_provider(provider);
-    const std::string credential_identifier = normalize(provider);
+    const std::string requested = normalize(provider);
     for (const auto& strategy : strategies_) {
-        const std::string login_provider =
-            normalize(strategy->login_provider());
         const std::string credential_id =
             normalize(strategy->token_store_key());
-        if (login_identifier != login_provider
-            && credential_identifier != credential_id) {
+        if (!matches_login_provider(*strategy, requested)
+            && requested != credential_id) {
             continue;
         }
         if (strategy->login_provider().empty()
@@ -811,9 +492,9 @@ AuthenticationManager::describe_provider(std::string_view provider) const {
 
 std::string AuthenticationManager::logout(std::string_view provider,
                                           bool revoke_remote) const {
-    const std::string requested = normalize_login_provider(provider);
+    const std::string requested = normalize(provider);
     for (const auto& strategy : strategies_) {
-        if (normalize(strategy->login_provider()) != requested) continue;
+        if (!matches_login_provider(*strategy, requested)) continue;
         const std::string_view store_key = strategy->token_store_key();
         if (store_key.empty()) {
             throw std::runtime_error(

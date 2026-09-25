@@ -866,6 +866,7 @@ void run_provider_auth(const std::string& provider,
     struct AuthState {
         bool success = false;
         bool completed = false;
+        bool cancelled = false;
         std::string provider;
         std::vector<std::string> hints;
         bool profile_persisted = false;
@@ -913,6 +914,13 @@ void run_provider_auth(const std::string& provider,
             state->provider = outcome.result.provider;
             state->hints = outcome.result.hints;
             state->completed = true;
+        } catch (const core::auth::LoginCancelled&) {
+            std::cout << "\nLogin cancelled.\n";
+            wait_for_enter();
+
+            state->success = false;
+            state->cancelled = true;
+            state->completed = true;
         } catch (const std::exception& e) {
             std::cerr << "\nAuthentication failed: " << e.what() << "\n";
             wait_for_enter();
@@ -926,6 +934,11 @@ void run_provider_auth(const std::string& provider,
     if (!state->completed) {
         append_fn(
             "\n\xe2\x9a\xa0  Authentication started. Check terminal output for progress.\n");
+        return;
+    }
+
+    if (state->cancelled) {
+        append_fn("\n\xe2\x84\xb9  Login cancelled.\n");
         return;
     }
 

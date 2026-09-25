@@ -1926,10 +1926,12 @@ bool ConfigManager::persist_managed_setting(SettingsScope scope,
     return true;
 }
 
-bool ConfigManager::persist_model_defaults(std::string_view default_provider,
-                                           std::string_view default_model_selection,
-                                           std::string_view specific_model,
-                                           std::string* error) {
+bool persist_model_defaults_overlay(
+    const std::filesystem::path& config_dir,
+    std::string_view default_provider,
+    std::string_view default_model_selection,
+    std::string_view specific_model,
+    std::string* error) {
     if (default_provider.empty()) {
         if (error) *error = "default provider cannot be empty";
         return false;
@@ -1942,7 +1944,7 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
     const std::string provider_str(default_provider);
     const std::string selection_str(default_model_selection);
     const std::string model_str(specific_model);
-    const fs::path overlay_path = model_defaults_overlay_path(get_config_dir());
+    const fs::path overlay_path = model_defaults_overlay_path(config_dir);
     auto file_lock = acquire_write_lock(overlay_path, error);
     if (!file_lock) return false;
 
@@ -1979,10 +1981,28 @@ bool ConfigManager::persist_model_defaults(std::string_view default_provider,
         return false;
     }
 
-    config_.default_provider = provider_str;
-    config_.default_model_selection = selection_str;
-    if (!model_str.empty()) {
-        config_.providers[provider_str].model = model_str;
+    if (error) error->clear();
+    return true;
+}
+
+bool ConfigManager::persist_model_defaults(std::string_view default_provider,
+                                           std::string_view default_model_selection,
+                                           std::string_view specific_model,
+                                           std::string* error) {
+    if (!persist_model_defaults_overlay(
+            get_config_dir(),
+            default_provider,
+            default_model_selection,
+            specific_model,
+            error)) {
+        return false;
+    }
+
+    config_.default_provider = std::string(default_provider);
+    config_.default_model_selection = std::string(default_model_selection);
+    if (!specific_model.empty()) {
+        config_.providers[std::string(default_provider)].model =
+            std::string(specific_model);
     }
     return true;
 }

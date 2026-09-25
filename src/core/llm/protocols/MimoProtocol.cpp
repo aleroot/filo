@@ -151,8 +151,10 @@ std::string MimoProtocol::format_error_message(
             break;
         case 401:
             return "[MiMo API Error 401: Authentication failed. "
-                   "Check MIMO_TOKEN_PLAN_API_KEY or XIAOMI_API_KEY, or run "
-                   "`filo --auth xiaomi`.]";
+                   "For Token Plan, confirm the key begins with 'tp-' or 'ttp-' "
+                   "and select the exact Base URL shown on its Token Plan page. "
+                   "Token Plan and pay-as-you-go ('sk-') keys cannot be mixed. "
+                   "Run `filo --auth xiaomi` to replace the saved key.]";
         case 402:
             return "[MiMo API Error 402: Payment required. "
                    + (detail.empty()

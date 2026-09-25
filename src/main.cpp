@@ -500,6 +500,9 @@ int main(int argc, char** argv) {
             for (const auto& hint : outcome.result.hints) {
                 core::logging::info("{}", hint);
             }
+        } catch (const core::auth::LoginCancelled&) {
+            core::logging::info("Login cancelled.");
+            return 1;
         } catch (const std::exception& e) {
             core::logging::error("Authentication failed: {}", e.what());
             return 1;

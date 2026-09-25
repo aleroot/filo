@@ -312,7 +312,7 @@ TEST_CASE("MiMo Token Plan completes a streamed HTTP tool round trip",
     std::lock_guard lock(received_mutex);
     REQUIRE(received.size() == 2);
     for (const auto& wire : received) {
-        CHECK(wire.get_header_value("Authorization") == "Bearer test-mimo-plan-key");
+        CHECK(wire.get_header_value("api-key") == "test-mimo-plan-key");
         CHECK(wire.get_header_value("X-Mimo-Source") == "mimocode-cli");
         simdjson::dom::parser parser;
         const auto body = parser.parse(wire.body);

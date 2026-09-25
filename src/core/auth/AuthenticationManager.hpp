@@ -4,6 +4,7 @@
 #include "core/config/ConfigManager.hpp"
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,6 +12,13 @@
 namespace core::auth {
 
 class IOAuthTokenRevoker;
+
+/** Thrown when the user cancels an interactive authentication flow
+ *  (a menu "Cancel" choice or a closed input stream). */
+class LoginCancelled : public std::runtime_error {
+public:
+    LoginCancelled() : std::runtime_error("Login cancelled.") {}
+};
 
 struct LoginResult {
     std::string provider;
@@ -37,6 +45,11 @@ public:
     virtual std::string_view login_provider() const noexcept = 0;
     virtual std::string_view display_name() const noexcept = 0;
 
+    /** Alternate command identifiers accepted by this authentication strategy. */
+    [[nodiscard]] virtual std::vector<std::string_view> login_aliases() const {
+        return {};
+    }
+
     virtual bool supports(std::string_view provider_type,
                           std::string_view auth_type) const noexcept = 0;
 
@@ -44,11 +57,12 @@ public:
         const core::config::ProviderConfig& provider_config,
         std::string_view config_dir) const = 0;
 
-    virtual void login(std::string_view config_dir) const = 0;
-
-    virtual std::vector<std::string> post_login_hints() const {
-        return {};
-    }
+    /**
+     * Run the interactive login and return user-facing hints describing the
+     * credential that was actually saved (the selected profile, endpoint, or
+     * model). Throws LoginCancelled when the user aborts the flow.
+     */
+    virtual std::vector<std::string> login(std::string_view config_dir) const = 0;
 
     /** Persistent token-store key, or empty when this strategy is not token-backed. */
     [[nodiscard]] virtual std::string_view token_store_key() const noexcept {

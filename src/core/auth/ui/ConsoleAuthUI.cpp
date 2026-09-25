@@ -1,5 +1,6 @@
 #include "ConsoleAuthUI.hpp"
 #include "core/auth/SecretInput.hpp"
+#include "core/utils/StringUtils.hpp"
 #include <iostream>
 #if !defined(_WIN32)
 #include <termios.h>
@@ -56,6 +57,18 @@ std::string ConsoleAuthUI::prompt_secret(const std::string& prompt_label) {
 #endif
 
     return core::auth::normalize_secret_input(input);
+}
+
+std::optional<std::string> ConsoleAuthUI::prompt_text(
+    const std::string& prompt_label) {
+    std::cout << ANSI_BOLD << ANSI_YELLOW << prompt_label << ANSI_RESET << " ";
+    std::cout.flush();
+
+    std::string input;
+    if (!std::getline(std::cin, input)) {
+        return std::nullopt;
+    }
+    return core::utils::str::trim_ascii_copy(input);
 }
 
 void ConsoleAuthUI::show_success(const std::string& message) {

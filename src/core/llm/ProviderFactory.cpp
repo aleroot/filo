@@ -278,6 +278,10 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             cred = core::auth::ApiKeyCredentialSource::as_custom_header(
                 key, "x-api-key", billing_kind);
             break;
+        case ProviderAuthStyle::ApiKey:
+            cred = core::auth::ApiKeyCredentialSource::as_custom_header(
+                key, "api-key", billing_kind);
+            break;
         case ProviderAuthStyle::None:
             cred = core::auth::ApiKeyCredentialSource::none();
             break;

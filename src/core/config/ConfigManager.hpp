@@ -282,6 +282,16 @@ struct ProfileConfig {
     AppConfig overlay;
 };
 
+/// Atomically replace the user-level model-selection overlay without requiring
+/// a process-wide ConfigManager instance. Authentication flows use this when a
+/// newly saved credential is explicitly made the active provider.
+[[nodiscard]] bool persist_model_defaults_overlay(
+    const std::filesystem::path& config_dir,
+    std::string_view default_provider,
+    std::string_view default_model_selection,
+    std::string_view specific_model = {},
+    std::string* error = nullptr);
+
 class ConfigManager {
 public:
     static ConfigManager& get_instance() {

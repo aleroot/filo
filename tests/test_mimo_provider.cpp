@@ -3,6 +3,7 @@
 
 #include "core/auth/AuthenticationManager.hpp"
 #include "core/auth/ICredentialSource.hpp"
+#include "core/auth/MimoAuthenticationStrategy.hpp"
 #include "core/auth/MimoOAuthFlow.hpp"
 #include "core/budget/TokenAccounting.hpp"
 #include "core/config/ConfigManager.hpp"
@@ -40,7 +41,7 @@ ChatRequest make_mimo_request(std::string model = "mimo-v2.6-pro",
 
 cpr::Header mimo_headers() {
     core::auth::AuthInfo auth;
-    auth.headers["Authorization"] = "Bearer sk-test";
+    auth.headers["api-key"] = "tp-test";
     return MimoProtocol().build_headers(auth);
 }
 
@@ -67,16 +68,27 @@ TEST_CASE("MiMo Token Plan presets resolve their regional gateways",
     CHECK(europe->base_url == "https://token-plan-ams.xiaomimimo.com/v1");
     CHECK(europe->billing_kind == core::auth::BillingKind::Subscription);
     CHECK(europe->env_var() == "MIMO_TOKEN_PLAN_API_KEY");
+    CHECK(europe->auth_style == ProviderAuthStyle::ApiKey);
     CHECK(europe->registry_provider == "mimo");
     CHECK(europe->catalog_group == "xiaomi");
+    CHECK(europe->usage_dashboard_url
+          == "https://platform.xiaomimimo.com/console/plan-manage");
+    CHECK(europe->has_usage_dashboard());
+    CHECK(europe->display_name_or_prefix() == "mimo-token-plan");
+    CHECK(core::llm::provider_display_name("mimo-token-plan-sgp")
+          == "mimo-token-plan");
 
     const auto* singapore = find_builtin_provider_definition("mimo-token-plan-sgp");
     REQUIRE(singapore != nullptr);
     CHECK(singapore->base_url == "https://token-plan-sgp.xiaomimimo.com/v1");
+    CHECK(singapore->usage_dashboard_url
+          == "https://platform.xiaomimimo.com/console/plan-manage");
 
     const auto* china = find_builtin_provider_definition("mimo-token-plan-cn");
     REQUIRE(china != nullptr);
     CHECK(china->base_url == "https://token-plan-cn.xiaomimimo.com/v1");
+    CHECK(china->usage_dashboard_url
+          == "https://platform.xiaomimimo.com/console/plan-manage");
 }
 
 TEST_CASE("The bare mimo preset stays pay-as-you-go", "[mimo][provider_definition]") {
@@ -109,6 +121,19 @@ TEST_CASE("Xiaomi is the login id; mimo remains an alias", "[mimo][auth]") {
     const auto providers = manager.available_login_providers();
     REQUIRE(std::ranges::find(providers, std::string("xiaomi")) != providers.end());
     CHECK(std::ranges::find(providers, std::string("mimo")) == providers.end());
+}
+
+TEST_CASE("MiMo authentication strategy accepts regional login aliases",
+          "[mimo][auth]") {
+    const auto strategy = core::auth::make_mimo_authentication_strategy();
+    CHECK(strategy->login_provider() == "xiaomi");
+
+    const auto aliases = strategy->login_aliases();
+    CHECK(std::ranges::find(aliases, std::string_view("mimo")) != aliases.end());
+    CHECK(std::ranges::find(aliases, std::string_view("mimo-token-plan-ams"))
+          != aliases.end());
+    CHECK(std::ranges::find(aliases, std::string_view("mimocode"))
+          != aliases.end());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,7 +171,7 @@ TEST_CASE("MiMo sends its client source header", "[mimo][headers]") {
     REQUIRE(headers.count("X-Mimo-Source") == 1);
     CHECK(headers.at("X-Mimo-Source") == "mimocode-cli");
     CHECK(headers.at("User-Agent") == std::string(core::version::user_agent));
-    CHECK(headers.at("Authorization") == "Bearer sk-test");
+    CHECK(headers.at("api-key") == "tp-test");
 }
 
 TEST_CASE("MiMo pins reasoning models to temperature 1", "[mimo][serializer]") {
@@ -314,10 +339,12 @@ TEST_CASE("MiMo relabels risk-control blocks", "[mimo][errors]") {
                Catch::Matchers::ContainsSubstring("risk control"));
 }
 
-TEST_CASE("MiMo auth failures name their credentials", "[mimo][errors]") {
+TEST_CASE("MiMo auth failures distinguish key types and regions", "[mimo][errors]") {
     const std::string message = format_error(401, R"({"error":{"message":"no"}})");
     CHECK_THAT(message,
-               Catch::Matchers::ContainsSubstring("MIMO_TOKEN_PLAN_API_KEY"));
+               Catch::Matchers::ContainsSubstring("tp-"));
+    CHECK_THAT(message,
+               Catch::Matchers::ContainsSubstring("Base URL"));
     CHECK_THAT(message, Catch::Matchers::ContainsSubstring("filo --auth xiaomi"));
 }
 

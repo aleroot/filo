@@ -347,6 +347,9 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     CHECK(token_plan->prefix == "qwen-token-plan");
     CHECK(token_plan->registry_provider == "qwen");
     CHECK(token_plan->default_wire_api == "chat_completions");
+    CHECK(token_plan->usage_dashboard_url
+          == "https://home.qwencloud.com/analytics/token-plan/individual");
+    CHECK(token_plan->has_usage_dashboard());
 
     const auto* coding = find_builtin_provider_definition("qwen-coding");
     REQUIRE(coding != nullptr);
@@ -359,8 +362,14 @@ TEST_CASE("Built-in provider definitions are ordered, boundary-aware data",
     REQUIRE(public_qwen != nullptr);
     CHECK(public_qwen->env_var() == "QWEN_API_KEY");
     CHECK(public_qwen->env_vars[1] == "DASHSCOPE_API_KEY");
+    CHECK_FALSE(public_qwen->has_usage_dashboard());
 
     CHECK(find_builtin_provider_definition("grokker") == nullptr);
     CHECK(find_builtin_provider_definition("kimiko") == nullptr);
     CHECK(find_builtin_provider_definition("zaire") == nullptr);
+
+    // A presentation alias is opt-in: matching a built-in provider must not
+    // collapse unrelated user-visible variants such as grok-fast.
+    CHECK(core::llm::provider_display_name("grok-fast") == "grok-fast");
+    CHECK(core::llm::provider_display_name("custom-provider") == "custom-provider");
 }

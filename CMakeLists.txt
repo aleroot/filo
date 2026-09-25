@@ -258,6 +258,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/routing/ComplexityScorer.cpp
     src/core/auth/FileTokenStore.cpp
     src/core/auth/AuthBrowserLauncher.cpp
+    src/core/auth/ApiKeyPromptStrategy.cpp
     src/core/auth/GoogleCodeAssist.cpp
     src/core/auth/GoogleOAuthFlow.cpp
     src/core/auth/GoogleAntigravityOAuthFlow.cpp
@@ -269,6 +270,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/OpenAIOAuthFlow.cpp
     src/core/auth/KimiOAuthFlow.cpp
     src/core/auth/MimoOAuthFlow.cpp
+    src/core/auth/MimoAuthenticationStrategy.cpp
     src/core/auth/QwenOAuthFlow.cpp
     src/core/auth/XaiOAuthFlow.cpp
     src/core/auth/OAuthTokenManager.cpp

@@ -13,6 +13,7 @@ enum class ProviderAuthStyle {
     Bearer,
     QueryParam,
     XApiKey,
+    ApiKey,
     None,
 };
 
@@ -40,6 +41,14 @@ struct BuiltinProviderDefinition {
     /// plans settle usage against plan quota, so per-token cost estimation
     /// is disabled for them. Providers not listed here are Metered.
     core::auth::BillingKind billing_kind = core::auth::BillingKind::Metered;
+    /// Optional provider-owned page that shows account usage when the API does
+    /// not return an authoritative quota snapshot. This is a navigation target,
+    /// not an endpoint Filo should scrape or call with the user's API key.
+    std::string_view usage_dashboard_url{};
+    /// Optional user-facing name. The configured provider key remains the
+    /// routing identity, while the UI can hide implementation details such as
+    /// a regional gateway suffix.
+    std::string_view display_name{};
 
     [[nodiscard]] constexpr bool matches(
         std::string_view provider_name) const noexcept {
@@ -51,6 +60,14 @@ struct BuiltinProviderDefinition {
 
     [[nodiscard]] constexpr std::string_view env_var() const noexcept {
         return env_vars.front();
+    }
+
+    [[nodiscard]] constexpr bool has_usage_dashboard() const noexcept {
+        return !usage_dashboard_url.empty();
+    }
+
+    [[nodiscard]] constexpr std::string_view display_name_or_prefix() const noexcept {
+        return display_name.empty() ? prefix : display_name;
     }
 };
 
@@ -69,22 +86,28 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         "mimo-token-plan-cn", "mimo", "xiaomi", config::ApiType::OpenAI,
         "https://token-plan-cn.xiaomimimo.com/v1",
         { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
-        ProviderAuthStyle::Bearer, "chat_completions",
+        ProviderAuthStyle::ApiKey, "chat_completions",
         core::auth::BillingKind::Subscription,
+        "https://platform.xiaomimimo.com/console/plan-manage",
+        "mimo-token-plan",
     },
     BuiltinProviderDefinition{
         "mimo-token-plan-sgp", "mimo", "xiaomi", config::ApiType::OpenAI,
         "https://token-plan-sgp.xiaomimimo.com/v1",
         { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
-        ProviderAuthStyle::Bearer, "chat_completions",
+        ProviderAuthStyle::ApiKey, "chat_completions",
         core::auth::BillingKind::Subscription,
+        "https://platform.xiaomimimo.com/console/plan-manage",
+        "mimo-token-plan",
     },
     BuiltinProviderDefinition{
         "mimo-token-plan", "mimo", "xiaomi", config::ApiType::OpenAI,
         "https://token-plan-ams.xiaomimimo.com/v1",
         { "MIMO_TOKEN_PLAN_API_KEY", "XIAOMI_API_KEY" },
-        ProviderAuthStyle::Bearer, "chat_completions",
+        ProviderAuthStyle::ApiKey, "chat_completions",
         core::auth::BillingKind::Subscription,
+        "https://platform.xiaomimimo.com/console/plan-manage",
+        "mimo-token-plan",
     },
     BuiltinProviderDefinition{
         "qwen-token-plan", "qwen", "qwen", config::ApiType::DashScope,
@@ -92,6 +115,7 @@ inline constexpr std::array kBuiltinProviderDefinitions{
         { "QWEN_TOKEN_PLAN_API_KEY" },
         ProviderAuthStyle::Bearer, "chat_completions",
         core::auth::BillingKind::Subscription,
+        "https://home.qwencloud.com/analytics/token-plan/individual",
     },
     BuiltinProviderDefinition{
         "qwen-coding", "qwen", "qwen", config::ApiType::DashScope,
@@ -163,6 +187,18 @@ find_builtin_provider_definition(std::string_view provider_name) noexcept {
     return it == kBuiltinProviderDefinitions.end()
         ? nullptr
         : &*it;
+}
+
+/// Resolves a configured provider key to its compact user-facing name.
+/// Unknown and custom providers preserve the configured name unchanged.
+[[nodiscard]] constexpr std::string_view provider_display_name(
+    std::string_view provider_name) noexcept {
+    if (const auto* definition = find_builtin_provider_definition(provider_name)) {
+        return definition->display_name.empty()
+            ? provider_name
+            : definition->display_name;
+    }
+    return provider_name;
 }
 
 } // namespace core::llm

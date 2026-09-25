@@ -16,6 +16,8 @@
 #include "core/auth/OAuthCredentialSource.hpp"
 #include "core/auth/ClaudeOAuthFlow.hpp"
 #include "core/auth/AuthenticationManager.hpp"
+#include "core/auth/ApiKeyPromptStrategy.hpp"
+#include "core/auth/MimoAuthenticationStrategy.hpp"
 #include "core/auth/SecretInput.hpp"
 #include "core/config/ConfigManager.hpp"
 
@@ -1042,8 +1044,9 @@ TEST_CASE("AuthenticationManager treats gemini as an alias for the google login 
           "[AuthenticationManager][google]") {
     TempDir tmp;
     auto manager = AuthenticationManager::create_with_defaults(tmp.path);
-    // "gemini" resolves to the registered "google" strategy (see
-    // normalize_login_provider inside AuthenticationManager.cpp). logout()
+    // "gemini" resolves to the registered "google" strategy via its
+    // login_aliases() (see matches_login_provider inside
+    // AuthenticationManager.cpp). logout()
     // with no stored token is a safe way to exercise dispatch without
     // performing a live OAuth login: it should resolve to the "google"
     // strategy's display name rather than throwing "unknown authentication
@@ -1194,6 +1197,289 @@ TEST_CASE("AuthenticationManager login(qwen) configures Token Plan API key",
     REQUIRE(overlay.find(
         R"("qwen-token-plan":{"api_key":"test-token-plan-key"})")
         != std::string::npos);
+}
+
+TEST_CASE("AuthenticationManager saves an existing MiMo Token Plan key for its region",
+          "[AuthenticationManager][mimo][token-plan]") {
+    TempDir tmp;
+    {
+        std::ofstream saved_model_selection(
+            std::filesystem::path(tmp.path) / "model_defaults.json");
+        saved_model_selection << R"({
+            "default_provider": "mimo-token-plan",
+            "default_model_selection": "manual",
+            "providers": {
+                "mimo-token-plan": { "model": "mimo-v2.6-pro" }
+            }
+        })";
+    }
+    auto manager = AuthenticationManager::create_with_defaults(tmp.path);
+
+    std::istringstream input("2\n2\ntp-test-mimo-token-plan-key\n");
+    ScopedCinRedirect redirect(input);
+    const auto result = manager.login("xiaomi");
+
+    REQUIRE(result.provider == "Xiaomi MiMo");
+    REQUIRE(result.login_provider == "xiaomi");
+
+    // Hints describe the profile that was actually selected, not a default.
+    REQUIRE_FALSE(result.hints.empty());
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'mimo-token-plan-sgp'"));
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'mimo-v2.6-pro'"));
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+    REQUIRE(overlay.find(
+        R"("default_provider":"mimo-token-plan-sgp")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("mimo-token-plan-sgp":{"model":"mimo-v2.6-pro","api_key":"tp-test-mimo-token-plan-key"})")
+        != std::string::npos);
+    REQUIRE(overlay.find(R"("mimo":{"model")") == std::string::npos);
+
+    std::ifstream model_file(
+        std::filesystem::path(tmp.path) / "model_defaults.json");
+    std::ostringstream model_buffer;
+    model_buffer << model_file.rdbuf();
+    const std::string model_defaults = model_buffer.str();
+    REQUIRE(model_defaults.find(
+        R"("default_provider": "mimo-token-plan-sgp")") != std::string::npos);
+    REQUIRE(model_defaults.find(
+        R"("model": "mimo-v2.6-pro")") != std::string::npos);
+}
+
+TEST_CASE("AuthenticationManager saves an existing MiMo pay-as-you-go key",
+          "[AuthenticationManager][mimo][payg]") {
+    TempDir tmp;
+    AuthenticationManager manager(tmp.path);
+    manager.register_strategy(make_mimo_authentication_strategy());
+
+    std::istringstream input("2\n4\nsk-test-mimo-payg-key\n");
+    ScopedCinRedirect redirect(input);
+    const auto result = manager.login("mimo");
+
+    REQUIRE(result.provider == "Xiaomi MiMo");
+    REQUIRE(result.login_provider == "xiaomi");
+
+    REQUIRE_FALSE(result.hints.empty());
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'mimo'"));
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'mimo-v2.6-pro'"));
+
+    std::ifstream file(std::filesystem::path(tmp.path) / "auth_defaults.json");
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string overlay = buffer.str();
+    REQUIRE(overlay.find(R"("default_provider":"mimo")") != std::string::npos);
+    REQUIRE(overlay.find(
+        R"("mimo":{"model":"mimo-v2.6-pro","api_key":"sk-test-mimo-payg-key"})")
+        != std::string::npos);
+    REQUIRE(overlay.find(R"("mimo-token-plan":{"model")") == std::string::npos);
+}
+
+namespace {
+
+/// Minimal strategy double for exercising registry dispatch and menus.
+struct StubAuthStrategy final : IAuthStrategy {
+    std::string id = "stub";
+    std::vector<std::string> aliases;
+    std::vector<std::string> hints = {"stub hint"};
+    std::string error; // when non-empty, login throws this instead
+    mutable int login_calls = 0;
+
+    std::string_view login_provider() const noexcept override { return id; }
+    std::string_view display_name() const noexcept override { return id; }
+    std::vector<std::string_view> login_aliases() const override {
+        std::vector<std::string_view> out;
+        out.reserve(aliases.size());
+        for (const std::string& alias : aliases) out.push_back(alias);
+        return out;
+    }
+    std::string_view token_store_key() const noexcept override { return id; }
+    bool supports(std::string_view,
+                  std::string_view) const noexcept override {
+        return false;
+    }
+    std::shared_ptr<ICredentialSource> create_credential_source(
+        const core::config::ProviderConfig&,
+        std::string_view) const override {
+        return nullptr;
+    }
+    std::vector<std::string> login(std::string_view) const override {
+        ++login_calls;
+        if (!error.empty()) throw std::runtime_error(error);
+        return hints;
+    }
+};
+
+} // namespace
+
+TEST_CASE("AuthenticationManager dispatches aliases declared by strategies",
+          "[AuthenticationManager][alias]") {
+    TempDir tmp;
+    auto strategy = std::make_shared<StubAuthStrategy>();
+    strategy->id = "record";
+    strategy->aliases = {"rec", "rec-order"};
+    AuthenticationManager manager(tmp.path);
+    manager.register_strategy(strategy);
+
+    // Matching is case-insensitive over login_provider and login_aliases.
+    const auto result = manager.login("REC");
+    CHECK(result.provider == "record");
+    CHECK(result.login_provider == "record");
+    CHECK(result.hints == std::vector<std::string>{"stub hint"});
+    CHECK(strategy->login_calls == 1);
+
+    const auto described = manager.describe_provider("rec-order");
+    REQUIRE(described.has_value());
+    CHECK(described->login_provider == "record");
+
+    CHECK(manager.logout("rec", /*revoke_remote=*/false) == "record");
+}
+
+TEST_CASE("AuthenticationManager rejects unknown providers",
+          "[AuthenticationManager][alias]") {
+    TempDir tmp;
+    auto strategy = std::make_shared<StubAuthStrategy>();
+    strategy->id = "record";
+    AuthenticationManager manager(tmp.path);
+    manager.register_strategy(strategy);
+
+    CHECK_THROWS_AS(manager.login("recording"), std::runtime_error);
+    CHECK(strategy->login_calls == 0);
+}
+
+TEST_CASE("CompositeAuthStrategy cancels on a closed input stream",
+          "[AuthenticationManager][composite][cancel]") {
+    TempDir tmp;
+    auto child = std::make_shared<StubAuthStrategy>();
+    CompositeAuthStrategy composite(CompositeAuthStrategySpec{
+        .login_provider = "combo",
+        .display_name = "Combo",
+        .instructions = "Pick one.",
+        .choices = {AuthStrategyChoice{
+            .selection = {.label = "Method one"},
+            .strategy = child,
+        }},
+    });
+
+    std::istringstream input(""); // EOF before the first prompt
+    ScopedCinRedirect redirect(input);
+    CHECK_THROWS_AS(composite.login(tmp.path), LoginCancelled);
+    CHECK(child->login_calls == 0);
+}
+
+TEST_CASE("CompositeAuthStrategy stops retrying when input runs out",
+          "[AuthenticationManager][composite][cancel][regression]") {
+    TempDir tmp;
+    auto child = std::make_shared<StubAuthStrategy>();
+    child->error = "child failed";
+    CompositeAuthStrategy composite(CompositeAuthStrategySpec{
+        .login_provider = "combo",
+        .display_name = "Combo",
+        .instructions = "Pick one.",
+        .choices = {AuthStrategyChoice{
+            .selection = {.label = "Method one"},
+            .strategy = child,
+        }},
+    });
+
+    // One failing attempt, then EOF: the retry menu must terminate instead
+    // of re-prompting forever on a closed stream.
+    std::istringstream input("1\n");
+    ScopedCinRedirect redirect(input);
+    CHECK_THROWS_AS(composite.login(tmp.path), LoginCancelled);
+    CHECK(child->login_calls == 1);
+}
+
+TEST_CASE("Interactive auth menus accept q as cancel",
+          "[AuthenticationManager][composite][cancel]") {
+    TempDir tmp;
+    auto child = std::make_shared<StubAuthStrategy>();
+    CompositeAuthStrategy composite(CompositeAuthStrategySpec{
+        .login_provider = "combo",
+        .display_name = "Combo",
+        .instructions = "Pick one.",
+        .choices = {AuthStrategyChoice{
+            .selection = {.label = "Method one"},
+            .strategy = child,
+        }},
+    });
+
+    std::istringstream input("q\n");
+    ScopedCinRedirect redirect(input);
+    CHECK_THROWS_AS(composite.login(tmp.path), LoginCancelled);
+    CHECK(child->login_calls == 0);
+}
+
+TEST_CASE("CompositeAuthStrategy returns hints from the chosen child",
+          "[AuthenticationManager][composite][hints]") {
+    TempDir tmp;
+    auto first = std::make_shared<StubAuthStrategy>();
+    first->hints = {"first hint"};
+    auto second = std::make_shared<StubAuthStrategy>();
+    second->hints = {"second hint"};
+    CompositeAuthStrategy composite(CompositeAuthStrategySpec{
+        .login_provider = "combo",
+        .display_name = "Combo",
+        .instructions = "Pick one.",
+        .choices = {
+            AuthStrategyChoice{
+                .selection = {.label = "Method one"},
+                .strategy = first,
+            },
+            AuthStrategyChoice{
+                .selection = {.label = "Method two"},
+                .strategy = second,
+            },
+        },
+    });
+
+    std::istringstream input("2\n");
+    ScopedCinRedirect redirect(input);
+    const auto hints = composite.login(tmp.path);
+    CHECK(hints == std::vector<std::string>{"second hint"});
+    CHECK(first->login_calls == 0);
+    CHECK(second->login_calls == 1);
+}
+
+TEST_CASE("API key login hints describe the profile that was selected",
+          "[AuthenticationManager][api_key][hints]") {
+    TempDir tmp;
+    AuthenticationManager manager(tmp.path);
+    manager.register_strategy(std::make_shared<ApiKeyPromptStrategy>(
+        ApiKeyPromptStrategySpec{
+            .login_provider = "acme",
+            .display_name = "Acme",
+            .profiles = {
+                ApiKeyLoginProfile{
+                    .selection = {.label = "Region A"},
+                    .provider_name = "acme-a",
+                    .default_model = "acme-model-a",
+                },
+                ApiKeyLoginProfile{
+                    .selection = {.label = "Region B"},
+                    .provider_name = "acme-b",
+                    .default_model = "acme-model-b",
+                },
+            },
+        }));
+
+    std::istringstream input("2\nsk-acme-key\n");
+    ScopedCinRedirect redirect(input);
+    const auto result = manager.login("acme");
+
+    REQUIRE_FALSE(result.hints.empty());
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'acme-b'"));
+    CHECK_THAT(result.hints.front(),
+               Catch::Matchers::ContainsSubstring("'acme-model-b'"));
+    CHECK_THAT(result.hints.front(),
+               !Catch::Matchers::ContainsSubstring("acme-a"));
 }
 
 TEST_CASE("AuthenticationManager strips bracketed paste markers from API keys",

@@ -26,6 +26,13 @@ public:
     // Returns the trimmed input string.
     virtual std::string prompt_secret(const std::string& prompt_label) = 0;
 
+    // Prompt the user for non-secret input (for example, a numbered choice).
+    // Unlike prompt_secret(), the input remains visible in the terminal.
+    // Returns nullopt when the input stream is closed, so callers can abort
+    // instead of looping on a prompt that can never be answered.
+    virtual std::optional<std::string> prompt_text(
+        const std::string& prompt_label) = 0;
+
     // Display a success message
     virtual void show_success(const std::string& message) = 0;
 

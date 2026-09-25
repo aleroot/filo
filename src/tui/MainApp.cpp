@@ -58,6 +58,8 @@
 #include "core/config/ModelDefaultsPersistence.hpp"
 #include "core/config/SessionModelOverride.hpp"
 #include "core/auth/AuthenticationManager.hpp"
+#include "core/auth/AuthBrowserLauncher.hpp"
+#include "core/llm/ProviderDefinition.hpp"
 #include "core/llm/routing/RouterEngine.hpp"
 #include "core/tools/ToolManager.hpp"
 #include "core/tools/BuiltinToolRegistry.hpp"
@@ -885,7 +887,7 @@ RunResult run(RunOptions opts) {
             return std::string{};
         }
         std::string summary = format_runtime_status_summary(
-            active_provider_name,
+            core::llm::provider_display_name(active_provider_name),
             active_model_name,
             core::mcp::McpConnectionManager::get_instance().connected_count());
         if (!context_sources_label.empty()) {
@@ -7422,6 +7424,23 @@ RunResult run(RunOptions opts) {
             && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed
             && usage_status_box.Contain(event.mouse().x, event.mouse().y)) {
+            const auto* definition =
+                core::llm::find_builtin_provider_definition(active_provider_name);
+            const auto rate_limit_info = llm_provider->get_last_rate_limit_info();
+            const bool has_live_quota = !rate_limit_info.usage_windows.empty()
+                || rate_limit_info.requests_limit > 0
+                || rate_limit_info.tokens_limit > 0;
+
+            // Providers that do not publish quota data through the chat API
+            // expose their account page as the status-bar usage action. Keep
+            // this entirely declarative: no provider-specific TUI branches and
+            // no reliance on private console APIs.
+            if (definition != nullptr && definition->has_usage_dashboard()
+                && !has_live_quota) {
+                core::auth::open_browser(definition->usage_dashboard_url);
+                return true;
+            }
+
             {
                 std::lock_guard lock(ui_mutex);
                 usage_details_panel_active = !usage_details_panel_active;
@@ -9401,7 +9420,7 @@ RunResult run(RunOptions opts) {
         Element banner_el = emptyElement();
         if (ui_show_banner) {
             banner_el = render_startup_banner_panel(
-                active_provider_name,
+                core::llm::provider_display_name(active_provider_name),
                 active_model_name.empty() ? "<provider default>" : active_model_name,
                 core::mcp::McpConnectionManager::get_instance().connected_count(),
                 context_sources_label,
@@ -9466,7 +9485,7 @@ RunResult run(RunOptions opts) {
                 visible_session_id);
             bottom_el = render_usage_details_panel(
                 rate_limit_info,
-                active_provider_name,
+                core::llm::provider_display_name(active_provider_name),
                 active_model_name,
                 session_effort_value,
                 is_subscription,
@@ -9796,7 +9815,24 @@ RunResult run(RunOptions opts) {
             rate_limit_el = text(label) | color(Color::Red);
         }
 
-        if (rate_limit_info.has_data()) {
+        const auto* active_provider_definition =
+            core::llm::find_builtin_provider_definition(active_provider_name);
+        const bool has_live_quota = !rate_limit_info.usage_windows.empty()
+            || rate_limit_info.requests_limit > 0
+            || rate_limit_info.tokens_limit > 0;
+        const bool has_usage_dashboard = active_provider_definition != nullptr
+            && active_provider_definition->has_usage_dashboard()
+            && !has_live_quota;
+        Element usage_dashboard_el = text("");
+
+        if (has_usage_dashboard) {
+            // This deliberately appears even before the first response. It
+            // gives Token Plan users a persistent, obvious route to their
+            // provider-owned balance page when there is no public quota API.
+            usage_dashboard_el = text(" ↗ ")
+                | color(ColorYellowBright)
+                | reflect(usage_status_box);
+        } else if (rate_limit_info.has_data()) {
             rate_limit_el = std::move(rate_limit_el) | reflect(usage_status_box);
         } else {
             usage_status_box = {0, -1, 0, -1};
@@ -9844,11 +9880,12 @@ RunResult run(RunOptions opts) {
         if (ui_show_model_info) {
             left_items.push_back(
                 text(format_model_status_badge(
-                    active_provider_name,
+                    core::llm::provider_display_name(active_provider_name),
                     active_model_name,
                     session_effort_value))
                     | bgcolor(ColorYellowDark) | color(Color::Black));
         }
+        left_items.push_back(usage_dashboard_el);
         left_items.push_back(budget_el);
         left_items.push_back(rate_limit_el);
         TurnActivityState turn_activity_state = TurnActivityState::Idle;
