@@ -222,6 +222,48 @@ void write_structural(core::utils::JsonWriter& writer,
     return tokens;
 }
 
+[[nodiscard]] std::optional<std::uint64_t> nonnegative_integer_keyword(
+    Object schema,
+    std::string_view key) {
+    std::uint64_t value = 0;
+    if (schema[key].get(value) != simdjson::SUCCESS) return std::nullopt;
+    return value;
+}
+
+[[nodiscard]] std::optional<ArgumentIssue> validate_count_bounds(
+    std::size_t actual,
+    Object schema,
+    std::string_view path,
+    std::string_view unit,
+    std::string_view minimum_key,
+    std::string_view maximum_key) {
+    if (const auto minimum = nonnegative_integer_keyword(schema, minimum_key);
+        minimum.has_value() && actual < *minimum) {
+        return make_issue(
+            ArgumentIssueCode::ConstraintViolation,
+            relative_path(path),
+            {},
+            std::format("{} must contain at least {} {}{}",
+                        path,
+                        *minimum,
+                        unit,
+                        *minimum == 1 ? "" : "s"));
+    }
+    if (const auto maximum = nonnegative_integer_keyword(schema, maximum_key);
+        maximum.has_value() && actual > *maximum) {
+        return make_issue(
+            ArgumentIssueCode::ConstraintViolation,
+            relative_path(path),
+            {},
+            std::format("{} must contain at most {} {}{}",
+                        path,
+                        *maximum,
+                        unit,
+                        *maximum == 1 ? "" : "s"));
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 namespace detail {
@@ -311,10 +353,26 @@ using detail::validate_value;
         simdjson::dom::array alternatives;
         if (schema[keyword].get(alternatives) != simdjson::SUCCESS) continue;
         std::size_t matches = 0;
+        std::optional<ArgumentIssue> matching_type_error;
         for (Element candidate : alternatives) {
-            if (!validate_value(value, candidate, path).has_value()) ++matches;
+            if (auto error = validate_value(value, candidate, path)) {
+                if (!matching_type_error.has_value()
+                    && schema_accepts_type(candidate, element_type_name(value))) {
+                    matching_type_error = std::move(*error);
+                }
+            } else {
+                ++matches;
+            }
         }
         if ((exact && matches != 1) || (!exact && matches == 0)) {
+            // Union branches often differ only by shape (for example, a read
+            // path can be one string or an array of strings). If the supplied
+            // value selected a branch by type but failed that branch's own
+            // constraint, preserve the actionable nested error rather than
+            // flattening it to an opaque union mismatch.
+            if (matches == 0 && matching_type_error.has_value()) {
+                return matching_type_error;
+            }
             return make_issue(
                 ArgumentIssueCode::CombinatorMismatch,
                 relative_path(path),
@@ -406,6 +464,14 @@ std::optional<ArgumentIssue> validate_value(
                         type_mismatch_detail(value, expected)));
     }
 
+    std::string_view text;
+    if (value.get(text) == simdjson::SUCCESS) {
+        if (auto error = validate_count_bounds(
+                text.size(), schema, path, "character", "minLength", "maxLength")) {
+            return error;
+        }
+    }
+
     simdjson::dom::array enum_values;
     if (schema["enum"].get(enum_values) == simdjson::SUCCESS) {
         const std::string canonical_value = canonicalize_json(simdjson::to_string(value));
@@ -443,6 +509,10 @@ std::optional<ArgumentIssue> validate_value(
 
     simdjson::dom::array array;
     if (value.get(array) == simdjson::SUCCESS) {
+        if (auto error = validate_count_bounds(
+                array.size(), schema, path, "item", "minItems", "maxItems")) {
+            return error;
+        }
         Element items;
         if (schema["items"].get(items) == simdjson::SUCCESS) {
             std::size_t index = 0;
@@ -575,6 +645,7 @@ std::string_view issue_code_name(ArgumentIssueCode code) noexcept {
         case ArgumentIssueCode::TypeMismatch: return "type_mismatch";
         case ArgumentIssueCode::EnumMismatch: return "enum_mismatch";
         case ArgumentIssueCode::ConstMismatch: return "const_mismatch";
+        case ArgumentIssueCode::ConstraintViolation: return "constraint_violation";
         case ArgumentIssueCode::CombinatorMismatch: return "combinator_mismatch";
     }
     return "unknown";

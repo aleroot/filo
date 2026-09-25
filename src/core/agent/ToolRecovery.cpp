@@ -209,6 +209,12 @@ std::optional<RecoveryHint> advise(
                 std::format("'{}' must be of type {}.",
                             issue.parameter, join_names(issue.allowed)));
         }
+        case ArgumentIssueCode::ConstraintViolation: {
+            if (issue.parameter.empty()) return std::nullopt;
+            return deduced(
+                std::format("Correct '{}' to satisfy the documented size limits.",
+                            issue.parameter));
+        }
         case ArgumentIssueCode::InvalidJson:
         case ArgumentIssueCode::NotAnObject:
         case ArgumentIssueCode::SchemaInvalid:

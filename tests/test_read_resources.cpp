@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/tools/ReadTool.hpp"
+#include "core/tools/ToolSchema.hpp"
 #include "core/tools/read/ReaderProfile.hpp"
 #include "core/tools/read/ReadTypes.hpp"
 #include "core/context/SteeringLoader.hpp"
@@ -11,6 +12,7 @@
 #include "core/session/SessionStats.hpp"
 #include "TestSessionContext.hpp"
 #include <simdjson.h>
+#include <array>
 #include <fstream>
 #include <atomic>
 #include <cstdlib>
@@ -218,6 +220,44 @@ TEST_CASE("Unified read rejects unsupported selectors and respects workspace bou
     CHECK_THAT(tool.execute(R"({"path":"/etc/passwd","view":"auto"})", fixture.context()), ContainsSubstring("error"));
     CHECK_THAT(tool.execute(R"({"path":".","view":"auto"})", fixture.context()), ContainsSubstring("source.txt"));
     CHECK_THAT(tool.execute(R"({"path":"ssh://host/file"})", fixture.context()), ContainsSubstring("Unsupported resource scheme"));
+}
+
+TEST_CASE("Unified read advertises and validates non-empty bounded paths", "[read][schema]") {
+    ReadTool tool;
+    const auto definition = tool.get_definition();
+    const auto schema = core::tools::schema::canonical_input_schema(definition);
+    CHECK_THAT(schema, ContainsSubstring(R"("minLength":1)"));
+    CHECK_THAT(schema, ContainsSubstring(R"("maxLength":1024)"));
+
+    struct InvalidCall {
+        std::string_view arguments;
+        std::string_view parameter;
+    };
+    for (const auto& invalid : std::array{
+             InvalidCall{R"({"path":""})", "path"},
+             InvalidCall{R"({"path":[]})", "path"},
+             InvalidCall{R"({"path":[""]})", "path[0]"},
+             InvalidCall{R"({"path":["source.txt",""]})", "path[1]"},
+         }) {
+        const auto result = core::tools::schema::validate_arguments(
+            definition, invalid.arguments);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code
+              == core::tools::schema::ArgumentIssueCode::ConstraintViolation);
+        CHECK(result.error().parameter == invalid.parameter);
+    }
+
+    const auto too_long = core::tools::schema::validate_arguments(
+        definition,
+        std::string(R"({"path":")") + std::string(1025, 'x') + R"("})");
+    REQUIRE_FALSE(too_long.has_value());
+    CHECK(too_long.error().code
+          == core::tools::schema::ArgumentIssueCode::ConstraintViolation);
+    CHECK(too_long.error().parameter == "path");
+
+    CHECK(core::tools::schema::validate_arguments(
+              definition, R"({"path":"source.txt"})")
+              .has_value());
 }
 TEST_CASE("Unified read compact views reduce parent payload without losing exact recovery", "[read][resources]") {
     Fixture fixture;

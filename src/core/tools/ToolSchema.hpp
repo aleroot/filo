@@ -28,6 +28,7 @@ enum class ArgumentIssueCode {
     TypeMismatch,       ///< An argument's JSON type is not accepted.
     EnumMismatch,       ///< An argument value is outside the allowed enum.
     ConstMismatch,      ///< An argument value differs from the required const.
+    ConstraintViolation, ///< A string or array size bound is violated.
     CombinatorMismatch, ///< A oneOf/anyOf constraint is not satisfied.
 };
 

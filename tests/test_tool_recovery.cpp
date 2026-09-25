@@ -480,6 +480,17 @@ TEST_CASE("advisor suggests renames, removals, and repairs deterministically",
     REQUIRE(typed.has_value());
     CHECK(typed->instruction == "'pattern' must be of type string.");
 
+    const core::tools::ToolDefinition bounded{
+        .name = "bounded",
+        .input_schema =
+            R"({"type":"object","properties":{"path":{"type":"string","minLength":1}},"required":["path"],"additionalProperties":false})",
+    };
+    const auto constrained = rec::advise(
+        require_issue(bounded, R"({"path":""})"), bounded);
+    REQUIRE(constrained.has_value());
+    CHECK(constrained->instruction
+          == "Correct 'path' to satisfy the documented size limits.");
+
     CHECK_FALSE(rec::advise(
         require_issue(definition, "{oops"), definition)
         .has_value());
