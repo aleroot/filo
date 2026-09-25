@@ -1,6 +1,7 @@
 #include "ProviderCatalogGrouping.hpp"
 
 #include "KimiModelTraits.hpp"
+#include "MimoModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -87,10 +88,6 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
     return normalized(provider_name).starts_with("qwen-coding");
 }
 
-[[nodiscard]] bool is_mimo_token_plan_source(std::string_view provider_name) {
-    return normalized(provider_name).starts_with("mimo-token-plan");
-}
-
 [[nodiscard]] ProviderCatalogModelFilter model_filter(
     ProviderCatalogModelRule rule,
     std::span<const std::string_view> model_ids) {
@@ -172,6 +169,10 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
 
 [[nodiscard]] ProviderCatalogSource source_for_provider(std::string_view provider_name,
                                                         std::string_view group_name) {
+    const auto* definition = find_builtin_provider_definition(provider_name);
+    const auto mimo_plan_region = group_name == "xiaomi" && definition
+        ? mimo_region_for_endpoint(definition->base_url)
+        : std::nullopt;
     ProviderCatalogSource source{
         .provider_name = std::string(provider_name),
         .service_id = std::string(provider_name),
@@ -203,8 +204,9 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
             std::string(kimi_service_id(KimiService::PublicApi));
         source.category_label = "Kimi API.";
         source.registry_model_filter = kimi_regular_filter();
-    } else if (group_name == "xiaomi" && is_mimo_token_plan_source(provider_name)) {
-        source.category_label = "Token Plan endpoint.";
+    } else if (mimo_plan_region) {
+        source.category_label = "Token Plan · "
+            + std::string(mimo_region_label(*mimo_plan_region)) + ".";
         source.registry_model_filter = mimo_token_plan_filter();
         source.api_model_filter = source.registry_model_filter;
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
@@ -397,24 +399,6 @@ ProviderCatalogGroup provider_catalog_group_for(
             configured_provider_names,
             [](std::string_view configured) { return !is_zai_coding_source(configured); },
             "zai");
-        return group;
-    }
-
-    if (group_name == "xiaomi") {
-        // Token Plan is the subscribed product; list it above pay-as-you-go so
-        // its models sit at the top of the picker.
-        append_first_matching_source(
-            group,
-            group_name,
-            configured_provider_names,
-            [](std::string_view configured) { return is_mimo_token_plan_source(configured); },
-            "mimo-token-plan");
-        append_first_matching_source(
-            group,
-            group_name,
-            configured_provider_names,
-            [](std::string_view configured) { return !is_mimo_token_plan_source(configured); },
-            "mimo");
         return group;
     }
 

@@ -2941,8 +2941,8 @@ TEST_CASE("SearchReplaceTool returns error for missing old_string key", "[tools]
 // PythonManager (basic functionality)
 // ---------------------------------------------------------------------------
 
-#ifdef FILO_ENABLE_PYTHON
 #undef execute
+#ifdef FILO_ENABLE_PYTHON
 TEST_CASE("PythonManager execute works correctly", "[tools][python]") {
     // Basic test of Python execution functionality
     auto& pm = core::tools::PythonManager::get_instance();

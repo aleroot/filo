@@ -396,23 +396,47 @@ TEST_CASE("MiMo presets group under the vendor name for the picker",
     CHECK(groups.front().provider_name == "xiaomi");
 }
 
-TEST_CASE("MiMo groups Token Plan ahead of pay-as-you-go", "[mimo][catalog]") {
+TEST_CASE("MiMo keeps Token Plan and pay-as-you-go as separate sources", "[mimo][catalog]") {
     const std::vector<std::string> configured{"mimo", "mimo-token-plan"};
     const auto group = provider_catalog_group_for("xiaomi", configured);
 
     REQUIRE(group.sources.size() == 2);
-    CHECK(group.sources[0].provider_name == "mimo-token-plan");
-    CHECK(group.sources[0].category_label == "Token Plan endpoint.");
-    CHECK(group.sources[1].provider_name == "mimo");
+    const auto* plan = group.find_source("mimo-token-plan");
+    const auto* api = group.find_source("mimo");
+    REQUIRE(plan != nullptr);
+    REQUIRE(api != nullptr);
+    CHECK(plan->category_label == "Token Plan · Europe.");
 
     // A plan key is rejected by api.xiaomimimo.com, so plan models must not be
     // offered under the pay-as-you-go source.
-    CHECK(group.sources[0].registry_model_filter.matches("mimo-v2.6-pro"));
-    CHECK_FALSE(group.sources[1].registry_model_filter.matches("mimo-v2.6-pro"));
+    CHECK(plan->registry_model_filter.matches("mimo-v2.6-pro"));
+    CHECK_FALSE(api->registry_model_filter.matches("mimo-v2.6-pro"));
     // UltraSpeed is pay-as-you-go only.
-    CHECK(group.sources[1].registry_model_filter.matches("mimo-v2.6-pro-ultraspeed"));
-    CHECK_FALSE(
-        group.sources[0].registry_model_filter.matches("mimo-v2.6-pro-ultraspeed"));
+    CHECK(api->registry_model_filter.matches("mimo-v2.6-pro-ultraspeed"));
+    CHECK_FALSE(plan->registry_model_filter.matches("mimo-v2.6-pro-ultraspeed"));
+}
+
+TEST_CASE("MiMo picker keeps every Token Plan endpoint separate",
+          "[mimo][catalog]") {
+    const std::vector<std::string> configured{
+        "mimo", "mimo-token-plan", "mimo-token-plan-sgp"};
+    const auto group = provider_catalog_group_for("xiaomi", configured);
+
+    REQUIRE(group.sources.size() == 3);
+    const auto* europe = group.find_source("mimo-token-plan");
+    const auto* singapore = group.find_source("mimo-token-plan-sgp");
+    REQUIRE(europe != nullptr);
+    REQUIRE(singapore != nullptr);
+    CHECK(europe->category_label == "Token Plan · Europe.");
+    CHECK(singapore->category_label == "Token Plan · Singapore.");
+    CHECK(group.find_source("mimo") != nullptr);
+    CHECK(group.contains_source_provider("mimo-token-plan-sgp"));
+    CHECK(provider_catalog_selection_key(europe->service_id, "mimo-v2.6-pro")
+          != provider_catalog_selection_key(singapore->service_id, "mimo-v2.6-pro"));
+
+    const auto from_region = provider_catalog_group_for("mimo-token-plan-sgp", configured);
+    REQUIRE(from_region.sources.size() == group.sources.size());
+    CHECK(from_region.find_source("mimo-token-plan-sgp") != nullptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
