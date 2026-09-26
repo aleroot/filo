@@ -51,6 +51,12 @@ struct ProviderCatalogGroup {
     find_source_by_service_id(std::string_view service_id) const;
 };
 
+/// Restrict a provider group to the first configured source preference that
+/// belongs to it. If no preference matches, leave the group unchanged.
+void retain_preferred_provider_catalog_source(
+    ProviderCatalogGroup& group,
+    std::span<const std::string_view> preferred_sources);
+
 [[nodiscard]] std::string provider_catalog_group_name(std::string_view provider_name);
 
 /**

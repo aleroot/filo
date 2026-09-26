@@ -1769,6 +1769,22 @@ std::string ConfigManager::get_config_dir() const {
     return ".filo"; // fallback to current dir
 }
 
+std::string ConfigManager::get_auth_default_provider() const {
+    const fs::path overlay_path = auth_defaults_overlay_path(get_config_dir());
+    try {
+        if (!fs::exists(overlay_path)) {
+            return {};
+        }
+        return parse_config_file(overlay_path).config.default_provider;
+    } catch (const std::exception& error) {
+        core::logging::warn(
+            "Failed to read authentication provider from '{}': {}",
+            overlay_path.string(),
+            error.what());
+        return {};
+    }
+}
+
 std::filesystem::path ConfigManager::get_profile_defaults_path() const {
     return profile_defaults_overlay_path(get_config_dir());
 }

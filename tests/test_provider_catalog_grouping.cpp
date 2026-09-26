@@ -5,6 +5,7 @@
 #include "core/llm/KimiModelTraits.hpp"
 #include "core/llm/ModelRegistry.hpp"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,43 @@ TEST_CASE("Provider catalog group lookup maps category source names to visible p
     REQUIRE(group.contains_source_provider("zai-coding"));
     REQUIRE(group.find_source("zai-coding") != nullptr);
     REQUIRE(group.find_source("missing") == nullptr);
+}
+
+TEST_CASE("Provider catalog source selection preserves the preferred endpoint",
+          "[llm][provider-catalog]") {
+    const std::vector<std::string> providers{
+        "mimo-token-plan",
+        "mimo-token-plan-sgp",
+        "mimo-token-plan-cn",
+    };
+    auto group =
+        core::llm::provider_catalog_group_for("mimo", providers);
+    const std::array<std::string_view, 3> preferences{
+        "mimo-token-plan-sgp",
+        "mimo-token-plan",
+        "mimo-token-plan-cn",
+    };
+
+    core::llm::retain_preferred_provider_catalog_source(group, preferences);
+
+    REQUIRE(group.sources.size() == 1);
+    CHECK(group.sources.front().provider_name == "mimo-token-plan-sgp");
+}
+
+TEST_CASE("Provider catalog source selection leaves unmatched groups unchanged",
+          "[llm][provider-catalog]") {
+    const std::vector<std::string> providers{"mimo-token-plan", "mimo-token-plan-sgp"};
+    auto group =
+        core::llm::provider_catalog_group_for("mimo", providers);
+    const auto original_sources = group.sources;
+    const std::array<std::string_view, 2> preferences{"qwen-token-plan", "qwen-coding"};
+
+    core::llm::retain_preferred_provider_catalog_source(group, preferences);
+
+    REQUIRE(group.sources.size() == original_sources.size());
+    for (std::size_t i = 0; i < original_sources.size(); ++i) {
+        CHECK(group.sources[i].provider_name == original_sources[i].provider_name);
+    }
 }
 
 TEST_CASE("Provider catalog grouping collapses Grok presets under Grok",

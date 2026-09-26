@@ -333,6 +333,22 @@ ProviderCatalogGroup::find_source_by_service_id(std::string_view service) const 
     return it == sources.end() ? nullptr : &*it;
 }
 
+void retain_preferred_provider_catalog_source(
+    ProviderCatalogGroup& group,
+    std::span<const std::string_view> preferred_sources) {
+    for (const std::string_view preferred : preferred_sources) {
+        if (preferred.empty() || !group.find_source(preferred)) {
+            continue;
+        }
+        std::erase_if(
+            group.sources,
+            [preferred](const ProviderCatalogSource& source) {
+                return source.provider_name != preferred;
+            });
+        return;
+    }
+}
+
 std::string provider_catalog_group_name(std::string_view provider_name) {
     const std::string lowered = normalized(provider_name);
     if (const auto* definition =

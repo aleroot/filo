@@ -336,6 +336,10 @@ public:
                            std::string* error = nullptr);
 
     std::string get_config_dir() const;
+    /// Provider selected by the authentication overlay, before model defaults
+    /// choose a session provider. Endpoint-sensitive model pickers use this to
+    /// retain the route associated with the saved credential.
+    [[nodiscard]] std::string get_auth_default_provider() const;
     std::filesystem::path get_profile_defaults_path() const;
     std::filesystem::path get_mcp_overlay_path(
         SettingsScope scope,
