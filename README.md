@@ -130,6 +130,28 @@ frontier through subagents, while the parent stays the single writer. It records
 branch, revision, and dirty paths, then audits the final state so branch/HEAD transitions or lost
 pre-existing changes cannot pass silently.
 
+### Execution profiles
+
+Subagent profiles can deliberately use a different configured provider and model from the parent conversation. Give the profile a descriptive, task-oriented name and ask the parent to select it with `subagent_type`. The parent cannot override a profile's provider or model in its prompt.
+
+```json
+{
+  "subagents": {
+    "luna-explore": {
+      "description": "Low-cost, read-only codebase investigation with GPT-5.6 Luna.",
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "use_allow_list": true,
+      "allowed_tools": ["read", "file_search", "grep_search", "list_directory"],
+      "allow_task_tool": false,
+      "max_steps": 24
+    }
+  }
+}
+```
+
+Profiles inherit the parent provider/model when their respective fields are omitted.
+
 A turn that changed the workspace must end with fresh verification evidence. On `stop` Filo runs
 project completion hooks; a successful hook marked `quality_gate` is authoritative. Otherwise AUTO
 runs the smallest deterministic gate from the repository recipe catalog, discovered from CMake

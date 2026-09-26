@@ -191,7 +191,9 @@ core::llm::Tool SubagentOrchestrator::task_tool_definition() const {
         {
             .name = "subagent_type",
             .type = "string",
-            .description = "Specialized subagent profile to run (e.g. general, explore).",
+            .description =
+                "Configured execution profile to run (for example, general, explore, or a "
+                "custom profile such as luna-explore).",
             .required = true,
         },
         {
@@ -621,13 +623,24 @@ std::string SubagentOrchestrator::build_task_description() const {
         "Delegates work to a specialized background subagent. "
         "Use this for complex multi-step research, broad file/code exploration, "
         "or splitting ambiguous work while you stay focused on the primary user goal.\\n\\n"
-        "Available subagent_type values:\\n";
+        "Available subagent execution profiles:\\n";
 
     if (profiles_snapshot.empty()) {
         description += "- none configured\\n";
     } else {
         for (const auto& profile : profiles_snapshot) {
-            description += std::format("- {}: {}\\n", profile.name, profile.description);
+            const std::string_view provider = profile.provider_override.empty()
+                ? "inherit parent"
+                : std::string_view(profile.provider_override);
+            const std::string_view model = profile.model_override.empty()
+                ? "inherit parent"
+                : std::string_view(profile.model_override);
+            description += std::format(
+                "- {}: {} [provider: {}; model: {}]\\n",
+                profile.name,
+                profile.description,
+                provider,
+                model);
         }
     }
 
@@ -635,8 +648,10 @@ std::string SubagentOrchestrator::build_task_description() const {
         "\\nWhen finished, the subagent returns a concise final result to this conversation. "
         "For a new task, omit task_id. To resume the same delegated thread later, pass "
         "the exact task_id returned by its earlier successful call; never invent one. "
-        "For multiple independent read-only investigations, issue several explore task calls "
-        "together in one response so Filo can run them concurrently.";
+        "Select the matching profile with subagent_type. A profile's provider and model are "
+        "fixed by user configuration and cannot be overridden in a task prompt. For multiple "
+        "independent read-only investigations, issue several explore task calls together in one "
+        "response so Filo can run them concurrently.";
 
     return description;
 }

@@ -466,27 +466,35 @@ TEST_CASE("SubagentOrchestrator reloads profile overrides live", "[agent][orches
     REQUIRE(requests[1].model == "model-from-reloaded-profile");
 }
 
-TEST_CASE("SubagentOrchestrator routes through provider override when configured", "[agent][orchestration]") {
+TEST_CASE("SubagentOrchestrator routes a configured execution profile through its provider and model",
+          "[agent][orchestration]") {
     auto parent_provider = std::make_shared<RecordingProvider>();
     auto worker_provider = std::make_shared<RecordingProvider>();
     auto& tool_manager = core::tools::ToolManager::get_instance();
 
-    constexpr std::string_view kWorkerAlias = "test-subagent-worker-provider";
+    constexpr std::string_view kWorkerAlias = "test-luna-explore-provider";
     core::llm::ProviderManager::get_instance().register_provider(std::string(kWorkerAlias), worker_provider);
 
     core::config::AppConfig config;
-    core::config::SubagentConfig general;
-    general.provider = std::string(kWorkerAlias);
-    config.subagents["general"] = std::move(general);
+    core::config::SubagentConfig luna_explore;
+    luna_explore.description = "Read-only GPT-5.6 Luna investigator.";
+    luna_explore.provider = std::string(kWorkerAlias);
+    luna_explore.model = "gpt-5.6-luna";
+    config.subagents["luna-explore"] = std::move(luna_explore);
 
     core::agent::SubagentOrchestrator orchestrator(tool_manager, &config);
     const auto session_context = test_support::make_workspace_session_context();
+    const auto definition = orchestrator.task_tool_definition();
+    CHECK_THAT(definition.function.description,
+               Catch::Matchers::ContainsSubstring("test-luna-explore-provider"));
+    CHECK_THAT(definition.function.description,
+               Catch::Matchers::ContainsSubstring("gpt-5.6-luna"));
 
     const auto result = orchestrator.execute_task(
-        R"({"description":"provider override","prompt":"run task","subagent_type":"general"})",
+        R"({"description":"provider override","prompt":"run task","subagent_type":"luna-explore"})",
         parent_provider,
         {
-            .active_model = "parent-model",
+            .active_model = "qwen3-max",
             .parent_mode = "BUILD",
             .session_context = session_context,
             .permission_check = {},
@@ -494,7 +502,9 @@ TEST_CASE("SubagentOrchestrator routes through provider override when configured
 
     REQUIRE_FALSE(result.contains("\"error\""));
     REQUIRE(parent_provider->requests_snapshot().empty());
-    REQUIRE(worker_provider->requests_snapshot().size() == 1);
+    const auto requests = worker_provider->requests_snapshot();
+    REQUIRE(requests.size() == 1);
+    CHECK(requests.front().model == "gpt-5.6-luna");
 }
 
 TEST_CASE("SubagentOrchestrator fails clearly when provider override is unavailable", "[agent][orchestration]") {
