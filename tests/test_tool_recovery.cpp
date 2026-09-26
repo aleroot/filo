@@ -882,6 +882,27 @@ TEST_CASE("agent records a lesson from failure followed by corrected success",
     CHECK(saw_structured_rejection);
 }
 
+TEST_CASE("agent replays malformed tool arguments as an empty object",
+          "[agent][recovery][integration][history][regression]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<RecoverySearchTool>());
+
+    const auto history = run_turn(
+        std::make_shared<ScriptedToolCallProvider>(
+            std::string(kValidationToolName),
+            std::vector<std::string>{R"({"pattern":)"}),
+        std::make_shared<RecordingToolRecoveryMemory>());
+
+    const auto assistant_tool_message = std::ranges::find_if(
+        history,
+        [](const core::llm::Message& message) {
+            return message.role == "assistant" && !message.tool_calls.empty();
+        });
+    REQUIRE(assistant_tool_message != history.end());
+    REQUIRE(assistant_tool_message->tool_calls.size() == 1);
+    CHECK(assistant_tool_message->tool_calls.front().function.arguments == "{}");
+}
+
 TEST_CASE("the agent gates and executes the same coerced arguments",
           "[agent][recovery][integration][coercion]") {
     // Safety invariant: whatever a PreToolUse hook or permission prompt is

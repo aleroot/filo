@@ -87,6 +87,24 @@ TEMPLATE_TEST_CASE("ParserRetentionGuard keeps small buffers warm and releases l
     CHECK(parser.capacity() == warm_capacity);
 }
 
+TEST_CASE("JsonUtils validates JSON values and object roots",
+          "[json_utils][regression]") {
+    CHECK(json::is_valid(R"({"name":"filo"})"));
+    CHECK(json::is_valid(R"("text")"));
+    CHECK(json::is_valid("123456789012345678901"));
+    CHECK_FALSE(json::is_valid(R"({"name":)"));
+
+    CHECK(json::is_object(" \t{\"name\":\"filo\"}\r\n"));
+    CHECK(json::is_object(R"({"count":123456789012345678901})"));
+    CHECK_FALSE(json::is_object("[1,2]"));
+    CHECK_FALSE(json::is_object(R"({"name":)"));
+
+    CHECK(json::object_or_empty(" {\"name\":\"filo\"} ")
+          == " {\"name\":\"filo\"} ");
+    CHECK(json::object_or_empty("[1,2]") == "{}");
+    CHECK(json::object_or_empty("") == "{}");
+}
+
 TEST_CASE("JsonUtils: typed field accessors return fallbacks for missing fields",
           "[json_utils]") {
     simdjson::dom::parser parser;

@@ -170,6 +170,65 @@ std::string repair_utf8(std::string_view sv) {
     return out;
 }
 
+namespace json {
+namespace {
+
+enum class RootKind {
+    Invalid,
+    Other,
+    Object,
+};
+
+[[nodiscard]] std::string_view trim_whitespace(std::string_view input) noexcept {
+    while (!input.empty() && is_whitespace(
+               static_cast<unsigned char>(input.front()))) {
+        input.remove_prefix(1);
+    }
+    while (!input.empty() && is_whitespace(
+               static_cast<unsigned char>(input.back()))) {
+        input.remove_suffix(1);
+    }
+    return input;
+}
+
+[[nodiscard]] RootKind root_kind(std::string_view input) {
+    if (input.empty()) return RootKind::Invalid;
+
+    thread_local simdjson::dom::parser parser;
+    const ParserRetentionGuard parser_guard{parser};
+    parser.number_as_string(true);
+
+    simdjson::dom::element document;
+    if (parser.parse(input.data(), input.size()).get(document)
+        != simdjson::SUCCESS) {
+        return RootKind::Invalid;
+    }
+    return document.is_object() ? RootKind::Object : RootKind::Other;
+}
+
+} // namespace
+
+bool is_valid(std::string_view input) {
+    return root_kind(input) != RootKind::Invalid;
+}
+
+bool is_object(std::string_view input) {
+    input = trim_whitespace(input);
+    // Truncated streamed arguments usually fail this check; avoid allocating a
+    // parser buffer proportional to their size just to reject them.
+    if (input.size() < 2 || input.front() != '{' || input.back() != '}') {
+        return false;
+    }
+    return root_kind(input) == RootKind::Object;
+}
+
+std::string_view object_or_empty(std::string_view input) {
+    static constexpr std::string_view empty_object = "{}";
+    return is_object(input) ? input : empty_object;
+}
+
+} // namespace json
+
 namespace {
 
 using core::utils::json::schema::RootRole;

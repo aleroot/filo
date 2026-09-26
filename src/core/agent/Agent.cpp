@@ -18,6 +18,7 @@
 #include "../tools/ToolPolicy.hpp"
 #include "../tools/read/ReadTypes.hpp"
 #include "../tools/ToolSchema.hpp"
+#include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 #include "../utils/Uuid.hpp"
@@ -76,6 +77,53 @@ private:
 // All Filo tools return {"error": "..."} on failure.
 [[nodiscard]] bool is_tool_error(const std::string& result) noexcept {
     return result.find("\"error\"") != std::string::npos;
+}
+
+void sanitize_tool_arguments(core::llm::Message& message) {
+    if (message.role != "assistant") return;
+    for (auto& call : message.tool_calls) {
+        if (!core::utils::json::is_object(call.function.arguments)) {
+            call.function.arguments = "{}";
+        }
+    }
+}
+
+[[nodiscard]] bool reconcile_persisted_tool_calls(
+    std::vector<core::llm::Message>& history,
+    const std::vector<core::llm::ToolCall>& completed_calls,
+    const std::vector<bool>& replace_invalid_arguments) {
+    if (history.empty() || history.back().role != "assistant"
+        || history.back().tool_calls.size() != completed_calls.size()
+        || completed_calls.size() != replace_invalid_arguments.size()) {
+        return false;
+    }
+
+    auto& persisted_calls = history.back().tool_calls;
+    for (std::size_t i = 0; i < persisted_calls.size(); ++i) {
+        const auto& persisted = persisted_calls[i];
+        const auto& completed = completed_calls[i];
+        if (persisted.function.name != completed.function.name
+            || (!persisted.id.empty() && persisted.id != completed.id)) {
+            return false;
+        }
+    }
+
+    for (std::size_t i = 0; i < persisted_calls.size(); ++i) {
+        auto& persisted = persisted_calls[i];
+        const auto& completed = completed_calls[i];
+        if (persisted.id != completed.id) persisted.id = completed.id;
+        if (persisted.type != completed.type) persisted.type = completed.type;
+        if (persisted.function.name != completed.function.name) {
+            persisted.function.name = completed.function.name;
+        }
+        const std::string_view replay_arguments = replace_invalid_arguments[i]
+            ? "{}"
+            : std::string_view(completed.function.arguments);
+        if (persisted.function.arguments != replay_arguments) {
+            persisted.function.arguments.assign(replay_arguments);
+        }
+    }
+    return true;
 }
 
 [[nodiscard]] bool is_truncation_stop_reason(std::string_view stop_reason) noexcept {
@@ -2188,6 +2236,8 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             // Structured argument-issue bookkeeping for recovery hints.
             std::vector<std::string> argument_parameters(tool_calls_accum->size());
             std::vector<std::string> argument_recovery_hints(tool_calls_accum->size());
+            std::vector<bool> replace_invalid_arguments(
+                tool_calls_accum->size(), false);
             // Resolved definitions reused by the scheduler pass for recovery
             // bookkeeping (empty where the tool was never found).
             std::vector<std::optional<core::tools::ToolDefinition>> resolved_definitions(
@@ -2238,7 +2288,18 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         tc.function.arguments = std::move(*normalized);
                     } else {
                         argument_issue = std::move(normalized.error());
+                        replace_invalid_arguments[i] =
+                            argument_issue->code
+                                == core::tools::schema::ArgumentIssueCode::InvalidJson
+                            || argument_issue->code
+                                == core::tools::schema::ArgumentIssueCode::NotAnObject;
                     }
+                } else {
+                    // An unregistered call cannot be executed. Avoid retaining
+                    // malformed arguments in replay history when there is no
+                    // schema available to classify them during validation.
+                    replace_invalid_arguments[i] =
+                        !core::utils::json::is_object(tc.function.arguments);
                 }
 
                 if (turn_callbacks.on_tool_start) {
@@ -2317,6 +2378,31 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
 
             if (self->is_stop_requested() || !self->is_turn_current(turn_state)) {
+                done_callback();
+                return;
+            }
+
+            // The assistant message was provisionally persisted before tool
+            // validation. Reconcile it now: keep rejected bytes in this live
+            // execution for diagnostics, but store a replay-safe transcript
+            // and the final synthesized call IDs. The paired tool result below
+            // carries the validation error back to the model.
+            bool history_reconciled = false;
+            if (!self->apply_to_history_if_turn_current(
+                    turn_state,
+                    [&](std::vector<core::llm::Message>& history) {
+                        history_reconciled = reconcile_persisted_tool_calls(
+                            history,
+                            *tool_calls_accum,
+                            replace_invalid_arguments);
+                    })) {
+                done_callback();
+                return;
+            }
+            if (!history_reconciled) {
+                core::logging::error(
+                    "Could not reconcile the assistant tool call with the live turn; refusing to continue with an unsafe transcript.");
+                self->turn_failed_.store(true, std::memory_order_release);
                 done_callback();
                 return;
             }
@@ -2842,6 +2928,7 @@ std::vector<core::llm::Message> Agent::get_history() const {
 }
 
 void Agent::append_history_message(core::llm::Message message) {
+    sanitize_tool_arguments(message);
     std::lock_guard lock(history_mutex_);
     if (turn_in_progress_.load(std::memory_order_acquire)) {
         core::logging::warn(
@@ -2860,6 +2947,10 @@ void Agent::append_history_message(core::llm::Message message) {
 void Agent::load_history(std::vector<core::llm::Message> messages,
                          const std::string &context_summary,
                          const std::string &mode) {
+  // Normalize the caller-owned snapshot before taking the history lock. The
+  // input is local to this call, so JSON parsing does not need shared state.
+  for (auto& message : messages) sanitize_tool_arguments(message);
+
   std::lock_guard lock(history_mutex_);
   ++conversation_generation_;
   current_mode_ = agent_mode_from_string(mode);

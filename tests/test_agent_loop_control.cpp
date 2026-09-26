@@ -1046,6 +1046,75 @@ TEST_CASE("Loading a malformed tool transcript keeps only its complete prefix",
     REQUIRE(provider->requests_snapshot().size() == 1);
 }
 
+TEST_CASE("Loading a complete transcript scrubs malformed tool arguments",
+          "[agent][history][load][tool-call][regression]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    core::llm::Message assistant{
+        .role = "assistant",
+        .tool_calls = {core::llm::ToolCall{
+            .id = "call_replayed",
+            .type = "function",
+            .function = {
+                .name = "edit",
+                .arguments = "{\"path\":",
+            },
+        }},
+    };
+    core::llm::Message result{
+        .role = "tool",
+        .content = R"({"error":"Invalid tool arguments"})",
+        .name = "edit",
+        .tool_call_id = "call_replayed",
+    };
+    agent->load_history(
+        {std::move(assistant), std::move(result)},
+        {},
+        "BUILD");
+
+    const auto restored = agent->get_history();
+    REQUIRE(restored.size() == 2);
+    REQUIRE(restored.front().tool_calls.size() == 1);
+    CHECK(restored.front().tool_calls.front().function.arguments == "{}");
+}
+
+TEST_CASE("Appending assistant tool history scrubs malformed arguments",
+          "[agent][history][append][tool-call][regression]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    agent->append_history_message(core::llm::Message{
+        .role = "assistant",
+        .tool_calls = {core::llm::ToolCall{
+            .id = "call_appended",
+            .function = {
+                .name = "edit",
+                .arguments = "{\"path\":",
+            },
+        }},
+    });
+    agent->append_history_message(core::llm::Message{
+        .role = "tool",
+        .content = "{}",
+        .name = "edit",
+        .tool_call_id = "call_appended",
+    });
+
+    const auto history = agent->get_history();
+    REQUIRE(history.size() == 2);
+    REQUIRE(history.front().tool_calls.size() == 1);
+    CHECK(history.front().tool_calls.front().function.arguments == "{}");
+}
+
 TEST_CASE("Agent runs independent explore subagents concurrently with a bounded fan-out",
           "[agent][orchestration][parallel]") {
     auto provider = std::make_shared<ParallelExploreProvider>();

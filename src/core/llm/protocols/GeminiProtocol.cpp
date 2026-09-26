@@ -352,16 +352,25 @@ std::string serialize_gemini_request(const ChatRequest& req,
             payload += R"({"functionResponse":{"name":")";
             payload += core::utils::escape_json_string(msg.name);
             payload += R"(","response":{"result":)";
-            payload += msg.content;
+            // Tool output is often JSON, but denials and failures are plain
+            // text. Preserve valid JSON values; encode all other results as a
+            // JSON string so one tool error cannot corrupt the next request.
+            if (core::utils::json::is_valid(msg.content)) {
+                payload += msg.content;
+            } else {
+                payload += '"';
+                payload += core::utils::escape_json_string(msg.content);
+                payload += '"';
+            }
             payload += "}}}";
         } else if (!msg.tool_calls.empty()) {
             for (size_t j = 0; j < msg.tool_calls.size(); ++j) {
                 const auto& tc = msg.tool_calls[j];
-                std::string args = tc.function.arguments.empty() ? "{}" : tc.function.arguments;
                 payload += R"({"functionCall":{"name":")";
                 payload += core::utils::escape_json_string(tc.function.name);
                 payload += R"(","args":)";
-                payload += args;
+                payload += core::utils::json::object_or_empty(
+                    tc.function.arguments);
                 payload += "}}";
                 if (j < msg.tool_calls.size() - 1) payload += ',';
             }

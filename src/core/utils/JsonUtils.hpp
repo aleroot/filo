@@ -77,6 +77,16 @@ namespace json {
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
 }
 
+/// Return whether simdjson accepts input as one complete JSON value.
+[[nodiscard]] bool is_valid(std::string_view input);
+
+/// Return whether input parses as a JSON object.
+[[nodiscard]] bool is_object(std::string_view input);
+
+/// Return the input object when valid, or a view of "{}" otherwise. The
+/// returned view borrows input on success; the fallback has static storage.
+[[nodiscard]] std::string_view object_or_empty(std::string_view input);
+
 // ---------------------------------------------------------------------------
 // ignore_error — deliberately discard an optional simdjson lookup.
 //

@@ -150,6 +150,39 @@ TEST_CASE("GeminiProvider Serializes Tool Calls and Responses", "[GeminiProvider
     REQUIRE(temp == 22);
 }
 
+TEST_CASE("Gemini serializer keeps malformed tool data inside valid JSON",
+          "[GeminiProvider][tool-call][regression]") {
+    ChatRequest req;
+    req.model = "gemini-2.5-flash";
+    req.messages.push_back(Message{
+        .role = "assistant",
+        .tool_calls = {ToolCall{
+            .id = "call_bad_args",
+            .function = {
+                .name = "edit",
+                .arguments = R"({"path":)",
+            },
+        }},
+    });
+    req.messages.push_back(Message{
+        .role = "tool",
+        .content = "[invalid tool arguments: arguments are not valid JSON]",
+        .name = "edit",
+    });
+
+    const std::string payload = serialize_gemini_request(req, req.model);
+    simdjson::dom::parser parser;
+    const auto document = parser.parse(payload);
+
+    simdjson::dom::object arguments;
+    REQUIRE(document["contents"].at(0)["parts"].at(0)["functionCall"]["args"]
+                .get_object().get(arguments) == simdjson::SUCCESS);
+    CHECK(arguments.size() == 0);
+    CHECK(document["contents"].at(1)["parts"].at(0)["functionResponse"]
+              ["response"]["result"].get_string().value()
+          == "[invalid tool arguments: arguments are not valid JSON]");
+}
+
 TEST_CASE("GeminiProvider serializes inlineData image parts", "[GeminiProvider][vision]") {
     const auto image = make_temp_image_file();
 

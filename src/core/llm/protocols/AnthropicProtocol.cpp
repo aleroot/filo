@@ -918,9 +918,10 @@ std::string AnthropicSerializer::serialize(
                 payload += core::utils::escape_json_string(tc.id);
                 payload += R"(","name":")";
                 payload += core::utils::escape_json_string(tc.function.name);
-                // "input" is a raw JSON object — embed directly.
+                // Only validated JSON objects may be embedded as native JSON.
                 payload += R"(","input":)";
-                payload += tc.function.arguments.empty() ? "{}" : tc.function.arguments;
+                payload += core::utils::json::object_or_empty(
+                    tc.function.arguments);
                 payload += '}';
             }
             payload += "]}";

@@ -58,6 +58,34 @@ static ChatRequest make_simple_request(std::string model    = "claude-sonnet-4-6
     return req;
 }
 
+TEST_CASE("Anthropic serializer replaces malformed tool input with an object",
+          "[claude][serializer][tool-call][regression]") {
+    for (const auto* arguments : {"{\"path\":", "[]", "not json"}) {
+        CAPTURE(arguments);
+        auto request = make_simple_request();
+        request.messages.clear();
+        request.messages.push_back(Message{
+            .role = "assistant",
+            .tool_calls = {ToolCall{
+                .id = "call_bad_args",
+                .function = {
+                    .name = "edit",
+                    .arguments = arguments,
+                },
+            }},
+        });
+
+        const std::string payload = AnthropicSerializer::serialize(request);
+        require_valid_json(payload);
+        simdjson::dom::parser parser;
+        const auto document = parser.parse(payload);
+        simdjson::dom::object input;
+        REQUIRE(document["messages"].at(0)["content"].at(0)["input"]
+                    .get_object().get(input) == simdjson::SUCCESS);
+        CHECK(input.size() == 0);
+    }
+}
+
 TEST_CASE("Fable 5.1 requests pair binding controls with current client headers",
           "[claude][fable51][serializer][headers]") {
     for (const auto* model : {"claude-fable-5-1", "fable", "best", "claude-fable",
