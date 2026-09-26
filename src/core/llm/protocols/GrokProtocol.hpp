@@ -92,9 +92,10 @@ enum class GrokReasoningEffort { None, Low, Medium, High };
 /**
  * @brief Return true if @p model accepts xAI hosted `web_search` / `x_search`.
  *
- * grok-build advertises `supports_backend_search` only for Grok 4.6. Sending
- * those tools to older families can 400 the request or shadow Filo's local
- * search tools without a working server-side implementation.
+ * grok-build advertises `supports_backend_search` for Grok 4.6. Sending those
+ * tools on a model whose deployment rejects them 400s the whole request, so
+ * the static gate stays at 4.6. Other Grok models, including 4.7, keep Filo's
+ * local web_search tool, which calls the Responses API as that session model.
  */
 [[nodiscard]] bool grok_responses_supports_hosted_search(
     std::string_view model) noexcept;

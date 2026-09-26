@@ -104,59 +104,18 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     return headers;
 }
 
-[[nodiscard]] std::string normalize_domain(std::string_view value) {
-    std::string domain = core::utils::str::trim_ascii_copy(value);
-    if (domain.empty()) return {};
-
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(domain);
-    if (lowered.starts_with("http://")) {
-        domain.erase(0, std::string("http://").size());
-    } else if (lowered.starts_with("https://")) {
-        domain.erase(0, std::string("https://").size());
-    }
-
-    if (const std::size_t at = domain.rfind('@'); at != std::string::npos) {
-        domain.erase(0, at + 1);
-    }
-    if (const std::size_t end = domain.find_first_of("/?#"); end != std::string::npos) {
-        domain.resize(end);
-    }
-    if (!domain.empty() && domain.front() != '[') {
-        if (const std::size_t port = domain.find(':'); port != std::string::npos) {
-            domain.resize(port);
-        }
-    }
-    while (!domain.empty() && domain.back() == '.') {
-        domain.pop_back();
-    }
-    return core::utils::str::to_lower_ascii_copy(domain);
-}
-
 [[nodiscard]] std::vector<std::string> normalized_domains(
     const std::vector<std::string>& domains) {
     std::vector<std::string> out;
     out.reserve(std::min(domains.size(), kMaxDomainFilters));
     for (const auto& domain : domains) {
         if (out.size() >= kMaxDomainFilters) break;
-        std::string normalized = normalize_domain(domain);
+        std::string normalized = detail::normalize_search_domain(domain);
         if (normalized.empty()) continue;
         if (std::ranges::find(out, normalized) != out.end()) continue;
         out.push_back(std::move(normalized));
     }
     return out;
-}
-
-void write_string_array(core::utils::JsonWriter& writer,
-                        std::string_view key,
-                        const std::vector<std::string>& values) {
-    writer.key(key);
-    {
-        auto _array = writer.array();
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            if (i != 0) writer.comma();
-            writer.str(values[i]);
-        }
-    }
 }
 
 void write_domain_filters(core::utils::JsonWriter& writer,
@@ -170,12 +129,12 @@ void write_domain_filters(core::utils::JsonWriter& writer,
         auto _filters = writer.object();
         bool first = true;
         if (!allowed.empty()) {
-            write_string_array(writer, "allowed_domains", allowed);
+            detail::write_string_array(writer, "allowed_domains", allowed);
             first = false;
         }
         if (!blocked.empty()) {
             if (!first) writer.comma();
-            write_string_array(writer, "blocked_domains", blocked);
+            detail::write_string_array(writer, "blocked_domains", blocked);
         }
     }
 }

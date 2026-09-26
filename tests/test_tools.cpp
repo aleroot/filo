@@ -1687,6 +1687,179 @@ TEST_CASE("OpenAI web search backend only supports native Responses endpoints",
     }));
 }
 
+TEST_CASE("Grok web search backend supports xAI hosts only", "[tools][web][grok]") {
+    const auto backend = core::tools::web::make_grok_web_search_backend();
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("grok-web-search-api"),
+        .model_name = "grok-4.7",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.x.ai/v1"),
+    }));
+
+    REQUIRE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("grok-web-search-proxy"),
+        .model_name = "grok-4.7",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://cli-chat-proxy.grok.com/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("grok-web-search-openai"),
+        .model_name = "grok-4.7",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.openai.com/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("grok-web-search-misleading"),
+        .model_name = "grok-4.7",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://example.com/api.x.ai/v1"),
+    }));
+
+    REQUIRE_FALSE(backend->supports(core::tools::ToolInvocationContext{
+        .session_context = make_tool_test_context("grok-web-search-no-credentials"),
+        .model_name = "grok-4.7",
+        .provider = make_metadata_provider(
+            core::config::ApiType::OpenAI,
+            "https://api.x.ai/v1",
+            false),
+    }));
+
+    const auto rejected = backend->search(
+        {.query = "q", .domains = {
+            .allowed_domains = {"docs.x.ai"},
+            .blocked_domains = {"reddit.com"},
+        }},
+        core::tools::ToolInvocationContext{
+            .session_context = make_tool_test_context("grok-web-search-domains"),
+            .model_name = "grok-4.7",
+            .provider = make_metadata_provider(
+                core::config::ApiType::OpenAI,
+                "https://api.x.ai/v1"),
+        });
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK_THAT(rejected.error(), Catch::Matchers::ContainsSubstring("not both"));
+}
+
+TEST_CASE("Grok web search request matches grok-build's Responses side call",
+          "[tools][web][grok]") {
+    // Sampling fields match grok-build's web_search side call. The model is
+    // the session model: a grok-4.7 turn searches as grok-4.7.
+    const auto body = core::tools::web::grok_web_search_request_json(
+        {.query = "Swift Task.sleep cancellation"},
+        "grok-4.7");
+    REQUIRE(body.has_value());
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("model":"grok-4.7")"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(
+        R"("input":"Swift Task.sleep cancellation")"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("store":false)"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("temperature":0.1)"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("top_p":0.95)"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("max_output_tokens":8192)"));
+    CHECK_THAT(*body, Catch::Matchers::ContainsSubstring(R"("type":"web_search")"));
+    CHECK_THAT(*body, !Catch::Matchers::ContainsSubstring("reasoning"));
+    CHECK_THAT(*body, !Catch::Matchers::ContainsSubstring("stream"));
+    CHECK_THAT(*body, !Catch::Matchers::ContainsSubstring("filters"));
+
+    const auto allowed = core::tools::web::grok_web_search_request_json(
+        {.query = "q", .domains = {.allowed_domains = {"https://docs.x.ai/guide"}}},
+        "grok-4.7");
+    REQUIRE(allowed.has_value());
+    CHECK_THAT(*allowed, Catch::Matchers::ContainsSubstring(
+        R"("allowed_domains":["docs.x.ai"])"));
+    CHECK_THAT(*allowed, !Catch::Matchers::ContainsSubstring("excluded_domains"));
+
+    const auto blocked = core::tools::web::grok_web_search_request_json(
+        {.query = "q", .domains = {.blocked_domains = {"reddit.com"}}},
+        "grok-4.7");
+    REQUIRE(blocked.has_value());
+    CHECK_THAT(*blocked, Catch::Matchers::ContainsSubstring(
+        R"("excluded_domains":["reddit.com"])"));
+    CHECK_THAT(*blocked, !Catch::Matchers::ContainsSubstring("allowed_domains"));
+    CHECK_THAT(*blocked, !Catch::Matchers::ContainsSubstring("blocked_domains"));
+
+    const auto both = core::tools::web::grok_web_search_request_json(
+        {.query = "q", .domains = {
+            .allowed_domains = {"docs.x.ai"},
+            .blocked_domains = {"reddit.com"},
+        }},
+        "grok-4.7");
+    REQUIRE_FALSE(both.has_value());
+    CHECK_THAT(both.error(), Catch::Matchers::ContainsSubstring("not both"));
+
+    const auto too_many = core::tools::web::grok_web_search_request_json(
+        {.query = "q", .domains = {.allowed_domains = {
+            "a.com", "b.com", "c.com", "d.com", "e.com", "f.com"}}},
+        "grok-4.7");
+    REQUIRE_FALSE(too_many.has_value());
+    CHECK_THAT(too_many.error(), Catch::Matchers::ContainsSubstring("at most 5"));
+
+    const auto no_model = core::tools::web::grok_web_search_request_json(
+        {.query = "q"}, "");
+    REQUIRE_FALSE(no_model.has_value());
+    CHECK_THAT(no_model.error(), Catch::Matchers::ContainsSubstring("active model"));
+}
+
+TEST_CASE("Grok web search response keeps url citations",
+          "[tools][web][grok]") {
+    const auto parsed = core::tools::web::parse_grok_web_search_response(R"({
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "Here is some info about Rust.",
+                "annotations": [
+                    {"type": "url_citation", "url": "https://www.rust-lang.org/",
+                     "title": "Rust Programming Language"},
+                    {"type": "url_citation", "url": "https://www.rust-lang.org/",
+                     "title": "Duplicate"},
+                    {"type": "file_citation", "url": "https://ignored.example/",
+                     "title": "Not a web citation"},
+                    {"type": "url_citation", "url": "https://docs.rs/", "title": "Docs.rs"}
+                ]
+            }]
+        }],
+        "citations": ["https://docs.rs/", "https://x.ai/news"]
+    })", 5);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->answer == "Here is some info about Rust.");
+    REQUIRE(parsed->results.size() == 3);
+    CHECK(parsed->results[0].url == "https://www.rust-lang.org/");
+    CHECK(parsed->results[0].title == "Rust Programming Language");
+    CHECK(parsed->results[1].url == "https://docs.rs/");
+    CHECK(parsed->results[1].title == "Docs.rs");
+    CHECK(parsed->results[2].url == "https://x.ai/news");
+
+    const auto limited = core::tools::web::parse_grok_web_search_response(R"({
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "Two sources.",
+                "annotations": [
+                    {"type": "url_citation", "url": "https://a.example/", "title": "A"},
+                    {"type": "url_citation", "url": "https://b.example/", "title": "B"}
+                ]
+            }]
+        }]
+    })", 1);
+    REQUIRE(limited.has_value());
+    REQUIRE(limited->results.size() == 1);
+    CHECK(limited->results[0].url == "https://a.example/");
+
+    const auto empty = core::tools::web::parse_grok_web_search_response(
+        R"({"output":[]})", 5);
+    REQUIRE(empty.has_value());
+    CHECK(empty->answer == "No search results found.");
+    CHECK(empty->results.empty());
+}
+
 TEST_CASE("Z.ai web backends support GLM API endpoints only",
           "[tools][web][zai]") {
     const auto search_backend = core::tools::web::make_zai_web_search_backend();

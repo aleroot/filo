@@ -259,10 +259,11 @@ bool grok_responses_supports_xhigh_effort(std::string_view model) noexcept {
 bool grok_responses_supports_hosted_search(std::string_view model) noexcept {
     // grok-build does not hard-code this list: its remote catalog rows carry a
     // per-model `supportsBackendSearch` flag (true for grok-4.6, false for
-    // grok-4.5) and xAI has not published the flag for grok-4.7. Keep the
-    // static allowlist at grok-4.6 — sending `web_search`/`x_search` to a
-    // model whose deployment rejects them 400s the whole request, while
-    // withholding them only leaves Filo's local search tools in place.
+    // grok-4.5). Public docs show `web_search` on grok-4.7, but injecting a
+    // hosted tool the deployment rejects 400s the whole turn. Keep the static
+    // allowlist at grok-4.6. Every other Grok model keeps Filo's local
+    // web_search tool, and GrokWebSearchBackend runs that search as the
+    // session model rather than as a stand-in.
     return grok_id_in_family(model, "grok-4.6");
 }
 

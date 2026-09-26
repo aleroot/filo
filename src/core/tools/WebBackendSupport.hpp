@@ -5,6 +5,7 @@
 #include "../llm/LLMProvider.hpp"
 #include "../utils/AsciiUtils.hpp"
 #include "../utils/JsonUtils.hpp"
+#include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
 
 #include <cpr/cpr.h>
@@ -66,6 +67,49 @@ inline void parse_search_hit_object(SearchResponse& response,
         }
     }
     return std::nullopt;
+}
+
+// Host form of a search-filter entry. OpenAI and xAI both want a bare domain;
+// models often pass a full URL.
+[[nodiscard]] inline std::string normalize_search_domain(std::string_view value) {
+    std::string domain = core::utils::str::trim_ascii_copy(value);
+    if (domain.empty()) return {};
+
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(domain);
+    if (lowered.starts_with("http://")) {
+        domain.erase(0, std::string("http://").size());
+    } else if (lowered.starts_with("https://")) {
+        domain.erase(0, std::string("https://").size());
+    }
+
+    if (const std::size_t at = domain.rfind('@'); at != std::string::npos) {
+        domain.erase(0, at + 1);
+    }
+    if (const std::size_t end = domain.find_first_of("/?#"); end != std::string::npos) {
+        domain.resize(end);
+    }
+    if (!domain.empty() && domain.front() != '[') {
+        if (const std::size_t port = domain.find(':'); port != std::string::npos) {
+            domain.resize(port);
+        }
+    }
+    while (!domain.empty() && domain.back() == '.') {
+        domain.pop_back();
+    }
+    return core::utils::str::to_lower_ascii_copy(domain);
+}
+
+inline void write_string_array(core::utils::JsonWriter& writer,
+                               std::string_view key,
+                               const std::vector<std::string>& values) {
+    writer.key(key);
+    {
+        auto _array = writer.array();
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) writer.comma();
+            writer.str(values[i]);
+        }
+    }
 }
 
 } // namespace core::tools::web::detail
