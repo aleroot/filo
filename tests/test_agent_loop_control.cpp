@@ -190,6 +190,49 @@ private:
     std::atomic<int> calls_{0};
 };
 
+class MixedValidAndNamelessToolProvider final : public core::llm::LLMProvider {
+public:
+    explicit MixedValidAndNamelessToolProvider(std::string valid_tool_name)
+        : valid_tool_name_(std::move(valid_tool_name)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        const int call = calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (call == 1) {
+            core::llm::ToolCall valid;
+            valid.index = 0;
+            valid.id = "valid-tool-call";
+            valid.type = "function";
+            valid.function.name = valid_tool_name_;
+            valid.function.arguments = "{}";
+
+            core::llm::ToolCall nameless;
+            nameless.index = 1;
+            nameless.id = "nameless-tool-call";
+            nameless.type = "function";
+            nameless.function.arguments = "{}";
+
+            callback(core::llm::StreamChunk{
+                .tools = {std::move(valid), std::move(nameless)},
+                .is_final = true,
+            });
+            return;
+        }
+
+        callback(core::llm::StreamChunk::make_content("finished"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+    [[nodiscard]] int call_count() const noexcept {
+        return calls_.load(std::memory_order_acquire);
+    }
+
+private:
+    std::string valid_tool_name_;
+    std::atomic<int> calls_{0};
+};
+
 class InfiniteToolLoopProvider final : public core::llm::LLMProvider {
 public:
     void stream_response(
@@ -869,6 +912,37 @@ TEST_CASE("Agent never executes tool calls from a failed terminal response",
                Catch::Matchers::ContainsSubstring("provider stream failed"));
 }
 
+TEST_CASE("Agent drops terminal nameless tool calls before they enter history",
+          "[agent][tool][history][replay][regression]") {
+    const std::string valid_tool_name = "mixed_valid_and_nameless_tool";
+    auto tool = std::make_shared<CountingTool>(valid_tool_name);
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(tool);
+    auto provider = std::make_shared<MixedValidAndNamelessToolProvider>(valid_tool_name);
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    send_and_wait(agent, "Run the valid tool only.");
+
+    CHECK(provider->call_count() == 2);
+    CHECK(tool->execution_count() == 1);
+    const auto history = agent->get_history();
+    const auto tool_use = std::ranges::find_if(
+        history,
+        [](const core::llm::Message& message) {
+            return message.role == "assistant" && !message.tool_calls.empty();
+        });
+    REQUIRE(tool_use != history.end());
+    REQUIRE(tool_use->tool_calls.size() == 1);
+    CHECK(tool_use->tool_calls.front().id == "valid-tool-call");
+    CHECK(tool_use->tool_calls.front().function.name == valid_tool_name);
+    CHECK(std::ranges::none_of(history, [](const core::llm::Message& message) {
+        return message.role == "tool" && message.tool_call_id == "nameless-tool-call";
+    }));
+}
+
 TEST_CASE("Clearing history invalidates a late provider callback",
           "[agent][history][generation][regression]") {
     auto provider = std::make_shared<DeferredFinalProvider>();
@@ -1081,6 +1155,68 @@ TEST_CASE("Loading a complete transcript scrubs malformed tool arguments",
     REQUIRE(restored.size() == 2);
     REQUIRE(restored.front().tool_calls.size() == 1);
     CHECK(restored.front().tool_calls.front().function.arguments == "{}");
+}
+
+TEST_CASE("Loading a legacy transcript removes nameless calls without truncating later history",
+          "[agent][history][load][tool-call][replay][regression]") {
+    auto provider = std::make_shared<CapturingProvider>();
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        tool_manager,
+        test_support::make_workspace_session_context());
+
+    core::llm::Message assistant{
+        .role = "assistant",
+        .content = "I will inspect the project.",
+        .tool_calls = {
+            {
+                .id = "call_valid",
+                .type = "function",
+                .function = {.name = "read", .arguments = R"({"path":"README.md"})"},
+            },
+            {
+                .id = "call_nameless",
+                .type = "function",
+                .function = {.name = "", .arguments = "{}"},
+            },
+        },
+    };
+    agent->load_history(
+        {
+            core::llm::Message{.role = "user", .content = "Inspect the project."},
+            std::move(assistant),
+            core::llm::Message{
+                .role = "tool",
+                .content = R"({"output":"README"})",
+                .name = "read",
+                .tool_call_id = "call_valid",
+            },
+            core::llm::Message{
+                .role = "tool",
+                .content = R"({"error":"Invalid tool arguments: tool not found"})",
+                .tool_call_id = "call_nameless",
+            },
+            core::llm::Message{.role = "assistant", .content = "The README is present."},
+        },
+        {},
+        "BUILD");
+
+    const auto restored = agent->get_history();
+    REQUIRE(restored.size() == 4);
+    REQUIRE(restored[1].tool_calls.size() == 1);
+    CHECK(restored[1].tool_calls.front().id == "call_valid");
+    CHECK(restored[1].tool_calls.front().function.name == "read");
+    CHECK(std::ranges::none_of(restored, [](const core::llm::Message& message) {
+        return message.role == "tool" && message.tool_call_id == "call_nameless";
+    }));
+    CHECK(restored.back().content == "The README is present.");
+
+    core::llm::ChatRequest claude_request;
+    claude_request.model = "claude-opus-5";
+    claude_request.messages = restored;
+    const auto payload = core::llm::protocols::AnthropicSerializer::serialize(claude_request);
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("name":"")"));
 }
 
 TEST_CASE("Appending assistant tool history scrubs malformed arguments",

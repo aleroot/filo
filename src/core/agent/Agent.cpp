@@ -6,6 +6,7 @@
 #include "../hooks/HookManager.hpp"
 #include "../llm/ModelRegistry.hpp"
 #include "../llm/ToolCallAssembly.hpp"
+#include "../llm/ToolTranscript.hpp"
 #include "../llm/OneShotCompletion.hpp"
 #include "../logging/Logger.hpp"
 #include "../memory/MemorySystem.hpp"
@@ -365,75 +366,6 @@ void append_compaction_section(
         core::context::ContextWindowTracker::resolve_max_context_tokens(
             provider,
             model));
-}
-
-struct InvalidToolHistory {
-    std::size_t index = 0;
-    std::string reason;
-};
-
-[[nodiscard]] std::optional<InvalidToolHistory> invalid_tool_history(
-    const std::vector<core::llm::Message>& messages) {
-    for (std::size_t i = 0; i < messages.size(); ++i) {
-        const auto& assistant = messages[i];
-        if (assistant.role != "assistant" || assistant.tool_calls.empty()) {
-            continue;
-        }
-
-        std::vector<bool> matched(assistant.tool_calls.size(), false);
-        std::size_t result_count = 0;
-        std::size_t cursor = i + 1;
-        while (cursor < messages.size() && messages[cursor].role == "tool") {
-            const auto& result = messages[cursor];
-            const auto call = std::ranges::find_if(
-                assistant.tool_calls,
-                [&](const core::llm::ToolCall& tool_call) {
-                    return tool_call.id == result.tool_call_id;
-                });
-            if (call == assistant.tool_calls.end()) {
-                return InvalidToolHistory{
-                    .index = i,
-                    .reason = std::format(
-                        "tool result '{}' does not belong to the preceding assistant message at history index {}",
-                        result.tool_call_id,
-                        i),
-                };
-            }
-            const auto match_index = static_cast<std::size_t>(
-                std::distance(assistant.tool_calls.begin(), call));
-            if (matched[match_index]) {
-                return InvalidToolHistory{
-                    .index = i,
-                    .reason = std::format(
-                        "tool call '{}' has more than one result after history index {}",
-                        result.tool_call_id,
-                        i),
-                };
-            }
-            matched[match_index] = true;
-            ++result_count;
-            ++cursor;
-        }
-
-        if (result_count != assistant.tool_calls.size()) {
-            std::string missing;
-            for (std::size_t call_index = 0;
-                 call_index < assistant.tool_calls.size();
-                 ++call_index) {
-                if (matched[call_index]) continue;
-                if (!missing.empty()) missing += ", ";
-                missing += assistant.tool_calls[call_index].id;
-            }
-            return InvalidToolHistory{
-                .index = i,
-                .reason = std::format(
-                    "assistant tool calls at history index {} are not immediately followed by all results; missing: {}",
-                    i,
-                    missing),
-            };
-        }
-    }
-    return std::nullopt;
 }
 
 } // namespace
@@ -1740,7 +1672,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         done_callback();
         return;
     }
-    if (const auto invalid = invalid_tool_history(request.messages);
+    if (const auto invalid = core::llm::validate_tool_transcript(request.messages);
         invalid.has_value()) {
         text_callback(std::format(
             "\n[Internal history error: Filo blocked a malformed tool transcript before it reached the provider: {}]\n",
@@ -2005,7 +1937,24 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
         }
 
-        // Persist the assistant message (with accumulated tool calls)
+        // Tool-call fragments may omit their id or name while streaming. Once
+        // the terminal event arrives, assign missing ids and discard calls
+        // which still lack a name before they can enter replay history.
+        // Otherwise a later provider switch could turn them into an invalid
+        // wire-level tool-use block.
+        if (!chunk.is_error && !self->is_stop_requested()) {
+            const auto normalization = core::llm::normalize_completed_tool_calls(
+                *tool_calls_accum,
+                [] { return "call_" + core::utils::random_uuid_v4(); });
+            if (normalization.discarded_calls > 0) {
+                core::logging::warn(
+                    "Discarded {} completed tool call(s) without a replayable id and name from provider '{}'",
+                    normalization.discarded_calls,
+                    provider_name_snapshot);
+            }
+        }
+
+        // Persist the assistant message (with validated accumulated tool calls)
         core::llm::Message asst_msg;
         asst_msg.role               = "assistant";
         asst_msg.content            = *assistant_response;
@@ -2916,19 +2865,32 @@ std::vector<core::llm::Message> Agent::get_history() const {
     for (const auto& msg : history_) {
         if (msg.role != "system") result.push_back(msg);
     }
+    // Keep snapshots safe even when a caller supplied legacy history through
+    // an out-of-band path. Normal streamed turns are normalized before their
+    // assistant message enters history.
+    static_cast<void>(core::llm::repair_tool_transcript(result));
     // Session snapshots must always be replayable. While tools are running,
     // the live history temporarily ends at an assistant tool-use message; save
     // only the last complete prefix. The same rule prevents legacy corruption
     // from being persisted again.
-    if (const auto invalid = invalid_tool_history(result);
+    if (const auto invalid = core::llm::validate_tool_transcript(result);
         invalid.has_value()) {
-        result.resize(invalid->index);
+        result.resize(invalid->message_index);
     }
     return result;
 }
 
 void Agent::append_history_message(core::llm::Message message) {
     sanitize_tool_arguments(message);
+    if (message.role == "assistant") {
+        const auto discarded = core::llm::discard_non_replayable_tool_calls(
+            message.tool_calls);
+        if (discarded > 0) {
+            core::logging::warn(
+                "Discarded {} non-replayable tool call(s) appended outside an agent turn.",
+                discarded);
+        }
+    }
     std::lock_guard lock(history_mutex_);
     if (turn_in_progress_.load(std::memory_order_acquire)) {
         core::logging::warn(
@@ -2950,6 +2912,14 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
   // Normalize the caller-owned snapshot before taking the history lock. The
   // input is local to this call, so JSON parsing does not need shared state.
   for (auto& message : messages) sanitize_tool_arguments(message);
+  const auto repair = core::llm::repair_tool_transcript(messages);
+  if (repair.removed_calls > 0) {
+    core::logging::warn(
+        "Repaired saved tool transcript by removing {} non-replayable tool call(s), {} paired result(s), and {} empty assistant message(s).",
+        repair.removed_calls,
+        repair.removed_results,
+        repair.removed_empty_messages);
+  }
 
   std::lock_guard lock(history_mutex_);
   ++conversation_generation_;
@@ -2978,12 +2948,12 @@ void Agent::load_history(std::vector<core::llm::Message> messages,
   // one.
   std::erase_if(messages,
                 [](const core::llm::Message &m) { return m.role == "system"; });
-  if (const auto invalid = invalid_tool_history(messages);
+  if (const auto invalid = core::llm::validate_tool_transcript(messages);
       invalid.has_value()) {
     core::logging::warn(
         "Truncated malformed saved tool transcript at history index {}: {}",
-        invalid->index, invalid->reason);
-    messages.resize(invalid->index);
+        invalid->message_index, invalid->reason);
+    messages.resize(invalid->message_index);
   }
   history_ = std::move(messages);
   refresh_stable_prompt_state_unlocked();
