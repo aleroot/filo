@@ -378,6 +378,14 @@ TEST_CASE("needs_permission auto-approves safe shell commands in Standard mode",
     REQUIRE_FALSE(needs_permission("run_terminal_command", PermissionProfile::Standard, args_glog));
 }
 
+TEST_CASE("needs_permission gates recursive deletion in Standard mode",
+          "[safety_policy][integration]") {
+    REQUIRE_FALSE(needs_permission("delete_file", PermissionProfile::Standard,
+                                   R"({"file_path":"tree"})"));
+    REQUIRE(needs_permission("delete_file", PermissionProfile::Standard,
+                             R"({"file_path":"tree","recursive":true})"));
+}
+
 TEST_CASE("needs_permission in Restricted mode always gates shell commands",
           "[safety_policy][integration]") {
     const auto args_ls = R"({"command":"ls -la"})";

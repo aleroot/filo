@@ -464,6 +464,10 @@ TEST_CASE("make_allow_label generates correct labels", "[permissions]") {
     SECTION("delete_file returns file deletions") {
         auto label = make_allow_label("delete_file", "{}");
         REQUIRE(label == "file deletions");
+        REQUIRE(make_allow_label("delete_file", R"({"recursive":true})")
+                == "recursive directory deletions");
+        REQUIRE(make_allow_key("delete_file", R"({"recursive":true})")
+                == "delete_file:recursive");
     }
 
     SECTION("run_verification identifies the approved recipe") {
@@ -489,6 +493,8 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
                 == "files:write");
         REQUIRE(make_session_allow_rule("delete_file", R"({"path":"x"})")
                 == "files:delete");
+        REQUIRE(make_session_allow_rule("delete_file", R"({"file_path":"x","recursive":true})")
+                == "files:delete_recursive");
         REQUIRE(make_session_allow_rule("move_file", R"({"source_path":"a","destination_path":"b"})")
                 == "files:move");
         REQUIRE(make_session_allow_rule("custom_tool", "{}")
@@ -505,6 +511,7 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
                 == "run_terminal_command:");
         REQUIRE(normalize_session_allow_rule("write_file") == "write_file");
         REQUIRE(normalize_session_allow_rule("tool:Read") == "tool:read");
+        REQUIRE(normalize_session_allow_rule("files:delete_recursive") == "files:delete_recursive");
     }
 
     SECTION("session_allow_rule_matches supports shell, files, and tools") {
@@ -536,6 +543,14 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
         REQUIRE_FALSE(session_allow_rule_matches("files:delete",
                                                  "write_file",
                                                  R"({"file_path":"x"})"));
+        for (const auto* prior_grant : {"files:delete", "files:*", "tool:delete_file", "delete_file"}) {
+            REQUIRE_FALSE(session_allow_rule_matches(prior_grant,
+                "delete_file", R"({"file_path":"x","recursive":true})"));
+        }
+        REQUIRE(session_allow_rule_matches("files:delete_recursive",
+            "delete_file", R"({"file_path":"x","recursive":true})"));
+        REQUIRE_FALSE(session_allow_rule_matches("files:delete_recursive",
+            "delete_file", R"({"file_path":"x"})"));
         REQUIRE(session_allow_rule_matches("write_file",
                                            "write_file",
                                            R"({"file_path":"x"})"));

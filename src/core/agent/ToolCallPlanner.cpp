@@ -68,7 +68,9 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
     } else if (name == kReplace || name == kReplaceInFile || name == kSearchReplace) {
         accesses = single_file_access(ToolFileOperation::ReadWrite, context, args, "path");
     } else if (name == kDeleteFile) {
-        accesses = single_file_access(ToolFileOperation::Write, context, args, "path");
+        accesses = single_file_access(ToolFileOperation::Write, context, args,
+                                      "file_path",
+                                      core::utils::json::bool_field(args, "recursive"));
     } else if (name == kMoveFile) {
         accesses = single_file_access(ToolFileOperation::ReadWrite, context, args, "source");
         accesses.push_back(ToolAccess::file_access(

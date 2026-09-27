@@ -9,6 +9,7 @@
 #include "core/workspace/Workspace.hpp"
 #include "TestSessionContext.hpp"
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -446,6 +447,32 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
         }) {
         REQUIRE_THAT(resp, ContainsSubstring(name));
     }
+}
+
+TEST_CASE("MCP delete_file exposes one optional recursive boolean", "[mcp][schema]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":2})");
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    int matches = 0;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        std::string_view name;
+        REQUIRE(tool["name"].get(name) == simdjson::SUCCESS);
+        if (name != "delete_file") continue;
+        ++matches;
+        std::string_view type;
+        REQUIRE(tool["inputSchema"]["properties"]["recursive"]["type"].get(type)
+                == simdjson::SUCCESS);
+        REQUIRE(type == "boolean");
+        for (auto required : tool["inputSchema"]["required"].get_array().value()) {
+            std::string_view required_name;
+            REQUIRE(required.get(required_name) == simdjson::SUCCESS);
+            REQUIRE(required_name != "recursive");
+        }
+    }
+    REQUIRE(matches == 1);
 }
 
 TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][schema]") {
@@ -1532,6 +1559,29 @@ TEST_CASE("MCP tools/call delete_file removes a file", "[mcp]") {
 
     REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
     REQUIRE_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("MCP tools/call delete_file recursively removes a directory", "[mcp]") {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path()
+        / ("filo_mcp_delete_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    REQUIRE(fs::create_directory(root));
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+    const auto tree = root / "tree";
+    fs::create_directories(tree / "nested");
+    { std::ofstream(tree / "nested" / "note.txt") << "note"; }
+
+    const auto req = std::format(
+        R"({{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"delete_file","arguments":{{"file_path":"{}","recursive":true}}}},"id":64}})",
+        tree.string());
+    const auto resp = disp().dispatch(req);
+    REQUIRE_THAT(resp, ContainsSubstring(R"("isError":false)"));
+    REQUIRE_FALSE(fs::exists(tree));
+    REQUIRE(fs::exists(root));
 }
 
 TEST_CASE("MCP tools/call move_file renames a file", "[mcp]") {

@@ -2,6 +2,7 @@
 
 #include "SafetyPolicy.hpp"
 #include "../tools/ToolNames.hpp"
+#include "../utils/JsonUtils.hpp"
 
 #include <string>
 #include <string_view>
@@ -157,6 +158,8 @@ enum class PermissionProfile {
 
     // 3. Standard mode: Allow file mods, gate shell/task.
     if (profile == PermissionProfile::Standard) {
+        if (tool_name == core::tools::names::kDeleteFile
+            && core::utils::json::bool_field(tool_args, "recursive")) return true;
         if (is_file_mod) return false;
         if (is_task)    return true;
         if (is_web_access) return true;

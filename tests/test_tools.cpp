@@ -27,6 +27,7 @@
 #include "core/tools/shell/ShellSession.hpp"
 #include "core/context/SessionContext.hpp"
 #include "core/workspace/FileAccessScope.hpp"
+#include "core/workspace/PathVisibility.hpp"
 #include "core/workspace/SessionWorkspace.hpp"
 #include "core/workspace/Workspace.hpp"
 #include "core/utils/JsonUtils.hpp"
@@ -1238,6 +1239,100 @@ TEST_CASE("DeleteFileTool returns error for nonexistent path", "[tools]") {
     DeleteFileTool tool;
     auto res = tool.execute("{\"file_path\": \"nonexistent_xyz_12345.txt\"}");
     REQUIRE_THAT(res, Catch::Matchers::ContainsSubstring("error"));
+}
+
+TEST_CASE("DeleteFileTool requires an explicit recursive option for nonempty directories", "[tools][delete]") {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path()
+        / ("filo_delete_recursive_" + std::to_string(getpid()) + "_"
+           + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    REQUIRE(fs::create_directory(root));
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+
+    const auto tree = root / ".claude";
+    fs::create_directories(tree / "nested");
+    { std::ofstream(tree / "settings.local.json") << "{}"; }
+    { std::ofstream(tree / "nested" / "note.txt") << "note"; }
+
+    auto context = test_support::make_session_context({.primary = root, .enforce = true});
+    DeleteFileTool tool;
+    const auto args = std::format(R"({{"file_path":"{}"}})", tree.string());
+    REQUIRE_THAT((tool.execute)(args, context), Catch::Matchers::ContainsSubstring("Directory not empty"));
+    REQUIRE(fs::exists(tree / "settings.local.json"));
+
+    const auto invalid = std::format(R"({{"file_path":"{}","recursive":"true"}})", tree.string());
+    REQUIRE_THAT((tool.execute)(invalid, context), Catch::Matchers::ContainsSubstring("must be a boolean"));
+    REQUIRE(fs::exists(tree));
+
+    const auto recursive = std::format(R"({{"file_path":"{}","recursive":true}})", tree.string());
+    REQUIRE_THAT((tool.execute)(recursive, context), Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    REQUIRE_FALSE(fs::exists(tree));
+    REQUIRE(fs::exists(root));
+}
+
+TEST_CASE("DeleteFileTool preflights recursive deletion before removing anything", "[tools][delete]") {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path()
+        / ("filo_delete_preflight_" + std::to_string(getpid()) + "_"
+           + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    REQUIRE(fs::create_directory(root));
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+
+    const auto tree = root / "tree";
+    fs::create_directory(tree);
+    { std::ofstream(root / ".agentignore") << "secret.txt\n"; }
+    { std::ofstream(tree / "keep.txt") << "keep"; }
+    { std::ofstream(tree / "secret.txt") << "secret"; }
+
+    auto context = test_support::make_session_context({.primary = root, .enforce = true});
+    const core::workspace::AgentIgnorePathVisibilityFactory factory;
+    context.path_visibility = std::make_shared<core::workspace::PathVisibility>(
+        factory.for_context(context));
+    DeleteFileTool tool;
+    const auto args = std::format(R"({{"file_path":"{}","recursive":true}})", tree.string());
+    REQUIRE_THAT((tool.execute)(args, context), Catch::Matchers::ContainsSubstring("agentignore"));
+    REQUIRE(fs::exists(tree / "keep.txt"));
+    REQUIRE(fs::exists(tree / "secret.txt"));
+
+    const auto root_args = std::format(R"({{"file_path":"{}","recursive":true}})", root.string());
+    REQUIRE_THAT((tool.execute)(root_args, context), Catch::Matchers::ContainsSubstring("workspace or scratch root"));
+    REQUIRE(fs::exists(root));
+}
+
+TEST_CASE("DeleteFileTool refuses symlinks during recursive deletion", "[tools][delete]") {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path()
+        / ("filo_delete_symlink_" + std::to_string(getpid()) + "_"
+           + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    REQUIRE(fs::create_directory(root));
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+
+    const auto tree = root / "tree";
+    fs::create_directory(tree);
+    { std::ofstream(root / "outside.txt") << "outside"; }
+    fs::create_symlink(root / "outside.txt", tree / "link");
+    auto context = test_support::make_session_context({.primary = root, .enforce = true});
+    DeleteFileTool tool;
+    const auto args = std::format(R"({{"file_path":"{}","recursive":true}})", tree.string());
+    REQUIRE_THAT((tool.execute)(args, context), Catch::Matchers::ContainsSubstring("contains a symlink"));
+    REQUIRE(fs::exists(tree / "link"));
+    REQUIRE(fs::exists(root / "outside.txt"));
+
+    fs::create_symlink(tree, root / "tree_alias");
+    const auto alias_args = std::format(R"({{"file_path":"{}","recursive":true}})",
+                                        (root / "tree_alias").string());
+    REQUIRE_THAT((tool.execute)(alias_args, context),
+                 Catch::Matchers::ContainsSubstring("deletion of a symlink is not allowed"));
+    REQUIRE(fs::exists(tree));
 }
 
 TEST_CASE("DeleteFileTool denies out-of-scope path when workspace is enforced", "[tools][workspace]") {

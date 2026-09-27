@@ -152,7 +152,8 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
 //   shell:<program>  → run_terminal_command calls for one program
 //   files:*          → any file modification/deletion/move tool call
 //   files:write      → write/apply_patch/replace/create_directory calls
-//   files:delete     → delete_file calls
+//   files:delete     → non-recursive delete_file calls
+//   files:delete_recursive → recursive delete_file calls
 //   files:move       → move_file calls
 //   tool:<name>      → a specific tool name
 //   <legacy key>     → exact make_allow_key() match (backward-compatible;

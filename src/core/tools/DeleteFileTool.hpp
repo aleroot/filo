@@ -5,7 +5,7 @@
 namespace core::tools {
 
 /**
- * @brief Tool that permanently deletes a file or empty directory.
+ * @brief Tool that permanently deletes a file or directory.
  *
  * Exposed to MCP clients as @c delete_file.
  *

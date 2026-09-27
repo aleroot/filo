@@ -141,6 +141,7 @@ enum class SessionRuleKind {
     FilesAny,
     FilesWrite,
     FilesDelete,
+    FilesRecursiveDelete,
     FilesMove,
 };
 
@@ -172,6 +173,9 @@ std::string normalize_files_scope(std::string_view value) {
     if (normalized == "delete" || normalized == "deletion" || normalized == "deletions"
         || normalized == "remove" || normalized == "removal" || normalized == "removals") {
         return "delete";
+    }
+    if (normalized == "delete_recursive") {
+        return "delete_recursive";
     }
     if (normalized == "move" || normalized == "moves" || normalized == "rename"
         || normalized == "renames") {
@@ -218,6 +222,10 @@ ParsedSessionRule parse_session_rule(std::string_view raw_rule) {
         }
         if (scope == "delete") {
             return ParsedSessionRule{.kind = SessionRuleKind::FilesDelete, .value = "delete"};
+        }
+        if (scope == "delete_recursive") {
+            return ParsedSessionRule{.kind = SessionRuleKind::FilesRecursiveDelete,
+                                     .value = "delete_recursive"};
         }
         if (scope == "move") {
             return ParsedSessionRule{.kind = SessionRuleKind::FilesMove, .value = "move"};
@@ -280,6 +288,8 @@ std::string session_rule_to_string(const ParsedSessionRule& rule) {
             return "files:write";
         case SessionRuleKind::FilesDelete:
             return "files:delete";
+        case SessionRuleKind::FilesRecursiveDelete:
+            return "files:delete_recursive";
         case SessionRuleKind::FilesMove:
             return "files:move";
         case SessionRuleKind::ExactAllowKey:
@@ -291,6 +301,11 @@ std::string session_rule_to_string(const ParsedSessionRule& rule) {
 bool parsed_session_rule_matches(const ParsedSessionRule& rule,
                                  std::string_view tool_name,
                                  std::string_view tool_args) {
+    const bool recursive_delete = tool_name == core::tools::names::kDeleteFile
+        && core::utils::json::bool_field(tool_args, "recursive");
+    if (recursive_delete && rule.kind != SessionRuleKind::FilesRecursiveDelete) {
+        return false;
+    }
     switch (rule.kind) {
         case SessionRuleKind::ToolName:
             return iequals_ascii(tool_name, rule.value);
@@ -308,7 +323,9 @@ bool parsed_session_rule_matches(const ParsedSessionRule& rule,
         case SessionRuleKind::FilesWrite:
             return is_write_like_file_tool(tool_name);
         case SessionRuleKind::FilesDelete:
-            return tool_name == core::tools::names::kDeleteFile;
+            return tool_name == core::tools::names::kDeleteFile && !recursive_delete;
+        case SessionRuleKind::FilesRecursiveDelete:
+            return recursive_delete;
         case SessionRuleKind::FilesMove:
             return tool_name == core::tools::names::kMoveFile;
         case SessionRuleKind::ExactAllowKey:
@@ -335,6 +352,8 @@ std::string describe_parsed_session_rule(const ParsedSessionRule& rule) {
             return "File modifications (write/apply/replace/create)";
         case SessionRuleKind::FilesDelete:
             return "File deletions";
+        case SessionRuleKind::FilesRecursiveDelete:
+            return "Recursive directory deletions";
         case SessionRuleKind::FilesMove:
             return "File moves";
         case SessionRuleKind::ExactAllowKey:
@@ -593,6 +612,10 @@ void PermissionSystem::reset() {
 // Utility functions
 // ---------------------------------------------------------------------------
 std::string make_allow_key(std::string_view tool_name, std::string_view tool_args) {
+    if (tool_name == core::tools::names::kDeleteFile
+        && core::utils::json::bool_field(tool_args, "recursive")) {
+        return "delete_file:recursive";
+    }
     if (const auto* rule = find_allow_rule(tool_name)) {
         return make_allow_key_from_rule(*rule, tool_args);
     }
@@ -600,6 +623,10 @@ std::string make_allow_key(std::string_view tool_name, std::string_view tool_arg
 }
 
 std::string make_allow_label(std::string_view tool_name, std::string_view tool_args) {
+    if (tool_name == core::tools::names::kDeleteFile
+        && core::utils::json::bool_field(tool_args, "recursive")) {
+        return "recursive directory deletions";
+    }
     if (const auto* rule = find_allow_rule(tool_name)) {
         return make_allow_label_from_rule(*rule, tool_args);
     }
@@ -627,7 +654,8 @@ std::string make_session_allow_rule(std::string_view tool_name,
     }
 
     if (tool_name == core::tools::names::kDeleteFile) {
-        return "files:delete";
+        return core::utils::json::bool_field(tool_args, "recursive")
+            ? "files:delete_recursive" : "files:delete";
     }
     if (tool_name == core::tools::names::kMoveFile) {
         return "files:move";

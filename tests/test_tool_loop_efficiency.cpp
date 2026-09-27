@@ -3,8 +3,10 @@
 
 #include "core/agent/ToolAccess.hpp"
 #include "core/agent/ToolCallDeduplicator.hpp"
+#include "core/agent/ToolCallPlanner.hpp"
 #include "core/agent/ToolCallScheduler.hpp"
 #include "core/llm/Models.hpp"
+#include "TestSessionContext.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -52,6 +54,24 @@ namespace {
 }
 
 } // namespace
+
+TEST_CASE("delete_file planner scopes recursive access to file_path", "[agent][tools]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto call = make_call("delete-1", "delete_file",
+        R"({"file_path":"tree","recursive":true})");
+    const auto planned = core::agent::plan_tool_call(call, context);
+
+    REQUIRE(planned.accesses.size() == 1);
+    REQUIRE(planned.accesses.front().kind == core::agent::ToolAccess::Kind::File);
+    const auto expected = context.resolve_path("tree").generic_string();
+    REQUIRE(planned.accesses.front().file.path == expected);
+    REQUIRE(planned.accesses.front().file.recursive);
+    REQUIRE(core::agent::tool_accesses_conflict(
+        planned.accesses.front(),
+        core::agent::ToolAccess::file_access(
+            core::agent::ToolFileOperation::Read, expected + "/nested.txt")));
+}
 
 TEST_CASE("tool scheduler runs non-conflicting reads concurrently", "[agent][tools]") {
     std::atomic<int> active{0};
