@@ -110,10 +110,52 @@ TEST_CASE("tool argument validation catches structural model mistakes",
         definition, R"({"path":"a.cpp","operation":{"delete":true}})");
     REQUIRE_FALSE(wrong_union.has_value());
     CHECK_THAT(wrong_union.error(), ContainsSubstring("does not satisfy oneOf"));
+    // Both branches accept an object, so neither is "the" intended branch:
+    // surfacing one branch's nested error would be arbitrary.
+    const auto wrong_union_issue = core::tools::schema::validate_arguments(
+        definition, R"({"path":"a.cpp","operation":{"delete":true}})");
+    REQUIRE_FALSE(wrong_union_issue.has_value());
+    CHECK(wrong_union_issue.error().code
+          == core::tools::schema::ArgumentIssueCode::CombinatorMismatch);
 
     const auto unknown = core::tools::schema::normalize_arguments(
         definition,
         R"({"path":"a.cpp","operation":{"append":"hello"},"surprise":1})");
     REQUIRE_FALSE(unknown.has_value());
     CHECK_THAT(unknown.error(), ContainsSubstring("Unknown argument 'surprise'"));
+}
+
+TEST_CASE("union errors surface the nested failure only for a type-selected branch",
+          "[tools][schema]") {
+    using core::tools::schema::ArgumentIssueCode;
+    const core::tools::ToolDefinition definition{
+        .name = "pick",
+        .input_schema = R"({"type":"object","properties":{
+            "value":{"oneOf":[
+                {"type":"number","enum":[1.5,2.5]},
+                {"type":"string","minLength":1}
+            ]}
+        },"additionalProperties":false})",
+    };
+
+    // Exactly one branch accepts a string: its constraint error is actionable.
+    const auto empty_string =
+        core::tools::schema::validate_arguments(definition, R"({"value":""})");
+    REQUIRE_FALSE(empty_string.has_value());
+    CHECK(empty_string.error().code == ArgumentIssueCode::ConstraintViolation);
+
+    // An integer selects the "number" branch, as JSON Schema integers are numbers.
+    const auto integer =
+        core::tools::schema::validate_arguments(definition, R"({"value":3})");
+    REQUIRE_FALSE(integer.has_value());
+    CHECK(integer.error().code == ArgumentIssueCode::EnumMismatch);
+
+    // No branch accepts a boolean, so only the union verdict applies.
+    const auto boolean =
+        core::tools::schema::validate_arguments(definition, R"({"value":true})");
+    REQUIRE_FALSE(boolean.has_value());
+    CHECK(boolean.error().code == ArgumentIssueCode::CombinatorMismatch);
+
+    CHECK(core::tools::schema::validate_arguments(definition, R"({"value":2.5})")
+              .has_value());
 }

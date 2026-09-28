@@ -321,6 +321,14 @@ using detail::element_type_name;
 using detail::schema_accepts_type;
 using detail::validate_value;
 
+/// JSON Schema treats every integer as a number, so an integer value also
+/// satisfies a schema declared as "number".
+[[nodiscard]] bool schema_accepts_value_type(Element schema,
+                                             std::string_view value_type) {
+    return schema_accepts_type(schema, value_type)
+        || (value_type == "integer" && schema_accepts_type(schema, "number"));
+}
+
 /**
  * Human-readable guidance appended to a type-mismatch message.
  *
@@ -353,11 +361,14 @@ using detail::validate_value;
         simdjson::dom::array alternatives;
         if (schema[keyword].get(alternatives) != simdjson::SUCCESS) continue;
         std::size_t matches = 0;
+        std::size_t matching_type_branches = 0;
         std::optional<ArgumentIssue> matching_type_error;
+        const auto value_type = element_type_name(value);
         for (Element candidate : alternatives) {
+            const bool matching_type = schema_accepts_value_type(candidate, value_type);
+            if (matching_type) ++matching_type_branches;
             if (auto error = validate_value(value, candidate, path)) {
-                if (!matching_type_error.has_value()
-                    && schema_accepts_type(candidate, element_type_name(value))) {
+                if (matching_type) {
                     matching_type_error = std::move(*error);
                 }
             } else {
@@ -367,10 +378,12 @@ using detail::validate_value;
         if ((exact && matches != 1) || (!exact && matches == 0)) {
             // Union branches often differ only by shape (for example, a read
             // path can be one string or an array of strings). If the supplied
-            // value selected a branch by type but failed that branch's own
-            // constraint, preserve the actionable nested error rather than
-            // flattening it to an opaque union mismatch.
-            if (matches == 0 && matching_type_error.has_value()) {
+            // value selected exactly one branch by type but failed that
+            // branch's own constraint, preserve the actionable nested error.
+            // If several branches share the type, no branch was selected and
+            // reporting one arbitrary branch's error would be misleading.
+            if (matches == 0 && matching_type_branches == 1
+                && matching_type_error.has_value()) {
                 return matching_type_error;
             }
             return make_issue(
@@ -449,8 +462,7 @@ std::optional<ArgumentIssue> validate_value(
     if (auto error = validate_combinators(value, schema, path)) return error;
 
     const std::string_view actual = element_type_name(value);
-    if (!schema_accepts_type(schema_element, actual)
-        && !(actual == "integer" && schema_accepts_type(schema_element, "number"))) {
+    if (!schema_accepts_value_type(schema_element, actual)) {
         const std::string expected =
             core::utils::json::string_field(schema, "type", "a valid schema type");
         return make_issue(
