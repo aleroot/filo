@@ -414,12 +414,12 @@ struct StreamChunk {
     bool is_final = false;         // True if this is the last chunk
     bool is_error = false;         // True if this chunk represents an API/HTTP error
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
-    std::vector<ContinuationItem> continuation_items; // Opaque signed/encrypted reasoning state
-    std::optional<AuthenticationRecoveryRequest> authentication_recovery;
+    std::vector<ContinuationItem> continuation_items = {}; // Opaque signed/encrypted reasoning state
+    std::optional<AuthenticationRecoveryRequest> authentication_recovery = {};
     // Wire-protocol family that produced reasoning_content (for example
     // "kimi" or "dashscope"). This prevents reasoning text from one provider
     // being replayed through another provider after a live model switch.
-    std::string reasoning_protocol;
+    std::string reasoning_protocol = {};
     // True when the transport is discarding the in-progress generation because
     // RetryController is restarting the request. Not a terminal event: Agent
     // clears accumulators and the TUI retracts the live card.
