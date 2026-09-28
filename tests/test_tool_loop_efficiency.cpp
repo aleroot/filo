@@ -100,6 +100,54 @@ TEST_CASE("tool scheduler runs non-conflicting reads concurrently", "[agent][too
     REQUIRE(max_active.load(std::memory_order_acquire) >= 2);
 }
 
+TEST_CASE("tool scheduler reports a finished task before its batch peers", "[agent][tools]") {
+    std::promise<void> slow_started;
+    const auto slow_started_signal = slow_started.get_future().share();
+    std::promise<void> allow_slow_finish;
+    const auto allow_slow_finish_signal = allow_slow_finish.get_future().share();
+    std::atomic<bool> slow_running{false};
+    std::atomic<bool> fast_reported_while_slow_running{false};
+
+    std::vector<core::agent::ScheduledToolTask<int>> tasks;
+    tasks.push_back({
+        .accesses = {core::agent::ToolAccess::file_access(
+            core::agent::ToolFileOperation::Read, "/tmp/filo/slow.txt")},
+        .run = [&] {
+            slow_running.store(true, std::memory_order_release);
+            slow_started.set_value();
+            // The callback releases this early. A timeout keeps this test
+            // bounded if a future change accidentally reintroduces a batch
+            // completion barrier.
+            allow_slow_finish_signal.wait_for(250ms);
+            slow_running.store(false, std::memory_order_release);
+            return 1;
+        },
+    });
+    tasks.push_back({
+        .accesses = {core::agent::ToolAccess::file_access(
+            core::agent::ToolFileOperation::Read, "/tmp/filo/fast.txt")},
+        .run = [&] {
+            slow_started_signal.wait();
+            return 2;
+        },
+    });
+
+    core::agent::ToolCallScheduler<int> scheduler;
+    const auto results = scheduler.run(
+        std::move(tasks),
+        [&](std::size_t index, const int&) {
+            if (index == 1) {
+                fast_reported_while_slow_running.store(
+                    slow_running.load(std::memory_order_acquire),
+                    std::memory_order_release);
+                allow_slow_finish.set_value();
+            }
+        });
+
+    REQUIRE(results == std::vector<int>{1, 2});
+    REQUIRE(fast_reported_while_slow_running.load(std::memory_order_acquire));
+}
+
 TEST_CASE("tool scheduler serializes overlapping write conflicts", "[agent][tools]") {
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};

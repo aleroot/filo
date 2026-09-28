@@ -2670,7 +2670,23 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
             }
 
             ToolCallScheduler<core::llm::Message> scheduler;
-            auto tool_messages = scheduler.run(std::move(scheduled_tasks));
+            auto tool_messages = scheduler.run(
+                std::move(scheduled_tasks),
+                [self, turn_state, tool_calls_accum, &turn_callbacks](
+                    std::size_t index,
+                    const core::llm::Message& result) {
+                    // The scheduler observes results as they complete. Settle
+                    // the corresponding transcript row now instead of making
+                    // a fast tool retain its spinner behind a slower sibling.
+                    // History is still appended below in call order, once the
+                    // complete batch is available.
+                    if (!self->is_turn_current(turn_state)
+                        || !turn_callbacks.on_tool_finish
+                        || index >= tool_calls_accum->size()) {
+                        return;
+                    }
+                    turn_callbacks.on_tool_finish((*tool_calls_accum)[index], result);
+                });
             turn_state->deduplicator.end_step();
             core::hooks::dispatch(
                 core::hooks::HookEvent::PostToolBatch,
@@ -2735,9 +2751,6 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                         })) {
                     done_callback();
                     return;
-                }
-                if (turn_callbacks.on_tool_finish) {
-                    turn_callbacks.on_tool_finish(tool_call, msg);
                 }
             }
 

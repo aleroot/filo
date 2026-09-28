@@ -22,7 +22,13 @@ struct ScheduledToolTask {
 template <typename Result>
 class ToolCallScheduler {
 public:
-    [[nodiscard]] std::vector<Result> run(std::vector<ScheduledToolTask<Result>> tasks) {
+    /// Runs tasks subject to their access/dependency constraints. `on_complete`
+    /// is called on the scheduling thread as soon as each result is available,
+    /// rather than after the complete batch has finished. The returned vector
+    /// remains ordered by the submitted tasks for model-history replay.
+    [[nodiscard]] std::vector<Result> run(
+        std::vector<ScheduledToolTask<Result>> tasks,
+        std::function<void(std::size_t, const Result&)> on_complete = {}) {
         std::vector<std::optional<Result>> results(tasks.size());
         std::vector<std::future<Result>> futures(tasks.size());
         std::vector<bool> started(tasks.size(), false);
@@ -65,6 +71,9 @@ public:
             std::erase(active, done_index);
             results[done_index] = futures[done_index].get();
             finished[done_index] = true;
+            if (on_complete) {
+                on_complete(done_index, *results[done_index]);
+            }
             ++completed;
         }
 
