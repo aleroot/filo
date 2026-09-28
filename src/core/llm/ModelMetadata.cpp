@@ -68,6 +68,22 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
             || discovered.reasoning.manual_thinking;
     }
 
+    // Wire constraints are curated per model: provider catalogs do not
+    // advertise them, so a refresh can only add knowledge, never remove it.
+    baseline.wire.thinking_always_on =
+        baseline.wire.thinking_always_on || discovered.wire.thinking_always_on;
+    baseline.wire.reasoning_text_hidden =
+        baseline.wire.reasoning_text_hidden
+        || discovered.wire.reasoning_text_hidden;
+    baseline.wire.reasoning_bound_to_prefix =
+        baseline.wire.reasoning_bound_to_prefix
+        || discovered.wire.reasoning_bound_to_prefix;
+    baseline.wire.fixed_sampling =
+        baseline.wire.fixed_sampling || discovered.wire.fixed_sampling;
+    baseline.wire.forced_tool_choice_rejected =
+        baseline.wire.forced_tool_choice_rejected
+        || discovered.wire.forced_tool_choice_rejected;
+
     if (discovered.tier != ModelTier::Balanced
         || baseline.tier == ModelTier::Balanced) {
         baseline.tier = discovered.tier;

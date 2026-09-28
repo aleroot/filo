@@ -10,6 +10,7 @@
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/AnthropicCompatibility.hpp"
 #include "core/tools/WebFetchTool.hpp"
 #include "core/tools/ReadTool.hpp"
 #include <atomic>
@@ -86,7 +87,8 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
 
     const auto backend = web::make_anthropic_web_search_backend();
     const std::vector<std::string> models{
-        "fable", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "sonnet[1m]"};
+        "fable", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "sonnet[1m]",
+        "claude-opus-5-5", "claude-opus-5"};
     for (const auto& model : models) {
         auto provider = std::make_shared<core::llm::HttpLLMProvider>(
             std::format("http://127.0.0.1:{}", port),
@@ -110,8 +112,11 @@ TEST_CASE("Claude web search uses compatible tool choice and shared client heade
         simdjson::dom::parser parser;
         const auto doc = parser.parse(actual.body);
         const auto choice = doc["tool_choice"]["type"].get_string().value();
-        CHECK(choice == (i < 3 ? "auto" : "tool"));
-        if (i < 3) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
+        const bool expect_auto =
+            core::llm::protocols::anthropic_wire_policy(models[i])
+                .forced_tool_choice_rejected;
+        CHECK(choice == (expect_auto ? "auto" : "tool"));
+        if (expect_auto) CHECK(doc["tool_choice"]["name"].error() == simdjson::NO_SUCH_FIELD);
         CHECK_THAT(actual.get_header_value("x-anthropic-billing-header"), Catch::Matchers::StartsWith("cc_version=2.1.280"));
         CHECK_THAT(actual.body, Catch::Matchers::ContainsSubstring(actual.get_header_value("x-anthropic-billing-header")));
         CHECK_THAT(actual.get_header_value("anthropic-beta"), Catch::Matchers::ContainsSubstring("web-search-2025-03-05"));

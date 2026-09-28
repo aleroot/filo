@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "core/llm/ModelRegistry.hpp"
+#include "core/llm/AnthropicCompatibility.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
@@ -257,6 +258,29 @@ TEST_CASE("ModelRegistry::lookup - Fable 5.1 aliases and cache pricing preserve 
     REQUIRE(pinned);
     CHECK(pinned->canonical_id == "claude-fable-5");
     CHECK(pinned->pricing.cached_input_per_mtok == Catch::Approx(1.0));
+}
+
+TEST_CASE("ModelRegistry::lookup - Opus 5.5 keeps its own price and does not steal the opus alias",
+          "[llm][registry][opus55]") {
+    auto& registry = ModelRegistry::instance();
+    const auto info = registry.get_info("claude-opus-5-5");
+    REQUIRE(info.has_value());
+    CHECK(info->display_name == "Claude Opus 5.5");
+    CHECK(info->context_window == 1'000'000);
+    CHECK(info->max_output_tokens == 128'000);
+    CHECK(info->knowledge_cutoff == "2026-06");
+    CHECK(info->pricing.input_per_mtok == Catch::Approx(4.0));
+    CHECK(info->pricing.output_per_mtok == Catch::Approx(20.0));
+    CHECK(info->pricing.cached_input_per_mtok == Catch::Approx(0.20));
+    CHECK(info->pricing.prompt_caching_write_per_mtok == Catch::Approx(5.0));
+    for (const auto* alias : {"opus-5-5", "opus-5.5", "claude-opus-5.5"}) {
+        const auto found = registry.lookup(alias);
+        REQUIRE(found);
+        CHECK(found->canonical_id == "claude-opus-5-5");
+    }
+    const auto opus = registry.lookup("opus");
+    REQUIRE(opus);
+    CHECK(opus->canonical_id == "claude-opus-5");
 }
 
 TEST_CASE("ModelRegistry::lookup - knows Claude 5 model metadata", "[llm][registry]") {
@@ -809,6 +833,92 @@ TEST_CASE("ModelRegistry::export_to_json - exports registry to JSON", "[llm][reg
     REQUIRE(json.find("gpt-4o") != std::string::npos);
     REQUIRE(json.find("\"capabilities\"") != std::string::npos);
     REQUIRE(json.find("\"pricing\"") != std::string::npos);
+}
+
+TEST_CASE("Claude alias predicates agree with the registered cards",
+          "[llm][registry][aliases]") {
+    auto& registry = ModelRegistry::instance();
+
+    // The protocol resolves these aliases before writing the request, so the
+    // predicate lists and the card aliases must not drift apart.
+    for (const auto* alias : {"fable", "best", "claude-fable", "fable-5-1"}) {
+        CAPTURE(alias);
+        CHECK(core::llm::anthropic::is_fable_alias(alias));
+        const auto card = registry.lookup(alias);
+        REQUIRE(card);
+        CHECK(card->canonical_id
+              == std::string(core::llm::anthropic::kDefaultFable));
+    }
+    for (const auto* alias : {"opus-5-5", "opus-5.5", "claude-opus-5.5"}) {
+        CAPTURE(alias);
+        CHECK(core::llm::anthropic::is_opus_55_alias(alias));
+        const auto card = registry.lookup(alias);
+        REQUIRE(card);
+        CHECK(card->canonical_id
+              == std::string(core::llm::anthropic::kDefaultOpus55));
+    }
+
+    // Bare `opus` staying on Claude Opus 5 is deliberate, so pin it.
+    const auto opus = registry.lookup("opus");
+    REQUIRE(opus);
+    CHECK(opus->canonical_id
+          == std::string(core::llm::anthropic::kDefaultOpus));
+}
+
+TEST_CASE("ModelRegistry carries Claude wire constraints", "[llm][registry][wire]") {
+    auto& registry = ModelRegistry::instance();
+
+    const auto opus55 = registry.get_info("claude-opus-5-5");
+    REQUIRE(opus55.has_value());
+    CHECK(opus55->reasoning.complete);
+    CHECK(opus55->reasoning.adaptive_thinking);
+    CHECK_FALSE(opus55->reasoning.manual_thinking);
+    CHECK(opus55->wire.thinking_always_on);
+    CHECK(opus55->wire.reasoning_text_hidden);
+    CHECK(opus55->wire.reasoning_bound_to_prefix);
+    CHECK(opus55->wire.fixed_sampling);
+    CHECK(opus55->wire.forced_tool_choice_rejected);
+
+    // Opus 5 shares the adaptive wire but keeps forced tool choice and an
+    // unbound prefix.
+    const auto opus5 = registry.get_info("claude-opus-5");
+    REQUIRE(opus5.has_value());
+    CHECK(opus5->wire.reasoning_text_hidden);
+    CHECK(opus5->wire.fixed_sampling);
+    CHECK_FALSE(opus5->wire.thinking_always_on);
+    CHECK_FALSE(opus5->wire.reasoning_bound_to_prefix);
+    CHECK_FALSE(opus5->wire.forced_tool_choice_rejected);
+
+    // Haiku 4.5 is a manual-budget model with no effort parameter.
+    const auto haiku = registry.get_info("claude-haiku-4-5");
+    REQUIRE(haiku.has_value());
+    CHECK(haiku->wire.empty());
+    CHECK(haiku->reasoning.manual_thinking);
+    CHECK_FALSE(haiku->reasoning.effort.supports_effort());
+
+    // Constraints survive an export/import cycle, so a saved catalog keeps them.
+    const std::string json = R"({"models":[{
+        "canonical_id": "wire-probe-model",
+        "display_name": "Wire Probe",
+        "provider": "anthropic",
+        "wire": {
+            "thinking_always_on": true,
+            "reasoning_text_hidden": true,
+            "reasoning_bound_to_prefix": true,
+            "fixed_sampling": true,
+            "forced_tool_choice_rejected": true
+        }
+    }]})";
+    REQUIRE(registry.load_from_json(json) == 1);
+    const auto probe = registry.get_info("wire-probe-model");
+    REQUIRE(probe.has_value());
+    CHECK(probe->wire.thinking_always_on);
+    CHECK(probe->wire.reasoning_bound_to_prefix);
+    CHECK(probe->wire.forced_tool_choice_rejected);
+
+    const auto exported = registry.export_to_json();
+    CHECK(exported.find("reasoning_bound_to_prefix") != std::string::npos);
+    CHECK(exported.find("wire-probe-model") != std::string::npos);
 }
 
 TEST_CASE("ModelRegistry JSON round-trip", "[llm][registry]") {

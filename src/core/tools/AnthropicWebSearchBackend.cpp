@@ -95,7 +95,8 @@ void write_string_array(core::utils::JsonWriter& writer,
         writer.comma().key("tool_choice");
         {
             auto _choice = writer.object();
-            if (core::llm::anthropic::rejects_forced_tool_choice(model)) {
+            if (core::llm::protocols::anthropic_wire_policy(model)
+                    .forced_tool_choice_rejected) {
                 writer.kv_str("type", "auto");
             } else {
                 writer.kv_str("type", "tool").comma()

@@ -214,6 +214,36 @@ struct ModelReasoningProfile {
     bool complete = false;
 };
 
+/**
+ * Provider wire constraints that a model catalog cannot advertise.
+ *
+ * Provider model catalogs describe features (vision, effort levels, thinking
+ * modes) but not how a model rejects request fields. Those rejections are
+ * documented per model generation, so they are curated here and merged
+ * additively. Protocols read these flags instead of matching model names,
+ * which keeps a newly released model working as soon as its card is filled in.
+ */
+struct ModelWireConstraints {
+    /// Reasoning cannot be turned off; effort is the only depth control.
+    bool thinking_always_on = false;
+    /// The server returns reasoning blocks with empty text unless the request
+    /// asks for a display mode.
+    bool reasoning_text_hidden = false;
+    /// Replayed reasoning is validated against the system prompt, tools, and
+    /// earlier messages; the request must say what to do on a mismatch.
+    bool reasoning_bound_to_prefix = false;
+    /// Non-default sampling parameters are rejected.
+    bool fixed_sampling = false;
+    /// Forcing a specific tool is rejected.
+    bool forced_tool_choice_rejected = false;
+
+    [[nodiscard]] constexpr bool empty() const noexcept {
+        return !thinking_always_on && !reasoning_text_hidden
+            && !reasoning_bound_to_prefix && !fixed_sampling
+            && !forced_tool_choice_rejected;
+    }
+};
+
 // ============================================================================
 // Model Information Record (the "Model Card")
 // ============================================================================
@@ -246,6 +276,7 @@ struct ModelInfo {
     ModelCapabilities capabilities = 0;          ///< Bitmap of ModelCapability flags
     bool capabilities_complete = false;          ///< True when the provider supplied an exhaustive capability set
     ModelReasoningProfile reasoning;              ///< Advertised effort levels and thinking wire modes
+    ModelWireConstraints wire;                    ///< Documented request-field rejections for this model
     ModelTier tier = ModelTier::Balanced;        ///< Quality tier for routing
     
     // ------------------------------------------------------------------------

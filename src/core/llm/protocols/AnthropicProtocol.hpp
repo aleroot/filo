@@ -66,6 +66,36 @@ struct AnthropicContinuationBlockState {
 };
 
 /**
+ * @brief Resolved request-shape policy for one Claude model id or alias.
+ *
+ * Claude generations differ in which request fields they reject, and the
+ * Models API does not advertise those rejections. Filo therefore curates them
+ * on the model card and resolves them once here, so the serializer, the header
+ * builder, and the hosted-tool backends all read the same flags instead of
+ * matching model names. Ids that match no card fall back to a generation table.
+ */
+struct AnthropicWirePolicy {
+    ReasoningCapabilities effort;             ///< Effort levels the model accepts.
+    bool known = false;                       ///< False when no card or generation matched.
+    bool adaptive_thinking = false;           ///< `thinking.type=adaptive` is the wire mode.
+    bool manual_thinking = false;             ///< `thinking.type=enabled` with a budget is accepted.
+    bool thinking_always_on = false;          ///< Reasoning cannot be disabled; effort is the control.
+    bool reasoning_text_hidden = false;       ///< Reasoning text is empty unless `display` is requested.
+    bool reasoning_bound_to_prefix = false;   ///< Replayed reasoning is validated against the prefix.
+    bool fixed_sampling = false;              ///< Non-default sampling parameters are rejected.
+    bool forced_tool_choice_rejected = false; ///< `tool_choice` `any`/`tool` are rejected.
+
+    /// Manual budgets are refused by every known adaptive-only model, but an
+    /// unrecognized id keeps the permissive historical behavior.
+    [[nodiscard]] constexpr bool rejects_manual_thinking() const noexcept {
+        return known && !manual_thinking;
+    }
+};
+
+/// Resolve the wire policy for a model id, alias, or `[1m]`-suffixed variant.
+[[nodiscard]] AnthropicWirePolicy anthropic_wire_policy(std::string_view model);
+
+/**
  * @brief Stateful SSE event parser for the Anthropic streaming Messages API.
  *
  * Claude's SSE format differs from OpenAI's: each event has an `"event:"` type

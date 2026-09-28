@@ -36,11 +36,6 @@ namespace {
     constexpr std::string_view ANTHROPIC_BETA_OAUTH    = "oauth-2025-04-20";
     constexpr std::string_view ANTHROPIC_BILLING_HEADER = anthropic::kBillingHeader;
 
-    constexpr std::string_view CLAUDE_DEFAULT_SONNET = "claude-sonnet-5";
-    constexpr std::string_view CLAUDE_DEFAULT_FABLE  = anthropic::kDefaultFable;
-    constexpr std::string_view CLAUDE_DEFAULT_OPUS   = "claude-opus-5";
-    constexpr std::string_view CLAUDE_DEFAULT_HAIKU  = "claude-haiku-4-5";
-    
     struct HeaderWindowDef {
         std::string_view suffix;
         std::string_view label;
@@ -179,54 +174,88 @@ namespace {
         return std::string(type);
     }
 
-    struct AnthropicReasoningPolicy {
-        std::string_view model_token;
-        ReasoningCapabilities capabilities;
-        bool rejects_manual_thinking = false;
-        bool needs_adaptive_thinking = false;
+    // Generation table for ids that match no model card: pinned snapshots,
+    // custom deployments, and models released after this build. Ordered most
+    // specific first, and matched on generation boundaries so `fable-5` never
+    // claims `claude-fable-5-1`.
+    struct AnthropicGenerationFallback {
+        std::string_view token;
+        ReasoningCapabilities effort;
+        bool adaptive_thinking;
+        bool manual_thinking;
+        ModelWireConstraints wire;
+    };
+
+    constexpr ModelWireConstraints kWireNone = {};
+    constexpr ModelWireConstraints kWireAdaptive = {
+        .reasoning_text_hidden = true,
+        .fixed_sampling = true,
+    };
+    constexpr ModelWireConstraints kWireNoForcedTools = {
+        .reasoning_text_hidden = true,
+        .fixed_sampling = true,
+        .forced_tool_choice_rejected = true,
+    };
+    constexpr ModelWireConstraints kWireBoundThinking = {
+        .thinking_always_on = true,
+        .reasoning_text_hidden = true,
+        .reasoning_bound_to_prefix = true,
+        .fixed_sampling = true,
+        .forced_tool_choice_rejected = true,
     };
 
     constexpr ReasoningCapabilities kEffortMax =
         ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
     constexpr ReasoningCapabilities kEffortMaxXHigh =
         kEffortMax | ReasoningCapability::XHighEffort;
-    constexpr std::array<AnthropicReasoningPolicy, 7> kAnthropicReasoningPolicies{{
-        {"fable", kEffortMaxXHigh, true, false},
-        {"mythos", kEffortMaxXHigh, true, false},
-        {"sonnet-5", kEffortMaxXHigh, true, false},
-        {"opus-5", kEffortMaxXHigh, true, true},
-        {"opus-4-8", kEffortMaxXHigh, true, true},
-        {"opus-4-7", kEffortMaxXHigh, true, true},
-        {"sonnet-4-6", kEffortMax, false, false},
-    }};
 
-    [[nodiscard]] std::optional<AnthropicReasoningPolicy>
-    anthropic_reasoning_policy(std::string_view model) {
-        if (const auto info = ModelRegistry::instance().lookup(model);
-            info && info->reasoning.complete) {
-            return AnthropicReasoningPolicy{
-                .model_token = {},
-                .capabilities = info->reasoning.effort,
-                .rejects_manual_thinking =
-                    !info->reasoning.manual_thinking,
-                .needs_adaptive_thinking =
-                    info->reasoning.adaptive_thinking,
-            };
-        }
+    constexpr std::array<AnthropicGenerationFallback, 12>
+        kAnthropicGenerationFallbacks{{
+            {"fable-5-1", kEffortMaxXHigh, false, false, kWireBoundThinking},
+            {"mythos-5-1", kEffortMaxXHigh, false, false, kWireNoForcedTools},
+            {"fable-5", kEffortMaxXHigh, false, false, kWireAdaptive},
+            {"mythos-5", kEffortMaxXHigh, false, false, kWireAdaptive},
+            {"opus-5-5", kEffortMaxXHigh, true, false, kWireBoundThinking},
+            {"sonnet-5", kEffortMaxXHigh, false, false, kWireAdaptive},
+            {"opus-4-8", kEffortMaxXHigh, true, false, kWireAdaptive},
+            {"opus-4-7", kEffortMaxXHigh, true, false, kWireAdaptive},
+            {"opus-5", kEffortMaxXHigh, true, false, kWireAdaptive},
+            {"sonnet-4-6", kEffortMax, false, true, kWireNone},
+            // Unversioned family ids keep the family's adaptive wire.
+            {"fable", kEffortMaxXHigh, false, false, kWireAdaptive},
+            {"mythos", kEffortMaxXHigh, false, false, kWireAdaptive},
+        }};
 
-        // Offline and legacy catalogs may not contain the richer reasoning
-        // profile. Keep a conservative compatibility table for those records;
-        // live provider metadata always takes precedence above.
-        const auto it = std::ranges::find_if(
-            kAnthropicReasoningPolicies,
-            [&](const AnthropicReasoningPolicy& policy) {
-                return core::utils::str::contains_case_insensitive(
-                    model, policy.model_token);
-            });
-        if (it == kAnthropicReasoningPolicies.end()) {
-            return std::nullopt;
+    /// True when `token` names the whole id or one generation segment of it.
+    [[nodiscard]] bool matches_generation(std::string_view normalized,
+                                          std::string_view token) {
+        const std::size_t start = normalized.find(token);
+        if (start == std::string_view::npos) return false;
+        const std::size_t end = start + token.size();
+        return end == normalized.size()
+            || normalized[end] == '-'
+            || normalized[end] == '[';
+    }
+
+    /// Token of the generation the bare Fable aliases resolve to.
+    constexpr std::string_view kCurrentFableToken = "fable-5-1";
+
+    [[nodiscard]] const AnthropicGenerationFallback* generation_fallback(
+        std::string_view normalized) {
+        if (normalized.empty()) return nullptr;
+        // Bare Fable aliases name the current Fable rather than a generation
+        // substring, so they resolve by token instead of by table position.
+        const bool bare_fable_alias = anthropic::is_fable_alias(normalized);
+        for (const auto& candidate : kAnthropicGenerationFallbacks) {
+            if (bare_fable_alias) {
+                if (candidate.token == kCurrentFableToken) return &candidate;
+                continue;
+            }
+            if (matches_generation(normalized, candidate.token)) {
+                return &candidate;
+            }
         }
-        return *it;
+        return nullptr;
     }
 
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
@@ -301,15 +330,17 @@ namespace {
 
         const std::string lowered = core::utils::str::to_lower_ascii_copy(out.model);
         if (lowered == "sonnet") {
-            out.model = std::string(CLAUDE_DEFAULT_SONNET);
+            out.model = std::string(anthropic::kDefaultSonnet);
         } else if (anthropic::is_fable_alias(lowered)) {
-            out.model = std::string(CLAUDE_DEFAULT_FABLE);
+            out.model = std::string(anthropic::kDefaultFable);
         } else if (lowered == "opus") {
-            out.model = std::string(CLAUDE_DEFAULT_OPUS);
+            out.model = std::string(anthropic::kDefaultOpus);
+        } else if (anthropic::is_opus_55_alias(lowered)) {
+            out.model = std::string(anthropic::kDefaultOpus55);
         } else if (lowered == "haiku") {
-            out.model = std::string(CLAUDE_DEFAULT_HAIKU);
+            out.model = std::string(anthropic::kDefaultHaiku);
         } else if (lowered == "opusplan") {
-            out.model = std::string(CLAUDE_DEFAULT_SONNET);
+            out.model = std::string(anthropic::kDefaultSonnet);
         }
 
         return out;
@@ -709,6 +740,47 @@ namespace {
 
 } // namespace
 
+AnthropicWirePolicy anthropic_wire_policy(std::string_view model) {
+    AnthropicWirePolicy policy;
+
+    const std::string normalized = anthropic::normalized_claude_id(model);
+    auto card = ModelRegistry::instance().lookup(model);
+    if (!card) card = ModelRegistry::instance().lookup(normalized);
+    const auto* generation = generation_fallback(normalized);
+
+    // A registry card wins when it carries a full reasoning profile. Cards are
+    // curated in the builtin catalog and refreshed from saved catalogs; live
+    // provider discovery is deliberately provider-scoped and never writes here,
+    // so the generation table covers ids no card knows (pinned snapshots, new
+    // deployments, models released after this build).
+    if (card && card->reasoning.complete) {
+        policy.known = true;
+        policy.effort = card->reasoning.effort;
+        policy.adaptive_thinking = card->reasoning.adaptive_thinking;
+        policy.manual_thinking = card->reasoning.manual_thinking;
+    } else if (generation) {
+        policy.known = true;
+        policy.effort = generation->effort;
+        policy.adaptive_thinking = generation->adaptive_thinking;
+        policy.manual_thinking = generation->manual_thinking;
+    } else if (card) {
+        policy.known = true;
+    }
+
+    // No model catalog advertises rejected request fields, so wire constraints
+    // come from the card when it is curated, and from the generation otherwise.
+    const ModelWireConstraints wire = (card && !card->wire.empty())
+        ? card->wire
+        : (generation ? generation->wire : ModelWireConstraints{});
+    policy.thinking_always_on = wire.thinking_always_on;
+    policy.reasoning_text_hidden = wire.reasoning_text_hidden;
+    policy.reasoning_bound_to_prefix = wire.reasoning_bound_to_prefix;
+    policy.fixed_sampling = wire.fixed_sampling;
+    policy.forced_tool_choice_rejected = wire.forced_tool_choice_rejected;
+
+    return policy;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AnthropicSerializer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -744,11 +816,12 @@ std::string AnthropicSerializer::serialize(
     } else {
     // Effort can reduce output/token spend for tool-heavy sessions.
     // Anthropic docs (Apr 2026): generally available, no beta header needed.
-    const std::optional<AnthropicReasoningPolicy> reasoning_policy =
-        anthropic_reasoning_policy(req.model);
-    const ReasoningCapabilities reasoning_capabilities = reasoning_policy
-        ? reasoning_policy->capabilities
-        : ReasoningCapabilities{};
+    const AnthropicWirePolicy wire_policy = anthropic_wire_policy(req.model);
+    ReasoningCapabilities reasoning_capabilities = wire_policy.effort;
+    if (wire_policy.thinking_always_on) {
+        reasoning_capabilities =
+            reasoning_capabilities | ReasoningCapability::Required;
+    }
     if (reasoning_capabilities.supports_effort()) {
         std::string effective_effort = normalized_effort_or_empty(req.effort);
         if (effective_effort == "max"
@@ -758,6 +831,14 @@ std::string AnthropicSerializer::serialize(
         if (effective_effort == "xhigh"
             && !reasoning_capabilities.supports(ReasoningCapability::XHighEffort)) {
             effective_effort = "high";
+        }
+        // A model that always thinks cannot honor `off`. Omitting effort would
+        // run it at the API default, which thinks more than the user asked for;
+        // `low` is the supported substitute.
+        if (effective_effort.empty()
+            && effort_explicitly_disabled(req.effort)
+            && wire_policy.thinking_always_on) {
+            effective_effort = "low";
         }
         if (!effective_effort.empty()) {
             payload += R"(,"output_config":{"effort":")";
@@ -779,37 +860,50 @@ std::string AnthropicSerializer::serialize(
 
     const bool use_adaptive_thinking =
         thinking_wanted
-        && reasoning_policy.has_value()
-        && reasoning_policy->needs_adaptive_thinking
-        && (reasoning_policy->rejects_manual_thinking || !thinking.enabled);
+        && wire_policy.adaptive_thinking
+        && (wire_policy.rejects_manual_thinking() || !thinking.enabled);
     const bool use_manual_thinking =
         thinking_wanted
-        && (!reasoning_policy.has_value()
-            || (!reasoning_policy->rejects_manual_thinking
-                && (!reasoning_policy->needs_adaptive_thinking
-                    || thinking.enabled)));
+        && (!wire_policy.known
+            || (!wire_policy.rejects_manual_thinking()
+                && (!wire_policy.adaptive_thinking || thinking.enabled)));
 
-    // Anthropic requires temperature=1 when extended thinking is enabled.
-    // Emit the constraint unconditionally so the API never receives a conflicting value.
-    if (use_manual_thinking) {
-        payload += R"(,"temperature":1)";
-    } else if (req.temperature.has_value()) {
-        payload += R"(,"temperature":)";
-        payload += std::to_string(req.temperature.value());
+    // Anthropic requires temperature=1 when extended thinking is enabled, and
+    // the newest generations reject every non-default sampling value outright.
+    // For those the field is omitted so the API never sees a value it refuses.
+    if (!wire_policy.fixed_sampling) {
+        if (use_manual_thinking) {
+            payload += R"(,"temperature":1)";
+        } else if (req.temperature.has_value()) {
+            payload += R"(,"temperature":)";
+            payload += std::to_string(req.temperature.value());
+        }
     }
 
+    // Models that hide reasoning text return thinking blocks with an empty
+    // `thinking` field, which would leave Filo's reasoning channel silent.
+    // `summarized` needs no beta header and carries no extra token cost.
+    const std::string_view thinking_display =
+        wire_policy.reasoning_text_hidden ? R"(,"display":"summarized")" : "";
+
     // Extended thinking block (must come before messages).
-    if (anthropic::uses_bound_thinking(req.model)) {
+    if (wire_policy.reasoning_bound_to_prefix) {
         // Filo intentionally changes tools/context during a session. Let the
         // API discard only invalidated reasoning instead of rejecting a turn.
-        // This also applies to /effort off: Fable thinking is always on.
-        payload += R"(,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}})";
+        // This also applies to /effort off: thinking stays on for these models.
+        payload += R"(,"thinking":{"type":"adaptive")";
+        payload += thinking_display;
+        payload += R"(,"block_binding":{"prefix_mismatch_behavior":"drop_block"}})";
     } else if (use_manual_thinking) {
-        payload += R"(,"thinking":{"type":"enabled","budget_tokens":)";
+        payload += R"(,"thinking":{"type":"enabled")";
+        payload += thinking_display;
+        payload += R"(,"budget_tokens":)";
         payload += std::to_string(thinking.budget_tokens);
         payload += '}';
     } else if (use_adaptive_thinking) {
-        payload += R"(,"thinking":{"type":"adaptive"})";
+        payload += R"(,"thinking":{"type":"adaptive")";
+        payload += thinking_display;
+        payload += '}';
     }
     }
 
@@ -1053,6 +1147,24 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             std::string_view stop_reason;
             if (delta_obj["stop_reason"].get(stop_reason) == simdjson::SUCCESS) {
                 result.stop_reason = std::string(stop_reason);
+                // Classifier refusals are HTTP 200 with an empty content array.
+                // Surface the API's explanation so the turn is not a blank stop.
+                if (stop_reason == "refusal") {
+                    simdjson::dom::object details;
+                    if (delta_obj["stop_details"].get(details) == simdjson::SUCCESS) {
+                        std::string_view explanation;
+                        std::string_view category;
+                        if (details["explanation"].get(explanation) == simdjson::SUCCESS
+                            && !explanation.empty()) {
+                            result.text = std::string(explanation);
+                        } else if (details["category"].get(category) == simdjson::SUCCESS
+                                   && !category.empty()) {
+                            result.text = "Request declined (";
+                            result.text.append(category);
+                            result.text += ").";
+                        }
+                    }
+                }
             }
         }
 
@@ -1205,8 +1317,11 @@ AnthropicReasoningEmitter AnthropicProtocol::reasoning_emitter() const {
 ReasoningCapabilities AnthropicProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
     try {
-        const auto policy = anthropic_reasoning_policy(model);
-        return policy ? policy->capabilities : ReasoningCapabilities{};
+        const auto policy = anthropic_wire_policy(model);
+        if (policy.thinking_always_on) {
+            return policy.effort | ReasoningCapability::Required;
+        }
+        return policy.effort;
     } catch (...) {
         return {};
     }
@@ -1243,16 +1358,12 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
     };
 
     append_beta_unique(ANTHROPIC_BETA_CLAUDE_CODE);
-    if (anthropic::uses_bound_thinking(last_requested_model_)) {
+    const auto wire_policy = anthropic_wire_policy(last_requested_model_);
+    if (wire_policy.reasoning_bound_to_prefix) {
         append_beta_unique(anthropic::kThinkingBindingBeta);
     }
     if (request_uses_context_1m_) append_beta_unique(ANTHROPIC_BETA_CONTEXT_1M);
-    const auto reasoning_policy =
-        anthropic_reasoning_policy(last_requested_model_);
-    if (thinking_.enabled
-        && (last_requested_model_.empty()
-            || !reasoning_policy.has_value()
-            || !reasoning_policy->rejects_manual_thinking)) {
+    if (thinking_.enabled && !wire_policy.rejects_manual_thinking()) {
         append_beta_unique(ANTHROPIC_BETA_THINKING);
     }
     if (auto it = auth.properties.find("oauth");

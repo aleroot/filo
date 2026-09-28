@@ -116,6 +116,10 @@ TEST_CASE("Anthropic protocol reports per-family effort levels",
     }
     CHECK(supports(protocol, "claude-fable-5", ReasoningCapability::XHighEffort));
     CHECK(supports(protocol, "claude-opus-4-7", ReasoningCapability::XHighEffort));
+    CHECK(supports(protocol, "claude-opus-5-5", ReasoningCapability::XHighEffort));
+    CHECK(supports(protocol, "claude-opus-5-5", ReasoningCapability::MaxEffort));
+    CHECK(supports(protocol, "claude-opus-5-5", ReasoningCapability::Required));
+    CHECK_FALSE(supports(protocol, "claude-opus-5", ReasoningCapability::Required));
     CHECK_FALSE(supports(protocol, "claude-sonnet-4-6", ReasoningCapability::XHighEffort));
     CHECK_FALSE(supports(protocol, "claude-haiku-4-5", ReasoningCapability::Effort));
     CHECK_FALSE(supports(protocol, "claude-3-5-sonnet", ReasoningCapability::Effort));

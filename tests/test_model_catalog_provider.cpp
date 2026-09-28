@@ -1357,6 +1357,103 @@ TEST_CASE("Complete reasoning metadata replaces stale wire-mode inference",
     CHECK_FALSE(merged.reasoning.manual_thinking);
 }
 
+TEST_CASE("A live catalog refresh keeps curated wire constraints",
+          "[llm][model-catalog][metadata-merge]") {
+    ModelInfo baseline;
+    baseline.canonical_id = "metadata-merge-wire";
+    baseline.reasoning.complete = true;
+    baseline.reasoning.adaptive_thinking = true;
+    baseline.wire.thinking_always_on = true;
+    baseline.wire.reasoning_text_hidden = true;
+    baseline.wire.reasoning_bound_to_prefix = true;
+    baseline.wire.fixed_sampling = true;
+    baseline.wire.forced_tool_choice_rejected = true;
+
+    // The Models API reports effort levels and thinking modes, but nothing
+    // about the request fields a model rejects, so its card has no wire data.
+    ModelInfo discovered;
+    discovered.canonical_id = baseline.canonical_id;
+    discovered.reasoning.effort =
+        ReasoningCapability::Effort
+        | ReasoningCapability::XHighEffort;
+    discovered.reasoning.adaptive_thinking = true;
+    discovered.reasoning.complete = true;
+
+    const ModelInfo merged =
+        merge_model_metadata(std::move(baseline), std::move(discovered));
+    CHECK(merged.reasoning.complete);
+    CHECK(merged.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+    CHECK(merged.wire.thinking_always_on);
+    CHECK(merged.wire.reasoning_text_hidden);
+    CHECK(merged.wire.reasoning_bound_to_prefix);
+    CHECK(merged.wire.fixed_sampling);
+    CHECK(merged.wire.forced_tool_choice_rejected);
+}
+
+TEST_CASE("A live Anthropic catalog keeps Opus 5.5 on its curated wire",
+          "[llm][model-catalog][anthropic][opus55]") {
+    AnthropicModelCatalogProvider provider;
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [{
+        "id": "claude-opus-5-5",
+        "display_name": "Claude Opus 5.5",
+        "max_input_tokens": 1000000,
+        "max_tokens": 128000,
+        "capabilities": {
+          "effort": {
+            "supported": true,
+            "low": {"supported": true},
+            "medium": {"supported": true},
+            "high": {"supported": true},
+            "xhigh": {"supported": true},
+            "max": {"supported": true}
+          },
+          "thinking": {
+            "supported": true,
+            "types": {
+              "adaptive": {"supported": true},
+              "enabled": {"supported": false}
+            }
+          }
+        }
+      }],
+      "has_more": false
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+
+    // Discovery is provider-scoped: it never writes to the global registry, so
+    // the request shape still resolves from the curated card.
+    const auto policy = protocols::anthropic_wire_policy("claude-opus-5-5");
+    CHECK(policy.known);
+    CHECK(policy.adaptive_thinking);
+    CHECK_FALSE(policy.manual_thinking);
+    CHECK(policy.thinking_always_on);
+    CHECK(policy.reasoning_bound_to_prefix);
+    CHECK(policy.forced_tool_choice_rejected);
+    CHECK(policy.effort.supports(ReasoningCapability::XHighEffort));
+
+    // The live card is authoritative for effort and thinking modes, and the
+    // curated constraints survive the merge because the API cannot report them.
+    const auto& live = result.models.front();
+    CHECK(live.wire.empty());
+    const auto resolved = resolve_model_metadata(
+        "claude-opus-5-5",
+        result.models,
+        ModelRegistry::instance().lookup("claude-opus-5-5"));
+    REQUIRE(resolved.model.has_value());
+    CHECK(resolved.model->reasoning.complete);
+    CHECK(resolved.model->reasoning.adaptive_thinking);
+    CHECK_FALSE(resolved.model->reasoning.manual_thinking);
+    CHECK(resolved.model->wire.thinking_always_on);
+    CHECK(resolved.model->wire.reasoning_text_hidden);
+    CHECK(resolved.model->wire.reasoning_bound_to_prefix);
+    CHECK(resolved.model->wire.fixed_sampling);
+    CHECK(resolved.model->wire.forced_tool_choice_rejected);
+}
+
 TEST_CASE("Model catalog resolution is provider API first with registry fallback",
           "[llm][model-catalog][metadata][fallback]") {
     std::vector<ModelInfo> provider_models(1);

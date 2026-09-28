@@ -269,6 +269,140 @@ TEST_CASE("ClaudeSerializer - Opus 5.5 has the full response budget",
     REQUIRE(document["max_tokens"].get_int64().value() == 128'000);
     REQUIRE(document["output_config"]["effort"].get_string().value() == "max");
     REQUIRE(document["thinking"]["type"].get_string().value() == "adaptive");
+    REQUIRE(document["thinking"]["display"].get_string().value() == "summarized");
+    REQUIRE(document["thinking"]["block_binding"]["prefix_mismatch_behavior"]
+                .get_string().value() == "drop_block");
+    REQUIRE(document["thinking"]["budget_tokens"].error() == simdjson::NO_SUCH_FIELD);
+}
+
+TEST_CASE("Claude Opus 5.5 follows the always-on adaptive contract",
+          "[claude][opus55][serializer][headers]") {
+    AnthropicProtocol protocol({.enabled = true, .budget_tokens = 5000});
+    for (const auto* model : {"claude-opus-5-5", "opus-5.5", "opus-5-5",
+                               "claude-opus-5.5"}) {
+        CAPTURE(model);
+        auto request = make_simple_request(model);
+        request.temperature = 0.2f;
+        request.effort = "off";
+        protocol.prepare_request(request);
+        REQUIRE(request.model == "claude-opus-5-5");
+
+        const auto payload = protocol.serialize(request);
+        simdjson::dom::parser parser;
+        const auto doc = parser.parse(payload);
+        REQUIRE(doc["thinking"]["type"].get_string().value() == "adaptive");
+        REQUIRE(doc["thinking"]["display"].get_string().value() == "summarized");
+        REQUIRE(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"]
+                    .get_string().value() == "drop_block");
+        REQUIRE(doc["thinking"]["budget_tokens"].error() == simdjson::NO_SUCH_FIELD);
+        REQUIRE(doc["output_config"]["effort"].get_string().value() == "low");
+        REQUIRE(doc["temperature"].error() == simdjson::NO_SUCH_FIELD);
+        REQUIRE(doc["tool_choice"].error() == simdjson::NO_SUCH_FIELD);
+
+        const auto headers = protocol.build_headers({});
+        const auto beta = headers.at("anthropic-beta");
+        CHECK_THAT(beta, Catch::Matchers::ContainsSubstring(
+            std::string(anthropic::kThinkingBindingBeta)));
+        CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+    }
+
+    // Claude Opus 5 hides reasoning text by default and rejects non-default
+    // sampling, so it gets the display opt-in and no temperature.
+    auto opus5 = make_simple_request("claude-opus-5");
+    opus5.temperature = 0.2f;
+    opus5.effort = "high";
+    const auto opus5_payload = AnthropicSerializer::serialize(opus5);
+    CHECK_THAT(opus5_payload, !Catch::Matchers::ContainsSubstring("block_binding"));
+    CHECK_THAT(opus5_payload, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"adaptive","display":"summarized"})"));
+    CHECK_THAT(opus5_payload, !Catch::Matchers::ContainsSubstring("\"temperature\""));
+
+    // Sonnet 4.6 is a manual-budget generation: no display opt-in, and a
+    // configured temperature still goes on the wire.
+    auto sonnet46 = make_simple_request("claude-sonnet-4-6");
+    sonnet46.temperature = 0.2f;
+    const auto sonnet46_payload = AnthropicSerializer::serialize(sonnet46);
+    CHECK_THAT(sonnet46_payload, !Catch::Matchers::ContainsSubstring("\"display\""));
+    CHECK_THAT(sonnet46_payload, Catch::Matchers::ContainsSubstring("\"temperature\""));
+    CHECK(anthropic_wire_policy("claude-opus-5-5").forced_tool_choice_rejected);
+    CHECK_FALSE(anthropic_wire_policy("claude-opus-5").forced_tool_choice_rejected);
+    CHECK(anthropic_wire_policy("claude-opus-5-5").thinking_always_on);
+    CHECK_FALSE(anthropic_wire_policy("claude-opus-5").thinking_always_on);
+}
+
+TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
+          "[claude][wire-policy]") {
+    // Aliases and the context suffix resolve to the same card.
+    for (const auto* alias : {"claude-opus-5-5", "opus-5-5", "opus-5.5",
+                              "claude-opus-5.5", "claude-opus-5-5[1m]"}) {
+        CAPTURE(alias);
+        const auto policy = anthropic_wire_policy(alias);
+        CHECK(policy.known);
+        CHECK(policy.thinking_always_on);
+        CHECK(policy.reasoning_text_hidden);
+        CHECK(policy.reasoning_bound_to_prefix);
+        CHECK(policy.fixed_sampling);
+        CHECK(policy.forced_tool_choice_rejected);
+        CHECK(policy.rejects_manual_thinking());
+        CHECK(policy.adaptive_thinking);
+        CHECK(policy.effort.supports(ReasoningCapability::XHighEffort));
+        CHECK(policy.effort.supports(ReasoningCapability::MaxEffort));
+    }
+
+    // Fable 5.1 shares the bound-thinking wire, reached through its alias.
+    const auto fable = anthropic_wire_policy("fable");
+    CHECK(fable.thinking_always_on);
+    CHECK(fable.reasoning_bound_to_prefix);
+
+    // Opus 5 is adaptive but keeps forced tool choice and an unbound prefix.
+    const auto opus5 = anthropic_wire_policy("claude-opus-5");
+    CHECK(opus5.known);
+    CHECK(opus5.reasoning_text_hidden);
+    CHECK(opus5.fixed_sampling);
+    CHECK_FALSE(opus5.thinking_always_on);
+    CHECK_FALSE(opus5.reasoning_bound_to_prefix);
+    CHECK_FALSE(opus5.forced_tool_choice_rejected);
+
+    // Manual-budget generations keep sampling and show reasoning by default.
+    const auto sonnet46 = anthropic_wire_policy("claude-sonnet-4-6");
+    CHECK(sonnet46.manual_thinking);
+    CHECK_FALSE(sonnet46.rejects_manual_thinking());
+    CHECK_FALSE(sonnet46.fixed_sampling);
+    CHECK_FALSE(sonnet46.reasoning_text_hidden);
+
+    const auto haiku = anthropic_wire_policy("claude-haiku-4-5");
+    CHECK(haiku.known);
+    CHECK(haiku.manual_thinking);
+    CHECK_FALSE(haiku.effort.supports_effort());
+
+    // Ids with no card fall back to their generation.
+    const auto opus47 = anthropic_wire_policy("claude-opus-4-7");
+    CHECK(opus47.known);
+    CHECK(opus47.adaptive_thinking);
+    CHECK(opus47.fixed_sampling);
+    CHECK_FALSE(opus47.reasoning_bound_to_prefix);
+
+    const auto mythos51 = anthropic_wire_policy("claude-mythos-5-1");
+    CHECK(mythos51.known);
+    CHECK(mythos51.forced_tool_choice_rejected);
+    CHECK_FALSE(mythos51.reasoning_bound_to_prefix);
+
+    // A later Fable 5.10 must not inherit Fable 5.1's binding.
+    CHECK_FALSE(anthropic_wire_policy("claude-fable-5-10").reasoning_bound_to_prefix);
+
+    // Unrecognized ids stay permissive so an older deployment keeps working.
+    const auto custom = anthropic_wire_policy("custom-deployment");
+    CHECK_FALSE(custom.known);
+    CHECK_FALSE(custom.rejects_manual_thinking());
+    CHECK_FALSE(custom.effort.supports_effort());
+
+    // A generation Filo has never seen degrades the same way: the request
+    // stays valid and the server's own defaults apply.
+    const auto future = anthropic_wire_policy("claude-opus-6");
+    CHECK_FALSE(future.known);
+    CHECK_FALSE(future.effort.supports_effort());
+    CHECK_FALSE(future.fixed_sampling);
+    CHECK_FALSE(future.reasoning_bound_to_prefix);
 }
 
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {
@@ -547,13 +681,14 @@ TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
             R"("thinking":{"type":"enabled")"));
     }
-    // high effort on Opus → adaptive thinking block.
+    // high effort on Opus → adaptive thinking block. Adaptive generations hide
+    // reasoning text by default, so Filo asks for the summarized display.
     {
         auto req = make_simple_request("claude-opus-4-8");
         req.effort = "high";
         const auto payload = AnthropicSerializer::serialize(req, 8096, cfg);
         REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-            R"("thinking":{"type":"adaptive"})"));
+            R"("thinking":{"type":"adaptive","display":"summarized"})"));
     }
     // off → no thinking block on Opus.
     {
@@ -587,7 +722,8 @@ TEST_CASE("ClaudeSerializer - Opus 4.8 converts thinking budget intent to adapti
           "[claude][serializer][thinking]") {
     AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 5000};
     auto payload = AnthropicSerializer::serialize(make_simple_request("claude-opus-4-8"), 8096, cfg);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"adaptive"})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("thinking":{"type":"adaptive","display":"summarized"})"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled")"));
 }
 
@@ -1442,6 +1578,35 @@ TEST_CASE("AnthropicProtocol - final event carries stop reason from message_delt
     REQUIRE(stop.done);
     REQUIRE(stop.stop_reason == "max_tokens");
     REQUIRE(stop.completion_tokens == 8096);
+}
+
+TEST_CASE("AnthropicProtocol surfaces a classifier refusal explanation",
+          "[claude][sse][refusal]") {
+    AnthropicProtocol protocol;
+    auto delta = protocol.parse_event(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\","
+        "\"stop_details\":{\"type\":\"refusal\",\"category\":\"reasoning_extraction\","
+        "\"explanation\":\"This request was declined because it asked for hidden reasoning.\"}},"
+        "\"usage\":{\"output_tokens\":0}}\n");
+    REQUIRE(delta.chunks.size() == 1);
+    CHECK(delta.chunks[0].content ==
+          "This request was declined because it asked for hidden reasoning.");
+
+    auto stop = protocol.parse_event(
+        "event: message_stop\n"
+        "data: {\"type\":\"message_stop\"}\n");
+    REQUIRE(stop.done);
+    CHECK(stop.stop_reason == "refusal");
+
+    AnthropicProtocol category_only;
+    auto category = category_only.parse_event(
+        "event: message_delta\n"
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\","
+        "\"stop_details\":{\"type\":\"refusal\",\"category\":\"cyber\",\"explanation\":null}},"
+        "\"usage\":{\"output_tokens\":0}}\n");
+    REQUIRE(category.chunks.size() == 1);
+    CHECK(category.chunks[0].content == "Request declined (cyber).");
 }
 
 TEST_CASE("AnthropicProtocol - final event reports incomplete tool call",

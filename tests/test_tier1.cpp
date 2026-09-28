@@ -392,6 +392,17 @@ TEST_CASE("rates_for_model — known models return correct rates", "[tier1][budg
     REQUIRE(r_opus_alias.input_per_m  == Catch::Approx(5.00));
     REQUIRE(r_opus_alias.output_per_m == Catch::Approx(25.00));
 
+    // Claude Opus 5.5 is $4/$20 and must not inherit the Opus 5 prefix rate.
+    auto r_opus55 = rates_for_model("claude-opus-5-5");
+    REQUIRE(r_opus55.input_per_m  == Catch::Approx(4.00));
+    REQUIRE(r_opus55.output_per_m == Catch::Approx(20.00));
+    auto r_opus55_alias = rates_for_model("opus-5.5");
+    REQUIRE(r_opus55_alias.input_per_m  == Catch::Approx(4.00));
+    REQUIRE(r_opus55_alias.output_per_m == Catch::Approx(20.00));
+    auto r_opus5 = rates_for_model("claude-opus-5");
+    REQUIRE(r_opus5.input_per_m  == Catch::Approx(5.00));
+    REQUIRE(r_opus5.output_per_m == Catch::Approx(25.00));
+
     auto r_fable = rates_for_model("claude-fable-5");
     REQUIRE(r_fable.input_per_m  == Catch::Approx(10.00));
     REQUIRE(r_fable.output_per_m == Catch::Approx(50.00));

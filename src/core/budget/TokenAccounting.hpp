@@ -110,6 +110,9 @@ struct ModelRates {
     if (model.find("grok-2")      != std::string_view::npos) return { 2.00, 10.00 };
     if (model.find("grok-4")      != std::string_view::npos) return { 3.00, 15.00 };
     if (model.find("claude-fable-5")   != std::string_view::npos) return {10.00, 50.00 };
+    // Opus 5.5 is $4/$20. Match it before the Opus 5 prefix, which is a substring.
+    if (model.find("opus-5-5") != std::string_view::npos
+        || model.find("opus-5.5") != std::string_view::npos) return { 4.00, 20.00 };
     if (model.find("claude-opus-5")    != std::string_view::npos) return { 5.00, 25.00 };
     if (model.find("claude-sonnet-5")  != std::string_view::npos) return { 2.00, 10.00 };
     if (model.find("fable")            != std::string_view::npos) return {10.00, 50.00 };

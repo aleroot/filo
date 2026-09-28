@@ -1,5 +1,6 @@
 #include "ModelRegistry.hpp"
 #include "ModelMetadata.hpp"
+#include "AnthropicCompatibility.hpp"
 
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -253,6 +254,49 @@ const ParameterConstraints kClaudeConstraints = [] {
     return c;
 }();
 
+// Wire constraints the Anthropic Models API does not advertise, curated from
+// the per-model documentation. Adaptive generations hide reasoning text by
+// default and reject non-default sampling; the newest of them also reject
+// forced tool choice and validate replayed reasoning against the prefix.
+constexpr ModelWireConstraints kClaudeAdaptiveWire = {
+    .reasoning_text_hidden = true,
+    .fixed_sampling = true,
+};
+constexpr ModelWireConstraints kClaudeBoundThinkingWire = {
+    .thinking_always_on = true,
+    .reasoning_text_hidden = true,
+    .reasoning_bound_to_prefix = true,
+    .fixed_sampling = true,
+    .forced_tool_choice_rejected = true,
+};
+
+// Reasoning wire modes per generation. The Models API reports these live; the
+// cards carry them so an offline session still builds a valid request.
+constexpr ReasoningCapabilities kClaudeEffortMax =
+    ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
+constexpr ReasoningCapabilities kClaudeEffortMaxXHigh =
+    kClaudeEffortMax | ReasoningCapability::XHighEffort;
+constexpr ModelReasoningProfile kClaudeAdaptiveReasoning = {
+    .effort = kClaudeEffortMaxXHigh,
+    .adaptive_thinking = true,
+    .manual_thinking = false,
+    .complete = true,
+};
+// Thinking is on by default server-side and needs no request field.
+constexpr ModelReasoningProfile kClaudeDefaultOnReasoning = {
+    .effort = kClaudeEffortMaxXHigh,
+    .adaptive_thinking = false,
+    .manual_thinking = false,
+    .complete = true,
+};
+// Extended thinking with a manual budget and no effort parameter.
+constexpr ModelReasoningProfile kClaudeBudgetOnlyReasoning = {
+    .effort = {},
+    .adaptive_thinking = false,
+    .manual_thinking = true,
+    .complete = true,
+};
+
 // Anthropic models
 std::vector<ModelInfo> build_anthropic_catalog() {
     return {
@@ -268,6 +312,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = kClaudeDefaultOnReasoning,
+            .wire = kClaudeBoundThinkingWire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 0.25, 12.5},
             .knowledge_cutoff = "2026-06",
@@ -287,6 +333,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = kClaudeDefaultOnReasoning,
+            .wire = kClaudeAdaptiveWire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 1.0, 12.5},
             .knowledge_cutoff = "2026-01",
@@ -311,6 +359,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
+            .reasoning = kClaudeAdaptiveReasoning,
+            .wire = kClaudeAdaptiveWire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-05",
@@ -320,7 +370,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
         // Claude Opus 5.5
         {
             .canonical_id = "claude-opus-5-5",
-            .aliases = {"opus-5-5", "opus-5.5"},
+            .aliases = {"opus-5-5", "opus-5.5", "claude-opus-5.5"},
             .display_name = "Claude Opus 5.5",
             .provider = "anthropic",
             .context_window = 1'000'000,
@@ -335,6 +385,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
+            .reasoning = kClaudeAdaptiveReasoning,
+            .wire = kClaudeBoundThinkingWire,
             .tier = ModelTier::Powerful,
             .pricing = {4.0, 20.0, 0.20, 5.0},
             .knowledge_cutoff = "2026-06",
@@ -354,6 +406,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = kClaudeDefaultOnReasoning,
+            .wire = kClaudeAdaptiveWire,
             .tier = ModelTier::Balanced,
             // Introductory launch pricing is effective through 2026-08-31.
             .pricing = {2.0, 10.0, 0.20, 2.5},
@@ -374,6 +428,7 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = kClaudeBudgetOnlyReasoning,
             .tier = ModelTier::Fast,
             .pricing = {1.0, 5.0, 0.10, 1.25},
             .knowledge_cutoff = "2025-02",
@@ -393,6 +448,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = kClaudeAdaptiveReasoning,
+            .wire = kClaudeAdaptiveWire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-03",
@@ -2109,6 +2166,21 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
             get_json_bool(reasoning, "complete", info.reasoning.complete);
         }
 
+        simdjson::dom::object wire_obj;
+        if (model_obj["wire"].get(wire_obj) == simdjson::SUCCESS) {
+            get_json_bool(wire_obj, "thinking_always_on", info.wire.thinking_always_on);
+            get_json_bool(wire_obj, "reasoning_text_hidden", info.wire.reasoning_text_hidden);
+            get_json_bool(
+                wire_obj,
+                "reasoning_bound_to_prefix",
+                info.wire.reasoning_bound_to_prefix);
+            get_json_bool(wire_obj, "fixed_sampling", info.wire.fixed_sampling);
+            get_json_bool(
+                wire_obj,
+                "forced_tool_choice_rejected",
+                info.wire.forced_tool_choice_rejected);
+        }
+
         simdjson::dom::object pricing_obj;
         if (model_obj["pricing"].get(pricing_obj) == simdjson::SUCCESS) {
             get_json_double(pricing_obj, "input", info.pricing.input_per_mtok);
@@ -2221,6 +2293,29 @@ std::string ModelRegistry::export_to_json() const {
                 }
                 writer.comma();
 
+                if (!info.wire.empty()) {
+                    writer.key("wire");
+                    {
+                        auto wire = writer.object();
+                        writer.kv_bool(
+                            "thinking_always_on",
+                            info.wire.thinking_always_on).comma();
+                        writer.kv_bool(
+                            "reasoning_text_hidden",
+                            info.wire.reasoning_text_hidden).comma();
+                        writer.kv_bool(
+                            "reasoning_bound_to_prefix",
+                            info.wire.reasoning_bound_to_prefix).comma();
+                        writer.kv_bool(
+                            "fixed_sampling",
+                            info.wire.fixed_sampling).comma();
+                        writer.kv_bool(
+                            "forced_tool_choice_rejected",
+                            info.wire.forced_tool_choice_rejected);
+                    }
+                    writer.comma();
+                }
+
                 writer.key("pricing");
                 {
                     auto pricing = writer.object();
@@ -2271,20 +2366,25 @@ std::string normalize_context_lookup_model(std::string_view model_id) {
     }
 
     const std::string lowered = core::utils::str::to_lower_ascii_copy(normalized);
+    // Same alias targets the Anthropic protocol resolves before a request, so
+    // the context window is always measured for the model that gets called.
     if (lowered == "sonnet") {
-        return "claude-sonnet-5";
+        return std::string(anthropic::kDefaultSonnet);
     }
-    if (lowered == "fable" || lowered == "best") {
-        return "claude-fable-5-1";
+    if (anthropic::is_fable_alias(lowered)) {
+        return std::string(anthropic::kDefaultFable);
     }
     if (lowered == "haiku") {
-        return "claude-haiku-4-5";
+        return std::string(anthropic::kDefaultHaiku);
     }
     if (lowered == "opusplan") {
-        return "claude-sonnet-5";
+        return std::string(anthropic::kDefaultSonnet);
     }
     if (lowered == "opus") {
-        return "claude-opus-5";
+        return std::string(anthropic::kDefaultOpus);
+    }
+    if (anthropic::is_opus_55_alias(lowered)) {
+        return std::string(anthropic::kDefaultOpus55);
     }
     return normalized;
 }
