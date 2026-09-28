@@ -76,4 +76,17 @@ private:
             lhs.features_ | static_cast<ReasoningCapabilities::Storage>(rhs))};
 }
 
+/**
+ * Provider-advertised reasoning controls for a model.
+ *
+ * Keeping this separate from the broad Reasoning capability lets protocols
+ * choose a supported wire mode without identifying model generations by name.
+ */
+struct ModelReasoningProfile {
+    ReasoningCapabilities effort;
+    bool adaptive_thinking = false;
+    bool manual_thinking = false;
+    bool complete = false;
+};
+
 } // namespace core::llm

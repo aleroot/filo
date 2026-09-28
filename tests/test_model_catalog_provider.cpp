@@ -944,7 +944,11 @@ TEST_CASE("A newly released Claude model is data-driven end to end",
     CHECK(payload.find(R"("max_tokens":192000)") != std::string::npos);
     CHECK(payload.find(R"("output_config":{"effort":"xhigh"})")
           != std::string::npos);
-    CHECK(payload.find(R"("thinking":{"type":"adaptive"})")
+    // Adaptive-only reasoning is the marker of the generations that return
+    // thinking blocks with empty text, so the request opts into the summarized
+    // display even though Filo has no curated card for this model.
+    CHECK(payload.find(
+              R"("thinking":{"type":"adaptive","display":"summarized"})")
           != std::string::npos);
     CHECK(payload.find(R"("thinking":{"type":"enabled")")
           == std::string::npos);
@@ -1389,6 +1393,46 @@ TEST_CASE("A live catalog refresh keeps curated wire constraints",
     CHECK(merged.wire.reasoning_bound_to_prefix);
     CHECK(merged.wire.fixed_sampling);
     CHECK(merged.wire.forced_tool_choice_rejected);
+}
+
+TEST_CASE("A live catalog supplies effort support the protocol does not know",
+          "[llm][model-catalog][anthropic][effort]") {
+    constexpr std::string_view provider_name = "anthropic-live-effort-provider";
+    constexpr std::string_view model_id = "claude-opus-6";
+
+    ModelInfo live_card;
+    live_card.canonical_id = std::string(model_id);
+    live_card.provider = "anthropic";
+    live_card.reasoning.effort =
+        ReasoningCapability::Effort | ReasoningCapability::XHighEffort;
+    live_card.reasoning.adaptive_thinking = true;
+    live_card.reasoning.complete = true;
+
+    ModelCatalogDiscoveryResult success;
+    success.attempted = true;
+    success.fetched = 1;
+    ModelCatalogAvailability::instance().record_result(
+        provider_name, success, {live_card});
+
+    HttpLLMProvider provider(
+        "https://example.invalid/v1",
+        core::auth::ApiKeyCredentialSource::as_bearer("test-key"),
+        std::string(model_id),
+        std::make_unique<protocols::AnthropicProtocol>(),
+        core::config::ApiType::Anthropic,
+        std::string(provider_name));
+
+    // The protocol has neither a card nor a generation row for this id, so the
+    // catalog is what makes /effort work on a model released after this build.
+    CHECK(protocols::AnthropicProtocol{}.reasoning_capabilities(model_id).empty());
+    const auto capabilities = provider.reasoning_capabilities(model_id);
+    CHECK(capabilities.supports_effort());
+    CHECK(capabilities.supports(ReasoningCapability::XHighEffort));
+
+    // A model the protocol already describes keeps its answer: Haiku 4.5 has a
+    // curated card with no effort control, so the catalog cannot add one.
+    CHECK_FALSE(
+        provider.reasoning_capabilities("claude-haiku-4-5").supports_effort());
 }
 
 TEST_CASE("A live Anthropic catalog keeps Opus 5.5 on its curated wire",

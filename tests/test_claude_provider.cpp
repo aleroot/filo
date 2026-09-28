@@ -403,6 +403,78 @@ TEST_CASE("Anthropic wire policy comes from metadata, not from the model name",
     CHECK_FALSE(future.effort.supports_effort());
     CHECK_FALSE(future.fixed_sampling);
     CHECK_FALSE(future.reasoning_bound_to_prefix);
+
+    // The provider's live catalog closes that gap: it reports effort levels
+    // and thinking modes, and adaptive-only implies the two constraints every
+    // adaptive generation has shared so far.
+    ModelReasoningProfile live;
+    live.effort = ReasoningCapability::Effort | ReasoningCapability::XHighEffort;
+    live.adaptive_thinking = true;
+    live.manual_thinking = false;
+    live.complete = true;
+    const auto live_policy = anthropic_wire_policy("claude-opus-6", &live);
+    CHECK(live_policy.known);
+    CHECK(live_policy.effort.supports(ReasoningCapability::XHighEffort));
+    CHECK_FALSE(live_policy.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(live_policy.reasoning_text_hidden);
+    CHECK(live_policy.fixed_sampling);
+    CHECK_FALSE(live_policy.reasoning_bound_to_prefix);
+    CHECK_FALSE(live_policy.forced_tool_choice_rejected);
+    CHECK_FALSE(live_policy.thinking_always_on);
+
+    // An incomplete catalog report changes nothing.
+    ModelReasoningProfile partial = live;
+    partial.complete = false;
+    CHECK_FALSE(anthropic_wire_policy("claude-opus-6", &partial).known);
+
+    // Curated constraints still win over inference for a known model, and the
+    // live catalog narrows what the card advertised.
+    ModelReasoningProfile narrowed;
+    narrowed.effort = ReasoningCapabilities{ReasoningCapability::Effort};
+    narrowed.adaptive_thinking = true;
+    narrowed.manual_thinking = false;
+    narrowed.complete = true;
+    const auto opus55_live = anthropic_wire_policy("claude-opus-5-5", &narrowed);
+    CHECK_FALSE(opus55_live.effort.supports(ReasoningCapability::XHighEffort));
+    CHECK(opus55_live.reasoning_bound_to_prefix);
+    CHECK(opus55_live.thinking_always_on);
+}
+
+TEST_CASE("Claude requests honor a live catalog for a model Filo has no card for",
+          "[claude][serializer][live-catalog]") {
+    ModelReasoningProfile live;
+    live.effort = ReasoningCapability::Effort | ReasoningCapability::XHighEffort;
+    live.adaptive_thinking = true;
+    live.manual_thinking = false;
+    live.complete = true;
+
+    auto request = make_simple_request("claude-opus-6");
+    request.effort = "xhigh";
+    request.temperature = 0.2f;
+    request.catalog_reasoning = live;
+
+    const auto payload = AnthropicSerializer::serialize(request);
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(payload);
+    REQUIRE(doc["output_config"]["effort"].get_string().value() == "xhigh");
+    REQUIRE(doc["thinking"]["type"].get_string().value() == "adaptive");
+    REQUIRE(doc["thinking"]["display"].get_string().value() == "summarized");
+    REQUIRE(doc["temperature"].error() == simdjson::NO_SUCH_FIELD);
+    // Not inferable from a catalog, so an unseen model never gets it.
+    REQUIRE(doc["thinking"]["block_binding"].error() == simdjson::NO_SUCH_FIELD);
+
+    // An unadvertised level clamps to the highest the endpoint reports.
+    auto clamped = make_simple_request("claude-opus-6");
+    clamped.effort = "max";
+    clamped.catalog_reasoning = live;
+    CHECK_THAT(AnthropicSerializer::serialize(clamped),
+               Catch::Matchers::ContainsSubstring(R"("effort":"high")"));
+
+    // Without catalog data the same id stays permissive.
+    const auto bare =
+        AnthropicSerializer::serialize(make_simple_request("claude-opus-6"));
+    CHECK_THAT(bare, !Catch::Matchers::ContainsSubstring("output_config"));
+    CHECK_THAT(bare, !Catch::Matchers::ContainsSubstring("\"thinking\""));
 }
 
 TEST_CASE("ClaudeSerializer - max_tokens honours explicit value", "[claude][serializer]") {

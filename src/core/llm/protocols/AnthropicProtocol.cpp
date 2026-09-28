@@ -740,7 +740,9 @@ namespace {
 
 } // namespace
 
-AnthropicWirePolicy anthropic_wire_policy(std::string_view model) {
+AnthropicWirePolicy anthropic_wire_policy(
+    std::string_view model,
+    const ModelReasoningProfile* live) {
     AnthropicWirePolicy policy;
 
     const std::string normalized = anthropic::normalized_claude_id(model);
@@ -748,16 +750,21 @@ AnthropicWirePolicy anthropic_wire_policy(std::string_view model) {
     if (!card) card = ModelRegistry::instance().lookup(normalized);
     const auto* generation = generation_fallback(normalized);
 
-    // A registry card wins when it carries a full reasoning profile. Cards are
-    // curated in the builtin catalog and refreshed from saved catalogs; live
-    // provider discovery is deliberately provider-scoped and never writes here,
-    // so the generation table covers ids no card knows (pinned snapshots, new
-    // deployments, models released after this build).
-    if (card && card->reasoning.complete) {
+    // Reasoning controls: the serving endpoint's own catalog is authoritative,
+    // the curated card covers an offline session, and the generation table
+    // covers ids that match neither (pinned snapshots, new deployments, models
+    // released after this build).
+    const ModelReasoningProfile* reasoning = nullptr;
+    if (live && live->complete) {
+        reasoning = live;
+    } else if (card && card->reasoning.complete) {
+        reasoning = &card->reasoning;
+    }
+    if (reasoning) {
         policy.known = true;
-        policy.effort = card->reasoning.effort;
-        policy.adaptive_thinking = card->reasoning.adaptive_thinking;
-        policy.manual_thinking = card->reasoning.manual_thinking;
+        policy.effort = reasoning->effort;
+        policy.adaptive_thinking = reasoning->adaptive_thinking;
+        policy.manual_thinking = reasoning->manual_thinking;
     } else if (generation) {
         policy.known = true;
         policy.effort = generation->effort;
@@ -767,17 +774,35 @@ AnthropicWirePolicy anthropic_wire_policy(std::string_view model) {
         policy.known = true;
     }
 
-    // No model catalog advertises rejected request fields, so wire constraints
-    // come from the card when it is curated, and from the generation otherwise.
-    const ModelWireConstraints wire = (card && !card->wire.empty())
-        ? card->wire
-        : (generation ? generation->wire : ModelWireConstraints{});
-    policy.thinking_always_on = wire.thinking_always_on;
-    policy.reasoning_text_hidden = wire.reasoning_text_hidden;
-    policy.reasoning_bound_to_prefix = wire.reasoning_bound_to_prefix;
-    policy.fixed_sampling = wire.fixed_sampling;
-    policy.forced_tool_choice_rejected = wire.forced_tool_choice_rejected;
+    // No model catalog advertises rejected request fields, so a matched card or
+    // generation is the only curated source. A matched generation counts as
+    // curated even when it carries no constraints.
+    const ModelWireConstraints* wire = nullptr;
+    if (card && !card->wire.empty()) {
+        wire = &card->wire;
+    } else if (generation) {
+        wire = &generation->wire;
+    }
 
+    if (wire) {
+        policy.thinking_always_on = wire->thinking_always_on;
+        policy.reasoning_text_hidden = wire->reasoning_text_hidden;
+        policy.reasoning_bound_to_prefix = wire->reasoning_bound_to_prefix;
+        policy.fixed_sampling = wire->fixed_sampling;
+        policy.forced_tool_choice_rejected = wire->forced_tool_choice_rejected;
+        return policy;
+    }
+
+    if (policy.known && policy.adaptive_thinking && !policy.manual_thinking) {
+        // An unseen model that offers only adaptive thinking belongs to the
+        // generations that hide reasoning text by default and reject
+        // non-default sampling: every adaptive-only Claude documented so far
+        // does both, and the catalog advertises neither. Prefix binding and
+        // forced-tool-choice rejection are NOT implied by adaptive thinking
+        // (Claude Opus 5 is adaptive-only and accepts both), so they stay off.
+        policy.reasoning_text_hidden = true;
+        policy.fixed_sampling = true;
+    }
     return policy;
 }
 
@@ -816,7 +841,8 @@ std::string AnthropicSerializer::serialize(
     } else {
     // Effort can reduce output/token spend for tool-heavy sessions.
     // Anthropic docs (Apr 2026): generally available, no beta header needed.
-    const AnthropicWirePolicy wire_policy = anthropic_wire_policy(req.model);
+    const AnthropicWirePolicy wire_policy = anthropic_wire_policy(
+        req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     ReasoningCapabilities reasoning_capabilities = wire_policy.effort;
     if (wire_policy.thinking_always_on) {
         reasoning_capabilities =

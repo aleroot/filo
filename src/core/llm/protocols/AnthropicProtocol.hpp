@@ -72,7 +72,13 @@ struct AnthropicContinuationBlockState {
  * Models API does not advertise those rejections. Filo therefore curates them
  * on the model card and resolves them once here, so the serializer, the header
  * builder, and the hosted-tool backends all read the same flags instead of
- * matching model names. Ids that match no card fall back to a generation table.
+ * matching model names.
+ *
+ * Resolution order for reasoning controls: the provider's live catalog when it
+ * reported a capability set, then the registry card, then a generation table
+ * for ids that match neither. Wire constraints come from the card or the
+ * generation table; for a model that matches neither, an adaptive-only profile
+ * implies the two constraints every adaptive generation has shared so far.
  */
 struct AnthropicWirePolicy {
     ReasoningCapabilities effort;             ///< Effort levels the model accepts.
@@ -93,7 +99,12 @@ struct AnthropicWirePolicy {
 };
 
 /// Resolve the wire policy for a model id, alias, or `[1m]`-suffixed variant.
-[[nodiscard]] AnthropicWirePolicy anthropic_wire_policy(std::string_view model);
+/// @p live carries the provider catalog's reasoning profile when it reported
+/// one, and wins over the registry card because it describes the endpoint
+/// actually serving the request.
+[[nodiscard]] AnthropicWirePolicy anthropic_wire_policy(
+    std::string_view model,
+    const ModelReasoningProfile* live = nullptr);
 
 /**
  * @brief Stateful SSE event parser for the Anthropic streaming Messages API.

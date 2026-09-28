@@ -21,6 +21,7 @@
 #include "../utils/JsonUtils.hpp"
 #include "../utils/MimeUtils.hpp"
 #include "ResponseFormat.hpp"
+#include "ReasoningCapabilities.hpp"
 
 namespace core::llm {
 
@@ -533,6 +534,12 @@ struct ChatRequest {
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
     core::context::PromptPlan prompt_plan; ///< Structured stable-to-dynamic system prompt.
+    /// Reasoning controls the provider's live catalog reported for `model`.
+    /// Model discovery is provider-scoped and never writes to the global
+    /// registry, so the transport copies this onto the request (the way it
+    /// copies `max_tokens`) to let a serializer honor a model the registry has
+    /// never seen. Empty when the provider reported no capability catalog.
+    std::optional<ModelReasoningProfile> catalog_reasoning;
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

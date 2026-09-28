@@ -465,7 +465,22 @@ bool HttpLLMProvider::should_estimate_cost() const {
 
 ReasoningCapabilities HttpLLMProvider::reasoning_capabilities(
     std::string_view model) const noexcept {
-    return protocol_ ? protocol_->reasoning_capabilities(model) : ReasoningCapabilities{};
+    const auto protocol_capabilities = protocol_
+        ? protocol_->reasoning_capabilities(model)
+        : ReasoningCapabilities{};
+    if (!protocol_capabilities.empty()) return protocol_capabilities;
+    // The protocol's answer wins; this endpoint's catalog only fills a gap. The
+    // rule is monotone, so it can add support for a model released after this
+    // build without changing any model the protocol already describes.
+    try {
+        if (const auto info = resolved_model_info(model);
+            info && info->reasoning.complete) {
+            return info->reasoning.effort;
+        }
+    } catch (...) {
+        // A catalog lookup must not turn a capability query into a failure.
+    }
+    return protocol_capabilities;
 }
 
 ProviderCapabilities HttpLLMProvider::capabilities() const {
@@ -543,6 +558,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
             if (max_output_tokens > 0) {
                 effective_request.max_tokens = max_output_tokens;
             }
+        }
+        // Same reasoning as max_tokens: a model this endpoint serves but the
+        // global registry has never seen still has to reach the serializer.
+        if (!effective_request.catalog_reasoning.has_value()
+            && metadata_info.has_value()
+            && metadata_info->reasoning.complete) {
+            effective_request.catalog_reasoning = metadata_info->reasoning;
         }
         if (metadata_info.has_value()
             && metadata_info->capabilities != 0) {
