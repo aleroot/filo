@@ -6,11 +6,17 @@
 #include "core/utils/JsonUtils.hpp"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <format>
 #include <limits>
-#include <simdjson.h>
 #include <string>
 #include <type_traits>
+
+#include <simdjson.h>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 using namespace core::utils;
 
@@ -92,10 +98,14 @@ TEST_CASE("JsonUtils validates JSON values and object roots",
     CHECK(json::is_valid(R"({"name":"filo"})"));
     CHECK(json::is_valid(R"("text")"));
     CHECK(json::is_valid("123456789012345678901"));
+    // simdjson 5 reports [2^64, 10^20) as a big integer, not a malformed number.
+    CHECK(json::is_valid("18446744073709551616"));
+    CHECK_FALSE(json::is_valid("123456789123456789123x"));
     CHECK_FALSE(json::is_valid(R"({"name":)"));
 
     CHECK(json::is_object(" \t{\"name\":\"filo\"}\r\n"));
     CHECK(json::is_object(R"({"count":123456789012345678901})"));
+    CHECK(json::is_object(R"({"count":18446744073709551616})"));
     CHECK_FALSE(json::is_object("[1,2]"));
     CHECK_FALSE(json::is_object(R"({"name":)"));
 
@@ -103,6 +113,34 @@ TEST_CASE("JsonUtils validates JSON values and object roots",
           == " {\"name\":\"filo\"} ");
     CHECK(json::object_or_empty("[1,2]") == "{}");
     CHECK(json::object_or_empty("") == "{}");
+}
+
+TEST_CASE("JsonUtils reads a view that ends on a page boundary",
+          "[json_utils][regression]") {
+    const long page = sysconf(_SC_PAGESIZE);
+    REQUIRE(page > 0);
+    const auto page_size = static_cast<std::size_t>(page);
+    void* memory = nullptr;
+    if (posix_memalign(&memory, page_size, page_size * 2) != 0) {
+        SKIP("aligned allocation is unavailable");
+    }
+    auto* bytes = static_cast<char*>(memory);
+    if (mprotect(bytes + page_size, page_size, PROT_NONE) != 0) {
+        std::free(memory);
+        SKIP("page protection is unavailable");
+    }
+
+    const std::string_view payload = R"({"name":"filo"})";
+    REQUIRE(payload.size() < page_size);
+    char* const start = bytes + page_size - payload.size();
+    std::memcpy(start, payload.data(), payload.size());
+    const std::string_view json(start, payload.size());
+
+    CHECK(json::is_valid(json));
+    CHECK(json::string_field(json, "name") == "filo");
+
+    REQUIRE(mprotect(bytes + page_size, page_size, PROT_READ | PROT_WRITE) == 0);
+    std::free(memory);
 }
 
 TEST_CASE("JsonUtils: typed field accessors return fallbacks for missing fields",

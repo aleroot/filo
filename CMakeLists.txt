@@ -43,13 +43,13 @@ set(_filo_saved_folder "${CMAKE_FOLDER}")
 set(CMAKE_FOLDER "Dependencies")
 
 # Add CLI11 for arg parsing
-CPMAddPackage("gh:CLIutils/CLI11@2.6.2")
+CPMAddPackage("gh:CLIutils/CLI11@2.7.2")
 
 # Add simdjson for MCP communication (replacing nlohmann/json)
-CPMAddPackage("gh:simdjson/simdjson@4.6.4")
+CPMAddPackage("gh:simdjson/simdjson@5.0.1")
 
 # Terminal UI
-set(FILO_FTXUI_VERSION 7.0.1)
+set(FILO_FTXUI_VERSION 7.0.3)
 string(REGEX REPLACE "[^0-9]" "" FILO_FTXUI_ABI_EPOCH "${FILO_FTXUI_VERSION}")
 CPMAddPackage("gh:ArthurSonzogni/FTXUI@${FILO_FTXUI_VERSION}")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -95,15 +95,15 @@ CPMAddPackage(
 if(APPLE)
     set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 endif()
-CPMAddPackage("gh:yhirose/cpp-httplib@0.50.1")
+CPMAddPackage("gh:yhirose/cpp-httplib@0.58.0")
 
 if(FILO_ENABLE_PYTHON)
     set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
     CPMAddPackage(
         NAME pybind11
         GITHUB_REPOSITORY pybind/pybind11
-        GIT_TAG v3.0.4
-        VERSION 3.0.4
+        GIT_TAG v3.1.0
+        VERSION 3.1.0
     )
 endif()
 
@@ -116,7 +116,7 @@ if(FILO_ENABLE_LLAMACPP)
     CPMAddPackage(
         NAME llama_cpp
         GITHUB_REPOSITORY ggml-org/llama.cpp
-        GIT_TAG b10066
+        GIT_TAG b11242
         EXCLUDE_FROM_ALL YES
         OPTIONS
             "BUILD_SHARED_LIBS OFF"
@@ -578,7 +578,7 @@ install(FILES LICENSE NOTICE
 enable_testing()
 set(_filo_saved_folder "${CMAKE_FOLDER}")
 set(CMAKE_FOLDER "Dependencies")
-CPMAddPackage("gh:catchorg/Catch2@3.15.2")
+CPMAddPackage("gh:catchorg/Catch2@3.16.0")
 if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     foreach(catch2_target Catch2 Catch2WithMain)
         if(TARGET ${catch2_target})

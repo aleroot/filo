@@ -948,8 +948,7 @@ parse_receipt(std::string_view tool_result) noexcept {
   try {
     simdjson::dom::parser parser;
     simdjson::dom::element document;
-    if (parser.parse(tool_result.data(), tool_result.size()).get(document) !=
-        simdjson::SUCCESS) {
+    if (parser.parse_unpadded(tool_result).get(document) != simdjson::SUCCESS) {
       return std::unexpected("verification result is not valid JSON");
     }
     simdjson::dom::object root;

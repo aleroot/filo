@@ -126,8 +126,8 @@ struct LlamaCppConfig {
     std::optional<int>  threads      = {};   ///< llama_context_params.n_threads
     std::optional<int>  threads_batch = {};  ///< llama_context_params.n_threads_batch
     std::optional<int>  gpu_layers   = {};   ///< llama_model_params.n_gpu_layers
-    std::optional<bool> use_mmap     = {};   ///< llama_model_params.use_mmap
-    std::optional<bool> use_mlock    = {};   ///< llama_model_params.use_mlock
+    std::optional<bool> use_mmap     = {};   ///< llama_model_params.load_mode mmap bit
+    std::optional<bool> use_mlock    = {};   ///< llama_model_params.load_mode mlock bit
 };
 
 // ---------------------------------------------------------------------------

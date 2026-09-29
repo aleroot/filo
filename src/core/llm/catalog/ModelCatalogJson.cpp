@@ -192,7 +192,7 @@ ModelCatalogResult parse_catalog_json(
         result.error = "empty model catalog response";
         return result;
     }
-    if (parser.parse(body.data(), body.size()).get(document) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(body).get(document) != simdjson::SUCCESS) {
         result.error = "invalid model catalog JSON";
     }
     return result;

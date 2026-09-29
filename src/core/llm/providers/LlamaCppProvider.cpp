@@ -626,8 +626,15 @@ bool LlamaCppProvider::ensure_model_loaded(std::string& error) {
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = gpu_layers_;
-    model_params.use_mmap = use_mmap_;
-    model_params.use_mlock = use_mlock_;
+    if (use_mmap_ && use_mlock_) {
+        model_params.load_mode = LLAMA_LOAD_MODE_MMAP_MLOCK;
+    } else if (use_mmap_) {
+        model_params.load_mode = LLAMA_LOAD_MODE_MMAP;
+    } else if (use_mlock_) {
+        model_params.load_mode = LLAMA_LOAD_MODE_MLOCK;
+    } else {
+        model_params.load_mode = LLAMA_LOAD_MODE_NONE;
+    }
 
     auto* raw_model = llama_model_load_from_file(model_path_.c_str(), model_params);
     if (raw_model == nullptr) {

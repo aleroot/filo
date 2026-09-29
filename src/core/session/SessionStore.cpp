@@ -532,7 +532,9 @@ std::optional<SessionData> SessionStore::from_json(std::string_view json) {
         simdjson::dom::parser parser;
         simdjson::dom::element doc;
         std::string repaired_json;
-        if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
+        // Sessions are the largest documents we parse. parse_unpadded keeps
+        // the bytes in `json` instead of copying them into the parser.
+        if (parser.parse_unpadded(json).get(doc) != simdjson::SUCCESS) {
             if (simdjson::validate_utf8(json)) return std::nullopt;
             repaired_json = core::utils::repair_utf8(json);
             if (parser.parse(repaired_json).get(doc) != simdjson::SUCCESS) {
@@ -853,7 +855,7 @@ private:
                                                    std::string_view json,
                                                    std::string& repaired,
                                                    simdjson::dom::element& out) {
-    const auto error = parser.parse(json.data(), json.size()).get(out);
+    const auto error = parser.parse_unpadded(json).get(out);
     if (error == simdjson::SUCCESS || simdjson::validate_utf8(json)) return error;
     repaired = core::utils::repair_utf8(json);
     return parser.parse(repaired).get(out);

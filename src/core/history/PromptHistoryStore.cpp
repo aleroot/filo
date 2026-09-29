@@ -207,7 +207,7 @@ std::optional<std::vector<std::string>> PromptHistoryStore::from_json(std::strin
     try {
         simdjson::dom::parser parser;
         simdjson::dom::element doc;
-        if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
+        if (parser.parse_unpadded(json).get(doc) != simdjson::SUCCESS) {
             return std::nullopt;
         }
 

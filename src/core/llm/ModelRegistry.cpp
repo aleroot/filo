@@ -2065,7 +2065,7 @@ static void parse_constraints_range(simdjson::dom::object constraints_obj,
 int ModelRegistry::load_from_json(std::string_view json_data) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(json_data.data(), json_data.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(json_data).get(doc) != simdjson::SUCCESS) {
         return -1;
     }
 

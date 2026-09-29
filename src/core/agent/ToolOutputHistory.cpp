@@ -497,7 +497,7 @@ void note_bucket(std::vector<std::pair<std::string, std::size_t>>& buckets,
 
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(raw_output.data(), raw_output.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(raw_output).get(doc) != simdjson::SUCCESS) {
         return std::nullopt;
     }
 

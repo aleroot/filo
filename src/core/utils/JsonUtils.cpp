@@ -199,8 +199,9 @@ enum class RootKind {
     parser.number_as_string(true);
 
     simdjson::dom::element document;
-    if (parser.parse(input.data(), input.size()).get(document)
-        != simdjson::SUCCESS) {
+    // Exact-length views have no SIMDJSON_PADDING bytes after them.
+    // parse_unpadded (simdjson 5) reads only input.size() and does not copy.
+    if (parser.parse_unpadded(input).get(document) != simdjson::SUCCESS) {
         return RootKind::Invalid;
     }
     return document.is_object() ? RootKind::Object : RootKind::Other;

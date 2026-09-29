@@ -241,7 +241,9 @@ first_int64_field(const simdjson::dom::object& object,
                                               std::string_view fallback = {}) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+    // parse(data, size) copies so stage 2 can read past the buffer.
+    // These views are exact; parse_unpadded does not copy or read past size().
+    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
         return std::string(fallback);
     }
     simdjson::dom::object object;
@@ -256,7 +258,7 @@ first_int64_field(const simdjson::dom::object& object,
                                      bool fallback = false) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
         return fallback;
     }
     simdjson::dom::object object;
@@ -271,7 +273,7 @@ first_string_field(std::string_view raw_json,
                    std::initializer_list<std::string_view> keys) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
         return std::nullopt;
     }
     simdjson::dom::object object;
@@ -292,7 +294,7 @@ first_int64_field(std::string_view raw_json,
                   std::initializer_list<std::string_view> keys) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(raw_json.data(), raw_json.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(raw_json).get(doc) != simdjson::SUCCESS) {
         return std::nullopt;
     }
     simdjson::dom::object object;

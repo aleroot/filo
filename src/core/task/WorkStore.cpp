@@ -263,7 +263,7 @@ std::string WorkStore::to_json(const WorkItem& item) {
 std::optional<WorkItem> WorkStore::from_json(std::string_view json) {
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
-    if (parser.parse(json.data(), json.size()).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse_unpadded(json).get(doc) != simdjson::SUCCESS) {
         return std::nullopt;
     }
 
