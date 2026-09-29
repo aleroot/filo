@@ -18,6 +18,7 @@
 #include "core/tools/ApplyPatchTool.hpp"
 #include "core/tools/SearchReplaceTool.hpp"
 #include "core/tools/ToolArgumentUtils.hpp"
+#include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/GetTimeTool.hpp"
 #include "core/tools/GetWorkspaceConfigTool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -280,6 +281,38 @@ TEST_CASE("WriteFileTool and ReadTool", "[tools]") {
     REQUIRE_THAT(read_res, Catch::Matchers::ContainsSubstring("Hello, Filo!\\nThis is a test."));
 
     std::filesystem::remove(test_file);
+}
+
+TEST_CASE("WriteFileTool says when the prior content it returns is incomplete", "[tools]") {
+    const std::string name =
+        "test_artifact_prev_content_" + std::to_string(getpid()) + ".txt";
+    WriteFileTool write_tool;
+
+    // A new file withheld nothing.
+    const auto created = write_tool.execute(
+        R"({"file_path":")" + name + R"(","content":"one\n"})");
+    REQUIRE_THAT(created, Catch::Matchers::ContainsSubstring(
+        R"("previous_content_truncated":false)"));
+
+    // A small file is returned whole, so a diff built from it is trustworthy.
+    const auto small = write_tool.execute(
+        R"({"file_path":")" + name + R"(","content":"two\n"})");
+    REQUIRE_THAT(small, Catch::Matchers::ContainsSubstring(R"("previous_content":"one\n")"));
+    REQUIRE_THAT(small, Catch::Matchers::ContainsSubstring(
+        R"("previous_content_truncated":false)"));
+
+    // Past the diff budget the old bytes cannot be returned in full. Saying so
+    // is what stops a diff from treating a long file as a short one.
+    const std::string big(core::tools::detail::kMaxToolDiffInputBytes + 1, 'x');
+    const auto grown = write_tool.execute(
+        R"({"file_path":")" + name + R"(","content":")" + big + R"("})");
+    REQUIRE_THAT(grown, Catch::Matchers::ContainsSubstring(R"("success":true)"));
+    const auto shrunk = write_tool.execute(
+        R"({"file_path":")" + name + R"(","content":"three\n"})");
+    REQUIRE_THAT(shrunk, Catch::Matchers::ContainsSubstring(
+        R"("previous_content_truncated":true)"));
+
+    std::filesystem::remove(name);
 }
 
 TEST_CASE("WriteFileTool resolves relative paths against scoped workspace overrides",

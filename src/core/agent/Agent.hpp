@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../changes/TurnChangeTracker.hpp"
 #include "../context/ContextBuilder.hpp"
 #include "../context/ContextWindowTracker.hpp"
 #include "../context/SessionContext.hpp"
@@ -70,6 +71,10 @@ public:
         std::function<void(const core::llm::ToolCall&, const core::llm::Message&)> on_tool_finish =
             {};
         std::function<void(const SubagentEvent&)> on_subagent_event = {};
+        // Raised once when a turn that changed files ends, just before the
+        // done callback, with the same net changes stamped on the turn's last
+        // assistant message in history.
+        std::function<void(const core::changes::TurnChanges&)> on_turn_changes = {};
         // Live reasoning/thinking deltas, streamed separately from the assistant
         // answer body. Display-only: routing reasoning here keeps chain-of-thought
         // out of the visible response text while still allowing the UI to show it
@@ -121,7 +126,12 @@ public:
           core::budget::BudgetTracker* budget_tracker = nullptr,
           std::shared_ptr<core::memory::MemorySystem> memory_system = {},
           std::shared_ptr<core::scm::WorkspaceLeaseRegistry>
-              workspace_leases = {});
+              workspace_leases = {},
+          // Parent turn's file-change tracker. A delegated worker records into
+          // the tracker of the turn that spawned it and publishes nothing of
+          // its own, so its edits land in that turn's summary. Agents that own
+          // their turns leave this empty and track per turn.
+          std::shared_ptr<core::changes::TurnChangeTracker> inherited_change_tracker = {});
     ~Agent();
 
     // -----------------------------------------------------------------------
@@ -391,6 +401,10 @@ private:
         std::string model;
         std::unique_ptr<AutoTurnState> auto_turn;
         core::hooks::CompletionGateState completion_hooks;
+        // Net file changes made during this turn. Shared rather than owned so
+        // a delegated worker can record into its parent's tracker; a worker
+        // that borrows one never publishes it (see inherit_change_tracker).
+        std::shared_ptr<core::changes::TurnChangeTracker> change_tracker;
     };
 
     void step(std::function<void(const std::string&)> text_callback,
@@ -404,6 +418,16 @@ private:
     // and makes every older turn stale.
     [[nodiscard]] bool is_turn_current(
         const std::shared_ptr<TurnState>& turn_state) const;
+
+    // Stamps the turn's net file changes on its last assistant message and
+    // returns them. Empty when the turn changed nothing or is no longer current.
+    core::changes::TurnChanges publish_turn_changes(
+        const std::shared_ptr<TurnState>& turn_state);
+
+    // The tracker a turn records into: the inherited one when this agent is a
+    // delegated worker, otherwise a fresh one rooted at the workspace.
+    [[nodiscard]] std::shared_ptr<core::changes::TurnChangeTracker> make_change_tracker(
+        const core::context::SessionContext& session_context) const;
 
     // Tool-recovery hooks. note_argument_validation_failure runs on the agent
     // thread while a batch is being gated; it recalls a proven lesson or
@@ -513,6 +537,10 @@ private:
     ToolResultStore tool_result_store_;
     core::tools::ReadToolResultTool read_tool_result_tool_;
     std::shared_ptr<core::memory::MemorySystem> memory_system_;
+    // Parent's tracker when this agent runs as a delegated worker; null for an
+    // agent that owns its turns. Fixed at construction: it is read from the
+    // agent thread without a lock.
+    const std::shared_ptr<core::changes::TurnChangeTracker> inherited_change_tracker_;
     std::vector<core::llm::Message> history_;
     mutable std::mutex history_mutex_;
     std::uint64_t history_revision_ = 0;

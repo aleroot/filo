@@ -383,7 +383,8 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
              core::budget::BudgetTracker* budget_tracker,
              std::shared_ptr<core::memory::MemorySystem> memory_system,
              std::shared_ptr<core::scm::WorkspaceLeaseRegistry>
-                 workspace_leases)
+                 workspace_leases,
+             std::shared_ptr<core::changes::TurnChangeTracker> inherited_change_tracker)
     : provider_(std::move(provider))
     , sleep_inhibitor_(sleep_inhibitor
           ? std::move(sleep_inhibitor)
@@ -415,6 +416,7 @@ Agent::Agent(std::shared_ptr<core::llm::LLMProvider> provider,
     , memory_system_(memory_system
           ? std::move(memory_system)
           : std::make_shared<core::memory::MemorySystem>())
+    , inherited_change_tracker_(std::move(inherited_change_tracker))
     , auto_turn_coordinator_(workspace_leases_) {
     loop_limits_.max_steps_per_turn = sanitize_max_steps_per_turn(loop_limits_.max_steps_per_turn);
     ensure_system_prompt();
@@ -576,6 +578,43 @@ Agent::run_read_only_goal_task(std::string_view description,
 bool Agent::is_turn_current(const std::shared_ptr<TurnState>& turn_state) const {
     std::lock_guard lock(history_mutex_);
     return turn_state->conversation_generation == conversation_generation_;
+}
+
+std::shared_ptr<core::changes::TurnChangeTracker> Agent::make_change_tracker(
+    const core::context::SessionContext& session_context) const {
+    if (inherited_change_tracker_) {
+        return inherited_change_tracker_;
+    }
+    return std::make_shared<core::changes::TurnChangeTracker>(
+        session_context.workspace_view().primary());
+}
+
+core::changes::TurnChanges Agent::publish_turn_changes(
+    const std::shared_ptr<TurnState>& turn_state) {
+    // A delegated worker records into its owner's tracker and stays quiet: the
+    // owner publishes the whole turn's summary once, at its own turn end.
+    if (!turn_state || !turn_state->change_tracker || inherited_change_tracker_) {
+        return {};
+    }
+    auto changes = turn_state->change_tracker->changes();
+    if (changes.empty()) {
+        return {};
+    }
+
+    std::lock_guard lock(history_mutex_);
+    if (turn_state->conversation_generation != conversation_generation_) {
+        return {};
+    }
+    for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+        if (it->role == "user" && !it->synthetic) {
+            break;  // The turn produced no assistant message to carry them.
+        }
+        if (it->role == "assistant") {
+            it->turn_changes = changes;
+            return changes;
+        }
+    }
+    return {};
 }
 
 void Agent::capture_turn_provider_snapshot_unlocked(
@@ -1423,14 +1462,23 @@ void Agent::send_message(core::llm::Message user_message,
         core::logging::warn("Could not prevent idle system sleep: unknown error");
     }
 
+    auto turn_state = std::make_shared<TurnState>();
     auto completion = std::make_shared<TurnCompletionState>(
         std::move(sleep_inhibition));
     auto finish_turn = [this,
                         done_callback = std::move(done_callback),
-                        completion = std::move(completion)]() mutable {
+                        completion = std::move(completion),
+                        turn_state,
+                        on_turn_changes = turn_callbacks.on_turn_changes]() mutable {
         auto sleep_inhibition = completion->claim_completion();
         if (!sleep_inhibition.has_value()) {
             return;
+        }
+
+        const auto turn_changes = publish_turn_changes(turn_state);
+        turn_state.reset();
+        if (!turn_changes.empty() && on_turn_changes) {
+            on_turn_changes(turn_changes);
         }
 
         // The winning callback now owns the assertion through completion.
@@ -1441,7 +1489,6 @@ void Agent::send_message(core::llm::Message user_message,
 
     clear_stop_request();  // Reset cancellation flag for new turn
     turn_failed_.store(false, std::memory_order_release);  // Reset outcome for new turn
-    auto turn_state = std::make_shared<TurnState>();
     if (user_message.role.empty()) {
         user_message.role = "user";
     }
@@ -1458,6 +1505,7 @@ void Agent::send_message(core::llm::Message user_message,
         : core::llm::message_text_for_display(user_message);
     std::string mode_snapshot;
     const auto session_context = session_context_snapshot();
+    turn_state->change_tracker = make_change_tracker(session_context);
     auto project_facts = core::context::capture_project_facts(session_context);
     const std::string auto_repository_context =
         project_facts.has_value()
@@ -1568,6 +1616,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
 
     if (!turn_state) {
         turn_state = std::make_shared<TurnState>();
+        // A turn entered without state still records what it changes: making
+        // the summary depend on which caller built the state would silently
+        // drop it.
+        turn_state->change_tracker = make_change_tracker(session_context_snapshot());
         std::lock_guard lock(history_mutex_);
         turn_state->max_steps = sanitize_max_steps_per_turn(
             turn_callbacks.max_steps_override.value_or(loop_limits_.max_steps_per_turn));
@@ -2551,6 +2603,10 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                     return self->is_stop_requested();
                                 },
                                 .memory_system = self->memory_system_,
+                                // The worker's edits belong to this turn's
+                                // summary, so it records into the same tracker
+                                // instead of one that is thrown away with it.
+                                .change_tracker = recovery_turn_state->change_tracker,
                             };
 
                             result = self->orchestrator_.execute_task(
@@ -2566,18 +2622,31 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                                 tc.function.arguments,
                                 session_context);
                         } else {
-                            result = self->skill_manager_.execute_tool(
-                                tc.function.name,
-                                tc.function.arguments,
-                                core::tools::ToolInvocationContext{
-                                    .session_context = session_context,
-                                    .tool_call_id = tc.id,
-                                    .provider_name = active_provider_name_for_task,
-                                    .model_name = active_model_for_task,
-                                    .provider = provider_for_task,
-                                    .cancellation_requested = [self] { return self->is_stop_requested(); },
-                                    .session_stats = self->session_stats_registry_,
-                                });
+                            const auto execute = [&] {
+                                return self->skill_manager_.execute_tool(
+                                    tc.function.name,
+                                    tc.function.arguments,
+                                    core::tools::ToolInvocationContext{
+                                        .session_context = session_context,
+                                        .tool_call_id = tc.id,
+                                        .provider_name = active_provider_name_for_task,
+                                        .model_name = active_model_for_task,
+                                        .provider = provider_for_task,
+                                        .cancellation_requested = [self] { return self->is_stop_requested(); },
+                                        .session_stats = self->session_stats_registry_,
+                                    });
+                            };
+                            result = recovery_turn_state->change_tracker
+                                ? recovery_turn_state->change_tracker->track(
+                                      core::changes::mutation_scope(
+                                          tc.function.name,
+                                          tc.function.arguments,
+                                          session_context,
+                                          recovery_definition
+                                              ? recovery_definition->annotations
+                                              : core::tools::ToolAnnotations{}),
+                                      execute)
+                                : execute();
                         }
                         const bool raw_tool_ok =
                             !recovery::result_indicates_error(result);

@@ -89,7 +89,8 @@ DelegatedAgentRunner::Result DelegatedAgentRunner::run(Request request) {
                   .tool_recovery = core::config::ConfigManager::get_instance()
                                        .get_config()
                                        .tool_recovery}),
-        request.workspace_leases);
+        request.workspace_leases,
+        request.change_tracker);
     agent->set_active_provider_name(request.provider_name);
     // Last line of defence: AUTO is a parent-transaction mode. If a caller
     // still forwards it, coerce to BUILD so the child cannot re-enter leases.

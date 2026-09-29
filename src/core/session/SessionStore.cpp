@@ -2,6 +2,7 @@
 
 #include "ActiveSessionLease.hpp"
 #include "ThreadCatalog.hpp"
+#include "core/changes/FileChangeJson.hpp"
 #include "core/utils/InterprocessFile.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include <simdjson.h>
@@ -252,6 +253,10 @@ void append_message_json(std::string& out, const core::llm::Message& msg) {
         }
         out += ']';
     }
+    if (!msg.turn_changes.empty()) {
+        out += ",\"turn_changes\":";
+        core::changes::append_turn_changes_json(out, msg.turn_changes);
+    }
     if (!msg.tool_calls.empty()) {
         out += ",\"tool_calls\":[";
         for (std::size_t i = 0; i < msg.tool_calls.size(); ++i) {
@@ -401,6 +406,11 @@ void append_goal_graph_json(std::string& out,
                 msg.continuation_items.push_back(std::move(item));
             }
         }
+    }
+
+    simdjson::dom::object turn_changes_obj;
+    if (msg_el["turn_changes"].get(turn_changes_obj) == simdjson::SUCCESS) {
+        msg.turn_changes = core::changes::parse_turn_changes_json(turn_changes_obj);
     }
 
     simdjson::dom::array tc_arr;

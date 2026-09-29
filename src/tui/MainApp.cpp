@@ -612,6 +612,23 @@ void insert_token_with_spacing(std::string& text, int& cursor, std::string_view 
     insert_text_at_cursor(text, cursor, chunk);
 }
 
+/// Holds a turn's file changes between the agent's `on_turn_changes` and the
+/// done callback that finalizes the assistant message, and returns the cell
+/// that callback moves from.
+///
+/// Both run on the agent thread one after the other, so the cell needs no lock;
+/// the message it is moved into is written under the UI mutex like any other
+/// live-message update. Holding the changes back is what keeps the box from
+/// appearing under a turn that still looks live.
+[[nodiscard]] std::shared_ptr<core::changes::TurnChanges> hold_turn_changes(
+    core::agent::Agent::TurnCallbacks& callbacks) {
+    auto held = std::make_shared<core::changes::TurnChanges>();
+    callbacks.on_turn_changes = [held](const core::changes::TurnChanges& changes) {
+        *held = changes;
+    };
+    return held;
+}
+
 } // namespace
 
 RunResult run(RunOptions opts) {
@@ -6742,6 +6759,7 @@ RunResult run(RunOptions opts) {
         wake_ui();
 
         auto effective_callbacks = make_turn_callbacks(runtime, live_timeline);
+        auto turn_changes = hold_turn_changes(effective_callbacks);
         auto retry_callbacks = turn_callbacks;
         effective_callbacks.provider_override = std::move(turn_callbacks.provider_override);
         effective_callbacks.model_override = std::move(turn_callbacks.model_override);
@@ -6801,6 +6819,7 @@ RunResult run(RunOptions opts) {
                      runtime,
                      effective_callbacks = std::move(effective_callbacks),
                      live_timeline,
+                     turn_changes,
                      user_message_id,
                      &update_live_assistant_message,
                      &submit_agent_turn,
@@ -6854,7 +6873,7 @@ RunResult run(RunOptions opts) {
                     });
                 },
                 [](const std::string&, const std::string&) {},
-                [runtime, live_timeline, agent, user_message_id,
+                [runtime, live_timeline, agent, user_message_id, turn_changes,
                  &submit_agent_turn,
                  &ui_mutex,
                  &animation_cv,
@@ -6889,6 +6908,7 @@ RunResult run(RunOptions opts) {
                             if (!turn_elapsed.empty()) {
                                 assistant->activity_elapsed = turn_elapsed;
                             }
+                            assistant->turn_changes = std::move(*turn_changes);
                         }
                         live_timeline->finish(
                             *runtime->messages(),

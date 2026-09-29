@@ -87,6 +87,7 @@ std::vector<UiMessage> build_resumed_ui_messages(
                     tc.function.arguments,
                     summarize_tool_arguments(tc.function.name, tc.function.arguments)));
             }
+            asst_msg.turn_changes = msg.turn_changes;
             current_asst_idx = static_cast<int>(ui_messages.size());
             ui_messages.push_back(std::move(asst_msg));
             continue;

@@ -1,4 +1,5 @@
 #include "ApplyPatchTool.hpp"
+#include "PatchTargets.hpp"
 #include "ToolNames.hpp"
 #include "shell/ShellUtils.hpp"
 #include "shell/ShellExecutorFactory.hpp"
@@ -14,9 +15,7 @@
 #include <format>
 #include <filesystem>
 #include <atomic>
-#include <cctype>
 #include <optional>
-#include <sstream>
 
 namespace core::tools {
 
@@ -42,80 +41,20 @@ static std::string unique_suffix() {
     return std::to_string(getpid()) + "_" + std::to_string(counter.fetch_add(1));
 }
 
-static std::string trim_ascii(std::string_view input) {
-    std::size_t start = 0;
-    while (start < input.size()
-           && std::isspace(static_cast<unsigned char>(input[start])) != 0) {
-        ++start;
-    }
-
-    std::size_t end = input.size();
-    while (end > start
-           && std::isspace(static_cast<unsigned char>(input[end - 1])) != 0) {
-        --end;
-    }
-    return std::string(input.substr(start, end - start));
-}
-
-static std::optional<std::string> extract_patch_path(std::string_view line) {
-    if (!(line.starts_with("--- ") || line.starts_with("+++ "))) {
-        return std::nullopt;
-    }
-
-    std::string raw = trim_ascii(line.substr(4));
-    if (raw.empty()) {
-        return std::nullopt;
-    }
-
-    const auto tab_pos = raw.find('\t');
-    if (tab_pos != std::string::npos) {
-        raw.erase(tab_pos);
-        raw = trim_ascii(raw);
-    }
-
-    if (raw == "/dev/null") {
-        return std::nullopt;
-    }
-
-    if ((raw.starts_with("a/") || raw.starts_with("b/")) && raw.size() > 2) {
-        raw.erase(0, 2);
-    }
-
-    if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-        raw = raw.substr(1, raw.size() - 2);
-    }
-
-    if (raw.empty()) {
-        return std::nullopt;
-    }
-    return raw;
-}
-
 static std::optional<std::string> validate_patch_paths(
     std::string_view patch_text,
     const std::filesystem::path& base_dir,
     const core::context::SessionContext& context)
 {
-    std::istringstream lines{std::string(patch_text)};
-    std::string line;
-    while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-
-        const auto patch_path = extract_patch_path(line);
-        if (!patch_path) {
-            continue;
-        }
-
-        const std::filesystem::path requested(*patch_path);
+    for (const auto& patch_path : patch_target_paths(patch_text)) {
+        const std::filesystem::path requested(patch_path);
         const std::filesystem::path resolved =
             requested.is_absolute() ? requested : (base_dir / requested);
 
         if (const auto access_error =
                 detail::check_workspace_access(
                     resolved,
-                    *patch_path,
+                    patch_path,
                     context,
                     nullptr,
                     names::kApplyPatch)) {

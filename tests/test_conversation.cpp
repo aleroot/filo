@@ -487,6 +487,58 @@ TEST_CASE("apply_tool_result — output truncation marker is detected",
     REQUIRE(tool.result.truncated == true);
 }
 
+TEST_CASE("apply_tool_result — write_file previews the diff against the bytes it replaced",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity(
+        "write-1", "write_file",
+        R"({"file_path":"src/app.cpp","content":"keep\nchanged\n"})", "write_file");
+    // Before the result arrives only the argument is known, so every line
+    // looks added.
+    CHECK(tool.diff_preview.deleted_count == 0);
+
+    apply_tool_result(
+        tool,
+        R"({"success":true,"file_path":"src/app.cpp","created":false,"bytes_written":12,)"
+        R"("previous_content":"keep\noriginal\n","previous_content_truncated":false})");
+
+    REQUIRE(tool.status == ToolActivity::Status::Succeeded);
+    CHECK(tool.diff_preview.added_count == 1);
+    CHECK(tool.diff_preview.deleted_count == 1);
+}
+
+TEST_CASE("apply_tool_result — write_file keeps its preview when the prior bytes were capped",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity(
+        "write-2", "write_file",
+        R"({"file_path":"src/app.cpp","content":"keep\nchanged\n"})", "write_file");
+    const auto speculative = tool.diff_preview.added_count;
+
+    apply_tool_result(
+        tool,
+        R"({"success":true,"file_path":"src/app.cpp","created":false,"bytes_written":12,)"
+        R"("previous_content":"keep\n","previous_content_truncated":true})");
+
+    // Diffing against a partial file would be wrong, so nothing is replaced.
+    REQUIRE(tool.status == ToolActivity::Status::Succeeded);
+    CHECK(tool.diff_preview.deleted_count == 0);
+    CHECK(tool.diff_preview.added_count == speculative);
+}
+
+TEST_CASE("apply_tool_result — an identical write_file shows no change at all",
+          "[tui][conversation][result]") {
+    auto tool = make_tool_activity(
+        "write-3", "write_file",
+        R"({"file_path":"src/app.cpp","content":"same\n"})", "write_file");
+
+    apply_tool_result(
+        tool,
+        R"({"success":true,"file_path":"src/app.cpp","created":false,"bytes_written":5,)"
+        R"("previous_content":"same\n","previous_content_truncated":false})");
+
+    CHECK(tool.diff_preview.added_count == 0);
+    CHECK(tool.diff_preview.deleted_count == 0);
+}
+
 // ============================================================================
 // Animation Helpers
 // ============================================================================

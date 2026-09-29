@@ -345,6 +345,7 @@ std::string SubagentOrchestrator::execute_task(
         .session_stats_registry = session_stats_registry_,
         .workspace_leases = workspace_leases_,
         .memory_system = context.memory_system,
+        .change_tracker = context.change_tracker,
         .timeout = std::chrono::minutes(30),
         .cancellation_requested = context.cancellation_requested,
         .permission_check = adapt_permission_check(context),

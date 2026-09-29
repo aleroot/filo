@@ -364,6 +364,10 @@ set(FILO_CORE_SOURCES
     src/core/tools/read/EvidenceSelector.cpp
     src/core/tools/WriteFileTool.cpp
     src/core/tools/ToolDiffUtils.cpp
+    src/core/tools/PatchTargets.cpp
+    src/core/changes/FileChangeJson.cpp
+    src/core/changes/MutationScope.cpp
+    src/core/changes/TurnChangeTracker.cpp
     src/core/tools/ListDirectoryTool.cpp
     src/core/tools/ReplaceTool.cpp
     src/core/tools/GrepSearchTool.cpp
@@ -680,6 +684,8 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_skill_commands.cpp
     tests/test_activity_timer.cpp
     tests/test_conversation.cpp
+    tests/test_turn_file_changes.cpp
+    tests/test_turn_change_tracker.cpp
     tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp
     tests/test_prompt_components.cpp
@@ -877,6 +883,8 @@ source_group(
         tests/test_skill_loader.cpp
         tests/test_activity_timer.cpp
         tests/test_conversation.cpp
+        tests/test_turn_file_changes.cpp
+        tests/test_turn_change_tracker.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp
         tests/test_file_system_picker.cpp

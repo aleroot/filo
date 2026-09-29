@@ -73,6 +73,43 @@ TEST_CASE("delete_file planner scopes recursive access to file_path", "[agent][t
             core::agent::ToolFileOperation::Read, expected + "/nested.txt")));
 }
 
+TEST_CASE("move_file planner scopes both ends of a directory move recursively",
+          "[agent][tools]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto call = make_call("move-1", "move_file",
+        R"({"source":"tree","destination":"moved"})");
+    const auto planned = core::agent::plan_tool_call(call, context);
+
+    REQUIRE(planned.accesses.size() == 2);
+    const auto source = context.resolve_path("tree").generic_string();
+    const auto destination = context.resolve_path("moved").generic_string();
+    CHECK(planned.accesses[0].file.path == source);
+    CHECK(planned.accesses[0].file.recursive);
+    CHECK(planned.accesses[1].file.path == destination);
+    CHECK(planned.accesses[1].file.recursive);
+
+    // A move carries a subtree: a write inside it must not run alongside, or
+    // the file it creates is missed by both the move and the change summary.
+    const auto inner_write = core::agent::ToolAccess::file_access(
+        core::agent::ToolFileOperation::Write, source + "/nested.txt");
+    REQUIRE(core::agent::tool_accesses_conflict(planned.accesses[0], inner_write));
+}
+
+TEST_CASE("create_directory planner reads the dir_path argument", "[agent][tools]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto call = make_call("mkdir-1", "create_directory",
+        R"({"dir_path":"build/gen"})");
+    const auto planned = core::agent::plan_tool_call(call, context);
+
+    // Not the workspace root: an unread argument used to make every
+    // create_directory conflict with every other file access in the batch.
+    REQUIRE(planned.accesses.size() == 1);
+    CHECK(planned.accesses.front().file.path
+          == context.resolve_path("build/gen").generic_string());
+}
+
 TEST_CASE("tool scheduler runs non-conflicting reads concurrently", "[agent][tools]") {
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};

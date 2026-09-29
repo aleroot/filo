@@ -81,12 +81,17 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
                                       "file_path",
                                       core::utils::json::bool_field(args, "recursive"));
     } else if (name == kMoveFile) {
-        accesses = single_file_access(ToolFileOperation::ReadWrite, context, args, "source");
+        // A move carries a whole subtree, so a write inside either side
+        // overlaps it and must not run alongside.
+        accesses = single_file_access(ToolFileOperation::ReadWrite, context, args,
+                                      "source", /*recursive=*/true);
         accesses.push_back(ToolAccess::file_access(
             ToolFileOperation::Write,
-            resolved_arg_path(context, args, "destination")));
+            resolved_arg_path(context, args, "destination"),
+            /*recursive=*/true));
     } else if (name == kCreateDirectory) {
-        accesses = single_file_access(ToolFileOperation::Write, context, args, "path", true);
+        accesses = single_file_access(ToolFileOperation::Write, context, args,
+                                      "dir_path", /*recursive=*/true);
     } else if (name == kApplyPatch) {
         accesses = {
             ToolAccess::file_access(

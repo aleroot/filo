@@ -66,6 +66,10 @@ public:
         /// Parent memory substrate. When empty the runner builds one from
         /// config so standalone TaskService callers keep working.
         std::shared_ptr<core::memory::MemorySystem> memory_system = {};
+        /// Parent turn's file-change tracker. When set the worker records into
+        /// it and publishes nothing of its own, so its edits appear in the
+        /// summary of the turn that spawned it.
+        std::shared_ptr<core::changes::TurnChangeTracker> change_tracker = {};
         std::chrono::milliseconds timeout = std::chrono::minutes(30);
         std::function<void(const std::shared_ptr<core::agent::Agent>&)> on_agent_ready = {};
         std::function<bool()> cancellation_requested = {};

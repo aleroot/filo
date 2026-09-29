@@ -59,6 +59,11 @@ Guidelines:
     // Note: The items_schema for the questions parameter would be set here
     // but for simplicity we're using a simpler definition
 
+    def.annotations = {
+        .read_only_hint = true,  // renders a dialog and returns the answer
+        .idempotent_hint = true,
+    };
+
     return def;
 }
 

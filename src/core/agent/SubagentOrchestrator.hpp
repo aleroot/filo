@@ -28,6 +28,10 @@ namespace core::session {
 class SessionStatsRegistry;
 }
 
+namespace core::changes {
+class TurnChangeTracker;
+}
+
 namespace core::scm {
 class WorkspaceLeaseRegistry;
 }
@@ -57,6 +61,10 @@ public:
         /// Shared memory substrate of the parent agent. Subagents learn into
         /// the same stores rather than constructing a second copy.
         std::shared_ptr<core::memory::MemorySystem> memory_system = {};
+        /// Parent turn's file-change tracker. A worker records into it so its
+        /// edits land in the summary of the turn that spawned it; when empty
+        /// the worker tracks only itself and reports nothing.
+        std::shared_ptr<core::changes::TurnChangeTracker> change_tracker = {};
         std::string effort = {};
     };
 

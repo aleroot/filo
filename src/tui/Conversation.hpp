@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DiffPreview.hpp"
+#include "core/changes/FileChange.hpp"
 #include "Constants.hpp"
 #include "ReviewCard.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -153,6 +154,11 @@ struct UiMessage {
     std::string reasoning_elapsed = {};       // e.g. "7s" — phase duration once finished
     bool activity_recorded = false;      // A reasoning disclosure exists for this turn
     
+    // Net file changes of the user turn this message ends, with the fidelity
+    // flags that say what the summary could not establish (see
+    // core::changes::TurnChangeTracker). Empty on every other message.
+    core::changes::TurnChanges turn_changes;
+
     // ToolGroup-specific
     bool tool_group_border_top = true;
     bool tool_group_border_bottom = true;
@@ -335,6 +341,14 @@ UiMessage make_user_message(std::string text, std::string timestamp = {});
 void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
                              std::string_view message_id,
                              std::string elapsed);
+
+/// Disclosure key of one file in a turn's file-change box.
+[[nodiscard]] std::string turn_file_change_key(std::string_view message_id,
+                                               std::string_view path);
+
+/// Rows a file-change box draws before it counts instead of listing. The
+/// model keeps every file; only the box is bounded.
+inline constexpr std::size_t kMaxRenderedFileChanges = 25;
 
 // Direct shell command submitted with !cmd
 UiMessage make_shell_command_message(std::string command,

@@ -4,6 +4,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/tools/read/ReadTypes.hpp"
 #include "core/utils/JsonUtils.hpp"
@@ -1933,6 +1934,10 @@ void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
     }
 }
 
+std::string turn_file_change_key(std::string_view message_id, std::string_view path) {
+    return std::format("file-change:{}:{}", message_id, path);
+}
+
 UiMessage make_shell_command_message(std::string command,
                                      std::string timestamp,
                                      bool pending) {
@@ -2072,6 +2077,45 @@ ToolActivity make_tool_activity(std::string id,
 
 namespace {
 
+/// Replaces the speculative all-additions preview with the diff against the
+/// bytes actually overwritten. When those bytes were capped or unreadable the
+/// argument preview stays: a diff against a partial file would be wrong.
+void refresh_write_file_diff(ToolActivity& tool, const simdjson::dom::object& result) {
+    const std::string previous = core::utils::json::string_field(result, "previous_content");
+    if (core::utils::json::bool_field(result, "previous_content_truncated", false)
+        || previous.size() >= core::tools::detail::kMaxToolDiffInputBytes) {
+        return;
+    }
+
+    std::string path = core::utils::json::string_field(result, "file_path");
+    std::string content;
+    simdjson::dom::parser parser;
+    simdjson::dom::element document;
+    if (parser.parse(tool.args).get(document) == simdjson::SUCCESS) {
+        simdjson::dom::object args;
+        if (document.get(args) == simdjson::SUCCESS) {
+            if (path.empty()) {
+                path = core::utils::json::string_field(args, "file_path");
+            }
+            if (const auto body = core::utils::json::first_string_field(args, {"content"})) {
+                content = *body;
+            }
+        }
+    }
+    if (path.empty()) {
+        return;
+    }
+    if (previous == content) {
+        tool.diff_preview = {};
+        return;
+    }
+    if (const auto diff = core::tools::detail::build_unified_diff(path, previous, content)) {
+        if (auto preview = build_tool_diff_preview_from_unified_diff(*diff); !preview.empty()) {
+            tool.diff_preview = std::move(preview);
+        }
+    }
+}
+
 /// Derives `tool.status` and `tool.result.summary` from a raw tool payload.
 /// Deliberately collapses structured results down to the single string the
 /// generic renderer shows; `apply_tool_result` preserves the original JSON for
@@ -2158,6 +2202,10 @@ void apply_tool_result_summary(ToolActivity& tool, std::string_view result_paylo
                     tool.diff_preview = std::move(preview);
                 }
             }
+        }
+        if (success
+            && core::tools::names::canonical_alias(tool.name) == core::tools::names::kWriteFile) {
+            refresh_write_file_diff(tool, object);
         }
         set_result_summary(success ? "Done" : "Tool reported failure.");
         return;
@@ -2487,6 +2535,139 @@ namespace {
     return vbox(std::move(lines));
 }
 
+/// What a summary must say about itself when it fell short of the whole truth.
+/// Each line names one specific gap; a summary that knows its limits states
+/// them instead of letting a short list read as a complete one.
+[[nodiscard]] std::vector<std::string> turn_change_caveats(
+    const core::changes::TurnChanges& changes) {
+    std::vector<std::string> caveats;
+    if (changes.partial_enumeration) {
+        caveats.emplace_back("too many files to detail fully");
+    }
+    if (changes.unscoped_mutations) {
+        // Files the turn already knew about were reconciled after such a tool
+        // ran, so their diffs are sound; only new paths are undiscoverable.
+        caveats.emplace_back(
+            "files created by shell, scripts or MCP tools are not listed");
+    }
+    return caveats;
+}
+
+[[nodiscard]] Element render_count_pair(std::size_t added, std::size_t deleted) {
+    return hbox({
+        ftxui::text(std::format("+{}", added))
+            | ftxui::color(ftxui::Color::RGB(120, 220, 130)),
+        ftxui::text(" "),
+        ftxui::text(std::format("-{}", deleted))
+            | ftxui::color(ftxui::Color::RGB(255, 150, 130)),
+    });
+}
+
+[[nodiscard]] std::string file_change_note(const core::changes::FileChange& change) {
+    using core::changes::FileChangeContent;
+    using core::changes::FileChangeKind;
+    std::string note;
+    switch (change.kind) {
+        case FileChangeKind::Added:    note = "new"; break;
+        case FileChangeKind::Deleted:  note = "deleted"; break;
+        case FileChangeKind::Renamed:  note = "renamed from " + change.previous_path; break;
+        case FileChangeKind::Modified: break;
+    }
+    const std::string_view detail =
+        change.content == FileChangeContent::Binary      ? "binary"
+        : change.content == FileChangeContent::TooLarge  ? "too large to diff"
+        : change.content == FileChangeContent::BudgetSpent ? "diff omitted"
+                                                        : "";
+    if (!detail.empty()) {
+        note += note.empty() ? "" : ", ";
+        note += detail;
+    }
+    return note;
+}
+
+// One disclosure per changed file: the header names the file and its line
+// counts; opening it shows the turn's net diff for that file.
+[[nodiscard]] Element render_file_change(const UiMessage& msg,
+                                         const core::changes::FileChange& change,
+                                         const ConversationRenderOptions& options) {
+    const std::string key = turn_file_change_key(msg.id, change.path);
+    const bool expandable = !change.diff.empty();
+    bool expanded = options.expand_system_details;
+    if (options.system_disclosure_expanded != nullptr) {
+        if (const auto it = options.system_disclosure_expanded->find(key);
+            it != options.system_disclosure_expanded->end()) {
+            expanded = expanded || it->second;
+        }
+    }
+    expanded = expanded && expandable;
+
+    Elements header{
+        ftxui::text(expandable ? (expanded ? "▼ " : "▶ ") : "• ")
+            | ftxui::color(ColorYellowDark),
+        ftxui::text(change.path) | ftxui::color(Color::GrayLight),
+    };
+    if (const auto note = file_change_note(change); !note.empty()) {
+        header.push_back(ftxui::text("  " + note) | ftxui::color(Color::GrayDark) | dim);
+    }
+    header.push_back(ftxui::filler());
+    if (change.added > 0 || change.deleted > 0) {
+        header.push_back(render_count_pair(change.added, change.deleted));
+    }
+    Element header_el = hbox(std::move(header));
+    if (expandable && options.system_disclosure_hitboxes != nullptr) {
+        header_el = std::move(header_el) | reflect((*options.system_disclosure_hitboxes)[key]);
+    }
+    if (!expanded) {
+        return header_el;
+    }
+    auto preview = build_tool_diff_preview_from_unified_diff(change.diff);
+    preview.title.clear();  // The row already names the file.
+    return vbox({
+        std::move(header_el),
+        render_tool_diff_preview(preview, options.tool_diff_expanded_max_lines),
+    });
+}
+
+// The turn's file changes, pinned below its final answer. A summary states
+// what it could not establish rather than letting a short list read as a
+// complete one.
+[[nodiscard]] Element render_turn_file_changes(const UiMessage& msg,
+                                               const ConversationRenderOptions& options) {
+    const auto& files = msg.turn_changes.files;
+    std::size_t added = 0;
+    std::size_t deleted = 0;
+    for (const auto& change : files) {
+        added += change.added;
+        deleted += change.deleted;
+    }
+    const std::size_t count = files.size();
+    Elements summary{
+        ftxui::text(std::format("{} {} changed", count, count == 1 ? "file" : "files"))
+            | ftxui::color(Color::GrayLight) | ftxui::bold,
+    };
+    if (added > 0 || deleted > 0) {
+        summary.push_back(ftxui::text("  "));
+        summary.push_back(render_count_pair(added, deleted));
+    }
+
+    Elements rows{hbox(std::move(summary))};
+    const std::size_t shown = std::min(count, kMaxRenderedFileChanges);
+    for (std::size_t i = 0; i < shown; ++i) {
+        rows.push_back(render_file_change(msg, files[i], options));
+    }
+    if (shown < count) {
+        rows.push_back(ftxui::text(std::format("… {} more not listed", count - shown))
+                       | ftxui::color(Color::GrayDark) | dim);
+    }
+    for (const auto& caveat : turn_change_caveats(msg.turn_changes)) {
+        rows.push_back(hbox({
+            ftxui::text("⚠ ") | ftxui::color(ColorYellowDark),
+            ftxui::text(caveat) | ftxui::color(Color::GrayDark) | dim,
+        }));
+    }
+    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
+}
+
 } // namespace
 
 Element render_assistant_message(const UiMessage& msg,
@@ -2541,6 +2722,14 @@ Element render_assistant_message(const UiMessage& msg,
         UiMessage tool_group = msg;
         tool_group.type = MessageType::ToolGroup;
         elements.push_back(render_tool_group(tool_group, tick, options));
+    }
+
+    if (!msg.turn_changes.empty()) {
+        if (has_reasoning || !msg.text.empty() || !msg.tools.empty()
+            || !msg.disclosure_summary.empty()) {
+            elements.push_back(ftxui::text(""));
+        }
+        elements.push_back(render_turn_file_changes(msg, options));
     }
 
     // Render thinking indicator at the BOTTOM (current activity)

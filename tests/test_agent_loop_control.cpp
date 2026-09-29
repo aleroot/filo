@@ -628,6 +628,38 @@ private:
     bool released_ = false;
 };
 
+class FileEditingProvider final : public core::llm::LLMProvider {
+public:
+    explicit FileEditingProvider(std::vector<std::string> write_arguments)
+        : write_arguments_(std::move(write_arguments)) {}
+
+    void stream_response(
+        const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+        const auto call = calls_.fetch_add(1, std::memory_order_acq_rel);
+        if (call < write_arguments_.size()) {
+            core::llm::ToolCall tool_call;
+            tool_call.index = 0;
+            tool_call.id = std::format("write-{}", call);
+            tool_call.type = "function";
+            tool_call.function.name = "write_file";
+            tool_call.function.arguments = write_arguments_[call];
+
+            core::llm::StreamChunk chunk;
+            chunk.tools = {std::move(tool_call)};
+            chunk.is_final = true;
+            callback(chunk);
+            return;
+        }
+        callback(core::llm::StreamChunk::make_content("edited"));
+        callback(core::llm::StreamChunk::make_final());
+    }
+
+private:
+    std::vector<std::string> write_arguments_;
+    std::atomic<std::size_t> calls_{0};
+};
+
 class ToolThenTextCapturingProvider final : public core::llm::LLMProvider {
 public:
     explicit ToolThenTextCapturingProvider(std::string tool_name)
@@ -2224,4 +2256,132 @@ TEST_CASE("AUTO explore subagents complete under a parent writer transaction",
             });
         return delegated && auto_system;
       }));
+}
+
+TEST_CASE("A turn publishes and records the net changes of its file tools",
+          "[agent][changes]") {
+    const auto temp_path =
+        std::filesystem::temp_directory_path() /
+        std::format("filo_turn_file_changes_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir temp(temp_path);
+    {
+        std::ofstream(temp.path() / "notes.txt") << "first\n";
+    }
+
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    auto provider = std::make_shared<FileEditingProvider>(std::vector<std::string>{
+        R"({"file_path":"notes.txt","content":"first\nsecond\n"})",
+        R"({"file_path":"notes.txt","content":"first\nsecond\nthird\n"})",
+    });
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager,
+        test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+            .primary = temp.path(),
+            .enforce = true,
+            .version = 1,
+        }));
+    agent->set_permission_fn([](std::string_view, std::string_view) { return true; });
+
+    std::mutex events_mutex;
+    std::vector<std::string> events;
+    std::vector<core::changes::TurnChanges> published;
+    send_and_wait(agent, "Extend the notes.",
+                  core::agent::Agent::TurnCallbacks{
+                      .on_step_begin = [&] {
+                          std::lock_guard lock(events_mutex);
+                          events.emplace_back("step");
+                      },
+                      .on_tool_finish =
+                          [&](const core::llm::ToolCall&, const core::llm::Message&) {
+                              std::lock_guard lock(events_mutex);
+                              events.emplace_back("tool");
+                          },
+                      .on_turn_changes =
+                          [&](const core::changes::TurnChanges& changes) {
+                              std::lock_guard lock(events_mutex);
+                              events.emplace_back("changes");
+                              published.push_back(changes);
+                          },
+                  });
+
+    // Published once, after the last step of the turn, never while it runs.
+    REQUIRE(!events.empty());
+    CHECK(events.back() == "changes");
+    CHECK(std::ranges::count(events, std::string("changes")) == 1);
+    CHECK(std::ranges::count(events, std::string("tool")) == 2);
+    REQUIRE(published.size() == 1);
+    REQUIRE(published[0].files.size() == 1);
+    const auto& change = published[0].files[0];
+    CHECK(change.path == "notes.txt");
+    CHECK(change.kind == core::changes::FileChangeKind::Modified);
+    CHECK(change.added == 2);
+    CHECK(change.deleted == 0);
+
+    const auto history = agent->get_history();
+    const auto last_assistant = std::ranges::find_if(
+        history | std::views::reverse,
+        [](const core::llm::Message& message) { return message.role == "assistant"; });
+    REQUIRE(last_assistant != (history | std::views::reverse).end());
+    CHECK(last_assistant->content == "edited");
+    CHECK(last_assistant->turn_changes == published[0]);
+    CHECK(std::ranges::count_if(history, [](const core::llm::Message& message) {
+        return !message.turn_changes.empty();
+    }) == 1);
+}
+
+TEST_CASE("A delegated worker records into the tracker it inherited and publishes nothing",
+          "[agent][changes]") {
+    const auto temp_path =
+        std::filesystem::temp_directory_path() /
+        std::format("filo_inherited_changes_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir temp(temp_path);
+    {
+        std::ofstream(temp.path() / "notes.txt") << "first\n";
+    }
+
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    tool_manager.register_tool(std::make_shared<core::tools::WriteFileTool>());
+    auto provider = std::make_shared<FileEditingProvider>(std::vector<std::string>{
+        R"({"file_path":"notes.txt","content":"first\nsecond\n"})",
+    });
+    // The turn that spawned this worker owns the summary; the worker only
+    // contributes to it.
+    auto owner = std::make_shared<core::changes::TurnChangeTracker>(temp.path());
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider, tool_manager,
+        test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+            .primary = temp.path(),
+            .enforce = true,
+            .version = 1,
+        }),
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        std::shared_ptr<core::session::SessionStatsRegistry>{},
+        nullptr,
+        std::shared_ptr<core::memory::MemorySystem>{},
+        std::shared_ptr<core::scm::WorkspaceLeaseRegistry>{},
+        owner);
+    agent->set_permission_fn([](std::string_view, std::string_view) { return true; });
+
+    std::size_t published = 0;
+    send_and_wait(agent, "Extend the notes.",
+                  core::agent::Agent::TurnCallbacks{
+                      .on_turn_changes =
+                          [&](const core::changes::TurnChanges&) { ++published; },
+                  });
+
+    // The owner publishes once, at its own turn end; a worker never pre-empts it.
+    CHECK(published == 0);
+    const auto summary = owner->changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].path == "notes.txt");
+    CHECK(summary.files[0].added == 1);
+
+    // The worker's own history carries no summary to be resurrected later.
+    CHECK(std::ranges::count_if(agent->get_history(), [](const core::llm::Message& message) {
+        return !message.turn_changes.empty();
+    }) == 0);
 }

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <fstream>
+#include "../changes/FileChange.hpp"
 #include "../tools/Tool.hpp"
 #include "../tools/StrictToolSchema.hpp"
 #include "../tools/ToolSchema.hpp"
@@ -510,6 +511,9 @@ struct Message {
     // tagged with the producing wire protocol so serializers can replay only
     // state they own while the UI remains provider-neutral.
     std::string reasoning_protocol = {};
+    // Display-only: net file changes of the agent turn this message ends.
+    // Persisted for resume, never sent upstream.
+    core::changes::TurnChanges turn_changes = {};
 };
 
 struct Tool {
