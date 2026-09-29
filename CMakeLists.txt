@@ -165,6 +165,7 @@ set(FILO_CORE_SOURCES
     src/core/mcp/ToolCallResult.cpp
     src/tui/ActivityTimer.cpp
     src/tui/Autocomplete.cpp
+    src/tui/CommandLookup.cpp
     src/tui/Conversation.cpp
     src/tui/CodeBlockRunner.cpp
     src/tui/CodeBlockRunServices.cpp
@@ -175,6 +176,9 @@ set(FILO_CORE_SOURCES
     src/tui/editor/PromptBuffer.cpp
     src/tui/editor/PromptEditorCatalog.cpp
     src/tui/editor/SystemPromptEditor.cpp
+    src/tui/viewer/DiffViewerCatalog.cpp
+    src/tui/viewer/ExternalDiffViewerController.cpp
+    src/tui/viewer/TerminalDiffViewer.cpp
     src/tui/HistoryComponent.cpp
     src/tui/TranscriptViewport.cpp
     src/tui/MarkdownRenderer.cpp
@@ -367,6 +371,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/PatchTargets.cpp
     src/core/changes/FileChangeJson.cpp
     src/core/changes/MutationScope.cpp
+    src/core/changes/PatchExport.cpp
     src/core/changes/TurnChangeTracker.cpp
     src/core/tools/ListDirectoryTool.cpp
     src/core/tools/ReplaceTool.cpp
@@ -435,12 +440,18 @@ set(FILO_CORE_SOURCES
     src/core/cli/WorkDirLayout.cpp
 )
 
-# Lampo is a native macOS App Store app: its backend only exists in Apple builds.
-# Every other platform simply never registers it in the prompt-editor catalog.
+# Lampo is a native macOS App Store app: its backends only exist in Apple
+# builds. Every other platform simply never registers them in the prompt-editor
+# or diff-comparer catalogs. The shared CLI transport is the only Objective-C++
+# translation unit in the project; the backends that speak it are plain C++.
 if(APPLE)
-    list(APPEND FILO_CORE_SOURCES src/tui/editor/LampoPromptEditor.mm)
+    list(APPEND FILO_CORE_SOURCES
+        src/tui/lampo/LampoCliSession.mm
+        src/tui/editor/LampoPromptEditor.cpp
+        src/tui/viewer/LampoDiffViewer.cpp
+    )
     set_source_files_properties(
-        src/tui/editor/LampoPromptEditor.mm
+        src/tui/lampo/LampoCliSession.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
     )
 endif()
@@ -685,6 +696,9 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_activity_timer.cpp
     tests/test_conversation.cpp
     tests/test_turn_file_changes.cpp
+    tests/test_patch_export.cpp
+    tests/test_diff_comparer.cpp
+    tests/test_lampo_cli_session.cpp
     tests/test_turn_change_tracker.cpp
     tests/test_code_blocks.cpp
     tests/test_markdown_renderer.cpp

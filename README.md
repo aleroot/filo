@@ -275,6 +275,7 @@ filo -w ../Lampo -w ../filo
 |---|---|
 | **Filo → Lampo (MCP tools)** | Lampo’s local models can call Filo’s coding tools — filesystem, shell, search, patches — outside Lampo’s App Sandbox. |
 | **Lampo → Filo (prompt editor)** | Edit Filo’s current draft in Lampo’s Prompter UI (`Ctrl+G`), then return the saved text to the TUI. |
+| **Lampo → Filo (diff comparer)** | Open the file changes a turn just made in Lampo’s Comparer (`Ctrl+X` or `/changes`), one window with a tab per file. |
 
 ### 1) Filo as an MCP tools server for Lampo
 
@@ -351,17 +352,35 @@ On macOS, Filo can open the current draft in Lampo’s Prompter instead of `$VIS
 **Usage**
 
 - Press **`Ctrl+G`** to edit the current draft in Lampo
-- **`Ctrl+X`** is also available as an alternate external-editor shortcut
 - Filo shows opening / editing state, then restores the saved text into the input box when you save in Lampo
 - Cancelling in Lampo leaves Filo’s draft unchanged
 
 > Lampo is opt-in, available only in macOS builds, and does not change the behaviour of other editor backends.
 
+### 3) Lampo as Filo’s diff comparer
+
+Every agent turn ends with the net changes it made, listed under its answer. Filo can hand those changes to Lampo’s Comparer instead of keeping them in the terminal, speaking the same client-neutral CLI protocol family — no adapter script is required.
+
+**Interactive setup**
+
+1. Install [Lampo from the Mac App Store](https://apps.apple.com/app/lampo/id6760648195)
+2. In Filo’s TUI, open **`/settings`**
+3. Choose **Lampo** as the diff comparer
+
+**Usage**
+
+- Press **`Ctrl+X`** or run **`/changes`** to open the most recent turn that changed files
+- Each file in a change box also carries a **`↗`** affordance that opens just that file
+- Lampo opens one window with a tab per file, reconstructed from the turn’s unified diff
+- A turn that changed nothing, or whose changes carry no diff (binary files, or a file beyond a size budget), says so instead of opening an empty window
+
+> The comparer is opt-in. `Built in` keeps every diff in the transcript, and `Terminal` pages it through `$PAGER` — on any platform.
+
 ---
 
 ## Settings
 
-Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.
+Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, diff comparer, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.
 
 Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settings.json` (workspace). Workspace values override user values.
 
@@ -371,6 +390,7 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Approval Mode | `default_approval_mode` | `prompt`, `yolo` |
 | Default Router Policy | `default_router_policy` | configured policy names |
 | Prompt Editor | `prompt_editor` | `system` (uses `$VISUAL` / `$EDITOR`), `lampo` (macOS), or an editor command |
+| Diff Comparer | `diff_comparer` | `builtin` (the transcript), `terminal` (uses `$PAGER`), `lampo` (macOS), or a pager command |
 | Startup Banner | `ui_banner` | `show`, `hide` |
 | Footer | `ui_footer` | `show`, `hide` |
 | Model Badge | `ui_model_info` | `show`, `hide` |

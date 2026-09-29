@@ -39,8 +39,4 @@ private:
     std::string_view command,
     std::string_view file_path);
 
-// True when the first token of `command` names an executable reachable from the
-// current PATH (or an executable path).
-[[nodiscard]] bool editor_command_is_executable(std::string_view command);
-
 } // namespace tui::editor

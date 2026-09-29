@@ -75,6 +75,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.default_router_policy;
         case core::config::ManagedSettingKey::PromptEditor:
             return settings.prompt_editor;
+        case core::config::ManagedSettingKey::DiffComparer:
+            return settings.diff_comparer;
         case core::config::ManagedSettingKey::UiBanner:
             return settings.ui_banner;
         case core::config::ManagedSettingKey::UiFooter:
@@ -110,6 +112,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return config.router.default_policy;
         case core::config::ManagedSettingKey::PromptEditor:
             return config.prompt_editor;
+        case core::config::ManagedSettingKey::DiffComparer:
+            return config.diff_comparer;
         case core::config::ManagedSettingKey::UiBanner:
             return config.ui_banner;
         case core::config::ManagedSettingKey::UiFooter:
@@ -1373,6 +1377,11 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
         ManagedSettingCase{
             core::config::ManagedSettingKey::PromptEditor,
             "prompt_editor",
+            "lampo",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::DiffComparer,
+            "diff_comparer",
             "lampo",
         },
         ManagedSettingCase{

@@ -4,6 +4,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/changes/PatchExport.hpp"
 #include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/tools/read/ReadTypes.hpp"
@@ -1938,6 +1939,116 @@ std::string turn_file_change_key(std::string_view message_id, std::string_view p
     return std::format("file-change:{}:{}", message_id, path);
 }
 
+namespace {
+
+constexpr std::string_view kFileChangeOpenPrefix = "file-change-open:";
+
+// Defined with the change box that renders it; a comparison repeats it.
+[[nodiscard]] std::vector<std::string> turn_change_caveats(
+    const core::changes::TurnChanges& changes);
+
+} // namespace
+
+std::string turn_file_change_open_key(std::string_view message_id, std::string_view path) {
+    return std::format("{}{}:{}", kFileChangeOpenPrefix, message_id, path);
+}
+
+bool is_turn_file_change_open_key(std::string_view key) {
+    return key.starts_with(kFileChangeOpenPrefix);
+}
+
+std::optional<TurnFileChangeRef> parse_turn_file_change_open_key(std::string_view key) {
+    if (!is_turn_file_change_open_key(key)) {
+        return std::nullopt;
+    }
+    key.remove_prefix(kFileChangeOpenPrefix.size());
+    // A message id is hexadecimal, so the first separator ends it and whatever
+    // follows is the path — colons and all.
+    const auto separator = key.find(':');
+    if (separator == std::string_view::npos || separator == 0 || separator + 1 >= key.size()) {
+        return std::nullopt;
+    }
+    return TurnFileChangeRef{
+        .message_id = std::string(key.substr(0, separator)),
+        .path = std::string(key.substr(separator + 1)),
+    };
+}
+
+TurnWithChanges latest_turn_with_changes(const std::vector<UiMessage>& messages) {
+    // A turn's changes sit on its last assistant message, after any steering
+    // the user sent while it ran, so a user message after them opens a later
+    // turn.
+    bool superseded = false;
+    for (std::size_t index = messages.size(); index-- > 0;) {
+        const UiMessage& message = messages[index];
+        if (!message.turn_changes.empty()) {
+            return TurnWithChanges{.message = &message, .index = index, .superseded = superseded};
+        }
+        superseded = superseded || message.type == MessageType::User;
+    }
+    return {};
+}
+
+std::string comparison_omissions(const TurnComparison& comparison) {
+    std::vector<std::string> gaps;
+    if (comparison.undiffed > 0) {
+        gaps.push_back(std::format(
+            "{} changed file{} {} no diff (binary, too large or over the diff budget)",
+            comparison.undiffed,
+            comparison.undiffed == 1 ? "" : "s",
+            comparison.undiffed == 1 ? "has" : "have"));
+    }
+    gaps.insert(gaps.end(), comparison.caveats.begin(), comparison.caveats.end());
+    if (gaps.empty()) {
+        return {};
+    }
+
+    std::string sentence = "The comparison is not the whole turn: ";
+    for (std::size_t i = 0; i < gaps.size(); ++i) {
+        sentence += i == 0 ? "" : "; ";
+        sentence += gaps[i];
+    }
+    sentence += ".";
+    return sentence;
+}
+
+std::optional<TurnComparison> turn_comparison(const UiMessage& message) {
+    const auto& changes = message.turn_changes;
+    auto exported = core::changes::export_patch(changes);
+    if (exported.empty()) {
+        return std::nullopt;
+    }
+
+    TurnComparison comparison;
+    comparison.patch = std::move(exported.patch);
+    comparison.undiffed = exported.undiffed;
+    comparison.caveats = turn_change_caveats(changes);
+    comparison.disclosure_keys.reserve(exported.files);
+    for (const auto& change : changes.files) {
+        if (!change.diff.empty()) {
+            comparison.disclosure_keys.push_back(turn_file_change_key(message.id, change.path));
+        }
+    }
+    return comparison;
+}
+
+std::optional<TurnComparison> turn_comparison(const UiMessage& message, std::string_view path) {
+    for (const auto& change : message.turn_changes.files) {
+        if (change.path != path) {
+            continue;
+        }
+        auto exported = core::changes::export_patch(change);
+        if (exported.empty()) {
+            return std::nullopt;
+        }
+        return TurnComparison{
+            .patch = std::move(exported.patch),
+            .disclosure_keys = {turn_file_change_key(message.id, change.path)},
+        };
+    }
+    return std::nullopt;
+}
+
 UiMessage make_shell_command_message(std::string command,
                                      std::string timestamp,
                                      bool pending) {
@@ -2612,6 +2723,19 @@ namespace {
     header.push_back(ftxui::filler());
     if (change.added > 0 || change.deleted > 0) {
         header.push_back(render_count_pair(change.added, change.deleted));
+    }
+    // The affordance carries its own hitbox, so it is reflected before it joins
+    // the row: the row's own box covers the whole line, this cell included.
+    // Only the glyph is the target; the gap before it still toggles the row.
+    const bool comparable = options.show_diff_comparer_affordance
+        && expandable
+        && options.system_disclosure_hitboxes != nullptr;
+    if (comparable) {
+        header.push_back(ftxui::text("  "));
+        header.push_back(
+            (ftxui::text("\u2197") | ftxui::color(Color::GrayLight))
+            | reflect((*options.system_disclosure_hitboxes)[
+                turn_file_change_open_key(msg.id, change.path)]));
     }
     Element header_el = hbox(std::move(header));
     if (expandable && options.system_disclosure_hitboxes != nullptr) {

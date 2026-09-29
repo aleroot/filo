@@ -59,7 +59,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 14> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 15> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -68,6 +68,7 @@ static constexpr std::array<ManagedSettingDescriptor, 14> kManagedSettingDescrip
       "default_router_policy",
       &ManagedSettings::default_router_policy },
     { ManagedSettingKey::PromptEditor, "prompt_editor", &ManagedSettings::prompt_editor },
+    { ManagedSettingKey::DiffComparer, "diff_comparer", &ManagedSettings::diff_comparer },
     { ManagedSettingKey::UiBanner, "ui_banner", &ManagedSettings::ui_banner },
     { ManagedSettingKey::UiFooter, "ui_footer", &ManagedSettings::ui_footer },
     { ManagedSettingKey::UiModelInfo, "ui_model_info", &ManagedSettings::ui_model_info },
@@ -120,6 +121,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::PromptEditor:
             config.prompt_editor = value;
+            break;
+        case ManagedSettingKey::DiffComparer:
+            config.diff_comparer = value;
             break;
         case ManagedSettingKey::UiBanner:
             config.ui_banner = value;
@@ -529,6 +533,7 @@ AppConfig make_default_config() {
     config.default_mode = "BUILD";
     config.default_approval_mode = "prompt";
     config.prompt_editor = "system";
+    config.diff_comparer = "builtin";
     config.ui_banner = "show";
     config.ui_footer = "show";
     config.ui_model_info = "show";
@@ -637,6 +642,7 @@ std::string default_config_json() {
     "default_mode": "BUILD",
     "default_approval_mode": "prompt",
     "prompt_editor": "system",
+    "diff_comparer": "builtin",
     "tool_output_token_limit": 3072,
     "tool_recovery": true,
     "context_compression": "off",
@@ -1127,6 +1133,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     if (!doc["prompt_editor"].get(value)) {
         parsed.prompt_editor = std::string(value);
     }
+    if (!doc["diff_comparer"].get(value)) {
+        parsed.diff_comparer = std::string(value);
+    }
     if (!doc["ui_banner"].get(value)) {
         parsed.ui_banner = std::string(value);
     }
@@ -1452,6 +1461,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (!overlay.prompt_editor.empty()) {
         base.prompt_editor = overlay.prompt_editor;
+    }
+    if (!overlay.diff_comparer.empty()) {
+        base.diff_comparer = overlay.diff_comparer;
     }
     if (!overlay.ui_banner.empty()) {
         base.ui_banner = overlay.ui_banner;

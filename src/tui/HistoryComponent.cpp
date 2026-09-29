@@ -259,12 +259,36 @@ bool HistoryComponent::HandleWheel(ftxui::Event event) {
     return false;
 }
 
+void HistoryComponent::ExpandDisclosures(const std::vector<std::string>& keys) {
+    for (const auto& key : keys) {
+        disclosure_expanded_[key] = true;
+    }
+}
+
+void HistoryComponent::SetDiffComparerOpener(std::function<void(std::string_view key)> opener) {
+    diff_comparer_opener_ = std::move(opener);
+}
+
 bool HistoryComponent::OnMouseEvent(ftxui::Event event) {
-    // Clicking a system-message disclosure chevron toggles its details.
     if (event.mouse().button == ftxui::Mouse::Left
         && event.mouse().motion == ftxui::Mouse::Pressed) {
+        // A file row's comparer affordance is tested first: the row's own
+        // disclosure box covers the whole line, this cell included, so the
+        // narrower target has to win.
+        if (diff_comparer_opener_) {
+            for (const auto& [key, box] : disclosure_hitboxes_) {
+                if (is_turn_file_change_open_key(key)
+                    && box.Contain(event.mouse().x, event.mouse().y)) {
+                    diff_comparer_opener_(key);
+                    return true;
+                }
+            }
+        }
+
+        // Clicking a system-message disclosure chevron toggles its details.
         for (const auto& [disclosure_id, box] : disclosure_hitboxes_) {
-            if (!box.Contain(event.mouse().x, event.mouse().y)) {
+            if (is_turn_file_change_open_key(disclosure_id)
+                || !box.Contain(event.mouse().x, event.mouse().y)) {
                 continue;
             }
             // Toggle relative to what is actually on screen: a card the user has never touched shows its default state, not `false`.
@@ -309,6 +333,7 @@ std::size_t HistoryComponent::compute_render_cache_key(
     seed = combine_hash(seed, options.show_reasoning ? 1 : 0);
     seed = combine_hash(seed, options.expand_system_details ? 1 : 0);
     seed = combine_hash(seed, options.expand_tool_results ? 1 : 0);
+    seed = combine_hash(seed, options.show_diff_comparer_affordance ? 1 : 0);
     seed = combine_hash(seed, options.tool_result_preview_max_lines);
     // Per-message disclosure (▶/▼) toggle state — toggling a card must rebuild.
     // Accumulated with wrapping addition so the digest depends only on the set of

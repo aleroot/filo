@@ -1494,6 +1494,7 @@ public:
             "  /memory [action]    Manage durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  /run [block]        Inspect and run a fenced block from the latest response\n"
+            "  /changes            Open the latest turn's file changes in the diff comparer\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
@@ -1508,7 +1509,7 @@ public:
             "  F2       Cycle agent mode (AUTO → BUILD → DEBUG → RESEARCH → EXECUTE)\n"
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
             "  Ctrl+O   Toggle verbose output view (compact/full)\n"
-            "  Ctrl+X   Open the prompt editor (Gemini CLI-compatible alias)\n"
+            "  Ctrl+X   Open the latest turn's file changes in the configured diff comparer\n"
             "  Ctrl+D   Delete char right; empty: close secondary or double-press on main to quit\n"
             "  Ctrl+L   Clear the screen\n"
             "  Esc      Stop active generation or terminal command\n"
@@ -3894,6 +3895,31 @@ public:
     }
 };
 
+/// Opens the most recent turn's file changes in the configured diff comparer.
+/// The host decides what "configured" means — the transcript itself, a pager, or
+/// another application — and says why nothing opened when nothing did.
+class ChangesCommand : public Command {
+public:
+    std::string get_name() const override { return "/changes"; }
+    std::vector<std::string> get_aliases() const override { return {"/diff"}; }
+    std::string get_description() const override {
+        return "Open the latest turn's file changes in the configured comparer";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.open_diff_comparer_fn) {
+            ctx.append_history_fn("\n✗  No diff comparer is available in this context.\n");
+            return;
+        }
+
+        const auto result = ctx.open_diff_comparer_fn();
+        if (!result.ok && !result.message.empty()) {
+            ctx.append_history_fn(std::format("\n✗  {}\n", result.message));
+        }
+    }
+};
+
 class RunCodeBlockCommand : public Command {
 public:
     std::string get_name() const override { return "/run"; }
@@ -3997,6 +4023,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<MemoryCommand>());
     register_command(std::make_unique<McpCommand>());
     register_command(std::make_unique<RunCodeBlockCommand>());
+    register_command(std::make_unique<ChangesCommand>());
     register_command(std::make_unique<ShellCommand>());
 }
 

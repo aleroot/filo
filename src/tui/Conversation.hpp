@@ -308,6 +308,10 @@ struct ConversationRenderOptions {
     // Reasoning disclosure. When false, chain-of-thought is never rendered.
     // When true, it stays collapsed until the user expands it.
     bool        show_reasoning = true;
+    // Draws the per-file affordance that opens one change in an external
+    // comparer. Off when the configured comparer is the transcript itself,
+    // because then the row already does everything the affordance would.
+    bool        show_diff_comparer_affordance = false;
     std::unordered_map<std::string, bool>* system_disclosure_expanded = nullptr;
     std::unordered_map<std::string, ftxui::Box>* system_disclosure_hitboxes = nullptr;
     std::size_t tool_result_preview_max_lines = kToolResultPreviewMaxLines;
@@ -345,6 +349,69 @@ void stamp_user_turn_elapsed(std::vector<UiMessage>& messages,
 /// Disclosure key of one file in a turn's file-change box.
 [[nodiscard]] std::string turn_file_change_key(std::string_view message_id,
                                                std::string_view path);
+
+/// Key of the affordance that opens one file of a turn's file-change box in the
+/// configured external comparer. It is distinct from the disclosure key because
+/// a single row carries both: clicking the row expands it, clicking the
+/// affordance sends it elsewhere.
+[[nodiscard]] std::string turn_file_change_open_key(std::string_view message_id,
+                                                    std::string_view path);
+
+/// True for a key `turn_file_change_open_key` produced.
+[[nodiscard]] bool is_turn_file_change_open_key(std::string_view key);
+
+/// The turn and file an affordance key names.
+struct TurnFileChangeRef {
+    std::string message_id;
+    std::string path;
+};
+
+/// Splits an affordance key back into what it names; nullopt for any other key.
+[[nodiscard]] std::optional<TurnFileChangeRef> parse_turn_file_change_open_key(
+    std::string_view key);
+
+/// The most recent turn that changed files, and where it sits.
+struct TurnWithChanges {
+    /// Borrows the searched messages; nullptr when no turn changed files.
+    const UiMessage* message = nullptr;
+    /// Position of `message` in the searched messages.
+    std::size_t index = 0;
+    /// A user turn started after it, so it is not the latest turn: a reviewer
+    /// has to be told, or they would read old changes as the latest ones.
+    bool superseded = false;
+};
+
+[[nodiscard]] TurnWithChanges latest_turn_with_changes(const std::vector<UiMessage>& messages);
+// The result borrows the messages, so a temporary would leave it dangling.
+TurnWithChanges latest_turn_with_changes(const std::vector<UiMessage>&& messages) = delete;
+
+/// One turn's changes shaped for a comparer: the patch to hand to an external
+/// application, the disclosures that show the same changes inline, and what
+/// the patch cannot contain.
+struct TurnComparison {
+    /// Git-shaped unified diff; never empty.
+    std::string patch;
+    /// Disclosure key of every file the patch describes.
+    std::vector<std::string> disclosure_keys;
+    /// Changed files the patch leaves out because they carry no diff.
+    std::size_t undiffed = 0;
+    /// Gaps the turn itself declared, worded as the change box words them.
+    std::vector<std::string> caveats;
+};
+
+/// One sentence naming what `comparison` leaves out, or empty when it is the
+/// whole turn. An external comparer shows only the patch, so this is the only
+/// place the reviewer learns the patch is not everything.
+[[nodiscard]] std::string comparison_omissions(const TurnComparison& comparison);
+
+/// Everything `message` can send to a comparer, or nullopt when its turn has no
+/// change an external comparer could show.
+[[nodiscard]] std::optional<TurnComparison> turn_comparison(const UiMessage& message);
+
+/// Only the named file of that turn, or nullopt when it carries no diff.
+[[nodiscard]] std::optional<TurnComparison> turn_comparison(
+    const UiMessage& message,
+    std::string_view path);
 
 /// Rows a file-change box draws before it counts instead of listing. The
 /// model keeps every file; only the box is bounded.

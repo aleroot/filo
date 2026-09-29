@@ -99,6 +99,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto stop_called = std::make_shared<bool>(false);
     auto direct_shell_commands = std::make_shared<std::vector<std::string>>();
     auto requested_code_block = std::make_shared<std::optional<std::size_t>>();
+    auto comparer_opens = std::make_shared<int>(0);
+    auto comparer_result = std::make_shared<CommandOperationResult>(CommandOperationResult{.ok = true});
 
     CommandContext ctx{
         .text = "",
@@ -269,6 +271,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *requested_code_block = block;
             return CommandOperationResult{.ok = true};
         },
+        .open_diff_comparer_fn = [comparer_opens, comparer_result]() {
+            ++*comparer_opens;
+            return *comparer_result;
+        },
     };
 
     SECTION("Unknown commands fall through") {
@@ -418,6 +424,36 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(executor.try_execute(ctx.text, ctx));
         CHECK_FALSE(requested_code_block->has_value());
         CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("positive block number"));
+    }
+
+    SECTION("/changes opens the configured comparer") {
+        *mock_history = "";
+        ctx.text = "/changes";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_opens == 1);
+        CHECK(*input_cleared == true);
+        // A comparison that opened says nothing: the diff is the confirmation.
+        CHECK_THAT(*mock_history, !Catch::Matchers::ContainsSubstring("✗"));
+    }
+
+    SECTION("/diff is another name for /changes") {
+        ctx.text = "/diff";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_opens == 1);
+    }
+
+    SECTION("/changes says why nothing opened") {
+        *mock_history = "";
+        *comparer_result = CommandOperationResult{
+            .ok = false,
+            .message = "The latest turn changed no files.",
+        };
+        ctx.text = "/changes";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_opens == 1);
+        CHECK_THAT(
+            *mock_history,
+            Catch::Matchers::ContainsSubstring("The latest turn changed no files."));
     }
 
     SECTION("/goal sets and shows the session goal") {

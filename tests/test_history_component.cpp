@@ -1495,3 +1495,130 @@ TEST_CASE("HistoryComponent invalidates render cache when tool approval changes"
     REQUIRE_THAT(after_approval,
                  Catch::Matchers::ContainsSubstring("auto-approved"));
 }
+
+namespace {
+
+/// One assistant turn that changed a single text file, so its change box has a
+/// row that can be toggled and an affordance that can be clicked.
+std::vector<tui::UiMessage> messages_with_one_change() {
+    auto answer = tui::make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = {
+        core::changes::FileChange{
+            .kind = core::changes::FileChangeKind::Modified,
+            .path = "src/app.cpp",
+            .diff = "--- a/src/app.cpp\n+++ b/src/app.cpp\n@@ -1 +1 @@\n-old-line\n+new-line\n",
+            .added = 1,
+            .deleted = 1,
+        },
+    };
+    return {std::move(answer)};
+}
+
+void click(tui::HistoryComponent& history, RenderedCell cell) {
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = ftxui::Mouse::Pressed;
+    mouse.x = cell.column;
+    mouse.y = cell.row;
+    REQUIRE(history.OnEvent(ftxui::Event::Mouse("", mouse)));
+}
+
+} // namespace
+
+TEST_CASE("HistoryComponent sends an affordance click to the comparer, not to the row",
+          "[tui][history_component][diff_comparer]") {
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+    const std::string message_id = messages.front().id;
+
+    tui::ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    std::vector<std::string> opened;
+    history.SetDiffComparerOpener(
+        [&opened](std::string_view key) { opened.emplace_back(key); });
+
+    const auto rendered = render_history_text(history);
+    const auto affordance = rendered_cell_of(rendered, "\u2197");
+    REQUIRE(affordance.row >= 0);
+    click(history, affordance);
+
+    REQUIRE(opened.size() == 1);
+    CHECK(opened.front() == tui::turn_file_change_open_key(message_id, "src/app.cpp"));
+    // The same click must not also have toggled the row open.
+    CHECK_THAT(render_history_text(history),
+               !Catch::Matchers::ContainsSubstring("new-line"));
+}
+
+TEST_CASE("HistoryComponent still toggles a change row clicked elsewhere",
+          "[tui][history_component][diff_comparer]") {
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+
+    tui::ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    bool opened = false;
+    history.SetDiffComparerOpener([&opened](std::string_view) { opened = true; });
+
+    const auto rendered = render_history_text(history);
+    const auto row = rendered_cell_of(rendered, "src/app.cpp");
+    REQUIRE(row.row >= 0);
+    click(history, row);
+
+    CHECK_FALSE(opened);
+    CHECK_THAT(render_history_text(history), Catch::Matchers::ContainsSubstring("new-line"));
+}
+
+TEST_CASE("HistoryComponent treats the gap before an affordance as the row",
+          "[tui][history_component][diff_comparer]") {
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+
+    tui::ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    bool opened = false;
+    history.SetDiffComparerOpener([&opened](std::string_view) { opened = true; });
+
+    const auto rendered = render_history_text(history);
+    auto gap = rendered_cell_of(rendered, "\u2197");
+    REQUIRE(gap.column >= 1);
+    --gap.column;
+    click(history, gap);
+
+    // Only the glyph opens the comparer; a near miss toggles the row instead.
+    CHECK_FALSE(opened);
+    CHECK_THAT(render_history_text(history), Catch::Matchers::ContainsSubstring("new-line"));
+}
+
+TEST_CASE("HistoryComponent expands the disclosures a host action names",
+          "[tui][history_component][diff_comparer]") {
+    std::atomic<size_t> tick{0};
+    auto messages = messages_with_one_change();
+    const std::string message_id = messages.front().id;
+
+    tui::ConversationRenderOptions options;
+    tui::HistoryComponent history(
+        [&messages]() { return messages; },
+        tick,
+        [&options]() { return options; });
+
+    CHECK_THAT(render_history_text(history), !Catch::Matchers::ContainsSubstring("new-line"));
+
+    history.ExpandDisclosures({tui::turn_file_change_key(message_id, "src/app.cpp")});
+
+    CHECK_THAT(render_history_text(history), Catch::Matchers::ContainsSubstring("new-line"));
+}

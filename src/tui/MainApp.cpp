@@ -17,6 +17,7 @@
 #include "SelectionClipboardCopier.hpp"
 #include "Text.hpp"
 #include "editor/ExternalEditorController.hpp"
+#include "viewer/ExternalDiffViewerController.hpp"
 #include "PromptInput.hpp"
 #include "PromptComponents.hpp"
 #include "QuestionDialogController.hpp"
@@ -1032,6 +1033,13 @@ RunResult run(RunOptions opts) {
         .with_terminal =
             [&screen](const std::function<void()>& body) { screen.WithRestoredIO(body)(); },
     });
+    // Owns the whole diff-comparer lifecycle: backend selection, session id,
+    // worker thread and cancellation.
+    viewer::ExternalDiffViewerController diff_comparer({
+        .wake_ui = [&wake_ui]() { wake_ui(); },
+        .with_terminal =
+            [&screen](const std::function<void()>& body) { screen.WithRestoredIO(body)(); },
+    });
     core::logging::Logger::get_instance().use_callback_sink(
         [&ui_mutex, &stderr_panel_state, &wake_ui](core::logging::Level level,
                                                   std::string line) {
@@ -1068,6 +1076,24 @@ RunResult run(RunOptions opts) {
         });
     }
     std::function<void()> reset_history_view = [] {};
+    // Expands a turn's change disclosures and scrolls to that turn on behalf of
+    // a host action, so "show me this turn's diffs" reaches the same state a
+    // click would, even when the turn is off screen. Assigned once the history
+    // component exists.
+    std::function<void(const std::vector<std::string>&, std::optional<std::size_t>)>
+        reveal_transcript_changes =
+            [](const std::vector<std::string>&, std::optional<std::size_t>) {};
+    // Whether the configured comparer launches something, which is what makes a
+    // file row's "open in comparer" affordance worth drawing. The transcript
+    // itself needs no affordance: its rows already open.
+    bool diff_comparer_is_external = false;
+    auto refresh_diff_comparer = [&]() {
+        diff_comparer_is_external = !viewer::select_diff_viewer(
+                                        viewer::builtin_diff_comparers(),
+                                        config.diff_comparer)
+                                         .inline_view();
+    };
+    refresh_diff_comparer();
     core::commands::CommandExecutor cmd_executor;
     // Load layered prompt skills (global → every workspace root, primary last so
     // it wins collisions) before describe_commands() so skill commands appear in
@@ -1415,6 +1441,26 @@ RunResult run(RunOptions opts) {
             .label = "General · Prompt Editor",
             .description = "Editor opened by Ctrl+G for the current prompt draft.",
             .choices = std::move(prompt_editor_choices),
+        });
+        // Driven by the comparer catalog, so a new backend shows up here (and
+        // only on the platforms that ship it) without touching the settings
+        // pane. The built-in choice is not a catalog entry: nothing is launched
+        // for it, the transcript already renders every diff.
+        std::vector<SettingsChoice> diff_comparer_choices{SettingsChoice{
+            .value = std::string(viewer::builtin_diff_comparer_descriptor().id),
+            .label = std::string(viewer::builtin_diff_comparer_descriptor().label),
+        }};
+        for (const auto& descriptor : viewer::builtin_diff_comparers().descriptors()) {
+            diff_comparer_choices.push_back(SettingsChoice{
+                .value = std::string(descriptor.id),
+                .label = std::string(descriptor.label),
+            });
+        }
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::DiffComparer,
+            .label = "General · Diff Comparer",
+            .description = "Where Ctrl+X and /changes open a turn's file changes.",
+            .choices = std::move(diff_comparer_choices),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiBanner,
@@ -4608,6 +4654,8 @@ RunResult run(RunOptions opts) {
                 return settings.default_router_policy;
             case core::config::ManagedSettingKey::PromptEditor:
                 return settings.prompt_editor;
+            case core::config::ManagedSettingKey::DiffComparer:
+                return settings.diff_comparer;
             case core::config::ManagedSettingKey::UiBanner:
                 return settings.ui_banner;
             case core::config::ManagedSettingKey::UiFooter:
@@ -4647,6 +4695,10 @@ RunResult run(RunOptions opts) {
                 return effective.prompt_editor.empty()
                     ? std::string("system")
                     : effective.prompt_editor;
+            case core::config::ManagedSettingKey::DiffComparer:
+                return effective.diff_comparer.empty()
+                    ? std::string(viewer::default_diff_comparer_id())
+                    : effective.diff_comparer;
             case core::config::ManagedSettingKey::UiBanner:
                 return effective.ui_banner;
             case core::config::ManagedSettingKey::UiFooter:
@@ -4700,6 +4752,8 @@ RunResult run(RunOptions opts) {
         config.default_mode = after.default_mode;
         config.default_approval_mode = after.default_approval_mode;
         config.prompt_editor = after.prompt_editor;
+        config.diff_comparer = after.diff_comparer;
+        refresh_diff_comparer();
         config.router.default_policy = after.router.default_policy;
         config.ui_banner = after.ui_banner;
         config.ui_footer = after.ui_footer;
@@ -5879,6 +5933,113 @@ RunResult run(RunOptions opts) {
         }
         wake_ui();
         return {.ok = true, .message = {}};
+    };
+
+    // ── Diff comparer ────────────────────────────────────────────────────────
+    // What the comparison being opened leaves out, reported only once an
+    // external comparer shows it (see ViewerOutcome::shown). UI thread only: it
+    // is set when a comparison opens and consumed when that comparison settles,
+    // and only one comparison runs at a time.
+    std::string pending_comparison_omissions;
+
+    // Reports what a comparison did once it settled. Success stays silent
+    // unless the diff on screen is not the whole turn: an external comparer
+    // shows only the patch, so the reviewer learns about the rest here.
+    auto show_comparer_notice = [&](const viewer::ViewerOutcome& outcome) {
+        const std::string omissions = std::exchange(pending_comparison_omissions, {});
+        if (outcome.shown && !omissions.empty()) {
+            append_history(std::format("\nℹ  {}\n", omissions));
+        }
+        if (outcome.notice.has_value()) {
+            append_history(std::format(
+                "\n{}  {}\n",
+                outcome.notice->success ? "✓" : "✗",
+                outcome.notice->message));
+        }
+        wake_ui();
+    };
+
+    // Hands one comparison to the configured backend. Terminal backends answer
+    // inline; a detached one publishes through take_outcome() once the other
+    // application has answered. `message_index` locates the turn in the
+    // transcript, for the built-in comparer to scroll to.
+    auto open_comparison = [&](TurnComparison comparison,
+                               std::optional<std::size_t> message_index) {
+        pending_comparison_omissions = comparison_omissions(comparison);
+        if (const auto outcome = diff_comparer.open(config.diff_comparer, comparison.patch)) {
+            if (outcome->inline_view) {
+                // The transcript is the configured comparer, so opening it means
+                // revealing what it already holds, where it holds it.
+                reveal_transcript_changes(comparison.disclosure_keys, message_index);
+            }
+            show_comparer_notice(*outcome);
+            return;
+        }
+        wake_ui();  // Draw the overlay while the detached session runs.
+    };
+
+    // Ctrl+X and /changes: the most recent turn that changed files. When that is
+    // not the latest turn the user is told so, or old changes would pass for
+    // what the model just did.
+    auto open_latest_changes = [&]() -> core::commands::CommandOperationResult {
+        const bool turn_running = current_runtime->turn_active();
+        std::optional<TurnComparison> comparison;
+        TurnWithChanges latest;
+        {
+            std::lock_guard lock(ui_mutex);
+            latest = latest_turn_with_changes(*selected_messages);
+            if (latest.message != nullptr) {
+                comparison = turn_comparison(*latest.message);
+            }
+        }
+        if (latest.message == nullptr) {
+            return {.ok = false,
+                    .message = turn_running
+                        ? "The current turn is still running, and no earlier turn changed files."
+                        : "No turn in this conversation has changed files yet."};
+        }
+        if (latest.superseded) {
+            append_history(turn_running
+                ? "\nℹ  The current turn is still running; showing the latest finished "
+                  "turn that changed files.\n"
+                : "\nℹ  The latest turn changed no files; showing the most recent turn "
+                  "that did.\n");
+        }
+        if (!comparison.has_value()) {
+            return {.ok = false,
+                    .message = "That turn changed files, but none of them has a diff to show "
+                               "(binary, too large or over the diff budget)."};
+        }
+        open_comparison(std::move(*comparison), latest.index);
+        return {.ok = true, .message = {}};
+    };
+
+    // The per-file affordance in a turn's change box: one file, one comparison.
+    auto open_file_change = [&](std::string_view key) {
+        const auto ref = parse_turn_file_change_open_key(key);
+        if (!ref.has_value()) {
+            return;
+        }
+
+        std::optional<TurnComparison> comparison;
+        std::optional<std::size_t> message_index;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto& messages = *selected_messages;
+            const auto turn = std::ranges::find_if(
+                messages,
+                [&ref](const UiMessage& message) { return message.id == ref->message_id; });
+            if (turn != messages.end()) {
+                comparison = turn_comparison(*turn, ref->path);
+                message_index = static_cast<std::size_t>(turn - messages.begin());
+            }
+        }
+        if (!comparison.has_value()) {
+            append_history(std::format("\n✗  '{}' has no diff to show.\n", ref->path));
+            wake_ui();
+            return;
+        }
+        open_comparison(std::move(*comparison), message_index);
     };
 
     auto open_rewind_menu = [&]() -> bool {
@@ -7312,6 +7473,7 @@ RunResult run(RunOptions opts) {
             .stop_active_terminal_fn = stop_active_terminal,
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
+            .open_diff_comparer_fn = open_latest_changes,
             .change_workspace_root_fn = change_workspace_root,
             .steering_policy_fn = [&]() {
                 return agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};
@@ -7332,7 +7494,7 @@ RunResult run(RunOptions opts) {
         submit_or_queue_agent_turn(std::move(text), {});
     };
 
-    // Ctrl+G / Ctrl+X — hand the draft to the configured prompt editor.
+    // Ctrl+G — hand the draft to the configured prompt editor.
     auto apply_editor_outcome = [&](const editor::EditorOutcome& outcome) {
         if (outcome.text.has_value()) {
             input_text = normalize_newlines(*outcome.text);
@@ -7347,25 +7509,29 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
+    // True while a dialog or picker owns the screen, so a global shortcut must
+    // not launch something behind it.
+    auto modal_owns_screen = [&]() {
+        std::lock_guard lock(ui_mutex);
+        return thread_modals.question_visible(session_id)
+            || thread_modals.permission_visible(session_id)
+            || model_picker_state.active
+            || model_provider_picker_state.active
+            || provider_model_picker_state.active
+            || command_option_picker_state.active
+            || provider_picker_state.active
+            || review_picker_state.active
+            || local_model_picker_state.active
+            || rewind_picker_state.active
+            || code_block_runner.active()
+            || conversation_search_state.active
+            || file_picker_state.active
+            || settings_panel_state.active;
+    };
+
     auto open_external_editor = [&]() -> bool {
-        {
-            std::lock_guard lock(ui_mutex);
-            if (thread_modals.question_visible(session_id)
-                || thread_modals.permission_visible(session_id)
-                || model_picker_state.active
-                || model_provider_picker_state.active
-                || provider_model_picker_state.active
-                || command_option_picker_state.active
-                || provider_picker_state.active
-                || review_picker_state.active
-                || local_model_picker_state.active
-                || rewind_picker_state.active
-                || code_block_runner.active()
-                || conversation_search_state.active
-                || file_picker_state.active
-                || settings_panel_state.active) {
-                return true;
-            }
+        if (modal_owns_screen()) {
+            return true;
         }
 
         // Terminal backends answer inline; detached ones report through
@@ -7374,6 +7540,18 @@ RunResult run(RunOptions opts) {
             apply_editor_outcome(*outcome);
         } else {
             wake_ui();  // Draw the overlay while the detached session runs.
+        }
+        return true;
+    };
+
+    // The comparer counterpart of open_external_editor: same guard, but the
+    // payload is what the last turn changed rather than the current draft.
+    auto open_diff_comparer = [&]() -> bool {
+        if (modal_owns_screen()) {
+            return true;
+        }
+        if (const auto result = open_latest_changes(); !result.ok && !result.message.empty()) {
+            append_history(std::format("\n✗  {}\n", result.message));
         }
         return true;
     };
@@ -7455,6 +7633,7 @@ RunResult run(RunOptions opts) {
                 .expand_system_details = tool_output_expanded,
                 .expand_tool_results = tool_output_expanded,
                 .show_reasoning = ui_show_reasoning,
+                .show_diff_comparer_affordance = diff_comparer_is_external,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
                 .scroll_anchor = nullptr,
@@ -7469,6 +7648,29 @@ RunResult run(RunOptions opts) {
     reset_history_view = [history_component]() {
         history_component->ResetToBottom();
     };
+    reveal_transcript_changes =
+        [history_component, &ui_mutex, &selected_messages](
+            const std::vector<std::string>& keys,
+            std::optional<std::size_t> message_index) {
+            history_component->ExpandDisclosures(keys);
+            if (!message_index.has_value()) {
+                return;
+            }
+            std::size_t message_count = 0;
+            {
+                std::lock_guard lock(ui_mutex);
+                message_count = selected_messages->size();
+            }
+            history_component->JumpToMessage(*message_index, message_count);
+        };
+    // A file row's affordance opens just that change in the configured
+    // comparer, unless a dialog or picker owns the screen.
+    history_component->SetDiffComparerOpener(
+        [&open_file_change, &modal_owns_screen](std::string_view key) {
+            if (!modal_owns_screen()) {
+                open_file_change(key);
+            }
+        });
 
     // ── Event handling ───────────────────────────────────────────────────────
     auto component = CatchEvent(input_stack, [&](Event event) {
@@ -7483,6 +7685,19 @@ RunResult run(RunOptions opts) {
         if (external_editor.busy()) {
             if (event == Event::Escape || is_ctrl_c_event(event)) {
                 external_editor.cancel();
+            }
+            return true;
+        }
+
+        // A detached comparer session owns the keys the same way. Unlike an edit
+        // it has no result to apply — only a notice when something went wrong.
+        if (auto outcome = diff_comparer.take_outcome()) {
+            show_comparer_notice(*outcome);
+            return true;
+        }
+        if (diff_comparer.busy()) {
+            if (event == Event::Escape || is_ctrl_c_event(event)) {
+                diff_comparer.cancel();
             }
             return true;
         }
@@ -9154,9 +9369,15 @@ RunResult run(RunOptions opts) {
             clear_screen();
             return true;
         }
-        // Ctrl+G matches Claude Code, Ctrl+X matches Gemini CLI.
-        if (is_ctrl_g_event(event) || is_ctrl_x_event(event)) {
+        // Ctrl+G matches Claude Code's external-editor binding.
+        if (is_ctrl_g_event(event)) {
             return open_external_editor();
+        }
+        // Gemini CLI binds Ctrl+X to the same external editor as Ctrl+G. Filo
+        // gives the draft Ctrl+G alone and spends Ctrl+X on the other thing
+        // worth opening: what the last turn changed.
+        if (is_ctrl_x_event(event)) {
+            return open_diff_comparer();
         }
         if (is_ctrl_v_event(event)) {  // Ctrl+V — paste clipboard content / image
             if (const auto image_path = read_clipboard_image_to_temp(); image_path.has_value()) {
@@ -9363,7 +9584,7 @@ RunResult run(RunOptions opts) {
         std::size_t                     agents_visualizer_selected = 0;
         int                             agents_visualizer_scroll = 0;
         std::size_t                     queued_steering_count = 0;
-        std::string                     external_editor_status;
+        std::string                     external_session_status;
         {
             std::lock_guard lock(ui_mutex);
             if (conversation_search_state.active) {
@@ -9481,7 +9702,12 @@ RunResult run(RunOptions opts) {
             remote_activity_snapshot.server_state =
                 core::mcp::RemoteServerState::starting;
         }
-        external_editor_status = external_editor.status_label();
+        // At most one external session runs at a time: while either is busy the
+        // event loop swallows every key but the cancel gesture.
+        external_session_status = external_editor.status_label();
+        if (external_session_status.empty()) {
+            external_session_status = diff_comparer.status_label();
+        }
         session_picker_running_ids = thread_runtimes.running_session_ids();
 
         std::vector<ThreadTab> thread_tabs;
@@ -9570,10 +9796,10 @@ RunResult run(RunOptions opts) {
 
         // ── Permission overlay ───────────────────────────────────────────
         Element bottom_el;
-        if (!external_editor_status.empty()) {
+        if (!external_session_status.empty()) {
             bottom_el = render_default_prompt_panel(
                 hbox({
-                    text(external_editor_status) | color(Color::GrayLight) | xflex,
+                    text(external_session_status) | color(Color::GrayLight) | xflex,
                     text("Esc to cancel") | color(Color::GrayDark),
                 }),
                 {});

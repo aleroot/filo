@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "tui/CommandLookup.hpp"
 #include "tui/editor/ExternalEditorController.hpp"
 #include "tui/editor/PromptBuffer.hpp"
 #include "tui/editor/PromptEditorCatalog.hpp"
@@ -16,6 +17,7 @@
 namespace {
 
 using namespace tui::editor;
+using tui::command_is_executable;
 
 // A backend with no side effects, so the controller can be exercised without
 // spawning an editor.
@@ -232,13 +234,13 @@ TEST_CASE("Editor invocations quote the buffer and add blocking flags", "[prompt
 }
 
 TEST_CASE("Executable detection resolves through PATH", "[prompt_editor]") {
-    REQUIRE(editor_command_is_executable("sh"));
-    REQUIRE(editor_command_is_executable("sh -c"));
-    REQUIRE(editor_command_is_executable("/bin/sh"));
-    REQUIRE(editor_command_is_executable("'/bin/sh' -c"));
-    REQUIRE_FALSE(editor_command_is_executable(""));
-    REQUIRE_FALSE(editor_command_is_executable("'/bin/sh"));
-    REQUIRE_FALSE(editor_command_is_executable("definitely-not-an-editor-9034"));
+    REQUIRE(command_is_executable("sh"));
+    REQUIRE(command_is_executable("sh -c"));
+    REQUIRE(command_is_executable("/bin/sh"));
+    REQUIRE(command_is_executable("'/bin/sh' -c"));
+    REQUIRE_FALSE(command_is_executable(""));
+    REQUIRE_FALSE(command_is_executable("'/bin/sh"));
+    REQUIRE_FALSE(command_is_executable("definitely-not-an-editor-9034"));
 
     auto buffer = PromptBuffer::create("");
     REQUIRE(buffer.has_value());
@@ -254,7 +256,7 @@ TEST_CASE("Executable detection resolves through PATH", "[prompt_editor]") {
             | std::filesystem::perms::owner_exec,
         std::filesystem::perm_options::replace);
 
-    REQUIRE(editor_command_is_executable("'" + editor.string() + "' --wait"));
+    REQUIRE(command_is_executable("'" + editor.string() + "' --wait"));
 }
 
 TEST_CASE("A terminal backend completes inline", "[prompt_editor]") {

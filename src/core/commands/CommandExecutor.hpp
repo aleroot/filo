@@ -156,6 +156,10 @@ struct CommandContext {
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
     std::function<void(std::string)> direct_shell_command_fn = {};
     std::function<CommandOperationResult(std::optional<std::size_t>)> open_code_block_runner_fn = {};
+    /// Opens the most recent turn's file changes in the configured diff
+    /// comparer (/changes, Ctrl+X). The host owns the comparison: which turn,
+    /// which backend, and what the user is told when there is nothing to show.
+    std::function<CommandOperationResult()> open_diff_comparer_fn = {};
     // Replaces the primary working directory: chdirs the process, updates
     // the process-wide default workspace, and rebases the active session's
     // roots. Implemented by the composition root because it coordinates OS

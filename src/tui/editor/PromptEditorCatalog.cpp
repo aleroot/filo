@@ -1,6 +1,7 @@
 #include "PromptEditorCatalog.hpp"
 
 #include "SystemPromptEditor.hpp"
+#include "tui/CommandLookup.hpp"
 #include "tui/Text.hpp"
 
 #include <algorithm>
@@ -72,7 +73,7 @@ EditorSelection select_prompt_editor(
     }
     // Undocumented ids are treated as a literal editor command, so a user can
     // pin "nvim" or "code --wait" without waiting for a dedicated backend.
-    if (editor_command_is_executable(configured)) {
+    if (command_is_executable(configured)) {
         return EditorSelection{
             .editor = std::make_unique<SystemPromptEditor>(std::string(configured)),
             .warning = {},

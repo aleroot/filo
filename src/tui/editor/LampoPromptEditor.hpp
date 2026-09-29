@@ -13,8 +13,9 @@ namespace tui::editor {
 
 [[nodiscard]] EditorDescriptor lampo_prompt_editor_descriptor() noexcept;
 
-// Creates the Lampo backend. The implementation (and all of its AppKit
-// dependencies) is confined to LampoPromptEditor.mm.
+// Creates the Lampo backend. All AppKit dependencies live in the shared Lampo
+// CLI transport (tui/lampo/LampoCliSession.mm); the backend itself is plain
+// C++ and only writes the protocol's state machine.
 [[nodiscard]] std::unique_ptr<PromptEditor> make_lampo_prompt_editor();
 
 } // namespace tui::editor

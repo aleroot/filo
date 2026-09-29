@@ -45,6 +45,14 @@ public:
     // Helper for external controllers (e.g. input forwarding wheel events).
     bool HandleWheel(ftxui::Event event);
 
+    /// Expands the named disclosures, so a host action reaches the same state a
+    /// click would. Unknown keys are harmless: they simply never render.
+    void ExpandDisclosures(const std::vector<std::string>& keys);
+
+    /// Receives the key of a file-change affordance the user clicked, to open
+    /// that one change in the configured external comparer.
+    void SetDiffComparerOpener(std::function<void(std::string_view key)> opener);
+
     // Read-only introspection (used by unit tests and diagnostics).
     [[nodiscard]] bool  IsAutoScrollFollowing()  const noexcept;
     [[nodiscard]] bool  HasNewContentIndicator() const noexcept;
@@ -85,6 +93,7 @@ private:
     // Explicit user toggles only; absent entries fall back to the pure default.
     std::unordered_map<std::string, bool>        disclosure_expanded_;
     std::unordered_map<std::string, ftxui::Box>  disclosure_hitboxes_;
+    std::function<void(std::string_view key)>    diff_comparer_opener_;
 };
 
 } // namespace tui

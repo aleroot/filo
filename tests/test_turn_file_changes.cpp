@@ -202,3 +202,216 @@ TEST_CASE("A change whose size cannot be known shows no counts at all",
     CHECK(text.find("+0") == std::string::npos);
     CHECK(text.find("-0") == std::string::npos);
 }
+
+namespace {
+
+[[nodiscard]] std::size_t count_of(std::string_view haystack, std::string_view needle) {
+    std::size_t count = 0;
+    for (auto at = haystack.find(needle); at != std::string_view::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("The comparer affordance marks only the files a comparer could show",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    std::unordered_map<std::string, ftxui::Box> hitboxes;
+    ConversationRenderOptions options;
+    options.show_diff_comparer_affordance = true;
+    options.system_disclosure_hitboxes = &hitboxes;
+
+    const auto text = render_text({answer}, options);
+    // Two of the three changes carry a diff; the binary one has nothing to
+    // compare, so it offers nothing to click.
+    CHECK(count_of(text, "\u2197") == 2);
+    CHECK(hitboxes.contains(turn_file_change_open_key(answer.id, "src/app.cpp")));
+    CHECK(hitboxes.contains(turn_file_change_open_key(answer.id, "docs/guide.md")));
+    CHECK_FALSE(hitboxes.contains(turn_file_change_open_key(answer.id, "assets/logo.png")));
+    // The row's own disclosure box is still there, affordance or not.
+    CHECK(hitboxes.contains(turn_file_change_key(answer.id, "src/app.cpp")));
+}
+
+TEST_CASE("No affordance is drawn while the transcript is the comparer",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    std::unordered_map<std::string, ftxui::Box> hitboxes;
+    ConversationRenderOptions options;
+    options.system_disclosure_hitboxes = &hitboxes;
+
+    const auto text = render_text({answer}, options);
+    CHECK(count_of(text, "\u2197") == 0);
+    CHECK_FALSE(hitboxes.contains(turn_file_change_open_key(answer.id, "src/app.cpp")));
+}
+
+TEST_CASE("An affordance key names the turn and file it came from",
+          "[tui][turn_file_changes][diff_comparer]") {
+    const auto key = turn_file_change_open_key("0123456789abcdef", "src/a:b.cpp");
+    CHECK(is_turn_file_change_open_key(key));
+    CHECK_FALSE(is_turn_file_change_open_key(turn_file_change_key("0123456789abcdef", "src/a:b.cpp")));
+
+    const auto ref = parse_turn_file_change_open_key(key);
+    REQUIRE(ref.has_value());
+    CHECK(ref->message_id == "0123456789abcdef");
+    // A path may hold colons; a message id never does, so the first one ends it.
+    CHECK(ref->path == "src/a:b.cpp");
+
+    CHECK_FALSE(parse_turn_file_change_open_key("file-change:0123456789abcdef:src/app.cpp").has_value());
+    CHECK_FALSE(parse_turn_file_change_open_key("file-change-open:0123456789abcdef").has_value());
+}
+
+TEST_CASE("A turn exports one patch for the comparer", "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    const auto comparison = turn_comparison(answer);
+    REQUIRE(comparison.has_value());
+    CHECK_THAT(comparison->patch, ContainsSubstring("diff --git a/src/app.cpp b/src/app.cpp"));
+    CHECK_THAT(comparison->patch, ContainsSubstring("diff --git a/docs/guide.md b/docs/guide.md"));
+    CHECK_THAT(comparison->patch, ContainsSubstring("+new-app-line"));
+    CHECK_THAT(comparison->patch, ContainsSubstring("+guide-body-line"));
+    // The binary change has no diff to export.
+    CHECK(comparison->patch.find("logo.png") == std::string::npos);
+
+    REQUIRE(comparison->disclosure_keys.size() == 2);
+    CHECK(comparison->disclosure_keys[0] == turn_file_change_key(answer.id, "src/app.cpp"));
+    CHECK(comparison->disclosure_keys[1] == turn_file_change_key(answer.id, "docs/guide.md"));
+}
+
+TEST_CASE("One file exports on its own", "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    const auto comparison = turn_comparison(answer, "docs/guide.md");
+    REQUIRE(comparison.has_value());
+    CHECK_THAT(comparison->patch, ContainsSubstring("diff --git a/docs/guide.md b/docs/guide.md"));
+    CHECK(comparison->patch.find("app.cpp") == std::string::npos);
+    REQUIRE(comparison->disclosure_keys.size() == 1);
+    CHECK(comparison->disclosure_keys[0] == turn_file_change_key(answer.id, "docs/guide.md"));
+
+    // Nothing to compare, so nothing to open.
+    CHECK_FALSE(turn_comparison(answer, "assets/logo.png").has_value());
+    CHECK_FALSE(turn_comparison(answer, "src/missing.cpp").has_value());
+}
+
+TEST_CASE("A turn with nothing diffable opens no comparer",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = {
+        FileChange{.kind = FileChangeKind::Modified,
+                   .content = FileChangeContent::Binary,
+                   .path = "assets/logo.png"},
+    };
+
+    const std::vector<UiMessage> messages{answer};
+    CHECK(latest_turn_with_changes(messages).message != nullptr);
+    CHECK_FALSE(turn_comparison(answer).has_value());
+}
+
+TEST_CASE("The comparer opens on the most recent turn that changed files",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto first = make_assistant_message("First.", "", false);
+    first.turn_changes.files = sample_changes();
+    auto quiet = make_assistant_message("Nothing touched.", "", false);
+    auto second = make_assistant_message("Second.", "", false);
+    second.turn_changes.files = {
+        FileChange{.kind = FileChangeKind::Added,
+                   .path = "src/late.cpp",
+                   .diff = "--- a/src/late.cpp\n+++ b/src/late.cpp\n@@ -0,0 +1 @@\n+late\n",
+                   .added = 1},
+    };
+
+    const std::vector<UiMessage> messages{first, quiet, second};
+    const auto latest = latest_turn_with_changes(messages);
+    REQUIRE(latest.message != nullptr);
+    CHECK(latest.message->id == second.id);
+    CHECK(latest.index == 2);
+    CHECK_FALSE(latest.superseded);
+
+    const auto comparison = turn_comparison(*latest.message);
+    REQUIRE(comparison.has_value());
+    CHECK_THAT(comparison->patch, ContainsSubstring("src/late.cpp"));
+    CHECK(comparison->patch.find("app.cpp") == std::string::npos);
+
+    const std::vector<UiMessage> quiet_only{quiet};
+    CHECK(latest_turn_with_changes(quiet_only).message == nullptr);
+    const std::vector<UiMessage> none;
+    CHECK(latest_turn_with_changes(none).message == nullptr);
+}
+
+TEST_CASE("A turn that changed files is flagged once a later turn started",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto changed = make_assistant_message("Edited.", "", false);
+    changed.turn_changes.files = sample_changes();
+    UiMessage later_prompt;
+    later_prompt.type = MessageType::User;
+    later_prompt.text = "Now explain it.";
+    auto later_answer = make_assistant_message("It works like this.", "", false);
+
+    SECTION("a later turn that changed nothing") {
+        const std::vector<UiMessage> messages{changed, later_prompt, later_answer};
+        const auto latest = latest_turn_with_changes(messages);
+        REQUIRE(latest.message != nullptr);
+        CHECK(latest.message->id == changed.id);
+        CHECK(latest.index == 0);
+        CHECK(latest.superseded);
+    }
+    SECTION("a later turn still running, with no answer yet") {
+        const std::vector<UiMessage> messages{changed, later_prompt};
+        const auto latest = latest_turn_with_changes(messages);
+        REQUIRE(latest.message != nullptr);
+        CHECK(latest.superseded);
+    }
+    SECTION("notices after the turn do not start a new one") {
+        const std::vector<UiMessage> messages{changed, make_info_message("Model switched.")};
+        const auto latest = latest_turn_with_changes(messages);
+        REQUIRE(latest.message != nullptr);
+        CHECK_FALSE(latest.superseded);
+    }
+}
+
+TEST_CASE("A comparison names the changes its patch leaves out",
+          "[tui][turn_file_changes][diff_comparer]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+
+    SECTION("a binary file has no diff to carry") {
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison->undiffed == 1);
+        CHECK(comparison->caveats.empty());
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: 1 changed file has no diff "
+                 "(binary, too large or over the diff budget).");
+    }
+    SECTION("the turn's own caveats travel with it") {
+        answer.turn_changes.unscoped_mutations = true;
+        answer.turn_changes.partial_enumeration = true;
+        answer.turn_changes.files.pop_back();  // Drop the binary change.
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison->undiffed == 0);
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: too many files to detail fully; "
+                 "files created by shell, scripts or MCP tools are not listed.");
+    }
+    SECTION("a complete turn has nothing to report") {
+        answer.turn_changes.files.pop_back();
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison).empty());
+    }
+    SECTION("one file is the whole of what was asked for") {
+        answer.turn_changes.unscoped_mutations = true;
+        const auto comparison = turn_comparison(answer, "src/app.cpp");
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison).empty());
+    }
+}
