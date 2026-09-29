@@ -237,9 +237,10 @@ void write_structural(core::utils::JsonWriter& writer,
     std::string_view unit,
     std::string_view minimum_key,
     std::string_view maximum_key) {
+    std::optional<ArgumentIssue> issue;
     if (const auto minimum = nonnegative_integer_keyword(schema, minimum_key);
         minimum.has_value() && actual < *minimum) {
-        return make_issue(
+        issue = make_issue(
             ArgumentIssueCode::ConstraintViolation,
             relative_path(path),
             {},
@@ -248,10 +249,9 @@ void write_structural(core::utils::JsonWriter& writer,
                         *minimum,
                         unit,
                         *minimum == 1 ? "" : "s"));
-    }
-    if (const auto maximum = nonnegative_integer_keyword(schema, maximum_key);
-        maximum.has_value() && actual > *maximum) {
-        return make_issue(
+    } else if (const auto maximum = nonnegative_integer_keyword(schema, maximum_key);
+               maximum.has_value() && actual > *maximum) {
+        issue = make_issue(
             ArgumentIssueCode::ConstraintViolation,
             relative_path(path),
             {},
@@ -261,7 +261,8 @@ void write_structural(core::utils::JsonWriter& writer,
                         unit,
                         *maximum == 1 ? "" : "s"));
     }
-    return std::nullopt;
+    if (issue) issue->actual_size = actual;
+    return issue;
 }
 
 } // namespace

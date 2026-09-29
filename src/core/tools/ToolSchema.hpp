@@ -2,7 +2,9 @@
 
 #include "Tool.hpp"
 
+#include <cstddef>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,6 +50,10 @@ struct ArgumentIssue {
     std::vector<std::string> allowed;
     /// Human-readable description (the historical validation message).
     std::string message;
+    /// For ConstraintViolation: the offending value's size in the unit its
+    /// bound counts (characters or items). Lets advice tell an empty emission
+    /// apart from an over-long one.
+    std::optional<std::size_t> actual_size = {};
 };
 
 /**

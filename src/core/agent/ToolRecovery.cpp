@@ -211,6 +211,17 @@ std::optional<RecoveryHint> advise(
         }
         case ArgumentIssueCode::ConstraintViolation: {
             if (issue.parameter.empty()) return std::nullopt;
+            // An empty value ("" or []) is a degenerate emission, not a limit
+            // to tune toward. Naming it breaks resend-the-same-call loops that
+            // the generic size-limits wording does not.
+            if (issue.actual_size == 0) {
+                if (issue.parameter.ends_with(']')) {
+                    return deduced(std::format(
+                        "'{}' is empty; give it a value or remove it.", issue.parameter));
+                }
+                return deduced(
+                    std::format("'{}' is empty; give it a value.", issue.parameter));
+            }
             return deduced(
                 std::format("Correct '{}' to satisfy the documented size limits.",
                             issue.parameter));

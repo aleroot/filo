@@ -449,6 +449,29 @@ TEST_CASE("schema fingerprint ignores descriptions but tracks structure",
         ContainsSubstring(R"("description":{"type":"string"})"));
 }
 
+TEST_CASE("advisor names empty values instead of generic size limits",
+          "[agent][recovery]") {
+    // The shape Grok degenerates on: a string, or a bounded array of strings.
+    const core::tools::ToolDefinition paths{
+        .name = "paths",
+        .input_schema =
+            R"({"type":"object","properties":{"path":{"oneOf":[{"type":"string","minLength":1,"maxLength":8},{"type":"array","items":{"type":"string","minLength":1},"minItems":1}]}},"required":["path"],"additionalProperties":false})",
+    };
+    const auto advice = [&paths](std::string_view arguments) {
+        const auto hint = rec::advise(require_issue(paths, arguments), paths);
+        REQUIRE(hint.has_value());
+        return hint->instruction;
+    };
+
+    CHECK(advice(R"({"path":""})") == "'path' is empty; give it a value.");
+    CHECK(advice(R"({"path":[]})") == "'path' is empty; give it a value.");
+    CHECK(advice(R"({"path":["a",""]})")
+          == "'path[1]' is empty; give it a value or remove it.");
+    // Over-long values keep the size-limits wording.
+    CHECK(advice(R"({"path":"123456789"})")
+          == "Correct 'path' to satisfy the documented size limits.");
+}
+
 TEST_CASE("advisor suggests renames, removals, and repairs deterministically",
           "[agent][recovery]") {
     const auto definition = search_definition();
@@ -488,8 +511,7 @@ TEST_CASE("advisor suggests renames, removals, and repairs deterministically",
     const auto constrained = rec::advise(
         require_issue(bounded, R"({"path":""})"), bounded);
     REQUIRE(constrained.has_value());
-    CHECK(constrained->instruction
-          == "Correct 'path' to satisfy the documented size limits.");
+    CHECK(constrained->instruction == "'path' is empty; give it a value.");
 
     CHECK_FALSE(rec::advise(
         require_issue(definition, "{oops"), definition)

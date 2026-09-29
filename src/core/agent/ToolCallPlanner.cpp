@@ -3,6 +3,7 @@
 #include "SubagentOrchestrator.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../tools/read/ReadTypes.hpp"
+#include "../tools/read/SerializedPathRecovery.hpp"
 #include "../utils/JsonUtils.hpp"
 
 #include <filesystem>
@@ -54,12 +55,20 @@ PlannedToolCall plan_tool_call(const core::llm::ToolCall& call,
     } else if (is_read_tool(name)) {
         auto options = core::tools::read::parse_options(args);
         if (!options) accesses = all_tool_access();
-        else for (const auto& path : options->paths) {
-            if (path.contains("://")) continue;
-            // Directory listings also overlap writes to their descendants.
-            const auto resolved = context.resolve_path(path);
-            accesses.push_back(ToolAccess::file_access(ToolFileOperation::Read,
-                resolved, true));
+        else {
+            // ReadTool reads the recovered path when `path` holds serialized
+            // argument text; reserve it too so that read never overlaps a
+            // concurrent write to the file it will actually open.
+            auto paths = options->paths;
+            if (auto recovered = core::tools::read::recover_serialized_path(args))
+                paths.insert(paths.end(), recovered->paths.begin(), recovered->paths.end());
+            for (const auto& path : paths) {
+                if (path.contains("://")) continue;
+                // Directory listings also overlap writes to their descendants.
+                const auto resolved = context.resolve_path(path);
+                accesses.push_back(ToolAccess::file_access(ToolFileOperation::Read,
+                    resolved, true));
+            }
         }
     } else if (name == kFileSearch || name == kGrepSearch || name == kListDirectory) {
         accesses = single_file_access(ToolFileOperation::Search, context, args, "path", true);

@@ -4,6 +4,7 @@
 #include "core/tools/ToolSchema.hpp"
 #include "core/tools/read/ReaderProfile.hpp"
 #include "core/tools/read/ReadTypes.hpp"
+#include "core/tools/read/SerializedPathRecovery.hpp"
 #include "core/context/SteeringLoader.hpp"
 #include "core/tools/PathVisibilityToolDecorator.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
@@ -258,6 +259,105 @@ TEST_CASE("Unified read advertises and validates non-empty bounded paths", "[rea
     CHECK(core::tools::schema::validate_arguments(
               definition, R"({"path":"source.txt"})")
               .has_value());
+}
+TEST_CASE("Unified read recovers paths from serialized argument text", "[read][resources]") {
+    const auto recover = [](std::string_view arguments) {
+        return read::recover_serialized_path(arguments);
+    };
+    // Verbatim corruptions recorded from grammar-constrained tool samplers.
+    const auto window = recover(
+        R"({"path":"[  \"src/tui/MainApp.cpp\",  \"offset_line\\\": 9600,  \"  ]  \"limit_lines\\\": 450"})");
+    REQUIRE(window.has_value());
+    CHECK(window->paths == std::vector<std::string>{"src/tui/MainApp.cpp"});
+    CHECK(window->offset_line == 9600);
+    CHECK(window->limit_lines == 450);
+    CHECK(window->sliced);
+
+    const auto leading_noise = recover(
+        R"({"path":"[  \"  ]  \"src/tui/PromptComponents.hpp\",  \"offset_line\\\": 70,  \"  ]  \"limit_lines\\\": 50"})");
+    REQUIRE(leading_noise.has_value());
+    CHECK(leading_noise->paths == std::vector<std::string>{"src/tui/PromptComponents.hpp"});
+    CHECK(leading_noise->offset_line == 70);
+    CHECK(leading_noise->limit_lines == 50);
+
+    const auto bare = recover(
+        R"({"path":"[  \"src/core/config/ModelDefaultsPersistence.hpp\",  \"  ]"})");
+    REQUIRE(bare.has_value());
+    CHECK(bare->paths == std::vector<std::string>{"src/core/config/ModelDefaultsPersistence.hpp"});
+    CHECK_FALSE(bare->sliced);
+
+    // A corruption that parses as a JSON array is not a path list: its second
+    // entry is an argument fragment, recovered as a window instead.
+    const auto parses_as_array = recover(R"({"path":"[  \"src/app.cpp\",  \"offset_line\\\": 10,  \"  ]"})");
+    REQUIRE(parses_as_array.has_value());
+    CHECK(parses_as_array->paths == std::vector<std::string>{"src/app.cpp"});
+    CHECK(parses_as_array->offset_line == 10);
+
+    // A clean stringified path array becomes a real batched read.
+    const auto batch = recover(
+        R"({"path":"[\"Lampo/Layout.swift\", \"Lampo/Scheduler.swift\"]","view":"exact"})");
+    REQUIRE(batch.has_value());
+    CHECK(batch->paths == std::vector<std::string>{"Lampo/Layout.swift", "Lampo/Scheduler.swift"});
+
+    // Spaces, non-ASCII and URLs survive; explicit arguments beat embedded ones.
+    const auto spaced = recover(R"({"path":"[\"My Docs/résumé v2.md\"]","offset_line":3})");
+    REQUIRE(spaced.has_value());
+    CHECK(spaced->paths == std::vector<std::string>{"My Docs/résumé v2.md"});
+    CHECK(spaced->offset_line == 3);
+    const auto url = recover(R"({"path":"[  \"https://example.com/a.txt\",  \"  ]"})");
+    REQUIRE(url.has_value());
+    CHECK(url->paths == std::vector<std::string>{"https://example.com/a.txt"});
+    const auto explicit_window = recover(
+        R"({"path":"[  \"a.cpp\",  \"offset_line\\\": 9,  \"  ]","offset_line":2})");
+    REQUIRE(explicit_window.has_value());
+    CHECK(explicit_window->offset_line == 2);
+
+    // Recovered arguments pass the ordinary contract or nothing is recovered.
+    CHECK_FALSE(recover(R"({"path":"[\"a.cpp\",\"b.cpp\"]","offset_line":3})").has_value());
+    CHECK_FALSE(recover(R"({"path":"[  \"  ]"})").has_value());
+    // An overflowing embedded integer is ignored, never wrapped.
+    const auto overflow = recover(
+        R"({"path":"[  \"a.cpp\",  \"offset_line\\\": 99999999999999999999999999,  \"  ]"})");
+    REQUIRE(overflow.has_value());
+    CHECK_FALSE(overflow->sliced);
+    // An in-range integer the contract forbids fails like the well-formed call.
+    CHECK_FALSE(recover(
+        R"({"path":"[  \"a.cpp\",  \"limit_lines\\\": 20000,  \"  ]"})").has_value());
+
+    // Ordinary paths and arrays are never touched.
+    CHECK_FALSE(recover(R"({"path":"missing.txt"})").has_value());
+    CHECK_FALSE(recover(R"({"path":"[slug]/page.tsx"})").has_value());
+    CHECK_FALSE(recover(R"({"path":["a.cpp","b.cpp"]})").has_value());
+    CHECK_FALSE(recover("{oops").has_value());
+}
+TEST_CASE("Unified read executes recovered paths only when the literal path is absent", "[read][resources]") {
+    Fixture fixture;
+    std::filesystem::create_directories(fixture.root / "src");
+    fixture.write("src/one.txt", "first\n");
+    fixture.write("src/two.txt", "second\n");
+    ReadTool tool;
+
+    const auto recovered = tool.execute(R"({"path":"[  \"src/one.txt\",  \"  ]"})", fixture.context());
+    CHECK_THAT(recovered, ContainsSubstring("first"));
+    const auto batch = tool.execute(R"({"path":"[\"src/one.txt\",\"src/two.txt\"]"})", fixture.context());
+    CHECK_THAT(batch, ContainsSubstring("[Source 2]"));
+    CHECK_THAT(batch, ContainsSubstring("second"));
+
+    // A file literally named like serialized text is read as named.
+    fixture.write("two.txt", "second\n");
+    fixture.write(R"(["two.txt"])", "literal\n");
+    REQUIRE(std::filesystem::exists(fixture.root / R"(["two.txt"])"));
+    const auto literal = tool.execute(R"({"path":"[\"two.txt\"]"})", fixture.context());
+    CHECK_THAT(literal, ContainsSubstring("literal"));
+    CHECK(literal.find("second") == std::string::npos);
+
+    // Recovery never widens access: workspace enforcement still applies.
+    const auto outside = tool.execute(R"({"path":"[  \"/etc/passwd\",  \"  ]"})", fixture.context());
+    CHECK_THAT(outside, ContainsSubstring("error"));
+    CHECK(outside.find("root:") == std::string::npos);
+    const auto escape = tool.execute(R"({"path":"[  \"../../etc/hosts\",  \"  ]","view":"auto"})", fixture.context());
+    CHECK_THAT(escape, ContainsSubstring("error"));
+    CHECK(escape.find("localhost") == std::string::npos);
 }
 TEST_CASE("Unified read compact views reduce parent payload without losing exact recovery", "[read][resources]") {
     Fixture fixture;

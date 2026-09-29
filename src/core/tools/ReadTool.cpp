@@ -1,7 +1,10 @@
 #include "ReadTool.hpp"
 #include "ToolNames.hpp"
+#include "read/SerializedPathRecovery.hpp"
+#include "../logging/Logger.hpp"
 #include "../utils/JsonWriter.hpp"
 #include <algorithm>
+#include <filesystem>
 #include <optional>
 
 namespace core::tools {
@@ -27,6 +30,18 @@ void write_selection(core::utils::JsonWriter& writer, const read::Options& optio
     auto object = writer.object();
     if (!options.cell.empty()) writer.kv_str("cell", options.cell);
 }
+/// Serialized argument text in `path` is recovered only when no resource by
+/// that literal name exists: a real file always wins over the heuristic.
+std::optional<read::Options> recovered_read(const std::string& args, const read::Options& options,
+                                            const core::context::SessionContext& context) {
+    auto recovered = read::recover_serialized_path(args);
+    if (!recovered) return std::nullopt;
+    std::error_code ec;
+    if (std::filesystem::exists(context.resolve_path(options.paths.front()), ec)) return std::nullopt;
+    core::logging::info("read: recovered path '{}' from serialized argument text",
+                        recovered->paths.front());
+    return recovered;
+}
 }
 ToolDefinition ReadTool::get_definition() const {
     return {
@@ -47,6 +62,8 @@ std::string ReadTool::execute(const std::string& args, const core::context::Sess
 std::string ReadTool::execute(const std::string& args, const ToolInvocationContext& invocation) {
     auto parsed = read::parse_options(args);
     if (!parsed) return error_json(parsed.error());
+    if (auto recovered = recovered_read(args, *parsed, invocation.session_context))
+        parsed = std::move(*recovered);
     const auto& options = *parsed;
     if (invocation.cancellation_requested && invocation.cancellation_requested()) return error_json("Read cancelled.");
     if (uses_legacy_text_path(options))

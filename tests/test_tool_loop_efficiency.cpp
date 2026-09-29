@@ -289,3 +289,21 @@ TEST_CASE("tool deduplicator force-stops only after repeated read-only calls", "
     REQUIRE(finalized.stop_turn);
     REQUIRE_THAT(finalized.result, Catch::Matchers::ContainsSubstring("Stop calling tools"));
 }
+
+TEST_CASE("read planner reserves the path recovered from serialized text", "[agent][tools]") {
+    const auto context = test_support::make_session_context(
+        {.primary = "/tmp/filo-planner", .enforce = true});
+    const auto call = make_call("read-1", "read",
+        R"({"path":"[  \"src/app.cpp\",  \"offset_line\\\": 10,  \"  ]"})");
+    const auto planned = core::agent::plan_tool_call(call, context);
+
+    // The recovered read must serialize against a write to the real file.
+    const auto write = core::agent::ToolAccess::file_access(
+        core::agent::ToolFileOperation::Write,
+        context.resolve_path("src/app.cpp").generic_string());
+    bool conflicts = false;
+    for (const auto& access : planned.accesses) {
+        conflicts |= core::agent::tool_accesses_conflict(write, access);
+    }
+    REQUIRE(conflicts);
+}
