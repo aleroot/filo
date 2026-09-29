@@ -178,17 +178,17 @@ struct ProviderConfig {
 };
 
 struct SubagentConfig {
-    std::string description;
-    std::string prompt;
+    std::string description = {};
+    std::string prompt = {};
     std::string provider;
-    std::string model;
-    std::optional<core::llm::ResponseFormat> response_format;
+    std::string model = {};
+    std::optional<core::llm::ResponseFormat> response_format = {};
 
-    std::optional<std::vector<std::string>> allowed_tools;
-    std::optional<bool> use_allow_list;
-    std::optional<bool> allow_task_tool;
-    std::optional<bool> enabled;
-    std::optional<int>  max_steps;
+    std::optional<std::vector<std::string>> allowed_tools = {};
+    std::optional<bool> use_allow_list = {};
+    std::optional<bool> allow_task_tool = {};
+    std::optional<bool> enabled = {};
+    std::optional<int>  max_steps = {};
 };
 
 struct ToolPolicyConfig {

@@ -1102,6 +1102,7 @@ RunResult run(RunOptions opts) {
     if (opts.remote_mcp_server_enabled) {
         command_index.push_back(core::commands::CommandDescriptor{
             .name = "/remote",
+            .aliases = {},
             .description = "Open inbound MCP client and tool activity.",
             .accepts_arguments = false,
         });
@@ -1172,7 +1173,7 @@ RunResult run(RunOptions opts) {
         std::string current_value;
         std::string help_text;
         std::vector<tui::OptionPickerRow> options;
-        std::function<std::string(std::string_view)> on_select;
+        std::function<std::string(std::string_view)> on_select = {};
         bool prefill_input = false;
     };
     CommandOptionPickerState command_option_picker_state;
@@ -1626,6 +1627,7 @@ RunResult run(RunOptions opts) {
                 .manual_model_name = manual_model_name,
                 .router_policy = active_router_policy,
             },
+            .previous_model_selection = std::nullopt,
             .yolo_enabled = startup_yolo_enabled,
             .permission_rules = {},
             .goal = startup_data.has_value() ? startup_data->goal : std::nullopt,
@@ -2444,7 +2446,9 @@ RunResult run(RunOptions opts) {
                         .mode = ModelSelectionMode::Manual,
                         .manual_provider_name = data.provider,
                         .manual_model_name = data.model,
+                        .router_policy = {},
                     },
+                    .previous_model_selection = std::nullopt,
                     .yolo_enabled = startup_yolo_enabled,
                     .permission_rules = {},
                     .goal = data.goal,
@@ -2693,6 +2697,7 @@ RunResult run(RunOptions opts) {
                             view.rows.push_back(ReviewGroupRow{
                                 .label = path,
                                 .state = ReviewGroupRow::State::Skipped,
+                                .elapsed = {},
                                 .note = "diff too large",
                             });
                         }
@@ -2705,6 +2710,8 @@ RunResult run(RunOptions opts) {
                         ReviewGroupRow row{
                             .label = progress.label,
                             .state = ReviewGroupRow::State::Running,
+                            .elapsed = {},
+                            .note = {},
                             .group_index = progress.group_index,
                             .started_at = now,
                         };
@@ -4995,6 +5002,7 @@ RunResult run(RunOptions opts) {
                     core::context::ActiveMention{
                         .replace_begin = cursor,
                         .replace_end = cursor,
+                        .raw_path = {},
                     },
                     mention_path);
                 input_text = completed.text;
@@ -5630,6 +5638,8 @@ RunResult run(RunOptions opts) {
                 .previous_model_selection = previous_model_selection,
                 .yolo_enabled = startup_yolo_enabled,
                 .permission_rules = {},
+                .goal = std::nullopt,
+                .goal_graph = std::nullopt,
             },
             *next_agent,
             std::move(next_messages),
@@ -6112,6 +6122,7 @@ RunResult run(RunOptions opts) {
             .clear_input_fn = [] {},
             .append_history_fn = append_history,
             .agent = agent,
+            .session_stats_registry = session_stats_registry,
         };
         bind_memory_commands(ctx);
         cmd_executor.try_execute(ctx.text, ctx);
@@ -6134,6 +6145,7 @@ RunResult run(RunOptions opts) {
             .current_value = std::move(menu.current),
             .help_text = menu.help.empty() ? "↑/↓ select · Enter apply/open · Esc close" : std::move(menu.help),
             .options = std::move(menu.options),
+            .on_select = {},
         };
         next.on_select = [&, page](std::string_view value) -> std::string {
             if (value == "page:overview") open_memory_picker(tui::MemoryMenuPage::Overview, {});
@@ -7359,6 +7371,7 @@ RunResult run(RunOptions opts) {
                 .show_reasoning = ui_show_reasoning,
                 .tool_result_preview_max_lines = kToolResultPreviewMaxLines,
                 // scroll_pos set by component
+                .scroll_anchor = nullptr,
                 .activity_elapsed = [&current_runtime](std::string_view message_id) {
                     const auto elapsed =
                         current_runtime->activity_timers().elapsed(message_id);

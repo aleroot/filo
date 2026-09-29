@@ -11,7 +11,7 @@
 namespace core::session {
 
 struct TodoDraft {
-    std::string id;
+    std::string id = {};
     std::string text;
     TodoStatus status = TodoStatus::Pending;
 };

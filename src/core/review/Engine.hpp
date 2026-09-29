@@ -15,8 +15,8 @@ class Engine {
 public:
     struct Options {
         std::unique_ptr<TurnRunner> runner;
-        std::function<bool()> cancellation_requested;
-        std::function<void(const Progress&)> on_progress;
+        std::function<bool()> cancellation_requested = {};
+        std::function<void(const Progress&)> on_progress = {};
         GrouperConfig grouper{};
         std::size_t max_parallel_groups = kMaxParallelReviewGroups;
     };

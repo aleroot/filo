@@ -26,7 +26,7 @@ struct QuestionItem {
     std::string header;
     std::vector<QuestionOption> options;
     bool multi_select = false;
-    std::string body;
+    std::string body = {};
 };
 
 /**

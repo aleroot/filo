@@ -13,8 +13,8 @@
 namespace tui {
 
 struct RewindPickerOption {
-    std::string label;
-    std::string description;
+    std::string label = {};
+    std::string description = {};
     enum class Action {
         RewindToMessage,
         SummarizeAndCompact,
@@ -22,13 +22,13 @@ struct RewindPickerOption {
     } action = Action::Cancel;
     std::size_t history_index = 0;
     std::size_t user_ordinal = 0;
-    std::string prompt;
+    std::string prompt = {};
 };
 
 struct RewindPickerState {
     bool active = false;
     int selected = 0;
-    std::vector<RewindPickerOption> options;
+    std::vector<RewindPickerOption> options = {};
 };
 
 struct RewindPickerEventResult {

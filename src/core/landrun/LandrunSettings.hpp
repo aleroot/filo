@@ -21,7 +21,7 @@ enum class LandrunCapability {
 
 struct LandrunStartupConfiguration {
     LandrunMode mode{LandrunMode::off};
-    std::vector<std::filesystem::path> excluded_paths;
+    std::vector<std::filesystem::path> excluded_paths = {};
 };
 
 /** Process-wide product setting. Tests and library users remain opt-in. */

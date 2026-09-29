@@ -63,8 +63,9 @@ QuestionDialogPromise QuestionDialogController::open(
         QuestionDialogItem item{
             .question = std::move(question.question),
             .header = std::move(question.header),
+            .options = {},
             .multi_select = question.multi_select,
-            .body = std::move(question.body),
+            .body = std::move(question.body)
         };
         item.options.reserve(question.options.size());
         for (auto& option : question.options) {

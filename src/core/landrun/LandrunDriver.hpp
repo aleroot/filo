@@ -15,7 +15,7 @@ struct LandrunProbe {
 
 struct LandrunResult {
     bool success{false};
-    std::string detail;
+    std::string detail = {};
 };
 
 /** Applies an irreversible policy in the fresh landrun helper process. */

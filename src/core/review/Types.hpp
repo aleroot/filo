@@ -72,13 +72,13 @@ struct LineRange {
 
 struct FileChange {
     std::string path;
-    std::string old_path;
+    std::string old_path = {};
     FileChangeKind kind = FileChangeKind::Modified;
-    std::string patch;
+    std::string patch = {};
     int added_lines = 0;
     int deleted_lines = 0;
     bool untracked = false;
-    std::vector<LineRange> hunks;
+    std::vector<LineRange> hunks = {};
 
     [[nodiscard]] int changed_lines() const noexcept {
         return added_lines + deleted_lines;
@@ -129,21 +129,21 @@ struct RiskItem {
 
 struct SteeringReference {
     std::string source_id;
-    std::string source_label;
-    std::string rule_excerpt;
+    std::string source_label = {};
+    std::string rule_excerpt = {};
 };
 
 struct Finding {
     std::string title;
-    std::string body;
-    std::optional<int> priority;
-    std::optional<Severity> severity;
-    std::optional<Category> category;
-    std::optional<double> confidence;
+    std::string body = {};
+    std::optional<int> priority = {};
+    std::optional<Severity> severity = {};
+    std::optional<Category> category = {};
+    std::optional<double> confidence = {};
     std::string absolute_file_path;
     int line_start = 0;
     int line_end = 0;
-    std::vector<SteeringReference> steering_references;
+    std::vector<SteeringReference> steering_references = {};
 };
 
 struct FailedGroup {
@@ -168,7 +168,7 @@ struct Report {
 struct ReviewSteeringSource {
     std::string id;
     std::string label;
-    std::string identity;
+    std::string identity = {};
     std::string content;
     std::vector<std::string> applies_to;
 };
@@ -200,7 +200,7 @@ struct Progress {
     ProgressPhase phase = ProgressPhase::GroupStarted;
     std::size_t group_index = 0; ///< 1-based; 0 for Planned.
     std::size_t group_total = 0;
-    std::string label;
+    std::string label = {};
     int files = 0;
     int changed_lines = 0;
     int findings = 0;
@@ -208,13 +208,13 @@ struct Progress {
     int skipped_files = 0;
     int risk_passes = 0;
     /// Planned/Finished: paths skipped because the diff exceeded the budget.
-    std::vector<std::string> skipped_paths;
+    std::vector<std::string> skipped_paths = {};
     /// Finished: units that failed but did not stop the campaign.
     int failed_groups = 0;
     /// Finished only: how the campaign ended.
     bool interrupted = false;
     /// GroupFailed: why this unit failed. Finished: why the campaign failed.
-    std::string failure;
+    std::string failure = {};
 };
 
 struct CampaignInput {

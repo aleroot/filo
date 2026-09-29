@@ -46,7 +46,7 @@ struct ToolInvocationContext {
 struct ToolParameter {
     std::string name;         ///< Parameter key — must be a valid JSON object key
     std::string type;         ///< JSON Schema type token (e.g. @c "string")
-    std::string description;  ///< Human-readable description shown to the LLM / UI
+    std::string description = {};  ///< Human-readable description shown to the LLM / UI
     bool        required = false; ///< If true, included in the JSON Schema @c required array
     /// Optional full JSON Schema object for this parameter. If set, serializers
     /// should emit it verbatim and ignore the convenience fields below.

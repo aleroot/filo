@@ -8,8 +8,8 @@
 namespace core::llm {
 
 struct ModelCatalogSelection {
-    std::string model;
-    std::string error;
+    std::string model = {};
+    std::string error = {};
 
     [[nodiscard]] bool ok() const noexcept {
         return !model.empty() && error.empty();

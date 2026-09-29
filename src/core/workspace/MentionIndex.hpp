@@ -17,8 +17,8 @@ namespace core::workspace {
 struct MentionSuggestion {
     std::string display_path;
     std::string insertion_text;
-    std::string search_path;
-    std::string search_basename;
+    std::string search_path = {};
+    std::string search_basename = {};
     int depth = 0;
     bool is_directory = false;
 };

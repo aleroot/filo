@@ -101,7 +101,12 @@ SessionPickerEventResult handle_session_picker_event(
         return {};
     }
 
-    SessionPickerEventResult result{.handled = true};
+    SessionPickerEventResult result{
+        .handled = true,
+        .action = SessionPickerAction::None,
+        .filtered_index = std::nullopt,
+        .rename_name = {},
+    };
 
     // ── Rename mode ──────────────────────────────────────────────────────────
     if (state.mode == SessionPickerMode::Rename) {

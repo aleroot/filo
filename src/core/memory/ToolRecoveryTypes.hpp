@@ -28,7 +28,7 @@ inline constexpr std::size_t kMaxHintChars = 160;
  */
 struct RecoveryKey {
     std::string tool;
-    std::string schema_fingerprint;
+    std::string schema_fingerprint = {};
     std::string issue_code;
     std::string parameter;
 

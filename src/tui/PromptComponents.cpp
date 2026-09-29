@@ -1439,6 +1439,7 @@ Element render_session_picker_panel(
             }
             rows.push_back(RenderRow{
                 .is_header = false,
+                .header_label = {},
                 .filtered_index = static_cast<int>(idx),
             });
         }

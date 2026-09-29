@@ -17,7 +17,7 @@ struct MemoryReviewInput {
     std::vector<core::llm::Message> history;
     core::context::SessionContext session_context;
     MemoryThreadPolicy thread_policy;
-    core::llm::protocols::RateLimitInfo rate_limit;
+    core::llm::protocols::RateLimitInfo rate_limit = {};
 };
 
 struct MemoryReviewResult {
@@ -27,7 +27,7 @@ struct MemoryReviewResult {
     std::size_t memories_stored = 0;
     std::size_t memories_cleaned = 0;
     std::size_t skill_drafts_written = 0;
-    std::string message;
+    std::string message = {};
 };
 
 class MemoryBackgroundService {

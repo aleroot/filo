@@ -44,13 +44,13 @@ struct GoalStatusSnapshot {
 class GoalEngine {
 public:
     struct Hooks {
-        CompletionFn complete;
+        CompletionFn complete = {};
         RecipeRunner run_recipe;
         CommandRunner run_command;
         std::function<WorkOutcome(const Node&, std::string_view)> run_work;
         std::function<bool(const Node&)> await_gate;
-        std::function<void(const GoalEvent&)> on_event;      ///< must be thread-safe
-        std::function<bool()> cancellation_requested;
+        std::function<void(const GoalEvent&)> on_event = {};    ///< must be thread-safe
+        std::function<bool()> cancellation_requested = {};
     };
 
     explicit GoalEngine(Hooks hooks);

@@ -17,7 +17,7 @@ struct MentionExpansionOptions {
 struct ActiveMention {
     std::size_t replace_begin = 0;
     std::size_t replace_end = 0;
-    std::string raw_path;
+    std::string raw_path = {};
     bool quoted = false;
 };
 

@@ -21,7 +21,7 @@ namespace core::scm {
 namespace {
 
 struct CommandResult {
-  std::string output;
+  std::string output = {};
   int exit_code = -1;
   bool truncated = false;
 };

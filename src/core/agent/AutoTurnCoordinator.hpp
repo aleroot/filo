@@ -78,7 +78,7 @@ enum class WorkspaceWriterState {
 
 struct AutoToolObservation {
   std::string_view name;
-  std::string_view arguments;
+  std::string_view arguments = {};
   std::string_view result;
   bool succeeded = false;
   bool mutation_hint = false;

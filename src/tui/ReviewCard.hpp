@@ -20,14 +20,14 @@ struct ReviewGroupRow {
         Failed,    ///< Sent to the model, but no usable review came back.
     };
 
-    std::string label;
+    std::string label = {};
     State state = State::Running;
     int findings = 0;
     int blocking = 0;
-    std::string elapsed;
+    std::string elapsed = {};
     /// Why this unit was skipped or failed. Shown verbatim, so it must stay a
     /// short single line: "diff too large", "not reviewed", a provider error.
-    std::string note;
+    std::string note = {};
     /// Stable identity for concurrent review progress events. Zero is reserved
     /// for synthetic skipped rows that have no engine group.
     std::size_t group_index = 0;

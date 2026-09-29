@@ -32,10 +32,10 @@ namespace core::landrun {
  */
 struct LandrunPolicy {
     LandrunMode mode{LandrunMode::off};
-    std::vector<std::filesystem::path> readable_roots;
-    std::vector<std::filesystem::path> writable_roots;
-    std::vector<std::filesystem::path> protected_read_paths;
-    std::vector<std::filesystem::path> protected_write_paths;
+    std::vector<std::filesystem::path> readable_roots = {};
+    std::vector<std::filesystem::path> writable_roots = {};
+    std::vector<std::filesystem::path> protected_read_paths = {};
+    std::vector<std::filesystem::path> protected_write_paths = {};
     bool allow_network{false};
 
     /// The user asked for a confined process tree (`--sandbox`).

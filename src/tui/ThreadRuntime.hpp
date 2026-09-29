@@ -31,9 +31,9 @@ enum class ModelSelectionMode {
 
 struct ModelSelectionSnapshot {
     ModelSelectionMode mode = ModelSelectionMode::Manual;
-    std::string manual_provider_name;
-    std::string manual_model_name;
-    std::string router_policy;
+    std::string manual_provider_name = {};
+    std::string manual_model_name = {};
+    std::string router_policy = {};
 
     bool operator==(const ModelSelectionSnapshot&) const = default;
 };
@@ -46,7 +46,7 @@ enum class TurnCompletionStatus {
 
 struct PendingAgentTurn {
     std::string text;
-    core::agent::Agent::TurnCallbacks callbacks;
+    core::agent::Agent::TurnCallbacks callbacks = {};
 };
 
 /// Parked composer contents for a thread that is not the visible TUI page.
@@ -86,24 +86,24 @@ struct ThreadRuntimeMetadata {
     /// User-facing label for this live runtime. This is intentionally not
     /// persisted as the session name: threads and sessions have independent
     /// identities and lifecycles.
-    std::string thread_name;
+    std::string thread_name = {};
     /// True when `thread_name` was auto-derived from the workspace directory
     /// name rather than chosen by the user. Auto-derived names follow the
     /// owning thread's primary workspace when it changes; user-assigned names
     /// never do.
     bool auto_thread_name = false;
     /// Name of the persisted conversation currently owned by this thread.
-    std::string session_name;
+    std::string session_name = {};
     std::string created_at;
-    std::string file_path;
-    std::string provider;
-    std::string model;
-    ModelSelectionSnapshot model_selection;
-    std::optional<ModelSelectionSnapshot> previous_model_selection;
+    std::string file_path = {};
+    std::string provider = {};
+    std::string model = {};
+    ModelSelectionSnapshot model_selection = {};
+    std::optional<ModelSelectionSnapshot> previous_model_selection = std::nullopt;
     bool yolo_enabled = false;
-    std::unordered_set<std::string> permission_rules;
-    std::optional<core::session::SessionGoal> goal;
-    std::optional<core::session::SessionGoalGraph> goal_graph;
+    std::unordered_set<std::string> permission_rules = {};
+    std::optional<core::session::SessionGoal> goal = std::nullopt;
+    std::optional<core::session::SessionGoalGraph> goal_graph = std::nullopt;
 };
 
 // Owns every mutable resource whose lifetime must follow a conversation rather

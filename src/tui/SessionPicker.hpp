@@ -34,12 +34,12 @@ struct SessionPickerState {
     SessionPickerResource resource = SessionPickerResource::SavedSessions;
     SessionPickerMode mode = SessionPickerMode::Browse;
     int selected = 0;
-    std::vector<core::session::SessionInfo> sessions;   ///< full catalogue
-    std::vector<core::session::SessionInfo> filtered;   ///< after query
-    std::string query;
-    std::string rename_buffer;
-    std::string status_message;
-    std::string current_session_id;
+    std::vector<core::session::SessionInfo> sessions = {};   ///< full catalogue
+    std::vector<core::session::SessionInfo> filtered = {};   ///< after query
+    std::string query = {};
+    std::string rename_buffer = {};
+    std::string status_message = {};
+    std::string current_session_id = {};
 };
 
 enum class SessionPickerAction {
@@ -56,8 +56,8 @@ struct SessionPickerEventResult {
     bool handled = false;
     SessionPickerAction action = SessionPickerAction::None;
     /// Index into state.filtered for Open/Delete/CloseThread/RenameCommit.
-    std::optional<int> filtered_index;
-    std::string rename_name;
+    std::optional<int> filtered_index = std::nullopt;
+    std::string rename_name = {};
 };
 
 /// Populate the persisted-session browser.

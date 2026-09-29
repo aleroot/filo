@@ -169,7 +169,7 @@ struct SteeringFile {
     bool enabled = true;
     /// Workspace root this file was discovered under. Lets the UI attribute a
     /// file to its project instead of implying everything came from the primary.
-    std::filesystem::path root;
+    std::filesystem::path root = {};
 };
 
 struct SteeringLoadResult {

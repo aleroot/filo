@@ -39,7 +39,7 @@ private:
         std::string key;
         bool duplicate = false;
         std::size_t original_index = 0;
-        std::optional<std::string> result;
+        std::optional<std::string> result = {};
     };
 
     std::vector<StepEntry> step_entries_;

@@ -24,15 +24,15 @@ struct MemoryEntry {
     std::string id;
     std::string content;
     std::string scope = "global";
-    std::vector<std::string> tags;
+    std::vector<std::string> tags = {};
     std::string source = "manual";
-    std::string created_at;
-    std::string updated_at;
-    std::string last_used_at;
+    std::string created_at = {};
+    std::string updated_at = {};
+    std::string last_used_at = {};
     int use_count = 0;
     bool archived = false;
-    std::string project_root;
-    std::string session_id;
+    std::string project_root = {};
+    std::string session_id = {};
 };
 
 struct MemoryState {
@@ -46,7 +46,7 @@ struct MemoryState {
 struct MemoryMutationResult {
     bool ok = false;
     std::string message;
-    std::optional<MemoryEntry> entry;
+    std::optional<MemoryEntry> entry = {};
 };
 
 struct MemoryFileResult {

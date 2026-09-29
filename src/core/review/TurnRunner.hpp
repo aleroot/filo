@@ -23,7 +23,7 @@ public:
         /// Empty means no tools. A non-empty list is the exact allow-set
         /// (read-only tools for large groups). Never leave this empty while
         /// intending "all tools" — review must not be able to edit the tree.
-        std::vector<std::string> allowed_tools;
+        std::vector<std::string> allowed_tools = {};
     };
 
     struct Response {

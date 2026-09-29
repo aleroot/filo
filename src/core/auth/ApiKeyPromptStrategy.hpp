@@ -12,7 +12,7 @@ namespace core::auth {
 /** A user-visible choice in an interactive authentication flow. */
 struct AuthMenuOption {
     std::string label;
-    std::string description;
+    std::string description = {};
 };
 
 /** Provider configuration written when an API-key profile is selected. */
@@ -26,13 +26,13 @@ struct ApiKeyProviderSeed {
  * endpoints, plans, or regions.
  */
 struct ApiKeyLoginProfile {
-    AuthMenuOption selection;
+    AuthMenuOption selection = {};
     std::string provider_name;
     std::string default_model;
-    std::vector<ApiKeyProviderSeed> additional_provider_seeds;
+    std::vector<ApiKeyProviderSeed> additional_provider_seeds = {};
     std::string key_prompt = "API key:";
-    std::vector<std::string> accepted_key_prefixes;
-    std::string invalid_key_message;
+    std::vector<std::string> accepted_key_prefixes = {};
+    std::string invalid_key_message = {};
 };
 
 /** Persist an API-key profile as the active default provider. */
@@ -45,17 +45,17 @@ struct ApiKeyPromptStrategySpec {
     /// Primary command identifier (`filo --auth <id>`).
     std::string login_provider;
     /// Alternate command identifiers accepted for the same login.
-    std::vector<std::string> login_aliases;
+    std::vector<std::string> login_aliases = {};
     std::string display_name;
     /// Shown before the prompts; defaults to the standard paste-a-key text.
-    std::string instructions;
+    std::string instructions = {};
     /// One entry per compatible endpoint, plan, or region. More than one entry
     /// presents a selector menu before the secret prompt.
     std::vector<ApiKeyLoginProfile> profiles;
     /// Environment variable (or short phrase) named in the post-login hint.
-    std::string env_var;
+    std::string env_var = {};
     /// Extra post-login hint.
-    std::string docs_hint;
+    std::string docs_hint = {};
 };
 
 /**
@@ -93,7 +93,7 @@ struct CompositeAuthStrategySpec {
     /// Primary command identifier (`filo --auth <id>`).
     std::string login_provider;
     /// Alternate command identifiers accepted for the same login.
-    std::vector<std::string> login_aliases;
+    std::vector<std::string> login_aliases = {};
     std::string display_name;
     std::string instructions;
     std::vector<AuthStrategyChoice> choices;

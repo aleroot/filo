@@ -11,8 +11,8 @@ enum class TurnCompletionAction { Complete, Continue, Fail };
 struct TurnCompletionResult {
   TurnCompletionAction action = TurnCompletionAction::Complete;
   bool quality_gate_satisfied = false;
-  std::string status;
-  std::string message;
+  std::string status = {};
+  std::string message = {};
 };
 
 } // namespace core::session

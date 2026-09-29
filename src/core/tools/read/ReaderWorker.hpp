@@ -19,7 +19,7 @@ struct Citation {
 };
 struct Answer {
     std::string text;
-    std::vector<Citation> citations;
+    std::vector<Citation> citations = {};
     std::string model;
     std::size_t input_bytes = 0;
     bool partial = false;

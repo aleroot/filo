@@ -14,7 +14,7 @@ struct FencedCodeBlock {
     std::size_t first_line = 0;
     std::size_t last_line = 0;
     std::string language;
-    std::string info;
+    std::string info = {};
     std::string source;
 };
 

@@ -31,7 +31,7 @@ struct ToolAccess {
     };
 
     Kind kind = Kind::None;
-    ToolFileAccess file;
+    ToolFileAccess file = {};
 
     [[nodiscard]] static ToolAccess none() noexcept {
         return {};

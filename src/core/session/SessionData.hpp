@@ -36,10 +36,10 @@ enum class GoalStatus {
 struct SessionGoal {
     std::string objective;
     GoalStatus status = GoalStatus::Active;
-    std::string note;
-    std::string created_at;
-    std::string updated_at;
-    std::string completed_at;
+    std::string note = {};
+    std::string created_at = {};
+    std::string updated_at = {};
+    std::string completed_at = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -84,9 +84,9 @@ struct SessionTodoItem {
     std::string id;
     std::string text;
     TodoStatus status = TodoStatus::Pending;
-    std::string created_at;
-    std::string updated_at;
-    std::string completed_at;
+    std::string created_at = {};
+    std::string updated_at = {};
+    std::string completed_at = {};
 };
 
 // ---------------------------------------------------------------------------

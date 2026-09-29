@@ -40,7 +40,7 @@ public:
   struct ReviewRequest {
     std::string_view objective;
     std::string_view candidate;
-    std::string_view evidence;
+    std::string_view evidence = {};
     // A turn that changed nothing cannot leave the workspace broken, so an
     // unavailable reviewer degrades instead of discarding usable work.
     bool mutated = false;

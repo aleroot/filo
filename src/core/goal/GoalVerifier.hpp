@@ -26,7 +26,7 @@ namespace core::goal {
 
 struct CommandResult {
     int exit_code = -1;
-    std::string output; ///< combined stdout+stderr, clamped
+    std::string output = {}; ///< combined stdout+stderr, clamped
 };
 
 struct RecipeResult {
@@ -50,7 +50,7 @@ struct Verdict {
     bool passed = false;
     bool deterministic = false; ///< true when produced by an executed command
     std::string reason;         ///< short human-readable explanation
-    std::string evidence;       ///< clamped tool output the verdict is based on
+    std::string evidence = {};       ///< clamped tool output the verdict is based on
 };
 
 class IVerifier {

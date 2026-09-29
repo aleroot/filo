@@ -31,7 +31,7 @@ enum class RemoteToolStatus {
 struct RemoteClientActivity {
     std::string session_id;
     std::string name{"Client"};
-    std::string version;
+    std::string version = {};
     bool ready = false;
     bool closed = false;
     std::chrono::steady_clock::time_point last_seen{};
@@ -39,10 +39,10 @@ struct RemoteClientActivity {
 
 struct RemoteToolActivity {
     std::uint64_t id = 0;
-    std::string session_id;
-    std::string tool_name;
-    std::string arguments;
-    std::string result;
+    std::string session_id = {};
+    std::string tool_name = {};
+    std::string arguments = {};
+    std::string result = {};
     RemoteToolStatus status{RemoteToolStatus::running};
     std::chrono::steady_clock::time_point started_at{};
     std::chrono::steady_clock::time_point finished_at{};
@@ -55,10 +55,10 @@ struct RemoteToolActivity {
 
 struct RemoteActivitySnapshot {
     RemoteServerState server_state{RemoteServerState::disabled};
-    std::string server_detail;
-    std::vector<RemoteClientActivity> clients;
+    std::string server_detail = {};
+    std::vector<RemoteClientActivity> clients = {};
     // Newest activity first.
-    std::vector<RemoteToolActivity> activities;
+    std::vector<RemoteToolActivity> activities = {};
     std::size_t unacknowledged_errors = 0;
 };
 

@@ -44,20 +44,20 @@ public:
     static constexpr std::ptrdiff_t kMaxParallelReadOnlySubagents = 4;
 
     struct RunContext {
-        std::string active_provider_name;
+        std::string active_provider_name = {};
         std::string active_model;
         std::string parent_mode;
         const core::context::SessionContext& session_context;
         std::function<bool(const std::string&, const std::string&)> permission_check;
-        std::string parent_tool_call_id;
-        std::function<void(const SubagentEvent&)> on_subagent_event;
+        std::string parent_tool_call_id = {};
+        std::function<void(const SubagentEvent&)> on_subagent_event = {};
         /// Polled by DelegatedAgentRunner while the worker runs; returning
         /// true cancels the delegated task (e.g. parent agent stop request).
-        std::function<bool()> cancellation_requested;
+        std::function<bool()> cancellation_requested = {};
         /// Shared memory substrate of the parent agent. Subagents learn into
         /// the same stores rather than constructing a second copy.
-        std::shared_ptr<core::memory::MemorySystem> memory_system;
-        std::string effort;
+        std::shared_ptr<core::memory::MemorySystem> memory_system = {};
+        std::string effort = {};
     };
 
     struct ExecutionRequest {
@@ -65,11 +65,11 @@ public:
         std::string_view worker_label = "worker";
         std::string_view parent_mode;
         std::shared_ptr<core::llm::LLMProvider> inherited_provider = {};
-        std::string_view inherited_provider_name;
+        std::string_view inherited_provider_name = {};
         std::string_view inherited_model;
         bool prefer_inherited_provider = false;
-        std::string_view provider_override;
-        std::string_view model_override;
+        std::string_view provider_override = {};
+        std::string_view model_override = {};
         std::optional<int> max_steps_override = std::nullopt;
     };
 
@@ -118,7 +118,7 @@ private:
         std::string prompt;
         std::string provider_override;
         std::string model_override;
-        std::optional<core::llm::ResponseFormat> response_format;
+        std::optional<core::llm::ResponseFormat> response_format = {};
         std::unordered_set<std::string> allowed_tools;
         bool use_allow_list = false;
         bool allow_task_tool = false;

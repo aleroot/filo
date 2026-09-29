@@ -155,7 +155,8 @@ LandrunResult LinuxLandlockDriver::apply(const LandrunPolicy& policy) const {
     }
 
     const std::uint64_t handled = handled_rights_for_abi(abi);
-    landlock_ruleset_attr ruleset{.handled_access_fs = handled};
+    landlock_ruleset_attr ruleset{};
+    ruleset.handled_access_fs = handled;
 #if defined(LANDLOCK_SCOPE_SIGNAL) && defined(LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET)
     ruleset.scoped = LANDLOCK_SCOPE_SIGNAL | LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET;
 #endif

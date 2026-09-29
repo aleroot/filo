@@ -45,16 +45,16 @@ struct RouteRule {
     std::string name;
     int priority = 100;
     Strategy strategy = Strategy::Fallback;
-    RuleCondition when;
+    RuleCondition when = {};
     std::vector<RouteCandidate> candidates;
 };
 
 struct PolicyDefinition {
     std::string name;
-    std::string description;
+    std::string description = {};
     Strategy strategy = Strategy::Fallback;
     std::vector<RouteCandidate> defaults;
-    std::vector<RouteRule> rules; // kept sorted by (priority, name) after construction
+    std::vector<RouteRule> rules = {}; // kept sorted by (priority, name) after construction
 };
 
 // Router-level guardrails evaluated by RouterProvider before dispatching a

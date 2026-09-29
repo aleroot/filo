@@ -231,7 +231,7 @@ public:
         int32_t api_calls_success;
         core::net::NetworkTraffic network_traffic;
         std::vector<PerModelSnapshot> per_model;
-        std::vector<PerToolSnapshot> per_tool;
+        std::vector<PerToolSnapshot> per_tool = {};
     };
 
     [[nodiscard]] Snapshot snapshot() const {

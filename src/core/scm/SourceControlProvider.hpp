@@ -22,7 +22,7 @@ struct RepositorySnapshot {
   std::filesystem::path root;
   std::string branch;
   std::string revision;
-  std::vector<StatusItem> changes;
+  std::vector<StatusItem> changes = {};
   std::uint64_t status_fingerprint = 0;
 };
 

@@ -19,14 +19,14 @@ namespace core::budget {
 
 struct BudgetRecordContext {
     std::string session_id;
-    std::string turn_id;
-    std::string request_id;
-    std::string parent_id;
+    std::string turn_id = {};
+    std::string request_id = {};
+    std::string parent_id = {};
     std::string actor = "agent";
-    std::string provider;
+    std::string provider = {};
     std::string model;
     TokenLedgerSource source = TokenLedgerSource::ModelCall;
-    std::string note;
+    std::string note = {};
 };
 
 // BudgetTracker is the process-wide accounting facade. TokenLedger is owned

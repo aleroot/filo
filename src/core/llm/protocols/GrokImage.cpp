@@ -370,7 +370,7 @@ enum class LoadKind { Ok, Unreadable, TooLarge };
 
 struct LoadedBytes {
     LoadKind kind = LoadKind::Unreadable;
-    std::string bytes;
+    std::string bytes = {};
 };
 
 [[nodiscard]] LoadedBytes load_image_file(const std::filesystem::path& path) {
@@ -391,8 +391,8 @@ struct LoadedBytes {
 
 struct InspectResult {
     bool keep = true;
-    std::string mime;
-    std::string placeholder_text;
+    std::string mime = {};
+    std::string placeholder_text = {};
 };
 
 [[nodiscard]] InspectResult inspect_bytes(std::string_view bytes, std::string_view path) {

@@ -17,8 +17,8 @@ namespace tui {
 
 struct CodeBlockRunnerItem {
     core::code::FencedCodeBlock block;
-    std::optional<core::code::ExecutionPlan> plan;
-    std::string unavailable_reason;
+    std::optional<core::code::ExecutionPlan> plan = std::nullopt;
+    std::string unavailable_reason = {};
 };
 
 enum class CodeBlockRunnerMode {
@@ -58,8 +58,8 @@ struct CodeBlockRunnerNotice {
 
 struct CodeBlockRunnerOutcome {
     bool handled = false;
-    std::optional<CodeBlockRunnerNotice> notice;
-    std::optional<std::filesystem::path> attachment;
+    std::optional<CodeBlockRunnerNotice> notice = std::nullopt;
+    std::optional<std::filesystem::path> attachment = std::nullopt;
 };
 
 class CodeBlockRunnerController {

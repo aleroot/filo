@@ -42,36 +42,36 @@ public:
 
     struct Request {
         std::shared_ptr<core::llm::LLMProvider> provider;
-        std::string provider_name;
+        std::string provider_name = {};
         core::tools::ToolManager& tool_manager;
         core::context::SessionContext session_context;
         std::string mode = "BUILD";
         std::string model;
-        std::optional<core::llm::ResponseFormat> response_format;
-        std::vector<std::string> allowed_tools;
+        std::optional<core::llm::ResponseFormat> response_format = {};
+        std::vector<std::string> allowed_tools = {};
         int max_steps = 0;
         std::string prompt;
-        std::string worker_name;
-        std::string worker_description;
-        std::string worker_prompt;
-        std::string task_id;
-        std::string task_description;
-        std::string parent_tool_call_id;
-        std::optional<ResumeState> resume_state;
+        std::string worker_name = {};
+        std::string worker_description = {};
+        std::string worker_prompt = {};
+        std::string task_id = {};
+        std::string task_description = {};
+        std::string parent_tool_call_id = {};
+        std::optional<ResumeState> resume_state = {};
         /// Shared metrics registry of the parent execution root; subagent
         /// accounting flows into it instead of a private registry.
-        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
+        std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {};
         /// Repository lease scope shared with the parent agent.
-        std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases;
+        std::shared_ptr<core::scm::WorkspaceLeaseRegistry> workspace_leases = {};
         /// Parent memory substrate. When empty the runner builds one from
         /// config so standalone TaskService callers keep working.
-        std::shared_ptr<core::memory::MemorySystem> memory_system;
+        std::shared_ptr<core::memory::MemorySystem> memory_system = {};
         std::chrono::milliseconds timeout = std::chrono::minutes(30);
         std::function<void(const std::shared_ptr<core::agent::Agent>&)> on_agent_ready = {};
         std::function<bool()> cancellation_requested = {};
         PermissionCheck permission_check = {};
         EventCallback on_event = {};
-        std::string effort;
+        std::string effort = {};
     };
 
     struct Result {

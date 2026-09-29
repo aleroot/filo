@@ -17,7 +17,7 @@ struct TreeNode {
   std::string name;
   bool directory = false;
   bool traversable = false;
-  std::vector<std::unique_ptr<TreeNode>> children;
+  std::vector<std::unique_ptr<TreeNode>> children = {};
 };
 
 struct FrontierEntry {

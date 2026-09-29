@@ -23,8 +23,8 @@ struct WebSocketStreamResult {
 
     Status status = Status::Completed;
     long http_status = 0;
-    std::string message;
-    cpr::Header response_headers;
+    std::string message = {};
+    cpr::Header response_headers = {};
     bool request_sent = false;
     bool connection_reused = false;
 

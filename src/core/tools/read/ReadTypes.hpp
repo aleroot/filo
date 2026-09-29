@@ -39,12 +39,12 @@ struct Section {
     std::string locator;
 };
 struct Resource {
-    std::string uri;
+    std::string uri = {};
     std::string kind = "text";
-    std::string text;
-    std::string digest;
+    std::string text = {};
+    std::string digest = {};
     bool truncated = false;
-    std::vector<Section> sections;
+    std::vector<Section> sections = {};
 };
 
 [[nodiscard]] std::string read_text_file(const Options& options, const core::context::SessionContext& context);

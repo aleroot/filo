@@ -25,8 +25,13 @@ MemoryMenu build_memory_menu(MemoryMenuPage page,
                               std::string_view entry_id) {
     const auto count = std::ranges::count_if(state.entries,
         [](const auto& entry) { return !entry.archived; });
-    MemoryMenu menu{.current = std::format("{} · {} {}", project, count,
-                                          count == 1 ? "memory" : "memories")};
+    MemoryMenu menu{
+        .title = {},
+        .current = std::format("{} · {} {}", project, count,
+                               count == 1 ? "memory" : "memories"),
+        .help = {},
+        .options = {},
+    };
     switch (page) {
     case MemoryMenuPage::Overview:
         menu.title = "MEMORY";

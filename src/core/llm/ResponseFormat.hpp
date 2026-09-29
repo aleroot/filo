@@ -9,7 +9,7 @@ struct ResponseFormat {
     enum class Type { Text, JsonObject, JsonSchema };
 
     Type type = Type::Text;
-    std::string schema;
+    std::string schema = {};
 
     [[nodiscard]] constexpr std::string_view to_string() const noexcept {
         switch (type) {

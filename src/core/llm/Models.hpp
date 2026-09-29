@@ -407,10 +407,10 @@ struct AuthenticationRecoveryRequest {
 };
 
 struct StreamChunk {
-    std::string content;           // Text content from the model
-    std::string reasoning_content; // Provider-specific thinking/reasoning content
-    std::string stop_reason;       // Provider terminal reason, populated on final chunks when available
-    std::vector<ToolCall> tools;   // Tool calls (if any)
+    std::string content = {};           // Text content from the model
+    std::string reasoning_content = {}; // Provider-specific thinking/reasoning content
+    std::string stop_reason = {};       // Provider terminal reason, populated on final chunks when available
+    std::vector<ToolCall> tools = {};   // Tool calls (if any)
     bool is_final = false;         // True if this is the last chunk
     bool is_error = false;         // True if this chunk represents an API/HTTP error
     bool incomplete_tool_call = false; // True if the stream ended mid-tool_use block
@@ -523,7 +523,7 @@ struct ChatRequest {
     bool stream = true;
     std::optional<float> temperature;
     std::optional<int> max_tokens;
-    std::vector<Tool> tools;
+    std::vector<Tool> tools = {};
     ResponseFormat response_format;  ///< For JSON mode / structured outputs
     std::string previous_response_id = {}; ///< Responses API incremental continuation id
     std::string prompt_cache_key = {};     ///< Responses API prompt cache key
@@ -533,13 +533,13 @@ struct ChatRequest {
     std::string transport_turn_id = {};     ///< Short-lived provider transport scope for one agent turn
     bool stream_include_usage = false;      ///< Per-request stream usage request (OpenAI-compatible APIs)
     std::unordered_map<std::string, std::string> auth_properties = {}; ///< Provider auth metadata projected into the request lifecycle
-    core::context::PromptPlan prompt_plan; ///< Structured stable-to-dynamic system prompt.
+    core::context::PromptPlan prompt_plan = {}; ///< Structured stable-to-dynamic system prompt.
     /// Reasoning controls the provider's live catalog reported for `model`.
     /// Model discovery is provider-scoped and never writes to the global
     /// registry, so the transport copies this onto the request (the way it
     /// copies `max_tokens`) to let a serializer honor a model the registry has
     /// never seen. Empty when the provider reported no capability catalog.
-    std::optional<ModelReasoningProfile> catalog_reasoning;
+    std::optional<ModelReasoningProfile> catalog_reasoning = {};
 };
 
 [[nodiscard]] inline bool message_has_image_input(const Message& msg) noexcept {

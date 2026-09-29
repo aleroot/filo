@@ -21,7 +21,7 @@ namespace core::commands {
 
 struct CommandOperationResult {
     bool ok = false;
-    std::string message;
+    std::string message = {};
 };
 
 struct ActiveTerminalInfo {
@@ -50,18 +50,18 @@ struct ToolRuleCallbacks {
  * @brief Context passed to every command execution containing the UI state.
  */
 struct CommandContext {
-    std::string text;
-    std::function<void()> clear_input_fn;
+    std::string text = {};
+    std::function<void()> clear_input_fn = {};
     std::function<void(const std::string&)> append_history_fn;
     std::function<void(const std::string&)> append_assistant_output_fn = {};
     /// Optional assistant output with a collapsed, interactive detail section.
     std::function<void(const std::string&,
                        const std::string&,
                        const std::string&)> append_assistant_disclosure_output_fn = {};
-    std::shared_ptr<core::agent::Agent> agent;
+    std::shared_ptr<core::agent::Agent> agent = {};
     /// Session metrics registry injected by the execution root; /usage reads
     /// the current thread's stats from here (never from a global singleton).
-    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry;
+    std::shared_ptr<core::session::SessionStatsRegistry> session_stats_registry = {};
     std::function<void()> clear_screen_fn = {};
     std::function<void()> quit_fn = {};
     std::function<std::string()> model_status_fn = {};
@@ -170,7 +170,7 @@ struct CommandContext {
 
 struct CommandDescriptor {
     std::string name;
-    std::vector<std::string> aliases;
+    std::vector<std::string> aliases = {};
     std::string description;
     bool accepts_arguments = false;
 };

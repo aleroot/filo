@@ -21,7 +21,7 @@ namespace core::scm {
 namespace {
 // Small bounded subprocess wrapper for Git's read-only plumbing commands.
 struct CommandResult {
-  std::string output;
+  std::string output = {};
   int exit_code = -1;
   bool truncated = false;
   std::uint64_t fingerprint = 14695981039346656037ULL;

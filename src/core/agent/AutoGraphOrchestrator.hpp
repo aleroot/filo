@@ -18,7 +18,7 @@ struct BoostCandidate {
   std::string name;
   bool ok = false;
   bool verified = false;
-  std::string patch;
+  std::string patch = {};
   std::string evidence;
 };
 
@@ -51,11 +51,11 @@ public:
       const core::goal::Node &, std::string_view)>;
 
   struct Hooks {
-    core::goal::CompletionFn complete;
+    core::goal::CompletionFn complete = {};
     ExploreFn explore;
-    ImplementFn implement;
-    std::function<void(const core::goal::GoalEvent &)> on_event;
-    std::function<bool()> cancellation_requested;
+    ImplementFn implement = {};
+    std::function<void(const core::goal::GoalEvent &)> on_event = {};
+    std::function<bool()> cancellation_requested = {};
   };
 
   [[nodiscard]] AutoGraphPreparation

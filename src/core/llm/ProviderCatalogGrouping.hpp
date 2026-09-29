@@ -20,7 +20,7 @@ enum class ProviderCatalogApiModelPolicy {
 
 struct ProviderCatalogModelFilter {
     ProviderCatalogModelRule rule = ProviderCatalogModelRule::All;
-    std::vector<std::string> model_ids;
+    std::vector<std::string> model_ids = {};
 
     [[nodiscard]] bool matches(std::string_view model_id) const;
 };

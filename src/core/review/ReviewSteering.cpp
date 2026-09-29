@@ -19,7 +19,7 @@ constexpr std::size_t kMaxReviewGuidanceBytes = 48 * 1024;
 
 struct ScopedDirectory {
     std::filesystem::path path;
-    std::vector<std::string> changed_paths;
+    std::vector<std::string> changed_paths = {};
 };
 
 [[nodiscard]] std::string normalize_whitespace(std::string_view value) {

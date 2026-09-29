@@ -122,7 +122,7 @@ struct UsageWindow {
 struct SupplementalCredits {
     bool available = false;
     bool unlimited = false;
-    std::string balance;
+    std::string balance = {};
 };
 
 /** Provider-neutral subscription details suitable for status presentation. */
@@ -252,7 +252,7 @@ struct RateLimitInfo {
  * carries usage data (not every event does).
  */
 struct ParseResult {
-    std::vector<StreamChunk> chunks;        ///< Chunks to forward to the caller.
+    std::vector<StreamChunk> chunks = {};        ///< Chunks to forward to the caller.
     bool    done              = false;      ///< True when the stream is complete.
     bool    stream_started    = false;      ///< True when the provider emitted a stream-start event.
     bool    stream_error      = false;      ///< True when the provider emitted an in-stream error event.
@@ -262,10 +262,10 @@ struct ParseResult {
     int32_t cached_prompt_tokens = 0;       ///< Input tokens served from cache.
     int32_t cache_creation_prompt_tokens = 0; ///< Input tokens used to create cache entries.
     int32_t reasoning_tokens = 0;           ///< Reasoning tokens included in completion tokens.
-    RateLimitInfo rate_limit;               ///< Rate limit info from HTTP headers (if available).
-    std::string stream_error_type;          ///< Provider error type for stream_error.
-    std::string stream_error_message;       ///< Provider error message for stream_error.
-    std::string stop_reason;                ///< Provider terminal reason, when reported.
+    RateLimitInfo rate_limit = {};               ///< Rate limit info from HTTP headers (if available).
+    std::string stream_error_type = {};          ///< Provider error type for stream_error.
+    std::string stream_error_message = {};       ///< Provider error message for stream_error.
+    std::string stop_reason = {};                ///< Provider terminal reason, when reported.
     bool incomplete_tool_call = false;      ///< True when a stream ended mid-tool-use block.
 };
 
@@ -295,7 +295,7 @@ struct ParseResult {
  */
 struct HttpResponse {
     int                status_code; ///< HTTP status code (200, 429, 500, …).
-    std::string_view   body;        ///< Response body; zero-copy view into `cpr::Response::text`.
+    std::string_view   body = {};        ///< Response body; zero-copy view into `cpr::Response::text`.
     const cpr::Header& headers;     ///< Response headers; reference into `cpr::Response::header`.
 };
 

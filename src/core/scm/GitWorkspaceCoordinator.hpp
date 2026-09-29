@@ -64,7 +64,7 @@ public:
 
   struct AcquireOptions {
     std::chrono::milliseconds timeout{60'000};
-    std::function<bool()> cancellation_requested;
+    std::function<bool()> cancellation_requested = {};
   };
 
   explicit GitWorkspaceCoordinator(

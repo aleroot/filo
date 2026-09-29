@@ -23,7 +23,7 @@ enum class HookEvent {
 struct HookDecision {
     bool allowed = true;
     bool approved = false;
-    std::string reason;
+    std::string reason = {};
 };
 
 // Synchronous stop hooks are completion gates rather than notifications. They
@@ -33,8 +33,8 @@ struct StopDecision {
     bool complete = true;
     bool quality_gate_configured = false;
     bool quality_gate_passed = false;
-    std::string reason;
-    std::string followup_message;
+    std::string reason = {};
+    std::string followup_message = {};
 };
 
 struct CompletionGateState {

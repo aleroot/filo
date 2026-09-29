@@ -13,10 +13,10 @@ namespace tui {
 enum class MemoryMenuPage { Overview, Settings, Session, Entries, Entry };
 
 struct MemoryMenu {
-    std::string title;
-    std::string current;
-    std::string help;
-    std::vector<OptionPickerRow> options;
+    std::string title = {};
+    std::string current = {};
+    std::string help = {};
+    std::vector<OptionPickerRow> options = {};
 };
 
 // Pure presentation model. Actions are existing slash commands; persistence

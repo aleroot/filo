@@ -68,9 +68,9 @@ void clear_mcp_oauth_meta(std::string_view server_name, std::string_view config_
 
 /** Options for interactive MCP OAuth login (keeps the free function stable). */
 struct McpOAuthLoginOptions {
-    std::vector<std::string> preferred_scopes;
-    std::string client_id;       // optional pre-registered public/confidential client
-    std::string client_secret;   // optional confidential client secret
+    std::vector<std::string> preferred_scopes = {};
+    std::string client_id = {};       // optional pre-registered public/confidential client
+    std::string client_secret = {};   // optional confidential client secret
     core::auth::ui::AuthUI* ui = nullptr;
 };
 

@@ -16,7 +16,7 @@ struct StoredToolResult {
 };
 
 struct ToolResultChunk {
-    std::string content;
+    std::string content = {};
     std::uint64_t offset = 0;
     std::uint64_t next_offset = 0;
     std::uint64_t total_bytes = 0;

@@ -15,7 +15,7 @@ namespace core::agent {
 template <typename Result>
 struct ScheduledToolTask {
     ToolAccessSet accesses;
-    std::vector<std::size_t> after;
+    std::vector<std::size_t> after = {};
     std::function<Result()> run;
 };
 

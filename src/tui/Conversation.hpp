@@ -114,30 +114,30 @@ enum class MessageType {
 struct UiMessage {
     // Core identity
     MessageType type = MessageType::System;
-    std::string id;                      // Unique identifier
+    std::string id = {};                      // Unique identifier
     
     // Content (varies by type)
     std::string text;                    // Primary text content
-    std::string secondary_text;          // Secondary/subtitle text
-    std::string disclosure_text;         // Optional expandable details (collapsed by default)
-    std::string disclosure_summary;      // Label for an assistant-message disclosure
-    std::string icon;                    // Custom icon override
+    std::string secondary_text = {};          // Secondary/subtitle text
+    std::string disclosure_text = {};         // Optional expandable details (collapsed by default)
+    std::string disclosure_summary = {};      // Label for an assistant-message disclosure
+    std::string icon = {};                    // Custom icon override
     std::size_t repeat_count = 1;        // Number of collapsed consecutive duplicates
     
     // Visual styling
-    std::optional<ftxui::Color> custom_color;
+    std::optional<ftxui::Color> custom_color = {};
     int margin_top = 0;
     int margin_bottom = 0;
     
     // Assistant-specific fields
-    std::vector<ToolActivity> tools;     // Tool calls in this turn
-    std::string assistant_source_text;   // Exact provider text; excludes presentation markers
+    std::vector<ToolActivity> tools = {};     // Tool calls in this turn
+    std::string assistant_source_text = {};   // Exact provider text; excludes presentation markers
     bool pending = false;                // Still streaming/receiving
     bool finalized = false;              // Turn completed; must not revert to pending
     bool thinking = false;               // Show thinking indicator
     bool show_activity_status = false;   // Show a neutral working-status prefix
     bool stopped = false;                // Generation was stopped by user
-    std::string activity_elapsed;        // Live thinking timer, or completed turn duration
+    std::string activity_elapsed = {};        // Live thinking timer, or completed turn duration
 
     // Activity disclosure (display-only; never part of the visible answer body).
     //
@@ -148,9 +148,9 @@ struct UiMessage {
     // is governed separately by the serializer.
     enum class ActivityKind { Thinking, Analyzing };
     ActivityKind reasoning_kind = ActivityKind::Thinking;  // Semantic label of the phase
-    std::string reasoning_text;          // Accumulated reasoning (may stream in; may be empty)
+    std::string reasoning_text = {};          // Accumulated reasoning (may stream in; may be empty)
     bool reasoning_active = false;       // Currently in the live activity phase
-    std::string reasoning_elapsed;       // e.g. "7s" — phase duration once finished
+    std::string reasoning_elapsed = {};       // e.g. "7s" — phase duration once finished
     bool activity_recorded = false;      // A reasoning disclosure exists for this turn
     
     // ToolGroup-specific
@@ -158,10 +158,10 @@ struct UiMessage {
     bool tool_group_border_bottom = true;
 
     // Review-specific: per-file progress of a running or finished /review.
-    ReviewProgressView review;
+    ReviewProgressView review = {};
     
     // Metadata
-    std::string timestamp;
+    std::string timestamp = {};
     
     // Helper methods
     bool is_system_feedback() const {
@@ -313,14 +313,14 @@ struct ConversationRenderOptions {
     // finished box always shows the full text on expand.
     std::size_t reasoning_stream_preview_max_lines = kReasoningStreamPreviewMaxLines;
     float       scroll_pos = 1.0f;  // 0.0 = top, 1.0 = bottom
-    std::shared_ptr<ConversationScrollAnchor> scroll_anchor;
+    std::shared_ptr<ConversationScrollAnchor> scroll_anchor = nullptr;
 
     // Optional live render state. HistoryComponent supplies these so animated
     // glyphs and elapsed labels can update inside an otherwise immutable,
     // cached transcript tree. Direct render callers may omit them and retain
     // the snapshot values passed to render_history_content().
     const std::atomic<std::size_t>* animation_tick = nullptr;
-    std::function<std::string(std::string_view)> activity_elapsed;
+    std::function<std::string(std::string_view)> activity_elapsed = {};
 };
 
 // ============================================================================

@@ -26,17 +26,17 @@ struct BuiltinToolRegistrationOptions {
     std::shared_ptr<AskUserQuestionTool>* ask_user_question_tool_out = nullptr;
     /// Semantic store from the execution-root MemorySystem. When unset the
     /// tool uses the default on-disk path handle (same file, separate owner).
-    std::optional<core::memory::MemoryStore> memory_store;
+    std::optional<core::memory::MemoryStore> memory_store = {};
     /// Root that `read` resolves `result://` references against. It must match
     /// the root the owning Agent stores oversized tool output in; when unset
     /// both sides use ToolResultStore's default root.
-    std::optional<std::filesystem::path> tool_result_root;
+    std::optional<std::filesystem::path> tool_result_root = {};
     /// Workspace roots skill discovery scans, in precedence order
     /// (core::workspace::ordered_roots(): index 0 is the primary, the rest are
     /// additional roots). When empty, discovery falls back to the process-wide
     /// Workspace singleton — the roots the composition root built from the `-w`
     /// flags — and never to the ambient working directory.
-    std::vector<std::filesystem::path> workspace_roots;
+    std::vector<std::filesystem::path> workspace_roots = {};
 };
 
 [[nodiscard]] BuiltinToolRegistrationOptions agent_builtin_tool_options();

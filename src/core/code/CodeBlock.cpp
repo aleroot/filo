@@ -153,7 +153,7 @@ std::expected<ExecutionPlan, ExecutionPlanError> plan_execution(FencedCodeBlock 
     struct Runtime {
         std::string_view interpreter;
         std::string_view extension;
-        std::vector<std::string> arguments;
+        std::vector<std::string> arguments = {};
     };
 
     const std::string& language = block.language;

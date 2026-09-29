@@ -19,9 +19,9 @@ public:
 };
 
 struct OAuthLoopbackResult {
-    std::string code;
-    std::string state;
-    std::string error;
+    std::string code = {};
+    std::string state = {};
+    std::string error = {};
     bool timed_out = false;
 };
 

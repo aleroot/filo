@@ -246,9 +246,9 @@ struct ModelInfo {
     // Identity
     // ------------------------------------------------------------------------
     std::string canonical_id;                    ///< Full model ID, e.g., "gpt-4o-2024-08-06"
-    std::vector<std::string> aliases;            ///< Alternative names, e.g., "gpt-4o"
-    std::string display_name;                    ///< Human-readable name
-    std::string provider;                        ///< Provider key: "openai", "anthropic", etc.
+    std::vector<std::string> aliases = {};            ///< Alternative names, e.g., "gpt-4o"
+    std::string display_name = {};                    ///< Human-readable name
+    std::string provider = {};                        ///< Provider key: "openai", "anthropic", etc.
     
     // ------------------------------------------------------------------------
     // Token Limits
@@ -262,22 +262,22 @@ struct ModelInfo {
     // ------------------------------------------------------------------------
     ModelCapabilities capabilities = 0;          ///< Bitmap of ModelCapability flags
     bool capabilities_complete = false;          ///< True when the provider supplied an exhaustive capability set
-    ModelReasoningProfile reasoning;              ///< Advertised effort levels and thinking wire modes
-    ModelWireConstraints wire;                    ///< Documented request-field rejections for this model
+    ModelReasoningProfile reasoning = {};              ///< Advertised effort levels and thinking wire modes
+    ModelWireConstraints wire = {};                    ///< Documented request-field rejections for this model
     ModelTier tier = ModelTier::Balanced;        ///< Quality tier for routing
     
     // ------------------------------------------------------------------------
     // Metadata
     // ------------------------------------------------------------------------
-    ModelPricing pricing;                        ///< Cost information
-    std::string knowledge_cutoff;                ///< Training data cutoff, e.g., "2024-06"
+    ModelPricing pricing = {};                        ///< Cost information
+    std::string knowledge_cutoff = {};                ///< Training data cutoff, e.g., "2024-06"
     std::string deprecation_date = "";           ///< Deprecation date (empty if active)
     std::string expected_completion_date = "";   ///< When deprecated model stops working
     
     // ------------------------------------------------------------------------
     // Constraints
     // ------------------------------------------------------------------------
-    ParameterConstraints constraints;            ///< Parameter valid ranges
+    ParameterConstraints constraints = {};            ///< Parameter valid ranges
     int32_t max_tool_calls = 32;                 ///< Max parallel tool calls (0 = unlimited)
     
     // ------------------------------------------------------------------------

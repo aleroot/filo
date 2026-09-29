@@ -151,8 +151,8 @@ struct SpanStyle {
 
 struct TextSpan {
     SpanKind kind = SpanKind::Text;
-    SpanStyle style;
-    std::string text;
+    SpanStyle style = {};
+    std::string text = {};
 };
 
 // Find the next exact run of `delim_char` repeated `delim_len` times,

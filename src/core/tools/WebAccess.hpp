@@ -11,28 +11,28 @@
 namespace core::tools::web {
 
 struct DomainFilters {
-    std::vector<std::string> allowed_domains;
-    std::vector<std::string> blocked_domains;
+    std::vector<std::string> allowed_domains = {};
+    std::vector<std::string> blocked_domains = {};
 };
 
 struct SearchRequest {
     std::string query;
     int limit = 5;
     bool include_page_content = false;
-    DomainFilters domains;
+    DomainFilters domains = {};
 };
 
 struct SearchHit {
-    std::string title;
+    std::string title = {};
     std::string url;
-    std::string snippet;
-    std::string content;
+    std::string snippet = {};
+    std::string content = {};
 };
 
 struct SearchResponse {
     std::string backend;
-    std::string answer;
-    std::vector<SearchHit> results;
+    std::string answer = {};
+    std::vector<SearchHit> results = {};
 };
 
 struct FetchRequest {
@@ -45,10 +45,10 @@ struct FetchRequest {
 };
 
 struct FetchResponse {
-    std::string final_url;
-    std::string content_type;
-    std::string title;
-    std::string text;
+    std::string final_url = {};
+    std::string content_type = {};
+    std::string title = {};
+    std::string text = {};
     long status_code = 0;
     bool truncated = false;
 };

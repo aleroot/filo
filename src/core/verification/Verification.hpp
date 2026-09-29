@@ -40,8 +40,8 @@ source_from_string(std::string_view value) noexcept;
 
 struct CommandSpec {
   std::string executable;
-  std::vector<std::string> arguments;
-  std::filesystem::path working_directory;
+  std::vector<std::string> arguments = {};
+  std::filesystem::path working_directory = {};
   int timeout_seconds = 600;
 
   bool operator==(const CommandSpec &) const = default;
@@ -49,10 +49,10 @@ struct CommandSpec {
 
 struct Recipe {
   std::string id;
-  std::string display_name;
+  std::string display_name = {};
   Kind kind = Kind::Custom;
   Source source = Source::AgentProposed;
-  CommandSpec command;
+  CommandSpec command = {};
   bool required = false;
 
   bool operator==(const Recipe &) const = default;
@@ -67,7 +67,7 @@ struct Receipt {
   std::filesystem::path working_directory;
   int exit_code = -1;
   long long duration_ms = 0;
-  std::string evidence;
+  std::string evidence = {};
 
   [[nodiscard]] bool passed() const noexcept { return exit_code == 0; }
 };

@@ -57,13 +57,13 @@ struct FileSystemQuickRoot {
 /// browsing (Ctrl+A) — it is a view option, not a caller policy.
 struct FileSystemPickerRequest {
     std::string title = "SELECT FOLDER";  ///< Panel badge, upper-case by convention.
-    std::string hint;                     ///< One line explaining the consequence.
+    std::string hint = {};                ///< One line explaining the consequence.
     FileSystemPickerTarget target = FileSystemPickerTarget::Directory;
-    std::filesystem::path start_directory;  ///< Empty → process working directory.
+    std::filesystem::path start_directory = {};  ///< Empty → process working directory.
     /// Lower-case, dot-prefixed (".gguf"). Empty accepts any file. Files that
     /// do not match stay visible but unselectable so the user keeps context.
-    std::vector<std::string> extensions;
-    std::vector<FileSystemQuickRoot> quick_roots;
+    std::vector<std::string> extensions = {};
+    std::vector<FileSystemQuickRoot> quick_roots = {};
     bool show_hidden = false;
     /// List files that cannot be confirmed (dimmed). Directory pickers read far
     /// better with them: an empty-looking folder is otherwise indistinguishable
@@ -83,9 +83,9 @@ enum class FileSystemRowRole : std::uint8_t {
 
 struct FileSystemRow {
     FileSystemRowRole role = FileSystemRowRole::File;
-    std::string label;                   ///< Primary text (directories keep a `/`).
-    std::string detail;                  ///< Trailing hint: size, target path, …
-    std::filesystem::path path;          ///< Absolute target.
+    std::string label = {};              ///< Primary text (directories keep a `/`).
+    std::string detail = {};             ///< Trailing hint: size, target path, …
+    std::filesystem::path path = {};     ///< Absolute target.
     bool selectable = false;             ///< This row's path is a valid answer (Tab).
     bool navigable = false;              ///< Enter/→ descends into this row.
 
@@ -106,17 +106,17 @@ enum class FileSystemPickerMode : std::uint8_t {
 
 struct FileSystemPickerState {
     bool active = false;
-    FileSystemPickerRequest request;
+    FileSystemPickerRequest request = {};
     FileSystemPickerMode mode = FileSystemPickerMode::Browse;
 
-    std::filesystem::path directory;   ///< Absolute directory being listed.
-    std::vector<FileSystemRow> rows;   ///< Full listing (synthetic + real).
-    std::vector<FileSystemRow> visible;///< `rows` after the fuzzy filter.
+    std::filesystem::path directory = {};   ///< Absolute directory being listed.
+    std::vector<FileSystemRow> rows = {};   ///< Full listing (synthetic + real).
+    std::vector<FileSystemRow> visible = {};///< `rows` after the fuzzy filter.
     int selected = 0;                  ///< Index into `visible`.
 
-    std::string filter;                ///< Browse-mode query.
-    std::string path_buffer;           ///< PathEntry-mode buffer.
-    std::string status;                ///< Error or transient hint.
+    std::string filter = {};                ///< Browse-mode query.
+    std::string path_buffer = {};           ///< PathEntry-mode buffer.
+    std::string status = {};                ///< Error or transient hint.
     bool truncated = false;            ///< Listing hit the entry cap.
 };
 
@@ -129,7 +129,7 @@ enum class FileSystemPickerAction : std::uint8_t {
 struct FileSystemPickerEventResult {
     bool handled = false;
     FileSystemPickerAction action = FileSystemPickerAction::None;
-    std::filesystem::path path;  ///< Meaningful only for `Confirm`.
+    std::filesystem::path path = {};  ///< Meaningful only for `Confirm`.
 };
 
 /// Upper bound on rows read from a single directory. Protects the render loop

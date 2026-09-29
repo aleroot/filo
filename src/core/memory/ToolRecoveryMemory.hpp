@@ -128,7 +128,7 @@ private:
 
     struct LoadedStore {
         LoadStatus status = LoadStatus::Ok;
-        std::vector<Entry> entries;
+        std::vector<Entry> entries = {};
     };
 
     /// Reads current state. Caller must hold the file lock.

@@ -34,7 +34,7 @@ namespace core::goal {
 
 struct WorkOutcome {
     bool ok = false;
-    std::string output; ///< summary on success, error description on failure
+    std::string output = {}; ///< summary on success, error description on failure
 };
 
 struct GoalEvent {
@@ -50,8 +50,8 @@ struct GoalEvent {
 
     Type type = Type::WaveBegin;
     NodeId node = kInvalidNodeId;
-    std::string node_name;
-    std::string message;
+    std::string node_name = {};
+    std::string message = {};
 };
 
 struct SchedulerDelegates {
@@ -88,8 +88,8 @@ public:
 private:
     struct ParallelResult {
         NodeId node = kInvalidNodeId;
-        WorkOutcome outcome;
-        Reflection reflection; ///< populated when the outcome failed
+        WorkOutcome outcome = {};
+        Reflection reflection = {}; ///< populated when the outcome failed
     };
 
     void emit(const GoalEvent& event) const;
