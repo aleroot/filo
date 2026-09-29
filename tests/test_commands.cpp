@@ -987,6 +987,22 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Switched to -"));
     }
 
+    SECTION("/model renders a using-notice as an indication") {
+        *mock_history = "";
+        ctx.switch_model_fn = [switch_target](std::string_view name) {
+            *switch_target = std::string(name);
+            return "Using Claude Opus 5.5 · 1M context · from model_defaults.json · /model";
+        };
+        ctx.text = "/model claude opus";
+        REQUIRE(executor.try_execute(ctx.text, ctx) == true);
+        REQUIRE(*switch_target == "claude opus");
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring(
+            "\xe2\x84\xb9  Using Claude Opus 5.5"));
+        REQUIRE_THAT(*mock_history, Catch::Matchers::ContainsSubstring(
+            "from model_defaults.json · /model"));
+        REQUIRE(mock_history->find("\xe2\x9c\x97") == std::string::npos);
+    }
+
     SECTION("/profile shows profile status by default") {
         *mock_history = "";
         ctx.text = "/profile";

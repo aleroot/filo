@@ -99,6 +99,7 @@
 #include "core/context/ContextMentions.hpp"
 #include "core/context/SteeringLoader.hpp"
 #include "core/commands/CommandExecutor.hpp"
+#include "core/commands/ModelInUseNotice.hpp"
 #include "core/commands/SkillCommandLoader.hpp"
 #include "core/review/ReviewTargets.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
@@ -1788,6 +1789,13 @@ RunResult run(RunOptions opts) {
         wake_ui();
     };
 
+    auto append_model_switch_result = [&](const std::string& result) {
+        append_history(std::format(
+            "\n{}{}\n",
+            core::commands::model_switch_mark(result),
+            result));
+    };
+
     auto list_active_terminals = [&]() {
         std::vector<core::commands::ActiveTerminalInfo> terminals;
         const auto now = std::chrono::steady_clock::now();
@@ -3076,6 +3084,59 @@ RunResult run(RunOptions opts) {
         return isolated;
     };
 
+    // Friendly subject for the manual model now in use: registry or live-catalog
+    // display name and context when we know them, otherwise provider · id.
+    // Local GGUF picks stay on the file stem so a colliding alias cannot
+    // relabel them as a hosted model.
+    auto manual_model_in_use_notice = [&]() {
+        const std::string provider = std::string(
+            core::llm::provider_display_name(manual_provider_name));
+        const std::string& model_id = manual_model_name;
+        std::string label;
+        int context_tokens = 0;
+
+        auto apply_card = [&](const core::llm::ModelInfo& info) {
+            context_tokens = info.context_window;
+            if (!info.display_name.empty()) {
+                label = info.display_name;
+            }
+        };
+
+        if (manual_provider_name != "local" && !model_id.empty()) {
+            if (const auto info = core::llm::ModelRegistry::instance().lookup(model_id)) {
+                apply_card(*info);
+            } else {
+                const auto snapshot = core::llm::ModelCatalogAvailability::instance()
+                    .snapshot(manual_provider_name);
+                for (const auto& model : snapshot.models) {
+                    if (model.canonical_id == model_id
+                        || std::ranges::find(model.aliases, model_id) != model.aliases.end()) {
+                        apply_card(model);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (label.empty()) {
+            label = model_id.empty()
+                ? provider + " · <provider default>"
+                : provider + " · " + model_id;
+        }
+        return core::commands::format_model_in_use_notice(
+            label, context_tokens, session_effort_value);
+    };
+
+    auto routing_in_use_notice = [&](std::string_view mode_label) {
+        const std::string policy = active_router_policy.empty()
+            ? std::string("<unset>")
+            : active_router_policy;
+        return core::commands::format_model_in_use_notice(
+            std::format("{} · {}", mode_label, policy),
+            0,
+            session_effort_value);
+    };
+
     auto activate_manual_mode = [&]() -> std::string {
         auto selected_provider = provider_for_current_thread(manual_provider_name);
         if (!selected_provider) {
@@ -3095,10 +3156,7 @@ RunResult run(RunOptions opts) {
             refresh_status_labels();
             sync_runtime_metadata();
 
-            std::string message = std::format(
-                "Switched to Manual mode: {} ({})",
-                manual_provider_name,
-                manual_model_name.empty() ? "<provider default>" : manual_model_name);
+            std::string message = manual_model_in_use_notice();
             const std::string hint = provider_setup_hint(manual_provider_name);
             if (!hint.empty()) {
                 message += "\n   " + hint;
@@ -3142,9 +3200,7 @@ RunResult run(RunOptions opts) {
         refresh_status_labels();
         sync_runtime_metadata();
 
-        return std::format(
-            "Switched to Router mode ({})",
-            router_policy_label());
+        return routing_in_use_notice("Router");
     };
 
     auto activate_auto_mode = [&]() -> std::string {
@@ -3177,9 +3233,7 @@ RunResult run(RunOptions opts) {
         refresh_status_labels();
         sync_runtime_metadata();
 
-        return std::format(
-            "Switched to Auto mode — task-aware smart routing via policy '{}'",
-            active_router_policy.empty() ? "<unset>" : active_router_policy);
+        return routing_in_use_notice("Auto");
     };
 
     reload_mcp_live = [&]() -> std::string {
@@ -3246,12 +3300,12 @@ RunResult run(RunOptions opts) {
             config.default_model_selection);
         if (preferred_mode == ModelSelectionMode::Router) {
             const std::string result = activate_router_mode();
-            if (!result.starts_with("Switched")) {
+            if (!core::commands::is_model_switch_success(result)) {
                 activate_manual_mode();
             }
         } else if (preferred_mode == ModelSelectionMode::Auto) {
             const std::string result = activate_auto_mode();
-            if (!result.starts_with("Switched")) {
+            if (!core::commands::is_model_switch_success(result)) {
                 activate_manual_mode();
             }
         } else {
@@ -3527,11 +3581,23 @@ RunResult run(RunOptions opts) {
         return message;
     };
 
-    auto with_persisted_model_preferences = [&](std::string message) -> std::string {
-        if (!message.starts_with("Switched")) {
+    auto finish_model_switch_message = [&](
+        std::string message,
+        const core::config::ModelPersistenceResult& persistence) {
+        if (!core::commands::is_model_switch_success(message)) {
             return message;
         }
-        return with_model_persistence_notice(
+        message = core::commands::append_model_in_use_source(
+            std::move(message),
+            persistence.status == core::config::ModelPersistenceStatus::Saved);
+        return with_model_persistence_notice(std::move(message), persistence);
+    };
+
+    auto with_persisted_model_preferences = [&](std::string message) -> std::string {
+        if (!core::commands::is_model_switch_success(message)) {
+            return message;
+        }
+        return finish_model_switch_message(
             std::move(message), persist_model_preferences());
     };
 
@@ -3562,7 +3628,7 @@ RunResult run(RunOptions opts) {
 
     auto finalize_model_switch = [&](const ModelSelectionSnapshot& before,
                                      std::string message) -> std::string {
-        if (message.starts_with("Switched")) {
+        if (core::commands::is_model_switch_success(message)) {
             remember_previous_model_selection(before);
         }
         return with_persisted_model_preferences(std::move(message));
@@ -3612,7 +3678,7 @@ RunResult run(RunOptions opts) {
         const ModelSelectionSnapshot before = current_model_selection_snapshot();
         const ModelSelectionSnapshot target = *previous_model_selection;
         std::string message = restore_model_selection(target);
-        if (message.starts_with("Switched")) {
+        if (core::commands::is_model_switch_success(message)) {
             previous_model_selection = before;
             sync_runtime_metadata();
         }
@@ -4175,7 +4241,7 @@ RunResult run(RunOptions opts) {
             if (persist_selection) {
                 return finalize_model_switch(before, std::move(message));
             }
-            if (message.starts_with("Switched")) {
+            if (core::commands::is_model_switch_success(message)) {
                 remember_previous_model_selection(before);
             }
             return message;
@@ -4502,9 +4568,9 @@ RunResult run(RunOptions opts) {
         manual_model_name    = model_label;
 
         std::string result = activate_manual_mode();
-        if (result.starts_with("Switched")) {
+        if (core::commands::is_model_switch_success(result)) {
             remember_previous_model_selection(before);
-            result = with_model_persistence_notice(
+            result = finish_model_switch_message(
                 std::move(result),
                 current_runtime == thread_runtimes.primary()
                     ? model_defaults.persist_local(model_path_str, model_label)
@@ -8247,13 +8313,15 @@ RunResult run(RunOptions opts) {
                     input_text = result;
                     input_cursor_position = static_cast<int>(input_text.size());
                 } else {
-                    const bool success = result.starts_with("Set")
-                        || result.starts_with("Switched")
+                    const bool success =
+                        core::commands::is_model_switch_success(result)
+                        || result.starts_with("Set")
                         || result.starts_with("Cleared")
                         || result.starts_with("Applied");
                     append_history(std::format(
-                        "\n{}\n",
-                        success ? "✓  " + result : "✗  " + result));
+                        "\n{}{}\n",
+                        core::commands::result_mark(success, result),
+                        result));
                 }
             }
             return true;
@@ -8602,11 +8670,7 @@ RunResult run(RunOptions opts) {
                     ? effective_provider
                     : effective_provider + " " + row.selector;
                 const std::string result = apply_model_selector(selector, true);
-                const bool success = result.starts_with("Switched");
-                append_history(std::format(
-                    "\n{}\n",
-                    success ? "\xe2\x9c\x93  " + result
-                            : "\xe2\x9c\x97  " + result));
+                append_model_switch_result(result);
             }
             return true;
         }
@@ -8704,16 +8768,12 @@ RunResult run(RunOptions opts) {
                     (*model_choice == 0) ? activate_manual_mode() :
                     (*model_choice == 2) ? activate_auto_mode()   :
                                           activate_router_mode();
-                const bool success = result.starts_with("Switched");
+                const bool success = core::commands::is_model_switch_success(result);
                 if (success) {
                     remember_previous_model_selection(before);
                     result = with_persisted_model_preferences(std::move(result));
                 }
-                append_history(std::format(
-                    "\n{}\n",
-                    success
-                        ? "\xe2\x9c\x93  " + result
-                        : "\xe2\x9c\x97  " + result));
+                append_model_switch_result(result);
             }
             return true;
         }
@@ -8864,11 +8924,7 @@ RunResult run(RunOptions opts) {
         if (local_model_picker_was_active) {
             if (local_model_selected_path.has_value()) {
                 const std::string result = select_local_model(*local_model_selected_path);
-                const bool success = result.starts_with("Switched");
-                append_history(std::format(
-                    "\n{}\n",
-                    success ? "\xe2\x9c\x93  " + result
-                            : "\xe2\x9c\x97  " + result));
+                append_model_switch_result(result);
             }
             return true;
         }

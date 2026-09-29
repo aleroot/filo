@@ -627,6 +627,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_sse_utils.cpp
     tests/test_model_catalog_provider.cpp
     tests/test_model_registry.cpp
+    tests/test_model_in_use_notice.cpp
     tests/test_provider_catalog_grouping.cpp
     tests/test_provider_credential_status.cpp
     tests/test_grok_provider.cpp

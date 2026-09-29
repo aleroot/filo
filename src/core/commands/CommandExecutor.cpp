@@ -31,6 +31,7 @@
 #include "core/utils/Base64.hpp"
 #include "core/utils/PathUtils.hpp"
 #include "GoalExecutor.hpp"
+#include "ModelInUseNotice.hpp"
 #include "ReviewExecutor.hpp"
 #include "core/review/ReviewTargets.hpp"
 
@@ -1653,11 +1654,10 @@ public:
         const std::string body = ctx.switch_model_fn
             ? ctx.switch_model_fn(arg)
             : "Switching provider is not available in this session.";
-        const bool success = body.starts_with("Switched");
         ctx.append_history_fn(std::format(
-            "\n{}\n", success
-                ? "\xe2\x9c\x93  " + body   // ✓
-                : "\xe2\x9c\x97  " + body)); // ✗
+            "\n{}{}\n",
+            model_switch_mark(body),
+            body));
     }
 };
 
