@@ -7769,6 +7769,15 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
+        // Refresh notifications are not input. FTXUI invalidates the frame
+        // when it dispatches them; letting a modal handle one and call wake_ui
+        // would continually requeue Custom. Since FTXUI 7.0.3 drains posted
+        // tasks before drawing, that feedback loop prevents any new frame.
+        // Keep asynchronous editor/comparer outcomes above this guard.
+        if (event == Event::Custom) {
+            return true;
+        }
+
         if (event.is_mouse()
             && event.mouse().button == Mouse::Left
             && event.mouse().motion == Mouse::Pressed) {
