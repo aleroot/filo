@@ -160,6 +160,12 @@ struct CommandContext {
     /// comparer (/changes, Ctrl+X). The host owns the comparison: which turn,
     /// which backend, and what the user is told when there is nothing to show.
     std::function<CommandOperationResult()> open_diff_comparer_fn = {};
+    /// Puts back the files the most recent turn changed (/revert). The host
+    /// owns the revert: which turn, whether the workspace still matches it, and
+    /// what the user is told. The conversation is left alone — /rewind and
+    /// /undo own that, and a revert that also rewrote history would hide the
+    /// turn whose work it just undid.
+    std::function<CommandOperationResult()> revert_turn_files_fn = {};
     // Replaces the primary working directory: chdirs the process, updates
     // the process-wide default workspace, and rebases the active session's
     // roots. Implemented by the composition root because it coordinates OS

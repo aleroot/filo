@@ -9,6 +9,7 @@
 #include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/AskUserQuestionTool.hpp"
 #include "core/tools/ListDirectoryTool.hpp"
+#include "core/tools/MemoryTool.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/Tool.hpp"
 
@@ -329,6 +330,9 @@ TEST_CASE("File changes survive a session save and load", "[changes][session]") 
         FileChange{.kind = FileChangeKind::Added, .content = FileChangeContent::Binary,
                    .path = "logo.png"},
     };
+    assistant.turn_changes.unscoped_mutations = true;
+    assistant.turn_changes.unscoped_tools = {"run_terminal_command", "a post-tool hook"};
+    assistant.turn_changes.reverted = true;
     data.messages = {user, assistant};
 
     REQUIRE(store.save(data));
@@ -577,4 +581,178 @@ TEST_CASE("A binary file too large to read is named binary, not a budget casualt
     CHECK(summary.files[0].content == FileChangeContent::Binary);
     CHECK(summary.files[0].added == 0);
     CHECK_FALSE(summary.partial_enumeration);
+}
+
+TEST_CASE("A directory moved onto an existing directory reports renames, not deletions",
+          "[changes]") {
+    // The files a move brings into an existing directory are paths the tracker
+    // has never seen. Seen for the first time after the mutation, they cannot be
+    // assumed to have existed before it, or the move reads as a deletion of the
+    // source and the destination silently swallows what arrived.
+    for (const bool occupied : {false, true}) {
+        DYNAMIC_SECTION("the destination "
+                        << (occupied ? "already held files" : "was empty")) {
+            TempDir dir;
+            put(dir.path / "src_dir" / "c.txt", "c\n");
+            put(dir.path / "src_dir" / "nested" / "d.txt", "d\n");
+            fs::create_directories(dir.path / "dst_dir");
+            if (occupied) {
+                put(dir.path / "dst_dir" / "existing.txt", "e\n");
+            }
+            TurnChangeTracker tracker(dir.path);
+
+            MutationScope move{
+                .paths = {dir.path / "src_dir", dir.path / "dst_dir"},
+                .moves = {{dir.path / "src_dir", dir.path / "dst_dir"}},
+            };
+            edit(tracker, move, [&] {
+                std::error_code ec;
+                fs::rename(dir.path / "src_dir", dir.path / "dst_dir", ec);
+                if (!ec) {
+                    return;
+                }
+                // What the move tool does when a rename cannot replace the
+                // destination: merge the tree in, then remove the source.
+                fs::copy(dir.path / "src_dir", dir.path / "dst_dir",
+                         fs::copy_options::recursive
+                             | fs::copy_options::overwrite_existing, ec);
+                if (!ec) {
+                    fs::remove_all(dir.path / "src_dir", ec);
+                }
+            });
+
+            const auto changes = tracker.changes();
+            REQUIRE(changes.files.size() == 2);
+            CHECK(changes.files[0].kind == FileChangeKind::Renamed);
+            CHECK(changes.files[0].path == "dst_dir/c.txt");
+            CHECK(changes.files[0].previous_path == "src_dir/c.txt");
+            CHECK(changes.files[1].kind == FileChangeKind::Renamed);
+            CHECK(changes.files[1].path == "dst_dir/nested/d.txt");
+            CHECK(changes.files[1].previous_path == "src_dir/nested/d.txt");
+            CHECK_FALSE(changes.partial_enumeration);
+            // What already lived in the destination is not this turn's doing.
+            CHECK(std::ranges::none_of(changes.files, [](const FileChange& change) {
+                return change.path == "dst_dir/existing.txt";
+            }));
+        }
+    }
+}
+
+TEST_CASE("A file discovered under a scope after the mutation is reported, not swallowed",
+          "[changes]") {
+    TempDir dir;
+    fs::create_directories(dir.path / "out");
+    TurnChangeTracker tracker(dir.path);
+
+    // A tool whose scope is a directory, and whose mutation adds a file to it:
+    // the tracker meets that path for the first time after the write.
+    const auto scope = scope_of({dir.path / "out"});
+    edit(tracker, scope, [&] { put(dir.path / "out" / "generated.txt", "made\n"); });
+
+    const auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK(changes.files[0].kind == FileChangeKind::Added);
+    CHECK(changes.files[0].path == "out/generated.txt");
+    CHECK(changes.files[0].added == 1);
+}
+
+TEST_CASE("The memory tool cannot make a summary incomplete", "[changes]") {
+    using core::changes::mutation_scope;
+    TempDir dir;
+    const auto context = context_for(dir.path);
+    const core::tools::MemoryTool memory;
+    const auto scope = mutation_scope("memory", R"({"action":"remember"})", context,
+                                      memory.get_definition().annotations);
+    CHECK(scope.empty());
+    CHECK_FALSE(scope.unbounded);
+
+    // Its store is Filo's own config file, outside every workspace, so a turn
+    // that remembered something still knows every file it changed.
+    const auto file = dir.path / "a.txt";
+    put(file, "one\n");
+    TurnChangeTracker tracker(dir.path);
+    edit(tracker, scope_of({file}), [&] { put(file, "two\n"); });
+    edit(tracker, scope, [] {});
+
+    const auto changes = tracker.changes();
+    CHECK(changes.complete());
+    CHECK(changes.unscoped_tools.empty());
+    REQUIRE(changes.files.size() == 1);
+}
+
+TEST_CASE("An unscoped summary names the tools behind it, once each", "[changes]") {
+    using core::changes::mutation_scope;
+    TempDir dir;
+    const auto context = context_for(dir.path);
+    const core::tools::ShellTool shell;
+    const auto annotations = shell.get_definition().annotations;
+    const auto scope = mutation_scope("run_terminal_command", R"({"command":"make"})",
+                                      context, annotations);
+    CHECK(scope.unbounded);
+    CHECK(scope.tool == "run_terminal_command");
+    // An alias is named as the tool it stands for.
+    CHECK(mutation_scope("shell", R"({"command":"make"})", context, annotations).tool
+          == "run_terminal_command");
+
+    TurnChangeTracker tracker(dir.path);
+    edit(tracker, scope, [] {});
+    edit(tracker, scope, [] {});
+    tracker.note_unscoped_mutation("a post-tool hook");
+
+    const auto changes = tracker.changes();
+    CHECK_FALSE(changes.complete());
+    CHECK(changes.unscoped_tools == std::vector<std::string>{"run_terminal_command",
+                                                            "a post-tool hook"});
+}
+
+TEST_CASE("A rewrite that changes nothing is not a change, retained or not", "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "a.txt";
+    const std::string content(64 * 1024, 'x');
+    put(file, content);
+    // Nothing is retained, so the file is known only by what a bounded read
+    // says about it: its lines, and the identity of the bytes they came from.
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 0});
+
+    edit(tracker, scope_of({file}), [] {});
+    CHECK(tracker.changes().files.empty());
+
+    // Only mtime moves. Reporting this would report a formatter that changed
+    // nothing, or a build that rewrote a file byte for byte.
+    edit(tracker, scope_of({file}), [&] { put(file, content); });
+    CHECK(tracker.changes().files.empty());
+
+    // A real edit is still seen, and still counts as one.
+    edit(tracker, scope_of({file}), [&] { put(file, content + "tail\n"); });
+    const auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK(changes.files[0].kind == FileChangeKind::Modified);
+}
+
+TEST_CASE("Settling takes one more look only for a turn something wrote behind its back",
+          "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "a.txt";
+    put(file, "one\n");
+    TurnChangeTracker tracker(dir.path);
+    edit(tracker, scope_of({file}), [&] { put(file, "two\n"); });
+
+    // Somebody edits the file by hand after the last observation. A turn that
+    // saw nothing unscoped must not claim that edit as its own.
+    put(file, "by hand\n");
+    tracker.settle();
+    auto changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("+two"));
+    CHECK_THAT(changes.files[0].diff, !ContainsSubstring("by hand"));
+
+    // A detached hook, though, is the turn's own doing: settling after it
+    // reports what the file holds when the turn is reported.
+    tracker.note_unscoped_mutation("a post-tool hook");
+    put(file, "formatted\n");
+    tracker.settle();
+    changes = tracker.changes();
+    REQUIRE(changes.files.size() == 1);
+    CHECK_THAT(changes.files[0].diff, ContainsSubstring("+formatted"));
+    CHECK(changes.unscoped_tools == std::vector<std::string>{"a post-tool hook"});
 }

@@ -596,6 +596,8 @@ core::changes::TurnChanges Agent::publish_turn_changes(
     if (!turn_state || !turn_state->change_tracker || inherited_change_tracker_) {
         return {};
     }
+    // A detached hook may still have been writing when the last tool returned.
+    turn_state->change_tracker->settle();
     auto changes = turn_state->change_tracker->changes();
     if (changes.empty()) {
         return {};
@@ -615,6 +617,23 @@ core::changes::TurnChanges Agent::publish_turn_changes(
         }
     }
     return {};
+}
+
+bool Agent::mark_latest_turn_changes_reverted() {
+    std::lock_guard lock(history_mutex_);
+    // The same walk `publish_turn_changes` made, backwards: the newest summary
+    // is the one a revert just put back.
+    for (auto it = history_.rbegin(); it != history_.rend(); ++it) {
+        if (it->turn_changes.empty()) {
+            continue;
+        }
+        if (it->turn_changes.reverted) {
+            return false;
+        }
+        it->turn_changes.reverted = true;
+        return true;
+    }
+    return false;
 }
 
 void Agent::capture_turn_provider_snapshot_unlocked(
@@ -2729,10 +2748,18 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                             .tool_call_id = tc.id,
                             .tool_calls   = {}
                         };
-                        core::hooks::dispatch(
-                            core::hooks::HookEvent::PostToolUse,
-                            build_tool_hook_payload(tc, &message),
-                            session_context);
+                        // A hook is a shell command Filo did not scope, and it
+                        // runs detached: it can rewrite what the tool just
+                        // wrote, or create files no scope names. The turn says
+                        // so, and takes one more look before it reports.
+                        if (core::hooks::dispatch(
+                                core::hooks::HookEvent::PostToolUse,
+                                build_tool_hook_payload(tc, &message),
+                                session_context) > 0
+                            && recovery_turn_state->change_tracker) {
+                            recovery_turn_state->change_tracker->note_unscoped_mutation(
+                                "a post-tool hook");
+                        }
                         return message;
                     },
                 });
@@ -2757,10 +2784,13 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
                     turn_callbacks.on_tool_finish((*tool_calls_accum)[index], result);
                 });
             turn_state->deduplicator.end_step();
-            core::hooks::dispatch(
-                core::hooks::HookEvent::PostToolBatch,
-                build_tool_batch_hook_payload(*tool_calls_accum, tool_messages),
-                step_session_context);
+            if (core::hooks::dispatch(
+                    core::hooks::HookEvent::PostToolBatch,
+                    build_tool_batch_hook_payload(*tool_calls_accum, tool_messages),
+                    step_session_context) > 0
+                && turn_state->change_tracker) {
+                turn_state->change_tracker->note_unscoped_mutation("a post-batch hook");
+            }
 
             const bool stop_requested_after_tools = self->is_stop_requested();
             if (!self->is_turn_current(turn_state)) {

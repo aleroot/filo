@@ -1495,6 +1495,7 @@ public:
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  /run [block]        Inspect and run a fenced block from the latest response\n"
             "  /changes            Open the latest turn's file changes in the diff comparer\n"
+            "  /revert             Put back the files the latest turn changed\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
             "  ↑/↓      Navigate input history (previous/next prompt)\n"
@@ -3920,6 +3921,33 @@ public:
     }
 };
 
+/// Puts back the files the latest turn changed. Strict, and all or nothing: a
+/// file that has moved on since refuses the whole revert rather than leaving a
+/// tree that matches no state anyone asked for.
+class RevertCommand : public Command {
+public:
+    std::string get_name() const override { return "/revert"; }
+    std::vector<std::string> get_aliases() const override { return {"/restore"}; }
+    std::string get_description() const override {
+        return "Put back the files the latest turn changed";
+    }
+
+    void execute(const CommandContext& ctx) override {
+        ctx.clear_input_fn();
+        if (!ctx.revert_turn_files_fn) {
+            ctx.append_history_fn("\n\u2717  Reverting files is not available in this context.\n");
+            return;
+        }
+
+        const auto result = ctx.revert_turn_files_fn();
+        if (result.message.empty()) {
+            return;
+        }
+        ctx.append_history_fn(std::format(
+            "\n{}{}\n", result_mark(result.ok, result.message), result.message));
+    }
+};
+
 class RunCodeBlockCommand : public Command {
 public:
     std::string get_name() const override { return "/run"; }
@@ -4024,6 +4052,7 @@ CommandExecutor::CommandExecutor() {
     register_command(std::make_unique<McpCommand>());
     register_command(std::make_unique<RunCodeBlockCommand>());
     register_command(std::make_unique<ChangesCommand>());
+    register_command(std::make_unique<RevertCommand>());
     register_command(std::make_unique<ShellCommand>());
 }
 

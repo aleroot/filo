@@ -593,11 +593,20 @@ std::string_view tool_result_payload(const ToolActivity& tool) {
         : std::string_view{tool.result.raw_payload};
 }
 
-std::string join_with(const std::vector<std::string>& parts, std::string_view separator) {
+/// Joins parts for display. `last_separator` is what reads best before the
+/// final part — " and " for a list of files, nothing for a list of gaps — and
+/// defaults to the ordinary separator.
+std::string join_with(const std::vector<std::string>& parts,
+                      std::string_view separator,
+                      std::string_view last_separator = {}) {
     std::string joined;
-    for (const auto& part : parts) {
-        if (!joined.empty()) joined += separator;
-        joined += part;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) {
+            joined += i + 1 == parts.size() && !last_separator.empty()
+                ? last_separator
+                : separator;
+        }
+        joined += parts[i];
     }
     return joined;
 }
@@ -2004,10 +2013,7 @@ std::string comparison_omissions(const TurnComparison& comparison) {
     }
 
     std::string sentence = "The comparison is not the whole turn: ";
-    for (std::size_t i = 0; i < gaps.size(); ++i) {
-        sentence += i == 0 ? "" : "; ";
-        sentence += gaps[i];
-    }
+    sentence += join_with(gaps, "; ");
     sentence += ".";
     return sentence;
 }
@@ -2047,6 +2053,50 @@ std::optional<TurnComparison> turn_comparison(const UiMessage& message, std::str
         };
     }
     return std::nullopt;
+}
+
+std::string describe_revert(const core::changes::RevertResult& result) {
+    // A revert is all or nothing, so the line says which: either the turn went
+    // back, or the workspace was left exactly as it was and the reader is told
+    // what stopped it. Naming a few files beats naming a count; naming every
+    // file of a large turn beats reading.
+    constexpr std::size_t kNamedFiles = 3;
+
+    if (!result.refused.empty()) {
+        constexpr std::size_t kNamedRefusals = 2;
+        std::vector<std::string> reasons;
+        for (std::size_t i = 0; i < std::min(result.refused.size(), kNamedRefusals); ++i) {
+            reasons.push_back(std::format(
+                "{} {}", result.refused[i].path, result.refused[i].reason));
+        }
+        std::string text = std::format(
+            "Nothing was reverted: {}.", join_with(reasons, "; "));
+        if (result.refused.size() > reasons.size()) {
+            const auto more = result.refused.size() - reasons.size();
+            text += std::format(" {} more file{} refused it.", more, more == 1 ? "" : "s");
+        }
+        return text;
+    }
+
+    const std::string restored = result.restored.size() <= kNamedFiles
+        ? join_with(result.restored, ", ", " and ")
+        : std::format("{} files", result.restored.size());
+    if (result.error) {
+        // Some files are back and the rest are not: the reader has to know
+        // which, because the tree now matches neither state.
+        return std::format("Reverted {}, then stopped: {}", restored, *result.error);
+    }
+    return std::format("Reverted {}.", restored);
+}
+
+std::string revert_omissions(const core::changes::TurnChanges& changes) {
+    const auto caveats = turn_change_caveats(changes);
+    if (caveats.empty()) {
+        return {};
+    }
+    return std::format(
+        "That turn's summary was incomplete, so this revert is too: {}.",
+        join_with(caveats, "; "));
 }
 
 UiMessage make_shell_command_message(std::string command,
@@ -2646,6 +2696,30 @@ namespace {
     return vbox(std::move(lines));
 }
 
+/// Names what made a summary incomplete: at most three tools, joined as
+/// "a, b or c". Naming them is what makes the warning weighable — a
+/// verification build leaves artifacts, a shell command may have edited
+/// source — and a line long enough to scan is a line a reader skips.
+[[nodiscard]] std::string unscoped_sources(const std::vector<std::string>& tools) {
+    if (tools.empty()) {
+        // A summary recorded before tools were named still knows it falls short.
+        return "shell, scripts or MCP tools";
+    }
+    constexpr std::size_t kNamed = 3;
+    const std::size_t shown = std::min(tools.size(), kNamed);
+    std::string text;
+    for (std::size_t i = 0; i < shown; ++i) {
+        if (i > 0) {
+            text += i + 1 == shown ? " or " : ", ";
+        }
+        text += tools[i];
+    }
+    if (tools.size() > shown) {
+        text += std::format(" and {} more", tools.size() - shown);
+    }
+    return text;
+}
+
 /// What a summary must say about itself when it fell short of the whole truth.
 /// Each line names one specific gap; a summary that knows its limits states
 /// them instead of letting a short list read as a complete one.
@@ -2658,8 +2732,8 @@ namespace {
     if (changes.unscoped_mutations) {
         // Files the turn already knew about were reconciled after such a tool
         // ran, so their diffs are sound; only new paths are undiscoverable.
-        caveats.emplace_back(
-            "files created by shell, scripts or MCP tools are not listed");
+        caveats.emplace_back(std::format(
+            "files created by {} are not listed", unscoped_sources(changes.unscoped_tools)));
     }
     return caveats;
 }
@@ -2772,6 +2846,13 @@ namespace {
     if (added > 0 || deleted > 0) {
         summary.push_back(ftxui::text("  "));
         summary.push_back(render_count_pair(added, deleted));
+    }
+    if (msg.turn_changes.reverted) {
+        // The summary is still what the turn did; this says the workspace is
+        // no longer what it left behind.
+        summary.push_back(ftxui::text("  "));
+        summary.push_back(ftxui::text("\u21b6 undone")
+                          | ftxui::color(Color::GrayDark) | dim);
     }
 
     Elements rows{hbox(std::move(summary))};

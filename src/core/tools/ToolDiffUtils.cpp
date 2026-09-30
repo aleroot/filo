@@ -14,11 +14,6 @@ namespace {
 constexpr std::size_t kMaxMyersWorkUnits = 4'000'000;
 constexpr std::size_t kUnifiedContextLines = 3;
 
-struct DiffLine {
-    std::string_view text;
-    bool             terminated = false;
-};
-
 enum class EditKind : std::uint8_t { Keep, Delete, Insert };
 
 struct Edit {
@@ -32,30 +27,6 @@ std::size_t line_count_for_unified_hunk(std::string_view text) noexcept {
     }
     return static_cast<std::size_t>(std::ranges::count(text, '\n'))
         + (text.back() == '\n' ? 0 : 1);
-}
-
-std::vector<DiffLine> split_diff_lines(std::string_view text) {
-    std::vector<DiffLine> lines;
-    lines.reserve(line_count_for_unified_hunk(text));
-
-    std::size_t start = 0;
-    while (start < text.size()) {
-        const std::size_t newline = text.find('\n', start);
-        if (newline == std::string_view::npos) {
-            lines.push_back({.text = text.substr(start), .terminated = false});
-            break;
-        }
-        lines.push_back({
-            .text = text.substr(start, newline - start),
-            .terminated = true,
-        });
-        start = newline + 1;
-    }
-    return lines;
-}
-
-bool lines_equal(const DiffLine& lhs, const DiffLine& rhs) noexcept {
-    return lhs.text == rhs.text && lhs.terminated == rhs.terminated;
 }
 
 struct Frontier {
@@ -89,6 +60,45 @@ bool consume_work(std::size_t& work, std::size_t units = 1) noexcept {
     work += units;
     return true;
 }
+
+} // namespace
+
+std::vector<DiffLine> split_diff_lines(std::string_view text) {
+    std::vector<DiffLine> lines;
+    lines.reserve(line_count_for_unified_hunk(text));
+
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t newline = text.find('\n', start);
+        if (newline == std::string_view::npos) {
+            lines.push_back({.text = text.substr(start), .terminated = false});
+            break;
+        }
+        lines.push_back({
+            .text = text.substr(start, newline - start),
+            .terminated = true,
+        });
+        start = newline + 1;
+    }
+    return lines;
+}
+
+std::string join_diff_lines(std::span<const DiffLine> lines) {
+    std::string text;
+    for (const DiffLine& line : lines) {
+        text += line.text;
+        if (line.terminated) {
+            text += '\n';
+        }
+    }
+    return text;
+}
+
+bool lines_equal(const DiffLine& lhs, const DiffLine& rhs) noexcept {
+    return lhs.text == rhs.text && lhs.terminated == rhs.terminated;
+}
+
+namespace {
 
 std::optional<std::vector<Edit>> shortest_edit_script(
     std::span<const DiffLine> old_lines,

@@ -284,3 +284,28 @@ TEST_CASE("Completion hook gate bounds repeated feedback", "[hooks]") {
     reset_config(sandbox);
     fs::remove_all(sandbox);
 }
+
+TEST_CASE("dispatch counts the hooks it started", "[hooks]") {
+    const auto sandbox = make_temp_dir("filo_hook_dispatch_count");
+    const ScopedEnvVar xdg("XDG_CONFIG_HOME", (sandbox / "xdg").string());
+    const auto project_dir = sandbox / "project";
+    write_text(
+        project_dir / ".filo" / "config.json",
+        // working_dir keeps the detached hook thread off the sandbox, which the
+        // test removes before that thread necessarily runs.
+        R"({"hooks":{"post_tool_use":[{"command":"true","working_dir":"/"},{"command":"true","enabled":false}]}})");
+    core::config::ConfigManager::get_instance().load(project_dir);
+    const auto context = make_hook_test_context(project_dir);
+
+    // One enabled hook starts; a disabled one is neither started nor counted.
+    CHECK(core::hooks::dispatch(core::hooks::HookEvent::PostToolUse,
+                                R"({"tool_name":"write_file"})", context) == 1);
+    // An event nothing is configured for starts nothing. That count is what
+    // lets a change tracker tell a hook ran behind its back from an ordinary
+    // tool call, instead of flagging every turn that has hooks configured.
+    CHECK(core::hooks::dispatch(core::hooks::HookEvent::PostToolBatch,
+                                R"({"tool_calls":[]})", context) == 0);
+
+    reset_config(sandbox);
+    fs::remove_all(sandbox);
+}

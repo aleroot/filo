@@ -340,17 +340,18 @@ std::string_view to_string(HookEvent event) noexcept {
     return "unknown";
 }
 
-void dispatch(HookEvent event,
-              std::string payload_json,
-              const core::context::SessionContext& session_context,
-              std::vector<std::pair<std::string, std::string>> extra_env) {
+std::size_t dispatch(HookEvent event,
+                     std::string payload_json,
+                     const core::context::SessionContext& session_context,
+                     std::vector<std::pair<std::string, std::string>> extra_env) {
     const auto hooks = hooks_for_event(
         core::config::ConfigManager::get_instance().get_config().hooks,
         event);
     if (hooks.empty()) {
-        return;
+        return 0;
     }
 
+    std::size_t started = 0;
     for (const auto& hook : hooks) {
         if (!hook.enabled || hook.command.empty()) {
             continue;
@@ -359,6 +360,7 @@ void dispatch(HookEvent event,
             continue;
         }
 
+        ++started;
         std::thread([hook_name = hook.name.empty() ? std::string(to_string(event)) : hook.name,
                      hook,
                      event,
@@ -386,6 +388,7 @@ void dispatch(HookEvent event,
             }
         }).detach();
     }
+    return started;
 }
 
 HookDecision run_pre_tool_use(

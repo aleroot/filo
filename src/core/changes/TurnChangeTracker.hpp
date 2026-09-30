@@ -49,6 +49,9 @@ public:
     /// Largest file whose lines are still counted when its content is not
     /// retained.
     static constexpr std::size_t kMaxCountedFileBytes = 8 * 1024 * 1024;
+    /// Distinct tool names one summary keeps as the reason its file list may be
+    /// incomplete. Past this the list is short, and the summary still says so.
+    static constexpr std::size_t kMaxUnscopedToolNames = 8;
 
     /// Resource bounds for one turn's summary. Exhausting any of them degrades
     /// detail and marks the summary partial; it never drops a file silently.
@@ -63,9 +66,18 @@ public:
     /// Same, with the resource bounds overridden.
     TurnChangeTracker(std::filesystem::path display_root, Limits limits);
 
-    /// Records the current state of every file in `scope`. Idempotent: call it
-    /// before and after a mutation.
-    void observe(const MutationScope& scope);
+    /// Records that something wrote where no scope can say: a shell command, a
+    /// script, a hook. Paths the turn already knows are reconciled, so a later
+    /// diff cannot be left stale; paths created from nothing stay invisible,
+    /// and the summary names `tool` as the reason.
+    void note_unscoped_mutation(std::string tool);
+
+    /// One more look before a report, for a turn that knows something wrote
+    /// where it could not follow: a hook runs on a detached thread, so its
+    /// edits can land after the last observation. A turn with nothing unscoped
+    /// is left alone — reconciling one would pick up edits made by hand and
+    /// blame them on the agent.
+    void settle();
 
     /// Runs `mutate` between two observations of `scope`. The second
     /// observation also runs when `mutate` throws: it may have changed files.
@@ -75,13 +87,13 @@ public:
         if (scope.empty()) {
             return std::forward<Mutation>(mutate)();
         }
-        observe(scope);
+        observe(scope, Observation::Before);
         try {
             auto result = std::forward<Mutation>(mutate)();
-            observe(scope);
+            observe(scope, Observation::After);
             return result;
         } catch (...) {
-            observe(scope);
+            observe(scope, Observation::After);
             throw;
         }
     }
@@ -91,6 +103,12 @@ public:
     [[nodiscard]] TurnChanges changes() const;
 
 private:
+    /// Where an observation sits relative to the mutation it describes. A path
+    /// met for the first time after a mutation cannot be assumed to have
+    /// existed before it — that assumption is what turned a directory moved
+    /// onto an existing one into a report of deletions.
+    enum class Observation { Before, After };
+
     struct Snapshot {
         enum class State { Missing, Text, Opaque };
         State state = State::Missing;
@@ -142,6 +160,9 @@ private:
     struct Scan {
         std::size_t lines = 0;
         bool text = true;
+        /// Identity of the bytes that were read, so a file whose content is not
+        /// retained can still be compared by content rather than by mtime.
+        std::uint64_t fingerprint = 0;
     };
 
     /// Reads a file far enough to count its lines and tell text from binary,
@@ -165,6 +186,8 @@ private:
     void store_current_unlocked(const Key& key, Snapshot snapshot);
     [[nodiscard]] Key key_for(const std::filesystem::path& path) const;
     [[nodiscard]] Expansion expand_unlocked(const Key& root) const;
+    void observe(const MutationScope& scope, Observation when);
+    void note_unscoped_tool_unlocked(std::string_view tool);
     void reconcile_known_unlocked();
     void record_move_unlocked(const Key& source, const Key& destination);
     [[nodiscard]] std::string display_path(const Key& key) const;
@@ -185,6 +208,7 @@ private:
     std::size_t tracked_bytes_ = 0;  ///< Text retained across baseline_ and current_
     bool partial_enumeration_ = false;
     bool unscoped_mutations_ = false;
+    std::vector<std::string> unscoped_tools_;  ///< Distinct, in first-run order
 };
 
 } // namespace core::changes

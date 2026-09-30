@@ -15,7 +15,10 @@ namespace {
 namespace fs = std::filesystem;
 using core::tools::detail::kMaxToolDiffInputBytes;
 
-std::uint64_t fnv1a(std::string_view bytes, std::uint64_t seed = 14695981039346656037ull) {
+constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+
+std::uint64_t fnv1a(std::string_view bytes,
+                    std::uint64_t seed = kFnvOffsetBasis) {
     std::uint64_t hash = seed;
     for (const unsigned char byte : bytes) {
         hash ^= byte;
@@ -129,12 +132,20 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
         const auto scan = scan_without_retaining(path);
         snapshot.fingerprint = snapshot.stamp;
         if (scan && !scan->text) {
+            // A binary file is not read to the end, so its head cannot identify
+            // it: size and mtime stay the only cheap witness of a change.
             snapshot.opaque_as = FileChangeContent::Binary;
             return snapshot;
         }
         snapshot.opaque_as = oversized ? FileChangeContent::TooLarge
                                        : FileChangeContent::BudgetSpent;
-        snapshot.lines = scan ? std::optional<std::size_t>(scan->lines) : std::nullopt;
+        if (scan) {
+            snapshot.lines = scan->lines;
+            // The bytes were read to count them, so they can also identify the
+            // file: a rewrite that changes nothing is then not a change, which
+            // a size-and-mtime stamp would call one.
+            snapshot.fingerprint = scan->fingerprint;
+        }
         // Only a spent turn budget is a gap in the summary; an oversized file
         // describes itself.
         partial_enumeration_ |= !oversized;
@@ -166,6 +177,7 @@ std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining
     Scan scan;
     std::array<char, 64 * 1024> buffer{};
     std::uint64_t seen = 0;
+    std::uint64_t hash = kFnvOffsetBasis;
     bool trailing_text = false;  // A last line without a terminator.
     bool first_chunk = true;
     while (in) {
@@ -180,16 +192,19 @@ std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining
         }
         const std::string_view chunk(buffer.data(), count);
         // Text or binary is decided by the head of the file, exactly where the
-        // retained path decides it; reading on only counts lines.
+        // retained path decides it; reading on only counts lines and identifies
+        // the content they came from.
         if (first_chunk && !core::tools::detail::is_text_like_for_diff(chunk)) {
             scan.text = false;
             return scan;
         }
         first_chunk = false;
         scan.lines += static_cast<std::size_t>(std::ranges::count(chunk, '\n'));
+        hash = fnv1a(chunk, hash);
         trailing_text = chunk.back() != '\n';
     }
     scan.lines += trailing_text ? 1 : 0;
+    scan.fingerprint = hash;
     return scan;
 }
 
@@ -263,29 +278,30 @@ void TurnChangeTracker::reconcile_known_unlocked() {
     }
 }
 
-void TurnChangeTracker::observe(const MutationScope& scope) {
+void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
     std::lock_guard lock(mutex_);
     if (scope.unbounded) {
         // The tool could have written anywhere. Everything the turn already
         // knows is brought up to date; what it created from nothing cannot be
-        // discovered, so the summary is flagged rather than trusted as whole.
+        // discovered, so the summary is flagged — and names the tool — rather
+        // than trusted as whole.
         unscoped_mutations_ = true;
+        note_unscoped_tool_unlocked(scope.tool);
         reconcile_known_unlocked();
     }
     for (const auto& path : scope.paths) {
         const Key root = key_for(path);
-        // Nothing beneath a path existed at baseline if the path itself did
-        // not, e.g. the destination of a directory move.
-        const auto root_baseline = baseline_.find(root);
-        const bool absent_at_baseline = root_baseline != baseline_.end()
-            && root_baseline->second.state == Snapshot::State::Missing;
-
         const auto expansion = expand_unlocked(root);
         partial_enumeration_ |= !expansion.complete;
         for (const auto& key : expansion.keys) {
             Snapshot snapshot = read_unlocked(key, reclaimable_for_unlocked(key));
             if (!baseline_.contains(key)) {
-                Snapshot baseline = absent_at_baseline && key != root ? Snapshot{} : snapshot;
+                // A path met for the first time after the mutation was not seen
+                // before it, so what it held then is unknown: an empty baseline
+                // reports it as the change it is, and lets a move pair it with
+                // the origin it came from. Before the mutation, what is on disk
+                // is the pre-image.
+                Snapshot baseline = when == Observation::After ? Snapshot{} : snapshot;
                 tracked_bytes_ += baseline.text.size();
                 baseline_.emplace(key, std::move(baseline));
             }
@@ -294,6 +310,27 @@ void TurnChangeTracker::observe(const MutationScope& scope) {
     }
     for (const auto& [source, destination] : scope.moves) {
         record_move_unlocked(key_for(source), key_for(destination));
+    }
+}
+
+void TurnChangeTracker::note_unscoped_mutation(std::string tool) {
+    observe(MutationScope{.unbounded = true, .tool = std::move(tool)}, Observation::After);
+}
+
+void TurnChangeTracker::settle() {
+    std::lock_guard lock(mutex_);
+    if (!unscoped_mutations_) {
+        return;
+    }
+    reconcile_known_unlocked();
+}
+
+void TurnChangeTracker::note_unscoped_tool_unlocked(std::string_view tool) {
+    if (tool.empty() || unscoped_tools_.size() == kMaxUnscopedToolNames) {
+        return;
+    }
+    if (std::ranges::find(unscoped_tools_, tool) == unscoped_tools_.end()) {
+        unscoped_tools_.emplace_back(tool);
     }
 }
 
@@ -410,6 +447,7 @@ TurnChanges TurnChangeTracker::changes() const {
     TurnChanges result;
     result.partial_enumeration = partial_enumeration_;
     result.unscoped_mutations = unscoped_mutations_;
+    result.unscoped_tools = unscoped_tools_;
     std::size_t diff_budget = limits_.max_diff_bytes;
     std::set<Key> reported;
 

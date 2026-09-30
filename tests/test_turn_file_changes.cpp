@@ -415,3 +415,119 @@ TEST_CASE("A comparison names the changes its patch leaves out",
         CHECK(comparison_omissions(*comparison).empty());
     }
 }
+
+TEST_CASE("A summary names the tools that made it incomplete", "[tui][turn_file_changes]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+    answer.turn_changes.files.pop_back();  // The binary change, so only the caveat remains.
+    answer.turn_changes.unscoped_mutations = true;
+
+    SECTION("a build is named as a build") {
+        answer.turn_changes.unscoped_tools = {"run_verification"};
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: files created by run_verification "
+                 "are not listed.");
+    }
+    SECTION("two are joined as a choice") {
+        answer.turn_changes.unscoped_tools = {"python", "run_terminal_command"};
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: files created by python or "
+                 "run_terminal_command are not listed.");
+    }
+    SECTION("a long list is cut short rather than read out") {
+        answer.turn_changes.unscoped_tools = {
+            "python", "run_terminal_command", "run_verification", "mcp__x", "mcp__y"};
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: files created by python, "
+                 "run_terminal_command or run_verification and 2 more are not listed.");
+    }
+    SECTION("a summary recorded before tools were named still says it falls short") {
+        const auto comparison = turn_comparison(answer);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison_omissions(*comparison)
+              == "The comparison is not the whole turn: files created by shell, scripts "
+                 "or MCP tools are not listed.");
+    }
+    SECTION("the box draws the name it was given") {
+        answer.turn_changes.unscoped_tools = {"run_verification"};
+        CHECK_THAT(render_text({answer}),
+                   ContainsSubstring("files created by run_verification are not listed"));
+    }
+}
+
+TEST_CASE("A reverted turn says its summary no longer describes the workspace",
+          "[tui][turn_file_changes]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = sample_changes();
+    CHECK(render_text({answer}).find("undone") == std::string::npos);
+
+    answer.turn_changes.reverted = true;
+    const auto text = render_text({answer});
+    CHECK_THAT(text, ContainsSubstring("\u21b6 undone"));
+    // The summary is still what the turn did; only its standing changed.
+    CHECK_THAT(text, ContainsSubstring("3 files changed"));
+}
+
+TEST_CASE("A revert says what went back, or what stopped it",
+          "[tui][turn_file_changes][revert]") {
+    core::changes::RevertResult result;
+
+    SECTION("one file is named") {
+        result.restored = {"src/app.cpp"};
+        CHECK(describe_revert(result) == "Reverted src/app.cpp.");
+    }
+    SECTION("a few files are named") {
+        result.restored = {"src/a.cpp", "include/b.hpp"};
+        CHECK(describe_revert(result) == "Reverted src/a.cpp and include/b.hpp.");
+    }
+    SECTION("a large revert is counted instead") {
+        result.restored = {"a", "b", "c", "d"};
+        CHECK(describe_revert(result) == "Reverted 4 files.");
+    }
+    SECTION("a refusal names the file and the reason") {
+        result.refused = {core::changes::RevertRefusal{
+            .path = "src/app.cpp", .reason = "changed since that turn"}};
+        CHECK(describe_revert(result)
+              == "Nothing was reverted: src/app.cpp changed since that turn.");
+    }
+    SECTION("only the first refusals are named, and the rest counted") {
+        result.refused = {
+            core::changes::RevertRefusal{.path = "a.cpp", .reason = "changed since that turn"},
+            core::changes::RevertRefusal{.path = "b.png", .reason = "is a binary file"},
+            core::changes::RevertRefusal{.path = "c.log", .reason = "kept no diff"},
+        };
+        CHECK(describe_revert(result)
+              == "Nothing was reverted: a.cpp changed since that turn; b.png is a binary "
+                 "file. 1 more file refused it.");
+    }
+    SECTION("a revert that stopped halfway says where") {
+        result.restored = {"a.cpp", "b.hpp"};
+        result.error = "c.md could not be written: permission denied.";
+        CHECK(describe_revert(result)
+              == "Reverted a.cpp and b.hpp, then stopped: c.md could not be written: "
+                 "permission denied.");
+    }
+}
+
+TEST_CASE("A revert repeats what its summary could not cover",
+          "[tui][turn_file_changes][revert]") {
+    core::changes::TurnChanges changes;
+    changes.files = sample_changes();
+    CHECK(revert_omissions(changes).empty());
+
+    changes.unscoped_mutations = true;
+    changes.unscoped_tools = {"run_terminal_command"};
+    CHECK(revert_omissions(changes)
+          == "That turn's summary was incomplete, so this revert is too: files created "
+             "by run_terminal_command are not listed.");
+
+    changes.partial_enumeration = true;
+    CHECK_THAT(revert_omissions(changes),
+               ContainsSubstring("too many files to detail fully"));
+}

@@ -6023,6 +6023,63 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = {}};
     };
 
+    // /revert: put back the files the most recent turn changed. The revert
+    // plans every file before writing any, so a turn whose files have moved on
+    // is refused whole rather than half undone. The conversation is left alone:
+    // /rewind owns that, and a revert that also rewrote history would hide the
+    // turn whose work it just undid.
+    auto revert_latest_turn_files = [&]() -> core::commands::CommandOperationResult {
+        if (current_runtime->turn_active()) {
+            return {.ok = false,
+                    .message = "Stop the active turn before reverting its files."};
+        }
+        core::changes::TurnChanges changes;
+        std::string message_id;
+        {
+            std::lock_guard lock(ui_mutex);
+            const auto latest = latest_turn_with_changes(*selected_messages);
+            if (latest.message == nullptr) {
+                return {.ok = false,
+                        .message = "No turn in this conversation has changed files yet."};
+            }
+            if (latest.message->turn_changes.reverted) {
+                return {.ok = false,
+                        .message = "That turn's changes were already reverted."};
+            }
+            changes = latest.message->turn_changes;
+            message_id = latest.message->id;
+        }
+
+        const auto result = core::changes::revert_turn(
+            changes, agent->workspace_snapshot().primary());
+        if (!result.reverted()) {
+            return {.ok = false, .message = describe_revert(result)};
+        }
+
+        // The summary stays — it is still what the turn did — and now says the
+        // workspace no longer matches it, in this transcript and on resume.
+        agent->mark_latest_turn_changes_reverted();
+        {
+            std::lock_guard lock(ui_mutex);
+            for (auto& message : *selected_messages) {
+                if (message.id == message_id) {
+                    message.turn_changes.reverted = true;
+                    break;
+                }
+            }
+        }
+        save_runtime_snapshot(current_runtime);
+        wake_ui();
+        // A revert can only cover what the summary recorded, and the summary
+        // said what it could not. Repeating that here is what keeps a clean
+        // looking tree from passing for a complete one.
+        std::string message = describe_revert(result);
+        if (const auto omissions = revert_omissions(changes); !omissions.empty()) {
+            message += " " + omissions;
+        }
+        return {.ok = true, .message = std::move(message)};
+    };
+
     // The per-file affordance in a turn's change box: one file, one comparison.
     auto open_file_change = [&](std::string_view key) {
         const auto ref = parse_turn_file_change_open_key(key);
@@ -7483,6 +7540,7 @@ RunResult run(RunOptions opts) {
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
             .open_diff_comparer_fn = open_latest_changes,
+            .revert_turn_files_fn = revert_latest_turn_files,
             .change_workspace_root_fn = change_workspace_root,
             .steering_policy_fn = [&]() {
                 return agent ? agent->session_context_snapshot().steering_policy : core::context::SteeringPolicy{};

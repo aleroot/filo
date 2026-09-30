@@ -2331,6 +2331,48 @@ TEST_CASE("A turn publishes and records the net changes of its file tools",
     }) == 1);
 }
 
+TEST_CASE("Marking a turn reverted stamps the newest summary, and only once",
+          "[agent][changes]") {
+    auto& tool_manager = core::tools::ToolManager::get_instance();
+    auto provider = std::make_shared<FileEditingProvider>(std::vector<std::string>{});
+    core::agent::Agent agent(
+        provider, tool_manager,
+        test_support::make_session_context(core::workspace::WorkspaceSnapshot{
+            .primary = std::filesystem::temp_directory_path(),
+            .enforce = true,
+            .version = 1,
+        }));
+
+    // Nothing has been recorded yet, so there is nothing to mark.
+    CHECK_FALSE(agent.mark_latest_turn_changes_reverted());
+
+    core::llm::Message answer{.role = "assistant", .content = "done"};
+    answer.turn_changes.files = {core::changes::FileChange{
+        .kind = core::changes::FileChangeKind::Modified,
+        .path = "notes.txt",
+        .diff = "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-first\n+second\n",
+        .added = 1,
+        .deleted = 1,
+    }};
+    agent.append_history_message(core::llm::Message{.role = "user", .content = "edit"});
+    agent.append_history_message(answer);
+
+    CHECK(agent.mark_latest_turn_changes_reverted());
+    const auto history = agent.get_history();
+    const auto marked = std::ranges::find_if(
+        history, [](const core::llm::Message& message) {
+            return !message.turn_changes.empty();
+        });
+    REQUIRE(marked != history.end());
+    // The summary is still what the turn did; only its standing changed, and it
+    // changed in the history a resumed session is built from.
+    CHECK(marked->turn_changes.reverted);
+    CHECK(marked->turn_changes.files == answer.turn_changes.files);
+
+    // A second revert of the same turn is the caller's to refuse, and says so.
+    CHECK_FALSE(agent.mark_latest_turn_changes_reverted());
+}
+
 TEST_CASE("A delegated worker records into the tracker it inherited and publishes nothing",
           "[agent][changes]") {
     const auto temp_path =

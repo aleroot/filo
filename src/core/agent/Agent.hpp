@@ -238,6 +238,12 @@ public:
     [[nodiscard]] bool has_user_turn() const;
     [[nodiscard]] std::optional<core::llm::Message> last_user_turn() const;
 
+    /// Marks the most recent turn that recorded file changes as reverted, so
+    /// the transcript — and a resumed session — says its summary no longer
+    /// describes the workspace. Returns false when there is nothing left to
+    /// mark, which is also the answer for a turn already reverted.
+    bool mark_latest_turn_changes_reverted();
+
     // -----------------------------------------------------------------------
     // Session persistence helpers.
     // -----------------------------------------------------------------------

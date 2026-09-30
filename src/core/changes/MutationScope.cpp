@@ -61,9 +61,14 @@ MutationScope apply_patch(std::string_view args, const Context& context) {
     return scope;
 }
 
-/// A tool Filo understands that cannot change the content of any file, so
-/// there is nothing to observe. Creating a directory can only fail on a path
-/// that is already a file; it never rewrites one.
+/// A tool Filo understands that cannot change what a summary reports: either it
+/// writes no file at all, or the only file it writes is Filo's own state
+/// outside every workspace. Creating a directory can only fail on a path that
+/// is already a file; it never rewrites one, and an empty directory holds no
+/// content to summarize. Memory keeps its store in Filo's config directory
+/// (MemoryStore::default_path), never in a workspace, so treating it as a write
+/// would flag every turn that remembered something as one whose file list may
+/// be incomplete.
 MutationScope inert(std::string_view, const Context&) {
     return {};
 }
@@ -84,6 +89,7 @@ constexpr std::array kRules{
     ScopeRule{names::kMoveFile, move_file},
     ScopeRule{names::kApplyPatch, apply_patch},
     ScopeRule{names::kCreateDirectory, inert},
+    ScopeRule{names::kMemory, inert},
 };
 
 } // namespace
@@ -100,8 +106,12 @@ MutationScope mutation_scope(std::string_view tool_name,
     }
     // No rule knows this tool, so fall back on what it promises. A tool that
     // declares it never writes to disk cannot change a summary; anything else
-    // is treated as able to write anywhere, which the tracker then reconciles.
-    return MutationScope{.unbounded = !annotations.read_only_hint};
+    // is treated as able to write anywhere, which the tracker then reconciles
+    // and names, so a reader can tell a build from a shell command.
+    if (annotations.read_only_hint) {
+        return {};
+    }
+    return MutationScope{.unbounded = true, .tool = std::string(canonical)};
 }
 
 } // namespace core::changes

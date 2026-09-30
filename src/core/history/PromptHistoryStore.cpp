@@ -192,14 +192,9 @@ std::string PromptHistoryStore::to_json(const std::vector<std::string>& entries)
     std::string out;
     out.reserve(1024 + entries.size() * 64);
 
-    out += "{\"version\":1,\"entries\":[";
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        if (i > 0) out += ',';
-        out += "\"";
-        core::utils::append_escaped(out, entries[i]);
-        out += "\"";
-    }
-    out += "]}";
+    out += "{\"version\":1,\"entries\":";
+    core::utils::append_string_array(out, entries);
+    out += '}';
     return out;
 }
 

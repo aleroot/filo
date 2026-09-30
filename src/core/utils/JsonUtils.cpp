@@ -140,6 +140,19 @@ void append_escaped_utf8_safe(std::string& out, std::string_view sv) {
     append_escaped(out, sv);
 }
 
+void append_string_array(std::string& out, std::span<const std::string> values) {
+    out.push_back('[');
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out.push_back(',');
+        }
+        out.push_back('"');
+        append_escaped(out, values[i]);
+        out.push_back('"');
+    }
+    out.push_back(']');
+}
+
 std::string repair_utf8(std::string_view sv) {
     if (simdjson::validate_utf8(sv)) return std::string(sv);
 

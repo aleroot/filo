@@ -4,6 +4,7 @@
 #include "../tools/Tool.hpp"
 
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -21,6 +22,9 @@ struct MutationScope {
     /// reconciles the paths the turn already knows and reports the summary as
     /// incomplete, because paths such a call creates cannot be discovered.
     bool unbounded = false;
+    /// The tool that made this scope unbounded, so a summary can name what to
+    /// weigh instead of guessing. Empty for a scope that lists its paths.
+    std::string tool;
 
     [[nodiscard]] bool empty() const noexcept { return paths.empty() && !unbounded; }
 };

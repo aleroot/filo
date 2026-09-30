@@ -4,8 +4,10 @@
 
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::tools::detail {
 
@@ -83,6 +85,24 @@ inline constexpr std::size_t kMaxToolDiffOutputBytes = 512 * 1024;
 
     return true;
 }
+
+/// One line of a file or of a patch side. `terminated` is false only for a
+/// final line that carries no newline, which a unified diff marks explicitly
+/// and a rewrite must reproduce byte for byte.
+struct DiffLine {
+    std::string_view text;
+    bool             terminated = false;
+};
+
+/// Splits content the way a unified diff counts lines: a final line without a
+/// terminator is still a line. The views borrow `text`.
+[[nodiscard]] std::vector<DiffLine> split_diff_lines(std::string_view text);
+
+/// Inverse of `split_diff_lines`: concatenates lines, terminating only those
+/// that were terminated.
+[[nodiscard]] std::string join_diff_lines(std::span<const DiffLine> lines);
+
+[[nodiscard]] bool lines_equal(const DiffLine& lhs, const DiffLine& rhs) noexcept;
 
 /// Builds a bounded, line-based unified diff. Returns no value when either
 /// input is unsuitable for a text diff or the bounded Myers search exceeds its

@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <array>
@@ -45,6 +46,14 @@ void append_escaped_unchecked(std::string& out, std::string_view sv);
 // Backward-compatible spelling retained for callers that document an external
 // byte boundary. It has the same behavior as append_escaped().
 void append_escaped_utf8_safe(std::string& out, std::string_view sv);
+
+// ---------------------------------------------------------------------------
+// append_string_array — ["a","b"], each value escaped.
+//
+// Callers that need a field write the name and the colon first: whether the
+// pair is preceded by a comma belongs to the document being built, not here.
+// ---------------------------------------------------------------------------
+void append_string_array(std::string& out, std::span<const std::string> values);
 
 // Returns valid UTF-8, replacing every malformed byte with U+FFFD. Valid input
 // is copied without per-code-point decoding after a vectorized validation pass.

@@ -55,6 +55,15 @@ struct TurnChanges {
     /// MCP, subagents). Paths the turn already knew about were reconciled
     /// afterwards; paths such a tool created from nothing are absent.
     bool unscoped_mutations = false;
+    /// The tools that set `unscoped_mutations`, in the order they first ran, so
+    /// a summary can name what to weigh: a verification build leaves artifacts,
+    /// a shell command may have edited source. Bounded by
+    /// TurnChangeTracker::kMaxUnscopedToolNames; empty for a summary recorded
+    /// before the names were kept.
+    std::vector<std::string> unscoped_tools;
+    /// These changes were put back by a revert. The summary stays — it is still
+    /// what the turn did — and says that the workspace no longer reflects it.
+    bool reverted = false;
 
     [[nodiscard]] bool empty() const noexcept { return files.empty(); }
     [[nodiscard]] bool complete() const noexcept {

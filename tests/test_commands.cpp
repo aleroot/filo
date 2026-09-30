@@ -101,6 +101,8 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto requested_code_block = std::make_shared<std::optional<std::size_t>>();
     auto comparer_opens = std::make_shared<int>(0);
     auto comparer_result = std::make_shared<CommandOperationResult>(CommandOperationResult{.ok = true});
+    auto revert_calls = std::make_shared<int>(0);
+    auto revert_result = std::make_shared<CommandOperationResult>(CommandOperationResult{.ok = true});
 
     CommandContext ctx{
         .text = "",
@@ -274,6 +276,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         .open_diff_comparer_fn = [comparer_opens, comparer_result]() {
             ++*comparer_opens;
             return *comparer_result;
+        },
+        .revert_turn_files_fn = [revert_calls, revert_result]() {
+            ++*revert_calls;
+            return *revert_result;
         },
     };
 
@@ -454,6 +460,40 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         CHECK_THAT(
             *mock_history,
             Catch::Matchers::ContainsSubstring("The latest turn changed no files."));
+    }
+
+    SECTION("/revert puts back the files the latest turn changed") {
+        *mock_history = "";
+        *revert_result = CommandOperationResult{
+            .ok = true,
+            .message = "Reverted src/app.cpp and docs/guide.md.",
+        };
+        ctx.text = "/revert";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*revert_calls == 1);
+        CHECK(*input_cleared == true);
+        CHECK_THAT(*mock_history,
+                   Catch::Matchers::ContainsSubstring("\u2713  Reverted src/app.cpp"));
+    }
+
+    SECTION("/restore is another name for /revert") {
+        ctx.text = "/restore";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*revert_calls == 1);
+    }
+
+    SECTION("/revert says what stopped it") {
+        *mock_history = "";
+        *revert_result = CommandOperationResult{
+            .ok = false,
+            .message = "Nothing was reverted: src/app.cpp changed since that turn.",
+        };
+        ctx.text = "/revert";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*revert_calls == 1);
+        CHECK_THAT(*mock_history,
+                   Catch::Matchers::ContainsSubstring(
+                       "\u2717  Nothing was reverted: src/app.cpp changed since that turn."));
     }
 
     SECTION("/goal sets and shows the session goal") {

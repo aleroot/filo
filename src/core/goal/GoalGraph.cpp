@@ -518,32 +518,15 @@ std::string GoalGraph::to_json() const {
         out += node.parallelizable ? "true" : "false";
         out += ",\"workspace_access\":\"";
         out += to_string(node.workspace_access);
-        out += "\",\"verification_recipes\":[";
-        bool first_recipe = true;
-        for (const auto &recipe_id : node.verification_recipe_ids) {
-          if (!std::exchange(first_recipe, false)) {
-            out += ',';
-          }
-          out += '\"';
-          core::utils::append_escaped(out, recipe_id);
-          out += '\"';
-        }
-        out += ']';
+        out += "\",\"verification_recipes\":";
+        core::utils::append_string_array(out, node.verification_recipe_ids);
         out += ",\"retry_target\":";
         out += std::to_string(node.retry_target);
         out += ",\"result\":\"";
         core::utils::append_escaped(out, node.result_summary);
-        out += "\",\"lessons\":[";
-        bool first_lesson = true;
-        for (const std::string& lesson : node.lessons) {
-            if (!std::exchange(first_lesson, false)) {
-                out += ',';
-            }
-            out += '\"';
-            core::utils::append_escaped(out, lesson);
-            out += '\"';
-        }
-        out += "]}";
+        out += "\",\"lessons\":";
+        core::utils::append_string_array(out, node.lessons);
+        out += '}';
     }
     out += "],\"edges\":[";
     bool first_edge = true;

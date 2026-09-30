@@ -3,6 +3,7 @@
 #include "../context/SessionContext.hpp"
 #include "../session/TurnCompletion.hpp"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,10 +42,15 @@ struct CompletionGateState {
     int blocked_attempts = 0;
 };
 
-void dispatch(HookEvent event,
-              std::string payload_json,
-              const core::context::SessionContext& session_context,
-              std::vector<std::pair<std::string, std::string>> extra_env = {});
+/// Runs the hooks configured for `event` whose matcher accepts the payload,
+/// each on its own detached thread, and returns how many were started. A
+/// caller that must know whether anything ran behind its back — a change
+/// tracker, whose summary a hook's shell command can invalidate — reads the
+/// count; everyone else ignores it.
+std::size_t dispatch(HookEvent event,
+                     std::string payload_json,
+                     const core::context::SessionContext& session_context,
+                     std::vector<std::pair<std::string, std::string>> extra_env = {});
 
 [[nodiscard]] HookDecision run_pre_tool_use(
     std::string payload_json,

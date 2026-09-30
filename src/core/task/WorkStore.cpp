@@ -49,17 +49,6 @@ namespace {
     return out.empty() ? "workspace" : out;
 }
 
-void append_string_array(std::string& out, const std::vector<std::string>& values) {
-    out.push_back('[');
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (i > 0) out.push_back(',');
-        out.push_back('"');
-        core::utils::append_escaped(out, values[i]);
-        out.push_back('"');
-    }
-    out.push_back(']');
-}
-
 } // namespace
 
 WorkStore::WorkStore(std::filesystem::path root_dir)
@@ -253,9 +242,9 @@ std::string WorkStore::to_json(const WorkItem& item) {
     out += ",\"failed_tool_calls\":";
     out += std::to_string(item.failed_tool_calls);
     out += ",\"files_touched\":";
-    append_string_array(out, item.files_touched);
+    core::utils::append_string_array(out, item.files_touched);
     out += ",\"commands_run\":";
-    append_string_array(out, item.commands_run);
+    core::utils::append_string_array(out, item.commands_run);
     out += '}';
     return out;
 }

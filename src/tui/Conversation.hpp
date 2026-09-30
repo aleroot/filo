@@ -2,6 +2,7 @@
 
 #include "DiffPreview.hpp"
 #include "core/changes/FileChange.hpp"
+#include "core/changes/TurnRevert.hpp"
 #include "Constants.hpp"
 #include "ReviewCard.hpp"
 #include <ftxui/dom/elements.hpp>
@@ -412,6 +413,17 @@ struct TurnComparison {
 [[nodiscard]] std::optional<TurnComparison> turn_comparison(
     const UiMessage& message,
     std::string_view path);
+
+/// One transcript line for a revert: what went back, or what stopped it. The
+/// mark that says whether it worked belongs to the command, not to this
+/// sentence.
+[[nodiscard]] std::string describe_revert(const core::changes::RevertResult& result);
+
+/// What a revert inherits from the summary it was built from: a turn that could
+/// not list every file it touched cannot put every file back, and saying so is
+/// the only thing standing between the reader and a false sense of a clean
+/// slate. Empty for a summary that was complete.
+[[nodiscard]] std::string revert_omissions(const core::changes::TurnChanges& changes);
 
 /// Rows a file-change box draws before it counts instead of listing. The
 /// model keeps every file; only the box is bounded.
