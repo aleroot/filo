@@ -7,15 +7,23 @@
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <span>
 #include <string_view>
+#include <utility>
 
 namespace core::changes {
 namespace {
 
 namespace fs = std::filesystem;
+using core::tools::detail::kFnvOffsetBasis;
 using core::tools::detail::kMaxToolDiffInputBytes;
 
-constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
+/// What one retained line hash costs, so both the allowance and the check that
+/// spends it agree on the price.
+constexpr std::size_t kBytesPerLineHash = sizeof(std::uint64_t);
+
+/// Additions and deletions of one change, when they could be established.
+using Counts = std::optional<std::pair<std::size_t, std::size_t>>;
 
 std::uint64_t fnv1a(std::string_view bytes,
                     std::uint64_t seed = kFnvOffsetBasis) {
@@ -48,25 +56,6 @@ std::size_t count_lines(std::string_view text) {
         ++lines;
     }
     return lines;
-}
-
-std::pair<std::size_t, std::size_t> count_diff_lines(std::string_view diff) {
-    std::size_t added = 0;
-    std::size_t deleted = 0;
-    bool in_hunk = false;
-    while (!diff.empty()) {
-        const auto newline = diff.find('\n');
-        const std::string_view line = diff.substr(0, newline);
-        diff.remove_prefix(newline == std::string_view::npos ? diff.size() : newline + 1);
-        if (line.starts_with("@@")) {
-            in_hunk = true;
-        } else if (in_hunk && line.starts_with('+')) {
-            ++added;
-        } else if (in_hunk && line.starts_with('-')) {
-            ++deleted;
-        }
-    }
-    return {added, deleted};
 }
 
 } // namespace
@@ -106,8 +95,14 @@ std::size_t TurnChangeTracker::remaining_bytes_unlocked() const {
         : 0;
 }
 
+std::size_t TurnChangeTracker::remaining_hash_bytes_unlocked() const {
+    return hashed_bytes_ < limits_.max_hashed_bytes
+        ? limits_.max_hashed_bytes - hashed_bytes_
+        : 0;
+}
+
 TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& path,
-                                                            std::size_t reclaimable) {
+                                                            const Reclaimable& reclaimable) {
     const auto stat = stat_of(path);
     if (!stat.exists) {
         return {};
@@ -122,7 +117,7 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
 
     const auto size = stat.size;
     const bool oversized = size > kMaxToolDiffInputBytes;
-    if (oversized || size > remaining_bytes_unlocked() + reclaimable) {
+    if (oversized || size > remaining_bytes_unlocked() + reclaimable.text) {
         // The bytes are not kept, so this change cannot be diffed: one file is
         // beyond any diff Filo shows, or the turn has retained all it may. One
         // bounded look still says how many lines the file held and whether it
@@ -145,6 +140,14 @@ TurnChangeTracker::Snapshot TurnChangeTracker::read_unlocked(const fs::path& pat
             // file: a rewrite that changes nothing is then not a change, which
             // a size-and-mtime stamp would call one.
             snapshot.fingerprint = scan->fingerprint;
+            // Line hashes are retained memory like text, and charged to an
+            // allowance of their own: they are what this file is counted from
+            // once its bytes are gone, so a turn that has spent its text budget
+            // is exactly the turn that still needs them.
+            if (scan->line_hashes.size() * kBytesPerLineHash
+                <= remaining_hash_bytes_unlocked() + reclaimable.hashes) {
+                snapshot.line_hashes = std::move(scan->line_hashes);
+            }
         }
         // Only a spent turn budget is a gap in the summary; an oversized file
         // describes itself.
@@ -180,6 +183,8 @@ std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining
     std::uint64_t hash = kFnvOffsetBasis;
     bool trailing_text = false;  // A last line without a terminator.
     bool first_chunk = true;
+    bool hashing = true;  // Until the file shows more lines than one keeps.
+    core::tools::detail::LineHasher hasher;
     while (in) {
         in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto count = static_cast<std::size_t>(in.gcount());
@@ -202,22 +207,53 @@ std::optional<TurnChangeTracker::Scan> TurnChangeTracker::scan_without_retaining
         scan.lines += static_cast<std::size_t>(std::ranges::count(chunk, '\n'));
         hash = fnv1a(chunk, hash);
         trailing_text = chunk.back() != '\n';
+        if (hashing) {
+            hasher.feed(chunk);
+            if (hasher.hashes.size() >= kMaxHashedLines) {
+                // More lines than one summary hashes. Hashes of only the first
+                // lines would count only part of a change, so they are given up
+                // whole.
+                hashing = false;
+                hasher.hashes.clear();
+            }
+        }
     }
     scan.lines += trailing_text ? 1 : 0;
     scan.fingerprint = hash;
+    if (hashing) {
+        hasher.finish();
+        scan.line_hashes = std::move(hasher.hashes);
+    }
     return scan;
 }
 
-std::size_t TurnChangeTracker::reclaimable_for_unlocked(const Key& key) const {
+TurnChangeTracker::Reclaimable TurnChangeTracker::reclaimable_for_unlocked(
+    const Key& key) const {
     const auto known = current_.find(key);
-    return known == current_.end() ? 0 : known->second.text.size();
+    return known == current_.end()
+        ? Reclaimable{}
+        : Reclaimable{.text = known->second.text.size(), .hashes = hash_bytes(known->second)};
+}
+
+std::size_t TurnChangeTracker::hash_bytes(const Snapshot& snapshot) noexcept {
+    return snapshot.line_hashes ? snapshot.line_hashes->size() * kBytesPerLineHash : 0;
+}
+
+void TurnChangeTracker::charge_unlocked(const Snapshot& snapshot) noexcept {
+    tracked_bytes_ += snapshot.text.size();
+    hashed_bytes_ += hash_bytes(snapshot);
+}
+
+void TurnChangeTracker::release_unlocked(const Snapshot& snapshot) noexcept {
+    tracked_bytes_ -= snapshot.text.size();
+    hashed_bytes_ -= hash_bytes(snapshot);
 }
 
 void TurnChangeTracker::store_current_unlocked(const Key& key, Snapshot snapshot) {
     if (const auto known = current_.find(key); known != current_.end()) {
-        tracked_bytes_ -= known->second.text.size();  // Superseded content is released.
+        release_unlocked(known->second);  // Superseded content is released.
     }
-    tracked_bytes_ += snapshot.text.size();
+    charge_unlocked(snapshot);
     current_[key] = std::move(snapshot);
 }
 
@@ -302,7 +338,7 @@ void TurnChangeTracker::observe(const MutationScope& scope, Observation when) {
                 // the origin it came from. Before the mutation, what is on disk
                 // is the pre-image.
                 Snapshot baseline = when == Observation::After ? Snapshot{} : snapshot;
-                tracked_bytes_ += baseline.text.size();
+                charge_unlocked(baseline);
                 baseline_.emplace(key, std::move(baseline));
             }
             store_current_unlocked(key, std::move(snapshot));
@@ -390,10 +426,44 @@ FileChangeContent TurnChangeTracker::no_diff_reason(const Snapshot& before,
     return FileChangeContent::BudgetSpent;
 }
 
+Counts TurnChangeTracker::counted_without_diff(const Snapshot& before,
+                                              const Snapshot& after,
+                                              core::tools::detail::WorkBudget& budget) {
+    // The hashes one side can be counted from: the ones a read kept when it
+    // could not keep the bytes, or the ones its retained text still yields.
+    // Borrowed where they already exist, so counting a file the turn could not
+    // afford does not copy what it dropped.
+    const auto hashes_of = [](const Snapshot& snapshot,
+                              std::vector<std::uint64_t>& owned)
+        -> std::optional<std::span<const std::uint64_t>> {
+        switch (snapshot.state) {
+            case Snapshot::State::Text:
+                owned = core::tools::detail::hash_text_lines(snapshot.text);
+                return std::span<const std::uint64_t>{owned};
+            case Snapshot::State::Opaque:
+                if (snapshot.line_hashes) {
+                    return std::span<const std::uint64_t>{*snapshot.line_hashes};
+                }
+                return std::nullopt;
+            case Snapshot::State::Missing:
+                return std::nullopt;
+        }
+        return std::nullopt;
+    };
+    std::vector<std::uint64_t> before_owned;
+    std::vector<std::uint64_t> after_owned;
+    const auto lhs = hashes_of(before, before_owned);
+    const auto rhs = hashes_of(after, after_owned);
+    if (!lhs || !rhs) {
+        return std::nullopt;
+    }
+    return core::tools::detail::count_line_edits(*lhs, *rhs, budget);
+}
+
 FileChange TurnChangeTracker::describe(FileChangeKind kind,
                                        const Key& from,
                                        const Key& to,
-                                       std::size_t& diff_budget) const {
+                                       ReportBudget& budget) const {
     const Snapshot& before = baseline_.at(from);
     const Snapshot& after = current_.at(to);
 
@@ -404,41 +474,69 @@ FileChange TurnChangeTracker::describe(FileChangeKind kind,
 
     // A change with no diff still has an exact size when a file simply appeared
     // or disappeared: its lines were counted even though its bytes were not
-    // kept. A modification cannot be split into additions and deletions without
-    // diffing, so it reports none rather than guess.
-    const auto undiffed = [&](FileChangeContent reason) {
+    // kept. A modification has no such shortcut, so it takes whatever the
+    // caller could establish, and reports no counts rather than guess.
+    const auto undiffed = [&](FileChangeContent reason, Counts counts) {
         change.content = reason;
         if (kind == FileChangeKind::Added) {
             change.added = after.lines.value_or(0);
         } else if (kind == FileChangeKind::Deleted) {
             change.deleted = before.lines.value_or(0);
+        } else if (counts) {
+            change.added = counts->first;
+            change.deleted = counts->second;
         }
         return change;
+    };
+    // What the per-line hashes both sides kept can still be searched for: the
+    // numbers a change no diff was built for. One file gets one search's worth
+    // of the report's allowance, so a change beyond the bound of a single
+    // search costs that bound and no more, and the files after it are left an
+    // allowance to be counted from.
+    const auto hashed_counts = [&] {
+        const auto allowance = std::min(core::tools::detail::kMaxMyersWorkUnits,
+                                        budget.count_work.remaining());
+        core::tools::detail::WorkBudget search(allowance);
+        auto counts = counted_without_diff(before, after, search);
+        budget.count_work.charge(allowance - search.remaining());
+        return counts;
     };
 
     const auto opaque = [](const Snapshot& snapshot) {
         return snapshot.state == Snapshot::State::Opaque;
     };
     if (opaque(before) || opaque(after)) {
-        return undiffed(no_diff_reason(before, after));
+        return undiffed(no_diff_reason(before, after), hashed_counts());
     }
     if (before.text == after.text) {
         return change;  // A pure rename.
     }
-    if (diff_budget == 0) {
-        return undiffed(FileChangeContent::BudgetSpent);
+    if (budget.diff_bytes == 0) {
+        return undiffed(FileChangeContent::BudgetSpent, hashed_counts());
     }
-    auto diff = core::tools::detail::build_unified_diff(change.path, before.text, after.text);
-    if (!diff) {
-        return undiffed(FileChangeContent::TooLarge);
+    auto outcome = core::tools::detail::build_unified_diff_detailed(
+        change.path, before.text, after.text);
+    if (!outcome.has_diff()) {
+        // Beyond what one diff may search or emit. The search may still have
+        // measured the change before its text proved unaffordable. Where it did
+        // not, the hashes both sides kept are searched on the report's own
+        // allowance — and that search charges a line what the diff charges a
+        // byte, so a change too reshaped to diff is often still cheap to count.
+        return undiffed(FileChangeContent::TooLarge,
+                        outcome.counts ? outcome.counts : hashed_counts());
     }
-    if (diff->size() > diff_budget) {
+    if (outcome.diff->size() > budget.diff_bytes) {
         // This one file would spend the whole turn's remaining detail budget.
-        return undiffed(FileChangeContent::BudgetSpent);
+        // The search that built it already proved the numbers, so they survive
+        // the text being dropped.
+        return undiffed(FileChangeContent::BudgetSpent, outcome.counts);
     }
-    diff_budget -= diff->size();
-    std::tie(change.added, change.deleted) = count_diff_lines(*diff);
-    change.diff = std::move(*diff);
+    budget.diff_bytes -= outcome.diff->size();
+    // A diff that fit the turn's budget was measured to build it, so its
+    // numbers came back with it.
+    change.added = outcome.counts->first;
+    change.deleted = outcome.counts->second;
+    change.diff = std::move(*outcome.diff);
     return change;
 }
 
@@ -448,7 +546,8 @@ TurnChanges TurnChangeTracker::changes() const {
     result.partial_enumeration = partial_enumeration_;
     result.unscoped_mutations = unscoped_mutations_;
     result.unscoped_tools = unscoped_tools_;
-    std::size_t diff_budget = limits_.max_diff_bytes;
+    ReportBudget budget{.diff_bytes = limits_.max_diff_bytes,
+                        .count_work = core::tools::detail::WorkBudget(limits_.max_count_work)};
     std::set<Key> reported;
 
     const auto missing = [](const Snapshot& snapshot) {
@@ -461,7 +560,7 @@ TurnChanges TurnChangeTracker::changes() const {
             continue;
         }
         result.files.push_back(
-            describe(FileChangeKind::Renamed, origin, destination, diff_budget));
+            describe(FileChangeKind::Renamed, origin, destination, budget));
         reported.insert(origin);
         reported.insert(destination);
     }
@@ -474,7 +573,7 @@ TurnChanges TurnChangeTracker::changes() const {
         const auto kind = missing(before) ? FileChangeKind::Added
             : missing(after)              ? FileChangeKind::Deleted
                                           : FileChangeKind::Modified;
-        result.files.push_back(describe(kind, key, key, diff_budget));
+        result.files.push_back(describe(kind, key, key, budget));
     }
 
     std::ranges::sort(result.files, {}, &FileChange::path);

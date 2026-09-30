@@ -11,8 +11,8 @@
 namespace core::tools::detail {
 namespace {
 
-constexpr std::size_t kMaxMyersWorkUnits = 4'000'000;
 constexpr std::size_t kUnifiedContextLines = 3;
+constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
 enum class EditKind : std::uint8_t { Keep, Delete, Insert };
 
@@ -53,14 +53,6 @@ struct Frontier {
     }
 };
 
-bool consume_work(std::size_t& work, std::size_t units = 1) noexcept {
-    if (units > kMaxMyersWorkUnits - work) {
-        return false;
-    }
-    work += units;
-    return true;
-}
-
 } // namespace
 
 std::vector<DiffLine> split_diff_lines(std::string_view text) {
@@ -98,11 +90,128 @@ bool lines_equal(const DiffLine& lhs, const DiffLine& rhs) noexcept {
     return lhs.text == rhs.text && lhs.terminated == rhs.terminated;
 }
 
+void LineHasher::feed(std::string_view chunk) {
+    for (const unsigned char byte : chunk) {
+        if (byte == '\n') {
+            hashes.push_back(pending_);
+            pending_ = kFnvOffsetBasis;
+            in_line_ = false;
+        } else {
+            pending_ ^= byte;
+            pending_ *= kFnvPrime;
+            in_line_ = true;
+        }
+    }
+}
+
+void LineHasher::finish() {
+    if (in_line_) {
+        // The read ended inside a line, so it carries no terminator. A line
+        // never contains '\n', so folding one in cannot collide with any
+        // terminated line: the hash then separates "a" from "a\n" exactly as
+        // lines_equal does, and a count of the two agrees with a diff of them.
+        pending_ ^= static_cast<std::uint64_t>('\n');
+        pending_ *= kFnvPrime;
+        hashes.push_back(pending_);
+        pending_ = kFnvOffsetBasis;
+        in_line_ = false;
+    }
+}
+
+std::vector<std::uint64_t> hash_text_lines(std::string_view text) {
+    LineHasher hasher;
+    hasher.feed(text);
+    hasher.finish();
+    return std::move(hasher.hashes);
+}
+
+std::optional<std::pair<std::size_t, std::size_t>> count_line_edits(
+    std::span<const std::uint64_t> before,
+    std::span<const std::uint64_t> after,
+    WorkBudget& budget)
+{
+    // Equal ends carry no edit. Trimming them leaves the search the span that
+    // actually moved, which is where a turn's edits sit in a file it otherwise
+    // kept.
+    std::size_t prefix = 0;
+    while (prefix < before.size() && prefix < after.size()
+           && before[prefix] == after[prefix]) {
+        ++prefix;
+    }
+    std::size_t suffix = 0;
+    while (suffix < before.size() - prefix && suffix < after.size() - prefix
+           && before[before.size() - 1 - suffix] == after[after.size() - 1 - suffix]) {
+        ++suffix;
+    }
+    const auto old_lines = before.subspan(prefix, before.size() - prefix - suffix);
+    const auto new_lines = after.subspan(prefix, after.size() - prefix - suffix);
+    const auto old_size = static_cast<std::int32_t>(old_lines.size());
+    const auto new_size = static_cast<std::int32_t>(new_lines.size());
+
+    // Myers' frontier, one row per edit distance: row `d` holds diagonal
+    // `-d + 2j` in slot `j`. A row only reads the row before it, so two rows
+    // suffice however far the search runs.
+    std::vector<std::int32_t> previous;
+    std::vector<std::int32_t> current;
+    for (std::int32_t distance = 0; distance <= old_size + new_size; ++distance) {
+        current.assign(static_cast<std::size_t>(distance) + 1, -1);
+        for (std::int32_t j = 0; j <= distance; ++j) {
+            if (!budget.spend()) {
+                return std::nullopt;
+            }
+            const std::int32_t diagonal = -distance + 2 * j;
+            std::int32_t x = 0;
+            if (distance != 0) {
+                // Diagonal + 1 of the previous row is this slot; diagonal - 1
+                // is the one before it.
+                const std::int32_t insert_x =
+                    static_cast<std::size_t>(j) < previous.size() ? previous[static_cast<std::size_t>(j)] : -1;
+                const std::int32_t delete_x = j > 0 ? previous[static_cast<std::size_t>(j) - 1] : -1;
+                const bool can_insert =
+                    insert_x >= 0 && insert_x - (diagonal + 1) < new_size;
+                const bool can_delete = delete_x >= 0 && delete_x < old_size;
+                if (!can_insert && !can_delete) {
+                    continue;  // Unreachable diagonal; the slot stays -1.
+                }
+                x = can_insert && (!can_delete || delete_x < insert_x)
+                    ? insert_x
+                    : delete_x + 1;
+            }
+            std::int32_t y = x - diagonal;
+            while (x < old_size && y < new_size) {
+                if (!budget.spend()) {
+                    return std::nullopt;
+                }
+                if (old_lines[static_cast<std::size_t>(x)]
+                    != new_lines[static_cast<std::size_t>(y)]) {
+                    break;
+                }
+                ++x;
+                ++y;
+            }
+            current[static_cast<std::size_t>(j)] = x;
+            if (x == old_size && y == new_size) {
+                // distance is additions plus deletions; the size difference
+                // is additions minus deletions.
+                const auto edits = static_cast<std::ptrdiff_t>(distance);
+                const auto delta = static_cast<std::ptrdiff_t>(new_size) - old_size;
+                return std::pair<std::size_t, std::size_t>{
+                    static_cast<std::size_t>((edits + delta) / 2),
+                    static_cast<std::size_t>((edits - delta) / 2),
+                };
+            }
+        }
+        previous.swap(current);
+    }
+    return std::nullopt;  // distance == old + new always arrives; this is a backstop.
+}
+
 namespace {
 
 std::optional<std::vector<Edit>> shortest_edit_script(
     std::span<const DiffLine> old_lines,
-    std::span<const DiffLine> new_lines)
+    std::span<const DiffLine> new_lines,
+    WorkBudget& budget)
 {
     const auto old_size = static_cast<std::int32_t>(old_lines.size());
     const auto new_size = static_cast<std::int32_t>(new_lines.size());
@@ -125,7 +234,6 @@ std::optional<std::vector<Edit>> shortest_edit_script(
 
     std::vector<Frontier> trace;
     trace.reserve(128);
-    std::size_t work = 0;
     std::int32_t found_distance = -1;
 
     for (std::int32_t distance = 0;
@@ -140,7 +248,7 @@ std::optional<std::vector<Edit>> shortest_edit_script(
         for (std::int32_t diagonal = -distance;
              diagonal <= distance;
              diagonal += 2) {
-            if (!consume_work(work)) {
+            if (!budget.spend()) {
                 return std::nullopt;
             }
 
@@ -174,7 +282,7 @@ std::optional<std::vector<Edit>> shortest_edit_script(
                 const DiffLine& new_line = new_lines[static_cast<std::size_t>(y)];
                 const std::size_t comparison_cost =
                     std::min(old_line.text.size(), new_line.text.size()) + 1;
-                if (!consume_work(work, comparison_cost)) {
+                if (!budget.spend(comparison_cost)) {
                     return std::nullopt;
                 }
                 if (!lines_equal(old_line, new_line)) {
@@ -315,7 +423,18 @@ const DiffLine& line_for_edit(const Edit& edit,
         : old_lines[edit.line];
 }
 
-std::optional<std::string> build_unified_diff_impl(
+/// Additions and deletions one edit script carries: what a diff of it would
+/// count, known as soon as the search finishes and before any text is written.
+std::pair<std::size_t, std::size_t> count_edits(std::span<const Edit> edits) noexcept {
+    std::pair<std::size_t, std::size_t> counts{};
+    for (const Edit& edit : edits) {
+        counts.first += edit.kind == EditKind::Insert ? 1 : 0;
+        counts.second += edit.kind == EditKind::Delete ? 1 : 0;
+    }
+    return counts;
+}
+
+DiffOutcome build_diff_outcome(
     std::string_view file_path,
     std::string_view old_content,
     std::string_view new_content)
@@ -323,14 +442,14 @@ std::optional<std::string> build_unified_diff_impl(
     if (old_content.size() > kMaxToolDiffInputBytes
         || new_content.size() > kMaxToolDiffInputBytes - old_content.size()
         || file_path.size() > (kMaxToolDiffOutputBytes - 64) / 2) {
-        return std::nullopt;
+        return {};
     }
 
     if (old_content == new_content
         || file_path.find_first_of("\r\n") != std::string_view::npos
         || !is_text_like_for_diff(old_content)
         || !is_text_like_for_diff(new_content)) {
-        return std::nullopt;
+        return {};
     }
 
     const auto old_lines = split_diff_lines(old_content);
@@ -354,9 +473,13 @@ std::optional<std::string> build_unified_diff_impl(
         prefix, old_lines.size() - prefix - suffix);
     const auto new_middle = std::span{new_lines}.subspan(
         prefix, new_lines.size() - prefix - suffix);
-    auto middle_script = shortest_edit_script(old_middle, new_middle);
+    WorkBudget budget(kMaxMyersWorkUnits);
+    auto middle_script = shortest_edit_script(old_middle, new_middle, budget);
     if (!middle_script) {
-        return std::nullopt;
+        // Either the search ran out of work or the frontier did not add up on
+        // the way back. Neither establishes anything about the change, so
+        // nothing is claimed: no text, and no numbers either.
+        return {};
     }
 
     std::vector<Edit> edits;
@@ -377,6 +500,11 @@ std::optional<std::string> build_unified_diff_impl(
         });
     }
 
+    // What the search proved, kept whether or not its text turns out to be
+    // affordable: a summary can then report the size of a change it cannot
+    // show instead of falling back to a second search for the same numbers.
+    const auto counts = count_edits(edits);
+
     std::vector<HunkRange> hunks;
     for (std::size_t i = 0; i < edits.size(); ++i) {
         if (edits[i].kind == EditKind::Keep) {
@@ -394,7 +522,7 @@ std::optional<std::string> build_unified_diff_impl(
         }
     }
     if (hunks.empty()) {
-        return std::nullopt;
+        return {};
     }
 
     std::size_t operation_index = 0;
@@ -419,12 +547,16 @@ std::optional<std::string> build_unified_diff_impl(
 
     std::string diff;
     diff.reserve(std::min<std::size_t>(kMaxToolDiffOutputBytes, 1024));
+    // The change is measured; only its text is unaffordable. Handing back the
+    // numbers without it is what lets a summary say how big a change it cannot
+    // show.
+    const auto counts_only = [&] { return DiffOutcome{.counts = counts}; };
     if (!append_bounded(diff, "--- a/")
         || !append_bounded(diff, file_path)
         || !append_bounded(diff, "\n+++ b/")
         || !append_bounded(diff, file_path)
         || !append_bounded(diff, '\n')) {
-        return std::nullopt;
+        return counts_only();
     }
 
     for (const HunkRange& hunk : hunks) {
@@ -442,7 +574,7 @@ std::optional<std::string> build_unified_diff_impl(
             new_start,
             hunk.new_count);
         if (!append_bounded(diff, header)) {
-            return std::nullopt;
+            return counts_only();
         }
 
         for (std::size_t i = hunk.begin; i < hunk.end; ++i) {
@@ -450,38 +582,38 @@ std::optional<std::string> build_unified_diff_impl(
             if (edit.kind == EditKind::Keep) {
                 if (!append_patch_line(
                         diff, ' ', line_for_edit(edit, old_lines, new_lines))) {
-                    return std::nullopt;
+                    return counts_only();
                 }
             } else if (edit.kind == EditKind::Delete) {
                 if (!append_patch_line(
                         diff, '-', line_for_edit(edit, old_lines, new_lines))) {
-                    return std::nullopt;
+                    return counts_only();
                 }
             } else {
                 if (!append_patch_line(
                         diff, '+', line_for_edit(edit, old_lines, new_lines))) {
-                    return std::nullopt;
+                    return counts_only();
                 }
             }
         }
     }
 
-    return diff;
+    return DiffOutcome{.diff = std::move(diff), .counts = counts};
 }
 
 } // namespace
 
-std::optional<std::string> build_unified_diff(
+DiffOutcome build_unified_diff_detailed(
     std::string_view file_path,
     std::string_view old_content,
     std::string_view new_content)
 {
     try {
-        return build_unified_diff_impl(file_path, old_content, new_content);
+        return build_diff_outcome(file_path, old_content, new_content);
     } catch (const std::bad_alloc&) {
         // Reporting is optional; an allocation failure must not make an edit
         // that has already been applied appear to have failed.
-        return std::nullopt;
+        return {};
     }
 }
 

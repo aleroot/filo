@@ -445,3 +445,165 @@ TEST_CASE("tool diff omits output that exceeds the result-size budget",
     CHECK_FALSE(core::tools::detail::build_unified_diff(
         "large-lines.txt", before, after));
 }
+
+TEST_CASE("line hashes split text the way a diff counts lines",
+          "[tools][diff]") {
+    using core::tools::detail::hash_text_lines;
+    CHECK(hash_text_lines("").empty());
+    CHECK(hash_text_lines("\n").size() == 1);
+    CHECK(hash_text_lines("a").size() == 1);
+    CHECK(hash_text_lines("a\n").size() == 1);
+    CHECK(hash_text_lines("a\nb").size() == 2);
+
+    // A line is its bytes without the terminator: an empty line hashes like
+    // any other line, and a carriage return stays part of the line.
+    CHECK(hash_text_lines("\n\n")[0] == hash_text_lines("\n")[0]);
+    CHECK(hash_text_lines("a\n")[0] != hash_text_lines("a\r\n")[0]);
+    CHECK(hash_text_lines("a\nb\n")[1] == hash_text_lines("x\nb\n")[1]);
+    // The terminator is part of a line's identity, because it is part of what
+    // a diff compares: "b" and "b\n" are different lines, and a rewrite that
+    // only adds a final newline is a change of one line for another.
+    CHECK(hash_text_lines("a\nb\n")[1] != hash_text_lines("a\nb")[1]);
+    CHECK(hash_text_lines("b")[0] != hash_text_lines("b\n")[0]);
+
+    // Chunked reads hash like one whole read, wherever the chunks fall.
+    const std::string text = "one\ntwo\nthree\nfour";
+    const auto whole = hash_text_lines(text);
+    for (std::size_t cut = 0; cut <= text.size(); ++cut) {
+        core::tools::detail::LineHasher hasher;
+        hasher.feed(std::string_view(text).substr(0, cut));
+        hasher.feed(std::string_view(text).substr(cut));
+        hasher.finish();
+        CHECK(hasher.hashes == whole);
+    }
+    core::tools::detail::LineHasher by_byte;
+    for (const char byte : text) {
+        by_byte.feed(std::string_view(&byte, 1));
+    }
+    by_byte.finish();
+    CHECK(by_byte.hashes == whole);
+}
+
+TEST_CASE("count_line_edits counts what a unified diff would", "[tools][diff]") {
+    using core::tools::detail::count_line_edits;
+    using core::tools::detail::hash_text_lines;
+    const auto count_edits = [](std::string_view before, std::string_view after) {
+        core::tools::detail::WorkBudget budget(core::tools::detail::kMaxMyersWorkUnits);
+        return count_line_edits(hash_text_lines(before), hash_text_lines(after), budget);
+    };
+    const auto check_edits = [&](std::string_view before, std::string_view after,
+                                 std::size_t added, std::size_t deleted) {
+        const auto counts = count_edits(before, after);
+        REQUIRE(counts.has_value());
+        CHECK(counts->first == added);
+        CHECK(counts->second == deleted);
+    };
+
+    check_edits("a\nb\n", "a\nb\n", 0, 0);
+    check_edits("", "a\nb\n", 2, 0);
+    check_edits("a\nb\n", "", 0, 2);
+    check_edits("a\nb\nc\n", "a\nB\nc\n", 1, 1);
+    check_edits("a\nb\nc\n", "a\nc\n", 0, 1);
+    check_edits("a\nc\n", "a\nb\nc\n", 1, 0);
+    check_edits("a\n", "b\n", 1, 1);
+    // A final newline gained or lost is one line replaced by another, which is
+    // what a diff of the same two texts reports.
+    check_edits("a\nb", "a\nb\n", 1, 1);
+    check_edits("a\nb\n", "a\nb", 1, 1);
+    // Repeated lines take the shortest edit script, not a greedy match.
+    check_edits("x\nx\nx\n", "x\n", 0, 2);
+
+    // What the diff itself counts, for edits spread across the file.
+    std::string before;
+    std::string after;
+    for (std::size_t i = 0; i < 100; ++i) {
+        before += std::format("row {}\n", i);
+        after += std::format("{} {}\n", i == 10 || i == 80 ? "updated" : "row", i);
+    }
+    const auto diff = core::tools::detail::build_unified_diff("f.txt", before, after);
+    REQUIRE(diff.has_value());
+    const auto counted = count_edits(before, after);
+    REQUIRE(counted.has_value());
+    CHECK(count_changes(*diff).added == counted->first);
+    CHECK(count_changes(*diff).deleted == counted->second);
+
+    // A count the budget cannot prove is not reported as one, and the budget
+    // says it was the reason.
+    core::tools::detail::WorkBudget tight(4);
+    CHECK_FALSE(count_line_edits(hash_text_lines(before), hash_text_lines(after), tight)
+                    .has_value());
+    CHECK(tight.exhausted());
+}
+
+TEST_CASE("one work budget is shared by every count it is asked for",
+          "[tools][diff]") {
+    using core::tools::detail::count_line_edits;
+    using core::tools::detail::hash_text_lines;
+    using core::tools::detail::WorkBudget;
+
+    WorkBudget budget(core::tools::detail::kMaxMyersWorkUnits);
+    const auto before = hash_text_lines("a\nb\nc\n");
+    const auto after = hash_text_lines("a\nB\nc\n");
+    REQUIRE(count_line_edits(before, after, budget).has_value());
+    // Spent in place: what is left is what the next count may use, so one
+    // turn's allowance covers all of its files rather than each of them.
+    const auto spent = core::tools::detail::kMaxMyersWorkUnits - budget.remaining();
+    CHECK(spent > 0);
+    CHECK_FALSE(budget.exhausted());
+    REQUIRE(count_line_edits(before, after, budget).has_value());
+    CHECK(budget.remaining() + 2 * spent == core::tools::detail::kMaxMyersWorkUnits);
+
+    // A budget already spent counts nothing further, and says so rather than
+    // reporting a count it never finished searching for.
+    WorkBudget none(0);
+    CHECK_FALSE(count_line_edits(before, after, none).has_value());
+    CHECK(none.exhausted());
+}
+
+TEST_CASE("a diff that cannot be shown still reports what the search proved",
+          "[tools][diff]") {
+    using core::tools::detail::build_unified_diff_detailed;
+
+    // A change that fits: the text and the numbers agree.
+    const auto shown = build_unified_diff_detailed("f.txt", "a\nb\n", "a\nB\n");
+    REQUIRE(shown.has_diff());
+    REQUIRE(shown.counts.has_value());
+    CHECK(shown.counts->first == 1);
+    CHECK(shown.counts->second == 1);
+    CHECK(count_changes(*shown.diff).added == shown.counts->first);
+    CHECK(count_changes(*shown.diff).deleted == shown.counts->second);
+
+    // Nothing was searched, so nothing is claimed: unchanged, not text, or too
+    // large to look at.
+    const auto unchanged = build_unified_diff_detailed("f.txt", "a\n", "a\n");
+    CHECK_FALSE(unchanged.has_diff());
+    CHECK_FALSE(unchanged.counts.has_value());
+    CHECK_FALSE(build_unified_diff_detailed("f.txt", std::string("a\0b", 3), "c")
+                    .has_diff());
+    const std::string oversized(core::tools::detail::kMaxToolDiffInputBytes + 1, 'x');
+    CHECK_FALSE(build_unified_diff_detailed("f.txt", oversized, "y").counts.has_value());
+
+    // The search gave up on the shape of the change, so no numbers are invented
+    // for it either.
+    std::string many_before;
+    std::string many_after;
+    for (std::size_t i = 0; i < 2'000; ++i) {
+        many_before += std::format("old-{}\n", i);
+        many_after += std::format("new-{}\n", i);
+    }
+    const auto hopeless = build_unified_diff_detailed("f.txt", many_before, many_after);
+    CHECK_FALSE(hopeless.has_diff());
+    CHECK_FALSE(hopeless.counts.has_value());
+
+    // The search finished and the change is known; only its text did not fit.
+    // The numbers survive the text being dropped, which is what lets a summary
+    // report the size of a change it cannot show.
+    const std::string one_line_before(262'143, 'a');
+    const std::string one_line_after(262'143, 'b');
+    const auto unaffordable =
+        build_unified_diff_detailed("f.txt", one_line_before, one_line_after);
+    CHECK_FALSE(unaffordable.has_diff());
+    REQUIRE(unaffordable.counts.has_value());
+    CHECK(unaffordable.counts->first == 1);
+    CHECK(unaffordable.counts->second == 1);
+}

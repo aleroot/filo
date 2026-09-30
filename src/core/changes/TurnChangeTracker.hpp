@@ -2,6 +2,7 @@
 
 #include "FileChange.hpp"
 #include "MutationScope.hpp"
+#include "../tools/ToolDiffUtils.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -29,10 +30,12 @@ namespace core::changes {
 /// stale. Paths such a tool creates from nothing stay invisible, and the
 /// summary says so rather than implying completeness.
 ///
-/// Both resources a turn can consume without limit are bounded: how much
-/// content a directory scan retains, and how much diff text the turn emits.
-/// Exhausting either degrades files to a listed-without-detail entry and
-/// marks the summary partial.
+/// Every resource a turn can consume without limit is bounded: how much
+/// content a directory scan retains, how many lines of it are kept as hashes,
+/// how much diff text the turn emits, and how much searching the counting of
+/// undiffed changes may do. Exhausting any of them degrades files to a
+/// listed-without-detail entry and marks the summary partial; none of them can
+/// hang a turn or drop a file silently.
 ///
 /// Thread-safe: tool calls with disjoint scopes may run concurrently.
 class TurnChangeTracker {
@@ -49,6 +52,23 @@ public:
     /// Largest file whose lines are still counted when its content is not
     /// retained.
     static constexpr std::size_t kMaxCountedFileBytes = 8 * 1024 * 1024;
+    /// Lines one summary hashes when it cannot retain their bytes: eight bytes
+    /// a line still separate additions from deletions in a modification too
+    /// large to diff. Past this a modification reports no counts at all.
+    static constexpr std::size_t kMaxHashedLines = 256 * 1024;
+    /// Line hashes one turn retains, across every file it saw. Charged apart
+    /// from `kMaxTrackedBytesPerTurn` on purpose: hashes are what a file whose
+    /// bytes the turn could not afford is still counted from, so spending the
+    /// text budget on them would take the counts down with the diffs. Eight
+    /// bytes a line covers both sides of one `kMaxHashedLines` file, or the
+    /// lines of a great many ordinary ones.
+    static constexpr std::size_t kMaxHashedBytesPerTurn = 4 * 1024 * 1024;
+    /// Searching one report may spend counting the changes it has no diff for.
+    /// Counting is a fallback for detail the turn could not afford, so it is
+    /// bounded like the rest: one heavily edited file costs up to
+    /// `kMaxMyersWorkUnits`, which measured is milliseconds, and an ordinary
+    /// one a thousandth of that.
+    static constexpr std::size_t kMaxCountWorkPerTurn = 128'000'000;
     /// Distinct tool names one summary keeps as the reason its file list may be
     /// incomplete. Past this the list is short, and the summary still says so.
     static constexpr std::size_t kMaxUnscopedToolNames = 8;
@@ -59,6 +79,8 @@ public:
         std::size_t max_files_per_directory = kMaxFilesPerDirectory;
         std::size_t max_tracked_bytes = kMaxTrackedBytesPerTurn;
         std::size_t max_diff_bytes = kMaxDiffBytesPerTurn;
+        std::size_t max_hashed_bytes = kMaxHashedBytesPerTurn;
+        std::size_t max_count_work = kMaxCountWorkPerTurn;
     };
 
     /// Files beneath `display_root` are reported relative to it.
@@ -118,6 +140,10 @@ private:
         /// Lines the file held. Known even when the bytes were not retained,
         /// so a change too large to diff can still be counted.
         std::optional<std::size_t> lines;
+        /// The FNV-1a of every line the file held, State::Opaque text only: the
+        /// bytes are gone but each line still identifies itself, so a
+        /// modification can be counted without being diffed.
+        std::optional<std::vector<std::uint64_t>> line_hashes;
         /// Cheap size+mtime identity of the file this came from; 0 when absent.
         /// Lets an unscoped mutation be reconciled with one stat per known
         /// path instead of a read.
@@ -141,6 +167,23 @@ private:
 
     using Key = std::string;  // canonical absolute path
 
+    /// What re-reading a path releases: the copy of it the turn already holds,
+    /// which the new read may spend in its place. Text and hashes are separate
+    /// because they are charged to separate allowances. No default member
+    /// initializers: clang will not use a nested type's while the enclosing
+    /// class is still incomplete, and `Reclaimable{}` is one.
+    struct Reclaimable {
+        std::size_t text;
+        std::size_t hashes;
+    };
+
+    /// What one report may still spend, threaded through `describe` so the
+    /// whole summary stays bounded however many files it covers.
+    struct ReportBudget {
+        std::size_t diff_bytes;                     ///< Diff text still to emit.
+        core::tools::detail::WorkBudget count_work;  ///< Counting still to search.
+    };
+
     /// The files a scope stands for, and whether all of them fit the cap.
     struct Expansion {
         std::vector<Key> keys;
@@ -163,6 +206,9 @@ private:
         /// Identity of the bytes that were read, so a file whose content is not
         /// retained can still be compared by content rather than by mtime.
         std::uint64_t fingerprint = 0;
+        /// Hash of every line read; empty when the file is binary or held more
+        /// lines than `kMaxHashedLines`.
+        std::vector<std::uint64_t> line_hashes;
     };
 
     /// Reads a file far enough to count its lines and tell text from binary,
@@ -173,15 +219,21 @@ private:
 
     [[nodiscard]] static Stat stat_of(const std::filesystem::path& path);
 
-    /// Reads one file, charging its content against the turn's budget.
+    /// Reads one file, charging its content against the turn's allowances.
     /// `reclaimable` is content already held for this path that the caller is
     /// about to release, so it is available to the new read.
     [[nodiscard]] Snapshot read_unlocked(const std::filesystem::path& path,
-                                        std::size_t reclaimable = 0);
+                                        const Reclaimable& reclaimable);
     /// Content held for `key` that a re-read would release.
-    [[nodiscard]] std::size_t reclaimable_for_unlocked(const Key& key) const;
-    /// Content the turn may still retain. Saturates at zero.
+    [[nodiscard]] Reclaimable reclaimable_for_unlocked(const Key& key) const;
+    /// Text the turn may still retain. Saturates at zero.
     [[nodiscard]] std::size_t remaining_bytes_unlocked() const;
+    /// Line hashes the turn may still retain. Saturates at zero.
+    [[nodiscard]] std::size_t remaining_hash_bytes_unlocked() const;
+    /// Adds one snapshot's share of both allowances to the turn's tally.
+    void charge_unlocked(const Snapshot& snapshot) noexcept;
+    /// Gives it back, for content a newer read supersedes.
+    void release_unlocked(const Snapshot& snapshot) noexcept;
     /// Replaces a path's current state, releasing the content it supersedes.
     void store_current_unlocked(const Key& key, Snapshot snapshot);
     [[nodiscard]] Key key_for(const std::filesystem::path& path) const;
@@ -194,10 +246,19 @@ private:
     /// The most informative reason neither side of a change can be diffed.
     [[nodiscard]] static FileChangeContent no_diff_reason(const Snapshot& before,
                                                           const Snapshot& after);
+    /// Additions and deletions of a change no diff was built for, from the
+    /// per-line hashes both sides still carry where they can. Spends `budget`,
+    /// and reports nothing rather than a count it could not prove.
+    [[nodiscard]] static std::optional<std::pair<std::size_t, std::size_t>>
+    counted_without_diff(const Snapshot& before,
+                         const Snapshot& after,
+                         core::tools::detail::WorkBudget& budget);
+    /// Bytes of line hashes a snapshot retains.
+    [[nodiscard]] static std::size_t hash_bytes(const Snapshot& snapshot) noexcept;
     [[nodiscard]] FileChange describe(FileChangeKind kind,
                                       const Key& from,
                                       const Key& to,
-                                      std::size_t& diff_budget) const;
+                                      ReportBudget& budget) const;
 
     std::filesystem::path display_root_;
     Limits limits_;
@@ -206,6 +267,7 @@ private:
     std::map<Key, Snapshot> current_;
     std::map<Key, Key> origin_;  // destination -> baseline path it was moved from
     std::size_t tracked_bytes_ = 0;  ///< Text retained across baseline_ and current_
+    std::size_t hashed_bytes_ = 0;   ///< Line hashes retained across both maps
     bool partial_enumeration_ = false;
     bool unscoped_mutations_ = false;
     std::vector<std::string> unscoped_tools_;  ///< Distinct, in first-run order

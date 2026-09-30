@@ -61,6 +61,16 @@ MutationScope scope_of(std::initializer_list<fs::path> paths) {
     return MutationScope{.paths = paths};
 }
 
+/// A file beyond any diff Filo shows: padding past the per-file diff cap.
+std::string oversized_content() {
+    std::string content;
+    const std::string line(64, 'x');
+    while (content.size() <= core::tools::detail::kMaxToolDiffInputBytes) {
+        content += line + "\n";
+    }
+    return content;
+}
+
 /// The files a turn reports. The fidelity flags are asserted separately.
 std::vector<FileChange> files_of(const TurnChangeTracker& tracker) {
     return tracker.changes().files;
@@ -208,7 +218,10 @@ TEST_CASE("Binary and oversized files are listed without a diff", "[changes]") {
     CHECK(changes[1].path == "large.txt");
     CHECK(changes[1].content == FileChangeContent::TooLarge);
     CHECK(changes[1].diff.empty());
-    CHECK(changes[1].added == 0);
+    // Nothing to open, but one line replaced another and the line hashes say
+    // so: a modification too large to diff is still counted.
+    CHECK(changes[1].added == 1);
+    CHECK(changes[1].deleted == 1);
 }
 
 TEST_CASE("A mutation that throws is still observed", "[changes]") {
@@ -528,19 +541,246 @@ TEST_CASE("A file whose content was not retained is still counted", "[changes]")
     CHECK(created.added == 2);
 }
 
-TEST_CASE("A modification without a diff reports no counts rather than guessing",
-          "[changes]") {
+TEST_CASE("A modification without a diff is counted from its lines", "[changes]") {
     TempDir dir;
     const auto file = dir.path / "a.txt";
-    put(file, "one\ntwo\n");
-    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 0});
+    std::string before;
+    std::string after;
+    for (int i = 0; i < 10; ++i) {
+        before += std::format("line {} of the file\n", i);
+        after += std::format("line {} of the file\n", i == 4 ? 99 : i);
+    }
+    put(file, before);
+    // The turn may retain the line hashes but not the bytes: the change is
+    // listed without a diff, and still counted.
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 100});
 
-    edit(tracker, scope_of({file}), [&] { put(file, "one\nTWO\nthree\n"); });
+    edit(tracker, scope_of({file}), [&] { put(file, after); });
 
     const auto summary = tracker.changes();
     REQUIRE(summary.files.size() == 1);
     CHECK(summary.files[0].kind == FileChangeKind::Modified);
-    // Additions and deletions cannot be separated without diffing the two.
+    CHECK(summary.files[0].content == FileChangeContent::BudgetSpent);
+    CHECK(summary.files[0].diff.empty());
+    // The bytes are gone, but eight bytes a line still separate additions from
+    // deletions: one line went out, one came in.
+    CHECK(summary.files[0].added == 1);
+    CHECK(summary.files[0].deleted == 1);
+}
+
+TEST_CASE("A modification whose lines were never readable reports no counts",
+          "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "blob.bin";
+    put(file, std::string("one\0two\n", 8));
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 0});
+
+    edit(tracker, scope_of({file}), [&] { put(file, std::string("one\0TWO\n", 8)); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    CHECK(summary.files[0].content == FileChangeContent::Binary);
+    // A binary file is never read to the end: no lines, no hashes, no counts.
+    CHECK(summary.files[0].added == 0);
+    CHECK(summary.files[0].deleted == 0);
+}
+
+TEST_CASE("A modification too large to diff is still counted", "[changes]") {
+    TempDir dir;
+    const auto big = dir.path / "big.cpp";
+    const auto content = oversized_content();
+    put(big, content);
+    TurnChangeTracker tracker(dir.path);
+
+    edit(tracker, scope_of({big}), [&] {
+        auto edited = content;
+        edited[edited.size() / 2] = 'y';  // One line in the middle changes.
+        put(big, edited);
+    });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
+    CHECK(summary.files[0].diff.empty());
+    // Nothing to open, yet the line hashes say exactly what moved: one line in,
+    // one line out.
+    CHECK(summary.files[0].added == 1);
+    CHECK(summary.files[0].deleted == 1);
+    // One file too big to diff describes itself; it is not a gap in the summary.
+    CHECK_FALSE(summary.partial_enumeration);
+}
+
+TEST_CASE("A turn that cannot keep bytes still counts them", "[changes]") {
+    TempDir dir;
+    // More files than the turn may retain: every one of them is past the text
+    // budget by the time it is read, which is exactly when the hashes charged
+    // to their own allowance are the only way its change can still be sized.
+    constexpr std::size_t kFiles = 12;
+    std::vector<fs::path> files;
+    for (std::size_t i = 0; i < kFiles; ++i) {
+        const auto file = dir.path / std::format("f{:02}.txt", i);
+        std::string content;
+        for (std::size_t line = 0; line < 40; ++line) {
+            content += std::format("line {} of file {}\n", line, i);
+        }
+        put(file, content);
+        files.push_back(file);
+    }
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 1024});
+    for (const auto& file : files) {
+        const auto scope = scope_of({file});
+        edit(tracker, scope, [&] {});  // Observed, so it has a baseline.
+    }
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const auto scope = scope_of({files[i]});
+        edit(tracker, scope, [&] {
+            std::string content;
+            for (std::size_t line = 0; line < 40; ++line) {
+                content += std::format("line {} of file {}\n",
+                                       line == 7 ? 77 : line, i);
+            }
+            put(files[i], content);
+        });
+    }
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == kFiles);
+    // No bytes were kept, so there is no diff to open anywhere in the turn.
+    CHECK(std::ranges::all_of(summary.files, [](const FileChange& change) {
+        return change.diff.empty()
+            && change.content == FileChangeContent::BudgetSpent;
+    }));
+    // Every file is still counted: the hashes did not have to fit the budget
+    // the bytes could not.
+    CHECK(std::ranges::all_of(summary.files, [](const FileChange& change) {
+        return change.added == 1 && change.deleted == 1;
+    }));
+    CHECK(summary.partial_enumeration);
+}
+
+TEST_CASE("Line hashes have an allowance of their own", "[changes]") {
+    TempDir dir;
+    const auto big = dir.path / "big.cpp";
+    const auto content = oversized_content();
+    put(big, content);
+    // Enough for no hashes at all: the counts a modification needs are
+    // retained memory too, and this turn may retain none.
+    TurnChangeTracker tracker(dir.path, {.max_hashed_bytes = 1024});
+
+    edit(tracker, scope_of({big}), [&] {
+        auto edited = content;
+        edited[edited.size() / 2] = 'y';
+        put(big, edited);
+    });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
+    // Listed and detected, only not counted: the hashes did not fit the turn.
+    CHECK(summary.files[0].added == 0);
+    CHECK(summary.files[0].deleted == 0);
+    CHECK_FALSE(summary.partial_enumeration);
+}
+
+TEST_CASE("A rewrite that only ends the last line is still a counted change",
+          "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "a.txt";
+    put(file, "one\ntwo");
+    // No bytes retained, so the count comes from the hashes alone: they have
+    // to separate a terminated last line from an unterminated one, or a change
+    // a diff would report is reported as no change at all.
+    TurnChangeTracker tracker(dir.path, {.max_tracked_bytes = 0});
+
+    edit(tracker, scope_of({file}), [&] { put(file, "one\ntwo\n"); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    CHECK(summary.files[0].diff.empty());
+    CHECK(summary.files[0].added == 1);
+    CHECK(summary.files[0].deleted == 1);
+}
+
+TEST_CASE("Counts survive a diff the turn cannot afford", "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "a.txt";
+    std::string before;
+    std::string after;
+    for (int i = 0; i < 40; ++i) {
+        before += std::format("line {} of the file\n", i);
+        after += std::format("line {} of the file\n", i == 4 ? 99 : i);
+    }
+    put(file, before);
+    // Room for a byte of diff: the search runs, its text is dropped, and what
+    // it proved is kept instead of being searched for a second time.
+    TurnChangeTracker tracker(dir.path, {.max_diff_bytes = 1});
+
+    edit(tracker, scope_of({file}), [&] { put(file, after); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].content == FileChangeContent::BudgetSpent);
+    CHECK(summary.files[0].diff.empty());
+    CHECK(summary.files[0].added == 1);
+    CHECK(summary.files[0].deleted == 1);
+    CHECK(summary.partial_enumeration);
+}
+
+TEST_CASE("A change too reshaped to diff is still counted from its lines",
+          "[changes]") {
+    TempDir dir;
+    const auto file = dir.path / "a.txt";
+    std::string before;
+    std::string after;
+    for (std::size_t line = 0; line < 2'000; ++line) {
+        before += std::format("line {} of a file long enough to be reshaped\n", line);
+        after += line % 4 == 0
+            ? std::format("rewritten {} past the reach of a diff\n", line)
+            : std::format("line {} of a file long enough to be reshaped\n", line);
+    }
+    for (int appended = 0; appended < 10; ++appended) {
+        after += std::format("appended {}\n", appended);
+    }
+    put(file, before);
+    TurnChangeTracker tracker(dir.path);
+
+    edit(tracker, scope_of({file}), [&] { put(file, after); });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    CHECK(summary.files[0].diff.empty());
+    // A diff charges a comparison by the byte and gives up on this; a count
+    // charges it by the line and does not. 500 lines rewritten, 10 appended.
+    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
+    CHECK(summary.files[0].added == 510);
+    CHECK(summary.files[0].deleted == 500);
+}
+
+TEST_CASE("A spent counting allowance leaves changes listed but uncounted",
+          "[changes]") {
+    TempDir dir;
+    const auto big = dir.path / "big.cpp";
+    const auto content = oversized_content();
+    put(big, content);
+    TurnChangeTracker tracker(dir.path, {.max_count_work = 0});
+
+    edit(tracker, scope_of({big}), [&] {
+        auto edited = content;
+        edited[edited.size() / 2] = 'y';
+        put(big, edited);
+    });
+
+    const auto summary = tracker.changes();
+    REQUIRE(summary.files.size() == 1);
+    CHECK(summary.files[0].kind == FileChangeKind::Modified);
+    // The file is still there with the reason it has no detail; only the
+    // numbers are missing, and a line count was never a guess.
+    CHECK(summary.files[0].content == FileChangeContent::TooLarge);
     CHECK(summary.files[0].added == 0);
     CHECK(summary.files[0].deleted == 0);
 }

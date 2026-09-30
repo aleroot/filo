@@ -154,10 +154,15 @@ TEST_CASE("A long file list is counted past the rows the box draws",
     auto answer = make_assistant_message("All done.", "", false);
     const std::size_t total = kMaxRenderedFileChanges + 5;
     for (std::size_t i = 0; i < total; ++i) {
+        const bool listed = i < kMaxRenderedFileChanges;
         answer.turn_changes.files.push_back(FileChange{
             .kind = FileChangeKind::Modified,
             .content = FileChangeContent::BudgetSpent,
             .path = std::format("src/f{:03}.cpp", i),
+            // The files past the cap carry counts of their own, so the header
+            // is the one place their numbers can still be seen.
+            .added = listed ? std::size_t{1} : std::size_t{100},
+            .deleted = listed ? std::size_t{1} : std::size_t{50},
         });
     }
 
@@ -166,6 +171,11 @@ TEST_CASE("A long file list is counted past the rows the box draws",
     CHECK_THAT(text, ContainsSubstring("5 more not listed"));
     CHECK_THAT(text, ContainsSubstring("src/f000.cpp"));
     CHECK(text.find("src/f029.cpp") == std::string::npos);
+    // The total covers every file, not only the drawn rows: 25 at +1 -1 and 5
+    // at +100 -50. A turn too large to list is still a turn whose size can be
+    // read off the summary.
+    CHECK_THAT(text, ContainsSubstring("+525"));
+    CHECK_THAT(text, ContainsSubstring("-275"));
 }
 
 TEST_CASE("A file that cannot be diffed still shows how large the change was",
@@ -201,6 +211,25 @@ TEST_CASE("A change whose size cannot be known shows no counts at all",
     // Guessing a size would be worse than showing none.
     CHECK(text.find("+0") == std::string::npos);
     CHECK(text.find("-0") == std::string::npos);
+}
+
+TEST_CASE("A modification too large to diff still shows its counts",
+          "[tui][turn_file_changes]") {
+    auto answer = make_assistant_message("All done.", "", false);
+    answer.turn_changes.files = {
+        FileChange{.kind = FileChangeKind::Modified,
+                   .content = FileChangeContent::TooLarge,
+                   .path = "src/tui/MainApp.cpp",
+                   .added = 12,
+                   .deleted = 3},
+    };
+
+    const auto text = render_text({answer});
+    CHECK_THAT(text, ContainsSubstring("too large to diff"));
+    CHECK_THAT(text, ContainsSubstring("+12"));
+    CHECK_THAT(text, ContainsSubstring("-3"));
+    // Still not expandable: the counts are exact, the diff is not there.
+    CHECK_THAT(text, ContainsSubstring("\u2022 src/tui/MainApp.cpp"));
 }
 
 namespace {
