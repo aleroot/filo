@@ -35,6 +35,7 @@ struct CliProtocol {
     std::string_view pasteboard_prefix;  ///< Private pasteboard name prefix.
     std::string_view pasteboard_type;    ///< Property-list type on that pasteboard.
     std::string_view file_name;          ///< The one payload file Lampo reads.
+    std::string_view reply = {};         ///< The `reply` value sent with the request.
 };
 
 // The protocols Lampo publishes, declared together because they are one wire
@@ -57,6 +58,7 @@ inline constexpr CliProtocol kComparerProtocol{
     .pasteboard_prefix = "alessio.pollero.Lampo.comparer-view.",
     .pasteboard_type = "alessio.pollero.Lampo.comparer-view.v1",
     .file_name = "changes.patch",
+    .reply = "comments",
 };
 
 /// The states a Lampo CLI protocol speaks. `request` is the client's; the rest
@@ -66,6 +68,9 @@ namespace state {
 inline constexpr std::string_view request = "request";
 inline constexpr std::string_view editing = "editing";
 inline constexpr std::string_view viewing = "viewing";
+/// A comparer session whose comments go back to the client, in place of
+/// `viewing`. Lampo stays in it until the review window closes.
+inline constexpr std::string_view annotating = "annotating";
 inline constexpr std::string_view saved = "saved";
 inline constexpr std::string_view cancelled = "cancelled";
 inline constexpr std::string_view failed = "failed";
@@ -162,6 +167,7 @@ private:
     std::string session_id_;
     std::string pasteboard_name_;
     std::string pasteboard_type_;
+    std::string reply_;
     long observed_change_count_ = 0;
     std::shared_ptr<Launch> launch_;
 };

@@ -31,6 +31,9 @@ struct ViewerOutcome {
     // User-facing message, if any. Success is silent: the diff on screen is the
     // confirmation.
     std::optional<ViewerNotice> notice;
+    // What a reviewer returned, for the host's prompt draft. Empty when the
+    // backend cannot review, or when nothing came back.
+    std::string comments;
 };
 
 // Drives one comparison at a time, whichever backend is configured.
@@ -96,6 +99,7 @@ private:
 
     mutable std::mutex mutex_;
     bool running_ = false;
+    bool viewing_ = false;
     bool cancelling_ = false;
     std::string label_;
     std::optional<ViewerOutcome> outcome_;

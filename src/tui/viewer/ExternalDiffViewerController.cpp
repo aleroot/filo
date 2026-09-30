@@ -72,6 +72,7 @@ std::optional<ViewerOutcome> ExternalDiffViewerController::open(
     {
         std::lock_guard lock(mutex_);
         running_ = true;
+        viewing_ = false;
         cancelling_ = false;
         label_ = session->label;
         outcome_.reset();
@@ -87,6 +88,13 @@ void ExternalDiffViewerController::run_detached(std::shared_ptr<Session> session
             .session_id = session->session_id,
             .cancellation = std::move(stop),
             .with_terminal = {},
+            .report_viewing = [this] {
+                {
+                    std::lock_guard lock(mutex_);
+                    viewing_ = true;
+                }
+                if (host_.wake_ui) { host_.wake_ui(); }
+            },
         };
         publish(finish(*session, session->viewer->view(context)));
     });
@@ -98,7 +106,10 @@ ViewerOutcome ExternalDiffViewerController::finish(
     switch (result.status()) {
         case ViewStatus::Shown:
             // The diff is on screen; a transcript line would only repeat it.
-            return ViewerOutcome{.inline_view = false, .shown = true, .notice = std::nullopt};
+            return ViewerOutcome{
+                .inline_view = false, .shown = true, .notice = std::nullopt,
+                .comments = result.comments(),
+            };
         case ViewStatus::Cancelled:
             // Cancelling is a deliberate, silent user action.
             return ViewerOutcome{};
@@ -137,7 +148,9 @@ std::string ExternalDiffViewerController::status_label() const {
     if (cancelling_) {
         return std::format("Cancelling the {} comparison…", label_);
     }
-    return std::format("Opening {}…", label_);
+    return viewing_
+        ? std::format("Reviewing in {}…", label_)
+        : std::format("Opening {}…", label_);
 }
 
 std::optional<ViewerOutcome> ExternalDiffViewerController::take_outcome() {

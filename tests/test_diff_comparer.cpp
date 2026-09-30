@@ -38,6 +38,8 @@ struct Recorder {
     bool saw_terminal = false;
     std::atomic_bool started{false};
     std::atomic_bool released{false};
+    std::atomic_bool complete{false};
+    std::string comments;
 };
 
 // A backend with no side effects, so the controller can be exercised without
@@ -68,16 +70,17 @@ public:
         if (launch_ == ViewerLaunch::Detached) {
             // Stands in for another application taking its time, and for the
             // cancellation the host offers while it does.
-            while (!context.cancellation.stop_requested()) {
+            if (context.report_viewing) { context.report_viewing(); }
+            while (!context.cancellation.stop_requested() && !recorder_->complete.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             recorder_->released.store(true);
-            return ViewResult::cancelled();
+            return context.cancellation.stop_requested() ? ViewResult::cancelled() : ending();
         }
 
         switch (status_) {
             case ViewStatus::Shown:
-                return ViewResult::shown();
+                return ending();
             case ViewStatus::Cancelled:
                 return ViewResult::cancelled();
             case ViewStatus::Failed:
@@ -87,6 +90,14 @@ public:
     }
 
 private:
+    /// How this backend ends a comparison the test let it finish: reviewed when
+    /// the test recorded comments to hand back, plain shown otherwise.
+    [[nodiscard]] ViewResult ending() const {
+        return recorder_->comments.empty()
+            ? ViewResult::shown()
+            : ViewResult::reviewed(recorder_->comments);
+    }
+
     std::shared_ptr<Recorder> recorder_;
     ViewerLaunch launch_;
     ViewStatus status_;
@@ -381,6 +392,34 @@ TEST_CASE("A detached backend publishes its outcome later", "[diff_comparer]") {
     REQUIRE(recorder->released.load());
 }
 
+TEST_CASE("A detached review returns its comments once and keeps cancellation silent", "[diff_comparer]") {
+    auto recorder = std::make_shared<Recorder>();
+    recorder->comments = "\n**Annotations:**\nFile: Sample.swift\nUse four instead\n";
+    auto catalog = catalog_recording_into(recorder, ViewerLaunch::Detached);
+    ExternalDiffViewerController controller({}, catalog);
+    REQUIRE_FALSE(controller.open("fake", kPatch).has_value());
+    for (int attempt = 0; attempt < 2000 && controller.status_label() != "Reviewing in Fake…"; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(controller.status_label() == "Reviewing in Fake…");
+    REQUIRE(controller.busy());
+    SECTION("return") {
+        recorder->complete.store(true);
+        const auto outcome = wait_for_outcome(controller);
+        REQUIRE(outcome.has_value());
+        CHECK(outcome->shown);
+        CHECK(outcome->comments == recorder->comments);
+        CHECK_FALSE(controller.take_outcome().has_value());
+    }
+    SECTION("cancel") {
+        REQUIRE(controller.cancel());
+        const auto outcome = wait_for_outcome(controller);
+        REQUIRE(outcome.has_value());
+        CHECK(outcome->comments.empty());
+        CHECK_FALSE(outcome->notice.has_value());
+    }
+}
+
 #if defined(__APPLE__)
 
 TEST_CASE("The Lampo protocols keep the shape Lampo publishes", "[diff_comparer][lampo]") {
@@ -394,6 +433,16 @@ TEST_CASE("The Lampo protocols keep the shape Lampo publishes", "[diff_comparer]
     CHECK(tui::lampo::kComparerProtocol.pasteboard_type
           == "alessio.pollero.Lampo.comparer-view.v1");
     CHECK(tui::lampo::kComparerProtocol.file_name == "changes.patch");
+    // The request asks for the comments back; Lampo's ComparerCliReview
+    // declares the same value, and answers with `annotating` instead of
+    // `viewing` when it accepts.
+    CHECK(tui::lampo::kComparerProtocol.reply == "comments");
+    CHECK(tui::lampo::state::annotating == "annotating");
+    CHECK(tui::lampo::state::viewing == "viewing");
+    CHECK(tui::lampo::state::saved == "saved");
+    CHECK(tui::lampo::state::cancelled == "cancelled");
+    CHECK(tui::lampo::state::failed == "failed");
+    CHECK(tui::lampo::kPromptEditProtocol.reply.empty());
 
     CHECK(tui::lampo::kPromptEditProtocol.directory_prefix == "lampo-prompter-edit-v1-");
     CHECK(tui::lampo::kPromptEditProtocol.pasteboard_prefix

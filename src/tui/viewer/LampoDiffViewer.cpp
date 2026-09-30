@@ -3,6 +3,8 @@
 #include "tui/lampo/LampoCliSession.hpp"
 
 #include <chrono>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -39,32 +41,54 @@ public:
             return ViewResult::failed(std::move(launched.error()));
         }
 
-        return await_viewing(*session, context);
+        return await_completion(*session, context);
     }
 
 private:
-    /// The comparer protocol is one-way: `viewing` means Lampo has read the
-    /// whole patch and put it on screen, and its window then lives
-    /// independently of Filo. Only a refusal, or a Lampo that disappears while
-    /// still reading, can follow. The user asked to see the diff, so a Lampo
-    /// that quits before showing it is a failure, not a cancellation.
-    [[nodiscard]] static ViewResult await_viewing(
+    /// Follows the comparer half of the protocol. A display-only Lampo answers
+    /// `viewing` and the window then lives independently of Filo. One that took
+    /// Filo's request for the comments back answers `annotating` instead, and
+    /// keeps the session open until its window closes: `saved`, whose comments
+    /// it wrote over the patch, or `cancelled` when it held none. The user asked to see the diff,
+    /// so a Lampo that quits before showing it is a failure; one that quits
+    /// during a review merely ends it.
+    [[nodiscard]] static ViewResult await_completion(
         lampo::CliSession& session,
         const ViewContext& context) {
+        bool acknowledged = false;
         const auto deadline = std::chrono::steady_clock::now() + kAcknowledgementTimeout;
+        auto next_answer = [&]() -> std::optional<ViewResult> {
+            const auto message = session.poll();
+            if (!message) { return std::nullopt; }
+            if (message->state == lampo::state::annotating) {
+                acknowledged = true;
+                if (context.report_viewing) { context.report_viewing(); }
+            } else if (message->state == lampo::state::viewing) {
+                // A Lampo that does not know the request predates returning
+                // comments: the diff is on screen and the comments stay in its
+                // chat, which is what this comparison always did.
+                return ViewResult::shown();
+            } else if (message->state == lampo::state::saved) {
+                return read_comments(session);
+            } else if (message->state == lampo::state::cancelled) {
+                return ViewResult::cancelled();
+            } else if (message->state == lampo::state::failed) {
+                return ViewResult::failed(
+                    message->error.empty() ? "Lampo could not complete the review." : message->error);
+            }
+            return std::nullopt;
+        };
 
         while (!context.cancellation.stop_requested()) {
-            if (auto answer = next_answer(session)) {
-                return std::move(*answer);
-            }
+            if (auto answer = next_answer()) { return std::move(*answer); }
             if (!session.app_running()) {
                 // Lampo may have answered between the poll above and its exit.
-                if (auto answer = next_answer(session)) {
-                    return std::move(*answer);
-                }
-                return ViewResult::failed("Lampo quit before showing the diff.");
+                if (auto answer = next_answer()) { return std::move(*answer); }
+                session.cancel();
+                return acknowledged ? ViewResult::cancelled()
+                    : ViewResult::failed("Lampo quit before showing the diff.");
             }
-            if (std::chrono::steady_clock::now() >= deadline) {
+            if (!acknowledged && std::chrono::steady_clock::now() >= deadline) {
                 session.cancel();
                 return ViewResult::failed(
                     "Lampo did not acknowledge the comparison. "
@@ -77,20 +101,13 @@ private:
         return ViewResult::cancelled();
     }
 
-    /// Lampo's answer, when it published one since the last poll.
-    [[nodiscard]] static std::optional<ViewResult> next_answer(lampo::CliSession& session) {
-        const auto message = session.poll();
-        if (!message.has_value()) {
-            return std::nullopt;
+    /// The comments Lampo wrote over the patch it was handed.
+    [[nodiscard]] static ViewResult read_comments(const lampo::CliSession& session) {
+        std::ifstream input(session.file(), std::ios::binary);
+        if (!input) {
+            return ViewResult::failed("Could not read Lampo's review comments.");
         }
-        if (message->state == lampo::state::viewing) {
-            return ViewResult::shown();
-        }
-        if (message->state == lampo::state::failed) {
-            return ViewResult::failed(
-                message->error.empty() ? "Lampo could not reconstruct the diff." : message->error);
-        }
-        return std::nullopt;
+        return ViewResult::reviewed(std::string(std::istreambuf_iterator<char>(input), {}));
     }
 };
 

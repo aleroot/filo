@@ -5942,11 +5942,20 @@ RunResult run(RunOptions opts) {
     // and only one comparison runs at a time.
     std::string pending_comparison_omissions;
 
-    // Reports what a comparison did once it settled. Success stays silent
-    // unless the diff on screen is not the whole turn: an external comparer
-    // shows only the patch, so the reviewer learns about the rest here.
-    auto show_comparer_notice = [&](const viewer::ViewerOutcome& outcome) {
+    // Applies what a comparison produced once it settled: review comments join
+    // the draft (never sent on their own), and success stays silent unless the
+    // diff on screen is not the whole turn: an external comparer shows only the
+    // patch, so the reviewer learns about the rest here.
+    auto apply_comparer_outcome = [&](const viewer::ViewerOutcome& outcome) {
         const std::string omissions = std::exchange(pending_comparison_omissions, {});
+        if (!outcome.comments.empty()) {
+            std::string comments = normalize_newlines(outcome.comments);
+            if (input_text.empty()) {
+                comments.erase(0, comments.find_first_not_of('\n'));
+            }
+            input_text += comments;
+            input_cursor_position = static_cast<int>(input_text.size());
+        }
         if (outcome.shown && !omissions.empty()) {
             append_history(std::format("\nℹ  {}\n", omissions));
         }
@@ -5972,7 +5981,7 @@ RunResult run(RunOptions opts) {
                 // revealing what it already holds, where it holds it.
                 reveal_transcript_changes(comparison.disclosure_keys, message_index);
             }
-            show_comparer_notice(*outcome);
+            apply_comparer_outcome(*outcome);
             return;
         }
         wake_ui();  // Draw the overlay while the detached session runs.
@@ -7689,10 +7698,10 @@ RunResult run(RunOptions opts) {
             return true;
         }
 
-        // A detached comparer session owns the keys the same way. Unlike an edit
-        // it has no result to apply — only a notice when something went wrong.
+        // A detached comparer session owns the keys the same way until the
+        // review ends; its result is the reviewer's comments, if any.
         if (auto outcome = diff_comparer.take_outcome()) {
-            show_comparer_notice(*outcome);
+            apply_comparer_outcome(*outcome);
             return true;
         }
         if (diff_comparer.busy()) {

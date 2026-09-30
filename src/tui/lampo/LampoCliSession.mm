@@ -163,6 +163,7 @@ CliSession& CliSession::operator=(CliSession&& other) noexcept {
         session_id_ = std::exchange(other.session_id_, {});
         pasteboard_name_ = std::exchange(other.pasteboard_name_, {});
         pasteboard_type_ = std::exchange(other.pasteboard_type_, {});
+        reply_ = std::exchange(other.reply_, {});
         observed_change_count_ = std::exchange(other.observed_change_count_, 0);
         launch_ = std::move(other.launch_);
     }
@@ -203,6 +204,7 @@ std::expected<CliSession, std::string> CliSession::begin(
     session.pasteboard_name_ =
         std::string(protocol.pasteboard_prefix) + std::string(session_id);
     session.pasteboard_type_ = protocol.pasteboard_type;
+    session.reply_ = protocol.reply;
     return session;
 }
 
@@ -263,6 +265,9 @@ void CliSession::publish(std::string_view published_state, std::string_view erro
         // reads a client name from.
         if (published_state == state::request) {
             message[@"client"] = to_ns(kClientName);
+            if (!reply_.empty()) {
+                message[@"reply"] = to_ns(reply_);
+            }
         }
 
         [board clearContents];
