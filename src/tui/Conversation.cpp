@@ -2050,6 +2050,8 @@ std::optional<TurnComparison> turn_comparison(const UiMessage& message, std::str
         return TurnComparison{
             .patch = std::move(exported.patch),
             .disclosure_keys = {turn_file_change_key(message.id, change.path)},
+            .undiffed = exported.undiffed,
+            .caveats = {},
         };
     }
     return std::nullopt;

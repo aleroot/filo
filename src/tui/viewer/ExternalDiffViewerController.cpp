@@ -48,6 +48,7 @@ std::optional<ViewerOutcome> ExternalDiffViewerController::open(
             .notice = selection.warning.empty()
                 ? std::nullopt
                 : std::optional(failure(std::move(selection.warning))),
+            .comments = {},
         };
     }
 
@@ -65,6 +66,7 @@ std::optional<ViewerOutcome> ExternalDiffViewerController::open(
             .session_id = session->session_id,
             .cancellation = {},
             .with_terminal = host_.with_terminal,
+            .report_viewing = {},
         };
         return finish(*session, session->viewer->view(context));
     }
@@ -118,7 +120,9 @@ ViewerOutcome ExternalDiffViewerController::finish(
     }
     return ViewerOutcome{
         .inline_view = false,
+        .shown = false,
         .notice = failure(std::format("{} comparer: {}", session.label, result.error())),
+        .comments = {},
     };
 }
 

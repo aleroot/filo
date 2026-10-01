@@ -486,6 +486,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
         -Wall
         -Wextra
         -Wpedantic
+        -Wno-missing-field-initializers
     )
 
     if(FILO_WARNINGS_AS_ERRORS)
