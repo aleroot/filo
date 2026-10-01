@@ -56,3 +56,13 @@ TEST_CASE("uri::is_loopback_http_url requires exact loopback host", "[utils][uri
     REQUIRE_FALSE(core::utils::uri::is_loopback_http_url("https://localhost.run/v1"));
     REQUIRE_FALSE(core::utils::uri::is_loopback_http_url("https://127.0.0.1.example.com/v1"));
 }
+
+TEST_CASE("append_query_params picks the separator and percent-encodes",
+          "[uri][query]") {
+    using core::utils::uri::append_query_params;
+    CHECK(append_query_params("https://h/p", {}) == "https://h/p");
+    CHECK(append_query_params("https://h/p", {{"key", "a b&c"}})
+          == "https://h/p?key=a%20b%26c");
+    CHECK(append_query_params("https://h/p?alt=sse", {{"key", "k"}})
+          == "https://h/p?alt=sse&key=k");
+}

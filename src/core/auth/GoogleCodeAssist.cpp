@@ -14,6 +14,8 @@ namespace core::auth::google_code_assist {
 namespace {
 
 constexpr std::string_view kDefaultEndpoint = "https://cloudcode-pa.googleapis.com";
+// Host the real Antigravity client talks to (same as the streaming protocol).
+constexpr std::string_view kAntigravityEndpoint = "https://daily-cloudcode-pa.googleapis.com";
 constexpr std::string_view kDocsUrl = "https://goo.gle/gemini-cli-auth-docs#workspace-gca";
 constexpr std::string_view kApiVersion = "v1internal";
 
@@ -101,10 +103,13 @@ constexpr std::string_view kApiVersion = "v1internal";
 
 } // namespace
 
-std::string code_assist_endpoint() {
+std::string code_assist_endpoint(std::string_view ide_type) {
     if (const char* raw = std::getenv("CODE_ASSIST_ENDPOINT");
         raw && raw[0] != '\0') {
         return raw;
+    }
+    if (ide_type == "ANTIGRAVITY") {
+        return std::string(kAntigravityEndpoint);
     }
     return std::string(kDefaultEndpoint);
 }
@@ -193,7 +198,7 @@ std::string setup_user(std::string_view access_token,
         ui->show_instructions("Completing Gemini Code Assist setup for your Google account.");
     }
 
-    const std::string endpoint = code_assist_endpoint();
+    const std::string endpoint = code_assist_endpoint(ide_type);
     const std::string load_url = endpoint + "/" + std::string(kApiVersion) + ":loadCodeAssist";
     cpr::Response load_response = post_json(
         load_url,

@@ -16,6 +16,7 @@
 #include "core/llm/ToolCallAssembly.hpp"
 #include "core/llm/protocols/DashScopeProtocol.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GrokProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
@@ -1548,7 +1549,34 @@ public:
     }
     bool refresh_on_auth_failure() override { ++refreshes; return true; }
 };
-}
+
+// Stands in for a protocol that rotates hosts between attempts (like
+// GeminiAntigravityProtocol): the host is chosen by per-stream state.
+class RotatingHostProtocol final : public GeminiCodeAssistProtocol {
+public:
+    explicit RotatingHostProtocol(std::string second_host)
+        : second_host_(std::move(second_host)) {}
+
+    [[nodiscard]] std::string build_url(std::string_view base_url,
+                                        std::string_view model) const override {
+        return GeminiCodeAssistProtocol::build_url(
+            failures_ % 2 == 0 ? base_url : std::string_view(second_host_), model);
+    }
+    void on_response(const HttpResponse& response) override {
+        if (response.status_code != 200) ++failures_;
+    }
+    [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override {
+        return response.status_code == 503;
+    }
+    [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
+        return std::make_unique<RotatingHostProtocol>(*this);
+    }
+
+private:
+    std::string second_host_;
+    int failures_ = 0;
+};
+} // namespace
 
 TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", "[integration][http][claude][hardening]") {
     struct Failure { std::string name; int status; std::string body; bool retry; bool veto = false; };
@@ -1710,4 +1738,56 @@ TEST_CASE("Shared HTTP transport isolates error bodies and trusts a completed st
         CHECK(finals == 1);
         CHECK(recovered == 1);
     }
+
+TEST_CASE("HttpLLMProvider re-resolves the protocol URL on retry",
+          "[integration][http][retry]") {
+    httplib::Server first;
+    httplib::Server second;
+    std::atomic<int> first_hits{0};
+    std::atomic<int> second_hits{0};
+    first.Post("/v1internal:streamGenerateContent",
+               [&](const httplib::Request&, httplib::Response& res) {
+        ++first_hits;
+        res.status = 503;
+        res.set_content(R"({"error":{"message":"unavailable"}})", "application/json");
+    });
+    second.Post("/v1internal:streamGenerateContent",
+                [&](const httplib::Request&, httplib::Response& res) {
+        ++second_hits;
+        res.set_content(
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":"
+            "[{\"text\":\"from-second\"}]}}]}}\n\n",
+            "text/event-stream");
+    });
+    const int first_port = first.bind_to_any_port("127.0.0.1");
+    const int second_port = second.bind_to_any_port("127.0.0.1");
+    if (first_port <= 0 || second_port <= 0) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
+    std::jthread first_thread([&first]() { first.listen_after_bind(); });
+    std::jthread second_thread([&second]() { second.listen_after_bind(); });
+    ScopedServerStop stop_first(first);
+    ScopedServerStop stop_second(second);
+    wait_until_running(first);
+    wait_until_running(second);
+
+    auto provider = std::make_shared<HttpLLMProvider>(
+        std::format("http://127.0.0.1:{}", first_port),
+        core::auth::ApiKeyCredentialSource::as_bearer("test-token"),
+        "gemini-2.5-flash",
+        std::make_unique<RotatingHostProtocol>(
+            std::format("http://127.0.0.1:{}", second_port)));
+
+    ChatRequest request;
+    request.model = "gemini-2.5-flash";
+    request.messages.push_back(Message{.role = "user", .content = "Hello"});
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(
+        request, [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+
+    CHECK(first_hits.load() == 1);
+    CHECK(second_hits.load() == 1);
+    CHECK(std::ranges::any_of(chunks, [](const StreamChunk& chunk) {
+        return chunk.content == "from-second";
+    }));
 }

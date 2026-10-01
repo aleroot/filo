@@ -84,13 +84,8 @@ namespace {
         prepared.model = req.model;
         prepared.payload = prepared.protocol->serialize(req);
         prepared.delimiter = std::string(prepared.protocol->event_delimiter());
-        prepared.url = prepared.protocol->build_url(base_url, req.model);
-        bool first = (prepared.url.find('?') == std::string::npos);
-        for (const auto& [k, v] : auth.query_params) {
-            prepared.url += (first ? '?' : '&');
-            prepared.url += k + '=' + v;
-            first = false;
-        }
+        prepared.url = core::utils::uri::append_query_params(
+            prepared.protocol->build_url(base_url, req.model), auth.query_params);
 
         prepared.headers = prepared.protocol->build_headers(auth);
         prepared.headers["Accept"] = "text/event-stream";
@@ -770,6 +765,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     return false;
                 }
                 protocol->reset_state();
+                url = core::utils::uri::append_query_params(
+                    protocol->build_url(self->base_url_, request_metadata.model),
+                    auth.query_params);
                 return true;
             };
 

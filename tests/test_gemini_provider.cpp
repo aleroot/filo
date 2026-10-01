@@ -322,7 +322,7 @@ TEST_CASE("HttpLLMProvider normalizes Gemini shorthand aliases for metadata look
 TEST_CASE("HttpLLMProvider uses inherited protocol model canonicalization",
           "[GeminiProvider][models][antigravity]") {
     HttpLLMProvider provider(
-        "https://cloudcode-pa.googleapis.com",
+        "https://daily-cloudcode-pa.googleapis.com",
         nullptr,
         "pro",
         std::make_unique<GeminiAntigravityProtocol>());
@@ -499,7 +499,8 @@ TEST_CASE("GeminiAntigravityProtocol wraps request with userAgent and requestId"
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("project":"project-123")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("request":{)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("userAgent":"antigravity")"));
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("requestId":"filo-antigravity-)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("requestType":"agent")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("requestId":"agent/)"));
 
     // Must still be a single well-formed JSON object.
     simdjson::dom::parser parser;
@@ -529,7 +530,9 @@ TEST_CASE("GeminiAntigravityProtocol build_headers sets Antigravity client ident
     REQUIRE(headers.at("Authorization") == "Bearer test-token");
     REQUIRE(headers.at("Content-Type") == "application/json");
     REQUIRE(headers.count("User-Agent") == 1);
-    REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::ContainsSubstring("antigravity/"));
+    REQUIRE_THAT(headers.at("User-Agent"),
+                 Catch::Matchers::StartsWith("antigravity/hub/" + std::string(kAntigravityClientVersion)
+                                             + " (aidev_client; os_type=darwin; arch=arm64;"));
     REQUIRE(headers.at("X-Goog-Api-Client") == "google-cloud-sdk vscode_cloudshelleditor/0.1");
     REQUIRE_THAT(headers.at("Client-Metadata"),
                  Catch::Matchers::ContainsSubstring(R"("ideType":"ANTIGRAVITY")"));
@@ -541,8 +544,217 @@ TEST_CASE("GeminiAntigravityProtocol name and url match Cloud Code Assist wire f
           "[gemini][antigravity]") {
     GeminiAntigravityProtocol protocol;
     REQUIRE(protocol.name() == "gemini_antigravity");
-    REQUIRE(protocol.build_url("https://cloudcode-pa.googleapis.com", "gemini-2.5-flash")
-            == "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
+    REQUIRE(protocol.build_url("https://daily-cloudcode-pa.googleapis.com", "gemini-2.5-flash")
+            == "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
+}
+
+namespace {
+ChatRequest antigravity_request(std::string model, std::string prompt = "Hello") {
+    ChatRequest req;
+    req.model = std::move(model);
+    req.messages.push_back(Message{.role = "system", .content = "Be brief."});
+    req.messages.push_back(Message{.role = "user", .content = std::move(prompt)});
+    return req;
+}
+
+simdjson::dom::element parse_json(simdjson::dom::parser& parser, const std::string& json) {
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(json).get(doc) == simdjson::SUCCESS);
+    return doc;
+}
+} // namespace
+
+TEST_CASE("GeminiAntigravityProtocol rotates daily and sandbox on failed attempts",
+          "[gemini][antigravity][failover]") {
+    GeminiAntigravityProtocol protocol;
+    cpr::Header headers;
+    const std::string daily = std::string(kAntigravityEndpoint);
+    const std::string sandbox = std::string(kAntigravitySandboxEndpoint);
+    const auto url = [&](std::string_view base) { return protocol.build_url(base, "m"); };
+    const auto fail = [&](int status) { protocol.on_response(HttpResponse{status, {}, headers}); };
+    const std::string tail = "/v1internal:streamGenerateContent?alt=sse";
+
+    REQUIRE(url(daily) == daily + tail);
+    fail(503);
+    REQUIRE(url(daily) == sandbox + tail);
+    fail(0);                                  // transport failure
+    REQUIRE(url(daily) == daily + tail);      // cycles back
+    fail(429);
+    REQUIRE(url(daily + "/") == sandbox + tail);
+    fail(400);                                // not an endpoint failure
+    REQUIRE(url(daily) == sandbox + tail);
+    protocol.on_response(HttpResponse{200, {}, headers});
+    REQUIRE(url(daily) == sandbox + tail);
+}
+
+TEST_CASE("GeminiAntigravityProtocol never rotates a user-supplied endpoint",
+          "[gemini][antigravity][failover]") {
+    GeminiAntigravityProtocol protocol;
+    cpr::Header headers;
+    protocol.on_response(HttpResponse{503, {}, headers});
+    REQUIRE(protocol.build_url("http://localhost:9999", "m")
+            == "http://localhost:9999/v1internal:streamGenerateContent?alt=sse");
+}
+
+TEST_CASE("GeminiAntigravityProtocol retries only transient failures",
+          "[gemini][antigravity][failover]") {
+    GeminiAntigravityProtocol protocol;
+    cpr::Header headers;
+    for (const int status : {0, 408, 429, 500, 503}) {
+        CHECK(protocol.is_retryable(HttpResponse{status, {}, headers}));
+    }
+    for (const int status : {400, 401, 403, 404}) {
+        CHECK_FALSE(protocol.is_retryable(HttpResponse{status, {}, headers}));
+    }
+}
+
+TEST_CASE("GeminiAntigravityProtocol envelope mirrors the hub client",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    simdjson::dom::parser parser;
+    const auto doc = parse_json(parser, protocol.serialize(antigravity_request("gemini-3.1-pro-preview")));
+
+    std::string_view request_id;
+    REQUIRE(doc["requestId"].get(request_id) == simdjson::SUCCESS);
+    REQUIRE_THAT(std::string(request_id),
+                 Catch::Matchers::Matches(
+                     "agent/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+                     "/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/2"));
+    std::string_view user_agent, request_type, session_id, role, tool_mode;
+    REQUIRE(doc["userAgent"].get(user_agent) == simdjson::SUCCESS);
+    REQUIRE(doc["requestType"].get(request_type) == simdjson::SUCCESS);
+    REQUIRE(user_agent == "antigravity");
+    REQUIRE(request_type == "agent");
+    REQUIRE(doc["request"]["sessionId"].get(session_id) == simdjson::SUCCESS);
+    REQUIRE(session_id.starts_with('-'));
+    REQUIRE(doc["request"]["systemInstruction"]["role"].get(role) == simdjson::SUCCESS);
+    REQUIRE(role == "user");
+    std::string_view last_step, used_claude;
+    REQUIRE(doc["request"]["labels"]["last_step_index"].get(last_step) == simdjson::SUCCESS);
+    REQUIRE(last_step == "1");
+    REQUIRE(doc["request"]["labels"]["used_claude"].get(used_claude) == simdjson::SUCCESS);
+    REQUIRE(used_claude == "false");
+    // No tools declared -> no toolConfig.
+    REQUIRE(doc["request"]["toolConfig"].error() == simdjson::NO_SUCH_FIELD);
+    REQUIRE(tool_mode.empty());
+}
+
+TEST_CASE("GeminiAntigravityProtocol keeps session ids stable and advances the step",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    auto first = antigravity_request("gemini-3.1-pro-preview", "Same conversation");
+    auto second = first;
+    second.messages.push_back(Message{.role = "assistant", .content = "Hi"});
+    second.messages.push_back(Message{.role = "user", .content = "More"});
+    auto other = antigravity_request("gemini-3.1-pro-preview", "Different conversation");
+
+    simdjson::dom::parser p1, p2, p3;
+    const auto d1 = parse_json(p1, protocol.serialize(first));
+    const auto d2 = parse_json(p2, protocol.serialize(second));
+    const auto d3 = parse_json(p3, protocol.serialize(other));
+
+    std::string_view s1, s2, s3, l2, t1, t2;
+    REQUIRE(d1["request"]["sessionId"].get(s1) == simdjson::SUCCESS);
+    REQUIRE(d2["request"]["sessionId"].get(s2) == simdjson::SUCCESS);
+    REQUIRE(d3["request"]["sessionId"].get(s3) == simdjson::SUCCESS);
+    REQUIRE(s1 == s2);
+    REQUIRE(s1 != s3);
+    REQUIRE(d2["request"]["labels"]["last_step_index"].get(l2) == simdjson::SUCCESS);
+    REQUIRE(l2 == "2");
+    REQUIRE(d1["request"]["labels"]["trajectory_id"].get(t1) == simdjson::SUCCESS);
+    REQUIRE(d2["request"]["labels"]["trajectory_id"].get(t2) == simdjson::SUCCESS);
+    REQUIRE(t1 == t2);
+}
+
+TEST_CASE("GeminiAntigravityProtocol prefers the explicit session id as anchor",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    auto a = antigravity_request("gemini-3.1-pro-preview", "First prompt");
+    auto b = antigravity_request("gemini-3.1-pro-preview", "Edited prompt");
+    a.session_id = b.session_id = "session-42";
+
+    simdjson::dom::parser pa, pb;
+    std::string_view sa, sb;
+    REQUIRE(parse_json(pa, protocol.serialize(a))["request"]["sessionId"].get(sa) == simdjson::SUCCESS);
+    REQUIRE(parse_json(pb, protocol.serialize(b))["request"]["sessionId"].get(sb) == simdjson::SUCCESS);
+    REQUIRE(sa == sb);
+}
+
+TEST_CASE("GeminiAntigravityProtocol validates tool calling and signs Gemini 3 calls",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    auto req = antigravity_request("gemini-3.1-pro-preview");
+    core::tools::ToolDefinition def;
+    def.name = "read_file";
+    def.description = "Read";
+    def.input_schema = R"({"type":"object","properties":{}})";
+    req.tools.push_back(Tool{.function = def});
+    Message call{.role = "assistant"};
+    ToolCall tc;
+    tc.id = "c1";
+    tc.function.name = "read_file";
+    tc.function.arguments = "{}";
+    call.tool_calls.push_back(tc);
+    call.tool_calls.push_back(tc);
+    req.messages.push_back(call);
+
+    const std::string payload = protocol.serialize(req);
+    simdjson::dom::parser parser;
+    const auto doc = parse_json(parser, payload);
+    std::string_view mode;
+    REQUIRE(doc["request"]["toolConfig"]["functionCallingConfig"]["mode"].get(mode)
+            == simdjson::SUCCESS);
+    REQUIRE(mode == "VALIDATED");
+
+    // Only the first call of the turn carries the bypass signature.
+    const std::string needle = R"("thoughtSignature":"skip_thought_signature_validator")";
+    const auto first = payload.find(needle);
+    REQUIRE(first != std::string::npos);
+    REQUIRE(payload.find(needle, first + 1) == std::string::npos);
+}
+
+TEST_CASE("GeminiAntigravityProtocol caps Claude output and skips the signature bypass",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    simdjson::dom::parser parser;
+
+    auto claude = antigravity_request("claude-sonnet-4-6");
+    auto doc = parse_json(parser, protocol.serialize(claude));
+    int64_t max_tokens = 0;
+    REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
+    REQUIRE(max_tokens == 64000);
+    std::string_view used_claude;
+    REQUIRE(doc["request"]["labels"]["used_claude"].get(used_claude) == simdjson::SUCCESS);
+    REQUIRE(used_claude == "true");
+
+    claude.max_tokens = 100000;
+    simdjson::dom::parser parser2;
+    doc = parse_json(parser2, protocol.serialize(claude));
+    REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
+    REQUIRE(max_tokens == 64000);
+
+    claude.max_tokens = 2048;
+    simdjson::dom::parser parser3;
+    doc = parse_json(parser3, protocol.serialize(claude));
+    REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens) == simdjson::SUCCESS);
+    REQUIRE(max_tokens == 2048);
+
+    // Gemini keeps whatever the caller asked for.
+    auto gemini = antigravity_request("gemini-3.1-pro-preview");
+    simdjson::dom::parser parser4;
+    doc = parse_json(parser4, protocol.serialize(gemini));
+    REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].error() == simdjson::NO_SUCH_FIELD);
+}
+
+TEST_CASE("Plain Code Assist serialization is unchanged by Antigravity extras",
+          "[gemini][code-assist]") {
+    GeminiCodeAssistProtocol protocol;
+    auto req = antigravity_request("gemini-2.5-flash");
+    const std::string payload = protocol.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("sessionId"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("labels"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("toolConfig"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("systemInstruction":{"parts")"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -554,4 +766,14 @@ TEST_CASE("ProviderFactory - creates Gemini provider", "[gemini][factory]") {
     config.model = "gemini-2.5-flash";
     auto provider = core::llm::ProviderFactory::create_provider("gemini", config);
     REQUIRE(provider != nullptr);
+}
+TEST_CASE("Code Assist request stays valid JSON without a project id",
+          "[gemini][code-assist]") {
+    GeminiCodeAssistProtocol protocol;
+    simdjson::dom::parser parser;
+    const auto doc = parse_json(parser, protocol.serialize(antigravity_request("gemini-2.5-flash")));
+    std::string_view model;
+    REQUIRE(doc["model"].get(model) == simdjson::SUCCESS);
+    REQUIRE(model == "gemini-2.5-flash");
+    REQUIRE(doc["project"].error() == simdjson::NO_SUCH_FIELD);
 }

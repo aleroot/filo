@@ -26,7 +26,9 @@ struct OnboardUserOperation {
     std::string project_id;
 };
 
-[[nodiscard]] std::string code_assist_endpoint();
+/// `CODE_ASSIST_ENDPOINT` override, else the daily host for the "ANTIGRAVITY"
+/// ide type and the production host for everything else.
+[[nodiscard]] std::string code_assist_endpoint(std::string_view ide_type = "IDE_UNSPECIFIED");
 [[nodiscard]] std::optional<std::string> configured_project_override();
 [[nodiscard]] LoadCodeAssistResponseData parse_load_code_assist_response(std::string_view json);
 [[nodiscard]] OnboardUserOperation parse_onboard_user_response(std::string_view json);

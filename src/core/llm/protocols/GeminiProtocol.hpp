@@ -17,7 +17,9 @@
  */
 
 #include "ApiProtocol.hpp"
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace core::llm::protocols {
@@ -44,8 +46,35 @@ normalize_requested_gemini_model(std::string_view raw_model);
  * The `default_model` parameter is unused when the model name is already
  * embedded in the URL; it is accepted for API symmetry.
  */
+/**
+ * @brief Optional wire additions for Cloud Code Assist variants that mirror a
+ *        first-party client (Antigravity). Plain Gemini passes none.
+ */
+struct GeminiRequestExtras {
+    /// Role stamped on `systemInstruction` (empty = omit the field).
+    std::string system_instruction_role;
+    /// Tag the first `functionCall` of every model turn with the bypass
+    /// signature (Gemini 3+ rejects unsigned first calls; Filo does not
+    /// round-trip thought signatures).
+    bool skip_thought_signature_on_first_call = false;
+    /// Emit `toolConfig.functionCallingConfig.mode = VALIDATED` when tools exist.
+    bool validated_tool_mode = false;
+    /// Request-level `sessionId` (empty = omit).
+    std::string session_id;
+    /// Raw JSON object emitted as request-level `labels` (empty = omit).
+    std::string labels_json;
+    /// Fixed `maxOutputTokens` ceiling: clamps a caller value, and is used
+    /// verbatim when the caller sent none.
+    std::optional<int> max_output_tokens_cap;
+};
+
+/// Value of `thoughtSignature` that makes Cloud Code Assist skip validation.
+inline constexpr std::string_view kSkipThoughtSignatureValidator =
+    "skip_thought_signature_validator";
+
 [[nodiscard]] std::string
-serialize_gemini_request(const ChatRequest& req, const std::string& default_model);
+serialize_gemini_request(const ChatRequest& req, const std::string& default_model,
+                         const GeminiRequestExtras* extras = nullptr);
 
 /**
  * @brief Parse a single Gemini SSE data-line JSON chunk.

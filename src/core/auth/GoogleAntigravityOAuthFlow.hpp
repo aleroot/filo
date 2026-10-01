@@ -30,10 +30,11 @@ namespace core::auth {
  * enable this auth type unless you understand and accept that your Google
  * account could be suspended or banned.
  *
- * The Cloud Code Assist backend it talks to (`cloudcode-pa.googleapis.com`)
- * is the same production host gemini-cli uses; only the OAuth client
- * identity, requested scopes, and per-request "Antigravity" client
- * metadata differ.
+ * The Cloud Code Assist backend it talks to is the daily host
+ * (`daily-cloudcode-pa.googleapis.com`, sandbox as streaming failover) the
+ * real Antigravity client uses, not gemini-cli's production host; the OAuth
+ * client identity, requested scopes, and per-request "Antigravity" client
+ * metadata differ too.
  *
  * Configure the OAuth client credentials via the
  * GOOGLE_ANTIGRAVITY_CLIENT_ID and GOOGLE_ANTIGRAVITY_CLIENT_SECRET

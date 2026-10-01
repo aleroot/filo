@@ -5,6 +5,7 @@
 #include <charconv>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <string_view>
 
 namespace core::utils::uri {
@@ -85,6 +86,22 @@ namespace core::utils::uri {
         out.push_back(kHex[ch & 0x0F]);
     }
     return out;
+}
+
+/// Appends `query_params` to `url` (using `?` or `&` as needed), percent-encoding
+/// every key and value.
+[[nodiscard]] inline std::string append_query_params(
+    std::string url,
+    const std::unordered_map<std::string, std::string>& query_params) {
+    bool first = url.find('?') == std::string::npos;
+    for (const auto& [key, value] : query_params) {
+        url += first ? '?' : '&';
+        url += percent_encode_uri_query_component(key);
+        url += '=';
+        url += percent_encode_uri_query_component(value);
+        first = false;
+    }
+    return url;
 }
 
 [[nodiscard]] inline std::optional<std::string_view> extract_http_host(std::string_view url) noexcept {

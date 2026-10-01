@@ -226,7 +226,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     }
 
     if (cred && canonical_type == "gemini" && normalized_auth_type == "oauth_google") {
-        base_url = core::auth::google_code_assist::code_assist_endpoint();
+        // "oauth_google" is the Antigravity client, which uses the daily host.
+        base_url = core::auth::google_code_assist::code_assist_endpoint("ANTIGRAVITY");
         core::logging::debug("Using Gemini Code Assist endpoint: {}", base_url);
     }
 

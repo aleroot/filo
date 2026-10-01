@@ -1,11 +1,13 @@
 #pragma once
 
 #include "ApiProtocol.hpp"
+#include "GeminiProtocol.hpp"
 
 namespace core::llm::protocols {
 
 [[nodiscard]] std::string
-serialize_gemini_code_assist_request(const ChatRequest& req, const std::string& default_model);
+serialize_gemini_code_assist_request(const ChatRequest& req, const std::string& default_model,
+                                     const GeminiRequestExtras* extras = nullptr);
 
 class GeminiCodeAssistProtocol : public ApiProtocolBase {
 public:

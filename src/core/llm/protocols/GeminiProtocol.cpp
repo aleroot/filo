@@ -4,6 +4,7 @@
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../tools/ToolSchema.hpp"
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <simdjson.h>
@@ -267,7 +268,8 @@ std::string normalize_requested_gemini_model(std::string_view raw_model) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::string serialize_gemini_request(const ChatRequest& req,
-                                      const std::string& default_model) {
+                                      const std::string& default_model,
+                                      const GeminiRequestExtras* extras) {
     const std::string normalized_effective_model = normalize_requested_gemini_model(
         req.model.empty() ? std::string_view(default_model) : std::string_view(req.model));
     const std::string_view effective_model = normalized_effective_model;
@@ -287,7 +289,13 @@ std::string serialize_gemini_request(const ChatRequest& req,
     }
 
     if (!system_prompt.empty()) {
-        payload += R"("systemInstruction":{"parts":[{"text":")" +
+        payload += R"("systemInstruction":{)";
+        if (extras && !extras->system_instruction_role.empty()) {
+            payload += R"("role":")" +
+                       core::utils::escape_json_string(extras->system_instruction_role) +
+                       R"(",)";
+        }
+        payload += R"("parts":[{"text":")" +
                    core::utils::escape_json_string(system_prompt) +
                    R"("}]},)";
     }
@@ -318,9 +326,15 @@ std::string serialize_gemini_request(const ChatRequest& req,
         payload += R"("temperature":)" + std::to_string(req.temperature.value());
         has_config = true;
     }
-    if (req.max_tokens.has_value()) {
+    std::optional<int> max_output_tokens = req.max_tokens;
+    if (extras && extras->max_output_tokens_cap.has_value()) {
+        max_output_tokens = max_output_tokens.has_value()
+            ? std::min(*max_output_tokens, *extras->max_output_tokens_cap)
+            : *extras->max_output_tokens_cap;
+    }
+    if (max_output_tokens.has_value()) {
         if (has_config) payload += ',';
-        payload += R"("maxOutputTokens":)" + std::to_string(req.max_tokens.value());
+        payload += R"("maxOutputTokens":)" + std::to_string(*max_output_tokens);
         has_config = true;
     }
     if (req.response_format.is_structured()) {
@@ -366,7 +380,13 @@ std::string serialize_gemini_request(const ChatRequest& req,
         } else if (!msg.tool_calls.empty()) {
             for (size_t j = 0; j < msg.tool_calls.size(); ++j) {
                 const auto& tc = msg.tool_calls[j];
-                payload += R"({"functionCall":{"name":")";
+                payload += '{';
+                if (j == 0 && extras && extras->skip_thought_signature_on_first_call) {
+                    payload += R"("thoughtSignature":")";
+                    payload += kSkipThoughtSignatureValidator;
+                    payload += R"(",)";
+                }
+                payload += R"("functionCall":{"name":")";
                 payload += core::utils::escape_json_string(tc.function.name);
                 payload += R"(","args":)";
                 payload += core::utils::json::object_or_empty(
@@ -412,7 +432,22 @@ std::string serialize_gemini_request(const ChatRequest& req,
         payload += "]}";
         if (i < filtered_messages.size() - 1) payload += ',';
     }
-    payload += "]}";
+    payload += ']';
+    if (extras) {
+        if (extras->validated_tool_mode && !req.tools.empty()) {
+            payload += R"(,"toolConfig":{"functionCallingConfig":{"mode":"VALIDATED"}})";
+        }
+        if (!extras->session_id.empty()) {
+            payload += R"(,"sessionId":")";
+            payload += core::utils::escape_json_string(extras->session_id);
+            payload += '"';
+        }
+        if (!extras->labels_json.empty()) {
+            payload += R"(,"labels":)";
+            payload += extras->labels_json;
+        }
+    }
+    payload += '}';
     return payload;
 }
 

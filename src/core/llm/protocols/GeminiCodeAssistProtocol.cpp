@@ -59,7 +59,8 @@ parse_code_assist_response(simdjson::dom::element response_el) {
 } // namespace
 
 std::string serialize_gemini_code_assist_request(const ChatRequest& req,
-                                                 const std::string& default_model) {
+                                                 const std::string& default_model,
+                                                 const GeminiRequestExtras* extras) {
     const std::string model = normalize_requested_gemini_model(
         req.model.empty() ? std::string_view(default_model) : std::string_view(req.model));
     auto project_it = req.auth_properties.find("project_id");
@@ -67,13 +68,14 @@ std::string serialize_gemini_code_assist_request(const ChatRequest& req,
     std::string payload = "{";
     payload += R"("model":")";
     payload += core::utils::escape_json_string(model);
+    payload += '"';
     if (project_it != req.auth_properties.end() && !project_it->second.empty()) {
-        payload += R"(","project":")";
+        payload += R"(,"project":")";
         payload += core::utils::escape_json_string(project_it->second);
         payload += '"';
     }
     payload += R"(,"request":)";
-    payload += serialize_gemini_request(req, default_model);
+    payload += serialize_gemini_request(req, default_model, extras);
     payload += '}';
     return payload;
 }

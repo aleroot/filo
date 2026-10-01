@@ -40,20 +40,6 @@ constexpr auto kCatalogRetryMaxDelay = std::chrono::minutes{30};
         && auth.query_params.empty();
 }
 
-[[nodiscard]] std::string append_query_params(
-    std::string url,
-    const std::unordered_map<std::string, std::string>& query_params) {
-    bool first = url.find('?') == std::string::npos;
-    for (const auto& [key, value] : query_params) {
-        url += first ? '?' : '&';
-        url += core::utils::uri::percent_encode_uri_query_component(key);
-        url += '=';
-        url += core::utils::uri::percent_encode_uri_query_component(value);
-        first = false;
-    }
-    return url;
-}
-
 [[nodiscard]] std::string build_url(std::string_view base_url,
                                     std::string_view path) {
     std::string base = core::utils::str::trim_trailing_slashes(base_url);
@@ -328,7 +314,7 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     const int max_pages = std::max(1, options.max_pages);
     for (int page = 0; page < max_pages; ++page) {
         const std::string path = catalog_provider->model_list_path(page_token);
-        const std::string url = append_query_params(build_url(base_url, path), auth.query_params);
+        const std::string url = core::utils::uri::append_query_params(build_url(base_url, path), auth.query_params);
 
         cpr::Response response = cpr::Get(
             cpr::Url{url},

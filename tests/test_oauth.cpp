@@ -1891,3 +1891,16 @@ TEST_CASE("OAuthLoopbackServer binds and exposes redirect_uri", "[OAuthLoopback]
     CHECK(server->redirect_uri().starts_with("http://127.0.0.1:"));
     CHECK(server->redirect_uri().ends_with("/callback"));
 }
+
+TEST_CASE("Code Assist endpoint: Antigravity uses the daily host unless overridden",
+          "[oauth][google][endpoint]") {
+    ::unsetenv("CODE_ASSIST_ENDPOINT");
+    using core::auth::google_code_assist::code_assist_endpoint;
+    CHECK(code_assist_endpoint() == "https://cloudcode-pa.googleapis.com");
+    CHECK(code_assist_endpoint("IDE_UNSPECIFIED") == "https://cloudcode-pa.googleapis.com");
+    CHECK(code_assist_endpoint("ANTIGRAVITY") == "https://daily-cloudcode-pa.googleapis.com");
+
+    ::setenv("CODE_ASSIST_ENDPOINT", "http://localhost:1234", 1);
+    CHECK(code_assist_endpoint("ANTIGRAVITY") == "http://localhost:1234");
+    ::unsetenv("CODE_ASSIST_ENDPOINT");
+}
