@@ -435,6 +435,46 @@ Element make_selection_row(std::string_view label,
     return row | color(Color::White);
 }
 
+// Shared chrome for both /settings navigation levels, so the category overview
+// and the drilled-in view cannot drift apart: header badge, scope breadcrumb,
+// settings file path and the status line all live here.
+Element make_settings_frame(std::string_view scope_label,
+                            std::string_view breadcrumb,
+                            std::string_view scope_path,
+                            std::string_view hints,
+                            std::string_view idle_status,
+                            std::string_view status_message,
+                            Elements body,
+                            int min_height) {
+    const std::string scope_text = breadcrumb.empty()
+        ? std::string(scope_label)
+        : std::format("{} · {}", scope_label, breadcrumb);
+    Element status = status_message.empty()
+        ? text(std::string(idle_status)) | dim
+        : text(std::string(status_message)) | color(ColorYellowBright);
+
+    Elements content{
+        hbox({
+            text(" SETTINGS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text("  " + scope_text) | ftxui::bold | color(ColorYellowBright),
+            filler(),
+            text(std::string(hints)) | color(Color::GrayDark)
+        }),
+        separator(),
+        text(std::string(scope_path)) | color(Color::GrayDark),
+        separator(),
+    };
+    content.reserve(content.size() + body.size() + 2);
+    for (auto& row : body) {
+        content.push_back(std::move(row));
+    }
+    content.push_back(filler());
+    content.push_back(std::move(status));
+
+    return vbox(std::move(content)) | UiBorder(ColorYellowBright)
+        | size(HEIGHT, GREATER_THAN, min_height);
+}
+
 Element make_command_selection_row(const CommandSuggestion& suggestion,
                                    bool selected) {
     const Color meta_color = selected ? Color::Black : Color::GrayDark;
@@ -1215,6 +1255,7 @@ Element render_authentication_recovery_panel(
 
 Element render_settings_panel(std::string_view scope_label,
                               std::string_view scope_path,
+                              std::string_view category_label,
                               const std::vector<SettingsPanelRow>& rows,
                               int selected_index,
                               std::string_view status_message) {
@@ -1237,26 +1278,47 @@ Element render_settings_panel(std::string_view scope_label,
                                ColorYellowDark));
     }
 
-    Element status = status_message.empty()
-        ? text("Tab switches scope. Left/Right changes values. Backspace resets. Esc closes.") | dim
-        : text(std::string(status_message)) | color(ColorYellowBright);
+    return make_settings_frame(
+        scope_label,
+        category_label,
+        scope_path,
+        "Tab: scope  Left/Right: change  Backspace: reset  Esc: categories",
+        "Left/Right changes values. Backspace resets to inherit. Esc returns to categories.",
+        status_message,
+        std::move(rendered_rows),
+        std::max(10, static_cast<int>(rows.size()) * 2 + 6));
+}
 
-    return vbox({
-        hbox({
-            text(" SETTINGS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
-            text("  " + std::string(scope_label)) | ftxui::bold | color(ColorYellowBright),
-            filler(),
-            text("Tab: scope  Left/Right: change  Backspace: reset  Esc: close")
-                | color(Color::GrayDark)
-        }),
-        separator(),
-        text(std::string(scope_path)) | color(Color::GrayDark),
-        separator(),
-        vbox(std::move(rendered_rows)),
-        filler(),
-        status
-    }) | UiBorder(ColorYellowBright)
-      | size(HEIGHT, GREATER_THAN, std::max(10, static_cast<int>(rows.size()) * 2 + 6));
+Element render_settings_categories_panel(std::string_view scope_label,
+                                         std::string_view scope_path,
+                                         const std::vector<SettingsCategoryRow>& categories,
+                                         int selected_index,
+                                         std::string_view status_message) {
+    Elements rendered_rows;
+    rendered_rows.reserve(categories.size());
+
+    for (std::size_t i = 0; i < categories.size(); ++i) {
+        const auto& category = categories[i];
+        std::string label = std::format(" [{}] {}", i + 1, category.name);
+        if (!category.summary.empty()) {
+            label += "  ·  " + category.summary;
+        }
+        rendered_rows.push_back(
+            make_selection_row(label,
+                               category.description,
+                               selected_index == static_cast<int>(i),
+                               ColorYellowDark));
+    }
+
+    return make_settings_frame(
+        scope_label,
+        {},
+        scope_path,
+        "Tab: scope  Enter: open  Esc: close",
+        "Enter opens a category. Tab switches scope. Esc closes.",
+        status_message,
+        std::move(rendered_rows),
+        std::max(10, static_cast<int>(categories.size()) * 2 + 6));
 }
 
 Element render_local_model_picker_panel(std::string_view current_dir,

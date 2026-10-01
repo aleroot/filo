@@ -26,6 +26,15 @@ struct SettingsPanelRow {
     bool inherited = false;
 };
 
+/// One row of the /settings category overview: the first navigation level,
+/// mirroring how /model lists providers before their models.
+struct SettingsCategoryRow {
+    std::string name;
+    /// Setting counts for the row title, e.g. "4 settings · 1 set in this scope".
+    std::string summary;
+    std::string description;
+};
+
 struct LocalModelEntry {
     std::string name;              // display name: "dirname/" or "model.gguf"
     std::filesystem::path path;    // full absolute path
@@ -200,11 +209,21 @@ ftxui::Element render_authentication_recovery_panel(
     bool retry_safe,
     int selected_index);
 
+/// Second level of the /settings drill-down: the settings of one category.
+/// @p category_label is the breadcrumb shown next to the scope.
 ftxui::Element render_settings_panel(std::string_view scope_label,
                                      std::string_view scope_path,
+                                     std::string_view category_label,
                                      const std::vector<SettingsPanelRow>& rows,
                                      int selected_index,
                                      std::string_view status_message);
+
+/// First level of the /settings drill-down: one row per category.
+ftxui::Element render_settings_categories_panel(std::string_view scope_label,
+                                                std::string_view scope_path,
+                                                const std::vector<SettingsCategoryRow>& categories,
+                                                int selected_index,
+                                                std::string_view status_message);
 
 ftxui::Element render_local_model_picker_panel(std::string_view current_dir,
                                                const std::vector<LocalModelEntry>& entries,

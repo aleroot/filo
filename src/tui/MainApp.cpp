@@ -1331,6 +1331,7 @@ RunResult run(RunOptions opts) {
 
     struct SettingsDefinition {
         core::config::ManagedSettingKey key;
+        std::string category;
         std::string label;
         std::string description;
         std::vector<SettingsChoice> choices;
@@ -1338,7 +1339,9 @@ RunResult run(RunOptions opts) {
 
     struct SettingsPanelState {
         bool active = false;
-        int selected = 0;
+        std::optional<std::size_t> open_category;
+        int selected = 0;          // row within the drilled-in category
+        int category_selected = 0; // row within the category overview
         core::config::SettingsScope scope = core::config::SettingsScope::User;
         std::string status_message;
     };
@@ -1408,24 +1411,20 @@ RunResult run(RunOptions opts) {
 
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::DefaultMode,
-            .label = "General · Start Mode",
+            .category = "General",
+            .label = "Start Mode",
             .description = "The agent mode Filo should start in for this scope.",
             .choices = std::move(mode_choices),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::DefaultApprovalMode,
-            .label = "General · Approval Mode",
+            .category = "General",
+            .label = "Approval Mode",
             .description = "PROMPT asks before sensitive tools. YOLO auto-approves them.",
             .choices = {
                 SettingsChoice{.value = "prompt", .label = "PROMPT"},
                 SettingsChoice{.value = "yolo", .label = "YOLO"},
             },
-        });
-        settings_definitions.push_back(SettingsDefinition{
-            .key = core::config::ManagedSettingKey::DefaultRouterPolicy,
-            .label = "Routing · Default Policy",
-            .description = "Pick the router policy new Router/Auto sessions should start from.",
-            .choices = std::move(router_policy_choices),
         });
         // Driven by the editor catalog, so a new backend shows up here (and only
         // on the platforms that ship it) without touching the settings pane.
@@ -1438,7 +1437,8 @@ RunResult run(RunOptions opts) {
         }
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::PromptEditor,
-            .label = "General · Prompt Editor",
+            .category = "General",
+            .label = "Prompt Editor",
             .description = "Editor opened by Ctrl+G for the current prompt draft.",
             .choices = std::move(prompt_editor_choices),
         });
@@ -1458,55 +1458,71 @@ RunResult run(RunOptions opts) {
         }
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::DiffComparer,
-            .label = "General · Diff Comparer",
+            .category = "General",
+            .label = "Diff Comparer",
             .description = "Where Ctrl+X and /changes open a turn's file changes.",
             .choices = std::move(diff_comparer_choices),
         });
         settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::DefaultRouterPolicy,
+            .category = "Routing",
+            .label = "Default Policy",
+            .description = "Pick the router policy new Router/Auto sessions should start from.",
+            .choices = std::move(router_policy_choices),
+        });
+        settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiBanner,
-            .label = "UI · Startup Banner",
+            .category = "UI",
+            .label = "Startup Banner",
             .description = "Show or hide the Filo banner on startup and after /clear.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiFooter,
-            .label = "UI · Footer",
+            .category = "UI",
+            .label = "Footer",
             .description = "Show or hide the footer with session status and context info.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiModelInfo,
-            .label = "UI · Model Badge",
+            .category = "UI",
+            .label = "Model Badge",
             .description = "Show or hide the active provider/model badge in the footer.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiContextUsage,
-            .label = "UI · Context Meter",
+            .category = "UI",
+            .label = "Context Meter",
             .description = "Show or hide the context usage indicator in the footer.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiTimestamps,
-            .label = "UI · Message Timestamps",
+            .category = "UI",
+            .label = "Message Timestamps",
             .description = "Show or hide timestamps on user messages.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiSpinner,
-            .label = "UI · Activity Spinner",
+            .category = "UI",
+            .label = "Activity Spinner",
             .description = "Show or hide the animated spinner while Filo is working.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::UiReasoning,
-            .label = "UI · Reasoning",
+            .category = "UI",
+            .label = "Reasoning",
             .description = "Show or hide the model's collapsible thinking/analyzing disclosure.",
             .choices = visibility_choices(),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::AutoCompactThreshold,
-            .label = "Session · Auto-Compaction",
+            .category = "Session",
+            .label = "Auto-Compaction",
             .description = "Total tokens before the conversation is summarised. 0 = disabled.",
             .choices = {
                 SettingsChoice{.value = "0",      .label = "Disabled"},
@@ -1518,7 +1534,8 @@ RunResult run(RunOptions opts) {
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::ContextCompression,
-            .label = "Session · Tool Compression",
+            .category = "Session",
+            .label = "Tool Compression",
             .description = "How aggressively tool outputs are compacted before entering context.",
             .choices = {
                 SettingsChoice{.value = "off",   .label = "Off"},
@@ -1540,12 +1557,50 @@ RunResult run(RunOptions opts) {
         }
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::SteeringMode,
-            .label = "Context · Steering Mode",
+            .category = "Context",
+            .label = "Steering Mode",
             .description = "Which project steering files load. Fallback walks the workspace "
                            "roots in order and uses the first one that has any.",
             .choices = std::move(steering_mode_choices),
         });
     }
+
+    // Categories in first-appearance order, so registering a setting is the
+    // only step needed to give it a home in the /settings overview.
+    std::vector<std::string> settings_categories;
+    for (const auto& definition : settings_definitions) {
+        if (std::ranges::find(settings_categories, definition.category)
+            == settings_categories.end()) {
+            settings_categories.push_back(definition.category);
+        }
+    }
+
+    // Overview blurbs; a category without one still renders, with its setting
+    // count as the only description.
+    const auto settings_category_description = [](std::string_view category) -> std::string {
+        static const std::unordered_map<std::string, std::string> kBlurbs = {
+            {"General", "Startup behaviour, approvals and the external tools Filo opens."},
+            {"Routing", "The router policy new Router/Auto sessions start from."},
+            {"UI", "What the interface shows: banner, footer, badges and disclosures."},
+            {"Session", "How conversation context is summarised and compacted."},
+            {"Context", "Which project steering files load into the prompt."},
+        };
+        const auto it = kBlurbs.find(std::string(category));
+        return it == kBlurbs.end() ? std::string{} : it->second;
+    };
+
+    // Definition indices of one category, in registration order: the rows of
+    // the drilled-in level of /settings.
+    const auto settings_indices_in_category = [&](std::size_t category) {
+        std::vector<int> indices;
+        for (int i = 0; i < static_cast<int>(settings_definitions.size()); ++i) {
+            if (settings_definitions[static_cast<std::size_t>(i)].category
+                == settings_categories[category]) {
+                indices.push_back(i);
+            }
+        }
+        return indices;
+    };
 
     // ── Session management ────────────────────────────────────────────────────
     auto session_store = std::make_shared<core::session::SessionStore>(
@@ -4847,7 +4902,7 @@ RunResult run(RunOptions opts) {
         std::string status = std::format(
             "{} setting saved: {} -> {}",
             settings_scope_label(scope),
-            definition.label,
+            std::format("{} · {}", definition.category, definition.label),
             value.has_value()
                 ? setting_choice_label(definition, *value)
                 : std::string("inherit"));
@@ -5331,10 +5386,11 @@ RunResult run(RunOptions opts) {
         {
             std::lock_guard lock(ui_mutex);
             settings_panel_state.active = true;
-            settings_panel_state.selected = std::clamp(
-                settings_panel_state.selected,
+            settings_panel_state.open_category = std::nullopt;
+            settings_panel_state.category_selected = std::clamp(
+                settings_panel_state.category_selected,
                 0,
-                static_cast<int>(settings_definitions.size()) - 1);
+                static_cast<int>(settings_categories.size()) - 1);
             settings_panel_state.status_message =
                 "Edit scoped app preferences here. Use /model for provider and session routing choices.";
         }
@@ -8480,18 +8536,39 @@ RunResult run(RunOptions opts) {
             std::lock_guard lock(ui_mutex);
             if (settings_panel_state.active) {
                 settings_panel_was_active = true;
+                const bool overview = !settings_panel_state.open_category.has_value();
+                const std::vector<int> visible_settings = overview
+                    ? std::vector<int>{}
+                    : settings_indices_in_category(*settings_panel_state.open_category);
+                int& row_selection = overview
+                    ? settings_panel_state.category_selected
+                    : settings_panel_state.selected;
+                const int row_count = overview
+                    ? static_cast<int>(settings_categories.size())
+                    : static_cast<int>(visible_settings.size());
+                // One wrap-around mover serves both navigation levels.
+                const auto move_selection = [&](int delta) {
+                    if (row_count > 0) {
+                        row_selection = (row_selection + delta + row_count) % row_count;
+                    }
+                };
+                const auto drill_into = [&](int row) {
+                    settings_panel_state.open_category = static_cast<std::size_t>(row);
+                    settings_panel_state.category_selected = row;
+                    settings_panel_state.selected = 0;
+                };
+
                 if (event == Event::ArrowUp) {
-                    settings_panel_state.selected =
-                        (settings_panel_state.selected
-                         + static_cast<int>(settings_definitions.size()) - 1)
-                        % static_cast<int>(settings_definitions.size());
+                    move_selection(-1);
                 } else if (event == Event::ArrowDown) {
-                    settings_panel_state.selected =
-                        (settings_panel_state.selected + 1)
-                        % static_cast<int>(settings_definitions.size());
-                } else if (event == Event::ArrowLeft) {
+                    move_selection(1);
+                } else if (overview
+                           && (event == Event::Return || event == Event::ArrowRight)) {
+                    drill_into(row_selection);
+                } else if (!overview && event == Event::ArrowLeft) {
                     settings_cycle_direction = -1;
-                } else if (event == Event::ArrowRight || event == Event::Return) {
+                } else if (!overview
+                           && (event == Event::ArrowRight || event == Event::Return)) {
                     settings_cycle_direction = 1;
                 } else if (event == Event::Tab) {
                     settings_panel_state.scope =
@@ -8501,23 +8578,33 @@ RunResult run(RunOptions opts) {
                     settings_panel_state.status_message = std::format(
                         "{} scope selected.",
                         settings_scope_label(settings_panel_state.scope));
-                } else if (event == Event::Backspace || event == Event::Delete) {
+                } else if (!overview
+                           && (event == Event::Backspace || event == Event::Delete)) {
                     settings_reset = true;
                 } else if (event == Event::Escape) {
-                    settings_panel_state.active = false;
+                    // Like /model: Esc walks one level up, and closes from the top.
+                    if (overview) {
+                        settings_panel_state.active = false;
+                    } else {
+                        settings_panel_state.open_category = std::nullopt;
+                    }
                 } else {
-                    for (int n = 1;
-                         n <= std::min(static_cast<int>(settings_definitions.size()), 9);
-                         ++n) {
+                    for (int n = 1; n <= std::min(row_count, 9); ++n) {
                         if (event == Event::Character(static_cast<char>('0' + n))) {
-                            settings_panel_state.selected = n - 1;
+                            if (overview) {
+                                drill_into(n - 1);
+                            } else {
+                                row_selection = n - 1;
+                            }
                             break;
                         }
                     }
                 }
 
-                if (settings_cycle_direction.has_value() || settings_reset) {
-                    settings_selected_index = settings_panel_state.selected;
+                if (!overview
+                    && (settings_cycle_direction.has_value() || settings_reset)) {
+                    settings_selected_index =
+                        visible_settings[static_cast<std::size_t>(row_selection)];
                     settings_scope = settings_panel_state.scope;
                 }
             }
@@ -9605,6 +9692,7 @@ RunResult run(RunOptions opts) {
         int                    provider_picker_selected = 0;
         int                    review_picker_selected = 0;
         int                    settings_panel_selected = 0;
+        std::optional<std::size_t> settings_panel_open_category;
         int                    authentication_recovery_selected = 0;
         std::vector<std::string> provider_picker_providers;
         std::vector<tui::ModelProviderPickerRow> model_provider_picker_providers;
@@ -9708,7 +9796,10 @@ RunResult run(RunOptions opts) {
             review_details_panel_visible =
                 review_details_panel_active && review_activity_active;
             settings_panel_active = settings_panel_state.active;
-            settings_panel_selected = settings_panel_state.selected;
+            settings_panel_open_category = settings_panel_state.open_category;
+            settings_panel_selected = settings_panel_state.open_category.has_value()
+                ? settings_panel_state.selected
+                : settings_panel_state.category_selected;
             settings_panel_scope = settings_panel_state.scope;
             settings_panel_status = settings_panel_state.status_message;
             authentication_recovery_active =
@@ -9931,28 +10022,70 @@ RunResult run(RunOptions opts) {
                 authentication_recovery_retry_safe,
                 authentication_recovery_selected);
         } else if (settings_panel_active) {
-            std::vector<SettingsPanelRow> settings_rows;
-            settings_rows.reserve(settings_definitions.size());
-            const auto& scope_overlay = config_manager.get_settings_overlay(settings_panel_scope);
-            for (const auto& definition : settings_definitions) {
-                const auto scoped_value = managed_setting_value(scope_overlay, definition.key);
-                const std::string effective_value = effective_setting_value(definition.key);
-                settings_rows.push_back(SettingsPanelRow{
-                    .label = definition.label,
-                    .value = setting_choice_label(
-                        definition,
-                        scoped_value.value_or(effective_value)),
-                    .description = definition.description,
-                    .inherited = !scoped_value.has_value(),
-                });
-            }
+            const auto& scope_overlay =
+                config_manager.get_settings_overlay(settings_panel_scope);
+            const std::string scope_path = config_manager.get_settings_path(
+                settings_panel_scope,
+                agent->workspace_snapshot().primary()).string();
+            if (settings_panel_open_category.has_value()) {
+                std::vector<SettingsPanelRow> settings_rows;
+                for (const int index :
+                     settings_indices_in_category(*settings_panel_open_category)) {
+                    const auto& definition =
+                        settings_definitions[static_cast<std::size_t>(index)];
+                    const auto scoped_value =
+                        managed_setting_value(scope_overlay, definition.key);
+                    settings_rows.push_back(SettingsPanelRow{
+                        .label = definition.label,
+                        .value = setting_choice_label(
+                            definition,
+                            scoped_value.value_or(effective_setting_value(definition.key))),
+                        .description = definition.description,
+                        .inherited = !scoped_value.has_value(),
+                    });
+                }
 
-            bottom_el = render_settings_panel(
-                settings_scope_label(settings_panel_scope),
-                config_manager.get_settings_path(settings_panel_scope, agent->workspace_snapshot().primary()).string(),
-                settings_rows,
-                settings_panel_selected,
-                settings_panel_status);
+                bottom_el = render_settings_panel(
+                    settings_scope_label(settings_panel_scope),
+                    scope_path,
+                    settings_categories[*settings_panel_open_category],
+                    settings_rows,
+                    settings_panel_selected,
+                    settings_panel_status);
+            } else {
+                std::vector<SettingsCategoryRow> category_rows;
+                category_rows.reserve(settings_categories.size());
+                for (std::size_t category = 0; category < settings_categories.size();
+                     ++category) {
+                    const auto indices = settings_indices_in_category(category);
+                    int set_in_scope = 0;
+                    for (const int index : indices) {
+                        if (managed_setting_value(
+                                scope_overlay,
+                                settings_definitions[static_cast<std::size_t>(index)].key)
+                                .has_value()) {
+                            ++set_in_scope;
+                        }
+                    }
+                    std::string summary = std::format("{} settings", indices.size());
+                    if (set_in_scope > 0) {
+                        summary += std::format(" · {} set in this scope", set_in_scope);
+                    }
+                    category_rows.push_back(SettingsCategoryRow{
+                        .name = settings_categories[category],
+                        .summary = std::move(summary),
+                        .description =
+                            settings_category_description(settings_categories[category]),
+                    });
+                }
+
+                bottom_el = render_settings_categories_panel(
+                    settings_scope_label(settings_panel_scope),
+                    scope_path,
+                    category_rows,
+                    settings_panel_selected,
+                    settings_panel_status);
+            }
         } else if (question_dialog_active) {
             bottom_el = thread_modals.render_question(session_id);
         } else if (code_block_runner_snapshot.active) {

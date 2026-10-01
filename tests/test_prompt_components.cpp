@@ -618,25 +618,68 @@ TEST_CASE("render_settings_panel — inherited and scoped rows render without cr
           "[tui][picker][settings]") {
     std::vector<SettingsPanelRow> rows = {
         {
-            .label = "General · Start Mode",
+            .label = "Start Mode",
             .value = "DEBUG",
             .description = "The agent mode Filo should start in.",
             .inherited = false,
         },
         {
-            .label = "Model · Manual Provider",
+            .label = "Manual Provider",
             .value = "grok (grok-code-fast-1)",
             .description = "Used when Model Selection is Manual.",
             .inherited = true,
         },
     };
 
-    REQUIRE_NOTHROW(render_settings_panel(
+    auto panel = render_settings_panel(
         "Workspace",
         "/tmp/project/.filo/settings.json",
+        "General",
         rows,
         1,
-        "Workspace setting saved."));
+        "Workspace setting saved.");
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(100),
+                                        ftxui::Dimension::Fixed(16));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("SETTINGS"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Workspace · General"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Start Mode: DEBUG"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Current scope inherits this value."));
+}
+
+TEST_CASE("render_settings_categories_panel — overview lists categories with counts",
+          "[tui][picker][settings]") {
+    std::vector<SettingsCategoryRow> categories = {
+        {
+            .name = "General",
+            .summary = "4 settings · 1 set in this scope",
+            .description = "Startup behaviour, approvals and the external tools Filo opens.",
+        },
+        {
+            .name = "UI",
+            .summary = "7 settings",
+            .description = "What the interface shows: banner, footer, badges and disclosures.",
+        },
+    };
+
+    auto panel = render_settings_categories_panel(
+        "User",
+        "/Users/alessio/.config/filo/settings.json",
+        categories,
+        0,
+        {});
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(110),
+                                        ftxui::Dimension::Fixed(16));
+    ftxui::Render(screen, panel);
+
+    const auto output = strip_ansi(screen.ToString());
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("SETTINGS"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("[1] General"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("4 settings · 1 set in this scope"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("[2] UI"));
+    REQUIRE_THAT(output, Catch::Matchers::ContainsSubstring("Enter opens a category"));
 }
 
 TEST_CASE("render_model_provider_picker_panel — renders providers and active marker",
