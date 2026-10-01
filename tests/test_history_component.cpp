@@ -3,7 +3,11 @@
 
 #include "tui/HistoryComponent.hpp"
 #include "tui/Conversation.hpp"
+#include "tui/KeyInput.hpp"
 
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/mouse.hpp>
+#include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/dom/selection.hpp>
 #include <ftxui/screen/screen.hpp>
@@ -1621,4 +1625,85 @@ TEST_CASE("HistoryComponent expands the disclosures a host action names",
     history.ExpandDisclosures({tui::turn_file_change_key(message_id, "src/app.cpp")});
 
     CHECK_THAT(render_history_text(history), Catch::Matchers::ContainsSubstring("new-line"));
+}
+
+namespace {
+
+ftxui::Event left_mouse(ftxui::Mouse::Motion motion, int x, int y) {
+    ftxui::Mouse mouse;
+    mouse.button = ftxui::Mouse::Left;
+    mouse.motion = motion;
+    mouse.x = x;
+    mouse.y = y;
+    return ftxui::Event::Mouse("", mouse);
+}
+
+} // namespace
+
+TEST_CASE("A redraw notification never reaches the transcript as handled input",
+          "[tui][history_component][selection][regression]") {
+    // FTXUI cancels an in-progress mouse selection whenever the component tree
+    // consumes an event, and it posts Event::Custom right after every selection
+    // change. MainApp's root handler must therefore answer a notification with
+    // `false`: answering `true` made a drag over a reply wipe itself between two
+    // mouse moves, so no text could be selected out of the transcript. The tree
+    // below mirrors MainApp's shape — the transcript next to a focused prompt
+    // under the root handler, plus a modal that claims everything else.
+    std::atomic<size_t> tick{0};
+    auto messages = std::make_shared<const std::vector<tui::UiMessage>>(
+        std::vector<tui::UiMessage>{
+            tui::make_assistant_message("SELECT_THIS_EXACT_TEXT", "", false)});
+    auto history = ftxui::Make<tui::HistoryComponent>(
+        std::function<tui::HistoryComponent::MessageSnapshot()>{
+            [messages]() { return messages; }
+        },
+        tick,
+        mock_options);
+
+    int modal_claims = 0;
+    bool modal_open = true;
+    auto prompt = ftxui::Renderer([] { return ftxui::text("Ask anything"); });
+    auto root = ftxui::CatchEvent(prompt, [&](ftxui::Event event) {
+        if (tui::is_refresh_notification(event)) {
+            return false;
+        }
+        if (modal_open) {
+            // The shape of the file-system picker, the conversation search panel
+            // and the remote-activity panel: claim the event, then wake the UI,
+            // which posts another notification.
+            ++modal_claims;
+            return true;
+        }
+        return false;
+    });
+    auto container = ftxui::Container::Vertical({history | ftxui::flex, root});
+    prompt->TakeFocus();
+
+    // Lay the tree out once: the render pass is what gives it focus, and it is
+    // what publishes the transcript's own click hitboxes.
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(60),
+                                        ftxui::Dimension::Fixed(8));
+    auto drawn = container->Render();
+    ftxui::Render(screen, drawn);
+
+    // The dispatch path is live, so the checks below cannot pass by accident: a
+    // modal does claim ordinary input.
+    CHECK(container->OnEvent(ftxui::Event::ArrowDown));
+    CHECK(modal_claims == 1);
+
+    // A notification is not input. Claiming it would both cancel the selection
+    // it announces and hand it to a modal that requeues it, spinning inside one
+    // FTXUI task drain.
+    CHECK_FALSE(container->OnEvent(ftxui::Event::Custom));
+    CHECK(modal_claims == 1);
+
+    // Neither may any step of a left-drag over a reply: FTXUI drives the
+    // selection itself while the tree consumes none of it.
+    modal_open = false;
+    const auto cell = rendered_cell_of(strip_ansi(screen.ToString()), "SELECT_THIS");
+    REQUIRE(cell.row >= 0);
+    CHECK_FALSE(container->OnEvent(left_mouse(ftxui::Mouse::Pressed, cell.column, cell.row)));
+    CHECK_FALSE(container->OnEvent(left_mouse(ftxui::Mouse::Moved, cell.column + 8, cell.row)));
+    CHECK_FALSE(container->OnEvent(left_mouse(ftxui::Mouse::Released, cell.column + 8, cell.row)));
+    CHECK(modal_claims == 1);
 }

@@ -15,6 +15,10 @@ bool is_panel_dismiss_event(const ftxui::Event& event) {
         || event == ftxui::Event::Character('Q');
 }
 
+bool is_refresh_notification(const ftxui::Event& event) {
+    return event == ftxui::Event::Custom;
+}
+
 namespace {
 
 bool parse_decimal(std::string_view token, int& out) {
