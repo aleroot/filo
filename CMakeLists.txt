@@ -97,6 +97,12 @@ if(APPLE)
 endif()
 CPMAddPackage("gh:yhirose/cpp-httplib@0.58.0")
 
+# Unicode algorithms (UAX #29 word segmentation, case folding, normalization).
+# Memory recall ranks text with BM25, and a hand-rolled ASCII tokenizer cannot
+# segment accented, Cyrillic or CJK prompts. uni-algo is the standard
+# dependency-free alternative to ICU: std-library only, no exceptions/RTTI.
+CPMAddPackage("gh:uni-algo/uni-algo@1.2.0")
+
 if(FILO_ENABLE_PYTHON)
     set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
     CPMAddPackage(
@@ -318,6 +324,7 @@ set(FILO_CORE_SOURCES
     src/core/hooks/HookManager.cpp
     src/core/memory/MemoryBackgroundService.cpp
     src/core/memory/MemoryStore.cpp
+    src/core/memory/MemoryRelevance.cpp
     src/core/memory/MemorySystem.cpp
     src/core/memory/ToolRecoveryMemory.cpp
     src/core/power/SleepInhibitor.cpp
@@ -541,6 +548,7 @@ target_link_libraries(filo_core
         ${FILO_FTXUI_TARGETS}
         cpr::cpr
         httplib::httplib
+        uni-algo::uni-algo
         ${CMAKE_DL_LIBS}
 )
 
@@ -624,6 +632,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_interprocess_file.cpp
     tests/test_network_traffic.cpp
     tests/test_memory_store.cpp
+    tests/test_memory_relevance.cpp
     tests/test_memory_system.cpp
     tests/test_agent_ignore.cpp
     tests/test_workspace.cpp

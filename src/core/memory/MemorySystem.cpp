@@ -19,23 +19,33 @@ MemorySystem::MemorySystem(MemoryStore store,
 
 SemanticPromptProjection MemorySystem::semantic_prompt_projection(
     const core::context::SessionContext& context,
-    std::size_t max_entries,
+    const PromptProjection& projection,
     bool allow_auto_capture) const {
     if (!context.memory_policy.use_memories) return {};
     std::string error;
-    const auto state = semantic(context).load_for_prompt(max_entries, &error);
+    const auto state = semantic(context).load_for_prompt(projection, &error);
     if (!error.empty()) return {};
 
-    SemanticPromptProjection projection;
-    projection.block = build_memory_prompt_block(state, max_entries,
+    SemanticPromptProjection result;
+    result.block = build_memory_prompt_block(state, projection.max_entries,
         allow_auto_capture && context.memory_policy.generate_memories);
-    if (!projection.block.empty()) {
-        projection.recalled_entry_ids.reserve(state.entries.size());
+    if (!result.block.empty()) {
+        result.recalled_entry_ids.reserve(state.entries.size());
         for (const auto& entry : state.entries) {
-            projection.recalled_entry_ids.push_back(entry.id);
+            result.recalled_entry_ids.push_back(entry.id);
         }
     }
-    return projection;
+    return result;
+}
+
+SemanticPromptProjection MemorySystem::semantic_prompt_projection(
+    const core::context::SessionContext& context,
+    std::span<const core::llm::Message> conversation,
+    bool allow_auto_capture) const {
+    return semantic_prompt_projection(
+        context,
+        PromptProjection{.relevance_query = conversation_relevance_query(conversation)},
+        allow_auto_capture);
 }
 
 bool MemorySystem::record_prompt_recall(
@@ -47,9 +57,9 @@ bool MemorySystem::record_prompt_recall(
 
 std::string MemorySystem::semantic_prompt_block(
     const core::context::SessionContext& context,
-    std::size_t max_entries,
+    const PromptProjection& projection,
     bool allow_auto_capture) const {
-    return semantic_prompt_projection(context, max_entries,
+    return semantic_prompt_projection(context, projection,
                                       allow_auto_capture).block;
 }
 

@@ -103,7 +103,7 @@ TEST_CASE("MemoryStore recall updates only entries included in the prompt",
     }
     REQUIRE(store.save(initial));
 
-    const auto recalled = a.load_for_prompt(1);
+    const auto recalled = a.load_for_prompt({.max_entries = 1});
     REQUIRE(recalled.entries.size() == 1);
     CHECK(recalled.entries.front().content == "Recently used project memory.");
     CHECK(recalled.entries.front().use_count == 7);

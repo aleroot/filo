@@ -132,7 +132,8 @@ TEST_CASE("MemorySystem semantic prompt is projected from the owned store",
                ContainsSubstring("Prefer concise engineering summaries."));
     CHECK_THAT(with_capture, ContainsSubstring("[Memory Capture]"));
 
-    const auto without_capture = system.semantic_prompt_block(context, 24, false);
+    const auto without_capture = system.semantic_prompt_block(
+        context, {.max_entries = 24}, false);
     CHECK_THAT(without_capture, ContainsSubstring("[Memory]"));
     CHECK(without_capture.find("[Memory Capture]") == std::string::npos);
 

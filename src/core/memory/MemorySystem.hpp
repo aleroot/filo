@@ -1,10 +1,12 @@
 #pragma once
 
 #include "MemoryBackgroundService.hpp"
+#include "MemoryRelevance.hpp"
 #include "MemoryStore.hpp"
 #include "ToolRecoveryMemory.hpp"
 
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -83,9 +85,19 @@ public:
 
     /// Prompt projection of semantic memories. ContextBuilder (and any other
     /// prompt assembler) should call this rather than constructing a store.
+    /// `projection.relevance_query` decides which memories win the block's
+    /// entry and character budgets; leave it empty for recency order.
     [[nodiscard]] SemanticPromptProjection semantic_prompt_projection(
         const core::context::SessionContext& context,
-        std::size_t max_entries = 24,
+        const PromptProjection& projection = {},
+        bool allow_auto_capture = true) const;
+
+    /// Same projection, ranked against a conversation instead of a caller-built
+    /// query: the ranking text is memory policy, so it is derived here (see
+    /// conversation_relevance_query) rather than assembled by the caller.
+    [[nodiscard]] SemanticPromptProjection semantic_prompt_projection(
+        const core::context::SessionContext& context,
+        std::span<const core::llm::Message> conversation,
         bool allow_auto_capture = true) const;
 
     /// Counts one recall for the ids a submitted request actually carried
@@ -100,7 +112,7 @@ public:
     /// memories were included in a submitted model request.
     [[nodiscard]] std::string semantic_prompt_block(
         const core::context::SessionContext& context,
-        std::size_t max_entries = 24,
+        const PromptProjection& projection = {},
         bool allow_auto_capture = true) const;
 
 private:

@@ -1095,8 +1095,11 @@ void Agent::refresh_stable_prompt_prefix_unlocked() {
     if (!stable_prompt_prefix_dirty_ && !stable_prompt_prefix_.empty()) {
         return;
     }
+    // The memory layer owns what its block is ranked against; the Agent only
+    // hands over the conversation it owns.
     auto memory_projection = memory_system_->semantic_prompt_projection(
-        session_context_);
+        session_context_,
+        std::span<const core::llm::Message>(history_));
     stable_prompt_plan_ =
         core::context::ContextBuilder(session_context_)
             .with_mode(to_string(current_mode_))
@@ -1533,7 +1536,6 @@ void Agent::send_message(core::llm::Message user_message,
     std::optional<AutoModeContext> auto_context;
     {
         std::lock_guard lock(history_mutex_);
-        ensure_system_prompt();
         append_project_facts_update_unlocked(std::move(project_facts));
         mode_snapshot = std::string(to_string(current_mode_));
         capture_turn_provider_snapshot_unlocked(*turn_state, turn_callbacks);
@@ -1553,7 +1555,22 @@ void Agent::send_message(core::llm::Message user_message,
               .boost_requested = boost_task.has_value(),
           };
         }
+        // The cached prefix ranks memories against the prompt that opens the
+        // conversation, so that prompt invalidates it exactly once. Later prompts
+        // must not: re-ranking every turn would rewrite the prefix and cost the
+        // provider's prompt cache.
+        const bool opens_conversation = !std::ranges::any_of(
+            history_, [](const core::llm::Message& message) {
+                return message.role == "user" && !message.synthetic;
+            });
         history_.push_back(std::move(user_message));
+        // After the prompt joins history: the memory block in the stable prefix
+        // is ranked against the conversation, and this prompt is the one that
+        // opens it. Everything above reads history as it stood before the turn.
+        if (opens_conversation) {
+            mark_stable_prompt_prefix_dirty();
+        }
+        ensure_system_prompt();
         refresh_context_window_snapshot_unlocked();
         consecutive_failure_rounds_ = 0;  // reset loop breaker on new user input
         turn_state->max_steps = sanitize_max_steps_per_turn(

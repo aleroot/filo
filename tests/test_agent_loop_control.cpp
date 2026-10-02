@@ -9,6 +9,9 @@
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/Models.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/memory/MemoryStore.hpp"
+#include "core/memory/MemorySystem.hpp"
+#include "core/memory/ToolRecoveryMemory.hpp"
 #include "core/tools/ShellTool.hpp"
 #include "core/tools/Tool.hpp"
 #include "core/tools/ToolManager.hpp"
@@ -2426,4 +2429,70 @@ TEST_CASE("A delegated worker records into the tracker it inherited and publishe
     CHECK(std::ranges::count_if(agent->get_history(), [](const core::llm::Message& message) {
         return !message.turn_changes.empty();
     }) == 0);
+}
+
+TEST_CASE("Recalled memories are ranked against the prompt that opened the conversation",
+          "[agent][memory][relevance]") {
+    const auto temp_path =
+        std::filesystem::temp_directory_path() /
+        std::format("filo_memory_rank_{}",
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+    TempDir temp(temp_path);
+    ScopedCurrentPath cwd(temp.path());
+
+    const auto context = test_support::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = temp.path(),
+            .enforce = true,
+            .version = 1,
+        });
+    core::memory::MemoryStore store{temp.path() / "memory.json"};
+    auto scoped = store.for_context(context);
+    // Saved in the order recency would recall them, so the relevant one is last:
+    // a block that still leads with it proves the query decided the order.
+    REQUIRE(scoped.remember("TurnRevert replays the hunks of a turn backwards.").ok);
+    REQUIRE(scoped.remember("The diff comparer opens patches in Lampo.").ok);
+    REQUIRE(scoped.remember("PromptEditor launches the external editor.").ok);
+
+    auto provider = std::make_shared<CapturingProvider>();
+    auto agent = std::make_shared<core::agent::Agent>(
+        provider,
+        core::tools::ToolManager::get_instance(),
+        context,
+        core::agent::ToolResultStore::default_root(),
+        std::shared_ptr<core::power::SleepInhibitor>{},
+        std::shared_ptr<core::session::SessionStatsRegistry>{},
+        nullptr,
+        std::make_shared<core::memory::MemorySystem>(
+            store, std::make_shared<core::memory::NullToolRecoveryMemory>()));
+
+    const auto system_prompt = [](const core::llm::ChatRequest& request) {
+        const auto found = std::ranges::find_if(
+            request.messages, [](const core::llm::Message& message) {
+                return message.role == "system";
+            });
+        return found == request.messages.end() ? std::string{} : found->content;
+    };
+
+    send_and_wait(agent, "PromptEditor never launches the external editor");
+    auto requests = provider->requests_snapshot();
+    REQUIRE_FALSE(requests.empty());
+    const auto first = system_prompt(requests.front());
+    const auto editor = first.find("PromptEditor launches the external editor.");
+    const auto revert = first.find("TurnRevert replays the hunks");
+    REQUIRE(editor != std::string::npos);
+    REQUIRE(revert != std::string::npos);
+    CHECK(editor < revert);
+
+    // The block lives in the cached prompt prefix, so a later turn on another
+    // topic must not re-rank it: that would rewrite the prefix every turn and
+    // cost the provider's prompt cache.
+    send_and_wait(agent, "Now check what TurnRevert restores");
+    requests = provider->requests_snapshot();
+    const auto later = system_prompt(requests.back());
+    const auto later_editor = later.find("PromptEditor launches the external editor.");
+    const auto later_revert = later.find("TurnRevert replays the hunks");
+    REQUIRE(later_editor != std::string::npos);
+    REQUIRE(later_revert != std::string::npos);
+    CHECK(later_editor < later_revert);
 }

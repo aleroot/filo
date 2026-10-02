@@ -1,5 +1,6 @@
 #include "MemoryStore.hpp"
 
+#include "MemoryRelevance.hpp"
 #include "../context/SessionContext.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -221,14 +222,6 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
         active_entry_limit(settings), remedy)};
 }
 
-/// Prompt precedence: most recently used first, then newest, then id so the
-/// projected block is deterministic across rebuilds.
-[[nodiscard]] bool prompt_precedes(const MemoryEntry& lhs, const MemoryEntry& rhs) {
-    if (lhs.last_used_at != rhs.last_used_at) return lhs.last_used_at > rhs.last_used_at;
-    if (lhs.created_at != rhs.created_at) return lhs.created_at > rhs.created_at;
-    return lhs.id < rhs.id;
-}
-
 [[nodiscard]] bool memory_state_within_active_limit(const MemoryState& state) {
     const auto limit = active_entry_limit(state.settings);
     std::map<std::tuple<std::string, std::string, std::string>, std::size_t> counts;
@@ -313,7 +306,7 @@ MemoryState MemoryStore::load(std::string* error) const {
     return state;
 }
 
-MemoryState MemoryStore::load_for_prompt(std::size_t max_entries,
+MemoryState MemoryStore::load_for_prompt(const PromptProjection& projection,
                                          std::string* error) const {
     if (error) error->clear();
     std::lock_guard lock(mutex_for_path(path_));
@@ -333,23 +326,24 @@ MemoryState MemoryStore::load_for_prompt(std::size_t max_entries,
     prompt_state.version = state.version;
     prompt_state.settings = state.settings;
 
-    if (!state.settings.enabled || max_entries == 0) return prompt_state;
+    if (!state.settings.enabled || projection.max_entries == 0) return prompt_state;
 
-    std::vector<std::size_t> selected;
-    selected.reserve(state.entries.size());
-    for (std::size_t i = 0; i < state.entries.size(); ++i) {
-        const auto& entry = state.entries[i];
+    // Ranking and the budget both need the candidates in one contiguous span, so
+    // the visible entries move out of the loaded state instead of being copied.
+    std::vector<MemoryEntry> candidates;
+    candidates.reserve(state.entries.size());
+    for (auto& entry : state.entries) {
         if (visible(entry) && !entry.archived && !entry.content.empty()) {
-            selected.push_back(i);
+            candidates.push_back(std::move(entry));
         }
     }
-    std::ranges::sort(selected, [&](std::size_t lhs, std::size_t rhs) {
-        return prompt_precedes(state.entries[lhs], state.entries[rhs]);
-    });
-    if (selected.size() > max_entries) selected.resize(max_entries);
 
+    const auto selected = select_memories(
+        candidates, projection.relevance_query,
+        projection.max_entries, projection.max_block_chars);
+    prompt_state.entries.reserve(selected.size());
     for (const std::size_t index : selected) {
-        prompt_state.entries.push_back(state.entries[index]);
+        prompt_state.entries.push_back(std::move(candidates[index]));
     }
     return prompt_state;
 }
@@ -849,9 +843,9 @@ std::string build_memory_prompt_block(const MemoryState& state,
             active.push_back(&entry);
         }
     }
-    std::ranges::sort(active, [](const MemoryEntry* lhs, const MemoryEntry* rhs) {
-        return prompt_precedes(*lhs, *rhs);
-    });
+    // No re-sorting here: `state` already carries the render order chosen by
+    // load_for_prompt (best relevance match first, recency behind it), and
+    // re-ordering would silently undo that selection.
 
     std::string out;
     if (!active.empty()) {
@@ -872,7 +866,7 @@ std::string build_memory_prompt_block(const MemoryState& state,
 
     if (state.settings.auto_capture && allow_auto_capture) {
         out += "\n\n[Memory Capture]\n";
-        out += "Filo memory is enabled. When the conversation reveals a stable preference, reusable workflow, durable project fact, or correction that should affect future sessions, call the `memory` tool with action `remember` and default project scope. Save only facts supported by this project or explicit user statements; never generalize project facts to other checkouts. Keep entries concise, factual, and non-sensitive. Do not store secrets, credentials, session transcripts, scratchpad notes, rejected approaches, conversation summaries, transient task details, or guesses.";
+        out += "Filo memory is enabled. When the conversation reveals a stable preference, reusable workflow, durable project fact, or correction that should affect future sessions, call the `memory` tool with action `remember` and default project scope. Save only facts supported by this project or explicit user statements; never generalize project facts to other checkouts. Keep entries concise, factual, and non-sensitive, and one durable fact per entry: an entry is recalled whole or not at all, so a mixed one either drags unrelated text into the prompt or costs the relevant part its place. Record what you observed as observation and label anything you infer as inference; state a general rule only when at least two independent cases agree, and treat missing evidence as missing data rather than as a conclusion. Do not store secrets, credentials, session transcripts, scratchpad notes, rejected approaches, conversation summaries, transient task details, or guesses.";
     }
 
     return out;

@@ -43,6 +43,20 @@ struct MemoryState {
     std::vector<MemoryEntry> entries;
 };
 
+/// How many memories one prompt carries at most.
+inline constexpr std::size_t kDefaultPromptEntries = 24;
+
+/// Total memory content one prompt carries, in characters.
+inline constexpr std::size_t kDefaultPromptBlockChars = 24'000;
+
+/// What one prompt may carry from semantic memory, and what it is ranked
+/// against. See MemoryRelevance.hpp for the ordering and budget rules.
+struct PromptProjection {
+    std::size_t max_entries = kDefaultPromptEntries;
+    std::size_t max_block_chars = kDefaultPromptBlockChars;
+    std::string relevance_query;
+};
+
 struct MemoryMutationResult {
     bool ok = false;
     std::string message;
@@ -67,9 +81,9 @@ public:
     [[nodiscard]] MemoryStore for_context(const core::context::SessionContext& context) const;
 
     [[nodiscard]] MemoryState load(std::string* error = nullptr) const;
-    /// Selects the active entries that fit in a prompt. The returned state
-    /// contains only entries that the prompt projection may include.
-    [[nodiscard]] MemoryState load_for_prompt(std::size_t max_entries = 24,
+    /// Selects and orders the active entries one prompt may carry. The returned
+    /// state holds only those entries, in render order (best match first).
+    [[nodiscard]] MemoryState load_for_prompt(const PromptProjection& projection = {},
                                               std::string* error = nullptr) const;
     /// Records one user-turn recall for ids that were actually included in a
     /// submitted prompt. Inactive or out-of-scope entries are left untouched.
