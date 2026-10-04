@@ -25,6 +25,7 @@ struct MemoryReviewResult {
     bool skipped_for_policy = false;
     bool skipped_for_rate_limit = false;
     std::size_t memories_stored = 0;
+    std::size_t memories_not_saved = 0;
     std::size_t memories_cleaned = 0;
     std::size_t skill_drafts_written = 0;
     std::string message = {};

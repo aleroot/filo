@@ -602,9 +602,16 @@ std::string format_memory_state(const core::memory::MemoryState& state) {
     out << "  Context: " << (state.settings.enabled ? "on" : "off") << '\n';
     out << "  Auto capture: " << (state.settings.auto_capture ? "on" : "off") << '\n';
     out << "  Background review: " << (state.settings.background_review ? "on" : "off") << '\n';
-    out << "  Consolidation: " << (state.settings.consolidation ? "on" : "off") << '\n';
+    out << "  Duplicate cleanup: " << (state.settings.consolidation ? "on" : "off") << '\n';
     out << "  Skill curation: " << (state.settings.skill_curation ? "on" : "off") << '\n';
     out << "  Rate-limit reserve: " << state.settings.min_rate_limit_remaining_percent << "%\n";
+    out << "  Automatic entry limit: " << core::memory::kMaxAutoMemoryBytes << " UTF-8 bytes\n";
+    for (const auto& usage : state.scope_usage) {
+        out << "  " << usage.scope << " capacity: " << usage.active_entries << '/' << usage.limit;
+        if (usage.active_entries >= usage.limit) out << " (full; update or merge overlapping facts)";
+        else if (usage.near_capacity()) out << " (near capacity)";
+        out << '\n';
+    }
 
     std::size_t active_count = 0;
     for (const auto& entry : state.entries) {

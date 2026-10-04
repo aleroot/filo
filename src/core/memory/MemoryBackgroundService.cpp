@@ -185,7 +185,11 @@ std::vector<std::string> MemoryBackgroundService::extract_candidate_memories(
 
 MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& input) const {
     const auto store = store_.for_context(input.session_context);
-    auto state = store.load();
+    std::string read_error;
+    auto state = store.load(&read_error);
+    if (!read_error.empty()) {
+        return {.message = "Memory background review could not read the store: " + read_error};
+    }
     if (!state.settings.enabled
         || !input.thread_policy.generate_memories
         || (!state.settings.background_review && !state.settings.consolidation && !state.settings.skill_curation)) {
@@ -198,17 +202,39 @@ MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& inpu
     MemoryReviewResult result;
     result.ran = true;
 
-    if (state.settings.background_review) {
-        for (const auto& candidate : extract_candidate_memories(input.history)) {
-            auto stored = store.remember(candidate, "project", {"background"}, "background_review");
-            if (stored.ok) ++result.memories_stored;
-        }
-    }
-
+    // Free exact duplicate slots before capture, never after a failed write.
+    // Semantic merges require explicit targets and are performed by MemoryTool.
     if (state.settings.consolidation) {
         const auto cleaned = store.clean();
         if (cleaned.ok && cleaned.message.find("Archived ") != std::string::npos) {
             result.memories_cleaned = 1;
+        }
+    }
+
+    if (state.settings.background_review) {
+        state = store.load(&read_error);
+        if (!read_error.empty()) {
+            result.message = "Memory background review could not read the store: " + read_error;
+            return result;
+        }
+        const auto fingerprint = [](std::string_view text) {
+            return core::utils::str::to_lower_ascii_copy(
+                core::utils::str::collapse_ascii_whitespace_copy(text));
+        };
+        for (const auto& candidate : extract_candidate_memories(input.history)) {
+            // Replaying recent history must neither refresh already captured
+            // facts nor resurrect originals archived by a correction or merge.
+            const auto normalized = fingerprint(candidate);
+            if (std::ranges::any_of(state.entries, [&](const auto& entry) {
+                return entry.scope == "project" && fingerprint(entry.content) == normalized;
+            })) continue;
+            auto stored = store.remember(candidate, "project", {"background"}, "background_review");
+            if (stored.ok) {
+                ++result.memories_stored;
+                if (stored.entry) state.entries.push_back(*stored.entry);
+            } else {
+                ++result.memories_not_saved;
+            }
         }
     }
 
@@ -218,12 +244,17 @@ MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& inpu
                 .skill_drafts_written;
     }
 
-    if (result.memories_stored > 0 || result.memories_cleaned > 0 || result.skill_drafts_written > 0) {
+    if (result.memories_stored > 0 || result.memories_not_saved > 0
+        || result.memories_cleaned > 0 || result.skill_drafts_written > 0) {
         result.message = std::format(
             "Memory background review stored {}, cleaned {}, drafted {} skill(s).",
             result.memories_stored,
             result.memories_cleaned,
             result.skill_drafts_written);
+        if (result.memories_not_saved > 0) {
+            result.message += std::format(" {} candidate(s) were not saved; check memory capacity and the automatic entry size limit.",
+                result.memories_not_saved);
+        }
     }
     return result;
 }

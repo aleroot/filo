@@ -354,10 +354,12 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     }
 
     SECTION("/memory status bypasses the picker") {
+        memory_state->scope_usage = {{.scope = "project", .active_entries = 120, .limit = 120}};
         ctx.text = "/memory status";
         REQUIRE(executor.try_execute(ctx.text, ctx));
         CHECK(option_picker_command->empty());
         CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Filo Memory"));
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("project capacity: 120/120 (full"));
     }
 
     SECTION("/memory falls back to text when a picker is unavailable") {

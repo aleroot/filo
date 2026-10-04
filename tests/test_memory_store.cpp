@@ -7,6 +7,8 @@
 #include "core/tools/MemoryTool.hpp"
 #include "core/tools/ToolNames.hpp"
 #include "core/tools/ToolSchema.hpp"
+#include "core/utils/JsonUtils.hpp"
+#include "core/utils/JsonWriter.hpp"
 #include "core/llm/protocols/AnthropicProtocol.hpp"
 
 #include <simdjson.h>
@@ -37,6 +39,453 @@ struct TempDir {
 };
 
 } // namespace
+
+namespace {
+
+std::string revision_args(std::string_view action,
+                          const std::vector<core::memory::MemoryRevisionTarget>& targets,
+                          std::string_view content) {
+    core::utils::JsonWriter writer;
+    {
+        auto object = writer.object();
+        writer.kv_str("action", action).comma().kv_str("content", content);
+        if (action == "update") {
+            writer.comma().kv_str("id", targets.front().id).comma()
+                  .kv_str("expected_content", targets.front().expected_content);
+        } else {
+            writer.comma().key("entries");
+            auto array = writer.array();
+            for (std::size_t i = 0; i < targets.size(); ++i) {
+                if (i > 0) writer.comma();
+                auto item = writer.object();
+                writer.kv_str("id", targets[i].id).comma()
+                      .kv_str("expected_content", targets[i].expected_content);
+            }
+        }
+    }
+    return std::move(writer).take();
+}
+
+} // namespace
+
+TEST_CASE("Memory revision frees capacity atomically and retains original facts", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_revision_capacity"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 2;
+    REQUIRE(store.save_settings(settings));
+    const auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    auto scoped = store.for_context(context);
+    const auto first = scoped.remember("Use the project virtual environment.", "project", {"python"});
+    const auto second = scoped.remember("Run pytest in the project virtual environment.", "project", {"tests"});
+    REQUIRE(first.ok);
+    REQUIRE(second.ok);
+    const auto rejected = scoped.remember("Prefer concise summaries.");
+    REQUIRE_FALSE(rejected.ok);
+    CHECK(rejected.code == "memory_capacity");
+    REQUIRE(rejected.capacity);
+    CHECK(rejected.capacity->active_entries == 2);
+    CHECK(rejected.capacity->scope == "project");
+
+    const auto merged = scoped.revise({{first.entry->id, first.entry->content},
+                                       {second.entry->id, second.entry->content}},
+                                      "Use the project virtual environment, including for pytest.");
+    REQUIRE(merged.ok);
+    REQUIRE(merged.entry);
+    CHECK(merged.entry->supersedes == std::vector<std::string>{first.entry->id, second.entry->id});
+    CHECK(merged.entry->tags == std::vector<std::string>{"python", "tests"});
+    REQUIRE(scoped.list().size() == 1);
+    const auto history = core::memory::MemoryStore{store.path()}.for_context(context).load();
+    REQUIRE(history.entries.size() == 3);
+    CHECK(history.entries[0].archived);
+    CHECK(history.entries[0].content == first.entry->content);
+    CHECK(history.entries[1].archived);
+    CHECK(history.entries[1].content == second.entry->content);
+    CHECK(history.entries[2].supersedes == merged.entry->supersedes);
+    REQUIRE(scoped.remember("Prefer concise summaries.").ok);
+    CHECK(scoped.list().size() == 2);
+}
+
+TEST_CASE("Memory update shortens legacy entries at capacity without truncating history", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_revision_legacy"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto original = store.remember(std::string(6000, 'x'));
+    REQUIRE(original.ok);
+    REQUIRE(store.remember("Independent user preference.").ok);
+    auto initial = store.load();
+    for (auto& entry : initial.entries) entry.last_used_at = "2026-01-01T00:00:00Z";
+    REQUIRE(store.save(initial));
+    auto settings = store.settings();
+    // Lowering the cap below current usage must not prevent maintenance.
+    settings.max_active_entries = 1;
+    REQUIRE(store.save_settings(settings));
+    const auto updated = store.revise({{original.entry->id, original.entry->content}},
+                                     "Build instructions live in docs/build.md.");
+    REQUIRE(updated.ok);
+    CHECK(store.list().size() == 2);
+    const auto loaded = store.load();
+    REQUIRE(loaded.entries.size() == 3);
+    CHECK(loaded.entries[0].content.size() == 6000);
+    CHECK(loaded.entries[0].archived);
+    CHECK(loaded.entries[1].content == "Independent user preference.");
+    CHECK_FALSE(loaded.entries[1].archived);
+    CHECK(loaded.entries[2].supersedes == std::vector<std::string>{original.entry->id});
+    CHECK(store.load_for_prompt({.max_entries = 1}).entries.front().id == updated.entry->id);
+}
+
+TEST_CASE("Memory revisions reject invalid or unavailable targets without partial writes", "[memory][maintenance][scope]") {
+    TempDir dir{"filo_memory_revision_validation"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path},
+        core::context::SessionTransport::cli, "session-a");
+    const auto scoped = store.for_context(context);
+    const auto first = scoped.remember("First fact.");
+    const auto second = scoped.remember("Second fact.");
+    REQUIRE(first.ok);
+    REQUIRE(second.ok);
+    std::vector<core::memory::MemoryRevisionTarget> targets{
+        {first.entry->id, first.entry->content}, {second.entry->id, second.entry->content}};
+    auto view = scoped;
+    SECTION("stale content") { targets[1].expected_content = "An obsolete value."; }
+    SECTION("missing target") { targets[1].id = "m999"; }
+    SECTION("duplicate target") { targets[1] = targets[0]; }
+    SECTION("empty precondition") { targets[1].expected_content.clear(); }
+    SECTION("another project") {
+        context.workspace = core::workspace::SessionWorkspace{
+            core::workspace::WorkspaceSnapshot{.primary = dir.path / "other"}};
+        view = store.for_context(context);
+    }
+    SECTION("archived target") { REQUIRE(scoped.forget(second.entry->id).ok); }
+    SECTION("mixed project and session scope") {
+        const auto session = scoped.remember("Session fact.", "session");
+        REQUIRE(session.ok);
+        targets[1] = {session.entry->id, session.entry->content};
+    }
+    SECTION("other session") {
+        const auto session = scoped.remember("Session fact.", "session");
+        REQUIRE(session.ok);
+        targets[1] = {session.entry->id, session.entry->content};
+        context.session_id = "session-b";
+        view = store.for_context(context);
+    }
+    SECTION("oversized revision") {
+        const auto result = scoped.revise(targets, std::string(core::memory::kMaxAutoMemoryBytes + 1, 'x'));
+        CHECK(result.code == "memory_content_too_long");
+        CHECK(scoped.load().entries.size() == 2);
+        return;
+    }
+    const auto bytes_before = [&] {
+        std::ifstream file{store.path()};
+        return std::string(std::istreambuf_iterator<char>(file), {});
+    }();
+    CHECK_FALSE(view.revise(targets, "Consolidated fact.").ok);
+    std::ifstream file{store.path()};
+    const std::string bytes_after(std::istreambuf_iterator<char>(file), {});
+    CHECK(bytes_after == bytes_before);
+}
+
+TEST_CASE("Concurrent revisions of one memory commit only one replacement", "[memory][maintenance][concurrency]") {
+    TempDir dir{"filo_memory_revision_concurrency"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto original = store.remember("Original fact.");
+    REQUIRE(original.ok);
+    const std::vector<core::memory::MemoryRevisionTarget> targets{{original.entry->id, original.entry->content}};
+    std::vector<core::memory::MemoryMutationResult> results(2);
+    std::thread first([&] { results[0] = store.revise(targets, "First correction."); });
+    std::thread second([&] { results[1] = store.revise(targets, "Second correction."); });
+    first.join();
+    second.join();
+    CHECK(static_cast<int>(results[0].ok) + static_cast<int>(results[1].ok) == 1);
+    CHECK((results[0].ok ? results[1] : results[0]).code == "memory_conflict");
+    CHECK(store.list().size() == 1);
+    CHECK(store.load().entries.size() == 2);
+}
+
+TEST_CASE("Revisions reuse an existing fact and no-op updates do not grow history", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_revision_deduplication"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto first = store.remember("Use pytest.");
+    const auto second = store.remember("pytest is the test runner.");
+    REQUIRE(first.ok);
+    REQUIRE(second.ok);
+    CHECK(store.revise({{first.entry->id, first.entry->content}}, first.entry->content).ok);
+    CHECK(store.load().entries.size() == 2);
+    const auto merged = store.revise({{first.entry->id, first.entry->content},
+                                      {second.entry->id, second.entry->content}}, "Use pytest.");
+    REQUIRE(merged.ok);
+    CHECK(merged.entry->id == first.entry->id);
+    CHECK(merged.entry->supersedes == std::vector<std::string>{second.entry->id});
+    CHECK(store.list().size() == 1);
+    CHECK(store.load().entries.size() == 2);
+}
+
+TEST_CASE("Memory revisions preserve case-sensitive identifier corrections", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_revision_identifier_case"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto original = store.remember("The table name is Foo.");
+    REQUIRE(original.ok);
+    const auto corrected = store.revise({{original.entry->id, original.entry->content}}, "The table name is foo.");
+    REQUIRE(corrected.ok);
+    CHECK(corrected.entry->content == "The table name is foo.");
+    CHECK(corrected.entry->id != original.entry->id);
+    CHECK(store.load().entries.front().archived);
+    CHECK(store.list().front().content == "The table name is foo.");
+}
+
+TEST_CASE("Automatic capture limits bytes while preserving manual and existing long memories", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_capture_size"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto at_limit = std::string(core::memory::kMaxAutoMemoryBytes, 'x');
+    REQUIRE(store.remember(at_limit, {}, {}, "agent").ok);
+    CHECK(store.remember(at_limit + "x", {}, {}, "agent").code == "memory_content_too_long");
+    CHECK(store.remember(at_limit + "x", {}, {}, "background_review").code == "memory_content_too_long");
+    const auto manual = store.remember(at_limit + "x");
+    REQUIRE(manual.ok);
+    CHECK(store.remember(manual.entry->content, {}, {}, "agent").ok);
+    CHECK(store.list().size() == 2);
+    std::string unicode;
+    for (int i = 0; i < 401; ++i) unicode += "界";
+    CHECK(store.remember(unicode, {}, {}, "agent").code == "memory_content_too_long");
+    CHECK(store.list().size() == 2);
+}
+
+TEST_CASE("Capacity warnings count all scoped entries before recall selection", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_capacity_projection"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 10;
+    REQUIRE(store.save_settings(settings));
+    auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path},
+        core::context::SessionTransport::cli, "session-a");
+    const auto scoped = store.for_context(context);
+    for (int i = 0; i < 7; ++i) REQUIRE(scoped.remember("Fact " + std::to_string(i)).ok);
+    CHECK(core::memory::build_memory_prompt_block(scoped.load_for_prompt()).find("Memory capacity:") == std::string::npos);
+    REQUIRE(scoped.remember("Fact seven.").ok);
+    REQUIRE(scoped.remember("Session-only fact.", "session").ok);
+    const auto projected = scoped.load_for_prompt({.max_entries = 1});
+    REQUIRE(projected.entries.size() == 1);
+    REQUIRE(projected.scope_usage.size() == 2);
+    CHECK(projected.scope_usage[0].active_entries == 8);
+    CHECK(projected.scope_usage[1].active_entries == 1);
+    CHECK_THAT(core::memory::build_memory_prompt_block(projected),
+               Catch::Matchers::ContainsSubstring("project scope has 8/10"));
+    const auto empty_projection = scoped.load_for_prompt({.max_entries = 0});
+    CHECK(empty_projection.entries.empty());
+    CHECK(empty_projection.scope_usage[0].active_entries == 8);
+    context.session_id = "session-b";
+    CHECK(store.for_context(context).load().scope_usage[1].active_entries == 0);
+}
+
+TEST_CASE("Memory tool recovers a full scope through merge then capture", "[memory][maintenance][tool]") {
+    TempDir dir{"filo_memory_tool_recovery"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 2;
+    REQUIRE(store.save_settings(settings));
+    const auto context = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    core::tools::MemoryTool tool{store};
+    REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Use the project virtual environment."})", context), "ok"));
+    REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Run pytest in the project virtual environment."})", context), "ok"));
+    const auto blocked = tool.execute(R"({"action":"remember","content":"Prefer concise summaries."})", context);
+    CHECK(core::utils::json::string_field(blocked, "code") == "memory_capacity");
+    const auto status = tool.execute(R"({"action":"status"})", context);
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(status).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["scopes"].at(0)["active_entries"].get_uint64().value() == 2);
+    CHECK(doc["scopes"].at(0)["remaining"].get_uint64().value() == 0);
+    CHECK(doc["scopes"].at(0)["near_capacity"].get_bool().value());
+    auto entries = store.for_context(context).load().entries;
+    const auto args = revision_args("merge", {{entries[0].id, entries[0].content}, {entries[1].id, entries[1].content}},
+                                    "Use the project virtual environment, including for pytest.");
+    const auto validated = core::tools::schema::validate_arguments(tool.get_definition(), args);
+    REQUIRE(validated.has_value());
+    const auto merged = tool.execute(*validated, context);
+    REQUIRE(core::tools::MemoryTool::committed_mutation(core::tools::names::kMemory, args, merged));
+    REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Prefer concise summaries."})", context), "ok"));
+    CHECK(store.for_context(context).list().size() == 2);
+    const auto history_json = tool.execute(R"({"action":"list","include_archived":true})", context);
+    REQUIRE(parser.parse(history_json).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["total"].get_uint64().value() == 4);
+    CHECK(doc["entries"].at(0)["supersedes"].is_array());
+}
+
+TEST_CASE("Memory tool updates a fact at capacity and rejects stale retries", "[memory][maintenance][tool]") {
+    TempDir dir{"filo_memory_tool_update"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 1;
+    REQUIRE(store.save_settings(settings));
+    const auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    const auto scoped = store.for_context(context);
+    const auto original = scoped.remember("Tests run with the old command.");
+    REQUIRE(original.ok);
+    core::tools::MemoryTool tool{store};
+    const auto args = revision_args("update", {{original.entry->id, original.entry->content}}, "Tests run with pytest.");
+    const auto validated = core::tools::schema::validate_arguments(tool.get_definition(), args);
+    REQUIRE(validated.has_value());
+    REQUIRE(core::tools::MemoryTool::committed_mutation(core::tools::names::kMemory, args, tool.execute(*validated, context)));
+    CHECK(core::utils::json::string_field(tool.execute(args, context), "code") == "memory_conflict");
+    REQUIRE(scoped.list().size() == 1);
+    CHECK(scoped.list().front().content == "Tests run with pytest.");
+    CHECK(scoped.load().entries.size() == 2);
+    CHECK_FALSE(core::utils::json::bool_field(tool.execute(R"({"action":"update","id":"m2","content":"Missing precondition."})", context), "ok"));
+    CHECK_FALSE(core::utils::json::bool_field(tool.execute(R"({"action":"merge","entries":["m2","m2"],"content":"Malformed."})", context), "ok"));
+    CHECK_FALSE(core::utils::json::bool_field(tool.execute(R"({"action":"merge","entries":[],"content":"Malformed."})", context), "ok"));
+    CHECK(scoped.load().entries.size() == 2);
+}
+
+TEST_CASE("Memory background cleanup runs before capture and reports unsaved candidates", "[memory][maintenance][background]") {
+    TempDir dir{"filo_memory_background_capacity"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.max_active_entries = 2;
+    settings.background_review = true;
+    settings.consolidation = true;
+    settings.min_rate_limit_remaining_percent = 0;
+    REQUIRE(store.save_settings(settings));
+    const auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    const auto scoped = store.for_context(context);
+    REQUIRE(scoped.remember("Existing fact.").ok);
+    auto state = store.load();
+    auto duplicate = state.entries.front();
+    duplicate.id = "m2";
+    state.entries.push_back(duplicate);
+    REQUIRE(store.save(state));
+    core::memory::MemoryBackgroundService service{store};
+    core::memory::MemoryReviewInput input{
+        .history = {core::llm::Message{.role = "user", .content = "Remember that pytest runs the tests."}},
+        .session_context = context, .thread_policy = {},
+    };
+    const auto result = service.review(input);
+    REQUIRE(result.ran);
+    CHECK(result.memories_cleaned == 1);
+    CHECK(result.memories_stored == 1);
+    CHECK(result.memories_not_saved == 0);
+    CHECK(scoped.list().size() == 2);
+    input.history = {core::llm::Message{.role = "user", .content = "Remember that I prefer concise summaries."}};
+    const auto full = service.review(input);
+    CHECK(full.memories_stored == 0);
+    CHECK(full.memories_not_saved == 1);
+    CHECK_THAT(full.message, Catch::Matchers::ContainsSubstring("were not saved"));
+    CHECK(scoped.list().size() == 2);
+}
+
+TEST_CASE("Background history replay cannot undo a revision or manual archival", "[memory][maintenance][background]") {
+    TempDir dir{"filo_memory_background_revision_replay"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto settings = store.settings();
+    settings.background_review = true;
+    settings.min_rate_limit_remaining_percent = 0;
+    REQUIRE(store.save_settings(settings));
+    const auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    const auto scoped = store.for_context(context);
+    core::memory::MemoryBackgroundService service{store};
+    core::memory::MemoryReviewInput input{
+        .history = {core::llm::Message{.role = "user", .content = "Remember that tests run with the old command."}},
+        .session_context = context, .thread_policy = {},
+    };
+    REQUIRE(service.review(input).memories_stored == 1);
+    const auto original = scoped.list().front();
+    SECTION("revised fact") {
+        REQUIRE(scoped.revise({{original.id, original.content}}, "Tests run with pytest.").ok);
+    }
+    SECTION("manually archived fact") { REQUIRE(scoped.forget(original.id).ok); }
+    SECTION("already active fact") {}
+    const auto before = scoped.load();
+    const auto replayed = service.review(input);
+    CHECK(replayed.memories_stored == 0);
+    CHECK(replayed.memories_not_saved == 0);
+    const auto after = scoped.load();
+    REQUIRE(after.entries.size() == before.entries.size());
+    for (std::size_t i = 0; i < after.entries.size(); ++i) {
+        CHECK(after.entries[i].archived == before.entries[i].archived);
+        CHECK(after.entries[i].use_count == before.entries[i].use_count);
+        CHECK(after.entries[i].updated_at == before.entries[i].updated_at);
+    }
+}
+
+TEST_CASE("Automatic capture cannot reactivate archived facts but explicit restoration can", "[memory][maintenance]") {
+    TempDir dir{"filo_memory_capture_archive"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto first = store.remember("Prefer concise summaries.");
+    REQUIRE(first.ok);
+    REQUIRE(store.forget(first.entry->id).ok);
+    CHECK(store.remember(first.entry->content, {}, {}, "agent").code == "memory_archived");
+    CHECK(store.remember(first.entry->content, {}, {}, "background_review").code == "memory_archived");
+    CHECK(store.list().empty());
+    REQUIRE(store.remember(first.entry->content).ok);
+    CHECK(store.list().size() == 1);
+
+    auto state = store.load();
+    auto earlier = state.entries.front();
+    earlier.id = "m2";
+    earlier.archived = true;
+    state.entries.insert(state.entries.begin(), earlier);
+    REQUIRE(store.save(state));
+    const auto remembered = store.remember(first.entry->content, {}, {}, "agent");
+    REQUIRE(remembered.ok);
+    CHECK(remembered.entry->id == first.entry->id);
+    CHECK(store.list().size() == 1);
+}
+
+TEST_CASE("Memory tool update and merge respect capture and thread policies", "[memory][maintenance][tool]") {
+    TempDir dir{"filo_memory_revision_policies"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    const auto scoped = store.for_context(context);
+    const auto first = scoped.remember("First fact.");
+    const auto second = scoped.remember("Second fact.");
+    REQUIRE(first.ok);
+    REQUIRE(second.ok);
+    core::tools::MemoryTool tool{store};
+    const std::vector<core::memory::MemoryRevisionTarget> targets{{first.entry->id, first.entry->content},
+                                                               {second.entry->id, second.entry->content}};
+    SECTION("memory disabled") {
+        auto settings = store.settings(); settings.enabled = false;
+        REQUIRE(store.save_settings(settings));
+    }
+    SECTION("automatic capture disabled") {
+        auto settings = store.settings(); settings.auto_capture = false;
+        REQUIRE(store.save_settings(settings));
+    }
+    SECTION("thread generation disabled") { context.memory_policy.generate_memories = false; }
+    for (const auto& action : {"update", "merge"}) {
+        const auto args = revision_args(action, targets, "Revised fact.");
+        CHECK_FALSE(core::tools::MemoryTool::committed_mutation(core::tools::names::kMemory, args, tool.execute(args, context)));
+    }
+    CHECK(scoped.load().entries.size() == 2);
+}
+
+TEST_CASE("Memory list searches and paginates without losing full revision content", "[memory][maintenance][tool]") {
+    TempDir dir{"filo_memory_list_pages"};
+    core::memory::MemoryStore store{dir.path / "memory.json"};
+    const auto context = core::context::make_session_context(core::workspace::WorkspaceSnapshot{.primary = dir.path});
+    const auto scoped = store.for_context(context);
+    for (int i = 0; i < 26; ++i) REQUIRE(scoped.remember("Unrelated fact " + std::to_string(i)).ok);
+    const auto relevant = scoped.remember("PromptEditor launches the external editor.");
+    REQUIRE(relevant.ok);
+    core::tools::MemoryTool tool{store};
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    auto result = tool.execute(R"({"action":"list","query":"PromptEditor","limit":1})", context);
+    REQUIRE(parser.parse(result).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["total"].get_uint64().value() == 27);
+    CHECK(doc["has_more"].get_bool().value());
+    CHECK(doc["entries"].at(0)["id"].get_string().value() == relevant.entry->id);
+    CHECK(doc["entries"].at(0)["content"].get_string().value() == relevant.entry->content);
+    result = tool.execute(R"({"action":"list","offset":24})", context);
+    REQUIRE(parser.parse(result).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["entries"].get_array().value().size() == 3);
+    CHECK_FALSE(doc["has_more"].get_bool().value());
+    result = tool.execute(R"({"action":"list","scope":"session"})", context);
+    REQUIRE(parser.parse(result).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["total"].get_uint64().value() == 0);
+}
 
 TEST_CASE("MemoryStore stores and reloads settings plus entries", "[memory]") {
     TempDir dir{"filo_memory_store_reload"};

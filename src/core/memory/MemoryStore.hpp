@@ -33,6 +33,18 @@ struct MemoryEntry {
     bool archived = false;
     std::string project_root = {};
     std::string session_id = {};
+    // Archived originals retained by an atomic revision or merge.
+    std::vector<std::string> supersedes = {};
+};
+
+struct MemoryScopeUsage {
+    std::string scope;
+    std::size_t active_entries = 0;
+    std::size_t limit = 120;
+
+    [[nodiscard]] bool near_capacity() const noexcept {
+        return active_entries >= limit - limit / 5;
+    }
 };
 
 struct MemoryState {
@@ -41,6 +53,17 @@ struct MemoryState {
     int version = kVersion;
     MemorySettings settings;
     std::vector<MemoryEntry> entries;
+    // Derived before prompt selection; never persisted as store data.
+    std::vector<MemoryScopeUsage> scope_usage = {};
+};
+
+// Only new automatic captures/revisions are bounded. Existing entries and
+// explicit manual/imported memories remain readable without truncation.
+inline constexpr std::size_t kMaxAutoMemoryBytes = 1200;
+
+struct MemoryRevisionTarget {
+    std::string id;
+    std::string expected_content;
 };
 
 /// How many memories one prompt carries at most.
@@ -61,6 +84,8 @@ struct MemoryMutationResult {
     bool ok = false;
     std::string message;
     std::optional<MemoryEntry> entry = {};
+    std::string code = {};
+    std::optional<MemoryScopeUsage> capacity = {};
 };
 
 struct MemoryFileResult {
@@ -102,6 +127,12 @@ public:
                                                 std::string_view scope = {},
                                                 std::vector<std::string> tags = {},
                                                 std::string_view source = "manual") const;
+    /// Replaces one fact, or merges overlapping facts in one scope, retaining
+    /// archived originals. Expected contents guard against concurrent edits.
+    [[nodiscard]] MemoryMutationResult revise(
+        const std::vector<MemoryRevisionTarget>& targets,
+        std::string_view content,
+        std::string_view source = "agent") const;
     [[nodiscard]] MemoryMutationResult forget(std::string_view selector) const;
     [[nodiscard]] MemoryMutationResult clean() const;
     [[nodiscard]] MemoryMutationResult clear() const;
@@ -118,6 +149,7 @@ private:
     [[nodiscard]] static std::string normalize_for_match(std::string_view value);
     [[nodiscard]] static std::string next_id(const std::vector<MemoryEntry>& entries);
     [[nodiscard]] bool visible(const MemoryEntry& entry) const;
+    void populate_scope_usage(MemoryState& state) const;
 
     std::filesystem::path path_;
     bool context_bound_ = false;

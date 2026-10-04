@@ -32,6 +32,12 @@ MemoryMenu build_memory_menu(MemoryMenuPage page,
         .help = {},
         .options = {},
     };
+    for (const auto& usage : state.scope_usage) {
+        if (usage.scope == "project") {
+            menu.current += std::format(" · project {}/{}{}", usage.active_entries,
+                usage.limit, usage.active_entries >= usage.limit ? " full" : usage.near_capacity() ? " near capacity" : "");
+        }
+    }
     switch (page) {
     case MemoryMenuPage::Overview:
         menu.title = "MEMORY";
@@ -64,7 +70,7 @@ MemoryMenu build_memory_menu(MemoryMenuPage page,
                    "Allow the model to save durable project memories. Enabling also enables background review."),
             toggle("Background review", state.settings.background_review, "background",
                    "Extract durable notes from this project's conversation history."),
-            toggle("Consolidation", state.settings.consolidation, "consolidate",
+            toggle("Duplicate cleanup", state.settings.consolidation, "consolidate",
                    "Clean duplicate memories during background review."),
             toggle("Skill drafts", state.settings.skill_curation, "skills",
                    "Create disabled skill drafts for manual review."),

@@ -59,7 +59,14 @@ void append_entry_json(std::string& out, const MemoryEntry& entry) {
               .kv_num("use_count", entry.use_count).comma()
               .kv_bool("archived", entry.archived).comma()
               .kv_str("project_root", entry.project_root).comma()
-              .kv_str("session_id", entry.session_id);
+              .kv_str("session_id", entry.session_id).comma().key("supersedes");
+        {
+            auto _ = writer.array();
+            for (std::size_t i = 0; i < entry.supersedes.size(); ++i) {
+                if (i > 0) writer.comma();
+                writer.str(entry.supersedes[i]);
+            }
+        }
     }
     out += std::move(writer).take();
 }
@@ -82,6 +89,15 @@ void append_entry_json(std::string& out, const MemoryEntry& entry) {
     entry.archived = core::utils::json::bool_field(object, "archived");
     entry.project_root = core::utils::json::string_field(object, "project_root");
     entry.session_id = core::utils::json::string_field(object, "session_id");
+    simdjson::dom::array supersedes;
+    if (object["supersedes"].get(supersedes) == simdjson::SUCCESS) {
+        for (auto value : supersedes) {
+            std::string_view id;
+            if (value.get(id) == simdjson::SUCCESS && !id.empty()) {
+                entry.supersedes.emplace_back(id);
+            }
+        }
+    }
 
     simdjson::dom::array tags;
     if (object["tags"].get(tags) == simdjson::SUCCESS) {
@@ -198,9 +214,8 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
     return static_cast<std::size_t>(std::max(1, settings.max_active_entries));
 }
 
-/// True when the project/scope/session bucket already holds the configured
-/// maximum of active entries, so activating one more would exceed it.
-[[nodiscard]] bool active_bucket_full(const MemoryState& state,
+/// Count one project/scope/session bucket, independently of prompt selection.
+[[nodiscard]] MemoryScopeUsage bucket_usage(const MemoryState& state,
                                       std::string_view project_root,
                                       std::string_view scope,
                                       std::string_view session_id) {
@@ -211,15 +226,44 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
                 && entry.scope == scope
                 && entry.session_id == session_id;
         }));
-    return active >= active_entry_limit(state.settings);
+    return {.scope = std::string(scope), .active_entries = active,
+            .limit = active_entry_limit(state.settings)};
 }
 
-[[nodiscard]] MemoryMutationResult active_limit_reached(const MemorySettings& settings,
+[[nodiscard]] bool active_bucket_full(const MemoryState& state,
+                                      std::string_view project_root,
+                                      std::string_view scope,
+                                      std::string_view session_id) {
+    const auto usage = bucket_usage(state, project_root, scope, session_id);
+    return usage.active_entries >= usage.limit;
+}
+
+[[nodiscard]] MemoryMutationResult active_limit_reached(MemoryScopeUsage usage,
                                                         std::string_view remedy) {
     return {.ok = false, .message = std::format(
-        "Memory limit reached: this scope already has the configured maximum "
-        "of {} active entries. Archive or forget an entry before {}.",
-        active_entry_limit(settings), remedy)};
+        "Memory limit reached: {} scope has {}/{} active entries; cannot {}. "
+        "List this scope and merge only overlapping facts, or update a superseded fact. "
+        "Do not forget unrelated memories to free space or retry unchanged. "
+        "If no safe consolidation exists, skip this capture and continue the user's task; "
+        "report that the new memory was not saved.",
+        usage.scope, usage.active_entries, usage.limit, remedy),
+        .code = "memory_capacity", .capacity = std::move(usage)};
+}
+
+[[nodiscard]] std::optional<MemoryMutationResult> automatic_content_error(
+    std::string_view content, std::string_view source) {
+    if ((source == "agent" || source == "background_review")
+        && content.size() > kMaxAutoMemoryBytes) {
+        return MemoryMutationResult{
+            .ok = false,
+            .message = std::format(
+                "Automatic memory is {} bytes; maximum is {} bytes. "
+                "Rewrite as one concise durable fact with a reference to canonical files "
+                "for details. Do not truncate blindly or split a long task summary into many entries.",
+                content.size(), kMaxAutoMemoryBytes),
+            .code = "memory_content_too_long"};
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] bool memory_state_within_active_limit(const MemoryState& state) {
@@ -268,6 +312,15 @@ bool MemoryStore::visible(const MemoryEntry& entry) const {
     return entry.scope == "project";
 }
 
+void MemoryStore::populate_scope_usage(MemoryState& state) const {
+    state.scope_usage.clear();
+    if (!context_bound_ || project_root_.empty()) return;
+    state.scope_usage.push_back(bucket_usage(state, project_root_, "project", ""));
+    if (!session_id_.empty()) {
+        state.scope_usage.push_back(bucket_usage(state, project_root_, "session", session_id_));
+    }
+}
+
 std::filesystem::path MemoryStore::default_path() {
     if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg && xdg[0] != '\0') {
         return std::filesystem::path{xdg} / "filo" / "memory.json";
@@ -302,6 +355,7 @@ MemoryState MemoryStore::load(std::string* error) const {
         return {};
     }
     auto state = load_unlocked(error);
+    populate_scope_usage(state);
     std::erase_if(state.entries, [this](const auto& entry) { return !visible(entry); });
     return state;
 }
@@ -325,6 +379,8 @@ MemoryState MemoryStore::load_for_prompt(const PromptProjection& projection,
     MemoryState prompt_state;
     prompt_state.version = state.version;
     prompt_state.settings = state.settings;
+    populate_scope_usage(state);
+    prompt_state.scope_usage = std::move(state.scope_usage);
 
     if (!state.settings.enabled || projection.max_entries == 0) return prompt_state;
 
@@ -548,7 +604,8 @@ std::vector<MemoryEntry> MemoryStore::list(bool include_archived, std::string* e
         entries.push_back(std::move(entry));
     }
     std::ranges::sort(entries, [](const MemoryEntry& lhs, const MemoryEntry& rhs) {
-        return lhs.created_at > rhs.created_at;
+        if (lhs.created_at != rhs.created_at) return lhs.created_at > rhs.created_at;
+        return lhs.id < rhs.id;
     });
     return entries;
 }
@@ -586,13 +643,30 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
     if (!read_error.empty()) return {.ok = false, .message = read_error};
     const std::string fingerprint = normalize_for_match(clean_content);
     const std::string now = now_iso8601();
-    for (auto& entry : state.entries) {
-        if (entry.project_root != project_root_ || entry.scope != clean_scope
-            || entry.session_id != entry_session_id) continue;
-        if (normalize_for_match(entry.content) != fingerprint) continue;
+    const std::string clean_source = core::utils::str::trim_ascii_copy(source);
+    const auto matches = [&](const MemoryEntry& entry) {
+        return entry.project_root == project_root_ && entry.scope == clean_scope
+            && entry.session_id == entry_session_id
+            && normalize_for_match(entry.content) == fingerprint;
+    };
+    // Prefer a live duplicate over an older archived copy of the same fact.
+    auto match = std::ranges::find_if(state.entries, [&](const auto& entry) {
+        return !entry.archived && matches(entry);
+    });
+    if (match == state.entries.end()) match = std::ranges::find_if(state.entries, matches);
+    if (match != state.entries.end()) {
+        auto& entry = *match;
+        if (entry.archived && (clean_source == "agent" || clean_source == "background_review")) {
+            return {.ok = false,
+                    .message = "This fact was archived. Automatic capture cannot restore it. "
+                        "Update the current fact if the user explicitly corrected it, or leave it archived. "
+                        "The user can restore it with /memory add. Do not retry unchanged.",
+                    .code = "memory_archived"};
+        }
         if (entry.archived
             && active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
-            return active_limit_reached(state.settings, "restoring this one");
+            return active_limit_reached(
+                bucket_usage(state, project_root_, clean_scope, entry_session_id), "restore this memory");
         }
         entry.archived = false;
         entry.updated_at = now;
@@ -605,14 +679,15 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
         return {.ok = true, .message = std::format("Updated memory {{{}}}.", entry.id), .entry = entry};
     }
 
+    if (auto error = automatic_content_error(clean_content, clean_source)) return *error;
     if (active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
-        return active_limit_reached(state.settings, "adding another");
+        return active_limit_reached(
+            bucket_usage(state, project_root_, clean_scope, entry_session_id), "add another memory");
     }
 
     std::erase_if(tags, [](const std::string& tag) {
         return core::utils::str::trim_ascii_copy(tag).empty();
     });
-    std::string clean_source = core::utils::str::trim_ascii_copy(source);
     MemoryEntry entry{
         .id = next_id(state.entries),
         .content = clean_content,
@@ -633,6 +708,95 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
         return {.ok = false, .message = error};
     }
     return {.ok = true, .message = std::format("Stored memory {{{}}}.", entry.id), .entry = entry};
+}
+
+MemoryMutationResult MemoryStore::revise(
+    const std::vector<MemoryRevisionTarget>& targets,
+    std::string_view content,
+    std::string_view source) const {
+    const auto clean_content = core::utils::str::trim_ascii_copy(content);
+    if (targets.empty() || clean_content.empty()) {
+        return {.ok = false, .message = "Revision requires targets and non-empty content.",
+                .code = "invalid_revision"};
+    }
+    if (auto error = automatic_content_error(clean_content, source)) return *error;
+    std::lock_guard lock(mutex_for_path(path_));
+    std::string error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &error);
+    if (!file_lock) return {.ok = false, .message = error};
+    auto state = load_unlocked(&error);
+    if (!error.empty()) return {.ok = false, .message = error};
+
+    std::vector<std::size_t> indices;
+    std::set<std::string> ids;
+    for (const auto& target : targets) {
+        const auto id = selector_id(target.id);
+        if (id.empty() || !ids.insert(id).second || target.expected_content.empty()) {
+            return {.ok = false, .message = "Each revision target requires a unique id and expected_content.",
+                    .code = "invalid_revision"};
+        }
+        auto it = std::ranges::find(state.entries, id, &MemoryEntry::id);
+        if (it == state.entries.end() || !visible(*it) || it->archived
+            || it->content != target.expected_content) {
+            return {.ok = false,
+                    .message = "Memory changed, was archived, or is unavailable in this scope. List again before revising; no changes were saved.",
+                    .code = "memory_conflict"};
+        }
+        if (!indices.empty()) {
+            const auto& first = state.entries[indices.front()];
+            if (it->project_root != first.project_root || it->scope != first.scope
+                || it->session_id != first.session_id) {
+                return {.ok = false, .message = "A revision cannot combine different project/session scopes.",
+                        .code = "invalid_revision"};
+            }
+        }
+        indices.push_back(static_cast<std::size_t>(it - state.entries.begin()));
+    }
+    const auto& first = state.entries[indices.front()];
+    // A no-op does not grow history.
+    if (indices.size() == 1 && first.content == clean_content) {
+        return {.ok = true, .message = "Memory is already up to date.", .entry = first};
+    }
+    // Reuse an existing active fact rather than creating a duplicate. Originals
+    // still become history, and their ids remain linked from the survivor.
+    // Revisions must preserve the requested spelling: Foo and foo may name
+    // different identifiers, even though capture deduplication folds case.
+    auto existing = std::ranges::find_if(state.entries, [&](const auto& entry) {
+        return !entry.archived && entry.project_root == first.project_root
+            && entry.scope == first.scope && entry.session_id == first.session_id
+            && entry.content == clean_content;
+    });
+    const auto now = now_iso8601();
+    MemoryEntry replacement = existing != state.entries.end() ? *existing : MemoryEntry{
+        .id = next_id(state.entries), .content = clean_content, .scope = first.scope,
+        .source = std::string(source), .created_at = now, .updated_at = now,
+        .last_used_at = now, .use_count = 1,
+        .project_root = first.project_root, .session_id = first.session_id,
+    };
+    for (const auto index : indices) {
+        auto& original = state.entries[index];
+        for (const auto& tag : original.tags) {
+            if (std::ranges::find(replacement.tags, tag) == replacement.tags.end()) {
+                replacement.tags.push_back(tag);
+            }
+        }
+        if (original.id == replacement.id) continue;
+        original.archived = true;
+        original.updated_at = now;
+        replacement.supersedes.push_back(original.id);
+    }
+    replacement.updated_at = now;
+    // A revised fact was just consulted by the caller. Keep it ahead of stale
+    // memories in recency fallback, as remember() does for newly saved facts.
+    replacement.last_used_at = now;
+    if (existing != state.entries.end()) *existing = replacement;
+    else state.entries.push_back(replacement);
+    // The transaction never increases the bucket count. It also works when a
+    // user lowered the limit below existing usage: repairs must remain possible.
+    if (!save_unlocked(state, &error)) return {.ok = false, .message = error};
+    return {.ok = true, .message = std::format("Revised {} memory item(s) into {{{}}}; originals retained in history.",
+                indices.size(), replacement.id), .entry = std::move(replacement)};
 }
 
 MemoryMutationResult MemoryStore::forget(std::string_view selector) const {
@@ -854,6 +1018,7 @@ std::string build_memory_prompt_block(const MemoryState& state,
         const std::size_t count = std::min(max_entries, active.size());
         for (std::size_t i = 0; i < count; ++i) {
             out += "- ";
+            out += "{" + active[i]->id + "} ";
             out += active[i]->content;
             if (!active[i]->scope.empty() && active[i]->scope != "global") {
                 out += " (scope: ";
@@ -867,6 +1032,27 @@ std::string build_memory_prompt_block(const MemoryState& state,
     if (state.settings.auto_capture && allow_auto_capture) {
         out += "\n\n[Memory Capture]\n";
         out += "Filo memory is enabled. When the conversation reveals a stable preference, reusable workflow, durable project fact, or correction that should affect future sessions, call the `memory` tool with action `remember` and default project scope. Save only facts supported by this project or explicit user statements; never generalize project facts to other checkouts. Keep entries concise, factual, and non-sensitive, and one durable fact per entry: an entry is recalled whole or not at all, so a mixed one either drags unrelated text into the prompt or costs the relevant part its place. Record what you observed as observation and label anything you infer as inference; state a general rule only when at least two independent cases agree, and treat missing evidence as missing data rather than as a conclusion. Do not store secrets, credentials, session transcripts, scratchpad notes, rejected approaches, conversation summaries, transient task details, or guesses.";
+        out += std::format(
+            " New automatic entries and revisions must fit within {} UTF-8 bytes. "
+            "Prefer a short fact and canonical file references over copying implementation details. "
+            "Before saving, use recalled ids or a subject query with list to check for existing facts. "
+            "Use update with id and exact expected_content to correct or shorten one fact; "
+            "use merge with entries containing id and exact expected_content to consolidate overlapping facts "
+            "in the same scope while preserving every distinct durable detail. Originals remain archived. "
+            "Never merge unrelated facts, weaken explicit user preferences, or forget valid memories solely to free space. "
+            "Only change a user preference when the user explicitly corrects it. "
+            "On memory_capacity, attempt a safe merge only if overlap is clear; otherwise skip capture, "
+            "report that the new memory was not saved, and continue the user's task. Do not retry unchanged writes.",
+            kMaxAutoMemoryBytes);
+        for (const auto& usage : state.scope_usage) {
+            if (!usage.near_capacity()) continue;
+            out += std::format(
+                "\nMemory capacity: {} scope has {}/{} active entries. {}",
+                usage.scope, usage.active_entries, usage.limit,
+                usage.active_entries >= usage.limit
+                    ? "New entries are blocked; update/merge existing facts instead when appropriate."
+                    : "Check for overlap and consolidate before adding new facts.");
+        }
     }
 
     return out;

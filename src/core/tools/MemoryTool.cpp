@@ -4,10 +4,12 @@
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
+#include "../memory/MemoryRelevance.hpp"
 
 #include <simdjson.h>
 
 #include <format>
+#include <algorithm>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -30,11 +32,24 @@ namespace {
     return tags;
 }
 
-[[nodiscard]] std::string entries_json(const std::vector<core::memory::MemoryEntry>& entries) {
+void append_capacity(core::utils::JsonWriter& writer,
+                     const core::memory::MemoryScopeUsage& usage) {
+    writer.raw("{").kv_str("scope", usage.scope).comma()
+          .kv_num("active_entries", usage.active_entries).comma()
+          .kv_num("limit", usage.limit).comma()
+          .kv_num("remaining", usage.active_entries < usage.limit ? usage.limit - usage.active_entries : 0).comma()
+          .kv_bool("near_capacity", usage.near_capacity()).raw("}");
+}
+
+[[nodiscard]] std::string entries_json(const std::vector<core::memory::MemoryEntry>& entries,
+                                      std::size_t total, std::size_t offset) {
     core::utils::JsonWriter writer(512 + entries.size() * 160);
     {
         auto _ = writer.object();
-        writer.kv_bool("ok", true).comma().key("entries");
+        writer.kv_bool("ok", true).comma().kv_num("total", total).comma()
+              .kv_num("offset", offset).comma()
+              .kv_bool("has_more", offset < total && entries.size() < total - offset).comma()
+              .key("entries");
         {
             auto _ = writer.array();
             for (std::size_t i = 0; i < entries.size(); ++i) {
@@ -47,6 +62,12 @@ namespace {
                       .kv_str("source", entry.source).comma()
                       .kv_str("project_root", entry.project_root).comma()
                       .kv_bool("archived", entry.archived)
+                      .comma().key("supersedes").raw("[");
+                for (std::size_t j = 0; j < entry.supersedes.size(); ++j) {
+                    if (j > 0) writer.comma();
+                    writer.str(entry.supersedes[j]);
+                }
+                writer.raw("]")
                       .raw("}");
             }
         }
@@ -60,6 +81,11 @@ namespace {
         auto _ = writer.object();
         writer.kv_bool("ok", result.ok).comma()
               .kv_str(result.ok ? "message" : "error", result.message);
+        if (!result.code.empty()) writer.comma().kv_str("code", result.code);
+        if (result.capacity) {
+            writer.comma().key("capacity");
+            append_capacity(writer, *result.capacity);
+        }
         if (result.entry.has_value()) {
             writer.comma().key("entry");
             {
@@ -79,7 +105,8 @@ MemoryTool::MemoryTool(core::memory::MemoryStore store)
     : store_(std::move(store)) {}
 
 bool MemoryTool::is_mutating_action(std::string_view action) noexcept {
-    return action == "remember" || action == "forget" || action == "clean";
+    return action == "remember" || action == "update" || action == "merge"
+        || action == "forget" || action == "clean";
 }
 
 bool MemoryTool::committed_mutation(std::string_view tool_name,
@@ -99,11 +126,12 @@ ToolDefinition MemoryTool::get_definition() const {
         .name = std::string(names::kMemory),
         .title = "Memory",
         .description =
-            "Manage durable Filo memories for the current project. Memories never cross project boundaries. "
-            "Memory and automatic capture are enabled by default; use status to check availability. "
-            "If disabled, the user can re-enable saving from Filo.",
+            "Project memory (default scope: project), <=1200 UTF-8 bytes/fact. "
+            "list: query/id/scope, limit=24, offset, include_archived. "
+            "update: id+exact expected_content. merge: entries[{id,expected_content}], overlapping same-scope facts. "
+            "Originals archived. At capacity never evict unrelated facts; skip capture and continue.",
         .input_schema =
-            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","list","forget","clean","status"]},"content":{"type":"string","description":"Content for remember."},"id":{"type":"string","description":"Memory id for forget."},"scope":{"type":"string","enum":["project","session"],"description":"Defaults to project. Session memories are visible only in this session."},"tags":{"type":"array","items":{"type":"string"}}},"required":["action"],"additionalProperties":false})",
+            R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","update","merge","list","forget","clean","status"]},"content":{"type":"string"},"id":{"type":"string"},"expected_content":{"type":"string"},"entries":{"type":"array","minItems":2,"items":{"type":"object","properties":{"id":{"type":"string"},"expected_content":{"type":"string"}},"required":["id","expected_content"],"additionalProperties":false}},"scope":{"type":"string","enum":["project","session"]},"tags":{"type":"array","items":{"type":"string"}},"include_archived":{"type":"boolean"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"offset":{"type":"integer","minimum":0}},"required":["action"],"additionalProperties":false})",
         .annotations = {
             .read_only_hint = false,
             .destructive_hint = true,
@@ -134,11 +162,23 @@ std::string MemoryTool::execute(const std::string& json_args,
         return mutation_json({.ok = false, .message = settings_error});
     }
     if (action == "status") {
-        return std::format(
-            R"({{"ok":true,"enabled":{},"auto_capture":{},"path":"{}"}})",
-            settings.enabled ? "true" : "false",
-            settings.auto_capture ? "true" : "false",
-            core::utils::escape_json_string(store_.path().string()));
+        const auto state = store.load(&settings_error);
+        if (!settings_error.empty()) return mutation_json({.ok = false, .message = settings_error});
+        core::utils::JsonWriter writer(512);
+        {
+            auto _ = writer.object();
+            writer.kv_bool("ok", true).comma().kv_bool("enabled", state.settings.enabled).comma()
+                  .kv_bool("auto_capture", state.settings.auto_capture).comma()
+                  .kv_str("path", store_.path().string()).comma()
+                  .kv_num("max_auto_memory_bytes", core::memory::kMaxAutoMemoryBytes).comma()
+                  .key("scopes");
+            auto scopes = writer.array();
+            for (std::size_t i = 0; i < state.scope_usage.size(); ++i) {
+                if (i > 0) writer.comma();
+                append_capacity(writer, state.scope_usage[i]);
+            }
+        }
+        return std::move(writer).take();
     }
 
     if (!settings.enabled) {
@@ -149,7 +189,33 @@ std::string MemoryTool::execute(const std::string& json_args,
         if (!context.memory_policy.use_memories) {
             return R"({"error":"Thread memory use is disabled."})";
         }
-        return entries_json(store.list(false));
+        auto entries = store.list(core::utils::json::bool_field(object, "include_archived"), &settings_error);
+        if (!settings_error.empty()) return mutation_json({.ok = false, .message = settings_error});
+        const auto scope = core::utils::json::string_field(object, "scope");
+        const auto id = core::utils::json::string_field(object, "id");
+        if (!scope.empty() && scope != "project" && scope != "session") {
+            return R"({"ok":false,"error":"Use project or session scope."})";
+        }
+        std::erase_if(entries, [&](const auto& entry) {
+            return (!scope.empty() && entry.scope != scope) || (!id.empty() && entry.id != id);
+        });
+        const auto query = core::utils::json::string_field(object, "query");
+        if (!query.empty()) {
+            const auto ranked = core::memory::rank_memories(entries, query);
+            std::vector<core::memory::MemoryEntry> ordered;
+            ordered.reserve(entries.size());
+            for (const auto index : ranked) ordered.push_back(std::move(entries[index]));
+            entries = std::move(ordered);
+        }
+        const auto total = entries.size();
+        const auto offset = static_cast<std::size_t>(std::max(0, core::utils::json::int_field(object, "offset")));
+        const auto limit = static_cast<std::size_t>(std::clamp(core::utils::json::int_field(object, "limit", 24), 1, 50));
+        if (offset >= total) entries.clear();
+        else {
+            entries.erase(entries.begin(), entries.begin() + offset);
+            if (entries.size() > limit) entries.resize(limit);
+        }
+        return entries_json(entries, total, offset);
     }
     if (action == "clean") {
         if (!context.memory_policy.generate_memories) {
@@ -163,12 +229,33 @@ std::string MemoryTool::execute(const std::string& json_args,
         }
         return mutation_json(store.forget(core::utils::json::string_field(object, "id")));
     }
-    if (action == "remember") {
+    if (action == "remember" || action == "update" || action == "merge") {
         if (!context.memory_policy.generate_memories) {
             return R"({"error":"Thread memory generation is disabled."})";
         }
         if (!settings.auto_capture) {
             return R"({"error":"Automatic memory capture is disabled. Ask the user to run /memory auto on or use /memory add."})";
+        }
+        if (action == "update" || action == "merge") {
+            std::vector<core::memory::MemoryRevisionTarget> targets;
+            if (action == "update") {
+                targets.push_back({core::utils::json::string_field(object, "id"),
+                                   core::utils::json::string_field(object, "expected_content")});
+            } else {
+                simdjson::dom::array values;
+                if (object["entries"].get(values) != simdjson::SUCCESS || values.size() < 2) {
+                    return R"({"ok":false,"code":"invalid_revision","error":"Merge requires at least two entries with id and expected_content."})";
+                }
+                for (auto value : values) {
+                    simdjson::dom::object target;
+                    if (value.get(target) != simdjson::SUCCESS) {
+                        return R"({"ok":false,"code":"invalid_revision","error":"Each merge entry must be an object with id and expected_content."})";
+                    }
+                    targets.push_back({core::utils::json::string_field(target, "id"),
+                                       core::utils::json::string_field(target, "expected_content")});
+                }
+            }
+            return mutation_json(store.revise(targets, core::utils::json::string_field(object, "content")));
         }
         const std::string scope = core::utils::json::string_field(object, "scope");
         return mutation_json(store.remember(
@@ -177,7 +264,7 @@ std::string MemoryTool::execute(const std::string& json_args,
             json_tags(object),
             "agent"));
     }
-    return R"({"error":"Unknown memory action. Use remember, list, forget, clean, or status."})";
+    return R"({"error":"Unknown memory action. Use remember, update, merge, list, forget, clean, or status."})";
 }
 
 } // namespace core::tools
