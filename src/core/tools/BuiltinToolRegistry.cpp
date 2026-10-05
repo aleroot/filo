@@ -40,6 +40,7 @@ BuiltinToolRegistrationOptions agent_builtin_tool_options() {
         .include_workspace_config = false,
         .include_delegate_task = false,
         .include_ask_user_question = true,
+        .include_web_search = true,
         .include_python = true,
         .include_instruction_skills = true,
         .discover_python_skills = true,
@@ -52,6 +53,7 @@ BuiltinToolRegistrationOptions mcp_builtin_tool_options() {
         .include_workspace_config = true,
         .include_delegate_task = true,
         .include_ask_user_question = false,
+        .include_web_search = false,
         .include_python = false,
         .include_instruction_skills = true,
         .discover_python_skills = false,
@@ -83,7 +85,9 @@ void register_builtin_tools(ToolManager& tool_manager,
     tool_manager.register_tool(with_path_visibility(std::make_shared<DeleteFileTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<MoveFileTool>()));
     tool_manager.register_tool(with_path_visibility(std::make_shared<CreateDirectoryTool>()));
-    tool_manager.register_tool(std::make_shared<WebSearchTool>());
+    if (options.include_web_search) {
+        tool_manager.register_tool(std::make_shared<WebSearchTool>());
+    }
     tool_manager.register_tool(std::make_shared<WebFetchTool>());
     if (!core::landrun::LandrunSettings::instance().enabled()) {
         tool_manager.register_tool(std::make_shared<MemoryTool>(

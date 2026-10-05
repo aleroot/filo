@@ -18,6 +18,10 @@ struct BuiltinToolRegistrationOptions {
     bool include_workspace_config = false;
     bool include_delegate_task = false;
     bool include_ask_user_question = false;
+    /// Web search runs through the active LLM provider's native backend.
+    /// Hosts without an active provider (the MCP server) cannot serve it, so
+    /// they must not advertise it.
+    bool include_web_search = false;
     bool include_python = false;
     bool include_instruction_skills = true;
     bool discover_python_skills = false;

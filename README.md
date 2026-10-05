@@ -287,7 +287,7 @@ Filo’s MCP server (`filo-mcp`) exposes local coding tools so a host such as La
 - **Write / edit:** `write_file`, `search_replace`, `apply_patch`, `replace`, `delete_file`, `move_file`, `create_directory`
 - **Shell:** `run_terminal_command`
 - **Workspace / orchestration:** `get_workspace_config`, `delegate_task`
-- **Web (when enabled):** `web_search`, `fetch_url`
+- **Web (when enabled):** `fetch_url`. `web_search` is not exposed: it runs through the active LLM provider, and the MCP server has none.
 - **Skills:** `activate_skill` when instruction skills are installed
 
 Paths may be absolute or relative to the active workspace. Use `--work-dir` / `-w` to set the primary project and optional additional allowed roots.

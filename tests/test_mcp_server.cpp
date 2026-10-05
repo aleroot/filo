@@ -449,6 +449,23 @@ TEST_CASE("MCP tools/list returns all registered tools", "[mcp]") {
     }
 }
 
+TEST_CASE("MCP tools/list omits web_search because no provider can serve it", "[mcp][web]") {
+    const auto resp = disp().dispatch(
+        R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":2})");
+    simdjson::dom::parser parser;
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(resp).get(doc) == simdjson::SUCCESS);
+
+    bool advertises_fetch_url = false;
+    for (auto tool : doc["result"]["tools"].get_array().value()) {
+        std::string_view name;
+        REQUIRE(tool["name"].get(name) == simdjson::SUCCESS);
+        REQUIRE(name != "web_search");
+        advertises_fetch_url = advertises_fetch_url || name == "fetch_url";
+    }
+    REQUIRE(advertises_fetch_url);
+}
+
 TEST_CASE("MCP delete_file exposes one optional recursive boolean", "[mcp][schema]") {
     const auto resp = disp().dispatch(
         R"({"jsonrpc":"2.0","method":"tools/list","params":{},"id":2})");
@@ -490,11 +507,11 @@ TEST_CASE("MCP built-in tool schemas fit Lampo's model-context budget", "[mcp][s
     {
         auto catalog_array = catalog.array();
         bool first = true;
-        constexpr std::array<std::string_view, 17> kBudgetedBuiltinNames{
+        constexpr std::array<std::string_view, 16> kBudgetedBuiltinNames{
             "run_terminal_command", "apply_patch", "file_search", "read",
             "write_file", "list_directory", "replace", "grep_search",
             "search_replace", "delete_file", "move_file", "create_directory",
-            "web_search", "fetch_url", "memory", "get_workspace_config",
+            "fetch_url", "memory", "get_workspace_config",
             "delegate_task",
         };
         for (auto tool : tools) {
@@ -675,11 +692,11 @@ TEST_CASE("MCP tools/list stays within Lampo's full-catalog stuffing budget", "[
     // ToolManager is intentionally process-global and other randomized tests
     // may register agent probes or executable skills; only the fixed MCP
     // built-ins count toward Lampo's real catalog budget.
-    constexpr std::array<std::string_view, 19> kMcpBuiltinNames{
+    constexpr std::array<std::string_view, 18> kMcpBuiltinNames{
         "run_terminal_command", "run_verification", "apply_patch", "file_search",
         "read", "write_file", "list_directory", "replace", "grep_search",
         "search_replace", "delete_file", "move_file", "create_directory",
-        "web_search", "fetch_url", "memory", "get_workspace_config",
+        "fetch_url", "memory", "get_workspace_config",
         "delegate_task", "activate_skill",
     };
     constexpr std::size_t kLampoOverheadPerTool = 130 + 141;
