@@ -810,6 +810,33 @@ AnthropicWirePolicy anthropic_wire_policy(
 // AnthropicSerializer
 // ─────────────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// Messages API image sources accept image/jpeg, image/png, image/gif, and
+// image/webp. `source.data` is raw base64, never a data: URL.
+[[nodiscard]] std::optional<std::string> anthropic_image_media_type(
+    std::string_view mime) {
+    std::string normalized;
+    normalized.reserve(mime.size());
+    for (const unsigned char ch : mime) {
+        if (ch == ' ' || ch == '\t') continue;
+        normalized.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    if (normalized == "image/jpg" || normalized == "image/pjpeg") {
+        return std::string("image/jpeg");
+    }
+    if (normalized == "image/x-png") {
+        return std::string("image/png");
+    }
+    if (normalized == "image/jpeg" || normalized == "image/png"
+        || normalized == "image/gif" || normalized == "image/webp") {
+        return normalized;
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 std::string AnthropicSerializer::serialize(
     const ChatRequest& req,
     int default_max_tokens,
@@ -1063,10 +1090,13 @@ std::string AnthropicSerializer::serialize(
                         continue;
                     }
 
-                    if (const auto encoded = encode_image_part(part);
-                        encoded.has_value() && !encoded->is_url_reference()) {
+                    const auto encoded = encode_image_part(part);
+                    const auto media_type = encoded.has_value() && !encoded->is_url_reference()
+                        ? anthropic_image_media_type(encoded->mime_type)
+                        : std::nullopt;
+                    if (media_type.has_value()) {
                         payload += R"({"type":"image","source":{"type":"base64","media_type":")";
-                        payload += core::utils::escape_json_string(encoded->mime_type);
+                        payload += core::utils::escape_json_string(*media_type);
                         payload += R"(","data":")";
                         payload += core::utils::escape_json_string(encoded->base64_data);
                         payload += R"("}})";

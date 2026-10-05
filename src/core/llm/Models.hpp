@@ -236,12 +236,82 @@ struct EncodedMediaPart {
         return "data:" + mime_type + ";base64," + base64_data;
     }
 
+    // Remote or provider references only. A data URL also keeps `url` so
+    // OpenAI-style serializers can pass it through, but its bytes live in
+    // `base64_data` and it is not a URL reference.
     [[nodiscard]] bool is_url_reference() const noexcept {
-        return !url.empty();
+        return !url.empty() && base64_data.empty();
     }
 };
 
 using EncodedImagePart = EncodedMediaPart;
+
+struct InlineDataUrl {
+    std::string mime_type;
+    std::string base64_data;
+    std::size_t decoded_size = 0;
+};
+
+// `data:<mime>;base64,<payload>` carries the bytes inline. Anthropic, Gemini,
+// and Ollama cannot accept that string as a URL source: their image blocks
+// want a media type plus raw base64. Returns nullopt for anything else,
+// including a non-base64 data URL.
+[[nodiscard]] inline std::optional<InlineDataUrl> decode_inline_data_url(
+    ContentPartType type,
+    std::string_view url) {
+    if (!is_data_url_for_media(type, url)) {
+        return std::nullopt;
+    }
+    const auto comma = url.find(',');
+    if (comma == std::string_view::npos || comma <= 5) {
+        return std::nullopt;
+    }
+    const auto header = url.substr(5, comma - 5);
+    const auto semi = header.find(';');
+    if (semi == std::string_view::npos || semi == 0) {
+        return std::nullopt;
+    }
+    const auto mime = header.substr(0, semi);
+    if ((type == ContentPartType::Image && !mime.starts_with("image/"))
+        || (type == ContentPartType::Video && !is_video_mime(mime))) {
+        return std::nullopt;
+    }
+    bool base64_param = false;
+    for (std::size_t pos = semi; pos < header.size();) {
+        const auto next = header.find(';', pos + 1);
+        const auto end = next == std::string_view::npos ? header.size() : next;
+        if (header.substr(pos + 1, end - (pos + 1)) == "base64") {
+            base64_param = true;
+        }
+        if (next == std::string_view::npos) break;
+        pos = next;
+    }
+    if (!base64_param) {
+        return std::nullopt;
+    }
+
+    std::string payload;
+    payload.reserve(url.size() - comma - 1);
+    for (const char ch : url.substr(comma + 1)) {
+        if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') continue;
+        payload.push_back(ch);
+    }
+    if (payload.empty() || payload.size() % 4 == 1) {
+        return std::nullopt;
+    }
+    while (payload.size() % 4 != 0) {
+        payload.push_back('=');
+    }
+    const auto decoded = core::utils::Base64::decode(payload);
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+    return InlineDataUrl{
+        .mime_type = std::string(mime),
+        .base64_data = std::move(payload),
+        .decoded_size = decoded->size(),
+    };
+}
 
 [[nodiscard]] inline std::optional<EncodedMediaPart> encode_media_part(
     const ContentPart& part) {
@@ -250,17 +320,35 @@ using EncodedImagePart = EncodedMediaPart;
     }
 
     if (!part.url.empty()) {
-        if (!is_media_reference_url(part.type, part.url)) {
-            return std::nullopt;
+        if (const auto inline_url = decode_inline_data_url(part.type, part.url)) {
+            // Oversized videos stay URL references: OpenAI can still pass the
+            // data URL through, and inline-only providers refuse them the same
+            // way they refuse an oversized local file.
+            const bool inline_allowed = part.type != ContentPartType::Video
+                || inline_url->decoded_size <= kMaxInlineVideoBytes;
+            return EncodedMediaPart{
+                .type = part.type,
+                .path = part.path,
+                .url = part.url,
+                .media_id = part.media_id,
+                .mime_type = inline_allowed ? inline_url->mime_type : part.mime_type,
+                .base64_data = inline_allowed ? inline_url->base64_data : std::string{},
+                .detail = part.detail.empty() ? "auto" : part.detail,
+            };
         }
-        return EncodedMediaPart{
-            .type = part.type,
-            .path = part.path,
-            .url = part.url,
-            .media_id = part.media_id,
-            .mime_type = part.mime_type,
-            .detail = part.detail.empty() ? "auto" : part.detail,
-        };
+        if (!(is_data_url_for_media(part.type, part.url) && !part.path.empty())) {
+            if (!is_media_reference_url(part.type, part.url)) {
+                return std::nullopt;
+            }
+            return EncodedMediaPart{
+                .type = part.type,
+                .path = part.path,
+                .url = part.url,
+                .media_id = part.media_id,
+                .mime_type = part.mime_type,
+                .detail = part.detail.empty() ? "auto" : part.detail,
+            };
+        }
     }
 
     if (part.path.empty()) {
@@ -307,10 +395,11 @@ using EncodedImagePart = EncodedMediaPart;
         return std::nullopt;
     }
 
+    const bool recovered_from_bad_data_url = is_data_url_for_media(part.type, part.url);
     return EncodedMediaPart{
         .type = part.type,
         .path = part.path,
-        .url = part.url,
+        .url = recovered_from_bad_data_url ? std::string{} : part.url,
         .media_id = part.media_id,
         .mime_type = std::move(mime_type),
         .base64_data = core::utils::Base64::encode(bytes),

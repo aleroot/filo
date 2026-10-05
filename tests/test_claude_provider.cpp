@@ -244,6 +244,73 @@ TEST_CASE("ClaudeSerializer - user image content becomes image blocks", "[claude
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("type":"text","text":"Describe this screenshot.")"));
 }
 
+TEST_CASE("ClaudeSerializer - pinned screenshot data URLs become base64 image blocks",
+          "[claude][serializer][vision][regression]") {
+    // @-mentions and drag-drop pin the bytes as a data URL and keep the path
+    // so a later turn does not depend on the file. Claude's image source is
+    // raw base64, not that data URL; dropping it makes the model see only the
+    // path and try to Read the PNG as text.
+    auto image = ContentPart::make_image(
+        "/Users/alessio/Desktop/Screenshot 2026-10-05 at 21.03.51.png",
+        "image/png");
+    image.url = "data:image/png;base64,cG5nLWJ5dGVz";
+
+    ChatRequest req;
+    req.model = "claude-opus-5-5";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content = "Describe this screenshot.",
+        .content_parts = {
+            ContentPart::make_text("Describe this screenshot."),
+            image,
+        },
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5nLWJ5dGVz"})"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("data:image/"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("[Attached image unavailable"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("Screenshot 2026-10-05"));
+}
+
+TEST_CASE("ClaudeSerializer - remote image URLs are not sent as base64 blocks",
+          "[claude][serializer][vision]") {
+    ChatRequest req;
+    req.model = "claude-opus-5-5";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content_parts = {
+            ContentPart::make_image_url("https://example.com/shot.png"),
+        },
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    require_valid_json(payload);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("type":"image")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("[Attached image unavailable: https://example.com/shot.png]"));
+}
+
+TEST_CASE("ClaudeSerializer - image/jpg is sent as image/jpeg",
+          "[claude][serializer][vision]") {
+    const auto image = make_temp_image_file("filo-claude-image.jpg");
+    ChatRequest req;
+    req.model = "claude-opus-5-5";
+    req.messages.push_back(Message{
+        .role = "user",
+        .content_parts = {
+            ContentPart::make_image(image.string(), "image/jpg"),
+        },
+    });
+
+    const auto payload = AnthropicSerializer::serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("media_type":"image/jpeg")"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("media_type":"image/jpg")"));
+}
+
 TEST_CASE("ClaudeSerializer - max_tokens uses registered model output limit by default", "[claude][serializer]") {
     auto payload = AnthropicSerializer::serialize(make_simple_request("claude-fable-5"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("max_tokens":128000)"));
