@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace core::llm {
+struct TokenUsage;
 
 // ============================================================================
 // Model Capabilities Bitmap (efficient feature testing)
@@ -164,6 +165,14 @@ struct ModelPricing {
     double output_per_mtok = 0.0;             ///< Standard output tokens
     double cached_input_per_mtok = -1.0;      ///< Cached input (-1 = not supported)
     double prompt_caching_write_per_mtok = -1.0; ///< Write to cache cost
+    struct LongContext {
+        int32_t threshold = 0;
+        double input = 0;
+        double output = 0;
+        double cache_read = -1;
+        double cache_write = -1;
+    };
+    std::optional<LongContext> long_context = {};
     
     [[nodiscard]] constexpr bool has_cached_pricing() const noexcept {
         return cached_input_per_mtok >= 0;
@@ -223,11 +232,14 @@ struct ModelWireConstraints {
     bool fixed_sampling = false;
     /// Forcing a specific tool is rejected.
     bool forced_tool_choice_rejected = false;
+    /// Lowest thinking mode suppresses up-front reasoning, retaining tool reasoning.
+    bool between_tools_thinking = false;
+    bool disabled_thinking = false;
 
     [[nodiscard]] constexpr bool empty() const noexcept {
         return !thinking_always_on && !reasoning_text_hidden
             && !reasoning_bound_to_prefix && !fixed_sampling
-            && !forced_tool_choice_rejected;
+            && !forced_tool_choice_rejected && !between_tools_thinking && !disabled_thinking;
     }
 };
 
@@ -313,6 +325,7 @@ struct ModelInfo {
      */
     [[nodiscard]] double estimate_cost(int input_tokens, int output_tokens, 
                                        bool use_cached_input = false) const noexcept;
+    [[nodiscard]] double estimate_cost(const TokenUsage& usage) const noexcept;
     
     /**
      * @brief Get effective max tokens (min of max_output_tokens and context_window).

@@ -51,6 +51,11 @@ public:
 
 class RetryableServerErrorProtocol final : public OpenAIProtocol {
 public:
+    core::llm::transport::RetryPolicy stream_retry_policy() const noexcept override {
+        return {.initial_backoff = std::chrono::milliseconds(1),
+            .minimum_delay = std::chrono::milliseconds(0), .jitter_ratio = 0};
+    }
+
     [[nodiscard]] std::string_view name() const noexcept override {
         return "retryable_test";
     }
@@ -1073,7 +1078,9 @@ TEST_CASE("Fable 5.1 completes an HTTP tool round trip after a context change",
     }
     REQUIRE(first.back().is_final);
     REQUIRE(assistant.tool_calls.size() == 1);
-    REQUIRE(assistant.continuation_items.size() == 1);
+    REQUIRE(std::ranges::any_of(assistant.continuation_items, [](const auto& item) {
+        return item.kind == "thinking";
+    }));
     request.messages.push_back(std::move(assistant));
     request.messages.push_back(Message{.role = "tool", .content = "File contents", .tool_call_id = "read-1"});
     request.messages[0].content = "Read the file. The user updated the goal.";
@@ -1245,7 +1252,7 @@ TEST_CASE("HttpLLMProvider - retries Anthropic stream error before output",
 
     std::string text;
     for (const auto& chunk : chunks) {
-        text += chunk.content;
+        if (!chunk.reset_attempt) text += chunk.content;
         REQUIRE_FALSE(chunk.is_error);
     }
     REQUIRE(text == "Recovered");
@@ -1507,4 +1514,200 @@ TEST_CASE("ClaudeOAuthFlow::refresh parses nested account/organization id fallba
 
     REQUIRE(token.account_id == "acct-nested-id");
     REQUIRE(token.organization_id == "org-nested-id");
+}
+
+namespace {
+class FastClaudeProtocol final : public AnthropicProtocol {
+public:
+    std::unique_ptr<ApiProtocolBase> clone() const override {
+        return std::make_unique<FastClaudeProtocol>();
+    }
+    core::llm::transport::RetryPolicy stream_retry_policy() const noexcept override {
+        return {.max_retries = 2, .initial_backoff = std::chrono::milliseconds(1),
+            .minimum_delay = std::chrono::milliseconds(0), .jitter_ratio = 0};
+    }
+};
+
+const std::string claude_success =
+    "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":30}}}\n\n"
+    "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Recovered\"}}\n\n"
+    "event: content_block_stop\ndata: {\"index\":0}\n\n"
+    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n"
+    "event: message_stop\ndata: {}\n\n";
+const std::string claude_overload =
+    "event: error\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n";
+
+class RefreshingClaudeCredentials final : public core::auth::ICredentialSource {
+public:
+    int refreshes = 0;
+    core::auth::AuthInfo get_auth() override {
+        core::auth::AuthInfo auth;
+        auth.properties["oauth"] = "1";
+        auth.headers["Authorization"] = refreshes ? "Bearer refreshed-test-token" : "Bearer expired-test-token";
+        return auth;
+    }
+    bool refresh_on_auth_failure() override { ++refreshes; return true; }
+};
+}
+
+TEST_CASE("Claude HTTP recovery is bounded and never replays committed output", "[integration][http][claude][hardening]") {
+    struct Failure { std::string name; int status; std::string body; bool retry; bool veto = false; };
+    const std::string tool_start = "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"read\",\"input\":{}}}\n\n";
+    const std::string thought = "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"signed\"}}\n\n";
+    for (const auto& failure : std::vector<Failure>{
+        {"overload before output", 200, claude_overload, true},
+        {"empty truncated stream", 200, "event: message_start\ndata: {\"message\":{}}\n\n", true},
+        {"malformed stream", 200, "event: message_delta\ndata: broken\n\n", true},
+        {"malformed tool", 200, tool_start + "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\n", true},
+        {"committed tool", 200, tool_start + "event: content_block_stop\ndata: {\"index\":0}\n\n" + claude_overload, false},
+        {"visible text", 200, "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial\"}}\n\n" + claude_overload, false},
+        {"reasoning", 200, thought + "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Partial\"}}\n\n" + claude_overload, false},
+        {"opaque reasoning is cleared on retry", 200, thought + "event: content_block_stop\ndata: {\"index\":0}\n\n" + claude_overload, true},
+        {"server error", 500, "{}", true},
+        {"overloaded HTTP", 529, "{}", true},
+        {"rate limit", 429, "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}", true},
+        {"monthly cap", 429, "{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Monthly spend limit reached\"}}", false},
+        {"bad request", 400, "{}", false},
+        {"permission", 403, "{}", false},
+        {"server retry veto", 529, "{}", false, true},
+        // Even an SSE-shaped error response cannot deliver tools/text to the agent.
+        {"non-success SSE body", 500, claude_success, true},
+    }) {
+        CAPTURE(failure.name);
+        httplib::Server server;
+        std::atomic<int> requests{0};
+        server.Post("/v1/messages", [&](const httplib::Request&, httplib::Response& response) {
+            if (++requests == 1) {
+                response.status = failure.status;
+                if (failure.veto) {
+                    response.set_header("x-should-retry", "false");
+                    response.set_header("Retry-After", "1.25");
+                    response.set_header("Request-Id", "req-veto");
+                }
+                response.set_content(failure.body, "text/event-stream");
+            } else response.set_content(claude_success, "text/event-stream");
+        });
+        const int port = server.bind_to_any_port("127.0.0.1");
+        if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+        std::jthread thread([&] { server.listen_after_bind(); });
+        ScopedServerStop stop(server);
+        wait_until_running(server);
+        auto provider = std::make_shared<HttpLLMProvider>(std::format("http://127.0.0.1:{}", port),
+            core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+            "claude-haiku-5-5", std::make_unique<FastClaudeProtocol>());
+        std::vector<StreamChunk> chunks;
+        provider->stream_response(make_claude_request("claude-haiku-5-5"), [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+        REQUIRE(requests == (failure.retry ? 2 : 1));
+        REQUIRE_FALSE(chunks.empty());
+        CHECK(chunks.back().is_final);
+        CHECK(chunks.back().is_error == !failure.retry);
+        int finals = 0;
+        int recovered = 0;
+        for (const auto& chunk : chunks) { finals += chunk.is_final; recovered += chunk.content == "Recovered"; }
+        CHECK(finals == 1);
+        CHECK(recovered == (failure.retry ? 1 : 0));
+        if (failure.veto) {
+            CHECK(provider->get_last_rate_limit_info().retry_after == 2);
+            CHECK_THAT(chunks.back().content, Catch::Matchers::ContainsSubstring("req-veto"));
+        }
+        if (failure.retry) {
+            const auto usage = provider->get_last_usage();
+            CHECK(usage.prompt_tokens == 60);
+            CHECK(usage.cached_prompt_tokens == 20);
+            CHECK(usage.cache_creation_prompt_tokens == 30);
+        }
+    }
+}
+
+TEST_CASE("Claude OAuth refresh happens once and cancellation stops retry backoff", "[integration][http][claude][hardening][oauth]") {
+    bool cancel = false;
+    bool reject_refreshed = false;
+    SECTION("refresh succeeds") {}
+    SECTION("refresh remains rejected") { reject_refreshed = true; }
+    SECTION("cancel during backoff") { cancel = true; }
+    httplib::Server server;
+    std::atomic<int> requests{0};
+    std::vector<std::string> auth_headers;
+    server.Post("/v1/messages", [&](const httplib::Request& request, httplib::Response& response) {
+        auth_headers.push_back(request.get_header_value("Authorization"));
+        const auto attempt = ++requests;
+        if (cancel) { response.status = 529; response.set_content("{}", "application/json"); }
+        else if (attempt == 1 || reject_refreshed) {
+            response.status = 401;
+            response.set_content(R"({"error":{"type":"authentication_error","message":"Expired token"}})", "application/json");
+        } else response.set_content(claude_success, "text/event-stream");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::jthread thread([&] { server.listen_after_bind(); });
+    ScopedServerStop stop(server);
+    wait_until_running(server);
+    auto credentials = std::make_shared<RefreshingClaudeCredentials>();
+    auto provider = std::make_shared<HttpLLMProvider>(std::format("http://127.0.0.1:{}", port), credentials,
+        "claude-haiku-5-5", std::make_unique<FastClaudeProtocol>());
+    std::vector<StreamChunk> chunks;
+    provider->stream_response(make_claude_request("claude-haiku-5-5"), [&](const StreamChunk& chunk) {
+        chunks.push_back(chunk);
+        if (cancel && chunk.reset_attempt) provider->cancel();
+    });
+    CHECK(requests == (cancel ? 1 : 2));
+    CHECK(credentials->refreshes == (cancel ? 0 : 1));
+    REQUIRE_FALSE(chunks.empty());
+    CHECK(chunks.back().is_final);
+    CHECK(chunks.back().is_error == reject_refreshed);
+    if (!cancel) CHECK(auth_headers.back() == "Bearer refreshed-test-token");
+}
+
+TEST_CASE("Shared HTTP transport isolates error bodies and trusts a completed stream",
+          "[integration][http][transport-hardening]") {
+    bool disconnect_after_completion = false;
+    SECTION("error bodies cannot emit model output") {}
+    SECTION("late disconnect cannot turn completion into an error") { disconnect_after_completion = true; }
+    for (const bool anthropic : {false, true}) {
+        CAPTURE(anthropic, disconnect_after_completion);
+        const std::string body = anthropic ? claude_success
+            : "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered\"}}]}\n\ndata: [DONE]\n\n";
+        httplib::Server server;
+        std::atomic<int> requests{0};
+        server.Post(anthropic ? "/v1/messages" : "/chat/completions",
+            [&](const httplib::Request&, httplib::Response& response) {
+                const int attempt = ++requests;
+                if (disconnect_after_completion) {
+                    response.set_chunked_content_provider("text/event-stream",
+                        [body](std::size_t offset, httplib::DataSink& sink) {
+                            if (offset == 0) sink.write(body.data(), body.size());
+                            // Close without the HTTP chunk terminator, after the API's
+                            // terminal event. libcurl reports a partial transfer.
+                            return false;
+                        });
+                } else {
+                    response.status = attempt == 1 ? 500 : 200;
+                    response.set_content(body, "text/event-stream");
+                }
+            });
+        const int port = server.bind_to_any_port("127.0.0.1");
+        if (port <= 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+        std::jthread thread([&] { server.listen_after_bind(); });
+        ScopedServerStop stop(server);
+        wait_until_running(server);
+        std::unique_ptr<ApiProtocolBase> protocol;
+        if (anthropic) protocol = std::make_unique<FastClaudeProtocol>();
+        else protocol = std::make_unique<RetryableServerErrorProtocol>();
+        auto provider = std::make_shared<HttpLLMProvider>(std::format("http://127.0.0.1:{}", port),
+            core::auth::ApiKeyCredentialSource::as_custom_header("test-key", "x-api-key"),
+            anthropic ? "claude-haiku-5-5" : "gpt-4o", std::move(protocol));
+        std::vector<StreamChunk> chunks;
+        provider->stream_response(make_claude_request(anthropic ? "claude-haiku-5-5" : "gpt-4o"),
+            [&](const StreamChunk& chunk) { chunks.push_back(chunk); });
+        CHECK(requests == (disconnect_after_completion ? 1 : 2));
+        int finals = 0;
+        int recovered = 0;
+        for (const auto& chunk : chunks) {
+            CHECK_FALSE(chunk.is_error);
+            finals += chunk.is_final;
+            recovered += chunk.content == "Recovered";
+        }
+        CHECK(finals == 1);
+        CHECK(recovered == 1);
+    }
 }

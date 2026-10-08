@@ -1,5 +1,6 @@
 #include "ModelRegistry.hpp"
 #include "ModelMetadata.hpp"
+#include "Models.hpp"
 #include "AnthropicCompatibility.hpp"
 
 #include "../utils/JsonWriter.hpp"
@@ -56,21 +57,33 @@ bool ModelInfo::validate_parameter(std::string_view param_name, double value) co
 
 double ModelInfo::estimate_cost(int input_tokens, int output_tokens, 
                                 bool use_cached_input) const noexcept {
-    if (context_window == 0) return 0.0;  // Unknown model, can't estimate
-    
-    double cost = 0.0;
-    
-    // Input tokens
-    if (use_cached_input && pricing.has_cached_pricing()) {
-        cost += (input_tokens / 1'000'000.0) * pricing.cached_input_per_mtok;
-    } else {
-        cost += (input_tokens / 1'000'000.0) * pricing.input_per_mtok;
+    if (context_window == 0) return 0.0;
+    return estimate_cost(TokenUsage{
+        .prompt_tokens = input_tokens,
+        .completion_tokens = output_tokens,
+        .cached_prompt_tokens = use_cached_input ? input_tokens : 0,
+    });
+}
+
+double ModelInfo::estimate_cost(const TokenUsage& usage) const noexcept {
+    double input_rate = pricing.input_per_mtok;
+    double output_rate = pricing.output_per_mtok;
+    double read_rate = pricing.cached_input_per_mtok;
+    double write_rate = pricing.prompt_caching_write_per_mtok;
+    const int64_t input = std::max(0, usage.prompt_tokens);
+    const int64_t read = std::clamp<int64_t>(usage.cached_prompt_tokens, 0, input);
+    const int64_t write = std::clamp<int64_t>(usage.cache_creation_prompt_tokens, 0, input - read);
+    if (pricing.long_context && input > pricing.long_context->threshold) {
+        const auto& rates = *pricing.long_context;
+        input_rate = rates.input;
+        output_rate = rates.output;
+        read_rate = rates.cache_read;
+        write_rate = rates.cache_write;
     }
-    
-    // Output tokens
-    cost += (output_tokens / 1'000'000.0) * pricing.output_per_mtok;
-    
-    return cost;
+    return ((input - read - write) * input_rate
+        + read * (read_rate >= 0 ? read_rate : input_rate)
+        + write * (write_rate >= 0 ? write_rate : input_rate)
+        + std::max(0, usage.completion_tokens) * output_rate) / 1'000'000.0;
 }
 
 // ============================================================================
@@ -133,6 +146,7 @@ constexpr LegacyModelEntry kLegacyRegistry[] = {
     { "claude-fable-5",     1000000 },
     { "claude-opus-5",      1000000 },
     { "claude-sonnet-5",    1000000 },
+    { "claude-haiku-5-5",   1000000 },
     { "claude-haiku-4-5",   200000 },
     { "claude-opus-4-8",    200000 },
     { "claude-sonnet-4-6", 1000000 },
@@ -254,41 +268,6 @@ const ParameterConstraints kClaudeConstraints = [] {
     return c;
 }();
 
-// Wire constraints the Anthropic Models API does not advertise, curated from
-// the per-model documentation. Adaptive generations hide reasoning text by
-// default and reject non-default sampling; the newest of them also reject
-// forced tool choice and validate replayed reasoning against the prefix.
-constexpr ModelWireConstraints kClaudeAdaptiveWire = {
-    .reasoning_text_hidden = true,
-    .fixed_sampling = true,
-};
-constexpr ModelWireConstraints kClaudeBoundThinkingWire = {
-    .thinking_always_on = true,
-    .reasoning_text_hidden = true,
-    .reasoning_bound_to_prefix = true,
-    .fixed_sampling = true,
-    .forced_tool_choice_rejected = true,
-};
-
-// Reasoning wire modes per generation. The Models API reports these live; the
-// cards carry them so an offline session still builds a valid request.
-constexpr ReasoningCapabilities kClaudeEffortMax =
-    ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
-constexpr ReasoningCapabilities kClaudeEffortMaxXHigh =
-    kClaudeEffortMax | ReasoningCapability::XHighEffort;
-constexpr ModelReasoningProfile kClaudeAdaptiveReasoning = {
-    .effort = kClaudeEffortMaxXHigh,
-    .adaptive_thinking = true,
-    .manual_thinking = false,
-    .complete = true,
-};
-// Thinking is on by default server-side and needs no request field.
-constexpr ModelReasoningProfile kClaudeDefaultOnReasoning = {
-    .effort = kClaudeEffortMaxXHigh,
-    .adaptive_thinking = false,
-    .manual_thinking = false,
-    .complete = true,
-};
 // Extended thinking with a manual budget and no effort parameter.
 constexpr ModelReasoningProfile kClaudeBudgetOnlyReasoning = {
     .effort = {},
@@ -312,8 +291,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = kClaudeDefaultOnReasoning,
-            .wire = kClaudeBoundThinkingWire,
+            .reasoning = anthropic::model_policy("fable-5-1")->reasoning(),
+            .wire = anthropic::model_policy("fable-5-1")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 0.25, 12.5},
             .knowledge_cutoff = "2026-06",
@@ -333,8 +312,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = kClaudeDefaultOnReasoning,
-            .wire = kClaudeAdaptiveWire,
+            .reasoning = anthropic::model_policy("fable-5")->reasoning(),
+            .wire = anthropic::model_policy("fable-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {10.0, 50.0, 1.0, 12.5},
             .knowledge_cutoff = "2026-01",
@@ -359,8 +338,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
-            .reasoning = kClaudeAdaptiveReasoning,
-            .wire = kClaudeAdaptiveWire,
+            .reasoning = anthropic::model_policy("opus-5")->reasoning(),
+            .wire = anthropic::model_policy("opus-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-05",
@@ -385,8 +364,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::CodeExecution) |
                 static_cast<uint32_t>(ModelCapability::Batch) |
                 static_cast<uint32_t>(ModelCapability::ContextManagement),
-            .reasoning = kClaudeAdaptiveReasoning,
-            .wire = kClaudeBoundThinkingWire,
+            .reasoning = anthropic::model_policy("opus-5-5")->reasoning(),
+            .wire = anthropic::model_policy("opus-5-5")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {4.0, 20.0, 0.20, 5.0},
             .knowledge_cutoff = "2026-06",
@@ -406,8 +385,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = kClaudeDefaultOnReasoning,
-            .wire = kClaudeAdaptiveWire,
+            .reasoning = anthropic::model_policy("sonnet-5")->reasoning(),
+            .wire = anthropic::model_policy("sonnet-5")->wire,
             .tier = ModelTier::Balanced,
             // Introductory launch pricing is effective through 2026-08-31.
             .pricing = {2.0, 10.0, 0.20, 2.5},
@@ -415,10 +394,48 @@ std::vector<ModelInfo> build_anthropic_catalog() {
             .constraints = kClaudeConstraints,
             .max_tool_calls = 32
         },
+        {
+            .canonical_id = "claude-sonnet-5-5",
+            .aliases = {"sonnet-5-5", "sonnet-5.5", "claude-sonnet-5.5"},
+            .display_name = "Claude Sonnet 5.5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = anthropic::model_policy("sonnet-5-5")->reasoning(),
+            .wire = anthropic::model_policy("sonnet-5-5")->wire,
+            .tier = ModelTier::Balanced,
+            .pricing = {2.0, 10.0, 0.10, 2.5},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
+        {
+            .canonical_id = "claude-haiku-5-5",
+            .aliases = {"haiku", "claude-haiku", "haiku-5-5", "haiku-5.5", "claude-haiku-5.5"},
+            .display_name = "Claude Haiku 5.5",
+            .provider = "anthropic",
+            .context_window = 1'000'000,
+            .max_output_tokens = 128'000,
+            .capabilities = CAP_FULL |
+                static_cast<uint32_t>(ModelCapability::PromptCaching) |
+                static_cast<uint32_t>(ModelCapability::TokenCounting) |
+                static_cast<uint32_t>(ModelCapability::Reasoning),
+            .reasoning = anthropic::model_policy("haiku-5-5")->reasoning(),
+            .wire = anthropic::model_policy("haiku-5-5")->wire,
+            .tier = ModelTier::Fast,
+            .pricing = {0.10, 0.50, 0.01, 0.125, ModelPricing::LongContext{100000, 0.50, 2.50, 0.05, 0.625}},
+            .knowledge_cutoff = "2026-06",
+            .constraints = kClaudeConstraints,
+            .max_tool_calls = 32
+        },
         // Claude Haiku 4.5
         {
             .canonical_id = "claude-haiku-4-5",
-            .aliases = {"haiku", "claude-haiku", "haiku-4.5", "haiku-4-5"},
+            .aliases = {"haiku-4.5", "haiku-4-5"},
             .display_name = "Claude Haiku 4.5",
             .provider = "anthropic",
             .context_window = 200000,
@@ -448,8 +465,8 @@ std::vector<ModelInfo> build_anthropic_catalog() {
                 static_cast<uint32_t>(ModelCapability::PromptCaching) |
                 static_cast<uint32_t>(ModelCapability::TokenCounting) |
                 static_cast<uint32_t>(ModelCapability::Reasoning),
-            .reasoning = kClaudeAdaptiveReasoning,
-            .wire = kClaudeAdaptiveWire,
+            .reasoning = anthropic::model_policy("opus-4-8")->reasoning(),
+            .wire = anthropic::model_policy("opus-4-8")->wire,
             .tier = ModelTier::Powerful,
             .pricing = {5.0, 25.0, 0.50, 6.25},
             .knowledge_cutoff = "2026-03",
@@ -2179,6 +2196,8 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
                 wire_obj,
                 "forced_tool_choice_rejected",
                 info.wire.forced_tool_choice_rejected);
+            get_json_bool(wire_obj, "between_tools_thinking", info.wire.between_tools_thinking);
+            get_json_bool(wire_obj, "disabled_thinking", info.wire.disabled_thinking);
         }
 
         simdjson::dom::object pricing_obj;
@@ -2191,6 +2210,17 @@ int ModelRegistry::load_from_json(std::string_view json_data) {
             get_json_double(pricing_obj, "cached_input_per_mtok", info.pricing.cached_input_per_mtok);
             get_json_double(pricing_obj, "prompt_caching_write", info.pricing.prompt_caching_write_per_mtok);
             get_json_double(pricing_obj, "prompt_caching_write_per_mtok", info.pricing.prompt_caching_write_per_mtok);
+            simdjson::dom::object long_context;
+            if (pricing_obj["long_context"].get(long_context) == simdjson::SUCCESS) {
+                ModelPricing::LongContext rates;
+                get_json_int(long_context, "threshold", rates.threshold);
+                get_json_double(long_context, "input", rates.input);
+                get_json_double(long_context, "output", rates.output);
+                get_json_double(long_context, "cache_read", rates.cache_read);
+                get_json_double(long_context, "cache_write", rates.cache_write);
+                if (rates.threshold > 0) info.pricing.long_context = rates;
+            }
+
         }
 
         simdjson::dom::object constraints_obj;
@@ -2311,7 +2341,9 @@ std::string ModelRegistry::export_to_json() const {
                             info.wire.fixed_sampling).comma();
                         writer.kv_bool(
                             "forced_tool_choice_rejected",
-                            info.wire.forced_tool_choice_rejected);
+                            info.wire.forced_tool_choice_rejected).comma();
+                        writer.kv_bool("between_tools_thinking", info.wire.between_tools_thinking).comma();
+                        writer.kv_bool("disabled_thinking", info.wire.disabled_thinking);
                     }
                     writer.comma();
                 }
@@ -2323,6 +2355,19 @@ std::string ModelRegistry::export_to_json() const {
                     writer.kv_float("output", info.pricing.output_per_mtok, 3);
                     if (info.pricing.has_cached_pricing()) {
                         writer.comma().kv_float("cached_input", info.pricing.cached_input_per_mtok, 3);
+                    }
+                    if (info.pricing.has_prompt_caching()) {
+                        writer.comma().kv_float("prompt_caching_write", info.pricing.prompt_caching_write_per_mtok, 3);
+                    }
+                    if (info.pricing.long_context) {
+                        writer.comma().key("long_context");
+                        auto tier = writer.object();
+                        const auto& rates = *info.pricing.long_context;
+                        writer.kv_num("threshold", rates.threshold).comma()
+                            .kv_float("input", rates.input, 3).comma()
+                            .kv_float("output", rates.output, 3).comma()
+                            .kv_float("cache_read", rates.cache_read, 3).comma()
+                            .kv_float("cache_write", rates.cache_write, 3);
                     }
                 }
 

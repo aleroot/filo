@@ -142,6 +142,7 @@ protected:
     /// serialized requests. This is the only Z.ai-specific serialization
     /// logic, and it lives here — never in the generic base.
     [[nodiscard]] AnthropicReasoningEmitter reasoning_emitter() const override;
+    [[nodiscard]] bool preserves_native_assistant_content() const noexcept override { return false; }
 
 private:
     RateLimitInfo last_rate_limit_;

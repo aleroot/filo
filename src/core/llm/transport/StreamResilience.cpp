@@ -129,7 +129,10 @@ std::chrono::milliseconds RetryController::calculate_delay(
             std::llround(static_cast<double>(delay.count())
                          * (1.0 + distribution(rng)))));
     }
-    return std::max(delay, policy_.minimum_delay);
+    // Retry-After is a lower bound, not a jitter target. Negative jitter must
+    // never put another request into the provider's closed rate-limit window.
+    return std::max({delay, policy_.minimum_delay,
+        std::chrono::duration_cast<std::chrono::milliseconds>(server_delay)});
 }
 
 bool wait_for_retry(

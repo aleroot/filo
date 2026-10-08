@@ -979,6 +979,12 @@ using ContinuationRejectPredicate =
         std::vector<ContinuationItem> kept;
         kept.reserve(msg.continuation_items.size());
         for (auto& item : msg.continuation_items) {
+            // Native Claude snapshots can contain nested signed reasoning;
+            // they must never bypass this gateway's signature filtering.
+            if (item.kind == "assistant_content") {
+                dropped = true;
+                continue;
+            }
             if (rejects(item, sanitized.model)) {
                 dropped = true;
                 continue;

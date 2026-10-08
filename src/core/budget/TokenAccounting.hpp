@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../llm/ModelRegistry.hpp"
+#include "../llm/Models.hpp"
 #include <cctype>
 #include <cstdint>
 #include <cstddef>
@@ -54,7 +56,8 @@ namespace core::budget {
     if (model.find("fable")            != std::string_view::npos) return 1'000'000;
     if (model == "sonnet") return 1'000'000;
     if (model.find("claude-haiku-4-5") != std::string_view::npos) return   200'000;
-    if (model == "haiku") return 200'000;
+    if (model == "haiku" || model.find("haiku-5-5") != std::string_view::npos
+        || model.find("haiku-5.5") != std::string_view::npos) return 1'000'000;
     if (model.find("claude-opus-4-8")  != std::string_view::npos) return   200'000;
     if (model.find("claude-sonnet-4-6") != std::string_view::npos) return 1'000'000;
     if (model.find("claude")           != std::string_view::npos) return   200'000;
@@ -99,6 +102,12 @@ struct ModelRates {
 };
 
 [[nodiscard]] inline ModelRates rates_for_model(std::string_view model) noexcept {
+    try {
+        if (const auto info = core::llm::ModelRegistry::instance().lookup(model);
+            info && info->provider == "anthropic") {
+            return {info->pricing.input_per_mtok, info->pricing.output_per_mtok};
+        }
+    } catch (...) {}
     if (model.find("grok-code-fast-1") != std::string_view::npos) return { 0.20,  1.50 };
     if (model.find("grok-4-fast")      != std::string_view::npos) return { 0.20,  0.50 };
     if (model.find("grok-4.1-fast")    != std::string_view::npos) return { 0.20,  0.50 };
@@ -164,6 +173,18 @@ struct ModelRates {
     if (model.find("auto-gemini-3") != std::string_view::npos) return { 1.25, 10.00 };
     if (model.find("auto-gemini-2.5") != std::string_view::npos) return { 1.25,  5.00 };
     return { 2.00, 8.00 };
+}
+
+/// Both budget guardrails and session stats use the same cache-aware estimate.
+[[nodiscard]] inline double estimate_usage_cost(const core::llm::TokenUsage& usage,
+                                                std::string_view model) noexcept {
+    try {
+        if (const auto info = core::llm::ModelRegistry::instance().lookup(model);
+            info && info->provider == "anthropic") return info->estimate_cost(usage);
+    } catch (...) {}
+    const auto rates = rates_for_model(model);
+    return (static_cast<double>(usage.prompt_tokens) * rates.input_per_m
+        + static_cast<double>(usage.completion_tokens) * rates.output_per_m) / 1'000'000.0;
 }
 
 } // namespace core::budget

@@ -83,6 +83,10 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
     baseline.wire.forced_tool_choice_rejected =
         baseline.wire.forced_tool_choice_rejected
         || discovered.wire.forced_tool_choice_rejected;
+    baseline.wire.between_tools_thinking =
+        baseline.wire.between_tools_thinking || discovered.wire.between_tools_thinking;
+
+    baseline.wire.disabled_thinking = baseline.wire.disabled_thinking || discovered.wire.disabled_thinking;
 
     if (discovered.tier != ModelTier::Balanced
         || baseline.tier == ModelTier::Balanced) {
@@ -104,6 +108,7 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
         baseline.pricing.prompt_caching_write_per_mtok =
             discovered.pricing.prompt_caching_write_per_mtok;
     }
+    if (discovered.pricing.long_context) baseline.pricing.long_context = discovered.pricing.long_context;
     if (!discovered.knowledge_cutoff.empty()) {
         baseline.knowledge_cutoff =
             std::move(discovered.knowledge_cutoff);

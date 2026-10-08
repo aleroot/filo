@@ -56,9 +56,11 @@ struct AnthropicToolBlockState {
     std::string id;
     std::string name;
     std::string accumulated_args; ///< Built up from `input_json_delta` chunks.
+    std::string initial_args;
 };
 
 struct AnthropicContinuationBlockState {
+    int index = -1;
     std::string type;
     std::string thinking;
     std::string signature;
@@ -90,6 +92,8 @@ struct AnthropicWirePolicy {
     bool reasoning_bound_to_prefix = false;   ///< Replayed reasoning is validated against the prefix.
     bool fixed_sampling = false;              ///< Non-default sampling parameters are rejected.
     bool forced_tool_choice_rejected = false; ///< `tool_choice` `any`/`tool` are rejected.
+    bool between_tools_thinking = false;
+    bool disabled_thinking = false;
 
     /// Manual budgets are refused by every known adaptive-only model, but an
     /// unrecognized id keeps the permissive historical behavior.
@@ -141,6 +145,9 @@ public:
         bool    retryable_stream_error = false; ///< True for transient stream errors.
         int32_t input_tokens  = 0;             ///< From `message_start` usage (includes cache token fields when present).
         int32_t output_tokens = 0;             ///< From `message_delta`.
+        int32_t cached_input_tokens = 0;
+        int32_t cache_creation_input_tokens = 0;
+        bool input_usage_reported = false;
         std::string error_type;
         std::string error_message;
         std::string stop_reason;               ///< From `message_delta.delta.stop_reason`.
@@ -159,6 +166,13 @@ public:
 private:
     std::optional<AnthropicToolBlockState> current_tool_;
     std::optional<AnthropicContinuationBlockState> current_continuation_;
+    int text_index_ = -1;
+    std::optional<std::string> current_text_;
+    std::vector<std::string> replay_blocks_;
+    bool replay_complete_ = true;
+    int64_t uncached_input_ = 0;
+    int64_t cached_input_ = 0;
+    int64_t cache_creation_input_ = 0;
 };
 
 /**
@@ -307,6 +321,8 @@ protected:
      * branching the generic implementation on model families.
      */
     [[nodiscard]] virtual AnthropicReasoningEmitter reasoning_emitter() const;
+    /// Gateways that rewrite signed histories must use normalized replay.
+    [[nodiscard]] virtual bool preserves_native_assistant_content() const noexcept { return true; }
 
 private:
     AnthropicThinkingConfig thinking_;
@@ -316,6 +332,8 @@ private:
     AnthropicSSEParser      sse_parser_;          ///< Stateful; reset on clone().
     int32_t                 accumulated_input_  = 0;
     int32_t                 accumulated_output_ = 0;
+    int32_t                 accumulated_cached_input_ = 0;
+    int32_t                 accumulated_cache_creation_ = 0;
     std::string             last_stop_reason_;
     RateLimitInfo           last_rate_limit_;     ///< Populated by on_response(); scoped to this clone.
 };

@@ -225,3 +225,17 @@ TEST_CASE("BudgetTracker presentation scope excludes gateway usage from active s
     tracker.set_session_id({});
     tracker.reset_session();
 }
+
+TEST_CASE("Haiku 5.5 cost uses the entire prompt threshold and separate cache prices", "[budget][token_ledger][claude][hardening]") {
+    const auto model = core::llm::ModelRegistry::instance().lookup("claude-haiku-5-5");
+    REQUIRE(model);
+    core::llm::TokenUsage usage{.prompt_tokens = 100000, .completion_tokens = 1000,
+        .cached_prompt_tokens = 80000, .cache_creation_prompt_tokens = 10000};
+    CHECK(model->estimate_cost(usage) == Catch::Approx(0.00355));
+    CHECK(estimate_cost_micro_usd(usage, model->canonical_id, true) == 3550);
+    usage.prompt_tokens = 100001;
+    CHECK(model->estimate_cost(usage) == Catch::Approx(0.0177505));
+    const auto sonnet = core::llm::ModelRegistry::instance().lookup("claude-sonnet-5-5");
+    REQUIRE(sonnet);
+    CHECK(sonnet->pricing.cached_input_per_mtok == Catch::Approx(0.10));
+}

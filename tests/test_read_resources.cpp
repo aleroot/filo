@@ -55,10 +55,15 @@ public:
     std::vector<core::llm::ChatRequest> requests;
     std::string response = R"({"answer":"The retry limit is three.","citations":[{"source":1,"first_line":2,"last_line":2}]})";
     bool block = false;
+    bool retry = false;
     std::atomic<bool> cancelled = false;
     void stream_response(const core::llm::ChatRequest& request, std::function<void(const core::llm::StreamChunk&)> callback) override {
         requests.push_back(request);
         if (block) while (!cancelled.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (retry) {
+            callback(core::llm::StreamChunk::make_content("Abandoned attempt"));
+            callback(core::llm::StreamChunk::make_attempt_reset("Retrying upstream"));
+        }
         set_last_usage(100, 20);
         callback({.content = response});
         callback(core::llm::StreamChunk::make_final());
@@ -731,4 +736,17 @@ TEST_CASE("Unified read directory listings hide symlinks that leave the workspac
 #endif
     CHECK_THAT(tool.execute(R"({"path":"missing.txt","view":"auto"})", fixture.context()),
         ContainsSubstring("does not exist"));
+}
+
+TEST_CASE("Reader excludes retry metadata and abandoned output", "[read][worker][retry]") {
+    Fixture fixture;
+    fixture.write("retry.cpp", "// retry policy\nconst int limit = 3;\n");
+    auto provider = std::make_shared<RecordingReader>();
+    provider->retry = true;
+    ReadTool tool(read::ResourceReader{}, worker_for(provider));
+    const auto output = tool.execute(R"({"path":"retry.cpp","question":"What is the retry limit?"})", fixture.context());
+    CHECK(field(output, "read_view") == "answer");
+    CHECK_THAT(output, ContainsSubstring("The retry limit is three."));
+    CHECK_THAT(output, !ContainsSubstring("Retrying upstream"));
+    CHECK_THAT(output, !ContainsSubstring("Abandoned attempt"));
 }

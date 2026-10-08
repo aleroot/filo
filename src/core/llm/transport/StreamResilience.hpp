@@ -16,6 +16,7 @@ enum class StreamTimeoutKind {
 struct StreamTimeoutPolicy {
     std::chrono::milliseconds response_start = std::chrono::seconds(120);
     std::chrono::milliseconds inactivity = std::chrono::seconds(240);
+    bool operator==(const StreamTimeoutPolicy&) const = default;
 };
 
 /** Tracks response-start and inter-activity deadlines for one stream attempt. */
@@ -66,6 +67,7 @@ struct RetryPolicy {
     // retract text already shown. grok-build defaults this to false so a
     // mid-generation `response.failed` restarts the request.
     bool retry_only_before_output = true;
+    bool operator==(const RetryPolicy&) const = default;
 };
 
 struct RetrySchedule {

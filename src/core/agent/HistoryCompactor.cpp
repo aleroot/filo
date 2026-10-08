@@ -84,6 +84,10 @@ void HistoryCompactor::compact_async(HistoryCompactionRequest request,
             request.provider->stream_response(
                 llm_request,
                 [summary, callbacks, completed, reason](const core::llm::StreamChunk& chunk) {
+                    if (chunk.reset_attempt) {
+                        summary->clear();
+                        return;
+                    }
                     if (!chunk.content.empty()) *summary += chunk.content;
                     if (!chunk.is_final) return;
 

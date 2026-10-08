@@ -105,11 +105,7 @@ int64_t estimate_cost_micro_usd(const core::llm::TokenUsage& usage,
         return 0;
     }
 
-    const auto rates = rates_for_model(model);
-    return static_cast<int64_t>(
-        (static_cast<double>(usage.prompt_tokens) / 1'000'000.0 * rates.input_per_m
-         + static_cast<double>(usage.completion_tokens) / 1'000'000.0 * rates.output_per_m)
-        * 1'000'000.0);
+    return static_cast<int64_t>(estimate_usage_cost(usage, model) * 1'000'000.0);
 }
 
 uint64_t TokenLedger::record(TokenLedgerRecordOptions options) {

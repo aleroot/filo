@@ -322,3 +322,37 @@ TEST_CASE("the OpenAI-compatible serializer flags projected tools strict",
     simdjson::dom::element root;
     CHECK(parser.parse(buffer).get(root) == simdjson::SUCCESS);
 }
+
+TEST_CASE("Anthropic strict schemas respect the combined provider grammar budget", "[strict-schema][claude][hardening]") {
+    ScopedStrictConfig config;
+    core::llm::ChatRequest request;
+    request.model = "claude-haiku-5-5";
+    request.messages.push_back({.role = "user", .content = "Use the requested tool."});
+    for (int i = 0; i < 25; ++i) {
+        core::llm::Tool tool;
+        tool.function.name = std::format("tool_{}", i);
+        tool.function.input_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false})";
+        request.tools.push_back(tool);
+    }
+    const auto payload = core::llm::protocols::AnthropicSerializer::serialize(request);
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(payload);
+    int strict_count = 0;
+    for (const auto tool : doc["tools"].get_array().value()) {
+        bool strict = false;
+        if (tool["strict"].get(strict) == simdjson::SUCCESS && strict) ++strict_count;
+    }
+    CHECK(strict_count == 20);
+    CHECK(doc["tools"].get_array().value().size() == 25);
+    // The output schema uses five of the optional parameter slots.
+    request.response_format = {.type = core::llm::ResponseFormat::Type::JsonSchema,
+        .schema = R"({"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string"},"d":{"type":"string"},"e":{"type":"string"}},"additionalProperties":false})"};
+    const auto combined = core::llm::protocols::AnthropicSerializer::serialize(request);
+    const auto combined_doc = parser.parse(combined);
+    strict_count = 0;
+    for (const auto tool : combined_doc["tools"].get_array().value()) {
+        bool strict = false;
+        if (tool["strict"].get(strict) == simdjson::SUCCESS && strict) ++strict_count;
+    }
+    CHECK(strict_count == 19);
+}

@@ -11,6 +11,15 @@ using core::llm::transport::StreamTimeoutKind;
 using core::llm::transport::StreamTimeoutPolicy;
 using core::llm::transport::StreamWatchdog;
 
+TEST_CASE("Retry jitter never shortens the server retry deadline", "[http][resilience][retry]") {
+    for (int i = 0; i < 100; ++i) {
+        RetryController retries(RetryPolicy{.server_delay_padding = 0ms, .jitter_ratio = 0.99});
+        const auto retry = retries.schedule(true, false, 10s);
+        REQUIRE(retry);
+        CHECK(retry->delay >= 10s);
+    }
+}
+
 TEST_CASE("StreamWatchdog distinguishes response-start and inactivity deadlines",
           "[http][resilience][timeout]") {
     const StreamWatchdog::TimePoint started{};

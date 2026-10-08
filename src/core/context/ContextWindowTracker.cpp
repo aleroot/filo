@@ -14,7 +14,8 @@ std::size_t ContextWindowTracker::estimate_tokens(
         total_chars += msg.content.size();
         total_chars += msg.reasoning_content.size();
         for (const auto& item : msg.continuation_items) {
-            total_chars += item.payload.size();
+            // Native block snapshots duplicate text, tools, and signed reasoning.
+            if (item.kind != "assistant_content") total_chars += item.payload.size();
         }
         for (const auto& tc : msg.tool_calls) {
             total_chars += tc.function.name.size() + tc.function.arguments.size();

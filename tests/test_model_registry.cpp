@@ -33,7 +33,7 @@ TEST_CASE("ModelRegistry - Legacy API returns correct context sizes for known mo
     REQUIRE(get_max_context_size("claude-haiku-4-5") == 200000);
     REQUIRE(get_max_context_size("fable") == 1000000);
     REQUIRE(get_max_context_size("sonnet") == 1000000);
-    REQUIRE(get_max_context_size("haiku") == 200000);
+    REQUIRE(get_max_context_size("haiku") == 1000000);
     REQUIRE(get_max_context_size("claude-sonnet-4-6[1m]") == 1000000);
     REQUIRE(get_max_context_size("sonnet[1m]") == 1000000);
     REQUIRE(get_max_context_size("opus") == 1000000);
@@ -183,7 +183,7 @@ TEST_CASE("ModelRegistry::lookup - finds models by alias", "[llm][registry]") {
 
     const auto haiku = registry.lookup("haiku");
     REQUIRE(haiku != nullptr);
-    REQUIRE(haiku->canonical_id == "claude-haiku-4-5");
+    REQUIRE(haiku->canonical_id == "claude-haiku-5-5");
 
     const auto grok45 = registry.lookup("grok-4-5");
     REQUIRE(grok45 != nullptr);
@@ -986,4 +986,21 @@ TEST_CASE("model_supports - free function", "[llm][registry]") {
 TEST_CASE("get_model_tier - free function", "[llm][registry]") {
     REQUIRE(get_model_tier("gpt-4o-mini") == ModelTier::Fast);
     REQUIRE_FALSE(get_model_tier("unknown-model").has_value());
+}
+
+TEST_CASE("Claude 5.5 wire policies and tiered prices survive registry persistence", "[llm][registry][claude][hardening]") {
+    auto& registry = ModelRegistry::instance();
+    const auto json = registry.export_to_json();
+    REQUIRE(registry.load_from_json(json) > 0);
+    const auto haiku = registry.lookup("haiku");
+    REQUIRE(haiku);
+    REQUIRE(haiku->pricing.long_context);
+    CHECK(haiku->pricing.long_context->threshold == 100000);
+    CHECK(haiku->pricing.long_context->cache_write == Catch::Approx(0.625));
+    CHECK(haiku->wire.disabled_thinking);
+    CHECK(haiku->wire.reasoning_bound_to_prefix);
+    const auto sonnet = registry.lookup("claude-sonnet-5-5");
+    REQUIRE(sonnet);
+    CHECK(sonnet->wire.between_tools_thinking);
+    CHECK(sonnet->wire.forced_tool_choice_rejected);
 }

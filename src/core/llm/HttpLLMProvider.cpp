@@ -744,8 +744,13 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
             }
 
-            transport::RetryController retry_controller(
-                protocol->stream_retry_policy());
+            // Preserve protocol defaults unless the caller supplied a non-default
+            // transport override. These options already belong to this driver.
+            const auto timeouts = self->transport_options_.timeouts == transport::StreamTimeoutPolicy{}
+                ? protocol->stream_timeouts() : self->transport_options_.timeouts;
+            const auto retries = self->transport_options_.retries == transport::RetryPolicy{}
+                ? protocol->stream_retry_policy() : self->transport_options_.retries;
+            transport::RetryController retry_controller(retries);
             bool attempted_auth_recovery = false;
 
             const auto emit_retry_reset = [&](const transport::RetrySchedule& retry,
@@ -780,7 +785,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 bool        output_emitted = false;
                 const bool requires_terminal_event =
                     protocol->requires_terminal_event();
-                transport::StreamWatchdog watchdog(protocol->stream_timeouts());
+                transport::StreamWatchdog watchdog(timeouts);
 
                 uint64_t response_bytes_received = 0;
                 const uint64_t request_bytes_sent =
@@ -788,6 +793,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                     + core::net::estimated_http_header_bytes(headers);
                 cpr::Header response_headers_seen;
                 bool observed_transport_headers = false;
+                int response_status = 0;
 
                 // Prevent stale usage from previous requests if this request does not
                 // emit a usage chunk.
@@ -814,10 +820,16 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 session.SetHeaderCallback(cpr::HeaderCallback(
                     [&protocol, &response_headers_seen,
                      &observed_transport_headers, &request_metadata,
-                     &response_bytes_received, &watchdog]
+                     &response_bytes_received, &watchdog, &response_status]
                     (std::string_view line, intptr_t /*userdata*/) -> bool {
                         if (!watchdog.observe_activity()) return false;
                         response_bytes_received += static_cast<uint64_t>(line.size());
+                        if (const auto status = transport::parse_status_line(line)) {
+                            response_status = *status;
+                            response_headers_seen.clear();
+                            observed_transport_headers = false;
+                            return true;
+                        }
                         if (core::utils::str::trim_ascii_view(line).empty()) {
                             if (!observed_transport_headers) {
                                 observed_transport_headers = true;
@@ -836,6 +848,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
 
                 auto forward_parsed_event = [&] (std::string_view event_payload) {
                     if (event_payload.empty()) return;
+                    if (response_status >= 400) return;
                     protocols::ParseResult result = protocol->parse_event(event_payload);
 
                     stream_started = stream_started || result.stream_started;
@@ -940,6 +953,11 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }));
 
                 cpr::Response r = session.Post();
+                // CPR's custom header callback can leave Response::header empty.
+                // Give protocol lifecycle/retry hooks the headers we collected.
+                for (const auto& [key, value] : response_headers_seen) {
+                    r.header.try_emplace(key, value);
+                }
                 core::net::NetworkTraffic traffic{
                     .bytes_sent = (r.status_code != 0
                                    || observed_transport_headers
@@ -1049,7 +1067,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 }
 
                 const bool transport_failed =
-                    r.error.code != cpr::ErrorCode::OK;
+                    r.error.code != cpr::ErrorCode::OK && !done_signalled;
                 const auto transport_retry = retry_controller.schedule(
                     transport_failed, output_emitted);
                 if (transport_retry.has_value()) {
@@ -1141,7 +1159,7 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
                 // Update cached rate limit info for status bar display.
                 self->set_last_rate_limit_info(rate_limit_info);
 
-                if (r.error.code != cpr::ErrorCode::OK) {
+                if (transport_failed) {
                     const std::string_view timeout_message =
                         transport::timeout_user_message(watchdog.timeout_kind());
                     const std::string transport_message = timeout_message.empty()

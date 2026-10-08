@@ -105,6 +105,10 @@ std::expected<Answer, std::string> ReaderWorker::answer(
         try {
             provider->stream_response(request, [&](const core::llm::StreamChunk& chunk) {
                 std::lock_guard lock(stream->mutex);
+                if (chunk.reset_attempt) {
+                    stream->output.clear();
+                    return;
+                }
                 if (chunk.is_error || !chunk.tools.empty()) stream->failed = true;
                 stream->terminal |= chunk.is_final;
                 if (stream->output.size() + chunk.content.size() > kMaxOutputChars) stream->failed = true;

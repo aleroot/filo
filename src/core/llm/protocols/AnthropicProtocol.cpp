@@ -12,6 +12,9 @@
 #include "../../tools/ToolSchema.hpp"
 #include "../StrictToolPolicy.hpp"
 #include <simdjson.h>
+#include <curl/curl.h>
+#include <cmath>
+#include <stdexcept>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -174,94 +177,11 @@ namespace {
         return std::string(type);
     }
 
-    // Generation table for ids that match no model card: pinned snapshots,
-    // custom deployments, and models released after this build. Ordered most
-    // specific first, and matched on generation boundaries so `fable-5` never
-    // claims `claude-fable-5-1`.
-    struct AnthropicGenerationFallback {
-        std::string_view token;
-        ReasoningCapabilities effort;
-        bool adaptive_thinking;
-        bool manual_thinking;
-        ModelWireConstraints wire;
-    };
-
-    constexpr ModelWireConstraints kWireNone = {};
-    constexpr ModelWireConstraints kWireAdaptive = {
-        .reasoning_text_hidden = true,
-        .fixed_sampling = true,
-    };
-    constexpr ModelWireConstraints kWireNoForcedTools = {
-        .reasoning_text_hidden = true,
-        .fixed_sampling = true,
-        .forced_tool_choice_rejected = true,
-    };
-    constexpr ModelWireConstraints kWireBoundThinking = {
-        .thinking_always_on = true,
-        .reasoning_text_hidden = true,
-        .reasoning_bound_to_prefix = true,
-        .fixed_sampling = true,
-        .forced_tool_choice_rejected = true,
-    };
-
-    constexpr ReasoningCapabilities kEffortMax =
-        ReasoningCapability::Effort | ReasoningCapability::MaxEffort;
-    constexpr ReasoningCapabilities kEffortMaxXHigh =
-        kEffortMax | ReasoningCapability::XHighEffort;
-
-    constexpr std::array<AnthropicGenerationFallback, 12>
-        kAnthropicGenerationFallbacks{{
-            {"fable-5-1", kEffortMaxXHigh, false, false, kWireBoundThinking},
-            {"mythos-5-1", kEffortMaxXHigh, false, false, kWireNoForcedTools},
-            {"fable-5", kEffortMaxXHigh, false, false, kWireAdaptive},
-            {"mythos-5", kEffortMaxXHigh, false, false, kWireAdaptive},
-            {"opus-5-5", kEffortMaxXHigh, true, false, kWireBoundThinking},
-            {"sonnet-5", kEffortMaxXHigh, false, false, kWireAdaptive},
-            {"opus-4-8", kEffortMaxXHigh, true, false, kWireAdaptive},
-            {"opus-4-7", kEffortMaxXHigh, true, false, kWireAdaptive},
-            {"opus-5", kEffortMaxXHigh, true, false, kWireAdaptive},
-            {"sonnet-4-6", kEffortMax, false, true, kWireNone},
-            // Unversioned family ids keep the family's adaptive wire.
-            {"fable", kEffortMaxXHigh, false, false, kWireAdaptive},
-            {"mythos", kEffortMaxXHigh, false, false, kWireAdaptive},
-        }};
-
-    /// True when `token` names the whole id or one generation segment of it.
-    [[nodiscard]] bool matches_generation(std::string_view normalized,
-                                          std::string_view token) {
-        const std::size_t start = normalized.find(token);
-        if (start == std::string_view::npos) return false;
-        const std::size_t end = start + token.size();
-        return end == normalized.size()
-            || normalized[end] == '-'
-            || normalized[end] == '[';
-    }
-
-    /// Token of the generation the bare Fable aliases resolve to.
-    constexpr std::string_view kCurrentFableToken = "fable-5-1";
-
-    [[nodiscard]] const AnthropicGenerationFallback* generation_fallback(
-        std::string_view normalized) {
-        if (normalized.empty()) return nullptr;
-        // Bare Fable aliases name the current Fable rather than a generation
-        // substring, so they resolve by token instead of by table position.
-        const bool bare_fable_alias = anthropic::is_fable_alias(normalized);
-        for (const auto& candidate : kAnthropicGenerationFallbacks) {
-            if (bare_fable_alias) {
-                if (candidate.token == kCurrentFableToken) return &candidate;
-                continue;
-            }
-            if (matches_generation(normalized, candidate.token)) {
-                return &candidate;
-            }
-        }
-        return nullptr;
-    }
-
     [[nodiscard]] bool is_retryable_anthropic_stream_error(std::string_view type) {
         return type == "overloaded_error"
             || type == "rate_limit_error"
-            || type == "api_error";
+            || type == "api_error"
+            || type == "timeout_error";
     }
 
     [[nodiscard]] int model_default_max_tokens(std::string_view model,
@@ -341,6 +261,9 @@ namespace {
             out.model = std::string(anthropic::kDefaultHaiku);
         } else if (lowered == "opusplan") {
             out.model = std::string(anthropic::kDefaultSonnet);
+        } else if (const auto card = ModelRegistry::instance().lookup(lowered);
+                   card && card->provider == "anthropic") {
+            out.model = card->canonical_id;
         }
 
         return out;
@@ -610,7 +533,19 @@ namespace {
 
         // Retry-after header (present on 429 responses)
         if (auto value = find_header_case_insensitive(headers, "retry-after")) {
-            info.retry_after = safe_stoi32(*value);
+            float seconds = 0;
+            if (try_parse_float(*value, seconds) && std::isfinite(seconds) && seconds >= 0) {
+                info.retry_after = static_cast<int32_t>(std::ceil(std::min<double>(
+                    seconds, std::numeric_limits<int32_t>::max())));
+            } else {
+                const std::string date(*value);
+                const auto deadline = curl_getdate(date.c_str(), nullptr);
+                if (deadline >= 0) {
+                    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    info.retry_after = static_cast<int32_t>(std::clamp<int64_t>(
+                        deadline - now, 0, std::numeric_limits<int32_t>::max()));
+                }
+            }
             if (info.retry_after > 0) {
                 info.is_rate_limited = true;
             }
@@ -679,23 +614,46 @@ namespace {
         return info;
     }
 
+    struct AnthropicErrorDetails {
+        std::string type;
+        std::string message;
+        std::string request_id;
+    };
+
+    [[nodiscard]] AnthropicErrorDetails error_details(const HttpResponse& response) {
+        AnthropicErrorDetails details;
+        simdjson::dom::parser parser;
+        simdjson::dom::element doc;
+        simdjson::padded_string body(response.body);
+        if (parser.parse(body).get(doc) == simdjson::SUCCESS) {
+            std::string_view value;
+            if (doc["error"]["type"].get(value) == simdjson::SUCCESS) details.type = value;
+            if (doc["error"]["message"].get(value) == simdjson::SUCCESS) details.message = value.substr(0, 2000);
+            if (doc["request_id"].get(value) == simdjson::SUCCESS) details.request_id = value.substr(0, 200);
+        }
+        if (const auto id = find_header_case_insensitive(response.headers, "request-id")) {
+            details.request_id = id->substr(0, 200);
+        }
+        return details;
+    }
+
+    [[nodiscard]] bool permanent_rate_limit(const AnthropicErrorDetails& error) {
+        const auto message = core::utils::str::to_lower_ascii_copy(error.message);
+        return error.type == "billing_error"
+            || message.find("credit balance is too low") != std::string::npos
+            || message.find("monthly spend") != std::string::npos
+            || message.find("spend limit") != std::string::npos
+            || message.find("usage tier's spend cap") != std::string::npos;
+    }
+
     std::string impl_format_error_message(int status_code,
-                                          std::string_view body,
-                                          std::string_view) {
+                                          const AnthropicErrorDetails& error) {
         switch (status_code) {
-            case 400: {
-                simdjson::dom::parser parser;
-                simdjson::padded_string padded(body);
-                simdjson::dom::element doc;
-                std::string_view message;
-                if (parser.parse(padded).get(doc) == simdjson::SUCCESS
-                    && doc["error"]["message"].get(message) == simdjson::SUCCESS
-                    && !message.empty()) {
-                    return "[Anthropic API Error 400: Invalid request. "
-                        + std::string(message.substr(0, 2000)) + "]";
-                }
-                return "[Anthropic API Error 400: Invalid request. The request body is malformed or contains invalid parameters.]";
-            }
+            case 400:
+                return "[Anthropic API Error 400: Invalid request. "
+                    + (error.message.empty()
+                        ? std::string("The request body is malformed or contains invalid parameters.")
+                        : error.message) + "]";
             case 401:
                 return "[Anthropic API Error 401: Authentication failed. Please check your API key or session token.]";
             case 403:
@@ -704,7 +662,7 @@ namespace {
                 return "[Anthropic API Error 404: Not found. The requested model or endpoint does not exist.]";
             case 429: {
                 std::string msg = "[Anthropic API Error 429: Rate limit exceeded. ";
-                if (!body.empty()) {
+                if (!error.message.empty()) {
                     msg += "Please wait before retrying. Consider reducing request frequency or context size.";
                 } else {
                     msg += "Please wait before retrying.";
@@ -748,7 +706,7 @@ AnthropicWirePolicy anthropic_wire_policy(
     const std::string normalized = anthropic::normalized_claude_id(model);
     auto card = ModelRegistry::instance().lookup(model);
     if (!card) card = ModelRegistry::instance().lookup(normalized);
-    const auto* generation = generation_fallback(normalized);
+    const auto* generation = anthropic::model_policy(normalized);
 
     // Reasoning controls: the serving endpoint's own catalog is authoritative,
     // the curated card covers an offline session, and the generation table
@@ -790,6 +748,8 @@ AnthropicWirePolicy anthropic_wire_policy(
         policy.reasoning_bound_to_prefix = wire->reasoning_bound_to_prefix;
         policy.fixed_sampling = wire->fixed_sampling;
         policy.forced_tool_choice_rejected = wire->forced_tool_choice_rejected;
+        policy.between_tools_thinking = wire->between_tools_thinking;
+        policy.disabled_thinking = wire->disabled_thinking;
         return policy;
     }
 
@@ -835,6 +795,109 @@ namespace {
     return std::nullopt;
 }
 
+// Grammar limits apply to the combined output schema and strict tools.
+// Tools outside the budget stay available with normal local argument validation.
+class AnthropicSchemaBudget {
+public:
+    void reserve_output(std::string_view schema) { counts_ = count(schema); }
+    bool admit_tool(std::string_view schema) {
+        const auto added = count(schema);
+        if (tools_ >= 20 || counts_.optional + added.optional > 24
+            || counts_.unions + added.unions > 16) return false;
+        ++tools_;
+        counts_.optional += added.optional;
+        counts_.unions += added.unions;
+        return true;
+    }
+private:
+    struct Counts { int optional = 0; int unions = 0; };
+    static Counts count(std::string_view schema) {
+        Counts counts;
+        simdjson::dom::parser parser;
+        simdjson::padded_string input(schema);
+        simdjson::dom::element root;
+        if (parser.parse(input).get(root) != simdjson::SUCCESS) return {25, 17};
+        const auto visit = [&](auto&& self, simdjson::dom::element node) -> void {
+            simdjson::dom::object object;
+            simdjson::dom::array array;
+            if (node.get(object) == simdjson::SUCCESS) {
+                simdjson::dom::object properties;
+                if (object["properties"].get(properties) == simdjson::SUCCESS) {
+                    for (const auto property : properties) {
+                        bool required = false;
+                        simdjson::dom::array names;
+                        if (object["required"].get(names) == simdjson::SUCCESS) {
+                            for (const auto name : names) {
+                                std::string_view value;
+                                if (name.get(value) == simdjson::SUCCESS && value == property.key) required = true;
+                            }
+                        }
+                        counts.optional += !required;
+                    }
+                }
+                if (object["anyOf"].get(array) == simdjson::SUCCESS) ++counts.unions;
+                if (object["type"].get(array) == simdjson::SUCCESS && array.size() > 1) ++counts.unions;
+                for (const auto field : object) self(self, field.value);
+            } else if (node.get(array) == simdjson::SUCCESS) {
+                for (const auto element : array) self(self, element);
+            }
+        };
+        visit(visit, root);
+        return counts;
+    }
+    Counts counts_;
+    int tools_ = 0;
+};
+
+// Replay native block order only while the visible transcript still matches it.
+// Session edits fall back to the normalized representation and binding controls.
+[[nodiscard]] std::optional<std::string> native_assistant_content(
+    const Message& message, bool omit_thinking) {
+    for (const auto& item : message.continuation_items) {
+        if (item.provider != "anthropic" || item.kind != "assistant_content") continue;
+        simdjson::dom::parser parser;
+        simdjson::padded_string payload(item.payload);
+        simdjson::dom::element doc;
+        simdjson::dom::array blocks;
+        if (parser.parse(payload).get(doc) != simdjson::SUCCESS
+            || doc["content"].get(blocks) != simdjson::SUCCESS) continue;
+        std::string text;
+        std::string content = "[";
+        std::size_t tool_index = 0;
+        bool matches = true;
+        for (const auto block : blocks) {
+            std::string_view type;
+            if (block["type"].get(type) != simdjson::SUCCESS) { matches = false; break; }
+            if (type == "text") {
+                std::string_view value;
+                if (block["text"].get(value) != simdjson::SUCCESS) { matches = false; break; }
+                text += value;
+            } else if (type == "tool_use") {
+                if (tool_index >= message.tool_calls.size()) { matches = false; break; }
+                const auto& tool = message.tool_calls[tool_index++];
+                std::string_view id, name;
+                simdjson::dom::object input;
+                simdjson::dom::parser arguments_parser;
+                simdjson::padded_string arguments(tool.function.arguments.empty() ? "{}" : tool.function.arguments);
+                simdjson::dom::object expected;
+                if (block["id"].get(id) != simdjson::SUCCESS || id != tool.id
+                    || block["name"].get(name) != simdjson::SUCCESS || name != tool.function.name
+                    || block["input"].get(input) != simdjson::SUCCESS
+                    || arguments_parser.parse(arguments).get_object().get(expected) != simdjson::SUCCESS
+                    || simdjson::to_string(input) != simdjson::to_string(expected)) { matches = false; break; }
+            } else if (type != "thinking" && type != "redacted_thinking") {
+                matches = false; break;
+            }
+            if (omit_thinking && (type == "thinking" || type == "redacted_thinking")) continue;
+            if (content.back() != '[') content += ',';
+            content += simdjson::to_string(block);
+        }
+        if (matches && text == message.content && tool_index == message.tool_calls.size()
+            && content.size() > 1) return content + "]";
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 std::string AnthropicSerializer::serialize(
@@ -863,20 +926,21 @@ std::string AnthropicSerializer::serialize(
         payload += R"(,"cache_control":{"type":"ephemeral"})";
     }
 
+    const auto wire_policy = anthropic_wire_policy(
+        req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     if (reasoning_emitter) {
         reasoning_emitter(payload, req);
     } else {
     // Effort can reduce output/token spend for tool-heavy sessions.
     // Anthropic docs (Apr 2026): generally available, no beta header needed.
-    const AnthropicWirePolicy wire_policy = anthropic_wire_policy(
-        req.model, req.catalog_reasoning ? &*req.catalog_reasoning : nullptr);
     ReasoningCapabilities reasoning_capabilities = wire_policy.effort;
     if (wire_policy.thinking_always_on) {
         reasoning_capabilities =
             reasoning_capabilities | ReasoningCapability::Required;
     }
+    std::string effective_effort;
     if (reasoning_capabilities.supports_effort()) {
-        std::string effective_effort = normalized_effort_or_empty(req.effort);
+        effective_effort = normalized_effort_or_empty(req.effort);
         if (effective_effort == "max"
             && !reasoning_capabilities.supports(ReasoningCapability::MaxEffort)) {
             effective_effort = "high";
@@ -893,11 +957,25 @@ std::string AnthropicSerializer::serialize(
             && wire_policy.thinking_always_on) {
             effective_effort = "low";
         }
+    }
+    if (!effective_effort.empty() || req.response_format.type == ResponseFormat::Type::JsonSchema) {
+        payload += R"(,"output_config":{)";
         if (!effective_effort.empty()) {
-            payload += R"(,"output_config":{"effort":")";
-            payload += core::utils::escape_json_string(effective_effort);
-            payload += R"("})";
+            payload += R"("effort":")" + core::utils::escape_json_string(effective_effort) + '"';
         }
+        if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
+            simdjson::dom::parser schema_parser;
+            simdjson::padded_string schema(req.response_format.schema);
+            simdjson::dom::object object;
+            if (schema_parser.parse(schema).get_object().get(object) != simdjson::SUCCESS) {
+                throw std::invalid_argument("Anthropic structured output requires a valid JSON schema object");
+            }
+            if (!effective_effort.empty()) payload += ',';
+            payload += R"("format":{"type":"json_schema","schema":)";
+            payload += req.response_format.schema;
+            payload += '}';
+        }
+        payload += '}';
     }
 
     // Thinking is wanted when either the config enabled it (thinking_budget > 0)
@@ -940,10 +1018,14 @@ std::string AnthropicSerializer::serialize(
         wire_policy.reasoning_text_hidden ? R"(,"display":"summarized")" : "";
 
     // Extended thinking block (must come before messages).
-    if (wire_policy.reasoning_bound_to_prefix) {
+    if (wire_policy.between_tools_thinking && effort_explicitly_disabled(req.effort)) {
+        payload += R"(,"thinking":{"type":"between_tools"})";
+    } else if (wire_policy.disabled_thinking && effort_explicitly_disabled(req.effort)) {
+        payload += R"(,"thinking":{"type":"disabled"})";
+    } else if (wire_policy.reasoning_bound_to_prefix) {
         // Filo intentionally changes tools/context during a session. Let the
         // API discard only invalidated reasoning instead of rejecting a turn.
-        // This also applies to /effort off: thinking stays on for these models.
+        // Always-on models keep adaptive thinking at their lowest supported effort.
         payload += R"(,"thinking":{"type":"adaptive")";
         payload += thinking_display;
         payload += R"(,"block_binding":{"prefix_mismatch_behavior":"drop_block"}})";
@@ -951,7 +1033,12 @@ std::string AnthropicSerializer::serialize(
         payload += R"(,"thinking":{"type":"enabled")";
         payload += thinking_display;
         payload += R"(,"budget_tokens":)";
-        payload += std::to_string(thinking.budget_tokens);
+        const int max_tokens = req.max_tokens.value_or(
+            model_default_max_tokens(req.model, default_max_tokens));
+        if (max_tokens <= 1024) {
+            throw std::invalid_argument("Anthropic manual thinking requires max_tokens greater than 1024");
+        }
+        payload += std::to_string(std::clamp(thinking.budget_tokens, 1024, max_tokens - 1));
         payload += '}';
     } else if (use_adaptive_thinking) {
         payload += R"(,"thinking":{"type":"adaptive")";
@@ -965,6 +1052,9 @@ std::string AnthropicSerializer::serialize(
     // remains reusable when session or dynamic context changes.
     append_anthropic_system_field(payload, req);
 
+    const bool omit_historical_thinking = effort_explicitly_disabled(req.effort)
+        && (wire_policy.between_tools_thinking || wire_policy.disabled_thinking);
+
     // Tools (Anthropic uses "input_schema" instead of "parameters").
     if (!req.tools.empty()) {
         // Strict tool use constrains the sampler to the declared shape, so a
@@ -972,6 +1062,10 @@ std::string AnthropicSerializer::serialize(
         // whose contract does not survive the projection is sent unflagged.
         const auto strict_dialect = configured_strict_tool_dialect(
             ToolSchemaWire::Anthropic, req.model);
+        AnthropicSchemaBudget schema_budget;
+        if (req.response_format.type == ResponseFormat::Type::JsonSchema) {
+            schema_budget.reserve_output(req.response_format.schema);
+        }
         payload += R"(,"tools":[)";
         for (size_t i = 0; i < req.tools.size(); ++i) {
             const auto& def = req.tools[i].function;
@@ -986,8 +1080,9 @@ std::string AnthropicSerializer::serialize(
                 ? core::tools::schema::strict_input_schema(
                       canonical_schema, *strict_dialect)
                 : std::nullopt;
-            payload += strict_schema.value_or(canonical_schema);
-            if (strict_schema.has_value()) {
+            const bool use_strict = strict_schema.has_value() && schema_budget.admit_tool(*strict_schema);
+            payload += use_strict ? *strict_schema : canonical_schema;
+            if (use_strict) {
                 payload += R"(,"strict":true)";
             }
             if (i + 1 == req.tools.size()) {
@@ -1007,6 +1102,8 @@ std::string AnthropicSerializer::serialize(
          ++message_index) {
         const auto& msg = req.messages[message_index];
         if (msg.role == "system") continue;
+        if (omit_historical_thinking && msg.role == "assistant"
+            && msg.content.empty() && msg.tool_calls.empty() && msg.content_parts.empty()) continue;
 
         if (!first_msg) payload += ',';
         first_msg = false;
@@ -1035,11 +1132,22 @@ std::string AnthropicSerializer::serialize(
 
         } else if (msg.role == "assistant"
                    && (!msg.tool_calls.empty() || !msg.continuation_items.empty())) {
+            if (const auto content = native_assistant_content(msg, omit_historical_thinking)) {
+                payload += R"({"role":"assistant","content":)";
+                payload += *content;
+                payload += '}';
+                continue;
+            }
             // OpenAI assistant tool_calls → Claude content blocks.
             payload += R"({"role":"assistant","content":[)";
             bool first_block = true;
 
             for (const auto& continuation : msg.continuation_items) {
+                if (continuation.kind == "assistant_content") continue;
+                // These low-thinking modes reject block_binding. Remove historical
+                // reasoning as documented so edited prefixes remain resumable.
+                if (omit_historical_thinking
+                    && (continuation.kind == "thinking" || continuation.kind == "redacted_thinking")) continue;
                 if ((!continuation.provider.empty()
                      && continuation.provider != "anthropic")
                     || !has_valid_continuation_payload(continuation)) {
@@ -1133,7 +1241,41 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     const core::utils::json::ParserRetentionGuard parser_guard{parser};
     simdjson::padded_string input(json_str);
     simdjson::dom::element doc;
-    if (parser.parse(input).get(doc) != simdjson::SUCCESS) return result;
+    if (parser.parse(input).get(doc) != simdjson::SUCCESS) {
+        if (event_type == "message_start" || event_type == "message_delta"
+            || event_type == "message_stop" || event_type == "content_block_start"
+            || event_type == "content_block_delta" || event_type == "content_block_stop"
+            || event_type == "error") {
+            result.stream_error = true;
+            result.retryable_stream_error = true;
+            result.error_type = "invalid_stream_event";
+            result.error_message = "Claude returned malformed streaming JSON";
+        }
+        return result;
+    }
+
+    const auto read_usage = [&](simdjson::dom::object usage) {
+        const auto read_input = [&](std::string_view key, int64_t& value) {
+            int64_t reported = 0;
+            if (usage[key].get(reported) == simdjson::SUCCESS) {
+                value = std::clamp<int64_t>(reported, 0, std::numeric_limits<int32_t>::max());
+                result.input_usage_reported = true;
+            }
+        };
+        read_input("input_tokens", uncached_input_);
+        read_input("cache_read_input_tokens", cached_input_);
+        read_input("cache_creation_input_tokens", cache_creation_input_);
+        if (result.input_usage_reported) {
+            result.input_tokens = static_cast<int32_t>(std::min<int64_t>(
+                uncached_input_ + cached_input_ + cache_creation_input_, std::numeric_limits<int32_t>::max()));
+            result.cached_input_tokens = static_cast<int32_t>(cached_input_);
+            result.cache_creation_input_tokens = static_cast<int32_t>(cache_creation_input_);
+        }
+        int64_t output = 0;
+        if (usage["output_tokens"].get(output) == simdjson::SUCCESS) {
+            result.output_tokens = static_cast<int32_t>(std::clamp<int64_t>(output, 0, std::numeric_limits<int32_t>::max()));
+        }
+    };
 
     if (event_type == "error") {
         result.stream_error = true;
@@ -1171,27 +1313,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
         if (doc["message"].get(msg_obj) == simdjson::SUCCESS) {
             simdjson::dom::object usage_obj;
             if (msg_obj["usage"].get(usage_obj) == simdjson::SUCCESS) {
-                const auto read_non_negative_usage = [&](std::string_view key) -> int64_t {
-                    int64_t value = 0;
-                    if (usage_obj[key].get(value) == simdjson::SUCCESS && value > 0) {
-                        return value;
-                    }
-                    return 0;
-                };
-                // Claude prompt caching reports a split of prompt usage:
-                // input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
-                // Context usage should account for the full effective prompt footprint.
-                const int64_t input_tokens = read_non_negative_usage("input_tokens");
-                const int64_t cache_creation_tokens =
-                    read_non_negative_usage("cache_creation_input_tokens");
-                const int64_t cache_read_tokens =
-                    read_non_negative_usage("cache_read_input_tokens");
-                const int64_t total_input_tokens =
-                    input_tokens + cache_creation_tokens + cache_read_tokens;
-                result.input_tokens = static_cast<int32_t>(
-                    std::min<int64_t>(
-                        total_input_tokens,
-                        static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
+                read_usage(usage_obj);
             }
         }
         return result;
@@ -1226,9 +1348,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
 
         simdjson::dom::object usage_obj;
         if (doc["usage"].get(usage_obj) == simdjson::SUCCESS) {
-            int64_t ot = 0;
-            [[maybe_unused]] const auto err = usage_obj["output_tokens"].get(ot);
-            result.output_tokens = static_cast<int32_t>(ot);
+            read_usage(usage_obj);
         }
         return result;
     }
@@ -1251,9 +1371,15 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
             std::string_view name_v;
             if (content_block["name"].get(name_v) == simdjson::SUCCESS)
                 state.name = std::string(name_v);
+            simdjson::dom::object initial_input;
+            if (content_block["input"].get(initial_input) == simdjson::SUCCESS) {
+                state.initial_args = simdjson::to_string(initial_input);
+            }
             current_tool_ = std::move(state);
         } else if (type_v == "thinking" || type_v == "redacted_thinking") {
             AnthropicContinuationBlockState state;
+            int64_t index = -1;
+            if (doc["index"].get(index) == simdjson::SUCCESS) state.index = static_cast<int>(index);
             state.type = std::string(type_v);
             state.initial_payload = simdjson::to_string(content_block);
             std::string_view value;
@@ -1264,6 +1390,14 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
                 state.signature = std::string(value);
             }
             current_continuation_ = std::move(state);
+        } else if (type_v == "text") {
+            int64_t index = -1;
+            if (doc["index"].get(index) == simdjson::SUCCESS) text_index_ = static_cast<int>(index);
+            std::string_view text;
+            current_text_ = content_block["text"].get(text) == simdjson::SUCCESS ? std::string(text) : "";
+            result.text = *current_text_;
+        } else {
+            replay_complete_ = false;
         }
         return result;
     }
@@ -1275,15 +1409,21 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
         std::string_view delta_type;
         if (delta["type"].get(delta_type) != simdjson::SUCCESS) return result;
 
-        if (delta_type == "text_delta") {
+        int64_t index = -1;
+        const bool has_index = doc["index"].get(index) == simdjson::SUCCESS;
+        if (delta_type == "text_delta" && (!current_text_ || !has_index || index == text_index_)) {
             std::string_view text;
-            if (delta["text"].get(text) == simdjson::SUCCESS)
+            if (delta["text"].get(text) == simdjson::SUCCESS) {
                 result.text = std::string(text);
-        } else if (delta_type == "input_json_delta" && current_tool_.has_value()) {
+                if (current_text_) *current_text_ += text;
+            }
+        } else if (delta_type == "input_json_delta" && current_tool_.has_value()
+                   && (!has_index || index == current_tool_->index)) {
             std::string_view partial_json;
             if (delta["partial_json"].get(partial_json) == simdjson::SUCCESS)
                 current_tool_->accumulated_args += partial_json;
-        } else if (delta_type == "thinking_delta" && current_continuation_.has_value()) {
+        } else if (delta_type == "thinking_delta" && current_continuation_.has_value()
+                   && (!has_index || index == current_continuation_->index)) {
             std::string_view thinking;
             if (delta["thinking"].get(thinking) == simdjson::SUCCESS) {
                 // Authoritative, signed thinking accumulated for upstream replay.
@@ -1293,7 +1433,8 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
                 // for API continuation and is never derived from this field.
                 result.reasoning_delta.append(thinking.data(), thinking.size());
             }
-        } else if (delta_type == "signature_delta" && current_continuation_.has_value()) {
+        } else if (delta_type == "signature_delta" && current_continuation_.has_value()
+                   && (!has_index || index == current_continuation_->index)) {
             std::string_view signature;
             if (delta["signature"].get(signature) == simdjson::SUCCESS) {
                 current_continuation_->signature += signature;
@@ -1303,17 +1444,41 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     }
 
     if (event_type == "content_block_stop") {
-        if (current_tool_.has_value()) {
+        int64_t index = -1;
+        const bool has_index = doc["index"].get(index) == simdjson::SUCCESS;
+        if (current_text_ && (!has_index || index == text_index_)) {
+            replay_blocks_.push_back(R"({"type":"text","text":")"
+                + core::utils::escape_json_string(*current_text_) + R"("})");
+            current_text_.reset();
+        }
+        if (current_tool_.has_value() && (!has_index || index == current_tool_->index)) {
+            const std::string args = current_tool_->accumulated_args.empty()
+                ? (current_tool_->initial_args.empty() ? "{}" : current_tool_->initial_args)
+                : current_tool_->accumulated_args;
+            simdjson::dom::parser arguments_parser;
+            simdjson::dom::object arguments;
+            simdjson::padded_string padded_args(args);
+            if (arguments_parser.parse(padded_args).get_object().get(arguments) != simdjson::SUCCESS) {
+                result.stream_error = true;
+                result.retryable_stream_error = true;
+                result.error_type = "invalid_tool_input";
+                result.error_message = "Claude returned incomplete or malformed tool arguments";
+                current_tool_.reset();
+                return result;
+            }
+            replay_blocks_.push_back(R"({"type":"tool_use","id":")"
+                + core::utils::escape_json_string(current_tool_->id) + R"(","name":")"
+                + core::utils::escape_json_string(current_tool_->name) + R"(","input":)" + args + "}");
             ToolCall tc;
             tc.index              = current_tool_->index;
             tc.id                 = std::move(current_tool_->id);
             tc.type               = "function";
             tc.function.name      = std::move(current_tool_->name);
-            tc.function.arguments = std::move(current_tool_->accumulated_args);
+            tc.function.arguments = args;
             result.completed_tools.push_back(std::move(tc));
             current_tool_.reset();
         }
-        if (current_continuation_.has_value()) {
+        if (current_continuation_.has_value() && (!has_index || index == current_continuation_->index)) {
             std::string block;
             if (current_continuation_->type == "redacted_thinking") {
                 block = std::move(current_continuation_->initial_payload);
@@ -1324,6 +1489,7 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
                 block += core::utils::escape_json_string(current_continuation_->signature);
                 block += R"("})";
             }
+            replay_blocks_.push_back(block);
             result.continuation_items.push_back(ContinuationItem{
                 .provider = "anthropic",
                 .kind = current_continuation_->type,
@@ -1337,8 +1503,22 @@ AnthropicSSEParser::Result AnthropicSSEParser::process_event(std::string_view ev
     if (event_type == "message_stop") {
         result.done = true;
         result.incomplete_tool_call = current_tool_.has_value();
+        // A terminal max_tokens stop can legitimately interrupt a block. The
+        // agent already recovers such turns and never executes unfinished tools.
+        if (!current_tool_ && !current_continuation_ && !current_text_
+            && replay_complete_ && !replay_blocks_.empty()) {
+            std::string content = R"({"content":[)";
+            for (const auto& block : replay_blocks_) {
+                if (content.back() != '[') content += ',';
+                content += block;
+            }
+            content += "]}";
+            result.continuation_items.push_back({.provider = "anthropic", .kind = "assistant_content", .payload = std::move(content)});
+        }
         current_tool_.reset();
         current_continuation_.reset();
+        current_text_.reset();
+        replay_blocks_.clear();
     }
 
     return result;
@@ -1428,7 +1608,7 @@ cpr::Header AnthropicProtocol::build_headers(const core::auth::AuthInfo& auth) c
     }
 
     for (const auto& [k, raw_v] : auth.headers) {
-        if (k == "anthropic-beta" && !raw_v.empty()) {
+        if (core::utils::ascii::iequals(k, "anthropic-beta") && !raw_v.empty()) {
             std::size_t start = 0;
             while (start < raw_v.size()) {
                 std::size_t comma = raw_v.find(',', start);
@@ -1475,7 +1655,11 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
     result.retryable_stream_error = r.retryable_stream_error;
     result.stream_error_type = std::move(r.error_type);
     result.stream_error_message = std::move(r.error_message);
-    if (r.input_tokens  > 0) accumulated_input_  = r.input_tokens;
+    if (r.input_usage_reported) {
+        accumulated_input_ = r.input_tokens;
+        accumulated_cached_input_ = r.cached_input_tokens;
+        accumulated_cache_creation_ = r.cache_creation_input_tokens;
+    }
     if (r.output_tokens > 0) accumulated_output_ = r.output_tokens;
     if (!r.stop_reason.empty()) last_stop_reason_ = r.stop_reason;
     if (r.prefix_binding_mismatches > 0 || r.model_binding_mismatches > 0) {
@@ -1491,6 +1675,9 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
         result.chunks.push_back(std::move(chunk));
     }
     if (!r.completed_tools.empty()) result.chunks.push_back(StreamChunk::make_tools(r.completed_tools));
+    if (!preserves_native_assistant_content()) {
+        std::erase_if(r.continuation_items, [](const auto& item) { return item.kind == "assistant_content"; });
+    }
     if (!r.continuation_items.empty()) {
         StreamChunk chunk;
         chunk.continuation_items = std::move(r.continuation_items);
@@ -1501,6 +1688,8 @@ ParseResult AnthropicProtocol::parse_event(std::string_view raw_event) {
         result.done              = true;
         result.prompt_tokens     = accumulated_input_;
         result.completion_tokens = accumulated_output_;
+        result.cached_prompt_tokens = accumulated_cached_input_;
+        result.cache_creation_prompt_tokens = accumulated_cache_creation_;
         result.stop_reason       = last_stop_reason_;
         result.incomplete_tool_call = r.incomplete_tool_call;
     }
@@ -1516,6 +1705,8 @@ void AnthropicProtocol::reset_state() {
     sse_parser_ = AnthropicSSEParser{};
     accumulated_input_ = 0;
     accumulated_output_ = 0;
+    accumulated_cached_input_ = 0;
+    accumulated_cache_creation_ = 0;
     last_stop_reason_.clear();
     last_rate_limit_ = RateLimitInfo{};
 }
@@ -1524,6 +1715,7 @@ void AnthropicProtocol::reset_state() {
 
 void AnthropicProtocol::on_response(const HttpResponse& response) {
     last_rate_limit_ = impl_parse_rate_limit_headers(response.headers);
+    last_rate_limit_.is_rate_limited = last_rate_limit_.is_rate_limited || response.status_code == 429;
 }
 
 void AnthropicProtocol::enrich_rate_limit(std::string_view base_url,
@@ -1547,14 +1739,30 @@ void AnthropicProtocol::enrich_rate_limit(std::string_view base_url,
 }
 
 std::string AnthropicProtocol::format_error_message(const HttpResponse& response) const {
-    return impl_format_error_message(
-        response.status_code,
-        response.body,
-        last_requested_model_);
+    const auto error = error_details(response);
+    std::string message;
+    if (response.status_code == 429 && permanent_rate_limit(error)) {
+        message = "[Anthropic API Error 429: Account spend limit reached. Check billing or increase the spend limit before retrying.]";
+    } else {
+        message = impl_format_error_message(response.status_code, error);
+    }
+    if (response.status_code != 400 && !error.message.empty()) {
+        message += " " + error.message;
+    }
+    if (!error.request_id.empty()) message += " (request-id: " + error.request_id + ")";
+    return message;
 }
 
 bool AnthropicProtocol::is_retryable(const HttpResponse& response) const noexcept {
-    return impl_is_retryable_status(response.status_code);
+    if (!impl_is_retryable_status(response.status_code)) return false;
+    if (const auto should_retry = find_header_case_insensitive(response.headers, "x-should-retry");
+        should_retry && core::utils::ascii::iequals(*should_retry, "false")) return false;
+    try {
+        if (response.status_code == 429 && permanent_rate_limit(error_details(response))) return false;
+    } catch (...) {
+        // Diagnostic parsing must not break transport error classification.
+    }
+    return true;
 }
 
 } // namespace core::llm::protocols

@@ -81,11 +81,8 @@ public:
             slot.prompt_tokens.fetch_add(usage.prompt_tokens, std::memory_order_relaxed);
             slot.completion_tokens.fetch_add(usage.completion_tokens, std::memory_order_relaxed);
             if (should_estimate_cost) {
-                const auto r = core::budget::rates_for_model(model);
                 const int64_t cost_micro = static_cast<int64_t>(
-                    (static_cast<double>(usage.prompt_tokens)     / 1'000'000.0 * r.input_per_m +
-                     static_cast<double>(usage.completion_tokens) / 1'000'000.0 * r.output_per_m)
-                    * 1'000'000.0);
+                    core::budget::estimate_usage_cost(usage, model) * 1'000'000.0);
                 slot.cost_micro_usd.fetch_add(cost_micro, std::memory_order_relaxed);
             }
         };

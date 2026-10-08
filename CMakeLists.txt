@@ -781,6 +781,10 @@ add_test(NAME read_http_integration
     COMMAND test_integration "[integration][tools][web][read]" --reporter compact)
 set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60)
 
+add_test(NAME provider_http_integration
+    COMMAND test_integration "[integration][http]" --reporter compact)
+set_tests_properties(provider_http_integration PROPERTIES TIMEOUT 60)
+
 add_executable(test_agent_freeze tests/test_agent_freeze.cpp)
 target_link_libraries(test_agent_freeze PRIVATE filo_core)
 set_target_properties(test_agent_freeze PROPERTIES

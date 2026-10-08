@@ -1162,6 +1162,12 @@ resolve_gateway_selection(const GatewayRuntime& runtime,
             [state](const core::llm::StreamChunk& chunk) {
                 std::lock_guard<std::mutex> lock(state->mutex);
 
+                if (chunk.reset_attempt) {
+                    state->content.clear();
+                    state->tool_calls.clear();
+                    return;
+                }
+
                 if (!chunk.content.empty()) {
                     state->content += chunk.content;
                 }
@@ -1592,7 +1598,7 @@ void stream_openai_chat_completion_response(const GatewaySelection& selection,
                          created,
                          model,
                          include_usage](const core::llm::StreamChunk& chunk) {
-                            if (state->queue.is_closed()) {
+                            if (state->queue.is_closed() || chunk.reset_attempt) {
                                 return;
                             }
 

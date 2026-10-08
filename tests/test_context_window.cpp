@@ -250,3 +250,10 @@ TEST_CASE("ContextWindowTracker respects custom compaction thresholds but caps t
     CHECK(decision.effective_token_threshold == 20'000);
     CHECK(decision.should_compact);
 }
+
+TEST_CASE("Context estimates do not count native replay snapshots twice", "[context][claude][hardening]") {
+    std::vector<core::llm::Message> history{{.role = "assistant", .content = std::string(400, 'a')}};
+    const auto estimate = core::context::ContextWindowTracker::estimate_tokens(history);
+    history[0].continuation_items.push_back({.provider = "anthropic", .kind = "assistant_content", .payload = std::string(1000, 'x')});
+    CHECK(core::context::ContextWindowTracker::estimate_tokens(history) == estimate);
+}

@@ -2,6 +2,8 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "core/agent/AgentMode.hpp"
+#include "core/agent/HistoryCompactor.hpp"
+#include <future>
 #include "core/agent/AutoGraphOrchestrator.hpp"
 #include "core/agent/AutoModePolicy.hpp"
 #include "core/agent/AutoQualityLedger.hpp"
@@ -629,4 +631,37 @@ TEST_CASE("complete_once honours cooperative cancellation",
   canceller.join();
   REQUIRE_FALSE(result.has_value());
   CHECK(core::llm::is_cancelled_error(result.error()));
+}
+
+namespace {
+  class RetryingProvider final : public core::llm::LLMProvider {
+  public:
+    void stream_response(const core::llm::ChatRequest&,
+        std::function<void(const core::llm::StreamChunk&)> callback) override {
+      callback(core::llm::StreamChunk::make_content("Abandoned attempt"));
+      callback(core::llm::StreamChunk::make_attempt_reset("Retrying upstream"));
+      callback(core::llm::StreamChunk::make_content(R"({"ok":true})"));
+      callback(core::llm::StreamChunk::make_final());
+    }
+  };
+}
+
+TEST_CASE("complete_once excludes retry metadata and abandoned output", "[llm][oneshot][retry]") {
+  const auto result = core::llm::complete_once(std::make_shared<RetryingProvider>(), "test-model", "Return JSON");
+  REQUIRE(result);
+  CHECK(*result == R"({"ok":true})");
+}
+
+TEST_CASE("Compaction excludes retry metadata and abandoned output", "[agent][compaction][retry]") {
+  auto result = std::make_shared<std::promise<std::string>>();
+  auto future = result->get_future();
+  core::agent::HistoryCompactor{}.compact_async(
+      {.history = {{.role = "user", .content = "Summarize this"}},
+       .provider = std::make_shared<RetryingProvider>(), .model = "test-model"},
+      {.on_summary = [result](std::string summary) {
+        result->set_value(std::move(summary));
+        return core::agent::HistoryCompactionApplyStatus::Applied;
+      }});
+  REQUIRE(future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+  CHECK(future.get() == R"({"ok":true})");
 }

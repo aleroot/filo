@@ -524,3 +524,19 @@ TEST_CASE("OpenAIProtocol::on_response - fresh clone has empty rate limit", "[li
     REQUIRE(typed->last_rate_limit().retry_after     == 0);
     REQUIRE(typed->last_rate_limit().is_rate_limited == false);
 }
+
+TEST_CASE("Anthropic errors preserve diagnostics and distinguish permanent quota from throttling", "[lifecycle][anthropic][hardening]") {
+    AnthropicProtocol protocol;
+    const cpr::Header headers{{"Request-Id", "req-test"}};
+    const auto message = protocol.format_error_message({403,
+        R"({"error":{"type":"permission_error","message":"Workspace access denied"}})", headers});
+    CHECK_THAT(message, ContainsSubstring("Workspace access denied"));
+    CHECK_THAT(message, ContainsSubstring("req-test"));
+    CHECK_FALSE(protocol.is_retryable({429,
+        R"({"error":{"type":"rate_limit_error","message":"You have reached your monthly spend limit"}})", {}}));
+    CHECK(protocol.is_retryable({429, R"({"error":{"type":"rate_limit_error","message":"Too many requests"}})", {}}));
+    CHECK_FALSE(protocol.is_retryable({529, "", {{"X-Should-Retry", "false"}}}));
+    protocol.on_response({429, "", {{"Retry-After", "1.25"}}});
+    CHECK(protocol.last_rate_limit().retry_after == 2);
+    CHECK(protocol.last_rate_limit().is_rate_limited);
+}

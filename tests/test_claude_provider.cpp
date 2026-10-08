@@ -841,7 +841,7 @@ TEST_CASE("ClaudeSerializer - effort drives thinking even with budget disabled",
 TEST_CASE("ClaudeSerializer - thinking enabled emits type enabled", "[claude][serializer][thinking]") {
     AnthropicThinkingConfig cfg{.enabled = true, .budget_tokens = 10000};
     auto payload = AnthropicSerializer::serialize(make_simple_request(), 8096, cfg);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled","budget_tokens":10000})"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking":{"type":"enabled","budget_tokens":8095})"));
 }
 
 TEST_CASE("ClaudeSerializer - thinking budget_tokens is correct", "[claude][serializer][thinking]") {
@@ -1253,13 +1253,13 @@ TEST_CASE("AnthropicProtocol::prepare_request resolves Fable alias to Fable 5.1"
     REQUIRE(req.model == "claude-fable-5-1");
 }
 
-TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 4.5",
+TEST_CASE("AnthropicProtocol::prepare_request resolves Haiku alias to Haiku 5.5",
           "[claude][headers]") {
     AnthropicProtocol protocol;
     ChatRequest req = make_simple_request("haiku");
     protocol.prepare_request(req);
 
-    REQUIRE(req.model == "claude-haiku-4-5");
+    REQUIRE(req.model == "claude-haiku-5-5");
 }
 
 TEST_CASE("AnthropicProtocol::build_headers omits legacy thinking beta for Fable 5",
@@ -1602,14 +1602,14 @@ TEST_CASE("AnthropicSSEParser - tool call index is captured", "[claude][sse][too
     REQUIRE(r.completed_tools[0].index == 2);
 }
 
-TEST_CASE("AnthropicSSEParser - tool with empty arguments emits empty string", "[claude][sse][tool]") {
+TEST_CASE("AnthropicSSEParser - tool with empty arguments emits a valid empty object", "[claude][sse][tool]") {
     AnthropicSSEParser p;
     p.process_event("content_block_start",
         R"({"type":"content_block_start","index":0,)"
         R"("content_block":{"type":"tool_use","id":"tc","name":"noop","input":{}}})");
     auto r = p.process_event("content_block_stop", R"({"type":"content_block_stop","index":0})");
     REQUIRE(r.completed_tools.size() == 1);
-    REQUIRE(r.completed_tools[0].function.arguments.empty());
+    REQUIRE(r.completed_tools[0].function.arguments == "{}");
 }
 
 TEST_CASE("AnthropicSSEParser - two sequential tool calls reassembled correctly", "[claude][sse][tool]") {
@@ -1958,4 +1958,139 @@ TEST_CASE("ProviderFactory creates a Claude provider", "[claude][factory]") {
     config.model = "claude-sonnet-4-6";
     auto provider = core::llm::ProviderFactory::create_provider("claude", config);
     REQUIRE(provider != nullptr);
+}
+
+TEST_CASE("Claude 5.5 policies are valid without discovery and keep their distinct off modes",
+          "[claude][hardening]") {
+    for (const auto* model : {"claude-haiku-5-5", "claude-sonnet-5-5"}) {
+        for (const auto* effort : {"", "auto", "low", "medium", "high", "xhigh", "max", "off"}) {
+            CAPTURE(model, effort);
+            auto request = make_simple_request(model);
+            request.effort = effort;
+            request.temperature = 0.2;
+            AnthropicProtocol protocol({.enabled = true, .budget_tokens = 10000});
+            protocol.prepare_request(request);
+            const auto payload = protocol.serialize(request);
+            simdjson::dom::parser parser;
+            const auto doc = parser.parse(payload);
+            CHECK(doc["max_tokens"].get_int64().value() == 128000);
+            CHECK(doc["temperature"].error() == simdjson::NO_SUCH_FIELD);
+            CHECK(doc["thinking"]["budget_tokens"].error() == simdjson::NO_SUCH_FIELD);
+            if (request.effort == "off") {
+                CHECK(doc["thinking"]["type"].get_string().value()
+                    == (request.model == "claude-haiku-5-5" ? "disabled" : "between_tools"));
+                CHECK(doc["thinking"]["block_binding"].error() == simdjson::NO_SUCH_FIELD);
+            } else {
+                CHECK(doc["thinking"]["type"].get_string().value() == "adaptive");
+                CHECK(doc["thinking"]["display"].get_string().value() == "summarized");
+                CHECK(doc["thinking"]["block_binding"]["prefix_mismatch_behavior"].get_string().value() == "drop_block");
+            }
+            if (request.effort == "max" || request.effort == "xhigh") {
+                CHECK(doc["output_config"]["effort"].get_string().value() == request.effort);
+            }
+            const auto beta = protocol.build_headers({}).at("anthropic-beta");
+            CHECK_THAT(beta, Catch::Matchers::ContainsSubstring("thinking-binding-controls-2026-08-01"));
+            CHECK_THAT(beta, !Catch::Matchers::ContainsSubstring("interleaved-thinking"));
+        }
+    }
+    CHECK(anthropic_wire_policy("claude-sonnet-5-5").forced_tool_choice_rejected);
+    CHECK_FALSE(anthropic_wire_policy("claude-haiku-5-5").forced_tool_choice_rejected);
+    for (const auto* alias : {"haiku", "haiku-5.5", "claude-haiku", "sonnet-5.5"}) {
+        auto request = make_simple_request(alias);
+        AnthropicProtocol protocol;
+        protocol.prepare_request(request);
+        CHECK(request.model == (std::string_view(alias).starts_with("sonnet")
+            ? "claude-sonnet-5-5" : "claude-haiku-5-5"));
+    }
+    CHECK(anthropic_wire_policy("claude-haiku-5-5-20261007").reasoning_bound_to_prefix);
+    CHECK(anthropic_wire_policy("claude-sonnet-5-5[1m]").between_tools_thinking);
+    CHECK_FALSE(anthropic_wire_policy("claude-haiku-4-5").adaptive_thinking);
+}
+
+TEST_CASE("Claude replay preserves interleaved native blocks and survives edited histories",
+          "[claude][hardening][continuation]") {
+    AnthropicSSEParser parser;
+    std::vector<ContinuationItem> items;
+    const auto consume = [&](std::string_view type, std::string_view json) {
+        auto result = parser.process_event(type, json);
+        items.insert(items.end(), result.continuation_items.begin(), result.continuation_items.end());
+        return result;
+    };
+    consume("content_block_start", R"({"index":0,"content_block":{"type":"text","text":"First."}})");
+    consume("content_block_stop", R"({"index":0})");
+    consume("content_block_start", R"({"index":1,"content_block":{"type":"thinking","thinking":"Thought","signature":"signed"}})");
+    consume("content_block_stop", R"({"index":1})");
+    consume("content_block_start", R"({"index":2,"content_block":{"type":"tool_use","id":"call","name":"read","input":{"path":"a"}}})");
+    const auto call = consume("content_block_stop", R"({"index":2})");
+    REQUIRE(call.completed_tools.size() == 1);
+    consume("message_stop", R"({"type":"message_stop"})");
+    auto request = make_simple_request("claude-haiku-5-5");
+    request.messages.push_back(Message{.role = "assistant", .content = "First.",
+        .tool_calls = call.completed_tools, .continuation_items = items});
+    request.messages.push_back(Message{.role = "tool", .content = "file", .tool_call_id = "call"});
+    simdjson::dom::parser json;
+    const auto payload = AnthropicSerializer::serialize(request);
+    const auto doc = json.parse(payload);
+    CHECK(doc["messages"].at(1)["content"].at(0)["type"].get_string().value() == "text");
+    CHECK(doc["messages"].at(1)["content"].at(1)["signature"].get_string().value() == "signed");
+    CHECK(doc["messages"].at(1)["content"].at(2)["type"].get_string().value() == "tool_use");
+    request.messages[1].content = "Edited.";
+    const auto edited = AnthropicSerializer::serialize(request);
+    CHECK_THAT(edited, Catch::Matchers::ContainsSubstring("Edited."));
+    CHECK_THAT(edited, !Catch::Matchers::ContainsSubstring("First."));
+    request.effort = "off";
+    const auto disabled = AnthropicSerializer::serialize(request);
+    CHECK_THAT(disabled, !Catch::Matchers::ContainsSubstring("signed"));
+    CHECK_THAT(disabled, Catch::Matchers::ContainsSubstring("tool_use"));
+}
+
+TEST_CASE("Claude parser keeps cache accounting and clears it between attempts", "[claude][hardening][usage]") {
+    AnthropicProtocol protocol;
+    (void)protocol.parse_event("event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":300,\"cache_creation_input_tokens\":200}}}\n\n");
+    (void)protocol.parse_event("event: message_delta\ndata: {\"usage\":{\"output_tokens\":42}}\n\n");
+    const auto complete = protocol.parse_event("event: message_stop\ndata: {}\n\n");
+    REQUIRE(complete.done);
+    CHECK(complete.prompt_tokens == 600);
+    CHECK(complete.cached_prompt_tokens == 300);
+    CHECK(complete.cache_creation_prompt_tokens == 200);
+    CHECK(complete.completion_tokens == 42);
+    protocol.reset_state();
+    const auto fresh = protocol.parse_event("event: message_stop\ndata: {}\n\n");
+    CHECK(fresh.prompt_tokens == 0);
+    CHECK(fresh.cached_prompt_tokens == 0);
+    CHECK(fresh.cache_creation_prompt_tokens == 0);
+}
+
+TEST_CASE("Claude parser refuses corrupted tools and mismatched block stops", "[claude][hardening][sse]") {
+    AnthropicSSEParser parser;
+    parser.process_event("content_block_start", R"({"index":2,"content_block":{"type":"tool_use","id":"call","name":"read"}})");
+    CHECK(parser.process_event("content_block_stop", R"({"index":1})").completed_tools.empty());
+    parser.process_event("content_block_delta", R"({"index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}})");
+    parser.process_event("content_block_delta", R"({"index":2,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}})");
+    const auto malformed = parser.process_event("content_block_stop", R"({"index":2})");
+    CHECK(malformed.stream_error);
+    CHECK(malformed.completed_tools.empty());
+    CHECK(parser.process_event("message_delta", "not json").stream_error);
+    CHECK_FALSE(parser.process_event("future_event", "not json").stream_error);
+}
+
+TEST_CASE("Claude structured outputs share output_config with effort and reject malformed schemas", "[claude][hardening][schema]") {
+    auto request = make_simple_request("claude-haiku-5-5");
+    request.effort = "medium";
+    request.response_format = {.type = ResponseFormat::Type::JsonSchema,
+        .schema = R"({"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false})"};
+    const auto payload = AnthropicSerializer::serialize(request);
+    simdjson::dom::parser parser;
+    const auto doc = parser.parse(payload);
+    CHECK(doc["output_config"]["effort"].get_string().value() == "medium");
+    CHECK(doc["output_config"]["format"]["type"].get_string().value() == "json_schema");
+    CHECK(doc["output_config"]["format"]["schema"]["properties"]["ok"]["type"].get_string().value() == "boolean");
+    request.response_format.schema = "broken";
+    CHECK_THROWS_AS(AnthropicSerializer::serialize(request), std::invalid_argument);
+    request.response_format = {};
+    AnthropicProtocol protocol;
+    protocol.prepare_request(request);
+    core::auth::AuthInfo auth;
+    auth.headers["Anthropic-Beta"] = "custom-beta";
+    CHECK_THAT(protocol.build_headers(auth).at("anthropic-beta"), Catch::Matchers::ContainsSubstring("custom-beta"));
 }

@@ -74,6 +74,11 @@ complete_once(const std::shared_ptr<LLMProvider> &provider,
 
   try {
     execution_provider->stream_response(request, [&](const StreamChunk &chunk) {
+      if (chunk.reset_attempt) {
+        std::lock_guard lock(output_mutex);
+        output.clear();
+        return;
+      }
       if (!chunk.content.empty()) {
         std::lock_guard lock(output_mutex);
         output += chunk.content;

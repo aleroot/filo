@@ -282,8 +282,8 @@ struct ModelListEntryStats {
 
 class StreamingGatewayTestProvider final : public core::llm::LLMProvider {
 public:
-    explicit StreamingGatewayTestProvider(bool emit_tool_call = false)
-        : emit_tool_call_(emit_tool_call) {}
+    explicit StreamingGatewayTestProvider(bool emit_tool_call = false, bool retry = false)
+        : emit_tool_call_(emit_tool_call), retry_(retry) {}
 
     void stream_response(
         const core::llm::ChatRequest& request,
@@ -303,6 +303,7 @@ public:
                 call.function.arguments = R"({"query":"filo"})";
                 callback(core::llm::StreamChunk::make_tools({std::move(call)}));
             } else {
+                if (retry_) callback(core::llm::StreamChunk::make_attempt_reset("Retrying upstream"));
                 callback(core::llm::StreamChunk::make_content("Hel"));
                 callback(core::llm::StreamChunk::make_content("lo"));
             }
@@ -319,6 +320,7 @@ public:
 
 private:
     bool emit_tool_call_ = false;
+    bool retry_ = false;
     mutable std::mutex mutex_;
     std::string last_model_ = "stream-model";
 };
@@ -1592,4 +1594,33 @@ TEST_CASE("API gateway surfaces policy routing validation errors",
         unknown_policy->body.find("Unknown router policy") != std::string::npos
         || unknown_policy->body.find("Router policies are unavailable") != std::string::npos;
     REQUIRE(has_policy_error);
+}
+
+TEST_CASE("API gateway excludes retry status from model responses", "[daemon][api_gateway][retry]") {
+    bool stream = false;
+    SECTION("non-streaming") {}
+    SECTION("streaming") { stream = true; }
+    const auto name = std::format("retry-gateway-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    core::llm::ProviderManager::get_instance().register_provider(name, std::make_shared<StreamingGatewayTestProvider>(false, true));
+    core::config::AppConfig config;
+    config.default_provider = name;
+    config.default_model_selection = "manual";
+    config.providers[name].model = "stream-model";
+    exec::gateway::ProviderCatalog catalog;
+    catalog.providers.insert({name, true});
+    catalog.provider_default_models[name] = "stream-model";
+    const int port = next_test_port();
+    GatewayServerRunner server(port, config, std::move(catalog));
+    bool ready = false;
+    for (int attempt = 0; attempt < 120 && !ready; ++attempt) {
+        ready = bool(get_request(port, "/v1/models"));
+        if (!ready) std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    if (!ready) SKIP("Local socket bind/listen is unavailable in this environment.");
+    const auto response = post_json_request(port, "/v1/chat/completions",
+        std::format(R"({{"model":"{}","stream":{},"messages":[{{"role":"user","content":"hi"}}]}})", name, stream));
+    REQUIRE(response);
+    REQUIRE(response->status == 200);
+    CHECK_THAT(response->body, !Catch::Matchers::ContainsSubstring("Retrying upstream"));
+    CHECK_THAT(response->body, Catch::Matchers::ContainsSubstring(stream ? R"("content":"Hel")" : "Hello"));
 }
