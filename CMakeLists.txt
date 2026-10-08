@@ -16,6 +16,21 @@ configure_file(
     @ONLY
 )
 
+# The built-in shell command rules are data; embed the JSON verbatim so the
+# binary and the documented file can never disagree.
+set(FILO_DEFAULT_COMMAND_RULES_JSON
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/permissions/default_command_rules.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${FILO_DEFAULT_COMMAND_RULES_JSON}")
+file(READ "${FILO_DEFAULT_COMMAND_RULES_JSON}" FILO_DEFAULT_COMMAND_RULES)
+set(FILO_GENERATED_COMMAND_RULES_SOURCE
+    "${FILO_GENERATED_INCLUDE_DIR}/core/permissions/DefaultCommandRules.cpp")
+configure_file(
+    cmake/DefaultCommandRules.cpp.in
+    "${FILO_GENERATED_COMMAND_RULES_SOURCE}"
+    @ONLY
+)
+
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -444,6 +459,8 @@ set(FILO_CORE_SOURCES
     src/core/task/WorkStore.cpp
     src/core/history/PromptHistoryStore.cpp
     src/core/permissions/PermissionSystem.cpp
+    src/core/permissions/ShellCommandParser.cpp
+    src/core/permissions/CommandPolicy.cpp
     src/core/cli/TrustFlagResolver.cpp
     src/core/cli/WorkDirLayout.cpp
 )
@@ -535,6 +552,7 @@ add_library(filo_core STATIC ${FILO_CORE_SOURCES})
 target_sources(filo_core PRIVATE
     ${FILO_HEADER_FILES}
     "${FILO_GENERATED_VERSION_HEADER}"
+    "${FILO_GENERATED_COMMAND_RULES_SOURCE}"
 )
 target_include_directories(filo_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -700,7 +718,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_workspace_details_panel.cpp
     tests/test_agents_visualizer_panel.cpp
     tests/test_agent_permissions.cpp
-    tests/test_safety_policy.cpp
+    tests/test_command_policy.cpp
     tests/test_subagent_orchestrator.cpp
     tests/test_skill_loader.cpp
     tests/test_skill_commands.cpp
@@ -908,7 +926,7 @@ source_group(
         tests/test_sessions_lifecycle.cpp
         tests/test_budget_tracker.cpp
         tests/test_agent_permissions.cpp
-        tests/test_safety_policy.cpp
+        tests/test_command_policy.cpp
         tests/test_subagent_orchestrator.cpp
         tests/test_skill_loader.cpp
         tests/test_activity_timer.cpp

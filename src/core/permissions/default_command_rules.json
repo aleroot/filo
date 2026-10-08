@@ -1,0 +1,291 @@
+{
+  "wrappers": [
+    {
+      "program": "timeout",
+      "flags": ["--foreground", "--preserve-status", "-v", "--verbose"],
+      "options_with_value": ["-s", "--signal", "-k", "--kill-after"],
+      "positionals": 1,
+      "justification": "timeout [options] DURATION COMMAND: judged as COMMAND."
+    },
+    {
+      "program": "nice",
+      "options_with_value": ["-n", "--adjustment"],
+      "justification": "nice [-n N] COMMAND: judged as COMMAND."
+    },
+    {
+      "program": "nohup",
+      "justification": "nohup COMMAND: judged as COMMAND."
+    },
+    {
+      "program": "time",
+      "flags": ["-p"],
+      "justification": "time [-p] COMMAND: judged as COMMAND."
+    }
+  ],
+
+  "global_options": [
+    {
+      "program": "git",
+      "flags": ["--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--no-replace-objects", "--no-advice"],
+      "options_with_value": ["-C", "--git-dir", "--work-tree"],
+      "justification": "-c, --config-env, --exec-path and -p/--paginate are left out on purpose: they make git run other programs, so a command using them matches no rule and asks."
+    }
+  ],
+
+  "rules": [
+    {
+      "pattern": [["cat", "head", "tail", "wc", "nl", "ls", "pwd", "cd", "basename", "dirname", "realpath", "readlink", "stat", "du", "df", "strings", "hexdump", "od", "cmp", "diff"]],
+      "decision": "allow",
+      "justification": "Read files, directories and metadata. None of these has an option that writes a file or runs a program.",
+      "match": ["cat README.md", "head -n 20 src/main.cpp", "ls -la", "diff -u a.cpp b.cpp", "du -sh build", "cd src"],
+      "not_match": ["./cat README.md", "lsof", "less README.md"]
+    },
+    {
+      "pattern": [["cut", "tr", "paste", "comm", "join", "fold", "fmt", "expand", "unexpand", "column", "rev", "tac", "seq", "grep", "egrep", "fgrep", "jq"]],
+      "decision": "allow",
+      "justification": "Text filters that only read their input and print to stdout.",
+      "match": ["grep -rn TODO src", "cut -d: -f1 /etc/passwd", "jq '.name' package.json", "seq 1 10"],
+      "not_match": ["awk '{print}' f", "sed 's/a/b/' f"]
+    },
+    {
+      "pattern": [["echo", "true", "false", "test", "[", "sleep", "which", "whereis", "type", "whoami", "id", "uname", "uptime", "ps", "pgrep", "free", "nproc", "printenv"]],
+      "decision": "allow",
+      "justification": "Shell built-ins and system information that change nothing.",
+      "match": ["echo hello", "uname -a", "ps aux", "which clang", "[ -f CMakeLists.txt ]", "printenv PATH"],
+      "not_match": ["eval echo hi", "export PATH=/tmp"]
+    },
+    {
+      "pattern": [["md5sum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "b2sum", "shasum", "md5", "cksum"]],
+      "decision": "allow",
+      "justification": "Checksums read files; -c only verifies.",
+      "match": ["sha256sum archive.tar.gz", "shasum -a 256 x", "md5 -q file"]
+    },
+    {
+      "pattern": ["printf"],
+      "decision": "allow",
+      "unless_options": ["-v"],
+      "justification": "printf -v assigns a shell variable, which persists in Filo's shell session (PATH, for one).",
+      "match": ["printf '%s\\n' hello"],
+      "not_match": ["printf -v PATH '%s' /tmp/evil"]
+    },
+    {
+      "pattern": ["tree"],
+      "decision": "allow",
+      "unless_options": ["-o"],
+      "justification": "tree -o FILE writes its output to FILE.",
+      "match": ["tree -L 2 src", "tree -a -I node_modules"],
+      "not_match": ["tree -o out.txt", "tree -ao out.txt"]
+    },
+    {
+      "pattern": ["file"],
+      "decision": "allow",
+      "unless_options": ["-C", "--compile"],
+      "justification": "file -C compiles a magic database, writing a .mgc file.",
+      "match": ["file build/filo", "file -b --mime-type x.png"],
+      "not_match": ["file -C -m magic"]
+    },
+    {
+      "pattern": ["sort"],
+      "decision": "allow",
+      "unless_options": ["-o", "--output", "--compress-program"],
+      "justification": "sort -o writes a file; --compress-program runs a program.",
+      "match": ["sort -u names.txt", "sort -t: -k3 -n /etc/passwd"],
+      "not_match": ["sort -o ~/.bashrc f", "sort -uo out f", "sort --output=out f", "sort --out=out f", "sort --compress-program=sh f"]
+    },
+    {
+      "pattern": ["uniq"],
+      "decision": "allow",
+      "max_positionals": 1,
+      "justification": "uniq INPUT OUTPUT writes OUTPUT, so at most one file name.",
+      "match": ["uniq -c", "uniq -c words.txt"],
+      "not_match": ["uniq in.txt out.txt"]
+    },
+    {
+      "pattern": ["xxd"],
+      "decision": "allow",
+      "max_positionals": 1,
+      "justification": "xxd INFILE OUTFILE writes OUTFILE, so at most one file name.",
+      "match": ["xxd build/filo", "xxd -r -p dump.hex"],
+      "not_match": ["xxd -r dump out.bin"]
+    },
+    {
+      "pattern": ["base64"],
+      "decision": "allow",
+      "unless_options": ["-o", "--output"],
+      "justification": "base64 -o (BSD) writes a file.",
+      "match": ["base64 -d payload.txt", "base64 -i image.png"],
+      "not_match": ["base64 -o out.bin -d in.txt"]
+    },
+    {
+      "pattern": ["date"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["-s", "--set"],
+      "justification": "date -s and a bare date argument set the clock.",
+      "match": ["date", "date -u"],
+      "not_match": ["date -s '2020-01-01'", "date 0101120020"]
+    },
+    {
+      "pattern": ["date", {"regex": "\\+.*"}],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["-s", "--set"],
+      "justification": "date +FORMAT prints the date in FORMAT.",
+      "match": ["date +%Y-%m-%d", "date '+%s'"],
+      "not_match": ["date +%s -s now"]
+    },
+    {
+      "pattern": ["hostname"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "justification": "hostname NAME renames the machine.",
+      "match": ["hostname", "hostname -s"],
+      "not_match": ["hostname evil"]
+    },
+    {
+      "pattern": ["env"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["-S", "--split-string"],
+      "justification": "Bare env prints the environment; env with a command runs that command, which this rule cannot judge.",
+      "match": ["env", "env -0"],
+      "not_match": ["env rm -rf /", "env FOO=1 make", "env -S'rm -rf /'"]
+    },
+    {
+      "pattern": ["command", ["-v", "-V"]],
+      "decision": "allow",
+      "justification": "command -v NAME looks a name up; command NAME would run it.",
+      "match": ["command -v cmake"],
+      "not_match": ["command rm -rf /"]
+    },
+    {
+      "pattern": ["sed", "-n", {"regex": "((\\d+|\\$|/([^/\\\\\\n]|\\\\.)*/)(,(\\d+|\\$|\\+\\d+|/([^/\\\\\\n]|\\\\.)*/))?p)(;(\\d+|\\$|/([^/\\\\\\n]|\\\\.)*/)(,(\\d+|\\$|\\+\\d+|/([^/\\\\\\n]|\\\\.)*/))?p)*"}],
+      "decision": "allow",
+      "unless_options": ["-i", "--in-place", "-e", "--expression", "-f", "--file"],
+      "justification": "Only print scripts: `ADDR[,ADDR]p` joined by `;`, where an address is a line number, $, +N, or a /regex/. Any other sed command can write files (w) or run programs (e), and -e or -f could add one.",
+      "match": ["sed -n 1,20p src/main.cpp", "sed -n '10p' f", "sed -n '5,$p' f", "sed -n '1,80p;190,250p' f", "sed -n '/^class Foo/,/^}/p' f", "sed -n '/func x/,+40p' f", "sed -n '/a\\/b/p' f"],
+      "not_match": ["sed 's/x/y/e' f", "sed -n 1p -i f", "sed -n 1p -e 'w out' f", "sed -n '1e rm -rf ~' f", "sed -n '1p;w out' f", "sed -n '/a/w out' f", "sed -n '/a\\/p;w out' f", "sed -n '/a/,/b/p;1d' f"]
+    },
+    {
+      "pattern": ["rg"],
+      "decision": "allow",
+      "unless_options": ["--pre", "--hostname-bin", "-z", "--search-zip"],
+      "justification": "--pre and --hostname-bin run a program; -z runs decompressors.",
+      "match": ["rg -n 'class Foo' src", "rg --files -g '*.hpp'", "rg --pre-glob '*.gz' x"],
+      "not_match": ["rg --pre 'rm -rf ~' x", "rg --pre=sh x", "rg -iz x", "rg --search-zip x"]
+    },
+    {
+      "pattern": ["find"],
+      "decision": "allow",
+      "unless_options": ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls", "-fprint", "-fprint0", "-fprintf"],
+      "justification": "These primaries run programs, delete files, or write file lists.",
+      "match": ["find . -name '*.cpp'", "find src -type f -newer CMakeLists.txt"],
+      "not_match": ["find . -exec rm {} ;", "find . -delete", "find . -fprint /tmp/x", "find . -okdir rm {} +"]
+    },
+    {
+      "pattern": ["fd"],
+      "decision": "allow",
+      "unless_options": ["-x", "--exec", "-X", "--exec-batch"],
+      "justification": "fd -x and -X run a program for each match.",
+      "match": ["fd -e cpp", "fd -H config"],
+      "not_match": ["fd -x rm", "fd --exec-batch rm"]
+    },
+    {
+      "pattern": ["git", ["status", "log", "diff", "show", "shortlog", "blame", "annotate", "describe", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "merge-base", "name-rev", "show-ref", "for-each-ref", "count-objects", "grep", "diff-tree", "diff-files", "diff-index", "show-branch", "check-ignore", "check-attr", "version"]],
+      "decision": "allow",
+      "unless_options": ["--output", "--ext-diff", "--textconv", "--exec", "--paginate", "-O", "--open-files-in-pager"],
+      "justification": "Read-only git. --output writes a file; --ext-diff, --textconv and --exec run configured programs; -O opens a pager.",
+      "match": ["git status", "git log --oneline -20", "git --no-pager diff --stat", "git -C ../other log", "git show HEAD@{1}", "git log --output-indicator-new=+"],
+      "not_match": ["git diff --output=/tmp/x", "git log --outp=x", "git -c core.pager='rm -rf ~' log", "git -p log", "git grep -O foo", "git push"]
+    },
+    {
+      "pattern": ["git", "stash", ["list", "show"]],
+      "decision": "allow",
+      "unless_options": ["--output", "--ext-diff", "--textconv"],
+      "justification": "Listing and showing stashes changes nothing.",
+      "match": ["git stash list", "git stash show -p"],
+      "not_match": ["git stash", "git stash pop"]
+    },
+    {
+      "pattern": ["git", "branch"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description", "-t", "--track"],
+      "justification": "Listing branches. A branch name, or any of these options, creates, renames, deletes or reconfigures one.",
+      "match": ["git branch", "git branch -a", "git branch -vv", "git branch --show-current"],
+      "not_match": ["git branch newbranch", "git branch -f main HEAD~5", "git branch -D old", "git branch --unset-upstream"]
+    },
+    {
+      "pattern": ["git", "branch", ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "-l", "--list"]],
+      "decision": "allow",
+      "unless_options": ["-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force", "-u", "--set-upstream-to", "--unset-upstream", "--edit-description", "-t", "--track"],
+      "justification": "These options put git branch in list mode (git documents that they imply --list), so the remaining words are patterns, not branches to create.",
+      "match": ["git branch --contains 6745899", "git branch --merged main", "git branch --list 'feat/*'"],
+      "not_match": ["git branch newbranch", "git branch --merged main -D old"]
+    },
+    {
+      "pattern": ["git", "tag"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["-a", "--annotate", "-s", "--sign", "-u", "--local-user", "-f", "--force", "-d", "--delete", "-m", "--message", "-F", "--file", "-e", "--edit"],
+      "justification": "Listing tags. A tag name, or any of these options, creates or deletes one.",
+      "match": ["git tag", "git tag -n"],
+      "not_match": ["git tag v1.0", "git tag -f v1", "git tag -d v0.9"]
+    },
+    {
+      "pattern": ["git", "tag", ["-l", "--list"]],
+      "decision": "allow",
+      "unless_options": ["-a", "--annotate", "-s", "--sign", "-u", "--local-user", "-f", "--force", "-d", "--delete", "-m", "--message", "-F", "--file", "-e", "--edit"],
+      "justification": "git tag -l PATTERN lists matching tags.",
+      "match": ["git tag -l 'v1.*'"],
+      "not_match": ["git tag -l -d v1"]
+    },
+    {
+      "pattern": ["git", "remote"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "justification": "git remote [-v] lists remotes; subcommands such as add and remove change them.",
+      "match": ["git remote", "git remote -v"],
+      "not_match": ["git remote add up https://example.com/x.git", "git remote prune origin"]
+    },
+    {
+      "pattern": ["git", "remote", "get-url"],
+      "decision": "allow",
+      "match": ["git remote get-url origin"]
+    },
+    {
+      "pattern": ["git", "config", ["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"]],
+      "decision": "allow",
+      "unless_options": ["--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"],
+      "justification": "Reading configuration. Any other git config form can set a value, and alias.*, core.pager or core.hooksPath values run programs.",
+      "match": ["git config --get user.name", "git config --list", "git config get user.email"],
+      "not_match": ["git config alias.x '!rm -rf ~'", "git config core.hooksPath /tmp/h", "git config --global user.name x"]
+    },
+    {
+      "pattern": ["git", "config", {"regex": "[A-Za-z][-A-Za-z0-9]*(\\..+)?\\.[A-Za-z][-A-Za-z0-9]*"}],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"],
+      "justification": "git config NAME prints one value; a second argument would set it. A name always contains a dot, so subcommands such as `edit` cannot match.",
+      "match": ["git config user.name", "git config remote.origin.url"],
+      "not_match": ["git config user.name x", "git config edit", "git config core.pager --unset", "git config alias.x '!sh'"]
+    },
+    {
+      "pattern": ["git", ["reflog", "worktree"], ["show", "list"]],
+      "decision": "allow",
+      "unless_options": ["--output", "--ext-diff", "--textconv"],
+      "justification": "Listing reflog entries and worktrees; expire, delete, add and remove change them.",
+      "match": ["git reflog show -10", "git worktree list"],
+      "not_match": ["git reflog expire --all", "git worktree add ../x"]
+    },
+    {
+      "pattern": ["git", "reflog"],
+      "decision": "allow",
+      "max_positionals": 0,
+      "unless_options": ["--output", "--ext-diff", "--textconv"],
+      "justification": "Bare git reflog shows the reflog.",
+      "match": ["git reflog", "git reflog -10"],
+      "not_match": ["git reflog delete HEAD@{1}"]
+    }
+  ]
+}

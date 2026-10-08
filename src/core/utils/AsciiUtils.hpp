@@ -18,10 +18,16 @@ namespace core::utils::ascii {
     });
 }
 
+[[nodiscard]] constexpr bool is_digit(unsigned char ch) noexcept {
+    return ch >= '0' && ch <= '9';
+}
+
+[[nodiscard]] constexpr bool is_alpha(unsigned char ch) noexcept {
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+}
+
 [[nodiscard]] constexpr bool is_alnum(unsigned char ch) noexcept {
-    return (ch >= '0' && ch <= '9')
-        || (ch >= 'A' && ch <= 'Z')
-        || (ch >= 'a' && ch <= 'z');
+    return is_digit(ch) || is_alpha(ch);
 }
 
 [[nodiscard]] constexpr bool is_space(unsigned char ch) noexcept {

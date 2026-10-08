@@ -483,8 +483,7 @@ TEST_CASE("Session trust-rule helpers", "[permissions]") {
                                         R"({"command":"git status"})")
                 == "shell:git");
         REQUIRE(make_session_allow_rule("run_terminal_command",
-                                        R"({"working_dir":"/tmp"})")
-                == "run_terminal_command");
+                                        R"({"working_dir":"/tmp"})").empty());
         REQUIRE(
             make_session_allow_rule("run_verification",
                                     R"({"recipe_id":"cmake:test:debug"})") ==

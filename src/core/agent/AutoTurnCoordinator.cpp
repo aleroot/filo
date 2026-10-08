@@ -29,11 +29,8 @@ namespace {
     return true;
   if (core::tools::names::is_subagent_tool(tool.name))
     return !tool.read_only_subagent;
-  if (core::tools::names::is_terminal_tool(tool.name)) {
-    const auto command = CommandSafetyPolicy::extract_shell_command(
-        tool.arguments);
-    return CommandSafetyPolicy::classify(command) != CommandSafetyClass::Safe;
-  }
+  if (core::tools::names::is_terminal_tool(tool.name))
+    return !core::permissions::shell_call_is_allowed(tool.arguments);
   return tool.destructive_hint;
 }
 

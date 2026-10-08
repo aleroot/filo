@@ -149,15 +149,19 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
 //
 // Supported canonical rule formats:
 //   shell:*          → any run_terminal_command call
-//   shell:<program>  → run_terminal_command calls for one program
+//   shell:<program>  → run_terminal_command calls in which every command is
+//                      <program> or one the CommandPolicy allows anyway
 //   files:*          → any file modification/deletion/move tool call
 //   files:write      → write/apply_patch/replace/create_directory calls
 //   files:delete     → non-recursive delete_file calls
 //   files:delete_recursive → recursive delete_file calls
 //   files:move       → move_file calls
 //   tool:<name>      → a specific tool name
-//   <legacy key>     → exact make_allow_key() match (backward-compatible;
-//                      for example run_terminal_command remains exact)
+//   <legacy key>     → exact make_allow_key() match (backward-compatible);
+//                      never matches a call that carries a shell command
+//
+// A shell call that does not name a single program yields an empty rule:
+// nothing broader than that one call may be remembered.
 std::string make_session_allow_rule(std::string_view tool_name,
                                     std::string_view tool_args);
 std::string normalize_session_allow_rule(std::string_view rule);

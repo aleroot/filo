@@ -1,6 +1,6 @@
 #include "PermissionSystem.hpp"
 #include "../agent/PermissionGate.hpp"
-#include "../agent/SafetyPolicy.hpp"
+#include "CommandPolicy.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
@@ -47,46 +47,6 @@ const AllowRule* find_allow_rule(std::string_view tool_name) {
     return nullptr;
 }
 
-std::string_view trim_left(std::string_view text) {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
-        text.remove_prefix(1);
-    }
-    return text;
-}
-
-std::string_view next_shell_token(std::string_view& rest) {
-    rest = trim_left(rest);
-    if (rest.empty()) {
-        return {};
-    }
-
-    std::size_t end = 0;
-    while (end < rest.size() && !std::isspace(static_cast<unsigned char>(rest[end]))) {
-        ++end;
-    }
-    const auto token = rest.substr(0, end);
-    rest.remove_prefix(end);
-    return token;
-}
-
-bool is_env_assignment(std::string_view token) {
-    if (token.empty()) {
-        return false;
-    }
-    if (!std::isalpha(static_cast<unsigned char>(token.front())) && token.front() != '_') {
-        return false;
-    }
-    for (const char ch : token) {
-        if (ch == '=') {
-            return true;
-        }
-        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_') {
-            return false;
-        }
-    }
-    return false;
-}
-
 std::string strip_path_prefix(std::string_view token) {
     const auto separator = token.find_last_of("/\\");
     if (separator != std::string_view::npos) {
@@ -95,24 +55,63 @@ std::string strip_path_prefix(std::string_view token) {
     return std::string(token);
 }
 
-std::string extract_shell_program(std::string_view tool_args) {
-    const auto command = core::agent::CommandSafetyPolicy::extract_shell_command(tool_args);
-    if (command.empty()) {
+// The program a command runs, as a session rule names it: no directory.
+// Empty unless the command starts with a plain literal program; an assignment
+// (`CC=clang make`) or an expansion (`$EDITOR x`) names none.
+std::string program_name(const ShellCommand& command) {
+    if (command.empty() || !command.front().is_literal()) {
         return {};
     }
-
-    std::string_view rest = command;
-    auto token = next_shell_token(rest);
-
-    // Skip env assignments: VAR=VALUE cmd ...
-    while (!token.empty() && is_env_assignment(token)) {
-        token = next_shell_token(rest);
-    }
-
-    if (token.empty()) {
+    const std::string& word = command.front().text;
+    if (word.empty() || word.contains('=')) {
         return {};
     }
-    return strip_path_prefix(token);
+    return strip_path_prefix(word);
+}
+
+// The one program a run_terminal_command call needs approval for: the program
+// of every command the policy would ask about, or of the first command when it
+// would ask about none. Empty when that is not a single program, so nothing
+// broader than the exact call can be remembered from it.
+std::string approved_program(std::string_view tool_args) {
+    const auto line = shell_command_argument(tool_args);
+    if (!line) {
+        return {};
+    }
+    const CommandPolicy& policy = command_policy();
+    const auto commands = policy.commands(*line);
+    if (!commands || commands->empty()) {
+        return {};
+    }
+    std::string program;
+    for (const ShellCommand& command : *commands) {
+        if (policy.decide(command) == CommandDecision::Allow) {
+            continue;
+        }
+        std::string name = program_name(command);
+        if (name.empty() || (!program.empty() && !core::utils::ascii::iequals(name, program))) {
+            return {};
+        }
+        program = std::move(name);
+    }
+    return program.empty() ? program_name(commands->front()) : program;
+}
+
+// A `shell:<program>` grant covers a call only when every command in it is
+// that program or one the policy allows anyway: approving `make` must not
+// approve `make && rm -rf ~` or `make > ~/.bashrc`.
+bool shell_call_only_runs(std::string_view tool_args, std::string_view program) {
+    const auto line = shell_command_argument(tool_args);
+    if (!line) {
+        return false;
+    }
+    const CommandPolicy& policy = command_policy();
+    const auto commands = policy.commands(*line);
+    return commands && !commands->empty()
+        && std::ranges::all_of(*commands, [&](const ShellCommand& command) {
+               return policy.decide(command) == CommandDecision::Allow
+                   || core::utils::ascii::iequals(program_name(command), program);
+           });
 }
 
 std::string extract_verification_scope(std::string_view tool_args) {
@@ -315,8 +314,7 @@ bool parsed_session_rule_matches(const ParsedSessionRule& rule,
             if (tool_name != core::tools::names::kRunTerminalCommand) {
                 return false;
             }
-            const auto current_program = extract_shell_program(tool_args);
-            return !current_program.empty() && iequals_ascii(current_program, rule.value);
+            return shell_call_only_runs(tool_args, rule.value);
         }
         case SessionRuleKind::FilesAny:
             return core::tools::names::is_file_modification_tool(tool_name);
@@ -329,6 +327,12 @@ bool parsed_session_rule_matches(const ParsedSessionRule& rule,
         case SessionRuleKind::FilesMove:
             return tool_name == core::tools::names::kMoveFile;
         case SessionRuleKind::ExactAllowKey:
+            // An allow key does not capture a shell command, so it can never
+            // vouch for one; shell grants go through shell:<program>.
+            if (tool_name == core::tools::names::kRunTerminalCommand
+                && shell_command_argument(tool_args).has_value()) {
+                return false;
+            }
             return !rule.value.empty() && make_allow_key(tool_name, tool_args) == rule.value;
     }
     return false;
@@ -366,7 +370,7 @@ std::string describe_parsed_session_rule(const ParsedSessionRule& rule) {
 
 std::string make_allow_key_from_rule(const AllowRule& rule, std::string_view tool_args) {
     if (rule.key_strategy == AllowKeyStrategy::ShellProgram) {
-        const auto program = extract_shell_program(tool_args);
+        const auto program = approved_program(tool_args);
         if (!program.empty()) {
             return std::format("{}:{}", rule.tool_name, program);
         }
@@ -382,7 +386,7 @@ std::string make_allow_key_from_rule(const AllowRule& rule, std::string_view too
 
 std::string make_allow_label_from_rule(const AllowRule& rule, std::string_view tool_args) {
     if (rule.key_strategy == AllowKeyStrategy::ShellProgram) {
-        const auto program = extract_shell_program(tool_args);
+        const auto program = approved_program(tool_args);
         if (!program.empty()) {
             return std::format("'{}' commands", program);
         }
@@ -636,15 +640,14 @@ std::string make_allow_label(std::string_view tool_name, std::string_view tool_a
 std::string make_session_allow_rule(std::string_view tool_name,
                                     std::string_view tool_args) {
     if (tool_name == core::tools::names::kRunTerminalCommand) {
-        const auto program = core::utils::str::to_lower_ascii_copy(extract_shell_program(tool_args));
+        const auto program = core::utils::str::to_lower_ascii_copy(approved_program(tool_args));
         if (!program.empty()) {
             return std::format("shell:{}", program);
         }
 
-        // Fail-safe default: if we cannot confidently scope to a single shell
-        // program, preserve the historical exact allow-key behavior instead of
-        // broadening to shell:*.
-        return make_allow_key(tool_name, tool_args);
+        // No single program to scope the grant to: remember nothing. The bare
+        // tool key would match every command whose program cannot be named.
+        return {};
     }
 
     if (tool_name == core::tools::names::kRunVerification) {

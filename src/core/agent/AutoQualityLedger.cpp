@@ -1,6 +1,6 @@
 #include "AutoQualityLedger.hpp"
 
-#include "SafetyPolicy.hpp"
+#include "../permissions/CommandPolicy.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 
@@ -31,12 +31,9 @@ void AutoQualityLedger::observe_tool(
   bool mutation = succeeded && !verification_tool &&
                   (mutation_hint ||
                    core::tools::names::is_file_modification_tool(tool_name));
-  if (succeeded && core::tools::names::is_terminal_tool(tool_name)) {
-    const std::string command =
-        CommandSafetyPolicy::extract_shell_command(arguments);
-    if (CommandSafetyPolicy::classify(command) != CommandSafetyClass::Safe) {
-      mutation = true;
-    }
+  if (succeeded && core::tools::names::is_terminal_tool(tool_name) &&
+      !core::permissions::shell_call_is_allowed(arguments)) {
+    mutation = true;
   }
   if (succeeded && core::tools::names::is_subagent_tool(tool_name)) {
     const std::string worker =

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "SafetyPolicy.hpp"
+#include "../permissions/CommandPolicy.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 
@@ -128,10 +128,10 @@ enum class PermissionProfile {
 // ---------------------------------------------------------------------------
 // Helper: Checks if a tool requires permission under the given profile.
 //
-// For run_terminal_command the optional `tool_args` JSON blob is inspected by
-// CommandSafetyPolicy so that read-only commands (ls, grep, git log, …) are
-// auto-approved even in Interactive mode, while state-changing commands
-// (rm, git push, npm install, …) always prompt the user.
+// For run_terminal_command the `tool_args` JSON blob is judged by the shell
+// CommandPolicy, so commands its rules allow (ls, grep, git log, …) run
+// without asking even in Interactive mode, while anything else (rm, git push,
+// npm install, output redirections, …) prompts the user.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] inline bool needs_permission(std::string_view requested_tool,
@@ -167,13 +167,8 @@ enum class PermissionProfile {
         if (is_verification)
           return true;
         if (is_shell) {
-            // Even in Standard mode, purely read-only shell commands are safe.
-            if (!tool_args.empty()) {
-                const auto cmd = CommandSafetyPolicy::extract_shell_command(tool_args);
-                if (!cmd.empty() && !CommandSafetyPolicy::command_needs_permission(cmd))
-                    return false;
-            }
-            return true;
+            // Even in Standard mode, commands the policy allows run unprompted.
+            return !core::permissions::shell_call_is_allowed(tool_args);
         }
         return false; // Safe tools (read, etc.) are always allowed.
     }
@@ -184,17 +179,12 @@ enum class PermissionProfile {
              is_web_access || is_python;
     }
 
-    // 5. Interactive: Ask for all side-effects, but apply SafetyPolicy to shell
-    //    commands so purely read-only commands are auto-approved.
+    // 5. Interactive: Ask for all side-effects, except shell commands the
+    //    command policy allows.
     if (is_file_mod || is_verification || is_task || is_web_access || is_python)
       return true;
     if (is_shell) {
-        if (!tool_args.empty()) {
-            const auto cmd = CommandSafetyPolicy::extract_shell_command(tool_args);
-            if (!cmd.empty() && !CommandSafetyPolicy::command_needs_permission(cmd))
-                return false;
-        }
-        return true;
+        return !core::permissions::shell_call_is_allowed(tool_args);
     }
     return false;
 }

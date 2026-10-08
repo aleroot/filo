@@ -1,0 +1,14 @@
+// Template (tracked in git): CMake's configure_file pastes
+// src/core/permissions/default_command_rules.json into the raw string below
+// and writes the result to
+// <build>/generated/core/permissions/DefaultCommandRules.cpp, which is not
+// tracked. Edit the rules in the JSON file, not in the generated source.
+#include "core/permissions/CommandPolicy.hpp"
+
+namespace core::permissions {
+
+std::string_view default_command_rules() noexcept {
+    return R"filo_rules_json(@FILO_DEFAULT_COMMAND_RULES@)filo_rules_json";
+}
+
+} // namespace core::permissions
