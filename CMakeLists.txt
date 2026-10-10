@@ -454,6 +454,9 @@ set(FILO_CORE_SOURCES
     src/core/session/SessionReport.cpp
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp
+    src/core/session/SessionDigest.cpp
+    src/core/session/SessionReference.cpp
+    src/core/session/SessionReferenceCatalogue.cpp
     src/core/net/NetworkTraffic.cpp
     src/core/task/TaskService.cpp
     src/core/task/WorkStore.cpp
@@ -663,6 +666,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_model_defaults_persistence.cpp
     tests/test_session_model_override.cpp
     tests/test_context_mentions.cpp
+    tests/test_session_reference.cpp
     tests/test_context_builder.cpp
     tests/test_steering_guard.cpp
     tests/test_context_window.cpp
@@ -886,6 +890,7 @@ source_group(
         tests/test_model_defaults_persistence.cpp
         tests/test_session_model_override.cpp
         tests/test_context_mentions.cpp
+        tests/test_session_reference.cpp
         tests/test_context_window.cpp
         tests/test_openai_provider.cpp
         tests/test_openai_stream_encoder.cpp

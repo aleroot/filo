@@ -6,6 +6,7 @@
 #include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/budget/TokenUsageFormatters.hpp"
+#include "core/session/SessionReference.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ThreadCatalog.hpp"
 #include "core/tools/ToolNames.hpp"
@@ -916,6 +917,110 @@ Element render_mention_prompt_panel(const std::vector<MentionSuggestion>& sugges
                                input_text, selected_index);
 }
 
+namespace {
+
+// Title spans with every query term emphasised. Matching is byte-wise on the
+// ASCII-lowercased title, so spans always split on UTF-8 boundaries.
+Elements highlighted_title(std::string_view title,
+                           const std::vector<std::string>& terms,
+                           bool selected) {
+    const std::string lowered = core::utils::str::to_lower_ascii_copy(title);
+    std::vector<bool> marked(title.size(), false);
+    for (const std::string& needle : terms) {
+        for (std::size_t at = lowered.find(needle); at != std::string::npos;
+             at = lowered.find(needle, at + needle.size())) {
+            std::fill_n(marked.begin() + static_cast<std::ptrdiff_t>(at), needle.size(), true);
+        }
+    }
+
+    const Color base = selected ? Color::Black : Color::White;
+    const Color accent = selected ? Color::Black : static_cast<Color>(ColorYellowBright);
+    Elements spans;
+    std::size_t start = 0;
+    while (start < title.size()) {
+        std::size_t end = start;
+        while (end < title.size() && marked[end] == marked[start]) ++end;
+        auto span = text(std::string(title.substr(start, end - start))) | ftxui::bold;
+        spans.push_back(marked[start] ? (std::move(span) | color(accent) | underlined)
+                                      : (std::move(span) | color(base)));
+        start = end;
+    }
+    return spans;
+}
+
+} // namespace
+
+Element render_session_reference_prompt_panel(
+    const std::vector<core::session::SessionReferenceSuggestion>& suggestions,
+    int selected_index,
+    std::string_view query,
+    bool enter_accepts,
+    Element input_line,
+    std::string_view input_text) {
+    // Two lines per conversation: what it was about and how much happened,
+    // then where it lives and exactly when.
+    constexpr int kTitleWidth = 72;
+    constexpr int kVisibleConversations = 5;
+    const auto now = std::chrono::system_clock::now();
+    const auto terms = core::session::session_reference_terms(query);
+
+    std::vector<Element> rows;
+    rows.reserve(suggestions.size());
+    for (std::size_t i = 0; i < suggestions.size(); ++i) {
+        const auto& s = suggestions[i];
+        const bool sel = static_cast<int>(i) == selected_index;
+        const Color muted = sel ? Color::Black : Color::GrayDark;
+        const Color soft = sel ? Color::Black : Color::GrayLight;
+
+        const std::string title = core::utils::str::trim_trailing(fit_column(s.title, kTitleWidth), ' ');
+        const std::string turns = s.turn_count == 1
+            ? std::string("1 turn")
+            : std::format("{} turns", s.turn_count);
+
+        Elements details;
+        details.push_back(text("   "));
+        details.push_back(text(s.session_id)
+                          | color(sel ? Color{Color::Black} : static_cast<Color>(ColorYellowDark)));
+        // The positional shortcut, so `#2` is discoverable from the list.
+        if (s.ordinal > 0) {
+            details.push_back(text(std::format("  #{}", s.ordinal)) | color(soft));
+        }
+        for (const std::string& part : {s.project, s.model}) {
+            if (part.empty()) continue;
+            details.push_back(text("  ·  ") | color(muted));
+            details.push_back(text(part) | color(muted));
+        }
+        details.push_back(filler());
+        details.push_back(text(core::session::format_session_moment(s.last_active_at, now))
+                          | color(soft));
+        details.push_back(text(" "));
+
+        auto row = vbox({
+            hbox({
+                text(sel ? " ▸ " : "   ")
+                    | color(sel ? Color{Color::Black} : static_cast<Color>(ColorYellowBright)),
+                hbox(highlighted_title(title, terms, sel)) | xflex,
+                text(turns) | color(muted),
+                text("  "),
+                text(fit_column_right(core::session::format_session_age(s.last_active_at, now), 9))
+                    | color(soft),
+                text(" "),
+            }),
+            hbox(std::move(details)),
+        });
+        rows.push_back(sel ? (std::move(row) | bgcolor(ColorYellowDark)) : std::move(row));
+    }
+
+    return render_picker_panel("CONVERSATIONS",
+                               std::move(rows),
+                               std::move(input_line),
+                               input_text,
+                               selected_index,
+                               kVisibleConversations,
+                               enter_accepts ? "↑↓ navigate  ↵/Tab reference  Esc dismiss"
+                                             : "↑↓ navigate  Tab reference  ↵ send  Esc dismiss");
+}
+
 Element render_permission_prompt_panel(std::string_view tool_name,
                                        std::string_view args_preview,
                                        const ToolDiffPreview& diff_preview,
@@ -1532,12 +1637,10 @@ Element render_session_picker_panel(
         const bool is_current = core::session::is_current_thread(s, current_session_id);
         const bool is_running = running_session_ids.contains(s.session_id);
 
-        const std::string stamp = s.last_active_at.empty() ? s.created_at : s.last_active_at;
-        const std::string relative = core::session::format_relative_time(stamp, now);
+        const std::string relative =
+            core::session::format_relative_time(core::session::thread_activity_timestamp(s), now);
         const std::string title = core::session::thread_display_title(s);
-        const std::string model_cell = s.provider.empty()
-            ? s.model
-            : std::format("{}/{}", s.provider, s.model);
+        const std::string model_cell = core::session::thread_model_label(s.provider, s.model);
 
         const Color primary_color = is_selected ? Color::Black : Color::White;
         const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;

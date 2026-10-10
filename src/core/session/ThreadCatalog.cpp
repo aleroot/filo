@@ -4,6 +4,7 @@
 #include "core/utils/StringUtils.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <ctime>
 #include <format>
@@ -19,6 +20,39 @@ namespace {
         return -1;
     }
     return value;
+}
+
+[[nodiscard]] std::tm local_tm(std::chrono::system_clock::time_point when) {
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(when);
+    std::tm out{};
+#if defined(_WIN32)
+    localtime_s(&out, &seconds);
+#else
+    localtime_r(&seconds, &out);
+#endif
+    return out;
+}
+
+[[nodiscard]] std::string format_tm(const char* pattern, const std::tm& when) {
+    std::array<char, 32> buffer{};
+    const std::size_t written = std::strftime(buffer.data(), buffer.size(), pattern, &when);
+    return std::string(buffer.data(), written);
+}
+
+// "Oct 12" without the zero padding %d would add.
+[[nodiscard]] std::string month_day(const std::tm& when) {
+    return std::format("{} {}", format_tm("%b", when), when.tm_mday);
+}
+
+[[nodiscard]] std::chrono::sys_days civil_day(const std::tm& when) noexcept {
+    using namespace std::chrono;
+    return sys_days{year{when.tm_year + 1900} / month{static_cast<unsigned>(when.tm_mon + 1)}
+                    / day{static_cast<unsigned>(when.tm_mday)}};
+}
+
+// Local calendar days from @p earlier to @p later (0 = same day).
+[[nodiscard]] int calendar_days_between(const std::tm& earlier, const std::tm& later) noexcept {
+    return static_cast<int>((civil_day(later) - civil_day(earlier)).count());
 }
 
 } // namespace
@@ -76,6 +110,15 @@ std::string thread_display_title(const SessionInfo& info) {
         return std::format("thread {}", info.session_id);
     }
     return "untitled thread";
+}
+
+std::string thread_model_label(std::string_view provider, std::string_view model) {
+    if (provider.empty() || model.empty()) return std::string(model);
+    return std::format("{}/{}", provider, model);
+}
+
+const std::string& thread_activity_timestamp(const SessionInfo& info) noexcept {
+    return info.last_active_at.empty() ? info.created_at : info.last_active_at;
 }
 
 std::optional<std::chrono::system_clock::time_point>
@@ -167,6 +210,39 @@ std::string format_relative_time(
     gmtime_r(&tt, &tm);
     return std::format("{:04d}-{:02d}-{:02d}",
                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+}
+
+std::string format_session_moment(std::string_view iso_timestamp,
+                                  std::chrono::system_clock::time_point now) {
+    const auto parsed = parse_iso8601_utc(iso_timestamp);
+    if (!parsed.has_value()) return std::string(iso_timestamp.substr(0, 10));
+    const std::tm when = local_tm(*parsed);
+    const std::tm today = local_tm(now);
+
+    const std::string clock = format_tm("%H:%M", when);
+    const int days_ago = calendar_days_between(when, today);
+    if (days_ago == 0) return clock;
+    if (days_ago == 1) return std::format("yesterday {}", clock);
+    if (days_ago > 1 && days_ago < 7) return std::format("{} {}", format_tm("%a", when), clock);
+    if (today.tm_year == when.tm_year) return month_day(when);
+    return std::format("{} {}", month_day(when), when.tm_year + 1900);
+}
+
+std::string format_session_age(std::string_view iso_timestamp,
+                               std::chrono::system_clock::time_point now) {
+    const auto parsed = parse_iso8601_utc(iso_timestamp);
+    if (!parsed.has_value()) return {};
+
+    const auto minutes = std::chrono::duration_cast<std::chrono::minutes>(now - *parsed).count();
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return std::format("{}m ago", minutes);
+    const int days_ago = calendar_days_between(local_tm(*parsed), local_tm(now));
+    if (days_ago <= 0) return std::format("{}h ago", minutes / 60);
+    if (days_ago == 1) return "yesterday";
+    if (days_ago < 14) return std::format("{}d ago", days_ago);
+    if (days_ago < 60) return std::format("{}w ago", days_ago / 7);
+    if (days_ago < 365) return std::format("{}mo ago", days_ago / 30);
+    return std::format("{}y ago", days_ago / 365);
 }
 
 ThreadRecencyGroup thread_recency_group(

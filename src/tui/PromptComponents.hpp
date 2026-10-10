@@ -6,6 +6,7 @@
 #include "RewindPicker.hpp"
 #include "core/llm/Models.hpp"
 #include "core/scm/SourceControlProvider.hpp"
+#include "core/session/SessionReferenceCatalogue.hpp"
 #include "core/session/SessionStore.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <filesystem>
@@ -156,6 +157,17 @@ ftxui::Element render_mention_prompt_panel(const std::vector<MentionSuggestion>&
                                            int selected_index,
                                            ftxui::Element input_line,
                                            std::string_view input_text);
+
+/// The `#` conversation picker: title (query terms emphasised), turns and
+/// relative age, then id, `#N` shortcut, project, model and the local
+/// date/time. @p enter_accepts picks the key hint (Enter may send instead).
+ftxui::Element render_session_reference_prompt_panel(
+    const std::vector<core::session::SessionReferenceSuggestion>& suggestions,
+    int selected_index,
+    std::string_view query,
+    bool enter_accepts,
+    ftxui::Element input_line,
+    std::string_view input_text);
 
 /// @p origin_label is optional decoration. Isolation is owned by
 /// ThreadModalHost: a prompt only paints on its origin thread.

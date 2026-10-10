@@ -1,6 +1,9 @@
 #include "ContextMentions.hpp"
 #include "MentionPathUtils.hpp"
+#include "MentionSyntax.hpp"
 #include "../config/ConfigManager.hpp"
+#include "../session/SessionDigest.hpp"
+#include "../session/SessionReference.hpp"
 #include "../utils/MimeUtils.hpp"
 #include "../workspace/PathVisibility.hpp"
 #include "../workspace/SessionWorkspace.hpp"
@@ -15,15 +18,14 @@ namespace core::context {
 
 namespace {
 
-bool is_boundary_char(char ch) {
-    return std::isspace(static_cast<unsigned char>(ch))
-        || ch == '(' || ch == '[' || ch == '{'
-        || ch == '"' || ch == '\'';
-}
-
-bool is_trailing_mention_suffix(char ch) {
-    return ch == ',' || ch == '.' || ch == ';' || ch == ':' || ch == '!'
-        || ch == '?' || ch == ')' || ch == ']' || ch == '}';
+// Appends the punctuation that followed a mention. A `[Context ...]` block
+// ends in a newline; the punctuation goes before it so the sentence reads on.
+void append_trailing_suffix(std::string& expansion, std::string_view suffix) {
+    if (!suffix.empty() && expansion.ends_with('\n')) {
+        expansion.insert(expansion.size() - 1, suffix);
+    } else {
+        expansion += suffix;
+    }
 }
 
 struct ParsedUnquotedMention {
@@ -66,7 +68,7 @@ ParsedUnquotedMention parse_unquoted_mention(std::string_view input, std::size_t
     while (!parsed.raw_path.empty()
            && !parsed.escaped.empty()
            && !parsed.escaped.back()
-           && is_trailing_mention_suffix(parsed.raw_path.back())) {
+           && is_trailing_mention_punctuation(parsed.raw_path.back())) {
         parsed.trailing_suffix.insert(parsed.trailing_suffix.begin(), parsed.raw_path.back());
         parsed.raw_path.pop_back();
         parsed.source_ends.pop_back();
@@ -286,7 +288,7 @@ std::optional<ActiveMention> find_active_mention(std::string_view input,
     for (std::size_t i = 0; i <= input.size(); ++i) {
         if (i == input.size() || input[i] != '@') continue;
 
-        const bool at_boundary = (i == 0) || is_boundary_char(input[i - 1]);
+        const bool at_boundary = is_mention_boundary(input, i);
         if (!at_boundary) continue;
 
         std::size_t path_start = i + 1;
@@ -404,15 +406,43 @@ ExpandedPrompt expand_prompt(std::string_view input,
         append_text_part(output.content_parts, text);
     };
 
+    // `#<session-id>` inlines another saved conversation. Tokens that name no
+    // session (`#123`, `#include`, headings) stay plain text.
+    const auto try_expand_session_reference = [&](std::size_t pos) -> std::optional<std::size_t> {
+        if (options.session_store == nullptr) return std::nullopt;
+        const auto token = core::session::parse_session_reference_token(input, pos);
+        if (!token.has_value() || core::session::is_inside_code_fence(input, pos)) {
+            return std::nullopt;
+        }
+        const auto session = core::session::resolve_session_reference(
+            *options.session_store, *token, options.current_session_id);
+        if (!session.has_value()) return std::nullopt;
+
+        std::string expansion = core::session::render_session_digest(
+            *session,
+            std::format("{}{}", core::session::kSessionReferenceSigil, session->session_id),
+            {.max_bytes = options.max_session_bytes});
+        append_trailing_suffix(expansion, token->trailing_suffix);
+        output.display_text += expansion;
+        append_text_part(output.content_parts, expansion);
+        return token->end;
+    };
+
     std::size_t i = 0;
     while (i < input.size()) {
+        if (input[i] == core::session::kSessionReferenceSigil) {
+            if (const auto next = try_expand_session_reference(i)) {
+                i = *next;
+                continue;
+            }
+        }
         if (input[i] != '@') {
             append_plain_text(input.substr(i, 1));
             ++i;
             continue;
         }
 
-        const bool at_boundary = (i == 0) || is_boundary_char(input[i - 1]);
+        const bool at_boundary = is_mention_boundary(input, i);
         if (!at_boundary || i + 1 >= input.size()) {
             append_plain_text(input.substr(i, 1));
             ++i;
@@ -461,13 +491,7 @@ ExpandedPrompt expand_prompt(std::string_view input,
         const std::filesystem::path resolved = resolve_mention_path(raw_path, base_dir);
         if (!visibility.is_visible(resolved)) {
             std::string expansion = render_ignored_path(raw_path);
-            if (!trailing_suffix.empty() && !expansion.empty() && expansion.back() == '\n') {
-                expansion.pop_back();
-                expansion += trailing_suffix;
-                expansion.push_back('\n');
-            } else {
-                expansion += trailing_suffix;
-            }
+            append_trailing_suffix(expansion, trailing_suffix);
             output.display_text += expansion;
             append_text_part(output.content_parts, expansion);
             i = cursor;
@@ -499,13 +523,7 @@ ExpandedPrompt expand_prompt(std::string_view input,
         }
 
         std::string expansion = render_mention(raw_path, base_dir, options, visibility);
-        if (!trailing_suffix.empty() && !expansion.empty() && expansion.back() == '\n') {
-            expansion.pop_back();
-            expansion += trailing_suffix;
-            expansion.push_back('\n');
-        } else {
-            expansion += trailing_suffix;
-        }
+        append_trailing_suffix(expansion, trailing_suffix);
         output.display_text += expansion;
         append_text_part(output.content_parts, expansion);
         i = cursor;

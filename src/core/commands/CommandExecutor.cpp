@@ -1512,6 +1512,8 @@ public:
             "  Ctrl+T   Browse and reuse previous prompts\n"
             "  Ctrl+F   Search the conversation history\n"
             "  Ctrl+B   Browse the filesystem and attach a file as an @mention\n"
+            "  #        Reference a past conversation by title (inlines a digest)\n"
+            "  #2 / #-1 Pick this project's 2nd newest / oldest conversation (Tab)\n"
             "  Ctrl+G   Open the current input in the configured prompt editor\n"
             "  Ctrl+R   Inspect and run fenced code from the latest response\n"
             "  F2       Cycle agent mode (AUTO → BUILD → DEBUG → RESEARCH → EXECUTE)\n"

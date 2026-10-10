@@ -7,11 +7,22 @@
 #include <vector>
 #include "../llm/Models.hpp"
 
+namespace core::session {
+class SessionStore;
+}
+
 namespace core::context {
 
 struct MentionExpansionOptions {
     std::size_t max_file_bytes = 24 * 1024;
     std::size_t max_directory_entries = 64;
+    /// Resolves `#<session-id>` / `#"name"` conversation references; when
+    /// null, `#` is plain text, so callers without a session store are
+    /// unaffected.
+    const core::session::SessionStore* session_store = nullptr;
+    /// The session the prompt belongs to; referencing it is rejected.
+    std::string current_session_id = {};
+    std::size_t max_session_bytes = 32 * 1024;
 };
 
 struct ActiveMention {

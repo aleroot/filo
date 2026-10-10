@@ -35,6 +35,8 @@
 #include "core/goal/GoalEngine.hpp"
 #include "core/session/GoalManager.hpp"
 #include "core/session/SessionHandoff.hpp"
+#include "core/session/SessionReference.hpp"
+#include "core/session/SessionReferenceCatalogue.hpp"
 #include "core/session/SessionStats.hpp"
 #include "core/session/SessionStore.hpp"
 #include "core/session/ActiveSessionLease.hpp"
@@ -1156,6 +1158,7 @@ RunResult run(RunOptions opts) {
     // ── Picker state (shared structure for mention and command pickers) ───────
     // See tui/PickerState.hpp for the struct definition.
     PickerState mention_picker;
+    PickerState session_reference_picker;
     PickerState command_picker;
 
     // ── Prompt history ────────────────────────────────────────────────────────
@@ -2515,6 +2518,7 @@ RunResult run(RunOptions opts) {
     auto reset_composer_chrome = [&]() {
         command_picker.clear();
         mention_picker.clear();
+        session_reference_picker.clear();
         prompt_history.abandon_navigation();
         double_escape_state = {};
         quit_confirm_key.clear();
@@ -3484,6 +3488,34 @@ RunResult run(RunOptions opts) {
         std::vector<CommandSuggestion> suggestions;
     };
 
+    // Saved sessions for the `#` conversation picker. The picker re-queries on
+    // every keystroke, so the catalogue is reused for a few seconds (and
+    // rebuilt at once when the thread or its project changes) instead of
+    // stat-ing every session file per key.
+    struct CachedReferenceCatalogue {
+        core::session::SessionReferenceCatalogue catalogue;
+        std::string key;
+        std::chrono::steady_clock::time_point built_at;
+    };
+    std::optional<CachedReferenceCatalogue> reference_catalogue;
+    auto session_reference_catalogue = [&]() -> const core::session::SessionReferenceCatalogue& {
+        constexpr auto kTtl = std::chrono::seconds(5);
+        const auto now = std::chrono::steady_clock::now();
+        const std::string session_id = current_runtime->session_id();
+        const std::string project =
+            current_runtime->agent()->workspace_snapshot().primary().string();
+        std::string key = std::format("{}\n{}", session_id, project);
+        if (!reference_catalogue.has_value() || reference_catalogue->key != key
+            || now - reference_catalogue->built_at > kTtl) {
+            reference_catalogue = CachedReferenceCatalogue{
+                .catalogue = {session_store->list(), project, session_id},
+                .key = std::move(key),
+                .built_at = now,
+            };
+        }
+        return reference_catalogue->catalogue;
+    };
+
     auto current_mention_snapshot = [&]() -> MentionSnapshot {
         MentionSnapshot snapshot;
         snapshot.active = core::context::find_active_mention(
@@ -3497,6 +3529,64 @@ RunResult run(RunOptions opts) {
                 kMaxAutocompleteSuggestions);
         }
         return snapshot;
+    };
+
+    struct SessionReferenceSnapshot {
+        std::optional<core::session::ActiveSessionReference> active;
+        std::vector<core::session::SessionReferenceSuggestion> suggestions;
+    };
+
+    // `#` opens the conversation picker; it is only "active" while something
+    // matches, so `#123`, `#include` or prose after a reference stay quiet.
+    auto current_session_reference_snapshot = [&]() -> SessionReferenceSnapshot {
+        SessionReferenceSnapshot snapshot;
+        auto active = core::session::find_active_session_reference(
+            input_text,
+            static_cast<std::size_t>(std::max(input_cursor_position, 0)));
+        if (!active.has_value()) {
+            return snapshot;
+        }
+        snapshot.suggestions = session_reference_catalogue().search(
+            active->query, kMaxAutocompleteSuggestions);
+        if (!snapshot.suggestions.empty()) {
+            snapshot.active = std::move(active);
+        }
+        return snapshot;
+    };
+
+    auto sync_session_reference_picker = [&](const SessionReferenceSnapshot& snapshot) {
+        session_reference_picker.sync(
+            snapshot.active.has_value()
+                ? std::format("{}|{}", snapshot.active->replace_begin, snapshot.active->query)
+                : std::string{},
+            static_cast<int>(snapshot.suggestions.size()));
+    };
+
+    auto session_reference_picker_visible = [&](const SessionReferenceSnapshot& snapshot) {
+        return snapshot.active.has_value() && !session_reference_picker.suppressed;
+    };
+
+    auto session_reference_accepts_on_enter = [&](const SessionReferenceSnapshot& snapshot) {
+        const auto selected = static_cast<std::size_t>(session_reference_picker.selected);
+        return core::session::session_reference_accepts_on_enter(
+            snapshot.active->query, snapshot.suggestions[selected].session_id);
+    };
+
+    auto accept_selected_session_reference = [&]() -> bool {
+        auto snapshot = current_session_reference_snapshot();
+        sync_session_reference_picker(snapshot);
+        if (!session_reference_picker_visible(snapshot)) {
+            return false;
+        }
+        const auto& suggestion =
+            snapshot.suggestions[static_cast<std::size_t>(session_reference_picker.selected)];
+        const auto completed = core::session::apply_session_reference_completion(
+            input_text, *snapshot.active, suggestion.session_id);
+        input_text = completed.text;
+        input_cursor_position = static_cast<int>(completed.cursor);
+        session_reference_picker.clear();
+        wake_ui();
+        return true;
     };
 
     auto sync_mention_picker = [&](const MentionSnapshot& snapshot) {
@@ -7099,6 +7189,7 @@ RunResult run(RunOptions opts) {
         try {
           std::thread([text = std::string(text),
                      base_dir = runtime->agent()->workspace_snapshot().primary(),
+                     session_store,
                      runtime,
                      effective_callbacks = std::move(effective_callbacks),
                      live_timeline,
@@ -7115,7 +7206,11 @@ RunResult run(RunOptions opts) {
                 ~WorkerCompletion() { runtime->finish_worker(); }
             } worker_completion{runtime};
             auto agent = runtime->agent();
-            const auto expanded_prompt = core::context::expand_prompt(text, base_dir);
+            const auto expanded_prompt = core::context::expand_prompt(
+                text,
+                base_dir,
+                {.session_store = session_store.get(),
+                 .current_session_id = runtime->session_id()});
             // An absolute @ mention is an explicit user selection. Finder
             // drag-and-drop arrives through bracketed paste in this form.
             agent->grant_workspace_paths(expanded_prompt.explicit_path_mentions);
@@ -9475,6 +9570,31 @@ RunResult run(RunOptions opts) {
                 mention_picker.navigate_up(static_cast<int>(mention_snapshot.suggestions.size()));
                 return true;
             }
+        } else {
+            auto reference_snapshot = current_session_reference_snapshot();
+            sync_session_reference_picker(reference_snapshot);
+            if (session_reference_picker_visible(reference_snapshot)) {
+                const int count = static_cast<int>(reference_snapshot.suggestions.size());
+                if (event == Event::Tab
+                    || (event == Event::Return
+                        && session_reference_accepts_on_enter(reference_snapshot))) {
+                    return accept_selected_session_reference();
+                }
+                if (event == Event::ArrowDown) {
+                    session_reference_picker.navigate_down(count);
+                    return true;
+                }
+                if (event == Event::ArrowUp) {
+                    session_reference_picker.navigate_up(count);
+                    return true;
+                }
+                // Dismissed until the query changes, so a `#tag` that happens
+                // to match a title never blocks sending the prompt.
+                if (event == Event::Escape) {
+                    session_reference_picker.suppress();
+                    return true;
+                }
+            }
         }
 
         if (event == Event::Escape) {
@@ -9664,6 +9784,8 @@ RunResult run(RunOptions opts) {
         sync_command_picker(command_snapshot);
         auto mention_snapshot = current_mention_snapshot();
         sync_mention_picker(mention_snapshot);
+        auto reference_snapshot = current_session_reference_snapshot();
+        sync_session_reference_picker(reference_snapshot);
         
         bool                   perm_active = false;
         bool                   model_picker_active = false;
@@ -10202,6 +10324,14 @@ RunResult run(RunOptions opts) {
                 bottom_el = render_mention_prompt_panel(
                     mention_snapshot.suggestions,
                     mention_picker.selected,
+                    std::move(input_el),
+                    input_text);
+            } else if (session_reference_picker_visible(reference_snapshot)) {
+                bottom_el = render_session_reference_prompt_panel(
+                    reference_snapshot.suggestions,
+                    session_reference_picker.selected,
+                    reference_snapshot.active->query,
+                    session_reference_accepts_on_enter(reference_snapshot),
                     std::move(input_el),
                     input_text);
             } else {

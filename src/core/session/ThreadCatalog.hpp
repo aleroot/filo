@@ -43,12 +43,31 @@ enum class ThreadRecencyGroup {
 /// User-facing title: explicit name → first-user preview → short id fallback.
 [[nodiscard]] std::string thread_display_title(const SessionInfo& info);
 
+/// "provider/model", or the model alone when either part is missing.
+[[nodiscard]] std::string thread_model_label(std::string_view provider, std::string_view model);
+
+/// When the thread was last used: last_active_at, else created_at.
+[[nodiscard]] const std::string& thread_activity_timestamp(const SessionInfo& info) noexcept;
+
 /// Parse Filo's ISO-8601 timestamps (`YYYY-MM-DDTHH:MM:SSZ`).
 [[nodiscard]] std::optional<std::chrono::system_clock::time_point>
 parse_iso8601_utc(std::string_view iso);
 
 /// Human relative time ("just now", "5m ago", "2h ago", "3d ago", or date).
 [[nodiscard]] std::string format_relative_time(
+    std::string_view iso_timestamp,
+    std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
+
+/// Compact local time: "14:05" today, "yesterday 14:05", "Tue 14:05" within
+/// the week, "Oct 12" this year, "Oct 12 2025" before.
+[[nodiscard]] std::string format_session_moment(
+    std::string_view iso_timestamp,
+    std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
+
+/// Age by local calendar day, consistent with format_session_moment: "5m ago",
+/// "3h ago" (same day), "yesterday", "4d ago", "3w ago", "5mo ago", "2y ago".
+/// Unlike format_relative_time, "yesterday" always means the previous date.
+[[nodiscard]] std::string format_session_age(
     std::string_view iso_timestamp,
     std::chrono::system_clock::time_point now = std::chrono::system_clock::now());
 
