@@ -119,7 +119,18 @@ struct ToolDefinition {
     /// Internal trust marker. It is never populated from remote MCP metadata;
     /// only built-in tools may mint receipts accepted by AUTO's quality gate.
     bool trusted_verification_receipts = false;
+    /// Local exposure policy, never serialized as MCP metadata. Internal
+    /// agent tools must remain private even in a shared TUI/MCP registry.
+    bool agent_only = false;
 };
+
+[[nodiscard]] constexpr bool tool_allows_transport(
+    const ToolDefinition& definition,
+    core::context::SessionTransport transport) noexcept {
+    return !definition.agent_only
+        || (transport != core::context::SessionTransport::mcp_stdio
+            && transport != core::context::SessionTransport::mcp_http);
+}
 
 /**
  * @brief Abstract base class for all filo MCP tools.

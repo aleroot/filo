@@ -356,6 +356,7 @@ set(FILO_CORE_SOURCES
     src/core/workspace/FileAccessScope.cpp
     src/core/context/ContextBuilder.cpp
     src/core/context/ContextMentions.cpp
+    src/core/context/PromptCode.cpp
     src/core/context/PromptPlan.cpp
     src/core/context/ContextWindowTracker.cpp
     src/core/context/MentionPathUtils.cpp
@@ -412,6 +413,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/MemoryTool.cpp
     src/core/tools/TodoTool.cpp
     src/core/tools/ReadToolResultTool.cpp
+    src/core/tools/ConversationTool.cpp
     src/core/tools/BuiltinToolRegistry.cpp
     src/core/tools/ToolPolicy.cpp
     src/core/tools/AnthropicWebSearchBackend.cpp
@@ -459,6 +461,7 @@ set(FILO_CORE_SOURCES
     src/core/session/SessionEfficiencyController.cpp
     src/core/session/SessionHandoff.cpp
     src/core/session/SessionDigest.cpp
+    src/core/session/SessionTranscriptReader.cpp
     src/core/session/SessionReference.cpp
     src/core/session/SessionReferenceCatalogue.cpp
     src/core/net/NetworkTraffic.cpp

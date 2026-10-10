@@ -6,7 +6,27 @@
 #include "core/session/SessionReference.hpp"
 #include "core/session/SessionReferenceCatalogue.hpp"
 #include "core/session/SessionStore.hpp"
+#include "core/session/SessionTranscriptReader.hpp"
 #include "core/session/ThreadCatalog.hpp"
+#include "core/tools/ConversationTool.hpp"
+#include "core/tools/BuiltinToolRegistry.hpp"
+#include "core/tools/ToolManager.hpp"
+#include "core/tools/WebSearchTool.hpp"
+#include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
+#include "core/llm/protocols/AnthropicProtocol.hpp"
+#include "core/llm/protocols/GeminiProtocol.hpp"
+#include "core/llm/protocols/OllamaProtocol.hpp"
+#include "core/agent/Agent.hpp"
+#include "core/mcp/McpDispatcher.hpp"
+#include "TestSessionContext.hpp"
+#include <simdjson.h>
+#include <algorithm>
+#include <condition_variable>
+#include <format>
+#include <memory>
+#include <mutex>
+#include <utility>
 
 #include <chrono>
 #include <cstdlib>
@@ -30,6 +50,19 @@ struct TempDir {
         std::error_code ec;
         fs::remove_all(path, ec);
     }
+};
+
+struct ScopedToolRegistration {
+    explicit ScopedToolRegistration(std::shared_ptr<core::tools::Tool> tool)
+        : name(tool->get_definition().name) {
+        core::tools::ToolManager::get_instance().register_tool(std::move(tool));
+    }
+
+    ~ScopedToolRegistration() {
+        (void)core::tools::ToolManager::get_instance().unregister_tool(name);
+    }
+
+    std::string name;
 };
 
 core::llm::Message message(std::string role, std::string content) {
@@ -373,4 +406,449 @@ TEST_CASE("picker timestamps scale from clock time to a dated label",
     CHECK(core::session::format_session_age(iso(now - hours(24 * 9)), now) == "9d ago");
     CHECK(core::session::format_session_age(iso(now - hours(24 * 800)), now) == "2y ago");
     CHECK(core::session::format_session_age("", now).empty());
+}
+
+TEST_CASE("reference completion preserves quoted ranges, punctuation and Unicode",
+          "[session][reference][regression]") {
+    using namespace core::session;
+    const std::string quoted = "use #\"Retry policy\" and go";
+    for (const auto cursor : {quoted.find(" policy"), quoted.find(" and")}) {
+        const auto active = find_active_session_reference(quoted, cursor);
+        REQUIRE(active);
+        const auto done = apply_session_reference_completion(quoted, *active, "deadbeef");
+        CHECK(done.text == "use #deadbeef and go");
+        CHECK(done.cursor == std::string_view("use #deadbeef ").size());
+        CHECK_FALSE(find_active_session_reference(done.text, done.cursor));
+    }
+    const std::string punct = "use (#retry), then go";
+    for (const auto cursor : {punct.find(')'), punct.find(" then")}) {
+        const auto active = find_active_session_reference(punct, cursor);
+        REQUIRE(active);
+        const auto done = apply_session_reference_completion(punct, *active, "deadbeef");
+        CHECK(done.text == "use (#deadbeef), then go");
+        CHECK(done.cursor == std::string_view("use (#deadbeef), ").size());
+    }
+    const std::string unicode = "Vedi #\"Politica café\"\npoi";
+    const auto active = find_active_session_reference(unicode, unicode.find(" café"));
+    REQUIRE(active);
+    const auto done = apply_session_reference_completion(unicode, *active, "deadbeef");
+    CHECK(done.text == "Vedi #deadbeef \npoi");
+    CHECK_FALSE(find_active_session_reference("#\"Retry policy\" and", 19));
+    const auto escaped = token_at(R"(#"Retry \"policy\" \\ notes")");
+    REQUIRE(escaped);
+    CHECK(escaped->target == "Retry \"policy\" \\ notes");
+    CHECK_FALSE(token_at("#\"unterminated"));
+    const std::string nested = R"(use #"Fix #123 parser" next)";
+    const auto named = find_active_session_reference(nested, nested.find(" next"));
+    REQUIRE(named);
+    CHECK(named->replace_begin == 4);
+    CHECK(apply_session_reference_completion(nested, *named, "deadbeef").text
+          == "use #deadbeef next");
+}
+
+TEST_CASE("reference picker and expansion share Markdown code boundaries",
+          "[session][reference][context][regression]") {
+    TempDir tmp("filo_reference_code");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    REQUIRE(store.save(make_session("deadbeef", "Retry policy")));
+    const std::vector<std::string> literal{
+        "```cpp\n#deadbeef\n```", "~~~cpp\n#deadbeef\n~~~",
+        "````markdown\n```cpp\n#deadbeef\n```\n````",
+        "```cpp\n~~~\n#deadbeef\n```",
+        "  ~~~~cpp\r\n#deadbeef\r\n  ~~~~\r\n",
+        "```cpp\n``` still code\n#deadbeef\n```",
+        "Explain `use #deadbeef here`", "Explain ``use ` #deadbeef here``",
+        "Explain `line one\n#deadbeef here`", "~~~cpp\n#deadbeef",
+    };
+    for (const auto& input : literal) {
+        INFO(input);
+        CHECK(core::context::expand_prompt(input, tmp.path, {.session_store = &store}).display_text
+              == input);
+        const auto cursor = input.find("#deadbeef") + std::string_view("#deadbeef").size();
+        CHECK_FALSE(core::session::find_active_session_reference(input, cursor));
+    }
+    for (const auto& input : {
+        std::string("Use `literal ``` text` then #deadbeef"),
+        std::string("```cpp\ncode\n```\n#deadbeef"),
+        std::string("~~~cpp\ncode\n~~~~\n#deadbeef"),
+        std::string("Unmatched ` then #deadbeef"),
+        std::string("Escaped \\` then #deadbeef"),
+        std::string("`paragraph\n\n#deadbeef"),
+    }) {
+        INFO(input);
+        CHECK_THAT(core::context::expand_prompt(input, tmp.path, {.session_store = &store}).display_text,
+                   ContainsSubstring("[Context for #deadbeef]"));
+        CHECK(core::session::find_active_session_reference(input, input.size()));
+    }
+}
+
+TEST_CASE("digest enforces every budget and preserves UTF-8 framing",
+          "[session][reference][regression]") {
+    auto data = make_session("deadbeef", "Retry policy");
+    data.working_dir = std::string(9000, 'p');
+    data.context_summary = std::string(9000, 's');
+    data.messages.front().input_text = std::string(9000, 'x') + "café 😀";
+    data.messages.push_back(message("assistant", std::string(9000, 'a') + "LATEST café 😀"));
+    for (const auto limit : {std::size_t{0}, 1UL, 16UL, 40UL, 80UL, 128UL, 1024UL, 4096UL, 32768UL}) {
+        INFO(limit);
+        const auto digest = core::session::render_session_digest(data, "#deadbeef", {.max_bytes = limit});
+        CHECK(digest.size() <= limit);
+        if (!digest.empty()) {
+            CHECK(digest.starts_with("\n[Context for #deadbeef]\n"));
+            CHECK(digest.ends_with("[/Context]\n"));
+            CHECK(simdjson::validate_utf8(digest.data(), digest.size()));
+        }
+    }
+    data.working_dir.clear();
+    data.context_summary.clear();
+    data.messages = {message("user", "Opening request"),
+                     message("assistant", std::string(9000, 'a'))};
+    const auto digest = core::session::render_session_digest(data, "#deadbeef", {.max_bytes = 1024});
+    CHECK_THAT(digest, ContainsSubstring("User: Opening request"));
+    CHECK_THAT(digest, ContainsSubstring("Assistant:"));
+    data.messages.clear();
+    CHECK(core::session::render_session_digest(data, "#deadbeef", {.max_bytes = 128}).size() <= 128);
+    data.messages = {message("user", "ééé😀😀😀")};
+    for (std::size_t n = 0; n <= 24; ++n) {
+        const auto text = core::session::render_session_digest(data, "#deadbeef", {.max_message_bytes = n});
+        CHECK(simdjson::validate_utf8(text.data(), text.size()));
+    }
+}
+
+TEST_CASE("prompt references deduplicate ids and respect aggregate limits",
+          "[session][reference][context][regression]") {
+    TempDir tmp("filo_reference_limits");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    REQUIRE(store.save(make_session("deadbeef", "Retry policy")));
+    REQUIRE(store.save(make_session("a1b2c3d4", "Payments")));
+    const auto expanded = core::context::expand_prompt(
+        "#deadbeef #\"Retry policy\" #a1b2c3d4", tmp.path,
+        {.session_store = &store, .max_total_session_bytes = 1024});
+    CHECK(expanded.display_text.find("[Context for #deadbeef]")
+          == expanded.display_text.rfind("[Context for #deadbeef]"));
+    CHECK_THAT(expanded.display_text, ContainsSubstring("conversation context included above"));
+    std::size_t digest_bytes = 0;
+    for (std::size_t at = 0; (at = expanded.display_text.find("\n[Context for #", at)) != std::string::npos;) {
+        const auto end = expanded.display_text.find("[/Context]\n", at);
+        REQUIRE(end != std::string::npos);
+        digest_bytes += end + std::string_view("[/Context]\n").size() - at;
+        at = end + std::string_view("[/Context]\n").size();
+    }
+    CHECK(digest_bytes <= 1024);
+    const auto capped = core::context::expand_prompt("#deadbeef #a1b2c3d4", tmp.path,
+        {.session_store = &store, .max_session_references = 1});
+    CHECK_THAT(capped.display_text, ContainsSubstring("use conversation with action=read"));
+    CHECK_THAT(capped.display_text, !ContainsSubstring("[Context for #a1b2c3d4]"));
+    const auto tiny = core::context::expand_prompt("#deadbeef", tmp.path,
+        {.session_store = &store, .max_total_session_bytes = 1});
+    CHECK_THAT(tiny.display_text, ContainsSubstring("Digest budget too small"));
+}
+
+TEST_CASE("conversation pages complete saved text and detects changes",
+          "[session][reference][tools][regression]") {
+    TempDir tmp("filo_reference_read");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    auto data = make_session("deadbeef", "Retry policy");
+    std::string long_text;
+    for (int i = 0; i < 2000; ++i) long_text += "History café 😀\n";
+    data.messages.push_back(message("assistant", long_text));
+    REQUIRE(store.save(data));
+    core::tools::ConversationTool tool(store);
+    const auto context = test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli, "11111111");
+    std::string collected, revision;
+    std::int64_t offset = 0;
+    bool complete = false;
+    for (int i = 0; i < 1000 && !complete; ++i) {
+        const auto response = tool.execute(std::format(
+            R"({{"action":"read","session_id":"DEADBEEF","offset":{},"limit":127,"revision":"{}"}})",
+            offset, revision), context);
+        simdjson::dom::parser parser;
+        const auto page = parser.parse(response);
+        REQUIRE(page.error() == simdjson::SUCCESS);
+        REQUIRE(page["content"].is_string());
+        const auto text = std::string_view(page["content"].get_string().value());
+        CHECK(text.size() <= 127);
+        CHECK(simdjson::validate_utf8(text.data(), text.size()));
+        collected += text;
+        revision = std::string(page["revision"].get_string().value());
+        complete = page["complete"].get_bool().value();
+        const auto next = page["next_offset"].get_int64().value();
+        if (!complete) REQUIRE(next > offset);
+        offset = next;
+    }
+    REQUIRE(complete);
+    CHECK(collected == core::session::render_session_transcript(data));
+    CHECK_THAT(collected, ContainsSubstring(long_text));
+    CHECK_THAT(collected, !ContainsSubstring("SECRET TOOL OUTPUT"));
+    CHECK_THAT(collected, !ContainsSubstring("internal synthetic"));
+    const auto invalid_offset = collected.find("é") + 1;
+    CHECK_THAT(tool.execute(std::format(
+        R"({{"action":"read","session_id":"deadbeef","offset":{}}})", invalid_offset), context),
+        ContainsSubstring("UTF-8 boundary"));
+    data.messages.push_back(message("assistant", "Changed"));
+    REQUIRE(store.save(data));
+    CHECK_THAT(tool.execute(std::format(
+        R"({{"action":"read","session_id":"deadbeef","offset":127,"revision":"{}"}})", revision), context),
+        ContainsSubstring("Conversation changed"));
+    for (const auto& args : {"[]", "{}", R"({"session_id":"deadbeef"})",
+        R"({"action":"delete","session_id":"deadbeef"})", R"({"action":"read","session_id":"../file"})",
+        R"({"action":"read","session_id":"deadbeef","offset":-1})",
+        R"({"action":"read","session_id":"deadbeef","offset":"1"})",
+        R"({"action":"read","session_id":"deadbeef","offset":99999999})",
+        R"({"action":"read","session_id":"deadbeef","limit":0})",
+        R"({"action":"read","session_id":"deadbeef","limit":8193})",
+        R"({"action":"read","session_id":"0000ffff"})"}) {
+        CHECK_THAT(tool.execute(args, context), ContainsSubstring("error"));
+    }
+    const auto self = test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli, "deadbeef");
+    CHECK_THAT(tool.execute(R"({"action":"read","session_id":"deadbeef"})", self), ContainsSubstring("error"));
+    CHECK(core::tools::agent_builtin_tool_options().include_conversation);
+    CHECK_FALSE(core::tools::mcp_builtin_tool_options().include_conversation);
+}
+
+TEST_CASE("conversation is hidden and blocked by MCP even in a shared registry",
+          "[session][reference][mcp][regression]") {
+    TempDir tmp("filo_reference_mcp");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    REQUIRE(store.save(make_session("deadbeef", "Private conversation")));
+    auto& dispatcher = core::mcp::McpDispatcher::get_instance();
+    auto& manager = core::tools::ToolManager::get_instance();
+    const auto tool = std::make_shared<core::tools::ConversationTool>(store);
+    ScopedToolRegistration registration(tool);
+    REQUIRE(manager.has_tool("conversation"));
+    REQUIRE(std::ranges::any_of(manager.get_all_tools(), [](const auto& t) {
+        return t.function.name == "conversation";
+    }));
+    for (const auto transport : {core::context::SessionTransport::mcp_stdio,
+                                 core::context::SessionTransport::mcp_http}) {
+        const auto context = test_support::make_workspace_session_context(transport, "mcp-test");
+        CHECK(std::ranges::none_of(manager.get_all_tools(transport), [](const auto& t) {
+            return t.function.name == "conversation";
+        }));
+        for (const auto mode : {core::mcp::McpProtocolMode::legacy,
+                               core::mcp::McpProtocolMode::stateless}) {
+            const auto listing = dispatcher.dispatch(
+                R"({"jsonrpc":"2.0","id":100,"method":"tools/list","params":{}})", context, mode);
+            CHECK_THAT(listing, !ContainsSubstring(R"("name":"conversation")"));
+            for (const auto name : {"conversation", "CONVERSATION", " conversation "}) {
+                const auto response = dispatcher.dispatch(std::format(
+                    R"({{"jsonrpc":"2.0","id":101,"method":"tools/call","params":{{"name":"{}","arguments":{{"action":"read","session_id":"deadbeef"}}}}}})", name),
+                    context, mode);
+                CHECK_THAT(response, ContainsSubstring("-32602"));
+                CHECK_THAT(response, !ContainsSubstring("Private conversation"));
+            }
+        }
+        CHECK_THAT(manager.execute_tool("conversation",
+            R"({"action":"read","session_id":"deadbeef"})", context), ContainsSubstring("error"));
+        CHECK_THAT(tool->execute(R"({"action":"read","session_id":"deadbeef"})", context),
+                   ContainsSubstring("error"));
+    }
+}
+
+TEST_CASE("referenced text survives save reload and every provider wire format",
+          "[session][reference][provider][regression]") {
+    TempDir tmp("filo_reference_protocol");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    REQUIRE(store.save(make_session("deadbeef", "Retry policy")));
+    const auto expanded = core::context::expand_prompt("Follow #deadbeef", tmp.path,
+        {.session_store = &store});
+    auto destination = make_session("a1b2c3d4", "New work");
+    auto user = message("user", expanded.display_text);
+    user.input_text = "Follow #deadbeef";
+    user.content_parts = expanded.content_parts;
+    destination.messages = {user};
+    destination.provider = "claude";
+    REQUIRE(store.save(destination));
+    const auto loaded = store.load_by_id("a1b2c3d4");
+    REQUIRE(loaded);
+    REQUIRE(loaded->messages.front().content == expanded.display_text);
+    core::llm::ChatRequest request;
+    request.model = "test-model";
+    request.messages = loaded->messages;
+    const core::tools::ConversationTool tool(store);
+    request.tools.push_back({.type = "function", .function = tool.get_definition()});
+    using namespace core::llm::protocols;
+    const std::vector<std::string> payloads{
+        OpenAIProtocol{}.serialize(request), OpenAIResponsesProtocol{}.serialize(request),
+        AnthropicProtocol{}.serialize(request), GeminiProtocol{}.serialize(request),
+        OllamaProtocol{}.serialize(request),
+    };
+    for (const auto& payload : payloads) {
+        simdjson::dom::parser parser;
+        CHECK(parser.parse(payload).error() == simdjson::SUCCESS);
+        CHECK_THAT(payload, ContainsSubstring("Decision: exponential backoff"));
+        CHECK_THAT(payload, ContainsSubstring("conversation"));
+        CHECK_THAT(payload, !ContainsSubstring("SECRET TOOL OUTPUT"));
+    }
+}
+
+namespace {
+
+class ReferenceCapturingProvider final : public core::llm::LLMProvider {
+public:
+    explicit ReferenceCapturingProvider(bool read = false) : read_(read) {}
+    void stream_response(const core::llm::ChatRequest& request,
+                         std::function<void(const core::llm::StreamChunk&)> callback) override {
+        bool call_reader;
+        {
+            std::lock_guard lock(mutex_);
+            call_reader = read_ && requests_.empty();
+            requests_.push_back(request);
+        }
+        if (call_reader) {
+            core::llm::ToolCall call;
+            call.id = "read_referenced_conversation";
+            call.function.name = "conversation";
+            call.function.arguments = R"({"action":"read","session_id":"deadbeef","limit":8192})";
+            callback(core::llm::StreamChunk::make_tools({call}));
+        } else {
+            callback(core::llm::StreamChunk::make_content("Read the referenced conversation."));
+        }
+        callback(core::llm::StreamChunk::make_final());
+    }
+    std::vector<core::llm::ChatRequest> requests() const {
+        std::lock_guard lock(mutex_);
+        return requests_;
+    }
+private:
+    bool read_;
+    mutable std::mutex mutex_;
+    std::vector<core::llm::ChatRequest> requests_;
+};
+
+} // namespace
+
+TEST_CASE("switching providers retains reference context and executes its reader",
+          "[session][reference][agent][provider][regression]") {
+    TempDir tmp("filo_reference_switch");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    auto source = make_session("deadbeef", "Retry policy");
+    source.messages.push_back(message("assistant", "EARLIER DETAIL AVAILABLE THROUGH READER"));
+    REQUIRE(store.save(source));
+    const auto expanded = core::context::expand_prompt("Follow #deadbeef", tmp.path,
+        {.session_store = &store, .max_session_bytes = 700});
+    auto& manager = core::tools::ToolManager::get_instance();
+    ScopedToolRegistration registration(std::make_shared<core::tools::ConversationTool>(store));
+    const auto first = std::make_shared<ReferenceCapturingProvider>();
+    const auto second = std::make_shared<ReferenceCapturingProvider>(true);
+    const auto context = test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli, "11111111");
+    const auto agent = std::make_shared<core::agent::Agent>(first, manager, context, tmp.path / "results");
+    const auto send = [&](core::llm::Message user) {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool done = false;
+        agent->send_message(std::move(user), [](const auto&) {}, [](const auto&, const auto&) {}, [&] {
+            {
+                std::lock_guard lock(mutex);
+                done = true;
+            }
+            cv.notify_one();
+        });
+        std::unique_lock lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(10), [&] { return done; }));
+        REQUIRE_FALSE(agent->last_turn_failed());
+    };
+    auto initial = message("user", expanded.display_text);
+    initial.input_text = "Follow #deadbeef";
+    send(initial);
+    agent->set_provider(second);
+    agent->set_active_provider_name("claude");
+    agent->set_active_model("claude-test");
+    send(message("user", "Read the earlier details of that conversation."));
+    const auto requests = second->requests();
+    REQUIRE(requests.size() == 2);
+    CHECK(std::ranges::any_of(requests.front().messages, [&](const auto& m) {
+        return m.role == "user" && m.content == expanded.display_text;
+    }));
+    CHECK(std::ranges::any_of(requests.front().tools, [](const auto& t) {
+        return t.function.name == "conversation";
+    }));
+    CHECK(std::ranges::any_of(requests.back().messages, [](const auto& m) {
+        return m.role == "tool" && m.content.contains("EARLIER DETAIL AVAILABLE THROUGH READER");
+    }));
+    CHECK(std::ranges::none_of(requests.back().messages, [](const auto& m) {
+        return m.content.contains("SECRET TOOL OUTPUT");
+    }));
+}
+
+TEST_CASE("saved transcript reader exposes typed pages independently of tools",
+          "[session][reference][regression]") {
+    TempDir tmp("filo_transcript_reader");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    const auto source = make_session("deadbeef", "Retry policy");
+    REQUIRE(store.save(source));
+    const core::session::SessionTranscriptReader reader(store);
+    const auto first = reader.read("DEADBEEF", "11111111", {.limit = 127});
+    REQUIRE(first);
+    CHECK(first->session_id == "deadbeef");
+    CHECK(first->content.starts_with("\n[Context for #deadbeef]\n"));
+    CHECK_FALSE(first->complete);
+    const auto rest = reader.read("deadbeef", "11111111", {
+        .offset = first->next_offset,
+        .limit = core::session::kMaxTranscriptPageBytes,
+        .revision = first->revision,
+    });
+    REQUIRE(rest);
+    REQUIRE(rest->complete);
+    CHECK(first->content + rest->content == core::session::render_session_transcript(source));
+    const auto end = reader.read("deadbeef", "11111111", {
+        .offset = rest->next_offset,
+        .revision = rest->revision,
+    });
+    REQUIRE(end);
+    CHECK(end->complete);
+    CHECK(end->content.empty());
+    CHECK(end->total_bytes == rest->total_bytes);
+    CHECK_FALSE(reader.read("../file", "11111111"));
+    CHECK_FALSE(reader.read("deadbeef", "deadbeef"));
+    CHECK_FALSE(reader.read("deadbeef", "11111111", {.limit = 0}));
+}
+
+namespace {
+
+class AgentOnlyExposureProbe final : public core::tools::Tool {
+public:
+    core::tools::ToolDefinition get_definition() const override {
+        return {
+            .name = "internal_exposure_probe",
+            .description = "Internal test tool with a name unrelated to conversation.",
+            .agent_only = true,
+        };
+    }
+
+    std::string execute(const std::string&, const core::context::SessionContext&) override {
+        return R"({"executed":true})";
+    }
+};
+
+} // namespace
+
+TEST_CASE("tool metadata controls MCP exposure without a name allowlist",
+          "[session][reference][tools][mcp][regression]") {
+    ScopedToolRegistration registration(std::make_shared<AgentOnlyExposureProbe>());
+    auto& manager = core::tools::ToolManager::get_instance();
+    const auto native_search = core::tools::WebSearchTool{}.get_definition();
+    CHECK(native_search.agent_only);
+    CHECK_FALSE(core::tools::tool_allows_transport(native_search, core::context::SessionTransport::mcp_stdio));
+    CHECK_FALSE(core::tools::tool_allows_transport(native_search, core::context::SessionTransport::mcp_http));
+    const auto cli = test_support::make_workspace_session_context(core::context::SessionTransport::cli);
+    CHECK_THAT(manager.execute_tool("internal_exposure_probe", "{}", cli),
+               ContainsSubstring(R"("executed":true)"));
+    for (const auto transport : {core::context::SessionTransport::mcp_stdio,
+                                 core::context::SessionTransport::mcp_http}) {
+        CHECK_FALSE(manager.get_tool_definition("internal_exposure_probe", transport));
+        CHECK(std::ranges::none_of(manager.get_all_tools(transport), [](const auto& tool) {
+            return tool.function.name == "internal_exposure_probe";
+        }));
+        const auto context = test_support::make_workspace_session_context(transport);
+        CHECK_THAT(manager.execute_tool("internal_exposure_probe", "{}", context),
+                   ContainsSubstring("error"));
+        const auto response = core::mcp::McpDispatcher::get_instance().dispatch(
+            R"({"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"internal_exposure_probe","arguments":{}}})",
+            context);
+        CHECK_THAT(response, ContainsSubstring("-32602"));
+    }
 }

@@ -765,7 +765,7 @@ static constexpr std::string_view kInvalidRequest{
 static const std::string& tools_list_result() {
     static const std::string result = [] {
         auto& sm    = core::tools::ToolManager::get_instance();
-        auto  tools = sm.get_all_tools();
+        auto tools = sm.get_all_tools(core::context::SessionTransport::mcp_http);
 
         JsonWriter w(8192);
         {
@@ -1428,7 +1428,7 @@ private:
     McpProtocolMode mode)
 {
     auto& sm = core::tools::ToolManager::get_instance();
-    auto tool_def = sm.get_tool_definition(request.name);
+    auto tool_def = sm.get_tool_definition(request.name, core::context::SessionTransport::mcp_http);
     if (!tool_def.has_value()) {
         return std::unexpected(
             RpcError{-32602, std::format("Unknown tool: {}", request.name)});
@@ -1813,7 +1813,7 @@ using MethodHandler = std::string (*)(
     if (!request) return make_rpc_error(id, request.error());
 
     auto& sm = core::tools::ToolManager::get_instance();
-    auto tool_def = sm.get_tool_definition(request->name);
+    auto tool_def = sm.get_tool_definition(request->name, core::context::SessionTransport::mcp_http);
     if (!tool_def.has_value()) {
         return make_error(id, -32602, std::format("Unknown tool: {}", request->name));
     }

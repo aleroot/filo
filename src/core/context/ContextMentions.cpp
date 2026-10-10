@@ -1,6 +1,7 @@
 #include "ContextMentions.hpp"
 #include "MentionPathUtils.hpp"
 #include "MentionSyntax.hpp"
+#include "PromptCode.hpp"
 #include "../config/ConfigManager.hpp"
 #include "../session/SessionDigest.hpp"
 #include "../session/SessionReference.hpp"
@@ -12,6 +13,7 @@
 #include <format>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace core::context {
@@ -400,6 +402,10 @@ ExpandedPrompt expand_prompt(std::string_view input,
     output.display_text.reserve(input.size() + 256);
     const core::workspace::AgentIgnorePathVisibilityFactory visibility_factory;
     const auto visibility = visibility_factory.for_root(base_dir);
+    const auto code_ranges = prompt_code_ranges(input);
+    std::size_t code_range_index = 0;
+    std::unordered_set<std::string> referenced_sessions;
+    std::size_t session_bytes = 0;
 
     const auto append_plain_text = [&](std::string_view text) {
         output.display_text += text;
@@ -411,17 +417,39 @@ ExpandedPrompt expand_prompt(std::string_view input,
     const auto try_expand_session_reference = [&](std::size_t pos) -> std::optional<std::size_t> {
         if (options.session_store == nullptr) return std::nullopt;
         const auto token = core::session::parse_session_reference_token(input, pos);
-        if (!token.has_value() || core::session::is_inside_code_fence(input, pos)) {
+        if (!token.has_value()) {
             return std::nullopt;
         }
         const auto session = core::session::resolve_session_reference(
             *options.session_store, *token, options.current_session_id);
         if (!session.has_value()) return std::nullopt;
 
+        if (referenced_sessions.contains(session->session_id)) {
+            append_plain_text(std::format("#{} (conversation context included above){}",
+                                          session->session_id, token->trailing_suffix));
+            return token->end;
+        }
+        const auto budget = std::min(options.max_session_bytes,
+            options.max_total_session_bytes - session_bytes);
+        if (referenced_sessions.size() >= options.max_session_references || budget == 0) {
+            append_plain_text(std::format(
+                "#{} [Digest limit reached; use conversation with action=read for this session.]{}",
+                session->session_id, token->trailing_suffix));
+            return token->end;
+        }
+
         std::string expansion = core::session::render_session_digest(
             *session,
             std::format("{}{}", core::session::kSessionReferenceSigil, session->session_id),
-            {.max_bytes = options.max_session_bytes});
+            {.max_bytes = budget});
+        if (expansion.empty()) {
+            append_plain_text(std::format(
+                "#{} [Digest budget too small; use conversation with action=read for this session.]{}",
+                session->session_id, token->trailing_suffix));
+            return token->end;
+        }
+        referenced_sessions.insert(session->session_id);
+        session_bytes += expansion.size();
         append_trailing_suffix(expansion, token->trailing_suffix);
         output.display_text += expansion;
         append_text_part(output.content_parts, expansion);
@@ -430,6 +458,15 @@ ExpandedPrompt expand_prompt(std::string_view input,
 
     std::size_t i = 0;
     while (i < input.size()) {
+        while (code_range_index < code_ranges.size() && code_ranges[code_range_index].end <= i) {
+            ++code_range_index;
+        }
+        if (code_range_index < code_ranges.size() && code_ranges[code_range_index].begin <= i) {
+            const auto end = code_ranges[code_range_index].end;
+            append_plain_text(input.substr(i, end - i));
+            i = end;
+            continue;
+        }
         if (input[i] == core::session::kSessionReferenceSigil) {
             if (const auto next = try_expand_session_reference(i)) {
                 i = *next;

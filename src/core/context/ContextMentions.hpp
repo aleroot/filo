@@ -23,6 +23,9 @@ struct MentionExpansionOptions {
     /// The session the prompt belongs to; referencing it is rejected.
     std::string current_session_id = {};
     std::size_t max_session_bytes = 32 * 1024;
+    /// Aggregate digest budget per prompt, across distinct conversations.
+    std::size_t max_total_session_bytes = 64 * 1024;
+    std::size_t max_session_references = 16;
 };
 
 struct ActiveMention {

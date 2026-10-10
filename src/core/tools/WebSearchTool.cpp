@@ -122,6 +122,8 @@ ToolDefinition WebSearchTool::get_definition() const {
             .idempotent_hint = false,
             .open_world_hint = true,
         },
+        // Native search needs an active agent provider, which --mcp cannot supply.
+        .agent_only = true,
     };
 }
 

@@ -5,6 +5,7 @@
 #include "../workspace/Workspace.hpp"
 #include "ActivateSkillTool.hpp"
 #include "ApplyPatchTool.hpp"
+#include "ConversationTool.hpp"
 #include "CreateDirectoryTool.hpp"
 #include "DeleteFileTool.hpp"
 #include "FileSearchTool.hpp"
@@ -37,6 +38,7 @@ namespace core::tools {
 BuiltinToolRegistrationOptions agent_builtin_tool_options() {
     return {
         .include_get_time = true,
+        .include_conversation = true,
         .include_workspace_config = false,
         .include_delegate_task = false,
         .include_ask_user_question = true,
@@ -64,6 +66,9 @@ void register_builtin_tools(ToolManager& tool_manager,
                             BuiltinToolRegistrationOptions options) {
     if (options.include_get_time) {
         tool_manager.register_tool(std::make_shared<GetTimeTool>());
+    }
+    if (options.include_conversation) {
+        tool_manager.register_tool(std::make_shared<ConversationTool>());
     }
 
     tool_manager.register_tool(std::make_shared<ShellTool>());

@@ -22,7 +22,7 @@ namespace core::session {
 // `#` is common in prose and code (`# Heading`, `#123`, `#include`, `#fff`),
 // so a sent token only becomes a reference when it is exactly an existing
 // session's 8-hex id, or an explicit `#"session name"`. Anything else is left
-// untouched, and nothing is recognised inside ``` fences. In the picker, `#2`
+// untouched, and nothing is recognised inside fenced blocks or inline code. In the picker, `#2`
 // or `#-1` select by position (see parse_session_ordinal).
 // ---------------------------------------------------------------------------
 
@@ -36,7 +36,7 @@ inline constexpr char kSessionReferenceSigil = '#';
 /// not end in whitespace (so the picker closes after an accepted reference).
 struct ActiveSessionReference {
     std::size_t replace_begin = 0; ///< index of '#'
-    std::size_t replace_end = 0;   ///< end of the word under the cursor
+    std::size_t replace_end = 0;   ///< end of the reference, excluding punctuation
     std::string query;             ///< text between '#' and the cursor
 };
 
@@ -89,9 +89,6 @@ struct SessionReferenceToken {
 [[nodiscard]] std::optional<SessionReferenceToken> parse_session_reference_token(
     std::string_view input,
     std::size_t pos);
-
-/// True when @p pos lies inside a ``` fenced block of @p input.
-[[nodiscard]] bool is_inside_code_fence(std::string_view input, std::size_t pos) noexcept;
 
 /// Loads the session @p token names, or nullopt when it names none or names
 /// @p current_session_id (a conversation cannot reference itself).

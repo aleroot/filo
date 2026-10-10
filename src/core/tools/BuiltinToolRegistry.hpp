@@ -15,6 +15,7 @@ class ToolManager;
 
 struct BuiltinToolRegistrationOptions {
     bool include_get_time = false;
+    bool include_conversation = false;
     bool include_workspace_config = false;
     bool include_delegate_task = false;
     bool include_ask_user_question = false;

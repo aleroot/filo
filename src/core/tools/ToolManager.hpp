@@ -51,7 +51,8 @@ public:
     }
 
     // Thread-safe read: called from any HTTP handler thread or the TUI agent thread.
-    std::vector<core::llm::Tool> get_all_tools() const {
+    std::vector<core::llm::Tool> get_all_tools(
+        core::context::SessionTransport transport = core::context::SessionTransport::unspecified) const {
         std::lock_guard lock(mutex_);
         std::vector<core::llm::Tool> tools;
         tools.reserve(tools_.size());
@@ -59,6 +60,7 @@ public:
             core::llm::Tool entry;
             entry.type = "function";
             entry.function = impl->get_definition();
+            if (!tool_allows_transport(entry.function, transport)) continue;
             if (!landrun_allows_tool(
                     core::landrun::LandrunSettings::instance().mode(),
                     entry.function.name)) {
@@ -98,6 +100,9 @@ public:
             if (!tool)
                 return "{\"error\": \"Tool not found: " + name + "\"}";
             definition = tool->get_definition();
+        }
+        if (!tool_allows_transport(definition, invocation.session_context.transport)) {
+            return R"({"error":"Tool is available only to Filo's internal agents."})";
         }
         const auto sandbox_mode =
             core::landrun::LandrunSettings::instance().mode();
@@ -144,11 +149,14 @@ public:
     }
 
     [[nodiscard]] std::optional<ToolDefinition>
-    get_tool_definition(const std::string& name) const {
+    get_tool_definition(const std::string& name,
+        core::context::SessionTransport transport = core::context::SessionTransport::unspecified) const {
         std::lock_guard lock(mutex_);
         auto tool = find_tool_unlocked(name);
         if (!tool) return std::nullopt;
-        return tool->get_definition();
+        auto definition = tool->get_definition();
+        if (!tool_allows_transport(definition, transport)) return std::nullopt;
+        return definition;
     }
 
     void clear_session_state(std::string_view session_id) {

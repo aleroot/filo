@@ -1790,7 +1790,7 @@ void Agent::step(std::function<void(const std::string&)> text_callback,
         }
     }
     if (provider->capabilities().supports_tool_calls) {
-        request.tools = skill_manager_.get_all_tools();
+        request.tools = skill_manager_.get_all_tools(session_context_snapshot().transport);
         if (!turn_callbacks.allowed_tools.empty()) {
             std::erase_if(request.tools, [&](const core::llm::Tool& tool) {
                 return !tool_is_allowed_for_turn(tool.function.name, turn_callbacks);
