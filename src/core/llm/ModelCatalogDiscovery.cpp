@@ -316,10 +316,12 @@ ModelCatalogDiscoveryResult discover_and_register_models(
         const std::string path = catalog_provider->model_list_path(page_token);
         const std::string url = core::utils::uri::append_query_params(build_url(base_url, path), auth.query_params);
 
-        cpr::Response response = cpr::Get(
-            cpr::Url{url},
-            headers,
-            cpr::Timeout{std::max(1, options.timeout_ms)});
+        const ModelCatalogRequest page_request =
+            catalog_provider->catalog_request(page_token);
+        const cpr::Timeout timeout{std::max(1, options.timeout_ms)};
+        cpr::Response response = page_request.method == "POST"
+            ? cpr::Post(cpr::Url{url}, headers, cpr::Body{page_request.body}, timeout)
+            : cpr::Get(cpr::Url{url}, headers, timeout);
 
         if (response.error) {
             discovery.error = response.error.message;

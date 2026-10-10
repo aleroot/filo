@@ -241,6 +241,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ModelMetadata.cpp
     src/core/llm/ReasoningEffortResolution.cpp
     src/core/llm/catalog/AnthropicModelCatalogProvider.cpp
+    src/core/llm/catalog/CodeAssistModelCatalogProvider.cpp
     src/core/llm/catalog/CompatibleModelMetadata.cpp
     src/core/llm/catalog/CodexModelCatalogProvider.cpp
     src/core/llm/catalog/GeminiModelCatalogProvider.cpp
@@ -272,6 +273,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/protocols/GeminiProtocol.cpp
     src/core/llm/protocols/GeminiCodeAssistProtocol.cpp
     src/core/llm/protocols/GeminiAntigravityProtocol.cpp
+    src/core/llm/protocols/AntigravityConversationState.cpp
     src/core/llm/protocols/OllamaProtocol.cpp
     src/core/llm/protocols/SseUtils.cpp
     src/core/llm/ProviderFactory.cpp

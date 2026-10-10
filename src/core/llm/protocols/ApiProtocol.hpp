@@ -267,6 +267,7 @@ struct ParseResult {
     std::string stream_error_message = {};       ///< Provider error message for stream_error.
     std::string stop_reason = {};                ///< Provider terminal reason, when reported.
     bool incomplete_tool_call = false;      ///< True when a stream ended mid-tool-use block.
+    std::string response_id = {};                  ///< Provider response handle, when reported (Antigravity echoes it as `labels.last_execution_id`).
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

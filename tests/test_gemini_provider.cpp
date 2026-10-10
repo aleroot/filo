@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include "core/auth/ApiKeyCredentialSource.hpp"
 #include "core/llm/protocols/GeminiAntigravityProtocol.hpp"
+#include "core/llm/protocols/AntigravityConversationState.hpp"
 #include "core/llm/protocols/GeminiCodeAssistProtocol.hpp"
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
@@ -533,11 +534,10 @@ TEST_CASE("GeminiAntigravityProtocol build_headers sets Antigravity client ident
     REQUIRE_THAT(headers.at("User-Agent"),
                  Catch::Matchers::StartsWith("antigravity/hub/" + std::string(kAntigravityClientVersion)
                                              + " (aidev_client; os_type=darwin; arch=arm64;"));
-    REQUIRE(headers.at("X-Goog-Api-Client") == "google-cloud-sdk vscode_cloudshelleditor/0.1");
-    REQUIRE_THAT(headers.at("Client-Metadata"),
-                 Catch::Matchers::ContainsSubstring(R"("ideType":"ANTIGRAVITY")"));
-    REQUIRE_THAT(headers.at("Client-Metadata"),
-                 Catch::Matchers::ContainsSubstring(R"("pluginType":"GEMINI")"));
+    // The real hub client sends no X-Goog-Api-Client / Client-Metadata on
+    // these calls; adding them would fingerprint Filo as a third-party client.
+    REQUIRE(headers.count("X-Goog-Api-Client") == 0);
+    REQUIRE(headers.count("Client-Metadata") == 0);
 }
 
 TEST_CASE("GeminiAntigravityProtocol name and url match Cloud Code Assist wire format",
@@ -744,6 +744,78 @@ TEST_CASE("GeminiAntigravityProtocol caps Claude output and skips the signature 
     simdjson::dom::parser parser4;
     doc = parse_json(parser4, protocol.serialize(gemini));
     REQUIRE(doc["request"]["generationConfig"]["maxOutputTokens"].error() == simdjson::NO_SUCH_FIELD);
+}
+
+TEST_CASE("GeminiAntigravityProtocol tags wire-profile models with model_enum and a fixed cap",
+          "[gemini][antigravity]") {
+    GeminiAntigravityProtocol protocol;
+    simdjson::dom::parser p1, p2, p3;
+
+    const auto profiled =
+        parse_json(p1, protocol.serialize(antigravity_request("gemini-3.1-pro-low", "Profiled wire model")));
+    std::string_view model_enum;
+    REQUIRE(profiled["request"]["labels"]["model_enum"].get(model_enum) == simdjson::SUCCESS);
+    REQUIRE(model_enum == "MODEL_PLACEHOLDER_M36");
+    int64_t max_tokens = 0;
+    REQUIRE(profiled["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens)
+            == simdjson::SUCCESS);
+    REQUIRE(max_tokens == 65535);
+
+    // The profile cap is a ceiling: a smaller caller request passes through.
+    auto clamped = antigravity_request("gemini-3.1-pro-low", "Clamped wire model");
+    clamped.max_tokens = 100'000;
+    const auto clamped_doc = parse_json(p2, protocol.serialize(clamped));
+    REQUIRE(clamped_doc["request"]["generationConfig"]["maxOutputTokens"].get(max_tokens)
+            == simdjson::SUCCESS);
+    REQUIRE(max_tokens == 65535);
+
+    // Unknown ids carry no telemetry label and no forced output cap.
+    const auto unknown = parse_json(
+        p3, protocol.serialize(antigravity_request("gemini-3.1-pro-preview", "Unknown wire model")));
+    REQUIRE(unknown["request"]["labels"]["model_enum"].error() == simdjson::NO_SUCH_FIELD);
+    REQUIRE(unknown["request"]["generationConfig"]["maxOutputTokens"].error()
+            == simdjson::NO_SUCH_FIELD);
+}
+
+TEST_CASE("Antigravity responseId becomes the next request's last_execution_id",
+          "[gemini][antigravity]") {
+    AntigravityConversationState::instance().clear();
+    GeminiAntigravityProtocol protocol;
+    auto first = antigravity_request("gemini-3.1-pro-low", "Execution handle conversation");
+
+    protocol.prepare_request(first);
+    simdjson::dom::parser p1;
+    const auto d1 = parse_json(p1, protocol.serialize(first));
+    REQUIRE(d1["request"]["labels"]["last_execution_id"].error() == simdjson::NO_SUCH_FIELD);
+
+    const auto parsed = protocol.parse_event(
+        "data: {\"response\":{\"responseId\":\"resp-77\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hi\"}]}}]}}\n\n");
+    REQUIRE(parsed.response_id == "resp-77");
+
+    auto second = first;
+    second.messages.push_back(Message{.role = "assistant", .content = "Hi"});
+    second.messages.push_back(Message{.role = "user", .content = "More"});
+    simdjson::dom::parser p2;
+    const auto d2 = parse_json(p2, protocol.serialize(second));
+    std::string_view execution_id;
+    REQUIRE(d2["request"]["labels"]["last_execution_id"].get(execution_id) == simdjson::SUCCESS);
+    REQUIRE(execution_id == "resp-77");
+}
+
+TEST_CASE("AntigravityConversationState drops the oldest conversations at capacity",
+          "[gemini][antigravity]") {
+    auto& state = AntigravityConversationState::instance();
+    state.clear();
+
+    constexpr std::size_t overflow = 8;
+    const std::size_t total = AntigravityConversationState::kMaxTrackedConversations + overflow;
+    for (std::size_t i = 0; i < total; ++i) {
+        state.record_execution_id("anchor-" + std::to_string(i), "exec-" + std::to_string(i));
+    }
+
+    CHECK(state.execution_id("anchor-0").empty());
+    CHECK(state.execution_id("anchor-" + std::to_string(total - 1))
+          == "exec-" + std::to_string(total - 1));
 }
 
 TEST_CASE("Plain Code Assist serialization is unchanged by Antigravity extras",

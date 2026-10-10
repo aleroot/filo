@@ -974,6 +974,13 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
     CHECK(gemini->model_list_path() == "/v1beta/models?pageSize=1000");
     CHECK(gemini->model_list_path("next") == "/v1beta/models?pageSize=1000&pageToken=next");
 
+    auto antigravity = make_model_catalog_provider(
+        core::config::ApiType::Gemini, "gemini-antigravity");
+    REQUIRE(antigravity != nullptr);
+    CHECK(dynamic_cast<CodeAssistModelCatalogProvider*>(antigravity.get()) != nullptr);
+    CHECK(antigravity->model_list_path() == "/v1internal:fetchAvailableModels");
+    CHECK(antigravity->catalog_request().method == "POST");
+
     auto grok = make_model_catalog_provider(core::config::ApiType::OpenAI, "grok");
     REQUIRE(grok != nullptr);
     CHECK(grok->provider_name() == "grok");
@@ -1760,7 +1767,7 @@ TEST_CASE("Model discovery follows the protocol catalog capability",
     core::llm::protocols::GeminiAntigravityProtocol antigravity;
 
     CHECK_FALSE(protocol.supports_model_catalog());
-    CHECK_FALSE(antigravity.supports_model_catalog());
+    CHECK(antigravity.supports_model_catalog());
 
     const auto result = discover_and_register_models(
         "gemini",
@@ -1774,6 +1781,8 @@ TEST_CASE("Model discovery follows the protocol catalog capability",
     CHECK(result.fetched == 0);
     CHECK(result.ok());
 
+    // Antigravity sessions discover through /v1internal:fetchAvailableModels;
+    // without credentials the probe is held back, not permanently skipped.
     const auto antigravity_result = discover_and_register_models(
         "gemini-antigravity",
         core::config::ApiType::Gemini,
@@ -1782,8 +1791,53 @@ TEST_CASE("Model discovery follows the protocol catalog capability",
         antigravity);
 
     CHECK_FALSE(antigravity_result.attempted);
-    CHECK(antigravity_result.permanent_skip);
-    CHECK(antigravity_result.ok());
+    CHECK_FALSE(antigravity_result.permanent_skip);
+    CHECK(antigravity_result.error == "missing credentials for remote model discovery");
+}
+
+TEST_CASE("CodeAssistModelCatalogProvider serves the hub fetchAvailableModels dialect",
+          "[llm][model-catalog][antigravity]") {
+    CodeAssistModelCatalogProvider catalog;
+    CHECK(catalog.provider_name() == "gemini-antigravity");
+    CHECK(catalog.model_list_path() == "/v1internal:fetchAvailableModels");
+    CHECK(catalog.model_list_path("ignored") == "/v1internal:fetchAvailableModels");
+
+    const ModelCatalogRequest request = catalog.catalog_request();
+    CHECK(request.method == "POST");
+    CHECK(request.body == "{}");
+
+    const auto result = catalog.parse_models_response(R"JSON({
+      "models": {
+        "gemini-3.1-pro-low": {
+          "displayName": "Gemini 3.1 Pro",
+          "supportsImages": true,
+          "supportsThinking": true,
+          "maxTokens": 200000,
+          "maxOutputTokens": 65535
+        },
+        "chat_20706": {"displayName": "Retired chat build"},
+        "internal-preview": {"displayName": "Internal", "isInternal": true}
+      },
+      "agentModelSorts": [{"groups": [{"modelIds": ["gemini-3.1-pro-low"]}]}],
+      "imageGenerationModelIds": ["gemini-3-pro-image"]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 1);
+    const auto& model = result.models.front();
+    CHECK(model.canonical_id == "gemini-3.1-pro-low");
+    CHECK(model.display_name == "Gemini 3.1 Pro");
+    CHECK(model.provider == "gemini-antigravity");
+    CHECK(model.context_window == 200000);
+    CHECK(model.max_output_tokens == 65535);
+    CHECK(model.supports(ModelCapability::Vision));
+    CHECK(model.supports(ModelCapability::Reasoning));
+    CHECK(model.supports(ModelCapability::FunctionCalling));
+
+    // A payload without the models map is a parse failure like the other
+    // catalogs report.
+    const auto missing = catalog.parse_models_response(R"({"agentModelSorts":[]})");
+    CHECK_FALSE(missing.ok());
 }
 
 TEST_CASE("Model discovery distinguishes authenticated catalogs from unsupported ones",

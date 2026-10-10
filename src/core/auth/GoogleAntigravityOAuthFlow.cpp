@@ -98,8 +98,12 @@ OAuthToken GoogleAntigravityOAuthFlow::login() {
     const std::string client_secret = resolve_client_secret();
 
     const std::string state = oauth_pkce::generate_correlation_token();
-    const std::string code_verifier = oauth_pkce::generate_code_verifier();
-    const std::string challenge = oauth_pkce::compute_code_challenge(code_verifier);
+    // The real Antigravity client does not use PKCE (its login exchange is a
+    // plain authorization-code flow with `access_type=offline&prompt=consent`),
+    // so the impersonation skips the code challenge as well: a PKCE parameter
+    // set the genuine client never sends is itself a fingerprint.
+    const std::string code_verifier;
+    const std::string challenge;
 
     OAuthLoopbackOptions loop_opts;
     loop_opts.bind_host = "127.0.0.1";
@@ -147,16 +151,19 @@ OAuthToken GoogleAntigravityOAuthFlow::login() {
     }
 
     const auto request_time = now_unix_seconds();
+    cpr::Payload token_payload{
+        {"client_id", client_id},
+        {"client_secret", client_secret},
+        {"code", result.code},
+        {"redirect_uri", redirect_uri},
+        {"grant_type", "authorization_code"},
+    };
+    if (!code_verifier.empty()) {
+        token_payload.Add({"code_verifier", code_verifier});
+    }
     cpr::Response token_response = cpr::Post(
         cpr::Url{"https://oauth2.googleapis.com/token"},
-        cpr::Payload{
-            {"client_id", client_id},
-            {"client_secret", client_secret},
-            {"code", result.code},
-            {"redirect_uri", redirect_uri},
-            {"grant_type", "authorization_code"},
-            {"code_verifier", code_verifier},
-        });
+        token_payload);
     if (token_response.status_code != 200) {
         throw std::runtime_error(
             "Google (Antigravity) token exchange failed (" +

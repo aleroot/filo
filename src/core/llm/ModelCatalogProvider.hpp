@@ -19,6 +19,17 @@ struct ModelCatalogResult {
 };
 
 /**
+ * @brief HTTP envelope for fetching one catalog page.
+ *
+ * Most catalogs are plain GETs; the default `catalog_request()` reflects
+ * that. POST-based catalogs (Cloud Code Assist) override only this hook.
+ */
+struct ModelCatalogRequest {
+    std::string_view method = "GET"; ///< HTTP method for the page fetch.
+    std::string body;                ///< Request body (empty for GET).
+};
+
+/**
  * Provider-specific adapter for the remote model-catalog contract.
  *
  * Transport orchestration depends only on this interface. Each implementation
@@ -32,6 +43,12 @@ public:
     [[nodiscard]] virtual std::string_view provider_name() const noexcept = 0;
     [[nodiscard]] virtual std::string model_list_path(std::string_view page_token = {}) const = 0;
     [[nodiscard]] virtual ModelCatalogResult parse_models_response(std::string_view body) const = 0;
+
+    /// Request envelope for `model_list_path()`; defaults to a bodiless GET.
+    [[nodiscard]] virtual ModelCatalogRequest
+    catalog_request(std::string_view /*page_token*/ = {}) const {
+        return {};
+    }
 };
 
 class GeminiModelCatalogProvider final : public ModelCatalogProvider {
@@ -40,6 +57,28 @@ public:
 
     [[nodiscard]] std::string_view provider_name() const noexcept override;
     [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
+
+private:
+    std::string provider_name_;
+};
+
+/**
+ * Cloud Code Assist catalog adapter (`POST /v1internal:fetchAvailableModels`).
+ *
+ * Used by the unofficial Antigravity session path against the daily
+ * `cloudcode-pa` hosts, where `/v1beta/models` does not exist. The response is
+ * an id-keyed `models` map rather than a list; internal and retired ids are
+ * dropped the way the real hub client filters its picker.
+ */
+class CodeAssistModelCatalogProvider final : public ModelCatalogProvider {
+public:
+    explicit CodeAssistModelCatalogProvider(
+        std::string provider_name = "gemini-antigravity");
+
+    [[nodiscard]] std::string_view provider_name() const noexcept override;
+    [[nodiscard]] std::string model_list_path(std::string_view page_token = {}) const override;
+    [[nodiscard]] ModelCatalogRequest catalog_request(std::string_view page_token = {}) const override;
     [[nodiscard]] ModelCatalogResult parse_models_response(std::string_view body) const override;
 
 private:

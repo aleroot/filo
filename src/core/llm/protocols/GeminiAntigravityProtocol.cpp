@@ -1,4 +1,5 @@
 #include "GeminiAntigravityProtocol.hpp"
+#include "AntigravityConversationState.hpp"
 #include "../../utils/JsonUtils.hpp"
 #include "../../utils/StringUtils.hpp"
 #include <algorithm>
@@ -6,7 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
+#include <optional>
 #include <string>
 
 namespace core::llm::protocols {
@@ -15,36 +16,25 @@ namespace {
 
 constexpr int kClaudeMaxOutputTokens = 64000;
 
-[[nodiscard]] std::string antigravity_platform() noexcept {
-#if defined(_WIN32)
-    return "windows";
-#elif defined(__APPLE__)
-    return "darwin";
-#else
-    return "linux";
-#endif
-}
+// Per-wire-id constants captured from the real `antigravity/hub` client.
+// `model_enum` is telemetry-only (the backend does not require it) but the
+// real client never omits it for these ids, so neither does Filo.
+struct WireProfileEntry {
+    std::string_view model;
+    AntigravityModelWireProfile profile;
+};
 
-// The backend gates newer models on the self-reported client version and
-// rejects ones it considers too old. The default tracks the latest release;
-// the env var lets users get ahead of a Filo release.
-[[nodiscard]] std::string antigravity_version() {
-    if (const char* raw = std::getenv("ANTIGRAVITY_CLI_VERSION"); raw && raw[0] != '\0') {
-        return raw;
-    }
-    return std::string(kAntigravityClientVersion);
-}
-
-// Format captured from the real darwin/arm64 `antigravity/hub` client. The
-// version and manifest come from that build, so os/arch stay pinned to it
-// regardless of the host. The backend does not validate `cl`.
-[[nodiscard]] std::string antigravity_user_agent() {
-    if (const char* raw = std::getenv("ANTIGRAVITY_USER_AGENT"); raw && raw[0] != '\0') {
-        return raw;
-    }
-    return "antigravity/hub/" + antigravity_version()
-        + " (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
-}
+constexpr std::array<WireProfileEntry, 7> kWireProfiles{{
+    {"gemini-3.5-flash-extra-low", {"MODEL_PLACEHOLDER_M187", 65536}},
+    {"gemini-3.5-flash-low", {"MODEL_PLACEHOLDER_M20", 65536}},
+    {"gemini-3-flash-agent", {"MODEL_PLACEHOLDER_M132", 65536}},
+    {"gemini-3.1-pro-low", {"MODEL_PLACEHOLDER_M36", 65535}},
+    {"gemini-pro-agent", {"MODEL_PLACEHOLDER_M16", 65535}},
+    // Claude on `daily-cloudcode-pa` rejects maxOutputTokens > 64000 with a
+    // 400; these ids carry no model_enum label.
+    {"claude-sonnet-4-6", {{}, 64000}},
+    {"claude-opus-4-6-thinking", {{}, 64000}},
+}};
 
 [[nodiscard]] std::uint64_t fnv1a64(std::string_view text) noexcept {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -110,7 +100,32 @@ std::string trim_trailing_slashes(std::string_view url) {
     return std::string(url);
 }
 
+// One `"key":"value"` labels entry with the value JSON-escaped.
+[[nodiscard]] std::string labels_entry(std::string_view key, std::string_view value) {
+    std::string entry = "\"";
+    entry += key;
+    entry += "\":\"";
+    entry += core::utils::escape_json_string(value);
+    entry += '\"';
+    return entry;
+}
+
 } // namespace
+
+std::optional<AntigravityModelWireProfile>
+antigravity_wire_profile(std::string_view model) {
+    for (const auto& entry : kWireProfiles) {
+        if (entry.model == model) return entry.profile;
+    }
+    return std::nullopt;
+}
+
+void GeminiAntigravityProtocol::prepare_request(ChatRequest& request) {
+    GeminiCodeAssistProtocol::prepare_request(request);
+    // Latch the conversation anchor so parse_event() can attribute the
+    // response's responseId to this trajectory (see stream_anchor_).
+    stream_anchor_ = conversation_anchor(request);
+}
 
 std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
     const std::string anchor = conversation_anchor(req);
@@ -126,17 +141,43 @@ std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
     const std::string trajectory_id = uuid_from_seed(anchor + "#trajectory");
     const std::string agent_id = uuid_from_seed(anchor + "#agent");
     const std::string used_claude = claude ? "true" : "false";
+    const auto profile = antigravity_wire_profile(model);
+
+    // Label order matches the real hub client. The previous response's
+    // execution handle appears only once a response has been observed for
+    // this conversation.
+    std::string labels = "{";
+    bool first_label = true;
+    const auto append_label = [&](std::string_view key, std::string_view value) {
+        if (!first_label) labels += ',';
+        labels += labels_entry(key, value);
+        first_label = false;
+    };
+    const std::string last_execution_id =
+        AntigravityConversationState::instance().execution_id(anchor);
+    if (!last_execution_id.empty()) {
+        append_label("last_execution_id", last_execution_id);
+    }
+    append_label("last_step_index", std::to_string(step - 1));
+    if (profile.has_value() && !profile->model_enum.empty()) {
+        append_label("model_enum", profile->model_enum);
+    }
+    append_label("trajectory_id", trajectory_id);
+    append_label("used_claude", used_claude);
+    append_label("used_claude_conservative", used_claude);
+    labels += '}';
 
     GeminiRequestExtras extras;
     extras.system_instruction_role = "user";
     extras.validated_tool_mode = true;
     extras.skip_thought_signature_on_first_call = is_gemini3_or_newer(model);
     extras.session_id = "-" + std::to_string(fnv1a64(anchor) & 0x7FFFFFFFFFFFFFFFULL);
-    extras.labels_json = R"({"last_step_index":")" + std::to_string(step - 1)
-        + R"(","trajectory_id":")" + trajectory_id
-        + R"(","used_claude":")" + used_claude
-        + R"(","used_claude_conservative":")" + used_claude + R"("})";
-    if (claude) extras.max_output_tokens_cap = kClaudeMaxOutputTokens;
+    extras.labels_json = std::move(labels);
+    if (profile.has_value()) {
+        extras.max_output_tokens_cap = profile->max_output_tokens;
+    } else if (claude) {
+        extras.max_output_tokens_cap = kClaudeMaxOutputTokens;
+    }
 
     std::string payload = serialize_gemini_code_assist_request(req, req.model, &extras);
     // serialize_gemini_code_assist_request always emits a single top-level
@@ -152,17 +193,11 @@ std::string GeminiAntigravityProtocol::serialize(const ChatRequest& req) const {
 }
 
 cpr::Header GeminiAntigravityProtocol::build_headers(const core::auth::AuthInfo& auth) const {
+    // The real hub client sends only its `User-Agent` beyond the standard
+    // auth/content headers — no X-Goog-Api-Client, no Client-Metadata.
     cpr::Header headers{
         {"Content-Type", "application/json"},
-        {"User-Agent", antigravity_user_agent()},
-        {"X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1"},
-        {"Client-Metadata",
-         R"({"ideType":"ANTIGRAVITY","platform":")" + [] {
-             const std::string p = antigravity_platform();
-             if (p == "darwin") return std::string("MACOS");
-             if (p == "windows") return std::string("WINDOWS");
-             return std::string("LINUX");
-         }() + R"(","pluginType":"GEMINI"})"},
+        {"User-Agent", core::auth::antigravity::user_agent()},
     };
     for (const auto& [k, v] : auth.headers) {
         headers[k] = v;
@@ -180,6 +215,17 @@ std::string GeminiAntigravityProtocol::build_url(std::string_view base_url,
         base_url = kHosts[static_cast<std::size_t>(failed_attempts_) % kHosts.size()];
     }
     return GeminiCodeAssistProtocol::build_url(base_url, model);
+}
+
+ParseResult GeminiAntigravityProtocol::parse_event(std::string_view raw_event) {
+    ParseResult result = GeminiCodeAssistProtocol::parse_event(raw_event);
+    // The hub client echoes the previous responseId as labels.last_execution_id
+    // on the next request of the trajectory; remember it for this conversation.
+    if (!result.response_id.empty()) {
+        AntigravityConversationState::instance().record_execution_id(
+            stream_anchor_, result.response_id);
+    }
+    return result;
 }
 
 void GeminiAntigravityProtocol::on_response(const HttpResponse& response) {

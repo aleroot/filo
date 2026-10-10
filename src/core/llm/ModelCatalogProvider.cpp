@@ -17,6 +17,12 @@ make_model_catalog_provider(
     const std::string name(provider_name);
     switch (api_type) {
         case config::ApiType::Gemini:
+            // The unofficial Antigravity session path talks to the Cloud Code
+            // Assist hosts, whose catalog is `v1internal:fetchAvailableModels`.
+            if (provider_name == "gemini-antigravity"
+                || provider_name == "gemini-code-assist") {
+                return std::make_unique<CodeAssistModelCatalogProvider>(name);
+            }
             return std::make_unique<GeminiModelCatalogProvider>(name);
         case config::ApiType::Anthropic:
             return std::make_unique<AnthropicModelCatalogProvider>(name);

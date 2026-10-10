@@ -921,6 +921,58 @@ TEST_CASE("Google Code Assist — current tier wins over default tier", "[Google
     REQUIRE(tier.user_defined_project);
 }
 
+TEST_CASE("Google Code Assist — Antigravity metadata mirrors the hub client",
+          "[GoogleCodeAssist][antigravity]") {
+    using google_code_assist::client_metadata_json;
+    using google_code_assist::load_code_assist_payload;
+    using google_code_assist::onboard_user_payload;
+
+    // The native Antigravity control plane sends only `ideType` in metadata.
+    CHECK(client_metadata_json("proj", "ANTIGRAVITY")
+          == R"({"ideType":"ANTIGRAVITY"})");
+
+    const std::string load = load_code_assist_payload("proj", "ANTIGRAVITY");
+    CHECK_THAT(load, Catch::Matchers::ContainsSubstring(R"("cloudaicompanionProject":"proj")"));
+    CHECK_THAT(load, Catch::Matchers::ContainsSubstring(R"("metadata":{"ideType":"ANTIGRAVITY"})"));
+    CHECK_THAT(load, !Catch::Matchers::ContainsSubstring("pluginType"));
+
+    // The hub onboards with tier + metadata only — no cloudaicompanionProject.
+    const std::string onboard = onboard_user_payload("free-tier", "proj", "ANTIGRAVITY");
+    CHECK_THAT(onboard, Catch::Matchers::ContainsSubstring(R"("tierId":"free-tier")"));
+    CHECK_THAT(onboard, !Catch::Matchers::ContainsSubstring("cloudaicompanionProject"));
+
+    // The gemini-cli shape is unchanged for other ide types.
+    CHECK(client_metadata_json("proj", "IDE_UNSPECIFIED")
+          == R"({"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI","duetProject":"proj"})");
+    CHECK_THAT(onboard_user_payload("legacy-tier", "proj", "IDE_UNSPECIFIED"),
+               Catch::Matchers::ContainsSubstring(R"("cloudaicompanionProject":"proj")"));
+}
+
+TEST_CASE("Google Code Assist — parse onboardUser operation responses",
+          "[GoogleCodeAssist][antigravity]") {
+    using google_code_assist::parse_onboard_user_response;
+
+    // Pending operation carries a pollable long-running-operation name.
+    const auto pending = parse_onboard_user_response(
+        R"({"name":"operations/abc-123","done":false})");
+    CHECK_FALSE(pending.done);
+    CHECK(pending.name == "operations/abc-123");
+    CHECK(pending.project_id.empty());
+
+    // Antigravity returns the project id as a plain string.
+    const auto done_string = parse_onboard_user_response(
+        R"({"name":"operations/abc-123","done":true,"response":{"cloudaicompanionProject":"project-9"}})");
+    CHECK(done_string.done);
+    CHECK(done_string.project_id == "project-9");
+
+    // Older responses wrap it in an object with `id`.
+    const auto done_object = parse_onboard_user_response(
+        R"({"done":true,"response":{"cloudaicompanionProject":{"id":"project-7"}}})");
+    CHECK(done_object.done);
+    CHECK(done_object.project_id == "project-7");
+    CHECK(done_object.name.empty());
+}
+
 // ── ClaudeOAuthFlow / AuthenticationManager ──────────────────────────────────
 
 TEST_CASE("ClaudeOAuthFlow::login uses ANTHROPIC_AUTH_TOKEN", "[ClaudeOAuthFlow]") {

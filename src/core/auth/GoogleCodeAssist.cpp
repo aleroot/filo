@@ -1,4 +1,5 @@
 #include "GoogleCodeAssist.hpp"
+#include "GoogleAntigravityIdentity.hpp"
 #include "../logging/Logger.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/StringUtils.hpp"
@@ -14,65 +15,23 @@ namespace core::auth::google_code_assist {
 namespace {
 
 constexpr std::string_view kDefaultEndpoint = "https://cloudcode-pa.googleapis.com";
-// Host the real Antigravity client talks to (same as the streaming protocol).
-constexpr std::string_view kAntigravityEndpoint = "https://daily-cloudcode-pa.googleapis.com";
 constexpr std::string_view kDocsUrl = "https://goo.gle/gemini-cli-auth-docs#workspace-gca";
 constexpr std::string_view kApiVersion = "v1internal";
 
-[[nodiscard]] std::string client_metadata_json(std::string_view project_id,
-                                               std::string_view ide_type) {
-    std::string json = R"({"ideType":")";
-    json += core::utils::escape_json_string(ide_type.empty() ? "IDE_UNSPECIFIED" : ide_type);
-    json += R"(","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI")";
-    if (!project_id.empty()) {
-        json += R"(,"duetProject":")";
-        json += core::utils::escape_json_string(project_id);
-        json += '"';
-    }
-    json += '}';
-    return json;
-}
-
-[[nodiscard]] std::string load_code_assist_payload(std::string_view project_id,
-                                                   std::string_view ide_type) {
-    std::string json = "{";
-    if (!project_id.empty()) {
-        json += R"("cloudaicompanionProject":")";
-        json += core::utils::escape_json_string(project_id);
-        json += R"(",)";
-    }
-    json += R"("metadata":)";
-    json += client_metadata_json(project_id, ide_type);
-    json += '}';
-    return json;
-}
-
-[[nodiscard]] std::string onboard_user_payload(std::string_view tier_id,
-                                               std::string_view project_id,
-                                               std::string_view ide_type) {
-    std::string json = R"({"tierId":")";
-    json += core::utils::escape_json_string(tier_id);
-    json += '"';
-    if (!project_id.empty()) {
-        json += R"(,"cloudaicompanionProject":")";
-        json += core::utils::escape_json_string(project_id);
-        json += '"';
-    }
-    json += R"(,"metadata":)";
-    json += client_metadata_json(project_id, ide_type);
-    json += '}';
-    return json;
-}
-
 [[nodiscard]] cpr::Response post_json(std::string_view url,
                                       std::string_view access_token,
-                                      std::string body) {
+                                      std::string body,
+                                      std::string_view user_agent = {}) {
+    cpr::Header headers{
+        {"Authorization", "Bearer " + std::string(access_token)},
+        {"Content-Type", "application/json"},
+    };
+    if (!user_agent.empty()) {
+        headers["User-Agent"] = std::string(user_agent);
+    }
     return cpr::Post(
         cpr::Url{std::string(url)},
-        cpr::Header{
-            {"Authorization", "Bearer " + std::string(access_token)},
-            {"Content-Type", "application/json"},
-        },
+        headers,
         cpr::Body{std::move(body)}
     );
 }
@@ -103,13 +62,66 @@ constexpr std::string_view kApiVersion = "v1internal";
 
 } // namespace
 
+std::string client_metadata_json(std::string_view project_id,
+                                 std::string_view ide_type) {
+    const std::string effective_ide = ide_type.empty() ? "IDE_UNSPECIFIED" : std::string(ide_type);
+    std::string json = R"({"ideType":")";
+    json += core::utils::escape_json_string(effective_ide);
+    json += '"';
+    // The native Antigravity control plane sends only `ideType`; the
+    // gemini-cli shape adds platform/pluginType/duetProject.
+    if (effective_ide != "ANTIGRAVITY") {
+        json += R"(,"platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI")";
+        if (!project_id.empty()) {
+            json += R"(,"duetProject":")";
+            json += core::utils::escape_json_string(project_id);
+            json += '"';
+        }
+    }
+    json += '}';
+    return json;
+}
+
+std::string load_code_assist_payload(std::string_view project_id,
+                                     std::string_view ide_type) {
+    std::string json = "{";
+    if (!project_id.empty()) {
+        json += R"("cloudaicompanionProject":")";
+        json += core::utils::escape_json_string(project_id);
+        json += R"(",)";
+    }
+    json += R"("metadata":)";
+    json += client_metadata_json(project_id, ide_type);
+    json += '}';
+    return json;
+}
+
+std::string onboard_user_payload(std::string_view tier_id,
+                                 std::string_view project_id,
+                                 std::string_view ide_type) {
+    const bool antigravity = ide_type == "ANTIGRAVITY";
+    std::string json = R"({"tierId":")";
+    json += core::utils::escape_json_string(tier_id);
+    json += '"';
+    // The Antigravity hub onboards with tier + metadata only.
+    if (!antigravity && !project_id.empty()) {
+        json += R"(,"cloudaicompanionProject":")";
+        json += core::utils::escape_json_string(project_id);
+        json += '"';
+    }
+    json += R"(,"metadata":)";
+    json += client_metadata_json(project_id, ide_type);
+    json += '}';
+    return json;
+}
+
 std::string code_assist_endpoint(std::string_view ide_type) {
     if (const char* raw = std::getenv("CODE_ASSIST_ENDPOINT");
         raw && raw[0] != '\0') {
         return raw;
     }
     if (ide_type == "ANTIGRAVITY") {
-        return std::string(kAntigravityEndpoint);
+        return std::string(core::auth::antigravity::kAntigravityEndpoint);
     }
     return std::string(kDefaultEndpoint);
 }
@@ -162,8 +174,16 @@ OnboardUserOperation parse_onboard_user_response(std::string_view json) {
     if (doc["done"].get_bool().get(done) == simdjson::SUCCESS) {
         result.done = done;
     }
-    if (doc["response"]["cloudaicompanionProject"]["id"].get_string().get(sv)
+    if (doc["name"].get_string().get(sv) == simdjson::SUCCESS) {
+        result.name = std::string(sv);
+    }
+    // `response.cloudaicompanionProject` is a plain project id on the
+    // Antigravity host and an object with `id` on older responses.
+    if (doc["response"]["cloudaicompanionProject"].get_string().get(sv)
         == simdjson::SUCCESS) {
+        result.project_id = std::string(sv);
+    } else if (doc["response"]["cloudaicompanionProject"]["id"].get_string().get(sv)
+               == simdjson::SUCCESS) {
         result.project_id = std::string(sv);
     }
 
@@ -198,12 +218,20 @@ std::string setup_user(std::string_view access_token,
         ui->show_instructions("Completing Gemini Code Assist setup for your Google account.");
     }
 
+    // The Antigravity client identifies itself on control-plane calls too; a
+    // missing hub User-Agent here would be an instant giveaway.
+    const std::string user_agent = ide_type == "ANTIGRAVITY"
+        ? core::auth::antigravity::user_agent()
+        : std::string{};
+
     const std::string endpoint = code_assist_endpoint(ide_type);
-    const std::string load_url = endpoint + "/" + std::string(kApiVersion) + ":loadCodeAssist";
+    const std::string api_base = endpoint + "/" + std::string(kApiVersion);
+    const std::string load_url = api_base + ":loadCodeAssist";
     cpr::Response load_response = post_json(
         load_url,
         access_token,
-        load_code_assist_payload(project_id, ide_type));
+        load_code_assist_payload(project_id, ide_type),
+        user_agent);
     if (load_response.status_code != 200) {
         throw std::runtime_error(format_endpoint_error("loadCodeAssist", load_response));
     }
@@ -221,32 +249,48 @@ std::string setup_user(std::string_view access_token,
             + std::string(kDocsUrl));
     }
 
-    const std::string onboard_url = endpoint + "/" + std::string(kApiVersion) + ":onboardUser";
-    for (int attempt = 0; attempt < 60; ++attempt) {
-        cpr::Response onboard_response = post_json(
-            onboard_url,
-            access_token,
-            onboard_user_payload(tier.id, project_id, ide_type));
-        if (onboard_response.status_code != 200) {
-            throw std::runtime_error(format_endpoint_error("onboardUser", onboard_response));
-        }
-
-        const OnboardUserOperation operation =
-            parse_onboard_user_response(onboard_response.text);
-        if (operation.done) {
-            if (!operation.project_id.empty()) {
-                return operation.project_id;
-            }
-            return project_id;
-        }
-
-        core::logging::debug(
-            "Google Code Assist onboarding still pending for tier '{}'; retrying.",
-            tier.id);
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+    const std::string onboard_url = api_base + ":onboardUser";
+    cpr::Response onboard_response = post_json(
+        onboard_url,
+        access_token,
+        onboard_user_payload(tier.id, project_id, ide_type),
+        user_agent);
+    if (onboard_response.status_code != 200) {
+        throw std::runtime_error(format_endpoint_error("onboardUser", onboard_response));
     }
 
-    throw std::runtime_error("Timed out waiting for Google Code Assist onboarding to finish");
+    // onboardUser returns a long-running operation; the real clients poll it
+    // through the operations endpoint instead of re-issuing onboards.
+    OnboardUserOperation operation =
+        parse_onboard_user_response(onboard_response.text);
+    for (int attempt = 0; !operation.done && attempt < 60; ++attempt) {
+        if (operation.name.empty()) {
+            throw std::runtime_error("onboardUser returned an operation without a name");
+        }
+        core::logging::debug(
+            "Google Code Assist onboarding still pending for tier '{}'; polling '{}'.",
+            tier.id, operation.name);
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+
+        cpr::Response operation_response = post_json(
+            api_base + "/" + operation.name,
+            access_token,
+            {},
+            user_agent);
+        if (operation_response.status_code != 200) {
+            throw std::runtime_error(
+                format_endpoint_error("onboardUser operation", operation_response));
+        }
+        operation = parse_onboard_user_response(operation_response.text);
+    }
+    if (!operation.done) {
+        throw std::runtime_error("Timed out waiting for Google Code Assist onboarding to finish");
+    }
+
+    if (!operation.project_id.empty()) {
+        return operation.project_id;
+    }
+    return project_id;
 }
 
 } // namespace core::auth::google_code_assist

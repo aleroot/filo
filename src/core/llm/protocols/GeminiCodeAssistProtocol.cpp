@@ -137,6 +137,11 @@ ParseResult GeminiCodeAssistProtocol::parse_event(std::string_view raw_event) {
     result.prompt_tokens = 0;
     result.completion_tokens = 0;
 
+    std::string_view response_id;
+    if (response_el["responseId"].get(response_id) == simdjson::SUCCESS) {
+        result.response_id = std::string(response_id);
+    }
+
     const GeminiUsageMetadata usage =
         extract_gemini_usage_metadata(simdjson::minify(response_el));
     result.prompt_tokens = usage.prompt_tokens;
