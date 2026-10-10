@@ -1,4 +1,5 @@
 #include "QwenModelTraits.hpp"
+#include "ModelRegistry.hpp"
 
 #include "core/utils/StringUtils.hpp"
 
@@ -8,6 +9,20 @@
 namespace core::llm {
 
 namespace {
+
+struct Entry { std::string_view id; int context; bool vision; };
+constexpr std::array kCodingPlanModels{
+    Entry{"qwen3.5-plus", 1000000, true},
+    Entry{"qwen3.6-plus", 1000000, true},
+    Entry{"qwen3.7-plus", 1000000, true},
+    Entry{"qwen3-coder-plus", 1000000, false},
+    Entry{"qwen3-coder-next", 262144, false},
+    Entry{"qwen3-max-2026-01-23", 262144, false},
+    Entry{"glm-5", 202752, false},
+    Entry{"glm-4.7", 202752, false},
+    Entry{"kimi-k2.5", 262144, true},
+    Entry{"MiniMax-M2.5", 196608, false},
+};
 
 [[nodiscard]] bool is_qwen_chat_model(std::string_view model_id) {
     const std::string lowered = core::utils::str::to_lower_ascii_copy(
@@ -48,6 +63,48 @@ bool is_qwen_text_model(std::string_view model_id) {
         && lowered.find("audio") == std::string::npos
         && lowered.find("embedding") == std::string::npos
         && lowered.find("rerank") == std::string::npos;
+}
+
+std::vector<ModelInfo> qwen_coding_plan_fallback_models() {
+    // Endpoint-local cards: do not register these under another vendor's
+    // global model identity. Live endpoint discovery always wins.
+    std::vector<ModelInfo> models;
+    for (const auto& entry : kCodingPlanModels) {
+        ModelInfo model;
+        if (const auto existing = ModelRegistry::instance().lookup(entry.id)) model = *existing;
+        model.canonical_id = entry.id;
+        model.display_name = entry.id;
+        model.provider = "qwen";
+        model.context_window = entry.context;
+        if (model.max_output_tokens <= 0) model.max_output_tokens = 32000;
+        model.reasoning = {};
+        model.wire = {};
+        model.capabilities = static_cast<uint32_t>(ModelCapability::TextInput)
+            | static_cast<uint32_t>(ModelCapability::TextOutput)
+            | static_cast<uint32_t>(ModelCapability::Streaming)
+            | static_cast<uint32_t>(ModelCapability::SystemPrompts)
+            | static_cast<uint32_t>(ModelCapability::FunctionCalling);
+        if (entry.vision) {
+            model.capabilities |= static_cast<uint32_t>(ModelCapability::Vision)
+                | static_cast<uint32_t>(ModelCapability::VideoInput);
+        }
+        if (!entry.id.starts_with("qwen3-coder")) {
+            model.capabilities |= static_cast<uint32_t>(ModelCapability::Reasoning);
+        }
+        models.push_back(std::move(model));
+    }
+    return models;
+}
+
+int qwen_endpoint_context_window(std::string_view model) {
+    std::string id = core::utils::str::to_lower_ascii_copy(model);
+    if (const auto slash = id.rfind('/'); slash != std::string::npos) id.erase(0, slash + 1);
+    for (const auto& entry : kCodingPlanModels) {
+        const auto canonical = core::utils::str::to_lower_ascii_copy(entry.id);
+        if (id == canonical || (id.starts_with(canonical) && id.size() > canonical.size()
+                                && id[canonical.size()] == '-')) return entry.context;
+    }
+    return id.starts_with("qwen") || id == "coder-model" ? get_max_context_size(id) : 0;
 }
 
 bool qwen_model_supports_preserve_thinking(std::string_view model_id) {

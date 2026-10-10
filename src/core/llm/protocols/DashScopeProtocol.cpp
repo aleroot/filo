@@ -1,6 +1,8 @@
 #include "DashScopeProtocol.hpp"
 #include "SseUtils.hpp"
+#include "OpenAIUsage.hpp"
 #include "../Models.hpp"
+#include "../ToolCallAssembly.hpp"
 #include "../QwenModelTraits.hpp"
 #include "../../utils/StringUtils.hpp"
 #include "../../utils/AsciiUtils.hpp"
@@ -15,22 +17,91 @@ namespace core::llm::protocols {
 
 namespace {
 
-[[nodiscard]] ReasoningCapabilities qwen_reasoning_capabilities(
-    std::string_view model) noexcept {
-    using core::utils::ascii::istarts_with;
-    const auto generation = qwen_model_generation(model);
-    const bool supported = (!generation.empty()
-                            && generation >= std::vector<int>{3})
-        || istarts_with(model, "qwen-plus")
-        || istarts_with(model, "qwen-flash")
-        || istarts_with(model, "qwen-turbo")
-        || istarts_with(model, "qwq")
-        || istarts_with(model, "qvq");
-    if (!supported) return {};
-    return ReasoningCapability::Effort
-        | ReasoningCapability::MaxEffort
-        | ReasoningCapability::XHighEffort
-        | ReasoningCapability::Disable;
+// Keep provisional tool fragments inside Qwen's wire adapter until the
+// request terminates successfully. The shared agent never sees partial calls.
+void collect_tool_calls(ParseResult& result, std::vector<ToolCall>& pending) {
+    std::erase_if(result.chunks, [&](StreamChunk& chunk) {
+        if (chunk.tools.empty()) return false;
+        for (const auto& call : chunk.tools) merge_tool_call_fragment(pending, call);
+        chunk.tools.clear();
+        return chunk.content.empty() && chunk.reasoning_content.empty()
+            && chunk.continuation_items.empty() && !chunk.is_final;
+    });
+}
+
+void complete_tool_calls(ParseResult& result, std::vector<ToolCall>& pending) {
+    simdjson::dom::parser parser;
+    for (const auto& call : pending) {
+        if (call.function.arguments.empty()) continue;
+        simdjson::padded_string json(call.function.arguments);
+        simdjson::dom::element arguments;
+        if (parser.parse(json).get(arguments) != simdjson::SUCCESS) {
+            result.incomplete_tool_call = true;
+            break;
+        }
+    }
+    if (!result.incomplete_tool_call && !pending.empty()) {
+        result.chunks.push_back(StreamChunk::make_tools(std::move(pending)));
+    }
+    pending.clear();
+}
+
+enum class ThinkingMode { None, Toggle, QwenEffort, VendorEffort };
+struct ThinkingPolicy {
+    ThinkingMode mode = ThinkingMode::None;
+    bool required = false;
+    bool low_effort = false;
+    bool xhigh_maps_high = false;
+};
+
+[[nodiscard]] std::string wire_model(std::string_view model) {
+    std::string id = core::utils::str::to_lower_ascii_copy(core::utils::str::trim_ascii_view(model));
+    if (const auto slash = id.rfind('/'); slash != std::string::npos) id.erase(0, slash + 1);
+    return id;
+}
+
+[[nodiscard]] ThinkingPolicy thinking_policy(std::string_view model) {
+    const std::string id = wire_model(model);
+    if (qwen_model_supports_tiered_effort(id)) {
+        return {ThinkingMode::QwenEffort, id.starts_with("qwen3.8-max"), true};
+    }
+    if (id.starts_with("qwen3-coder")) return {};
+    if (id.starts_with("glm-5.3")) return {ThinkingMode::VendorEffort, true, true};
+    if (id.starts_with("glm-5")) return {ThinkingMode::VendorEffort};
+    if (id.starts_with("deepseek-v4")) {
+        const bool native_low = id.starts_with("deepseek-v4.1")
+            || id.starts_with("deepseek-v4-flash-0731")
+            || id.starts_with("deepseek-v4-pro-0813");
+        return {ThinkingMode::VendorEffort, false, native_low, native_low};
+    }
+    if (id.starts_with("kimi-k3")) return {ThinkingMode::VendorEffort, false, true};
+    if (id.starts_with("kimi-k2.7-code") || id.starts_with("kimi-k2-thinking")) {
+        return {ThinkingMode::Toggle, true};
+    }
+    if (id.starts_with("kimi-k2.") || id.starts_with("glm-4.")
+        || id == "coder-model" || id.starts_with("qwen3")
+        || id.starts_with("qwen-plus") || id.starts_with("qwen-flash")
+        || id.starts_with("qwen-turbo")) {
+        return {ThinkingMode::Toggle};
+    }
+    if (id.starts_with("qwq") || id.starts_with("qvq")) return {ThinkingMode::Toggle, true};
+    return {};
+}
+
+[[nodiscard]] ReasoningCapabilities qwen_reasoning_capabilities(std::string_view model) {
+    const auto policy = thinking_policy(model);
+    if (policy.mode == ThinkingMode::None) return {};
+    ReasoningCapabilities caps{policy.required ? ReasoningCapability::Required
+                                               : ReasoningCapability::Disable};
+    if (policy.mode == ThinkingMode::Toggle) return caps | ReasoningCapability::ToggleOnly;
+    caps = caps | ReasoningCapability::Effort | ReasoningCapability::MapsMinimalToLow;
+    if (policy.mode == ThinkingMode::QwenEffort) {
+        return caps | ReasoningCapability::XHighEffort | ReasoningCapability::MapsHighToXHigh;
+    }
+    caps = caps | ReasoningCapability::MaxEffort | ReasoningCapability::MapsMediumToHigh;
+    if (!policy.low_effort) caps = caps | ReasoningCapability::MapsLowToHigh;
+    return caps | (policy.xhigh_maps_high ? ReasoningCapability::MapsXHighToHigh
+                                         : ReasoningCapability::MapsXHighToMax);
 }
 
 [[nodiscard]] int32_t parse_int_header(const cpr::Header& headers,
@@ -102,28 +173,33 @@ namespace {
     return info;
 }
 
-[[nodiscard]] std::string normalize_qwen_effort(std::string_view configured,
-                                                std::string_view model) {
-    const std::string lowered = core::utils::str::to_lower_ascii_copy(
+[[nodiscard]] std::string normalize_dashscope_effort(
+    std::string_view configured, const ThinkingPolicy& policy) {
+    std::string effort = core::utils::str::to_lower_ascii_copy(
         core::utils::str::trim_ascii_view(configured));
-    if (lowered == "off" || lowered == "none" || lowered == "disabled") return "none";
-    if (qwen_model_supports_tiered_effort(model)) {
+    if (effort == "off" || effort == "disabled") effort = "none";
+    if (effort == "none") return policy.required ? "low" : "none";
+    if (effort == "ultra") effort = "max";
+    if (effort != "minimal" && effort != "low" && effort != "medium"
+        && effort != "high" && effort != "xhigh" && effort != "max") return {};
+    if (policy.mode == ThinkingMode::QwenEffort) {
         // Use QwenCloud's documented low/medium/xhigh ladder. In particular,
         // forwarding Filo's max/minimal verbatim can produce a persistent 400.
-        if (lowered == "minimal") return "low";
-        if (lowered == "high" || lowered == "max" || lowered == "ultra") return "xhigh";
+        if (effort == "minimal") return "low";
+        if (effort == "high" || effort == "max") return "xhigh";
     }
-    if (lowered == "minimal" || lowered == "low" || lowered == "medium"
-        || lowered == "high" || lowered == "xhigh" || lowered == "max") {
-        return lowered;
+    if (policy.mode == ThinkingMode::VendorEffort) {
+        if (effort == "minimal") effort = policy.low_effort ? "low" : "high";
+        if (effort == "low" && !policy.low_effort) effort = "high";
+        if (effort == "medium") effort = "high";
+        if (effort == "xhigh") effort = policy.xhigh_maps_high ? "high" : "max";
     }
-    return {};
+    return effort;
 }
 
 [[nodiscard]] bool supports_dashscope_structured_cache_content(
     const ChatRequest& request) {
-    const std::string model = core::utils::str::to_lower_ascii_copy(
-        core::utils::str::trim_ascii_view(request.model));
+    const std::string model = wire_model(request.model);
     if (!model.starts_with("glm-")) return true;
     if (!request.tools.empty()) return true;
     return std::ranges::any_of(request.messages, [](const Message& message) {
@@ -205,16 +281,55 @@ struct DashScopeErrorDetails {
         details.code = value;
     } else if (doc["error"]["code"].get(value) == simdjson::SUCCESS) {
         details.code = value;
+    } else if (doc["response"]["error"]["code"].get(value) == simdjson::SUCCESS) {
+        details.code = value;
     }
     if (doc["message"].get(value) == simdjson::SUCCESS) {
         details.message = value;
     } else if (doc["error"]["message"].get(value) == simdjson::SUCCESS) {
+        details.message = value;
+    } else if (doc["response"]["error"]["message"].get(value) == simdjson::SUCCESS) {
         details.message = value;
     }
 
     details.token_plan_limit =
         classify_token_plan_limit(details.code, details.message);
     return details;
+}
+
+void mark_rate_limit(RateLimitInfo& info, const DashScopeErrorDetails& error) {
+    info.is_rate_limited = true;
+    info.unified_status = "rate_limited";
+    if (error.token_plan_limit == TokenPlanLimitKind::PlanQuota) info.unified_overage_status = "rejected";
+}
+
+ParseResult stream_failure(const DashScopeErrorDetails& error, std::string type,
+                           RateLimitInfo& rate_limit, bool& saw_limit,
+                           ParseResult result = {}) {
+    const auto message = core::utils::str::to_lower_ascii_copy(error.message);
+    const bool throttle = error.token_plan_limit == TokenPlanLimitKind::RequestRate
+        || message.find("rate limit") != std::string::npos
+        || message.find("throttl") != std::string::npos || message.find("tpm") != std::string::npos;
+    if (error.token_plan_limit != TokenPlanLimitKind::Unknown || throttle) {
+        rate_limit = {};
+        mark_rate_limit(rate_limit, error);
+        saw_limit = true;
+    }
+    result.stream_error = true;
+    result.retryable_stream_error = throttle && error.token_plan_limit != TokenPlanLimitKind::PlanQuota;
+    result.stream_error_type = std::move(type);
+    result.stream_error_message = error.message.empty() ? "Qwen generation failed." : error.message;
+    return result;
+}
+
+bool retryable_response(const HttpResponse& response) noexcept {
+    if (response.status_code == 429) {
+        try {
+            return parse_dashscope_error(response.body).token_plan_limit != TokenPlanLimitKind::PlanQuota;
+        } catch (...) { return true; }
+    }
+    return response.status_code == 500 || response.status_code == 502
+        || response.status_code == 503 || response.status_code == 504;
 }
 
 [[nodiscard]] std::string format_dashscope_error(
@@ -345,8 +460,11 @@ cpr::Header DashScopeProtocol::build_headers(const core::auth::AuthInfo& auth) c
     return headers;
 }
 
-ReasoningCapabilities DashScopeProtocol::reasoning_capabilities(
-    std::string_view model) const noexcept {
+void DashScopeProtocol::prepare_request(ChatRequest& request) {
+    if (lifecycle_.prepare) lifecycle_.prepare(request);
+}
+
+ReasoningCapabilities DashScopeProtocol::reasoning_capabilities(std::string_view model) const noexcept {
     return qwen_reasoning_capabilities(model);
 }
 
@@ -388,7 +506,8 @@ std::string DashScopeProtocol::serialize(const ChatRequest& req) const {
     if (payload.ends_with('}')) {
         payload.pop_back();
         append_extra_fields(payload, req);
-        if (!req.session_id.empty() || !req.transport_turn_id.empty()) {
+        if (qwen_model_requires_nonnull_assistant_content(req.model)
+            && (!req.session_id.empty() || !req.transport_turn_id.empty())) {
             payload += R"(,"metadata":{)";
             bool has_metadata_field = false;
             if (!req.session_id.empty()) {
@@ -419,43 +538,34 @@ void DashScopeProtocol::append_extra_fields(std::string&       payload,
         payload += R"(,"vl_high_resolution_images":true)";
     }
 
-    if (qwen_reasoning_capabilities(req.model).supports_effort()) {
-        const std::string effort = normalize_qwen_effort(
-            req.effort.empty() ? std::string_view(default_effort_)
-                               : std::string_view(req.effort),
-            req.model);
-
-        if (qwen_model_supports_tiered_effort(req.model)) {
-            std::string tier = effort;
-            if (req.effort.empty() && thinking_budget_ > 0 && tier != "none") {
-                tier.clear();
-            }
-            if (tier.empty() && thinking_budget_ > 0) {
-                // A configured budget must not silently become unlimited thinking.
-                // Budget and effort are mutually exclusive on Qwen 3.8.
-                payload += R"(,"enable_thinking":true,"thinking_budget":)";
-                payload += std::to_string(thinking_budget_);
-            } else if (!tier.empty()) {
-                if (tier == "none"
-                    && core::utils::ascii::istarts_with(req.model, "qwen3.8-flash")) {
-                    payload += R"(,"enable_thinking":false)";
-                } else {
-                    // The max family's canonical disable is reasoning_effort:none,
-                    // also used by Qwen Code's DashScope request builder.
-                    payload += R"(,"reasoning_effort":")";
-                    payload += core::utils::escape_json_string(tier);
-                    payload += '"';
-                }
-            }
-        } else if (effort == "none") {
+    const auto policy = thinking_policy(req.model);
+    const bool mandatory = policy.required;
+    const std::string effort = normalize_dashscope_effort(
+        req.effort.empty() ? std::string_view(default_effort_) : std::string_view(req.effort), policy);
+    if (policy.mode != ThinkingMode::None) {
+        if (effort == "none") {
             payload += R"(,"enable_thinking":false)";
-        } else if (!effort.empty() || thinking_budget_ > 0) {
-            payload += R"(,"enable_thinking":true)";
-            if (thinking_budget_ > 0) {
-                payload += R"(,"thinking_budget":)";
-                payload += std::to_string(thinking_budget_);
+        } else if (policy.mode == ThinkingMode::QwenEffort) {
+            if (req.effort.empty() && thinking_budget_ > 0) {
+                payload += R"(,"enable_thinking":true,"thinking_budget":)" + std::to_string(thinking_budget_);
+            } else if (!effort.empty()) {
+                payload += R"(,"reasoning_effort":")" + effort + '"';
+            }
+        } else {
+            if (!effort.empty() || thinking_budget_ > 0 || mandatory) {
+                payload += R"(,"enable_thinking":true)";
+            }
+            if (policy.mode == ThinkingMode::VendorEffort && !effort.empty()) {
+                payload += R"(,"reasoning_effort":")" + effort + '"';
+            } else if (thinking_budget_ > 0) {
+                payload += R"(,"thinking_budget":)" + std::to_string(thinking_budget_);
             }
         }
+    }
+    const std::string id = wire_model(req.model);
+    if (id.starts_with("glm-")) payload += R"(,"clear_thinking":false)";
+    if (id.starts_with("kimi-k2.") || id.starts_with("kimi-k3")) {
+        payload += R"(,"preserve_thinking":true)";
     }
 
     // Qwen Code stamps preserve_thinking on every DashScope chat request for
@@ -471,6 +581,12 @@ DashScopeResponsesProtocol::DashScopeResponsesProtocol()
 DashScopeResponsesProtocol::DashScopeResponsesProtocol(Options options)
     : OpenAIResponsesProtocol(/*include_reasoning_encrypted=*/false)
     , options_(std::move(options)) {}
+
+void DashScopeResponsesProtocol::prepare_request(ChatRequest& request) {
+    if (options_.lifecycle.prepare) options_.lifecycle.prepare(request);
+    session_id_ = request.session_id;
+    OpenAIResponsesProtocol::prepare_request(request);
+}
 
 ReasoningCapabilities DashScopeResponsesProtocol::reasoning_capabilities(
     std::string_view model) const noexcept {
@@ -499,11 +615,10 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
         }
     }
 
-    const std::string effort = normalize_qwen_effort(
-        req.effort.empty()
-            ? std::string_view(options_.default_effort)
-            : std::string_view(req.effort),
-        req.model);
+    const auto policy = thinking_policy(req.model);
+    const std::string effort = normalize_dashscope_effort(
+        req.effort.empty() ? std::string_view(options_.default_effort) : std::string_view(req.effort),
+        policy);
     const std::string effective_effort = effort.empty() ? "xhigh" : effort;
     const auto model_reasoning =
         qwen_reasoning_capabilities(req.model);
@@ -524,7 +639,7 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
     const std::span<const std::string_view> hosted_tools = enable_hosted_tools
         ? std::span<const std::string_view>{kHostedTools}
         : std::span<const std::string_view>{};
-    return serialize_with_options(
+    std::string payload = serialize_with_options(
         effective,
         SerializationOptions{
             .include_store = false,
@@ -533,6 +648,11 @@ std::string DashScopeResponsesProtocol::serialize(const ChatRequest& req) const 
             .reasoning_effort_override = reasoning_effort,
             .hosted_tool_types = hosted_tools,
         });
+    if (policy.mode == ThinkingMode::Toggle && (!effort.empty() || policy.required)) {
+        payload.pop_back();
+        payload += effort == "none" ? R"(,"enable_thinking":false})" : R"(,"enable_thinking":true})";
+    }
+    return payload;
 }
 
 cpr::Header DashScopeResponsesProtocol::build_headers(
@@ -549,23 +669,93 @@ std::string DashScopeResponsesProtocol::format_error_message(
         response, options_.deployment, last_rate_limit().retry_after);
 }
 
-bool DashScopeResponsesProtocol::is_retryable(
-    const HttpResponse& response) const noexcept {
-    return response.status_code == 429 || response.status_code == 500
-        || response.status_code == 502 || response.status_code == 503
-        || response.status_code == 504;
+void DashScopeResponsesProtocol::on_response(const HttpResponse& response) {
+    if (response.status_code >= 400 && options_.lifecycle.failure) {
+        options_.lifecycle.failure(response.status_code, parse_dashscope_error(response.body).message);
+    }
+    OpenAIResponsesProtocol::on_response(response);
+    if (stream_rate_limit_seen_ && response.status_code == 200) {
+        stream_rate_limit_seen_ = false;
+        return;
+    }
+    stream_rate_limit_seen_ = false;
+    response_rate_limit_ = OpenAIResponsesProtocol::last_rate_limit();
+    if (response.status_code == 429) mark_rate_limit(response_rate_limit_, parse_dashscope_error(response.body));
+}
+
+ParseResult DashScopeResponsesProtocol::parse_event(std::string_view raw) {
+    sse::ParsedEventView envelope;
+    if (!sse::parse_event_payload(raw, envelope) || envelope.is_done) {
+        auto result = OpenAIResponsesProtocol::parse_event(raw);
+        if (result.done) complete_tool_calls(result, pending_tool_calls_);
+        return result;
+    }
+    simdjson::dom::parser parser;
+    simdjson::padded_string json(envelope.data);
+    simdjson::dom::element doc;
+    if (parser.parse(json).get(doc) != simdjson::SUCCESS) return {};
+    std::string_view type = envelope.event;
+    if (type.empty()) (void)doc["type"].get(type);
+    simdjson::dom::object bare_error;
+    if (type.empty() && doc["error"].get(bare_error) == simdjson::SUCCESS) type = "error";
+    if (type == "error" || type == "response.failed" || type == "response.incomplete") {
+        ParseResult result;
+        simdjson::dom::object usage;
+        if (doc["response"]["usage"].get(usage) == simdjson::SUCCESS) {
+            (void)parse_openai_usage(usage, result);
+        }
+        if (result.prompt_tokens > 0 && options_.lifecycle.prompt_usage) options_.lifecycle.prompt_usage(result.prompt_tokens);
+        // Never release client calls from an interrupted response.
+        result.incomplete_tool_call = !pending_tool_calls_.empty();
+        pending_tool_calls_.clear();
+        // An interrupted response cannot extend the preceding successful
+        // response's chain. Clear only this session so recovery replays input.
+        {
+            std::lock_guard lock(shared_state_->mutex);
+            shared_state_->sessions[session_id_].previous_response_id.clear();
+        }
+        if (type == "response.incomplete") {
+            std::string_view reason;
+            (void)doc["response"]["incomplete_details"]["reason"].get(reason);
+            if (reason == "max_output_tokens" || reason == "length") {
+                result.done = true;
+                result.stop_reason = "max_tokens";
+                return result;
+            }
+        }
+        const auto error = parse_dashscope_error(envelope.data);
+        return stream_failure(error, error.code.empty() ? std::string(type) : error.code,
+                              response_rate_limit_, stream_rate_limit_seen_, std::move(result));
+    }
+    auto result = OpenAIResponsesProtocol::parse_event(raw);
+    collect_tool_calls(result, pending_tool_calls_);
+    if (result.prompt_tokens > 0 && options_.lifecycle.prompt_usage) options_.lifecycle.prompt_usage(result.prompt_tokens);
+    result.stream_started = type.starts_with("response.");
+    if (result.done) {
+        result.stop_reason = "stop";
+        complete_tool_calls(result, pending_tool_calls_);
+    }
+    return result;
+}
+
+void DashScopeResponsesProtocol::reset_state() {
+    OpenAIResponsesProtocol::reset_state();
+    response_rate_limit_ = {};
+    stream_rate_limit_seen_ = false;
+    pending_tool_calls_.clear();
+}
+
+bool DashScopeResponsesProtocol::is_retryable(const HttpResponse& response) const noexcept {
+    return retryable_response(response);
 }
 
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol()
     : DashScopeTokenPlanProtocol(Options{}) {}
 
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(Options options)
-    : DashScopeTokenPlanProtocol(
-          options,
-          std::make_unique<DashScopeProtocol>(
-              options.thinking_budget,
-              options.default_effort,
-              DashScopeDeployment::TokenPlan)) {}
+    : DashScopeTokenPlanProtocol(options, std::make_unique<DashScopeProtocol>(
+          options.thinking_budget, options.default_effort,
+          DashScopeDeployment::TokenPlan, options.lifecycle)) {}
 
 DashScopeTokenPlanProtocol::DashScopeTokenPlanProtocol(
     Options options,
@@ -597,7 +787,7 @@ std::string_view DashScopeTokenPlanProtocol::event_delimiter() const noexcept {
     return delegate_->event_delimiter();
 }
 
-ParseResult DashScopeTokenPlanProtocol::parse_event(
+ParseResult DashScopeProtocol::parse_event(
     std::string_view raw_event) {
     sse::ParsedEventView parsed;
     if (sse::parse_event_payload(raw_event, parsed) && !parsed.is_done) {
@@ -621,6 +811,15 @@ ParseResult DashScopeTokenPlanProtocol::parse_event(
                     is_error = true;
                     error = parse_dashscope_error(parsed.data);
                     error_type = error.code.empty() ? "error" : error.code;
+                }
+                std::string_view code;
+                simdjson::dom::array normal_choices;
+                if (!is_error && doc["code"].get(code) == simdjson::SUCCESS
+                    && !code.empty() && code != "0"
+                    && doc["choices"].get(normal_choices) != simdjson::SUCCESS) {
+                    is_error = true;
+                    error = parse_dashscope_error(parsed.data);
+                    error_type = error.code;
                 }
                 simdjson::dom::array choices;
                 if (doc["choices"].get(choices) == simdjson::SUCCESS) {
@@ -646,39 +845,35 @@ ParseResult DashScopeTokenPlanProtocol::parse_event(
             }
         }
 
-        if (is_error) {
-            const std::string normalized_message =
-                core::utils::str::to_lower_ascii_copy(error.message);
-            const bool transient_throttle =
-                error.token_plan_limit == TokenPlanLimitKind::RequestRate
-                || normalized_message.find("rate limit") != std::string::npos
-                || normalized_message.find("throttl") != std::string::npos
-                || normalized_message.find("tpm") != std::string::npos;
-
-            if (error.token_plan_limit != TokenPlanLimitKind::Unknown
-                || transient_throttle) {
-                RateLimitInfo info;
-                info.is_rate_limited = true;
-                info.unified_status = "rate_limited";
-                if (error.token_plan_limit == TokenPlanLimitKind::PlanQuota) {
-                    info.unified_overage_status = "rejected";
-                }
-                rate_limit_override_ = std::move(info);
-                has_rate_limit_override_ = true;
-                stream_rate_limit_seen_ = true;
-            }
-
-            ParseResult result;
-            result.stream_error = true;
-            result.retryable_stream_error = transient_throttle
-                && error.token_plan_limit != TokenPlanLimitKind::PlanQuota;
-            result.stream_error_type = std::move(error_type);
-            result.stream_error_message = error.message.empty()
-                ? "Unknown stream error"
-                : std::move(error.message);
-            return result;
-        }
+        if (is_error) return stream_failure(error, std::move(error_type), last_rate_limit_, stream_rate_limit_seen_);
     }
+    auto result = OpenAIProtocol::parse_event(raw_event);
+    collect_tool_calls(result, pending_tool_calls_);
+    if (result.prompt_tokens > 0 && lifecycle_.prompt_usage) lifecycle_.prompt_usage(result.prompt_tokens);
+    if (parsed.is_done) {
+        result.stop_reason = stop_reason_;
+        complete_tool_calls(result, pending_tool_calls_);
+        return result;
+    }
+    thread_local simdjson::dom::parser finish_parser;
+    const core::utils::json::ParserRetentionGuard guard{finish_parser};
+    simdjson::padded_string json(parsed.data);
+    simdjson::dom::element doc;
+    if (finish_parser.parse(json).get(doc) != simdjson::SUCCESS) return result;
+    simdjson::dom::array choices;
+    if (doc["choices"].get(choices) != simdjson::SUCCESS) return result;
+    for (const auto choice : choices) {
+        result.stream_started = true;
+        std::string_view reason;
+        if (choice["finish_reason"].get(reason) != simdjson::SUCCESS || reason.empty()) continue;
+        stop_reason_ = reason == "length" ? "max_tokens"
+            : reason == "tool_calls" ? "tool_use"
+            : reason == "content_filter" ? "refusal" : std::string(reason);
+    }
+    return result;
+}
+
+ParseResult DashScopeTokenPlanProtocol::parse_event(std::string_view raw_event) {
     return delegate_->parse_event(raw_event);
 }
 
@@ -693,42 +888,8 @@ std::unique_ptr<ApiProtocolBase> DashScopeTokenPlanProtocol::clone() const {
             options_, delegate_->clone())};
 }
 
-void DashScopeTokenPlanProtocol::on_response(
-    const HttpResponse& response) {
-    // Keep the inner protocol's behaviour (usage parsing, header-based limits).
+void DashScopeTokenPlanProtocol::on_response(const HttpResponse& response) {
     delegate_->on_response(response);
-
-    // A stream can start with HTTP 200 and fail with a quota error later.
-    // Its parsed signal must survive the response lifecycle hook.
-    const bool preserve_stream_limit = stream_rate_limit_seen_
-        && response.status_code == 200;
-    stream_rate_limit_seen_ = false;
-    if (preserve_stream_limit) return;
-
-    // The Token Plan inference endpoints expose no rate-limit/usage headers, so
-    // on a successful response there is nothing additional to capture. The only
-    // provider-backed quota signal is a 429 body; translate it into a
-    // rate-limit snapshot so the status bar and quota notifications can react.
-    has_rate_limit_override_ = false;
-    rate_limit_override_ = {};
-
-    if (response.status_code != 429) return;
-
-    RateLimitInfo info = delegate_->last_rate_limit();
-    info.is_rate_limited = true;
-    info.unified_status = "rate_limited";
-    if (const int32_t retry_after = parse_int_header(response.headers, "retry-after");
-        retry_after > 0) {
-        info.retry_after = retry_after;
-    }
-    // A plan-quota block is a hard rejection (not a transient throttle).
-    if (parse_dashscope_error(response.body).token_plan_limit
-        == TokenPlanLimitKind::PlanQuota) {
-        info.unified_overage_status = "rejected";
-    }
-
-    rate_limit_override_ = info;
-    has_rate_limit_override_ = true;
 }
 
 std::string DashScopeTokenPlanProtocol::format_error_message(
@@ -736,32 +897,21 @@ std::string DashScopeTokenPlanProtocol::format_error_message(
     return delegate_->format_error_message(response);
 }
 
-bool DashScopeTokenPlanProtocol::is_retryable(
-    const HttpResponse& response) const noexcept {
-    if (response.status_code == 429) {
-        try {
-            if (parse_dashscope_error(response.body).token_plan_limit
-                == TokenPlanLimitKind::PlanQuota) {
-                return false;
-            }
-        } catch (...) {
-            // Retry is the conservative fallback when a diagnostic body cannot
-            // be decoded; only positively identified plan exhaustion fast-fails.
-        }
-    }
+bool DashScopeTokenPlanProtocol::is_retryable(const HttpResponse& response) const noexcept {
     return delegate_->is_retryable(response);
 }
 
 RateLimitInfo DashScopeTokenPlanProtocol::last_rate_limit() const noexcept {
-    if (has_rate_limit_override_) return rate_limit_override_;
     return delegate_->last_rate_limit();
 }
 
-void DashScopeTokenPlanProtocol::reset_state() {
-    delegate_->reset_state();
-    has_rate_limit_override_ = false;
+void DashScopeTokenPlanProtocol::reset_state() { delegate_->reset_state(); }
+
+void DashScopeProtocol::reset_state() {
+    stop_reason_.clear();
+    pending_tool_calls_.clear();
     stream_rate_limit_seen_ = false;
-    rate_limit_override_ = {};
+    last_rate_limit_ = {};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -769,7 +919,15 @@ void DashScopeTokenPlanProtocol::reset_state() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void DashScopeProtocol::on_response(const HttpResponse& response) {
+    if (response.status_code >= 400 && lifecycle_.failure) {
+        lifecycle_.failure(response.status_code, parse_dashscope_error(response.body).message);
+    }
+    // An HTTP-200 stream may fail later; preserve its authoritative quota signal.
+    const bool preserve_limit = stream_rate_limit_seen_ && response.status_code == 200;
+    stream_rate_limit_seen_ = false;
+    if (preserve_limit) return;
     last_rate_limit_ = build_rate_limit_info(response.headers, response.status_code);
+    if (response.status_code == 429) mark_rate_limit(last_rate_limit_, parse_dashscope_error(response.body));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -781,11 +939,7 @@ std::string DashScopeProtocol::format_error_message(const HttpResponse& response
 }
 
 bool DashScopeProtocol::is_retryable(const HttpResponse& response) const noexcept {
-    return response.status_code == 429 ||
-           response.status_code == 500 ||
-           response.status_code == 502 ||
-           response.status_code == 503 ||
-           response.status_code == 504;
+    return retryable_response(response);
 }
 
 } // namespace core::llm::protocols

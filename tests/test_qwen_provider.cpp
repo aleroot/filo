@@ -7,6 +7,10 @@
 #include "core/llm/ProviderFactory.hpp"
 #include "core/llm/ModelRegistry.hpp"
 #include "core/llm/QwenModelTraits.hpp"
+#include "core/llm/providers/QwenRequestBudget.hpp"
+#include "core/llm/providers/QwenProvider.hpp"
+#include "core/llm/ContextTokenEstimator.hpp"
+#include "core/llm/ReasoningEffortResolution.hpp"
 #include "core/llm/providers/QwenModelCatalogSelector.hpp"
 #include "core/config/ConfigManager.hpp"
 #include "core/context/ContextMentions.hpp"
@@ -19,6 +23,191 @@
 
 using namespace core::llm;
 using namespace core::llm::protocols;
+
+TEST_CASE("Qwen finish reasons survive the usage tail without changing OpenAI",
+          "[qwen][regression][sse]") {
+    DashScopeProtocol qwen;
+    OpenAIProtocol openai;
+    const std::string event = R"(data: {"choices":[{"delta":{"content":"Partial answer"},"finish_reason":"length"}]})";
+    REQUIRE(qwen.parse_event(event).chunks.front().content == "Partial answer");
+    (void)qwen.parse_event(R"(data: {"choices":[],"usage":{"prompt_tokens":500,"completion_tokens":32000}})");
+    auto finished = qwen.parse_event("data: [DONE]");
+    CHECK(finished.done);
+    CHECK(finished.stop_reason == "max_tokens");
+    CHECK(qwen.requires_terminal_event());
+    (void)openai.parse_event(event);
+    CHECK(openai.parse_event("data: [DONE]").stop_reason.empty());
+    CHECK_FALSE(openai.requires_terminal_event());
+    qwen.reset_state();
+    CHECK(qwen.parse_event("data: [DONE]").stop_reason.empty());
+}
+
+TEST_CASE("Coding Plan catches quota SSE failures and permanent HTTP quotas",
+          "[qwen][regression][sse][retry]") {
+    DashScopeProtocol coding;
+    const auto error = coding.parse_event(R"(data: {"choices":[{"delta":{"content":"Allocated quota exceeded"},"finish_reason":"error_finish"}]})");
+    CHECK(error.stream_error);
+    CHECK(error.chunks.empty());
+    CHECK_FALSE(error.retryable_stream_error);
+    coding.on_response({200, {}, cpr::Header{}});
+    CHECK(coding.last_rate_limit().unified_overage_status == "rejected");
+    const cpr::Header headers;
+    const HttpResponse quota{429, R"({"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}})", headers};
+    CHECK_FALSE(coding.is_retryable(quota));
+    CHECK(OpenAIProtocol{}.is_retryable(quota));
+    CHECK(coding.parse_event(R"(data: {"code":"Throttling.RateQuota","message":"Requests rate limit exceeded"})").retryable_stream_error);
+}
+
+TEST_CASE("Qwen tracks incomplete parallel tool calls without leaking clone state",
+          "[qwen][regression][tools]") {
+    DashScopeProtocol protocol;
+    (void)protocol.parse_event(R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{}"}},{"index":1,"function":{"name":"write","arguments":"{\"path\":"}}]},"finish_reason":"length"}]})");
+    CHECK(protocol.parse_event("data: [DONE]").incomplete_tool_call);
+    CHECK_FALSE(protocol.clone()->parse_event("data: [DONE]").incomplete_tool_call);
+}
+
+TEST_CASE("DashScope uses vendor thinking fields without forwarding Qwen metadata",
+          "[qwen][regression][thinking][third-party]") {
+    DashScopeProtocol protocol;
+    ChatRequest request;
+    request.session_id = "session";
+    request.transport_turn_id = "prompt";
+    request.model = "ZHIPU/GLM-5.3";
+    request.effort = "none";
+    const auto mandatory = protocol.serialize(request);
+    CHECK_THAT(mandatory, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+    CHECK_THAT(mandatory, !Catch::Matchers::ContainsSubstring("metadata"));
+    CHECK_THAT(mandatory, Catch::Matchers::ContainsSubstring(R"("clear_thinking":false)"));
+    request.model = "kimi-k2.5";
+    request.effort = "high";
+    const auto kimi = protocol.serialize(request);
+    CHECK_THAT(kimi, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+    CHECK_THAT(kimi, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
+    request.model = "deepseek-v4-pro";
+    request.effort = "low";
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
+    request.model = "qwen3-coder-plus";
+    CHECK_THAT(protocol.serialize(request), !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    CHECK(resolve_reasoning_effort("high", protocol.reasoning_capabilities("qwen3.7-plus")).effective == "on");
+    CHECK(resolve_reasoning_effort("max", protocol.reasoning_capabilities("qwen3.8-max")).effective == "xhigh");
+}
+
+TEST_CASE("Qwen budgets include schemas and media and respect endpoint limits",
+          "[qwen][regression][context]") {
+    using core::llm::providers::QwenRequestBudget;
+    ModelInfo model;
+    ChatRequest request;
+    request.model = "qwen3.8-flash";
+    model.context_window = 16384;
+    model.max_output_tokens = 131072;
+    request.messages = {Message{.role = "user", .content = std::string(9000, 'x')}};
+    request.messages.front().content_parts.push_back(ContentPart::make_image_url("https://example.com/image.png"));
+    Tool tool;
+    tool.function.name = "read";
+    tool.function.description = std::string(6000, 'x');
+    request.tools.push_back(tool);
+    const auto estimate = QwenRequestBudget::estimate_request(request);
+    CHECK(estimate > 13000);
+    QwenRequestBudget::prepare(request, &model);
+    REQUIRE(request.max_tokens.has_value());
+    CHECK(*request.max_tokens > 0);
+    CHECK(estimate + *request.max_tokens <= static_cast<std::size_t>(model.context_window));
+    model.context_window = 1000000;
+    request.max_tokens = 2000;
+    QwenRequestBudget::prepare(request, &model);
+    CHECK(request.max_tokens == 2000);
+    request.max_tokens.reset();
+    QwenRequestBudget::prepare(request, &model);
+    CHECK(request.max_tokens == 64000);
+    CHECK(get_max_context_size("qwen3-coder-next") == 262144);
+    static_assert(!std::is_base_of_v<core::llm::ContextTokenEstimator, core::llm::HttpLLMProvider>);
+}
+
+TEST_CASE("Qwen endpoint limits yield to live metadata without changing native cards",
+          "[qwen][regression][context][isolation]") {
+    const auto native = ModelRegistry::instance().lookup("kimi-k2.5");
+    REQUIRE(native != nullptr);
+    const auto native_window = native->context_window;
+    const std::string catalog = "qwen-endpoint-context-regression";
+    core::llm::ModelCatalogAvailability::instance().record_result(catalog, {}, {});
+    core::llm::providers::QwenProvider provider({
+        .model = "kimi-k2.5",
+        .provider_name = catalog,
+    });
+    CHECK(provider.max_context_size() == 262144);
+    ModelInfo discovered;
+    discovered.canonical_id = "kimi-k2.5";
+    discovered.context_window = 327680;
+    core::llm::ModelCatalogAvailability::instance().record_result(
+        catalog, {.attempted = true, .fetched = 1}, {discovered});
+    CHECK(provider.max_context_size() == 327680);
+    CHECK(ModelRegistry::instance().lookup("kimi-k2.5")->context_window == native_window);
+}
+
+TEST_CASE("Token Plan respects explicit Responses routing and retains quota handling",
+          "[qwen][regression][responses]") {
+    DashScopeResponsesProtocol protocol({
+        .enable_hosted_tools = true,
+        .deployment = DashScopeDeployment::TokenPlan,
+    });
+    ChatRequest request;
+    request.model = "qwen3.8-max";
+    CHECK(protocol.build_url("https://example.com/v1", request.model) == "https://example.com/v1/responses");
+    CHECK_THAT(protocol.serialize(request), Catch::Matchers::ContainsSubstring(R"({"type":"web_search"})"));
+    const cpr::Header headers;
+    CHECK_FALSE(protocol.is_retryable({429, R"({"error":{"code":"insufficient_quota","message":"exceeded your current quota"}})", headers}));
+    CHECK(protocol.clone()->build_url("https://example.com/v1", request.model).ends_with("/responses"));
+}
+
+TEST_CASE("OpenAI-compatible Qwen plan configurations select the Qwen adapter",
+          "[qwen][regression][factory]") {
+    core::config::ProviderConfig config;
+    config.api_type = core::config::ApiType::OpenAI;
+    config.base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+    config.api_key = "test-token-plan-key";
+    config.model = "qwen3.8-max";
+    const auto provider = core::llm::ProviderFactory::create_provider("custom-qwen-plan", config);
+    REQUIRE(provider != nullptr);
+    CHECK(provider->metadata()->api_type == core::config::ApiType::DashScope);
+    CHECK(provider->reasoning_capabilities(config.model).supports(ReasoningCapability::Required));
+    CHECK_FALSE(provider->should_estimate_cost());
+}
+
+TEST_CASE("Qwen Responses preserves output limits and SSE quota rejection",
+          "[qwen][regression][responses]") {
+    DashScopeResponsesProtocol protocol;
+    ChatRequest request;
+    request.model = "qwen3.8-max";
+    request.session_id = "qwen-response-regression";
+    protocol.prepare_request(request);
+    const auto incomplete = protocol.parse_event(R"(data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12,"output_tokens":34}}})");
+    CHECK(incomplete.done);
+    CHECK(incomplete.stop_reason == "max_tokens");
+    CHECK(incomplete.prompt_tokens == 12);
+    CHECK(incomplete.chunks.empty());
+    const auto failure = protocol.parse_event(R"(data: {"type":"response.failed","response":{"error":{"code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}}})");
+    CHECK(failure.stream_error);
+    CHECK_FALSE(failure.retryable_stream_error);
+    const cpr::Header headers;
+    protocol.on_response({200, {}, headers});
+    CHECK(protocol.last_rate_limit().unified_overage_status == "rejected");
+    protocol.reset_state();
+    protocol.on_response({200, {}, headers});
+    CHECK_FALSE(protocol.last_rate_limit().is_rate_limited);
+    CHECK(protocol.requires_terminal_event());
+    CHECK_FALSE(OpenAIResponsesProtocol{}.requires_terminal_event());
+}
+
+TEST_CASE("Qwen tool buffering preserves reasoning continuation chunks",
+          "[qwen][regression][responses][tools]") {
+    DashScopeResponsesProtocol protocol;
+    const auto reasoning = protocol.parse_event(
+        R"(data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"reason_1","encrypted_content":"opaque"}})");
+    REQUIRE(reasoning.chunks.size() == 1);
+    REQUIRE(reasoning.chunks.front().continuation_items.size() == 1);
+    CHECK_THAT(reasoning.chunks.front().continuation_items.front().payload,
+               Catch::Matchers::ContainsSubstring("opaque"));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -290,7 +479,7 @@ TEST_CASE("Qwen catalog selector chooses the highest live server generation",
     REQUIRE(selected.model == "qwen3.10-max-preview");
 }
 
-TEST_CASE("Qwen catalog selector preserves server order within one generation",
+TEST_CASE("Qwen catalog selector prefers quality within one generation",
           "[qwen][model-catalog]") {
     const auto selector = core::llm::providers::make_qwen_model_catalog_selector();
     const std::vector<ModelInfo> models{
@@ -300,7 +489,7 @@ TEST_CASE("Qwen catalog selector preserves server order within one generation",
 
     const auto selected = selector->select(models);
     REQUIRE(selected.ok());
-    REQUIRE(selected.model == "qwen3.8-plus");
+    REQUIRE(selected.model == "qwen3.8-max");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,7 +586,7 @@ TEST_CASE("DashScopeProtocol - preserve_thinking covers Coding Plan coder models
     auto req = make_simple_request("qwen3-coder-plus");
     req.effort = "high";
     const auto payload = DashScopeProtocol(0, "high").serialize(req);
-    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("preserve_thinking":true)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("vl_high_resolution_images"));
 }
@@ -413,13 +602,13 @@ TEST_CASE("DashScopeProtocol - vision models request high-resolution images",
 
 TEST_CASE("DashScopeProtocol - enable_thinking injected when budget > 0",
           "[qwen][serializer][thinking]") {
-    auto payload = DashScopeProtocol{/*thinking_budget=*/4096}.serialize(make_simple_request());
+    auto payload = DashScopeProtocol{/*thinking_budget=*/4096}.serialize(make_simple_request("qwen3.7-plus"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
 }
 
 TEST_CASE("DashScopeProtocol - thinking_budget value injected correctly",
           "[qwen][serializer][thinking]") {
-    auto payload = DashScopeProtocol{8192}.serialize(make_simple_request());
+    auto payload = DashScopeProtocol{8192}.serialize(make_simple_request("qwen3.7-plus"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thinking_budget":8192)"));
 }
 
@@ -595,7 +784,7 @@ TEST_CASE("DashScopeProtocol - qwen3.8 sends the native effort tier alone",
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
-TEST_CASE("DashScopeProtocol - qwen3.8 honors explicit thinking disable",
+TEST_CASE("DashScopeProtocol - qwen3.8 mandatory thinking clamps disable to minimum effort",
           "[qwen][serializer][thinking][effort]") {
     auto req = make_simple_request("qwen3.8-max");
     req.effort = "none";
@@ -603,7 +792,7 @@ TEST_CASE("DashScopeProtocol - qwen3.8 honors explicit thinking disable",
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
     require_valid_json(payload);
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
-        R"("reasoning_effort":"none")"));
+        R"("reasoning_effort":"low")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
@@ -704,12 +893,13 @@ TEST_CASE("DashScopeProtocol - non-streaming cache control is system-only",
         R"("content":"Latest prompt")"));
 }
 
-TEST_CASE("DashScopeProtocol - omits Qwen thinking fields for third-party models",
+TEST_CASE("DashScopeProtocol - sends GLM reasoning controls without a competing budget",
           "[qwen][serializer][thinking][token-plan]") {
     auto req = make_simple_request("glm-5.2");
     req.effort = "high";
     const auto payload = DashScopeProtocol(8192, "high").serialize(req);
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("enable_thinking":true)"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning_effort":"high")"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("thinking_budget"));
 }
 
@@ -775,7 +965,7 @@ TEST_CASE("DashScope Responses - Token Plan omits Qwen-only features for GLM",
         R"("model":"glm-5.2")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("name":"read")"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("reasoning":)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
         R"({"type":"web_search"})"));
@@ -1079,9 +1269,13 @@ TEST_CASE("DashScope Responses - does not concatenate provisional and completed 
     const auto done = protocol.parse_event(
         "event: response.output_item.done\n"
         R"(data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"list_directory","arguments":"{\"path\":\"Lampo/Prompter\"}","status":"completed"}})");
-    REQUIRE(done.chunks.size() == 1);
-    REQUIRE(done.chunks.front().tools.size() == 1);
-    CHECK(done.chunks.front().tools.front().function.arguments
+    REQUIRE(done.chunks.empty());
+    const auto completed = protocol.parse_event(
+        R"(data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}})");
+    REQUIRE(completed.done);
+    REQUIRE(completed.chunks.size() == 1);
+    REQUIRE(completed.chunks.front().tools.size() == 1);
+    CHECK(completed.chunks.front().tools.front().function.arguments
           == R"({"path":"Lampo/Prompter"})");
 }
 
@@ -1180,7 +1374,7 @@ TEST_CASE("Token Plan routes third-party models through Chat Completions",
 
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("messages":[)"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("input":[)"));
-    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("enable_thinking"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring("enable_thinking"));
     REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring("cache_control"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("content":"Hello")"));
@@ -1196,21 +1390,22 @@ TEST_CASE("Token Plan Chat route parses fragmented GLM tool arguments",
 
     const auto named = protocol.parse_event(
         R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"ping","arguments":"{"}}]}}]})");
-    REQUIRE(named.chunks.size() == 1);
-    REQUIRE(named.chunks.front().tools.size() == 1);
-    REQUIRE(named.chunks.front().tools.front().function.name == "ping");
-    REQUIRE(named.chunks.front().tools.front().function.arguments == "{");
+    REQUIRE(named.chunks.empty());
 
     const auto args = protocol.parse_event(
         R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"value\":\"ok\"}"}}]}}]})");
-    REQUIRE(args.chunks.size() == 1);
-    REQUIRE(args.chunks.front().tools.front().function.arguments
-            == R"("value":"ok"})");
+    REQUIRE(args.chunks.empty());
+    const auto done = protocol.parse_event("data: [DONE]");
+    REQUIRE(done.chunks.size() == 1);
+    REQUIRE(done.chunks.front().tools.size() == 1);
+    REQUIRE(done.chunks.front().tools.front().function.name == "ping");
+    REQUIRE(done.chunks.front().tools.front().function.arguments
+            == R"({"value":"ok"})");
 }
 
-TEST_CASE("Token Plan adapter preserves future Qwen reasoning capabilities",
+TEST_CASE("Token Plan does not guess reasoning controls for an unknown future model",
           "[qwen][token-plan][routing][traits]") {
-    CHECK(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen4-coder")
+    CHECK_FALSE(DashScopeTokenPlanProtocol{}.reasoning_capabilities("qwen4-coder")
           .supports_effort());
 }
 
@@ -1534,8 +1729,8 @@ TEST_CASE("ModelRegistry - qwen3-coder-plus has 64K max output tokens", "[qwen][
     REQUIRE(info->max_output_tokens == 64'000);
 }
 
-TEST_CASE("ModelRegistry - qwen3-coder-plus supports Reasoning capability", "[qwen][registry]") {
-    REQUIRE(ModelRegistry::instance().supports("qwen3-coder-plus", ModelCapability::Reasoning));
+TEST_CASE("ModelRegistry - qwen3-coder-plus does not advertise thinking", "[qwen][registry]") {
+    REQUIRE_FALSE(ModelRegistry::instance().supports("qwen3-coder-plus", ModelCapability::Reasoning));
 }
 
 TEST_CASE("ModelRegistry - qwen3-coder-plus supports FunctionCalling", "[qwen][registry]") {

@@ -3,6 +3,8 @@
 #include "WebBackendSupport.hpp"
 #include "../auth/ICredentialSource.hpp"
 #include "../llm/QwenModelTraits.hpp"
+#include "../llm/protocols/SseUtils.hpp"
+#include "../utils/UriUtils.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
 #include "../utils/StringUtils.hpp"
@@ -12,6 +14,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <charconv>
+#include <cstdlib>
+#include <thread>
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -24,9 +30,7 @@ namespace core::tools::web {
 
 namespace {
 
-// Search + optional page extraction can take longer than a simple HTTP GET.
-// Keep the same outer budget as other provider search backends.
-constexpr int kSearchTimeoutMs = 60000;
+constexpr std::size_t kMaxSearchBytes = 16 * 1024 * 1024;
 
 // Side-channel system prompt. Mirrors Qwen Code's web_search tool so the
 // DashScope hosted web_search / web_extractor tools actually run and treat
@@ -116,7 +120,7 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
 [[nodiscard]] cpr::Header dashscope_headers(const core::auth::AuthInfo& auth) {
     cpr::Header headers{
         {"Content-Type", "application/json"},
-        {"Accept", "application/json"},
+        {"Accept", "text/event-stream"},
         {"User-Agent", "filo/1.0 (+https://github.com/alessio/filo)"},
         // Session-cache is harmless for one-shot search and matches the
         // DashScope Responses agent path.
@@ -141,17 +145,14 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
     return input;
 }
 
-// Hosted tools: always advertise web_search. web_extractor is Qwen Code's
-// default and is also enabled when the local tool asks for page content.
+// Hosted search is mandatory; extraction defaults on to match Qwen Code.
 [[nodiscard]] std::string search_payload(const SearchRequest& request,
-                                         std::string_view model) {
-    // Always advertise web_extractor to match Qwen Code's default
-    // (webExtractor !== false). include_page_content only adjusts the prompt.
+                                         std::string_view model, bool web_extractor) {
     core::utils::JsonWriter writer(2048);
     {
         auto _root = writer.object();
         writer.kv_str("model", model).comma()
-              .kv_bool("stream", false).comma()
+              .kv_bool("stream", true).comma()
               .kv_bool("store", false).comma()
               .kv_str("input", search_input(request)).comma()
               .kv_str("instructions", kSearchInstructions).comma()
@@ -162,8 +163,8 @@ void add_auth_headers(cpr::Header& headers, const core::auth::AuthInfo& auth) {
                 auto _tool = writer.object();
                 writer.kv_str("type", "web_search");
             }
-            writer.comma();
-            {
+            if (web_extractor) {
+                writer.comma();
                 auto _tool = writer.object();
                 writer.kv_str("type", "web_extractor");
             }
@@ -421,111 +422,200 @@ void parse_results(SearchResponse& response,
     return {};
 }
 
+// Search narration is evidence only after a successful hosted search call.
+bool has_executed_search(simdjson::dom::element doc) {
+    simdjson::dom::array output;
+    if (doc["output"].get(output) != simdjson::SUCCESS
+        && doc["response"]["output"].get(output) != simdjson::SUCCESS) return false;
+    for (const auto item : output) {
+        std::string_view type, status;
+        if (item["type"].get(type) != simdjson::SUCCESS || type != "web_search_call") continue;
+        if (item["status"].get(status) == simdjson::SUCCESS && status != "completed") continue;
+        return true;
+    }
+    return false;
+}
+
+struct SearchStream {
+    SearchResponse partial{.backend = "dashscope-responses-web-search"};
+    std::string extraction;
+    std::string error;
+    bool searched = false;
+    bool completed = false;
+    bool received_event = false;
+
+    void event(std::string_view raw, int limit) {
+        core::llm::protocols::sse::ParsedEventView envelope;
+        if (!core::llm::protocols::sse::parse_event_payload(raw, envelope) || envelope.is_done) return;
+        simdjson::dom::parser parser;
+        simdjson::padded_string json(envelope.data);
+        simdjson::dom::element doc;
+        if (parser.parse(json).get(doc) != simdjson::SUCCESS) return;
+        received_event = true;
+        std::string_view type;
+        if (doc["type"].get(type) != simdjson::SUCCESS) type = envelope.event;
+        if (type == "error" || type == "response.failed") {
+            error = read_error_message(doc);
+            if (error.empty()) error = "DashScope search stream failed.";
+            return;
+        }
+        if (type == "response.output_text.delta") {
+            std::string_view delta;
+            if (doc["delta"].get(delta) == simdjson::SUCCESS) partial.answer += delta;
+        } else if (type == "response.output_item.done") {
+            simdjson::dom::object item;
+            if (doc["item"].get(item) != simdjson::SUCCESS) return;
+            const auto kind = core::utils::json::first_string_field_or_empty(item, {"type"});
+            const auto status = core::utils::json::first_string_field_or_empty(item, {"status"});
+            if (kind == "web_search_call" && (status.empty() || status == "completed")) {
+                searched = true;
+                parse_web_search_call(partial, item);
+            } else if (kind == "web_extractor_call") {
+                parse_web_extractor_call(partial, extraction, item);
+            } else if (kind == "message") {
+                SearchResponse message;
+                parse_message_item(message, item);
+                if (!message.answer.empty()) partial.answer = std::move(message.answer);
+                for (auto& hit : message.results) detail::add_hit_if_present(partial, std::move(hit));
+            }
+        } else if (type == "response.completed" || type == "response.incomplete") {
+            searched = searched || has_executed_search(doc);
+            SearchResponse final{.backend = partial.backend};
+            parse_results(final, doc, limit);
+            if (!final.answer.empty()) partial.answer = std::move(final.answer);
+            if (!final.results.empty()) partial.results = std::move(final.results);
+            completed = type == "response.completed";
+        }
+    }
+};
+
 class DashScopeWebSearchBackend final : public IWebSearchBackend {
 public:
-    [[nodiscard]] std::string_view name() const noexcept override {
-        return "dashscope-responses-web-search";
+    explicit DashScopeWebSearchBackend(DashScopeWebSearchOptions options)
+        : options_(std::move(options)) {
+        if (options_.model.empty()) {
+            if (const char* value = std::getenv("QWEN_WEB_SEARCH_MODEL"); value && *value) options_.model = value;
+        }
+        if (const char* value = std::getenv("QWEN_WEB_SEARCH_TIMEOUT_MS"); value && *value) {
+            int timeout = 0;
+            const std::string_view text(value);
+            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), timeout);
+            if (parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size()) options_.timeout_ms = timeout;
+        }
+        if (options_.timeout_ms <= 0 || options_.timeout_ms > 600000) options_.timeout_ms = 120000;
     }
+
+    [[nodiscard]] std::string_view name() const noexcept override { return "dashscope-responses-web-search"; }
 
     [[nodiscard]] bool supports(const ToolInvocationContext& context) const override {
         const auto metadata = detail::metadata_for(context);
-        return metadata.has_value()
-            && is_dashscope_endpoint(*metadata)
-            && metadata->credential_source != nullptr;
+        if (!metadata || !is_dashscope_endpoint(*metadata) || !metadata->credential_source) return false;
+        const auto host = core::utils::uri::extract_http_host(metadata->base_url);
+        // Match Qwen Code's conservative Coding Plan default. Explicit search
+        // configuration can opt an endpoint in once Responses is supported.
+        return !host || (!host->starts_with("coding.") && !host->starts_with("coding-intl."))
+            || !options_.model.empty();
     }
 
     [[nodiscard]] std::expected<SearchResponse, std::string>
-    search(const SearchRequest& request,
-           const ToolInvocationContext& context) const override {
+    search(const SearchRequest& request, const ToolInvocationContext& context) const override {
         const auto metadata = detail::metadata_for(context);
-        if (!metadata.has_value() || !metadata->credential_source) {
-            return std::unexpected(
-                "DashScope web search requires an active Qwen/DashScope "
-                "provider with credentials.");
+        if (!metadata || !supports(context)) {
+            return std::unexpected("DashScope search needs an eligible endpoint and credentials. Configure QWEN_WEB_SEARCH_MODEL to opt a Coding Plan endpoint in explicitly.");
         }
-        if (!is_dashscope_endpoint(*metadata)) {
-            return std::unexpected(
-                "DashScope web search is only available for DashScope/"
-                "Qwen Token Plan endpoints.");
+        if (!request.domains.allowed_domains.empty() || !request.domains.blocked_domains.empty()) {
+            return std::unexpected("DashScope web search does not support allowed_domains or blocked_domains filters.");
         }
-        if (!request.domains.allowed_domains.empty()
-            || !request.domains.blocked_domains.empty()) {
-            // Qwen Code documents that DashScope Responses ignores domain
-            // filter shapes; do not pretend they work.
-            return std::unexpected(
-                "DashScope web search does not support allowed_domains or "
-                "blocked_domains filters. Remove the filters or use an "
-                "Anthropic/Claude or OpenAI provider for domain-filtered search.");
-        }
-
-        const std::string model = !context.model_name.empty()
-            ? context.model_name
-            : metadata->default_model;
-        if (model.empty()) {
-            return std::unexpected("DashScope web search requires an active model.");
-        }
-
-        const auto auth = metadata->credential_source->get_auth();
-        const cpr::Response response = cpr::Post(
-            cpr::Url{responses_url(metadata->base_url)},
-            dashscope_headers(auth),
-            cpr::Body{search_payload(request, model)},
-            cpr::Timeout{kSearchTimeoutMs});
-
-        if (response.error.code != cpr::ErrorCode::OK) {
-            return std::unexpected(
-                "DashScope web search request failed: " + response.error.message);
-        }
-
-        simdjson::dom::parser parser;
-        simdjson::padded_string padded(response.text);
-        simdjson::dom::element doc;
-        if (parser.parse(padded).get(doc) != simdjson::SUCCESS) {
-            if (response.status_code < 200 || response.status_code >= 300) {
-                return std::unexpected(std::format(
-                    "DashScope web search failed with HTTP {}: {}",
-                    response.status_code,
-                    response.text.substr(0, 1000)));
+        const std::string model = options_.model.empty() ? "qwen3.8-flash" : options_.model;
+        const auto cancelled = [&] { return context.cancellation_requested && context.cancellation_requested(); };
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options_.timeout_ms);
+        std::string failure = "DashScope search did not execute a web search.";
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (cancelled()) return std::unexpected("DashScope web search cancelled.");
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return std::unexpected("DashScope web search timed out.");
+            SearchStream stream;
+            std::string buffer, raw_body;
+            std::size_t received_bytes = 0;
+            cpr::Session session;
+            session.SetUrl(cpr::Url{responses_url(metadata->base_url)});
+            session.SetHeader(dashscope_headers(metadata->credential_source->get_auth()));
+            session.SetBody(cpr::Body{search_payload(request, model, options_.web_extractor)});
+            session.SetTimeout(cpr::Timeout{static_cast<int>(remaining)});
+            session.SetProgressCallback(cpr::ProgressCallback([&](cpr::cpr_off_t, cpr::cpr_off_t, cpr::cpr_off_t, cpr::cpr_off_t, intptr_t) {
+                return !cancelled() && std::chrono::steady_clock::now() < deadline;
+            }));
+            session.SetWriteCallback(cpr::WriteCallback([&](std::string_view bytes, intptr_t) {
+                if (cancelled() || std::chrono::steady_clock::now() >= deadline) return false;
+                received_bytes += bytes.size();
+                if (received_bytes > kMaxSearchBytes) return false;
+                if (raw_body.size() < 1024 * 1024) raw_body.append(bytes.substr(0, 1024 * 1024 - raw_body.size()));
+                buffer += bytes;
+                while (true) {
+                    auto pos = buffer.find("\n\n");
+                    std::size_t delimiter = 2;
+                    const auto crlf = buffer.find("\r\n\r\n");
+                    if (crlf != std::string::npos && (pos == std::string::npos || crlf < pos)) { pos = crlf; delimiter = 4; }
+                    if (pos == std::string::npos) break;
+                    stream.event(std::string_view(buffer).substr(0, pos), request.limit);
+                    buffer.erase(0, pos + delimiter);
+                }
+                return stream.error.empty();
+            }));
+            const auto response = session.Post();
+            if (cancelled()) return std::unexpected("DashScope web search cancelled.");
+            if (received_bytes > kMaxSearchBytes) return std::unexpected("DashScope search response exceeded its size limit.");
+            if (!buffer.empty() && stream.received_event) stream.event(buffer, request.limit);
+            if (!stream.received_event && response.status_code >= 200 && response.status_code < 300) {
+                simdjson::dom::parser parser;
+                simdjson::padded_string json(raw_body);
+                simdjson::dom::element doc;
+                if (parser.parse(json).get(doc) == simdjson::SUCCESS) {
+                    stream.searched = has_executed_search(doc);
+                    stream.error = read_error_message(doc);
+                    parse_results(stream.partial, doc, request.limit);
+                    std::string_view status;
+                    stream.completed = doc["status"].get(status) != simdjson::SUCCESS || status == "completed";
+                }
             }
-            return std::unexpected(
-                "DashScope web search response was not valid JSON.");
-        }
-
-        if (response.status_code < 200 || response.status_code >= 300) {
-            const std::string message = read_error_message(doc);
-            return std::unexpected(std::format(
-                "DashScope web search failed with HTTP {}: {}",
-                response.status_code,
-                message.empty() ? response.text.substr(0, 1000) : message));
-        }
-
-        // Surface request-level failures that arrive with HTTP 200.
-        if (const std::string message = read_error_message(doc); !message.empty()) {
-            // Only treat as error when an explicit error object/code is present.
-            simdjson::dom::object error_object;
-            std::string_view code;
-            if (doc["error"].get_object().get(error_object) == simdjson::SUCCESS
-                || (doc["code"].get(code) == simdjson::SUCCESS && !code.empty())) {
-                return std::unexpected(
-                    "DashScope web search backend error: " + message);
+            const bool success_status = response.status_code >= 200 && response.status_code < 300;
+            if (success_status && stream.searched && (!stream.partial.answer.empty() || !stream.partial.results.empty())) {
+                if (!stream.completed || response.error.code != cpr::ErrorCode::OK || !stream.error.empty()) {
+                    stream.partial.answer = "[Partial search result: the search ran, but the response did not finish.]\n" + stream.partial.answer;
+                }
+                if (request.limit > 0 && stream.partial.results.size() > static_cast<std::size_t>(request.limit)) stream.partial.results.resize(request.limit);
+                return stream.partial;
+            }
+            if (!stream.error.empty()) return std::unexpected("DashScope search backend error: " + stream.error);
+            if (response.status_code == 0 && response.error.code != cpr::ErrorCode::OK) {
+                failure = "DashScope web search request failed: " + response.error.message;
+            } else if (!success_status) {
+                failure = std::format("DashScope web search failed with HTTP {}: {}", response.status_code, raw_body.substr(0, 1000));
+                if (response.status_code != 429 && response.status_code < 500) return std::unexpected(failure);
+                // Exhausted allocation quota is permanent, never a retry loop.
+                if (raw_body.find("AllocationQuota") != std::string::npos || raw_body.find("insufficient_quota") != std::string::npos) return std::unexpected(failure);
+            } else if (response.error.code != cpr::ErrorCode::OK) {
+                failure = "DashScope web search request failed: " + response.error.message;
+            }
+            if (attempt == 0) {
+                // One shared timeout budget, with cancellation during backoff.
+                for (int i = 0; i < 10; ++i) {
+                    if (cancelled()) return std::unexpected("DashScope web search cancelled.");
+                    if (std::chrono::steady_clock::now() >= deadline) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
             }
         }
-
-        SearchResponse out{.backend = std::string(name())};
-        parse_results(out, doc, request.limit);
-        if (out.answer.empty() && out.results.empty()) {
-            return std::unexpected(
-                "DashScope web search response did not contain output text "
-                "or source URLs.");
-        }
-        return out;
+        return std::unexpected(failure);
     }
+private:
+    DashScopeWebSearchOptions options_;
 };
 
 } // namespace
 
-std::shared_ptr<IWebSearchBackend> make_dashscope_web_search_backend() {
-    return std::make_shared<DashScopeWebSearchBackend>();
+std::shared_ptr<IWebSearchBackend> make_dashscope_web_search_backend(DashScopeWebSearchOptions options) {
+    return std::make_shared<DashScopeWebSearchBackend>(std::move(options));
 }
 
 } // namespace core::tools::web

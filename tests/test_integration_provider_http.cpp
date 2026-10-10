@@ -1738,6 +1738,7 @@ TEST_CASE("Shared HTTP transport isolates error bodies and trusts a completed st
         CHECK(finals == 1);
         CHECK(recovered == 1);
     }
+}
 
 TEST_CASE("HttpLLMProvider re-resolves the protocol URL on retry",
           "[integration][http][retry]") {

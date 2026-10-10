@@ -1,11 +1,19 @@
 #include "ContextWindowTracker.hpp"
 
 #include "../llm/ModelRegistry.hpp"
+#include "../llm/ContextTokenEstimator.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 namespace core::context {
+namespace {
+std::size_t context_tokens(const std::vector<core::llm::Message>& history,
+                           const std::shared_ptr<core::llm::LLMProvider>& provider) noexcept {
+    const auto* estimator = dynamic_cast<const core::llm::ContextTokenEstimator*>(provider.get());
+    return estimator ? estimator->estimate_context_tokens(history) : ContextWindowTracker::estimate_tokens(history);
+}
+} // namespace
 
 std::size_t ContextWindowTracker::estimate_tokens(
     const std::vector<core::llm::Message>& history) noexcept {
@@ -50,7 +58,7 @@ ContextWindowSnapshot ContextWindowTracker::snapshot(
     std::size_t metered_tokens_to_exclude) noexcept {
     const int32_t max_context_tokens =
         resolve_max_context_tokens(provider, model);
-    const std::size_t estimated_context_tokens = estimate_tokens(history);
+    const std::size_t estimated_context_tokens = context_tokens(history, provider);
     const std::size_t metered_context_tokens =
         estimated_context_tokens > metered_tokens_to_exclude
             ? estimated_context_tokens - metered_tokens_to_exclude
@@ -102,7 +110,7 @@ CompactionDecision ContextWindowTracker::compaction_decision(
     const CompactionTriggerPolicy& policy) noexcept {
     const int32_t max_context_tokens =
         resolve_max_context_tokens(provider, model);
-    const std::size_t estimated_context_tokens = estimate_tokens(history);
+    const std::size_t estimated_context_tokens = context_tokens(history, provider);
     const int effective_threshold =
         effective_compaction_threshold(policy, max_context_tokens);
 

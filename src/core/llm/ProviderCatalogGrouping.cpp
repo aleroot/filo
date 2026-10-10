@@ -2,6 +2,7 @@
 
 #include "KimiModelTraits.hpp"
 #include "MimoModelTraits.hpp"
+#include "QwenModelTraits.hpp"
 #include "ProviderDefinition.hpp"
 #include "../utils/StringUtils.hpp"
 
@@ -35,11 +36,9 @@ constexpr std::array<std::string_view, 6> kZaiCodingPlanModels{{
     "glm-4.5-air",
 }};
 
-// The Qwen family is served by three mutually exclusive endpoints that share a
-// single registry provider key ("qwen"). Without disjoint model sets every
-// endpoint would offer every Qwen model, so the picker would list the same ID
-// under providers that cannot serve it -- and the first, usually
-// credential-less, copy wins.
+// Qwen services share a registry key but authenticate independently. Scoped
+// fallback catalogs and selection identities keep subscription models routed
+// to the endpoint whose credentials can serve them.
 constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.8-max",
     "qwen3.8-flash",
@@ -47,12 +46,6 @@ constexpr std::array<std::string_view, 6> kQwenTokenPlanTextModels{{
     "qwen3.7-plus",
     "qwen3.6-plus",
     "qwen3.6-flash",
-}};
-
-constexpr std::array<std::string_view, 3> kQwenCodingPlanModels{{
-    "qwen3-coder-plus",
-    "qwen3-coder-flash",
-    "coder-model",
 }};
 
 // The MiMo Token Plan gateways and the pay-as-you-go host share one model
@@ -131,12 +124,12 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
         kQwenTokenPlanTextModels);
 }
 
-[[nodiscard]] ProviderCatalogModelFilter qwen_coding_plan_filter() {
-    // coding.dashscope.aliyuncs.com only serves the coder line; "coder-model"
-    // is the endpoint's own subscription alias.
-    return model_filter(
-        ProviderCatalogModelRule::Include,
-        kQwenCodingPlanModels);
+[[nodiscard]] ProviderCatalogModelFilter qwen_coding_plan_filter(std::span<const ModelInfo> models) {
+    ProviderCatalogModelFilter filter{.rule = ProviderCatalogModelRule::Include};
+    for (const auto& model : models) {
+        filter.model_ids.push_back(model.canonical_id);
+    }
+    return filter;
 }
 
 [[nodiscard]] ProviderCatalogModelFilter mimo_token_plan_filter() {
@@ -154,16 +147,9 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
     // hosts and vice versa, so the pay-as-you-go source claims exactly the
     // models the other two do not.
     std::vector<std::string_view> reserved;
-    reserved.reserve(
-        kQwenTokenPlanTextModels.size() + kQwenCodingPlanModels.size());
-    reserved.insert(
-        reserved.end(),
-        kQwenTokenPlanTextModels.begin(),
-        kQwenTokenPlanTextModels.end());
-    reserved.insert(
-        reserved.end(),
-        kQwenCodingPlanModels.begin(),
-        kQwenCodingPlanModels.end());
+    reserved.insert(reserved.end(), kQwenTokenPlanTextModels.begin(), kQwenTokenPlanTextModels.end());
+    const auto coding_models = qwen_coding_plan_fallback_models();
+    for (const auto& model : coding_models) reserved.push_back(model.canonical_id);
     return model_filter(ProviderCatalogModelRule::Exclude, reserved);
 }
 
@@ -221,7 +207,8 @@ constexpr std::array<std::string_view, 5> kMimoTokenPlanModels{{
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen" && is_qwen_coding_source(provider_name)) {
         source.category_label = "Coding Plan endpoint.";
-        source.registry_model_filter = qwen_coding_plan_filter();
+        source.fallback_models = qwen_coding_plan_fallback_models();
+        source.registry_model_filter = qwen_coding_plan_filter(source.fallback_models);
         source.api_model_policy = ProviderCatalogApiModelPolicy::TextGeneration;
     } else if (group_name == "qwen") {
         source.category_label = "DashScope API.";
@@ -276,6 +263,13 @@ bool ProviderCatalogModelFilter::matches(std::string_view model_id) const {
 
 bool ProviderCatalogSource::includes_registry_model(std::string_view model_id) const {
     return registry_model_filter.matches(model_id);
+}
+
+std::vector<ModelInfo> ProviderCatalogSource::registry_models(std::string_view registry_provider) const {
+    auto models = fallback_models.empty()
+        ? ModelRegistry::instance().get_by_provider(registry_provider) : fallback_models;
+    std::erase_if(models, [this](const auto& model) { return !includes_registry_model(model.canonical_id); });
+    return models;
 }
 
 bool ProviderCatalogSource::includes_api_model(std::string_view model_id) const {

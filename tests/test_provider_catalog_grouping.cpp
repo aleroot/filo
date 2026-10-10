@@ -6,8 +6,34 @@
 #include "core/llm/ModelRegistry.hpp"
 
 #include <array>
+#include <algorithm>
 #include <string>
 #include <vector>
+
+TEST_CASE("Catalog fallback selection preserves other providers",
+          "[llm][provider-catalog][isolation]") {
+    std::vector<std::string> providers;
+    for (const auto& definition : core::llm::kBuiltinProviderDefinitions) {
+        if (definition.registry_provider != "qwen") providers.emplace_back(definition.prefix);
+    }
+    for (const auto& group : core::llm::provider_catalog_groups(providers)) {
+        for (const auto& source : group.sources) {
+            CAPTURE(source.provider_name);
+            REQUIRE(source.fallback_models.empty());
+            const auto* definition = core::llm::find_builtin_provider_definition(source.provider_name);
+            REQUIRE(definition != nullptr);
+            auto expected = core::llm::ModelRegistry::instance().get_by_provider(definition->registry_provider);
+            std::erase_if(expected, [&](const auto& model) { return !source.includes_registry_model(model.canonical_id); });
+            const auto actual = source.registry_models(definition->registry_provider);
+            REQUIRE(actual.size() == expected.size());
+            for (std::size_t i = 0; i < actual.size(); ++i) {
+                CHECK(actual[i].canonical_id == expected[i].canonical_id);
+                CHECK(actual[i].context_window == expected[i].context_window);
+                CHECK(actual[i].capabilities == expected[i].capabilities);
+            }
+        }
+    }
+}
 
 TEST_CASE("Provider catalog grouping keeps Z.ai categories under one provider",
           "[llm][provider-catalog]") {
@@ -301,7 +327,7 @@ TEST_CASE("Provider catalog grouping gives Qwen Token Plan an exact registry fal
     CHECK(public_api->includes_api_model("qwen3.8-max"));
 }
 
-TEST_CASE("Qwen catalog sources never offer the same registry model twice",
+TEST_CASE("Qwen catalog preserves separate subscription identities for shared models",
           "[llm][provider-catalog][qwen][token-plan]") {
     // Regression: making `qwen` and `qwen-coding` default providers gave the
     // Qwen group three sources that share registry provider key "qwen". Only
@@ -328,14 +354,15 @@ TEST_CASE("Qwen catalog sources never offer the same registry model twice",
             }
         }
         INFO("model: " << model.canonical_id << " owners: " << owners);
-        CHECK(owners == 1);
+        CHECK(owners == ((model.canonical_id == "qwen3.6-plus" || model.canonical_id == "qwen3.7-plus") ? 2 : 1));
     }
 
     const auto* coding = group.find_source("qwen-coding");
     REQUIRE(coding != nullptr);
     CHECK(coding->includes_registry_model("qwen3-coder-plus"));
-    CHECK(coding->includes_registry_model("qwen3-coder-flash"));
-    CHECK(coding->includes_registry_model("coder-model"));
+    CHECK(coding->includes_registry_model("qwen3-coder-next"));
+    CHECK(coding->includes_registry_model("qwen3.7-plus"));
+    CHECK(coding->fallback_models.size() == 10);
     CHECK_FALSE(coding->includes_registry_model("qwen3.8-max"));
     CHECK_FALSE(coding->includes_registry_model("qwen3-max"));
     CHECK_FALSE(coding->includes_api_model("qwen-image-2.0"));

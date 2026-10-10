@@ -87,21 +87,24 @@ TEST_CASE("Kimi protocol reports selectable and required reasoning modes",
     CHECK_FALSE(supports(protocol, "moonshot-v1-8k", ReasoningCapability::Effort));
 }
 
-TEST_CASE("DashScope protocols own Qwen reasoning policy", "[llm][effort][qwen]") {
+TEST_CASE("DashScope protocols own endpoint-specific model reasoning policy", "[llm][effort][qwen]") {
     DashScopeProtocol chat;
     DashScopeResponsesProtocol responses;
-    for (const auto model : {"qwen3.8-max", "qwen3.7-max",
-                             "qwen3.7-plus", "qwen3.6-flash", "qwen3-coder-plus"}) {
-        CAPTURE(model);
-        for (const auto* protocol : {static_cast<ApiProtocolBase*>(&chat),
-                                     static_cast<ApiProtocolBase*>(&responses)}) {
-            CHECK(supports(*protocol, model, ReasoningCapability::Effort));
-            CHECK(supports(*protocol, model, ReasoningCapability::MaxEffort));
-            CHECK(supports(*protocol, model, ReasoningCapability::Disable));
+    for (const auto* protocol : {static_cast<ApiProtocolBase*>(&chat), static_cast<ApiProtocolBase*>(&responses)}) {
+        CHECK(supports(*protocol, "qwen3.8-max", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "qwen3.8-max", ReasoningCapability::Required));
+        CHECK_FALSE(supports(*protocol, "qwen3.8-max", ReasoningCapability::Disable));
+        CHECK_FALSE(supports(*protocol, "qwen3.8-max", ReasoningCapability::MaxEffort));
+        CHECK(supports(*protocol, "qwen3.8-flash", ReasoningCapability::Disable));
+        for (const auto model : {"qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash"}) {
+            CHECK_FALSE(supports(*protocol, model, ReasoningCapability::Effort));
+            CHECK(supports(*protocol, model, ReasoningCapability::ToggleOnly));
         }
+        CHECK_FALSE(supports(*protocol, "qwen3-coder-plus", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "glm-5.2", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "ZHIPU/GLM-5.3", ReasoningCapability::Required));
     }
     CHECK_FALSE(supports(chat, "qwen2.5-72b-instruct", ReasoningCapability::Effort));
-    CHECK_FALSE(supports(chat, "glm-5.2", ReasoningCapability::Effort));
 }
 
 TEST_CASE("Anthropic protocol reports per-family effort levels",

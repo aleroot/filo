@@ -4,6 +4,7 @@
 #include "ProviderDefinition.hpp"
 #include "ProviderClientIdentity.hpp"
 #include "providers/QwenModelCatalogSelector.hpp"
+#include "providers/QwenProvider.hpp"
 #ifdef FILO_ENABLE_LLAMACPP
 #include "providers/LlamaCppProvider.hpp"
 #endif
@@ -241,9 +242,9 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
     if (qwen_coding_plan && env_vars.front().empty()) {
         env_vars = { "QWEN_CODING_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY" };
     }
-    if (qwen_coding_plan
+    if ((qwen_coding_plan || qwen_token_plan)
         && (api_type == ApiType::Unknown || api_type == ApiType::OpenAI)) {
-        // Coding Plan is DashScope-compatible. Treating it as vanilla OpenAI
+        // Qwen plans are DashScope-compatible. Treating them as vanilla OpenAI
         // drops X-DashScope-* cache headers and Qwen thinking fields.
         api_type = ApiType::DashScope;
     }
@@ -358,35 +359,7 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
         protocol = std::make_unique<protocols::KimiProtocol>();
         break;
     case ApiType::DashScope:
-        // Qwen Code's normal Token Plan agent pipeline uses Chat Completions.
-        // Keep that compatibility choice in the Qwen adapter, including for
-        // existing configs generated with the former `responses` default.
-        if (qwen_token_plan) {
-            protocol = std::make_unique<protocols::DashScopeTokenPlanProtocol>(
-                protocols::DashScopeTokenPlanProtocol::Options{
-                    .thinking_budget = config.thinking_budget,
-                    .default_effort = config.reasoning_effort.empty()
-                        ? "high"
-                        : config.reasoning_effort,
-                });
-        } else if (parse_openai_wire_api(
-                       wire_api,
-                       builtin ? builtin->default_wire_api : "chat_completions")
-                   == OpenAIWireApi::Responses) {
-            protocol = std::make_unique<protocols::DashScopeResponsesProtocol>(
-                protocols::DashScopeResponsesProtocol::Options{
-                    .default_effort = config.reasoning_effort.empty()
-                        ? "high"
-                        : config.reasoning_effort,
-                    .enable_hosted_tools = false,
-                    .deployment = protocols::DashScopeDeployment::Standard,
-                });
-        } else {
-            protocol = std::make_unique<protocols::DashScopeProtocol>(
-                config.thinking_budget,
-                config.reasoning_effort,
-                protocols::DashScopeDeployment::Standard);
-        }
+        // QwenProvider owns request policy; the generic transport stays shared.
         break;
     case ApiType::Anthropic: {
         if (canonical_type == "zai-coding") {
@@ -437,6 +410,22 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
             !resolved.empty()) {
             service_id = resolved;
         }
+    }
+
+    if (api_type == ApiType::DashScope) {
+        return std::make_shared<providers::QwenProvider>(providers::QwenProvider::Options{
+            .base_url = base_url,
+            .credentials = std::move(cred),
+            .model = config.model,
+            .provider_name = std::string(name),
+            .service_id = std::move(service_id),
+            .model_selector = std::move(model_catalog_selector),
+            .thinking_budget = config.thinking_budget,
+            .default_effort = config.reasoning_effort,
+            .token_plan = qwen_token_plan,
+            .responses = parse_openai_wire_api(wire_api, builtin ? builtin->default_wire_api : "chat_completions")
+                == OpenAIWireApi::Responses,
+        });
     }
 
     return std::make_shared<HttpLLMProvider>(

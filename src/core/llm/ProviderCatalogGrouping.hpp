@@ -1,4 +1,5 @@
 #pragma once
+#include "ModelRegistry.hpp"
 
 #include <span>
 #include <string>
@@ -35,8 +36,12 @@ struct ProviderCatalogSource {
     ProviderCatalogModelFilter api_model_filter;
     ProviderCatalogApiModelPolicy api_model_policy =
         ProviderCatalogApiModelPolicy::All;
+    // Optional endpoint-owned fallback cards. They do not modify the global
+    // model registry or metadata for another service hosting the same model.
+    std::vector<ModelInfo> fallback_models = {};
 
     [[nodiscard]] bool includes_registry_model(std::string_view model_id) const;
+    [[nodiscard]] std::vector<ModelInfo> registry_models(std::string_view registry_provider) const;
     [[nodiscard]] bool includes_api_model(std::string_view model_id) const;
 };
 

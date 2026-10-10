@@ -22,6 +22,14 @@ ReasoningEffortResolution resolve_reasoning_effort(
         return {"provider default", Kind::UnsupportedProviderDefault};
     }
 
+    if (capabilities.supports(ReasoningCapability::ToggleOnly)) {
+        return {"on", Kind::Mapped};
+    }
+    if ((configured == "high" || configured == "max" || configured == "ultra")
+        && capabilities.supports(ReasoningCapability::MapsHighToXHigh)) {
+        return {"xhigh", Kind::Mapped};
+    }
+
     if (configured == "low"
         && capabilities.supports(ReasoningCapability::MapsLowToHigh)) {
         return {"high", Kind::Mapped};

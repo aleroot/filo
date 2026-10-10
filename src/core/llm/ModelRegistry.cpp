@@ -1462,7 +1462,7 @@ std::vector<ModelInfo> build_grok_catalog() {
 // Pricing is approximate (USD / 1M tokens) sourced from the DashScope pricing
 // page; actual costs may vary by region and promotional tier.
 //
-// Thinking mode (enable_thinking=true) is supported on all Qwen3 models.
+// Thinking controls are model-specific; the Qwen3-Coder family is non-thinking.
 // It is activated at the protocol level via DashScopeProtocol::thinking_budget_.
 std::vector<ModelInfo> build_qwen_catalog() {
     // Capabilities shared by all Qwen text models that support tool calling.
@@ -1484,10 +1484,9 @@ std::vector<ModelInfo> build_qwen_catalog() {
         CAP_QWEN_VL |
         static_cast<uint32_t>(ModelCapability::VideoInput);
 
-    // Coder models: tools + reasoning, no vision (VL is a separate model line).
+    // Coding specialists expose tools without selectable thinking or vision.
     constexpr ModelCapabilities CAP_QWEN_CODER =
         CAP_TOOLS |
-        static_cast<uint32_t>(ModelCapability::Reasoning) |
         static_cast<uint32_t>(ModelCapability::PromptCaching);
 
     return {
@@ -1527,7 +1526,7 @@ std::vector<ModelInfo> build_qwen_catalog() {
             .context_window    = 1'000'000,
             .max_output_tokens = 64'000,
             .max_reasoning_tokens = 256'000,
-            .capabilities      = CAP_QWEN_CODER,
+            .capabilities      = CAP_QWEN_CODER | static_cast<uint32_t>(ModelCapability::Reasoning),
             .tier              = ModelTier::Powerful,
             .pricing           = {2.50, 7.50, 0.50, 0.25},
             .knowledge_cutoff  = "2026-06",
@@ -1589,6 +1588,17 @@ std::vector<ModelInfo> build_qwen_catalog() {
             .pricing           = {0.43, 1.77, -1.0, -1.0},
             .knowledge_cutoff  = "2024-12",
             .constraints       = kStandardConstraints,
+        },
+        {
+            .canonical_id = "qwen3-coder-next",
+            .display_name = "Qwen3 Coder Next",
+            .provider = "qwen",
+            .context_window = 262'144,
+            .max_output_tokens = 32'000,
+            .capabilities = CAP_QWEN_CODER,
+            .tier = ModelTier::Balanced,
+            .pricing = {-1.0, -1.0, -1.0, -1.0},
+            .constraints = kStandardConstraints,
         },
         {
             .canonical_id      = "qwen3-coder-flash",

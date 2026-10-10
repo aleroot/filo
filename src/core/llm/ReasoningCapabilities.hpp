@@ -19,6 +19,8 @@ enum class ReasoningCapability : std::uint16_t {
     MapsMinimalToLow = 1U << 11,
     MapsMinimalToOff = 1U << 12,
     MapsXHighToHigh = 1U << 13,
+    ToggleOnly = 1U << 14,
+    MapsHighToXHigh = 1U << 15,
 };
 
 class ReasoningCapabilities {

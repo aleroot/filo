@@ -5,6 +5,8 @@
 
 namespace core::llm {
 
+struct ModelInfo;
+
 [[nodiscard]] std::vector<int> qwen_model_generation(std::string_view model_id);
 [[nodiscard]] bool is_qwen_text_model(std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_preserve_thinking(
@@ -19,5 +21,7 @@ namespace core::llm {
     std::string_view model_id);
 [[nodiscard]] bool qwen_model_supports_tiered_effort(
     std::string_view model_id);
+[[nodiscard]] std::vector<ModelInfo> qwen_coding_plan_fallback_models();
+[[nodiscard]] int qwen_endpoint_context_window(std::string_view model);
 
 } // namespace core::llm

@@ -18,7 +18,7 @@
  * context prefix automatically, with no changes required to the request body.
  *
  * ## Thinking Mode (Qwen3 models)
- * Qwen3 models (qwen3-coder-plus, qwen3-max, etc.) support extended thinking
+ * Hybrid Qwen models (qwen3.7-plus, qwen3-max, etc.) support extended thinking
  * via `enable_thinking: true` + `thinking_budget: <N>` in the request body.
  * The streaming response then carries `delta.reasoning_content` chunks before
  * the regular `delta.content` chunks — identical to Kimi K2.5 thinking tokens.
@@ -41,8 +41,15 @@
 
 #include "OpenAIProtocol.hpp"
 #include "OpenAIResponsesProtocol.hpp"
+#include <functional>
 
 namespace core::llm::protocols {
+
+struct DashScopeRequestLifecycle {
+    std::function<void(ChatRequest&)> prepare;
+    std::function<void(int, std::string_view)> failure;
+    std::function<void(int32_t)> prompt_usage;
+};
 
 enum class DashScopeDeployment {
     Standard,
@@ -74,30 +81,36 @@ class DashScopeProtocol : public OpenAIProtocol {
 public:
     /**
      * @param thinking_budget  Token budget for Qwen3 extended thinking.
-     *                         Zero (default) disables thinking mode entirely.
+     *                         Zero (default) leaves the budget to the provider.
      *                         Only takes effect on models that support it
-     *                         (qwen3-coder-plus, qwen3-max, qwen3-plus, etc.).
-     *                         The server silently ignores the field on models
-     *                         that do not support thinking, so it is safe to
-     *                         always pass a non-zero value for Qwen3 providers.
+     *                         (qwen3.7-plus, qwen3-max, qwen3-plus, etc.).
+     *                         Coder models and unknown aliases receive no
+     *                         unsupported thinking fields.
      */
     explicit DashScopeProtocol(int thinking_budget = 0,
                                std::string default_effort = {},
-                               DashScopeDeployment deployment = DashScopeDeployment::Standard)
+                               DashScopeDeployment deployment = DashScopeDeployment::Standard,
+                               DashScopeRequestLifecycle lifecycle = {})
         : OpenAIProtocol(/*stream_usage=*/true)  // DashScope supports usage in stream
         , thinking_budget_(thinking_budget)
         , default_effort_(std::move(default_effort))
-        , deployment_(deployment) {}
+        , deployment_(deployment)
+        , lifecycle_(std::move(lifecycle)) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return "dashscope"; }
     [[nodiscard]] ReasoningCapabilities reasoning_capabilities(
         std::string_view model) const noexcept override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override {
-        return std::make_unique<DashScopeProtocol>(*this);
+        return std::make_unique<DashScopeProtocol>(
+            thinking_budget_, default_effort_, deployment_, lifecycle_);
     }
 
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
+    void prepare_request(ChatRequest& request) override;
+    [[nodiscard]] bool requires_terminal_event() const noexcept override { return true; }
+    [[nodiscard]] ParseResult parse_event(std::string_view event) override;
+    void reset_state() override;
 
     // ── Request building ─────────────────────────────────────────────────────
 
@@ -114,8 +127,8 @@ public:
 
     // ── Response lifecycle ───────────────────────────────────────────────────
 
-    // OpenAIProtocol owns SSE parsing, including reasoning_content. Reusing
-    // it preserves DashScope provenance without emitting reasoning twice.
+    // The Qwen parser augments shared text/tool parsing with stop reasons,
+    // terminal-event checks, and provider-owned stream errors.
 
     /**
      * @brief Extract DashScope rate-limit headers from the HTTP response.
@@ -161,10 +174,14 @@ protected:
     void append_extra_fields(std::string& payload, const ChatRequest& req) const override;
 
 private:
-    int           thinking_budget_;  ///< 0 = disabled; >0 = thinking token budget
+    std::string stop_reason_;
+    std::vector<ToolCall> pending_tool_calls_;
+    bool stream_rate_limit_seen_ = false;
+    int           thinking_budget_;  ///< 0 = provider default; >0 = thinking token budget
     std::string   default_effort_;   ///< Provider default used when the turn is auto.
     DashScopeDeployment deployment_ = DashScopeDeployment::Standard;
     RateLimitInfo last_rate_limit_;  ///< Populated by on_response()
+    DashScopeRequestLifecycle lifecycle_;
 };
 
 /**
@@ -180,15 +197,24 @@ public:
         std::string default_effort = "high";
         bool enable_hosted_tools = true;
         DashScopeDeployment deployment = DashScopeDeployment::TokenPlan;
+        DashScopeRequestLifecycle lifecycle = {};
     };
 
     DashScopeResponsesProtocol();
     explicit DashScopeResponsesProtocol(Options options);
 
     [[nodiscard]] std::string serialize(const ChatRequest& req) const override;
+    void prepare_request(ChatRequest& request) override;
     [[nodiscard]] cpr::Header build_headers(const core::auth::AuthInfo& auth) const override;
     [[nodiscard]] std::string format_error_message(const HttpResponse& response) const override;
     [[nodiscard]] bool is_retryable(const HttpResponse& response) const noexcept override;
+    void on_response(const HttpResponse& response) override;
+    [[nodiscard]] RateLimitInfo last_rate_limit() const noexcept override {
+        return response_rate_limit_;
+    }
+    [[nodiscard]] bool requires_terminal_event() const noexcept override { return true; }
+    [[nodiscard]] ParseResult parse_event(std::string_view event) override;
+    void reset_state() override;
     [[nodiscard]] std::string_view name() const noexcept override {
         return "dashscope_responses";
     }
@@ -203,6 +229,10 @@ public:
 
 private:
     Options options_;
+    RateLimitInfo response_rate_limit_;
+    bool stream_rate_limit_seen_ = false;
+    std::string session_id_;
+    std::vector<ToolCall> pending_tool_calls_;
 };
 
 /**
@@ -218,6 +248,7 @@ public:
     struct Options {
         int thinking_budget = 0;
         std::string default_effort = "high";
+        DashScopeRequestLifecycle lifecycle = {};
     };
 
     DashScopeTokenPlanProtocol();
@@ -239,6 +270,9 @@ public:
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override;
 
     void prepare_request(ChatRequest& request) override;
+    [[nodiscard]] bool requires_terminal_event() const noexcept override {
+        return delegate_->requires_terminal_event();
+    }
     void on_response(const HttpResponse& response) override;
     [[nodiscard]] std::string format_error_message(
         const HttpResponse& response) const override;
@@ -255,17 +289,6 @@ private:
     Options options_;
     std::unique_ptr<ApiProtocolBase> delegate_;
 
-    // The Token Plan inference endpoints never return rate-limit/usage headers
-    // (verified for chat/completions, responses and the Anthropic-compatible
-    // shim). The only provider-backed quota signal available over the API-key
-    // path is the 429 body. Exact allocation errors
-    // (`Throttling.AllocationQuota` / `insufficient_quota`) identify an
-    // exhausted Personal Edition Credits window; request/burst throttles stay
-    // transient. We capture the resulting state here so the status bar and
-    // quota notifications can surface the blocked state honestly.
-    RateLimitInfo rate_limit_override_;
-    bool has_rate_limit_override_ = false;
-    bool stream_rate_limit_seen_ = false;
 };
 
 } // namespace core::llm::protocols

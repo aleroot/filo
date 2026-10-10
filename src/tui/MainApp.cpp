@@ -4094,13 +4094,7 @@ RunResult run(RunOptions opts) {
             const std::string registry_key =
                 core::llm::model_registry_provider_key(
                     source_provider, provider_cfg.api_type);
-            auto registry_models =
-                core::llm::ModelRegistry::instance().get_by_provider(
-                    registry_key);
-            std::erase_if(registry_models, [&](const auto& model) {
-                return !effective_source->includes_registry_model(
-                    model.canonical_id);
-            });
+            auto registry_models = effective_source->registry_models(registry_key);
             std::ranges::sort(
                 registry_models, {}, &core::llm::ModelInfo::canonical_id);
 
@@ -4220,13 +4214,7 @@ RunResult run(RunOptions opts) {
                 const std::string registry_key =
                     core::llm::model_registry_provider_key(
                         source_provider, provider_it->second.api_type);
-                auto registry_models =
-                    core::llm::ModelRegistry::instance().get_by_provider(
-                        registry_key);
-                std::erase_if(registry_models, [&](const auto& model) {
-                    return !source.includes_registry_model(
-                        model.canonical_id);
-                });
+                auto registry_models = source.registry_models(registry_key);
                 auto provider_models = snapshot.models;
                 std::erase_if(provider_models, [&](const auto& model) {
                     return !source.includes_api_model(model.canonical_id);
@@ -4341,7 +4329,11 @@ RunResult run(RunOptions opts) {
 
         std::string applies_note =
             "Applies when the active provider protocol supports effort for this model.";
-        if (model_selection_mode == ModelSelectionMode::Manual
+        if (capabilities.supports(core::llm::ReasoningCapability::ToggleOnly)) {
+            applies_note = capabilities.supports(core::llm::ReasoningCapability::Required)
+                ? "This model requires thinking; effort levels do not change its intensity."
+                : "This model supports thinking on/off; enabled effort levels all map to on.";
+        } else if (model_selection_mode == ModelSelectionMode::Manual
             && !capabilities.supports_effort()) {
             applies_note = std::format(
                 "Current manual provider '{}' does not support effort for this model.",

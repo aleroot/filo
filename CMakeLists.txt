@@ -231,6 +231,8 @@ set(FILO_CORE_SOURCES
     src/core/config/SessionModelOverride.cpp
     src/core/llm/providers/RouterProvider.cpp
     src/core/llm/providers/QwenModelCatalogSelector.cpp
+    src/core/llm/providers/QwenProvider.cpp
+    src/core/llm/providers/QwenRequestBudget.cpp
     src/core/llm/KimiModelTraits.cpp
     src/core/llm/QwenModelTraits.cpp
     src/core/llm/ZaiModelTraits.cpp
@@ -776,6 +778,7 @@ set(FILO_INTEGRATION_TEST_SOURCES
     tests/test_integration_mcp_client_session.cpp
     tests/test_integration_prompt_input.cpp
     tests/test_integration_provider_http.cpp
+    tests/test_integration_qwen.cpp
     tests/test_integration_shell_tool.cpp
     tests/test_integration_web_tools.cpp
     tests/test_curl_websocket_transport.cpp
@@ -808,6 +811,10 @@ set_tests_properties(read_http_integration PROPERTIES TIMEOUT 60)
 add_test(NAME provider_http_integration
     COMMAND test_integration "[integration][http]" --reporter compact)
 set_tests_properties(provider_http_integration PROPERTIES TIMEOUT 60)
+
+add_test(NAME qwen_web_integration
+    COMMAND test_integration "[integration][qwen][web]" --reporter compact)
+set_tests_properties(qwen_web_integration PROPERTIES TIMEOUT 60)
 
 add_executable(test_agent_freeze tests/test_agent_freeze.cpp)
 target_link_libraries(test_agent_freeze PRIVATE filo_core)
@@ -962,6 +969,7 @@ source_group(
         tests/test_integration_mcp_client_session.cpp
         tests/test_integration_prompt_input.cpp
         tests/test_integration_provider_http.cpp
+        tests/test_integration_qwen.cpp
         tests/test_integration_shell_tool.cpp
         tests/test_integration_web_tools.cpp
         tests/test_curl_websocket_transport.cpp
