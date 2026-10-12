@@ -2,6 +2,7 @@
 #include "OpenAIUsage.hpp"
 #include "SseUtils.hpp"
 #include "OpenAIProtocol.hpp"
+#include "../ModelCatalogProvider.hpp"
 #include "../Models.hpp"
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
@@ -229,6 +230,22 @@ void append_function_call_output_item(std::string& payload,
         }
     }
 
+    return items;
+}
+
+// The ChatGPT backend rejects `instructions`. The official client sends the
+// same stable prompt as a developer message at the front of `input`.
+[[nodiscard]] std::vector<std::string> codex_input_items(const ChatRequest& request) {
+    auto items = build_input_items(request.messages);
+    const std::string instructions = collect_instructions(request);
+    if (instructions.empty()) return items;
+
+    Message developer;
+    developer.role = "developer";
+    developer.content = instructions;
+    std::string item;
+    append_message_item(item, developer);
+    items.insert(items.begin(), std::move(item));
     return items;
 }
 
@@ -796,7 +813,8 @@ std::string OpenAIResponsesProtocol::serialize_with_input_items(
         payload += R"(,"max_output_tokens":)";
         payload += std::to_string(*req.max_tokens);
     }
-    if (options.reasoning_effort_override.has_value()
+    if (options.include_reasoning_summary
+        || options.reasoning_effort_override.has_value()
         || reasoning_capabilities(req.model).supports_effort()) {
         // Public OpenAI/Grok/DashScope send effort only. Codex opts into
         // `summary: auto` via SerializationOptions because the ChatGPT
@@ -941,7 +959,12 @@ cpr::Header CodexResponsesProtocol::build_headers(
 }
 
 std::string CodexResponsesProtocol::serialize(const ChatRequest& request) const {
-    return serialize_codex_with_input_items(request, build_input_items(request.messages));
+    return serialize_codex_with_input_items(request, codex_input_items(request));
+}
+
+std::unique_ptr<core::llm::ModelCatalogProvider>
+CodexResponsesProtocol::model_catalog(std::string_view provider_name) const {
+    return std::make_unique<CodexModelCatalogProvider>(std::string(provider_name));
 }
 
 std::string CodexResponsesProtocol::serialize_codex_with_input_items(
@@ -952,9 +975,16 @@ std::string CodexResponsesProtocol::serialize_codex_with_input_items(
     options.include_reasoning_summary = true;
     std::string payload = serialize_with_input_items(
         request, input_items, previous_response_id_override, options);
-    const std::string window_id = (request.session_id.empty() ? std::string("filo") : request.session_id) + ":0";
+    const std::string thread_id = request.session_id.empty()
+        ? std::string("filo")
+        : request.session_id;
+    const std::string window_id = thread_id + ":0";
     std::string metadata = R"("client_metadata":{"x-codex-installation-id":")";
     metadata += core::utils::escape_json_string(installation_id());
+    metadata += R"(","session_id":")";
+    metadata += core::utils::escape_json_string(thread_id);
+    metadata += R"(","thread_id":")";
+    metadata += core::utils::escape_json_string(thread_id);
     metadata += R"(","x-codex-window-id":")";
     metadata += core::utils::escape_json_string(window_id);
     metadata += R"("})";
@@ -986,7 +1016,11 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-responsesapi-include-timing-metrics"] = "true";
     headers["originator"] = "filo";
     headers["version"] = std::string(core::version::value);
+    // Current Codex sends the hyphenated names. Filo has always sent the
+    // underscore form as well, so it stays.
     headers["session_id"] = thread_id;
+    headers["session-id"] = thread_id;
+    headers["thread-id"] = thread_id;
     headers["User-Agent"] = std::string(core::version::user_agent);
     if (!turn_state.empty()) {
         headers["x-codex-turn-state"] = turn_state;
@@ -1059,14 +1093,14 @@ WebSocketRequestFrame CodexResponsesProtocol::next_websocket_request_frame(
 std::string CodexResponsesProtocol::serialize_websocket_request_impl(
     const ChatRequest& request,
     bool prewarm) const {
-    const auto full_input_items = build_input_items(request.messages);
+    const auto full_input_items = codex_input_items(request);
 
     ChatRequest signature_request = request;
     signature_request.messages = system_messages_only(request.messages);
     signature_request.previous_response_id.clear();
     const std::string request_signature = serialize_codex_with_input_items(
         signature_request,
-        build_input_items(signature_request.messages),
+        codex_input_items(signature_request),
         std::string_view{});
 
     std::string incremental_previous_response_id;

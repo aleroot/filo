@@ -41,6 +41,10 @@ TEST_CASE("OpenAI protocols own their reasoning capability policy", "[llm][effor
         CHECK_FALSE(supports(*protocol, "gpt-5.5", ReasoningCapability::MaxEffort));
         CHECK_FALSE(supports(*protocol, "gpt-4o", ReasoningCapability::Effort));
         CHECK_FALSE(supports(*protocol, "glm-5.2", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "gpt-6", ReasoningCapability::Effort));
+        CHECK(supports(*protocol, "gpt-6.1", ReasoningCapability::XHighEffort));
+        CHECK(supports(*protocol, "gpt-6.1-sol", ReasoningCapability::MaxEffort));
+        CHECK_FALSE(supports(*protocol, "gpt-6.1", ReasoningCapability::UltraEffort));
     }
 
     CodexResponsesProtocol codex;

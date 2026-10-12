@@ -21,6 +21,7 @@ namespace {
         || lower.starts_with("o3")
         || lower.starts_with("o4")
         || lower.starts_with("gpt-5")
+        || lower.starts_with("gpt-6")
         || catalog::contains_ascii(model_id, "reasoning")
         || catalog::contains_ascii(model_id, "thinking");
 }
@@ -44,6 +45,7 @@ namespace {
         || model.string_array_contains("input_modalities", "image")
         || catalog::contains_ascii(model_id, "gpt-4")
         || catalog::contains_ascii(model_id, "gpt-5")
+        || catalog::contains_ascii(model_id, "gpt-6")
         || catalog::contains_ascii(model_id, "4o")
         || catalog::contains_ascii(model_id, "vision")) {
         capabilities |= static_cast<uint32_t>(ModelCapability::Vision);
@@ -66,6 +68,19 @@ namespace {
         (void)model.string("id", info.canonical_id);
     }
     if (info.canonical_id.empty()) return info;
+
+    // The Codex picker only lists `visibility: list`. Hidden and unavailable
+    // rows stay out of Filo's model list; a missing field stays visible so
+    // older catalogs are not emptied.
+    std::string visibility;
+    if (model.string("visibility", visibility)) {
+        const std::string normalized =
+            core::utils::str::to_lower_ascii_copy(visibility);
+        if (normalized == "hide" || normalized == "none") {
+            info.canonical_id.clear();
+            return info;
+        }
+    }
 
     info.provider = catalog::copy_string(provider_name);
     if (!model.string("display_name", info.display_name)) {

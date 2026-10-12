@@ -76,9 +76,8 @@ protected:
         return ConversationContextStrategy::StatefulPreviousResponse;
     }
 
-    /// Replay-only APIs normally carry system messages inside input. Codex
-    /// keeps them in the dedicated instructions field so PromptPlan content is
-    /// preserved without duplicating system messages.
+    /// Replay-only APIs carry system messages inside `input` instead of the
+    /// top-level `instructions` field.
     [[nodiscard]] virtual bool replay_system_messages_in_input() const noexcept {
         return true;
     }
@@ -205,6 +204,8 @@ public:
     void reset_state() override;
 
     [[nodiscard]] std::unique_ptr<ApiProtocolBase> clone() const override;
+    [[nodiscard]] std::unique_ptr<core::llm::ModelCatalogProvider>
+    model_catalog(std::string_view provider_name) const override;
 
 protected:
     [[nodiscard]] ConversationContextStrategy conversation_context_strategy()
@@ -215,7 +216,9 @@ protected:
         return ConversationContextStrategy::ReplayInput;
     }
     [[nodiscard]] bool replay_system_messages_in_input() const noexcept override {
-        return false;
+        // The ChatGPT backend answers a top-level `instructions` field with
+        // HTTP 400, so the stable prompt travels in `input`.
+        return true;
     }
 
 private:

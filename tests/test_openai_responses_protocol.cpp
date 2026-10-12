@@ -311,12 +311,16 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("x-codex-window-id") == "thread-123:0");
     REQUIRE(headers.at("originator") == "filo");
     REQUIRE(headers.at("session_id") == "thread-123");
+    REQUIRE(headers.at("session-id") == "thread-123");
+    REQUIRE(headers.at("thread-id") == "thread-123");
     REQUIRE_FALSE(headers.at("version").empty());
     REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::StartsWith("filo/"));
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("x-codex-installation-id")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("session_id":"thread-123")"));
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("thread_id":"thread-123")"));
 
     protocol.observe_response_headers(
         cpr::Header{{"x-codex-turn-state", "sticky-route"}}, req);
@@ -343,8 +347,9 @@ TEST_CASE("CodexResponsesProtocol - HTTP replay includes system context and encr
     };
 
     const std::string payload = protocol.serialize(req);
-    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(R"("instructions":"Preserve this policy.")"));
-    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring("Preserve this policy."));
+    CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("instructions")"));
+    CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("role":"developer","content":[{"type":"input_text","text":"Preserve this policy."}])"));
     CHECK_THAT(payload, !Catch::Matchers::ContainsSubstring(R"("role":"system")"));
     CHECK_THAT(payload, Catch::Matchers::ContainsSubstring(
         R"("include":["reasoning.encrypted_content"])"));

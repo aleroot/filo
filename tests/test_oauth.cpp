@@ -1882,6 +1882,8 @@ TEST_CASE("AuthenticationManager logout rejects unsupported providers", "[Authen
 #include "core/auth/OAuthLoopback.hpp"
 #include "core/auth/OAuthTokenEndpoint.hpp"
 
+#include <httplib.h>
+
 TEST_CASE("parse_oauth_token_response — standard body", "[OAuthTokenEndpoint]") {
     using namespace core::auth;
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1942,6 +1944,46 @@ TEST_CASE("OAuthLoopbackServer binds and exposes redirect_uri", "[OAuthLoopback]
     CHECK(server->port() > 0);
     CHECK(server->redirect_uri().starts_with("http://127.0.0.1:"));
     CHECK(server->redirect_uri().ends_with("/callback"));
+}
+
+TEST_CASE("OAuth loopback accepts only the registered ChatGPT state suffix",
+          "[OAuthLoopback][openai]") {
+    using namespace core::auth;
+
+    const auto serve = [](std::string_view state) {
+        OAuthLoopbackOptions opts;
+        opts.fixed_port = 0;
+        opts.callback_path = "/auth/callback";
+        opts.expected_state = "state-token";
+        opts.accepted_state_suffixes = {".onboarding_entrypoint=life_sciences"};
+        opts.timeout = std::chrono::seconds(2);
+        auto server = std::make_unique<OAuthLoopbackServer>(opts);
+        server->start();
+        httplib::Client client("127.0.0.1", server->port());
+        client.set_connection_timeout(1, 0);
+        client.set_read_timeout(2, 0);
+        const std::string path = std::string("/auth/callback?code=abc&state=")
+            + std::string(state);
+        auto response = client.Get(path);
+        REQUIRE(response);
+        auto result = server->wait();
+        return std::pair{response->status, std::move(result)};
+    };
+
+    try {
+        const auto accepted = serve("state-token.onboarding_entrypoint=life_sciences");
+        CHECK(accepted.first == 200);
+        CHECK(accepted.second.error.empty());
+        CHECK(accepted.second.code == "abc");
+
+        const auto rejected = serve("state-token.not-the-onboarding-suffix");
+        CHECK(rejected.first == 400);
+        CHECK_THAT(rejected.second.error,
+                   Catch::Matchers::ContainsSubstring("state mismatch"));
+        CHECK(rejected.second.code.empty());
+    } catch (const OAuthLoopbackBindError&) {
+        SKIP("Local socket bind/listen is unavailable in this environment.");
+    }
 }
 
 TEST_CASE("Code Assist endpoint: Antigravity uses the daily host unless overridden",

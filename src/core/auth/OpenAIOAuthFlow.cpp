@@ -412,7 +412,9 @@ OAuthToken OpenAIOAuthFlow::login() {
     const std::string challenge      = compute_code_challenge(code_verifier);
 
     OAuthLoopbackOptions loopback_options;
-    loopback_options.redirect_host = "localhost";
+    // The public Codex client is registered for 127.0.0.1 only. `localhost`
+    // is a different redirect URI and auth.openai.com rejects it.
+    loopback_options.redirect_host = "127.0.0.1";
     loopback_options.port_start = port_start_;
     loopback_options.port_end = port_end_;
     // These are the callback ports registered for the public Codex client.
@@ -422,6 +424,9 @@ OAuthToken OpenAIOAuthFlow::login() {
     loopback_options.callback_path = "/auth/callback";
     loopback_options.extra_paths = {"/callback"};
     loopback_options.expected_state = state;
+    // ChatGPT may append this exact onboarding marker to an otherwise valid state.
+    loopback_options.accepted_state_suffixes = {
+        ".onboarding_entrypoint=life_sciences"};
     loopback_options.success_html =
         "<html><body><h2>OpenAI login successful!</h2>"
         "<p>You can close this tab and return to Filo.</p></body></html>";

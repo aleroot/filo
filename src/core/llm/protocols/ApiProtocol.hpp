@@ -98,6 +98,10 @@
 #include <utility>
 #include <vector>
 
+namespace core::llm {
+class ModelCatalogProvider;
+}
+
 namespace core::llm::protocols {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,6 +433,18 @@ public:
     /** Whether this wire protocol supports its API family's model catalog endpoint. */
     [[nodiscard]] virtual bool supports_model_catalog() const noexcept {
         return true;
+    }
+
+    /**
+     * Catalog schema owned by this wire protocol.
+     *
+     * Null means the protocol has no schema of its own and discovery should
+     * use the API-type factory. A protocol overrides this when its endpoint
+     * does not speak that factory's default list format.
+     */
+    [[nodiscard]] virtual std::unique_ptr<core::llm::ModelCatalogProvider>
+    model_catalog([[maybe_unused]] std::string_view provider_name) const {
+        return nullptr;
     }
 
     /** Provider/model reasoning controls accepted by this wire protocol. */

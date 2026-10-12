@@ -19,6 +19,7 @@ namespace core::llm::protocols {
 ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noexcept {
     using core::utils::ascii::istarts_with;
     if (!istarts_with(model, "gpt-5")
+        && !istarts_with(model, "gpt-6")
         && !istarts_with(model, "o1")
         && !istarts_with(model, "o3")
         && !istarts_with(model, "o4")) {
@@ -32,12 +33,13 @@ ReasoningCapabilities openai_reasoning_capabilities(std::string_view model) noex
     }
     // The original GPT-5 family tops out at high. Newer versioned families
     // advertise their additional effort levels explicitly below.
-    if (istarts_with(model, "gpt-5.")
-        && !istarts_with(model, "gpt-5-mini")
-        && !istarts_with(model, "gpt-5-nano")) {
+    if ((istarts_with(model, "gpt-5.")
+            && !istarts_with(model, "gpt-5-mini")
+            && !istarts_with(model, "gpt-5-nano"))
+        || istarts_with(model, "gpt-6")) {
         features = features | ReasoningCapability::XHighEffort;
     }
-    if (istarts_with(model, "gpt-5.6")) {
+    if (istarts_with(model, "gpt-5.6") || istarts_with(model, "gpt-6")) {
         features = features
             | ReasoningCapability::MaxEffort
             | ReasoningCapability::Disable;

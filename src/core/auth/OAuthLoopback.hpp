@@ -50,6 +50,9 @@ struct OAuthLoopbackOptions {
     std::string code_param = "code";
     /// When set, reject mismatched callbacks before displaying success.
     std::optional<std::string> expected_state;
+    /// Exact suffixes the authorization server may append to `expected_state`.
+    /// The callback state must still be that value plus one listed suffix.
+    std::vector<std::string> accepted_state_suffixes;
     std::chrono::seconds timeout{std::chrono::minutes(5)};
     std::string success_html =
         "<html><body style=\"font-family:system-ui;padding:2rem\">"

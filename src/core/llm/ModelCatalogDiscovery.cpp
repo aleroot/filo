@@ -292,8 +292,11 @@ ModelCatalogDiscoveryResult discover_and_register_models(
     const bool oauth_session = auth.properties.contains("oauth");
     const bool subscription_session = oauth_session
         && provider_name.starts_with("grok");
-    auto catalog_provider = make_model_catalog_provider(
-        api_type, provider_name, subscription_session);
+    auto catalog_provider = protocol.model_catalog(provider_name);
+    if (!catalog_provider) {
+        catalog_provider = make_model_catalog_provider(
+            api_type, provider_name, subscription_session);
+    }
     if (!catalog_provider) {
         discovery.permanent_skip = true;
         return discovery;

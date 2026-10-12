@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <httplib.h>
+
 #include "core/llm/LLMProvider.hpp"
 #include "core/llm/HttpLLMProvider.hpp"
 #include "core/llm/ModelCatalogDiscovery.hpp"
@@ -13,7 +15,12 @@
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/protocols/KimiProtocol.hpp"
 #include "core/llm/protocols/OpenAIProtocol.hpp"
+#include "core/llm/protocols/OpenAIResponsesProtocol.hpp"
 #include "core/auth/ApiKeyCredentialSource.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 using namespace core::llm;
 
@@ -324,6 +331,22 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
           "experimental_supported_tools": ["apply_patch"]
         },
         {
+          "slug": "gpt-6.1",
+          "display_name": "GPT-6.1",
+          "visibility": "list",
+          "supported_reasoning_levels": [
+            {"effort": "high"},
+            {"effort": "xhigh"},
+            {"effort": "max"}
+          ],
+          "context_window": 1000000
+        },
+        {
+          "slug": "internal-hidden",
+          "display_name": "Hidden",
+          "visibility": "hide"
+        },
+        {
           "slug": "internal-chatgpt-only",
           "display_name": "Internal ChatGPT Only",
           "supported_in_api": false
@@ -332,7 +355,7 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     })JSON");
 
     REQUIRE(result.ok());
-    REQUIRE(result.models.size() == 2);
+    REQUIRE(result.models.size() == 3);
 
     const auto& codex = result.models[0];
     CHECK(codex.canonical_id == "gpt-5.5-codex");
@@ -348,7 +371,11 @@ TEST_CASE("CodexModelCatalogProvider parses the subscription model catalog", "[l
     CHECK(codex.supports(ModelCapability::Reasoning));
     CHECK(codex.supports(ModelCapability::Vision));
 
-    CHECK(result.models[1].canonical_id == "internal-chatgpt-only");
+    CHECK(result.models[1].canonical_id == "gpt-6.1");
+    CHECK(result.models[1].context_window == 1000000);
+    CHECK(result.models[1].reasoning.effort.supports(ReasoningCapability::XHighEffort));
+    CHECK(result.models[1].reasoning.effort.supports(ReasoningCapability::MaxEffort));
+    CHECK(result.models[2].canonical_id == "internal-chatgpt-only");
 }
 
 TEST_CASE("xAI catalog loads callable language models, limits, aliases, and pricing",
@@ -990,6 +1017,16 @@ TEST_CASE("make_model_catalog_provider selects supported catalog implementations
         core::config::ApiType::OpenAI, "openai-codex");
     REQUIRE(codex != nullptr);
     CHECK(dynamic_cast<CodexModelCatalogProvider*>(codex.get()) != nullptr);
+
+    core::llm::protocols::CodexResponsesProtocol codex_protocol;
+    auto chatgpt = codex_protocol.model_catalog("openai");
+    REQUIRE(chatgpt != nullptr);
+    CHECK(dynamic_cast<CodexModelCatalogProvider*>(chatgpt.get()) != nullptr);
+    CHECK(chatgpt->provider_name() == "openai");
+    CHECK(chatgpt->model_list_path().find("/models?client_version=") == 0);
+
+    core::llm::protocols::OpenAIResponsesProtocol public_openai;
+    CHECK(public_openai.model_catalog("openai") == nullptr);
 
     auto mistral = make_model_catalog_provider(
         core::config::ApiType::OpenAI,
@@ -1838,6 +1875,47 @@ TEST_CASE("CodeAssistModelCatalogProvider serves the hub fetchAvailableModels di
     // catalogs report.
     const auto missing = catalog.parse_models_response(R"({"agentModelSorts":[]})");
     CHECK_FALSE(missing.ok());
+}
+
+TEST_CASE("Discovery reads the ChatGPT catalog only through the Codex protocol",
+          "[llm][model-catalog][discovery][openai]") {
+    httplib::Server server;
+    std::atomic<bool> versioned{false};
+    server.Get("/models", [&](const httplib::Request& req, httplib::Response& res) {
+        versioned = req.has_param("client_version");
+        res.set_content(R"JSON({"models":[
+            {"slug":"codex-discovery-test-model","display_name":"Visible","visibility":"list"},
+            {"slug":"codex-discovery-test-hidden","visibility":"hide"}
+        ]})JSON", "application/json");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    if (port < 0) SKIP("Local socket bind/listen is unavailable in this environment.");
+    std::thread worker([&] { server.listen_after_bind(); });
+    for (int i = 0; i < 200 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    const std::string base_url = "http://127.0.0.1:" + std::to_string(port);
+
+    core::llm::protocols::CodexResponsesProtocol codex;
+    const auto discovered = discover_and_register_models(
+        "codex-discovery-test", core::config::ApiType::OpenAI, base_url, nullptr, codex);
+    CHECK(discovered.ok());
+    CHECK(discovered.fetched == 1);
+    CHECK(versioned.load());
+    const auto snapshot =
+        ModelCatalogAvailability::instance().snapshot("codex-discovery-test");
+    REQUIRE(snapshot.models.size() == 1);
+    CHECK(snapshot.models.front().canonical_id == "codex-discovery-test-model");
+
+    // The same payload is not a public OpenAI list, so a protocol without its
+    // own catalog must keep using the API-type default and reject it.
+    core::llm::protocols::OpenAIResponsesProtocol public_openai;
+    const auto mismatched = discover_and_register_models(
+        "public-discovery-test", core::config::ApiType::OpenAI, base_url, nullptr, public_openai);
+    CHECK_FALSE(mismatched.ok());
+
+    server.stop();
+    worker.join();
 }
 
 TEST_CASE("Model discovery distinguishes authenticated catalogs from unsupported ones",

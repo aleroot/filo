@@ -38,6 +38,19 @@ namespace {
     return std::string("/") + std::string(path);
 }
 
+[[nodiscard]] bool oauth_state_matches(
+    std::string_view state,
+    std::string_view expected,
+    const std::vector<std::string>& accepted_suffixes) {
+    if (state == expected) return true;
+    if (expected.empty() || !state.starts_with(expected)) return false;
+    const std::string_view suffix = state.substr(expected.size());
+    for (const std::string& allowed : accepted_suffixes) {
+        if (suffix == allowed) return true;
+    }
+    return false;
+}
+
 [[nodiscard]] std::string url_decode_component(std::string_view value) {
     std::string out;
     out.reserve(value.size());
@@ -85,7 +98,10 @@ OAuthLoopbackServer::OAuthLoopbackServer(OAuthLoopbackOptions options)
     const auto handler = [this](const httplib::Request& req, httplib::Response& res) {
         const std::string state = req.get_param_value("state");
         if (impl_->options.expected_state.has_value()
-            && state != *impl_->options.expected_state) {
+            && !oauth_state_matches(
+                state,
+                *impl_->options.expected_state,
+                impl_->options.accepted_state_suffixes)) {
             res.status = 400;
             res.set_content(
                 "Login failed: OAuth state mismatch - possible CSRF attempt",
