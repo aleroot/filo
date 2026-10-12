@@ -3,6 +3,7 @@
 #include "SseUtils.hpp"
 #include "OpenAIProtocol.hpp"
 #include "../ModelCatalogProvider.hpp"
+#include "../../auth/CodexClientIdentity.hpp"
 #include "../Models.hpp"
 #include "../ProviderClientIdentity.hpp"
 #include "../transport/HttpHeaderUtils.hpp"
@@ -1014,14 +1015,14 @@ void CodexResponsesProtocol::prepare_headers(cpr::Header& headers,
     headers["x-codex-installation-id"] = installation_id();
     headers["x-codex-window-id"] = thread_id + ":0";
     headers["x-responsesapi-include-timing-metrics"] = "true";
-    headers["originator"] = "filo";
-    headers["version"] = std::string(core::version::value);
+    headers["originator"] = std::string(core::auth::codex_cli::kOriginator);
+    headers["version"] = std::string(core::auth::codex_cli::kClientVersion);
     // Current Codex sends the hyphenated names. Filo has always sent the
     // underscore form as well, so it stays.
     headers["session_id"] = thread_id;
     headers["session-id"] = thread_id;
     headers["thread-id"] = thread_id;
-    headers["User-Agent"] = std::string(core::version::user_agent);
+    headers["User-Agent"] = core::auth::codex_cli::user_agent();
     if (!turn_state.empty()) {
         headers["x-codex-turn-state"] = turn_state;
     } else {

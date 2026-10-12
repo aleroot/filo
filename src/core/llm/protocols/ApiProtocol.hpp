@@ -443,9 +443,7 @@ public:
      * does not speak that factory's default list format.
      */
     [[nodiscard]] virtual std::unique_ptr<core::llm::ModelCatalogProvider>
-    model_catalog([[maybe_unused]] std::string_view provider_name) const {
-        return nullptr;
-    }
+    model_catalog(std::string_view provider_name) const;
 
     /** Provider/model reasoning controls accepted by this wire protocol. */
     [[nodiscard]] virtual ReasoningCapabilities reasoning_capabilities(

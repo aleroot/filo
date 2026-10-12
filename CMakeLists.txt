@@ -261,6 +261,7 @@ set(FILO_CORE_SOURCES
     src/core/llm/ProviderCredentialStatus.cpp
     src/core/llm/transport/CurlWebSocketTransport.cpp
     src/core/llm/protocols/OpenAIProtocol.cpp
+    src/core/llm/protocols/ApiProtocol.cpp
     src/core/llm/protocols/ZaiProtocol.cpp
     src/core/llm/protocols/OpenAIUsage.cpp
     src/core/llm/protocols/OpenAIResponsesProtocol.cpp
@@ -297,6 +298,7 @@ set(FILO_CORE_SOURCES
     src/core/auth/OAuthLoopback.cpp
     src/core/auth/OAuthTokenEndpoint.cpp
     src/core/auth/OpenAIOAuthFlow.cpp
+    src/core/auth/CodexClientIdentity.cpp
     src/core/auth/KimiOAuthFlow.cpp
     src/core/auth/MimoOAuthFlow.cpp
     src/core/auth/MimoAuthenticationStrategy.cpp

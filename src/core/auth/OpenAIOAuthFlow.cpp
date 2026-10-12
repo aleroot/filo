@@ -3,6 +3,7 @@
 #include "AuthBrowserLauncher.hpp"
 #include "OAuthLoopback.hpp"
 #include "OAuthPkce.hpp"
+#include "CodexClientIdentity.hpp"
 #include "core/utils/Base64.hpp"
 #include "core/utils/JsonUtils.hpp"
 #include "core/utils/StringUtils.hpp"
@@ -107,7 +108,6 @@ struct OpenAIClaims {
 
 // Public OAuth client id used by the official Codex login flow.
 constexpr std::string_view kCodexDefaultClientId = "app_EMoamEEZ73f0CkXaXp7hrann";
-constexpr std::string_view kFiloOriginator = "filo";
 
 [[nodiscard]] bool env_truthy(const char* name) {
     const char* value = std::getenv(name);
@@ -219,7 +219,7 @@ std::string OpenAIOAuthFlow::build_auth_url(std::string_view client_id,
         + "&code_challenge_method=S256"
         + "&id_token_add_organizations=true"
         + "&codex_cli_simplified_flow=true"
-        + "&originator="            + oauth_pkce::url_encode(kFiloOriginator);
+        + "&originator="            + oauth_pkce::url_encode(codex_cli::originator());
 }
 
 // static

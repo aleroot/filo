@@ -1616,7 +1616,7 @@ TEST_CASE("OpenAIOAuthFlow::build_auth_url — contains PKCE parameters", "[Open
     REQUIRE(url.find("response_type=code")     != std::string::npos);
     REQUIRE(url.find("id_token_add_organizations=true") != std::string::npos);
     REQUIRE(url.find("codex_cli_simplified_flow=true")  != std::string::npos);
-    REQUIRE(url.find("originator=filo")                  != std::string::npos);
+    REQUIRE(url.find("originator=codex_cli_rs")       != std::string::npos);
 }
 
 TEST_CASE("OpenAIOAuthFlow::build_auth_url — redirect_uri is percent-encoded", "[OpenAIOAuthFlow]") {

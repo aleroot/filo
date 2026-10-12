@@ -4,8 +4,8 @@
 #include "CodexModelCatalog.hpp"
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
+#include "../../auth/CodexClientIdentity.hpp"
 #include "../../utils/StringUtils.hpp"
-#include "core/version/Version.hpp"
 
 #include <simdjson.h>
 
@@ -117,7 +117,8 @@ std::string_view CodexModelCatalogProvider::provider_name() const noexcept {
 std::string CodexModelCatalogProvider::model_list_path(
     std::string_view page_token) const {
     (void)page_token;
-    return "/models?client_version=" + std::string(core::version::value);
+    return "/models?client_version="
+        + std::string(core::auth::codex_cli::client_version());
 }
 
 ModelCatalogResult catalog::parse_codex_style_model_catalog(

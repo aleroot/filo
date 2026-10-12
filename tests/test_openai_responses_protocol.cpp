@@ -309,12 +309,12 @@ TEST_CASE("CodexResponsesProtocol - builds Responses websocket request",
     REQUIRE(headers.at("OpenAI-Beta") == "responses_websockets=2026-02-06");
     REQUIRE(headers.at("x-client-request-id") == "thread-123");
     REQUIRE(headers.at("x-codex-window-id") == "thread-123:0");
-    REQUIRE(headers.at("originator") == "filo");
+    REQUIRE(headers.at("originator") == "codex_cli_rs");
     REQUIRE(headers.at("session_id") == "thread-123");
     REQUIRE(headers.at("session-id") == "thread-123");
     REQUIRE(headers.at("thread-id") == "thread-123");
-    REQUIRE_FALSE(headers.at("version").empty());
-    REQUIRE_THAT(headers.at("User-Agent"), Catch::Matchers::StartsWith("filo/"));
+    REQUIRE(headers.at("version") == "0.160.0");
+    REQUIRE(headers.at("User-Agent") == "codex_cli_rs/0.160.0");
     REQUIRE_THAT(payload, Catch::Matchers::StartsWith(R"({"type":"response.create",)"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("model":"gpt-5")"));
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("client_metadata")"));
