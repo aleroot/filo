@@ -4382,7 +4382,7 @@ RunResult run(RunOptions opts) {
             || normalized == "default") {
             session_effort_value.clear();
             agent->set_effort_level(session_effort_value);
-            return "Set effort to auto (provider default).";
+            return "Set effort to auto (model catalog default).";
         }
 
         if (normalized == "off" || normalized == "none" || normalized == "disabled") {
@@ -5299,7 +5299,7 @@ RunResult run(RunOptions opts) {
                 : session_effort_value;
             next.help_text = "Esc closes this panel.";
             next.options = {
-                {.value = "auto", .label = "Auto", .description = "Use the provider default for the selected model."},
+                {.value = "auto", .label = "Auto", .description = "Use the model catalog default for the selected model."},
                 {.value = "low", .label = "Low", .description = "Prefer faster, lighter reasoning when supported."},
                 {.value = "medium", .label = "Medium", .description = "Use balanced reasoning effort when supported."},
                 {.value = "high", .label = "High", .description = "Use deeper reasoning effort when supported."},

@@ -389,14 +389,23 @@ std::string GrokResponsesProtocol::serialize(const ChatRequest& request) const {
                 || tool.function.name == "x_search";
         });
     }
-    // A session override wins over the provider default. Normalize it here so
-    // Filo's provider-neutral "max" setting maps to Grok 4.6's wire-level
-    // "xhigh", while older effort-capable Grok models safely fall back high.
+    // Session effort, then the catalog default, then the provider fallback.
+    // "max" maps to "xhigh" where that tier exists, otherwise to high.
     std::string normalized_effort;
     if (grok_responses_supports_effort(request.model)) {
+        std::string_view raw_effort = request.effort;
+        if (raw_effort.empty()) {
+            if (request.catalog_reasoning
+                && request.catalog_reasoning->catalog_default_effort
+                       .has_value()) {
+                raw_effort =
+                    *request.catalog_reasoning->catalog_default_effort;
+            } else {
+                raw_effort = default_effort_;
+            }
+        }
         normalized_effort = normalize_grok_responses_effort(
-            request.effort.empty() ? default_effort_ : request.effort,
-            request.model);
+            raw_effort, request.model);
         if (!normalized_effort.empty()) {
             options.reasoning_effort_override = normalized_effort;
         }

@@ -1106,6 +1106,37 @@ TEST_CASE("GrokResponsesProtocol applies default effort when session leaves it u
     REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(R"("reasoning":{"effort":"medium"})"));
 }
 
+TEST_CASE("GrokResponsesProtocol prefers the catalog default over the provider fallback",
+          "[grok][serializer][responses][reasoning]") {
+    GrokResponsesProtocol proto{
+        /*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};
+    auto req = make_simple_request("grok-4.7");
+    core::llm::ModelReasoningProfile catalog;
+    catalog.catalog_default_effort = "low";
+    req.catalog_reasoning = catalog;
+    const auto payload = proto.serialize(req);
+    REQUIRE_THAT(payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"low"})"));
+
+    req.effort = "xhigh";
+    const auto session_payload = proto.serialize(req);
+    REQUIRE_THAT(session_payload, Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort":"xhigh"})"));
+}
+
+TEST_CASE("GrokResponsesProtocol omits effort when the catalog leaves the server default",
+          "[grok][serializer][responses][reasoning]") {
+    GrokResponsesProtocol proto{
+        /*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};
+    auto req = make_simple_request("grok-4.7");
+    core::llm::ModelReasoningProfile catalog;
+    catalog.catalog_default_effort = "";
+    req.catalog_reasoning = catalog;
+    const auto payload = proto.serialize(req);
+    REQUIRE_THAT(payload, !Catch::Matchers::ContainsSubstring(
+        R"("reasoning":{"effort")"));
+}
+
 TEST_CASE("GrokResponsesProtocol default effort is ignored for unsupported models",
           "[grok][serializer][responses]") {
     GrokResponsesProtocol proto{/*service_tier=*/{}, /*enable_hosted_tools=*/true, "high"};

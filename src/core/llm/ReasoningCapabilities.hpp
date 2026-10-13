@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 
 namespace core::llm {
 
@@ -89,6 +91,7 @@ struct ModelReasoningProfile {
     bool adaptive_thinking = false;
     bool manual_thinking = false;
     bool complete = false;
+    std::optional<std::string> catalog_default_effort;
 };
 
 } // namespace core::llm

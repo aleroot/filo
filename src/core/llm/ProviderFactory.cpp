@@ -306,11 +306,8 @@ std::shared_ptr<LLMProvider> ProviderFactory::create_provider(
 
         if (wire == OpenAIWireApi::Responses) {
             if (canonical_type.starts_with("grok")) {
-                // reasoning_effort now flows through the Responses
-                // `reasoning:{effort:...}` control (honoured by Grok 4.5 /
-                // 4.3 / grok-build). It is applied as a provider default when
-                // the session leaves effort unset; xAI hosted server-side
-                // tools (web_search, x_search) are enabled by default.
+                // reasoning_effort is the fallback when the session leaves it
+                // unset. Hosted web_search and x_search are on by default.
                 protocol = std::make_unique<protocols::GrokResponsesProtocol>(
                     config.service_tier,
                     /*enable_hosted_tools=*/true,

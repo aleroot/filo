@@ -558,7 +558,9 @@ void HttpLLMProvider::stream_response(const ChatRequest&                      re
         // global registry has never seen still has to reach the serializer.
         if (!effective_request.catalog_reasoning.has_value()
             && metadata_info.has_value()
-            && metadata_info->reasoning.complete) {
+            && (metadata_info->reasoning.complete
+                || metadata_info->reasoning.catalog_default_effort
+                       .has_value())) {
             effective_request.catalog_reasoning = metadata_info->reasoning;
         }
         if (metadata_info.has_value()

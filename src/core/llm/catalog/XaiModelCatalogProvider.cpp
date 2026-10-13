@@ -5,11 +5,17 @@
 #include "ModelCatalogJson.hpp"
 #include "ModelCatalogTraits.hpp"
 #include "../../utils/JsonUtils.hpp"
+#include "core/utils/StringUtils.hpp"
 
 #include <simdjson.h>
 
 #include <cstdint>
-#include <utility>
+#include <initializer_list>
+#include <optional>
+#include <ranges>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace core::llm {
 namespace {
@@ -26,62 +32,213 @@ namespace {
         : 0.0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Remote catalog rows.
-//
-// grok-build (xai-org/grok-build, remote/model_source/oai.rs +
-// remote/client.rs parse_remote_model_value) reads an OpenAI-shaped
-// `{"data":[...]}` list from BOTH endpoints:
-//   - cli-chat-proxy.grok.com/v1/models (account sessions): rich camelCase
-//     "models-v2" rows — model/modelId, contextWindow, maxCompletionTokens,
-//     reasoningEfforts[{value,label,default}], supportsReasoningEffort,
-//     supportsBackendSearch, hidden, supportedInApi;
-//   - api.x.ai/v1/models (API keys): id/aliases/context_length plus xAI
-//     pricing fields, with the effort menu nested under
-//     `capabilities.reasoning_effort` (bare strings) and
-//     `capabilities.default_reasoning_effort`.
-// The rows below decode both dialects, so new models (grok-4.7 and later)
-// surface with their server-published context window and effort menu as soon
-// as the catalog serves them.
-// ─────────────────────────────────────────────────────────────────────────────
+// Both endpoints return {"data":[...]}. Session rows are camelCase
+// (model, contextWindow, reasoningEfforts); public rows use the OpenAI
+// shape, with the effort menu under capabilities.
+
+struct GrokCatalogEffortOption {
+    std::string value;
+    bool is_default = false;
+};
+
+[[nodiscard]] std::optional<std::string> canonical_grok_catalog_effort(
+    std::string_view raw) {
+    // Lowercase, and only the effort tokens Grok accepts.
+    const std::string effort = core::utils::str::to_lower_ascii_copy(raw);
+    if (effort == "none" || effort == "minimal" || effort == "low"
+        || effort == "medium" || effort == "high" || effort == "xhigh"
+        || effort == "max") {
+        return effort;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> effort_field(
+    simdjson::dom::object object,
+    std::string_view key) {
+    std::string_view value;
+    if (object[key].get(value) != simdjson::SUCCESS) return std::nullopt;
+    return canonical_grok_catalog_effort(value);
+}
+
+// Bare strings and {value, default?} objects. Unknown tokens are skipped.
+[[nodiscard]] std::vector<GrokCatalogEffortOption> parse_effort_options(
+    simdjson::dom::array array) {
+    std::vector<GrokCatalogEffortOption> options;
+    for (simdjson::dom::element item : array) {
+        std::string_view bare;
+        if (item.get(bare) == simdjson::SUCCESS) {
+            if (auto value = canonical_grok_catalog_effort(bare)) {
+                options.push_back({std::move(*value), false});
+            }
+            continue;
+        }
+        simdjson::dom::object object;
+        if (item.get(object) != simdjson::SUCCESS) continue;
+        auto value = effort_field(object, "value");
+        if (!value) continue;
+        bool is_default = false;
+        core::utils::json::ignore_error(object["default"].get(is_default));
+        options.push_back({std::move(*value), is_default});
+    }
+    return options;
+}
+
+[[nodiscard]] std::optional<simdjson::dom::array> array_field(
+    simdjson::dom::object object,
+    std::string_view key) {
+    simdjson::dom::array array;
+    if (object[key].get(array) != simdjson::SUCCESS) return std::nullopt;
+    return array;
+}
+
+// First present key wins. A non-bool value is false; a missing key falls through.
+[[nodiscard]] bool first_bool(
+    simdjson::dom::object object,
+    const simdjson::dom::object* meta,
+    std::initializer_list<std::string_view> object_keys,
+    std::string_view meta_key) {
+    const auto read = [](simdjson::dom::object source, std::string_view key)
+        -> std::optional<bool> {
+        simdjson::dom::element element;
+        if (source[key].get(element) != simdjson::SUCCESS) return std::nullopt;
+        bool value = false;
+        if (element.get(value) != simdjson::SUCCESS) return false;
+        return value;
+    };
+    for (const std::string_view key : object_keys) {
+        if (auto value = read(object, key)) return *value;
+    }
+    if (meta) {
+        if (auto value = read(*meta, meta_key)) return *value;
+    }
+    return false;
+}
+
+[[nodiscard]] std::vector<GrokCatalogEffortOption> first_nonempty_menu(
+    simdjson::dom::object object,
+    const simdjson::dom::object* meta) {
+    for (const std::string_view key :
+         {"reasoningEfforts", "reasoning_efforts"}) {
+        if (auto array = array_field(object, key)) {
+            auto options = parse_effort_options(*array);
+            if (!options.empty()) return options;
+        }
+    }
+    if (meta) {
+        if (auto array = array_field(*meta, "reasoningEfforts")) {
+            return parse_effort_options(*array);
+        }
+    }
+    return {};
+}
+
+struct GrokCatalogEffortMenu {
+    std::vector<GrokCatalogEffortOption> options;
+    bool server_default = false;
+};
+
+// Public rows keep the menu under capabilities.reasoning_effort.
+[[nodiscard]] std::optional<GrokCatalogEffortMenu> capabilities_effort_menu(
+    simdjson::dom::object model) {
+    simdjson::dom::object capabilities;
+    if (model["capabilities"].get(capabilities) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    auto levels = array_field(capabilities, "reasoning_effort");
+    if (!levels) return std::nullopt;
+    GrokCatalogEffortMenu menu;
+    menu.options = parse_effort_options(*levels);
+    if (menu.options.empty()) return std::nullopt;
+
+    simdjson::dom::element default_effort;
+    const bool has_default =
+        capabilities["default_reasoning_effort"].get(default_effort)
+        == simdjson::SUCCESS
+        && !default_effort.is_null();
+    bool marked = false;
+    if (has_default) {
+        std::string_view raw;
+        const auto level = default_effort.get(raw) == simdjson::SUCCESS
+            ? canonical_grok_catalog_effort(raw)
+            : std::nullopt;
+        if (level) {
+            for (auto& option : menu.options) {
+                option.is_default = option.value == *level;
+                marked = marked || option.is_default;
+            }
+        }
+    }
+    menu.server_default = !marked;
+    return menu;
+}
 
 [[nodiscard]] ModelReasoningProfile xai_reasoning_profile(
     const catalog::JsonObjectView& model) {
     ModelReasoningProfile profile;
-    ReasoningCapabilities effort{ReasoningCapability::Effort};
 
-    // Session-proxy shape: reasoningEfforts[{value,...}] object rows.
-    const auto object_menu_has = [&](std::string_view level) {
-        return model.object_array_contains("reasoningEfforts", "value", level)
-            || model.object_array_contains("reasoning_efforts", "value",
-                                           level);
-    };
+    simdjson::dom::object meta_object;
+    const bool has_meta =
+        model.raw()["meta"].get(meta_object) == simdjson::SUCCESS;
+    const simdjson::dom::object* meta = has_meta ? &meta_object : nullptr;
 
-    // Public-API shape: capabilities.reasoning_effort bare-string menu.
-    const auto capability_menu_has = [&](std::string_view level) {
-        simdjson::dom::object capabilities;
-        simdjson::dom::array levels;
-        return model.raw()["capabilities"].get(capabilities)
-                == simdjson::SUCCESS
-            && capabilities["reasoning_effort"].get(levels)
-                == simdjson::SUCCESS
-            && catalog::JsonObjectView(capabilities)
-                   .string_array_contains("reasoning_effort", level);
-    };
+    const bool supports_flag = first_bool(
+        model.raw(), meta,
+        {"supportsReasoningEffort", "supports_reasoning_effort"},
+        "supportsReasoningEffort");
 
-    const auto menu_has = [&](std::string_view level) {
-        return object_menu_has(level) || capability_menu_has(level);
-    };
-
-    if (menu_has("low") || menu_has("medium") || menu_has("high")
-        || menu_has("xhigh")
-        || model.boolean("supportsReasoningEffort")
-        || model.boolean("supports_reasoning_effort")) {
-        if (menu_has("xhigh")) {
-            effort = effort | ReasoningCapability::XHighEffort;
-        }
-        profile.effort = effort;
+    std::optional<std::string> explicit_effort =
+        effort_field(model.raw(), "reasoningEffort");
+    if (!explicit_effort) {
+        explicit_effort = effort_field(model.raw(), "reasoning_effort");
     }
+    if (!explicit_effort && meta) {
+        explicit_effort = effort_field(*meta, "reasoningEffort");
+    }
+
+    std::optional<GrokCatalogEffortMenu> menu;
+    if (auto object_menu = first_nonempty_menu(model.raw(), meta);
+        !object_menu.empty()) {
+        menu = GrokCatalogEffortMenu{
+            std::move(object_menu),
+            /*server_default=*/false,
+        };
+    } else {
+        menu = capabilities_effort_menu(model.raw());
+    }
+
+    // Explicit field, else the marked entry, else the first session-menu entry.
+    std::optional<std::string> chosen = explicit_effort;
+    if (!chosen && menu && !menu->options.empty()) {
+        const auto marked = std::ranges::find_if(
+            menu->options,
+            [](const GrokCatalogEffortOption& option) {
+                return option.is_default;
+            });
+        if (marked != menu->options.end()) {
+            chosen = marked->value;
+        } else if (!menu->server_default) {
+            chosen = menu->options.front().value;
+        }
+    }
+
+    const bool menu_supports = menu && !menu->options.empty();
+    const bool supports =
+        supports_flag || menu_supports || explicit_effort.has_value();
+    if (!supports) return profile;
+
+    ReasoningCapabilities effort{ReasoningCapability::Effort};
+    bool xhigh = chosen && *chosen == "xhigh";
+    if (menu) {
+        for (const auto& option : menu->options) {
+            if (option.value == "xhigh") xhigh = true;
+        }
+    }
+    if (xhigh) {
+        effort = effort | ReasoningCapability::XHighEffort;
+    }
+    profile.effort = effort;
+    profile.catalog_default_effort = chosen.value_or(std::string{});
     return profile;
 }
 

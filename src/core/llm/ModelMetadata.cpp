@@ -66,6 +66,10 @@ ModelInfo merge_model_metadata(ModelInfo baseline, ModelInfo discovered) {
         baseline.reasoning.manual_thinking =
             baseline.reasoning.manual_thinking
             || discovered.reasoning.manual_thinking;
+        if (discovered.reasoning.catalog_default_effort.has_value()) {
+            baseline.reasoning.catalog_default_effort =
+                discovered.reasoning.catalog_default_effort;
+        }
     }
 
     // Wire constraints are curated per model: provider catalogs do not

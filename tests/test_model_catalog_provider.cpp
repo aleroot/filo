@@ -505,6 +505,8 @@ TEST_CASE("xAI session catalog decodes the grok-build proxy data[] rows",
     CHECK(grok47.reasoning.effort.supports_effort());
     CHECK(grok47.reasoning.effort.supports(
         ReasoningCapability::XHighEffort));
+    REQUIRE(grok47.reasoning.catalog_default_effort.has_value());
+    CHECK(*grok47.reasoning.catalog_default_effort == "high");
 
     const auto& legacy = result.models[1];
     CHECK(legacy.canonical_id == "grok-account-legacy");
@@ -512,6 +514,7 @@ TEST_CASE("xAI session catalog decodes the grok-build proxy data[] rows",
     // No effort menu and no flag: the profile stays empty and the model is
     // still listed (the registry baseline decides reasoning elsewhere).
     CHECK(legacy.reasoning.effort.empty());
+    CHECK_FALSE(legacy.reasoning.catalog_default_effort.has_value());
 }
 
 TEST_CASE("xAI public catalog reads the capabilities reasoning-effort menu",
@@ -553,8 +556,113 @@ TEST_CASE("xAI public catalog reads the capabilities reasoning-effort menu",
     CHECK(grok47.reasoning.effort.supports_effort());
     CHECK(grok47.reasoning.effort.supports(
         ReasoningCapability::XHighEffort));
+    REQUIRE(grok47.reasoning.catalog_default_effort.has_value());
+    CHECK(*grok47.reasoning.catalog_default_effort == "high");
     CHECK(grok47.pricing.input_per_mtok == 2.0);
     CHECK(grok47.pricing.output_per_mtok == 6.0);
+}
+
+TEST_CASE("xAI catalog effort default matches grok-build",
+          "[llm][model-catalog][xai]") {
+    XaiModelCatalogProvider provider("grok", true);
+
+    const auto result = provider.parse_models_response(R"JSON({
+      "data": [
+        {
+          "id": "grok-unmarked-menu",
+          "model": "grok-unmarked-menu",
+          "reasoningEfforts": [
+            {"value": "nope"},
+            {"value": "xhigh"},
+            {"value": "high"}
+          ]
+        },
+        {
+          "id": "grok-explicit-wins",
+          "model": "grok-explicit-wins",
+          "reasoning_effort": "low",
+          "reasoningEfforts": [
+            {"value": "high", "default": true},
+            {"value": "low"}
+          ]
+        },
+        {
+          "id": "grok-flag-only",
+          "model": "grok-flag-only",
+          "supportsReasoningEffort": true
+        },
+        {
+          "id": "grok-public-unmarked",
+          "model": "grok-public-unmarked",
+          "completion_text_token_price": 60000,
+          "capabilities": {
+            "reasoning_effort": ["low", "medium", "high", "xhigh"],
+            "default_reasoning_effort": "turbo"
+          }
+        },
+        {
+          "id": "grok-public-server-default",
+          "model": "grok-public-server-default",
+          "completion_text_token_price": 60000,
+          "capabilities": {
+            "reasoning_effort": ["low", "high"]
+          }
+        }
+      ]
+    })JSON");
+
+    REQUIRE(result.ok());
+    REQUIRE(result.models.size() == 5);
+
+    const auto& unmarked = result.models[0];
+    REQUIRE(unmarked.reasoning.catalog_default_effort.has_value());
+    CHECK(*unmarked.reasoning.catalog_default_effort == "xhigh");
+    CHECK(unmarked.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+
+    const auto& explicit_wins = result.models[1];
+    REQUIRE(explicit_wins.reasoning.catalog_default_effort.has_value());
+    CHECK(*explicit_wins.reasoning.catalog_default_effort == "low");
+
+    const auto& flag_only = result.models[2];
+    CHECK(flag_only.reasoning.effort.supports_effort());
+    REQUIRE(flag_only.reasoning.catalog_default_effort.has_value());
+    CHECK(flag_only.reasoning.catalog_default_effort->empty());
+
+    const auto& unknown_mark = result.models[3];
+    REQUIRE(unknown_mark.reasoning.catalog_default_effort.has_value());
+    CHECK(unknown_mark.reasoning.catalog_default_effort->empty());
+    CHECK(unknown_mark.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+
+    const auto& server_default = result.models[4];
+    REQUIRE(server_default.reasoning.catalog_default_effort.has_value());
+    CHECK(server_default.reasoning.catalog_default_effort->empty());
+    CHECK_FALSE(server_default.reasoning.effort.supports(
+        ReasoningCapability::XHighEffort));
+}
+
+TEST_CASE("A catalog effort policy replaces the baseline without erasing it when absent",
+          "[llm][model-catalog][metadata-merge]") {
+    ModelInfo baseline;
+    baseline.canonical_id = "grok-4.7";
+    baseline.reasoning.catalog_default_effort = "high";
+
+    ModelInfo silent;
+    silent.canonical_id = baseline.canonical_id;
+    silent.reasoning.effort = ReasoningCapabilities{ReasoningCapability::Effort};
+    const ModelInfo kept =
+        merge_model_metadata(baseline, silent);
+    REQUIRE(kept.reasoning.catalog_default_effort.has_value());
+    CHECK(*kept.reasoning.catalog_default_effort == "high");
+
+    ModelInfo discovered;
+    discovered.canonical_id = baseline.canonical_id;
+    discovered.reasoning.catalog_default_effort = "";
+    const ModelInfo omitted =
+        merge_model_metadata(std::move(baseline), std::move(discovered));
+    REQUIRE(omitted.reasoning.catalog_default_effort.has_value());
+    CHECK(omitted.reasoning.catalog_default_effort->empty());
 }
 
 TEST_CASE("Mistral catalog loads its capability matrix and context limit",

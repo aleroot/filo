@@ -257,10 +257,9 @@ public:
      * @param enable_hosted_tools When true (default), advertises the xAI hosted
      *                           `web_search` and `x_search` tools so the model
      *                           can use server-side live/X search.
-     * @param default_effort     Provider-configured reasoning effort ("low" /
-     *                           "medium" / "high") applied when the session
-     *                           leaves effort unset. Ignored for models that do
-     *                           not expose the Responses effort knob.
+     * @param default_effort     Fallback when the session and catalog leave
+     *                           effort unset. Ignored when the model has no
+     *                           Responses effort knob.
      */
     explicit GrokResponsesProtocol(std::string service_tier = {},
                                    bool enable_hosted_tools = true,
