@@ -82,10 +82,6 @@ void append_capacity(core::utils::JsonWriter& writer,
         writer.kv_bool("ok", result.ok).comma()
               .kv_str(result.ok ? "message" : "error", result.message);
         if (!result.code.empty()) writer.comma().kv_str("code", result.code);
-        if (result.capacity) {
-            writer.comma().key("capacity");
-            append_capacity(writer, *result.capacity);
-        }
         if (result.entry.has_value()) {
             writer.comma().key("entry");
             {
@@ -129,7 +125,7 @@ ToolDefinition MemoryTool::get_definition() const {
             "Project memory (default scope: project), <=1200 UTF-8 bytes/fact. "
             "list: query/id/scope, limit=24, offset, include_archived. "
             "update: id+exact expected_content. merge: entries[{id,expected_content}], overlapping same-scope facts. "
-            "Originals archived. At capacity never evict unrelated facts; skip capture and continue.",
+            "Originals archived. Do not forget a fact to make room.",
         .input_schema =
             R"({"type":"object","properties":{"action":{"type":"string","enum":["remember","update","merge","list","forget","clean","status"]},"content":{"type":"string"},"id":{"type":"string"},"expected_content":{"type":"string"},"entries":{"type":"array","minItems":2,"items":{"type":"object","properties":{"id":{"type":"string"},"expected_content":{"type":"string"}},"required":["id","expected_content"],"additionalProperties":false}},"scope":{"type":"string","enum":["project","session"]},"tags":{"type":"array","items":{"type":"string"}},"include_archived":{"type":"boolean"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"offset":{"type":"integer","minimum":0}},"required":["action"],"additionalProperties":false})",
         .annotations = {

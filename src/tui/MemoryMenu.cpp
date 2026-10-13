@@ -35,7 +35,7 @@ MemoryMenu build_memory_menu(MemoryMenuPage page,
     for (const auto& usage : state.scope_usage) {
         if (usage.scope == "project") {
             menu.current += std::format(" · project {}/{}{}", usage.active_entries,
-                usage.limit, usage.active_entries >= usage.limit ? " full" : usage.near_capacity() ? " near capacity" : "");
+                usage.limit, usage.active_entries >= usage.limit ? " retaining" : "");
         }
     }
     switch (page) {

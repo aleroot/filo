@@ -214,6 +214,55 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
     return static_cast<std::size_t>(std::max(1, settings.max_active_entries));
 }
 
+/// Stores written before this ceiling persisted 120, the old compiled default.
+/// That value was not chosen. Any other saved ceiling is.
+[[nodiscard]] int active_entry_ceiling(int stored) noexcept {
+    if (stored == 120) return kDefaultMaxActiveEntries;
+    return std::max(1, stored);
+}
+
+[[nodiscard]] bool retention_eligible(const MemoryEntry& entry) noexcept {
+    return entry.source == "agent" || entry.source == "background_review";
+}
+
+/// Archive the least-recalled automatic notes in one bucket until it fits the
+/// ceiling. `protected_id` is the fact just saved and is never archived.
+/// Manual and imported notes are not eligible, so a bucket of those may stay
+/// above the ceiling rather than lose an explicit note.
+void retain_active_bucket(MemoryState& state,
+                          std::string_view project_root,
+                          std::string_view scope,
+                          std::string_view session_id,
+                          std::string_view protected_id,
+                          std::string_view now) {
+    const auto limit = active_entry_limit(state.settings);
+    auto in_bucket = [&](const MemoryEntry& entry) {
+        return !entry.archived && entry.project_root == project_root
+            && entry.scope == scope && entry.session_id == session_id;
+    };
+    std::size_t active = 0;
+    std::vector<MemoryEntry*> victims;
+    for (auto& entry : state.entries) {
+        if (!in_bucket(entry)) continue;
+        ++active;
+        if (entry.id == protected_id || !retention_eligible(entry)) continue;
+        victims.push_back(&entry);
+    }
+    if (active <= limit) return;
+    std::ranges::sort(victims, [](const MemoryEntry* lhs, const MemoryEntry* rhs) {
+        if (lhs->use_count != rhs->use_count) return lhs->use_count < rhs->use_count;
+        if (lhs->last_used_at != rhs->last_used_at) return lhs->last_used_at < rhs->last_used_at;
+        if (lhs->created_at != rhs->created_at) return lhs->created_at < rhs->created_at;
+        return lhs->id < rhs->id;
+    });
+    for (auto* entry : victims) {
+        if (active <= limit) break;
+        entry->archived = true;
+        entry->updated_at = std::string(now);
+        --active;
+    }
+}
+
 /// Count one project/scope/session bucket, independently of prompt selection.
 [[nodiscard]] MemoryScopeUsage bucket_usage(const MemoryState& state,
                                       std::string_view project_root,
@@ -228,26 +277,6 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
         }));
     return {.scope = std::string(scope), .active_entries = active,
             .limit = active_entry_limit(state.settings)};
-}
-
-[[nodiscard]] bool active_bucket_full(const MemoryState& state,
-                                      std::string_view project_root,
-                                      std::string_view scope,
-                                      std::string_view session_id) {
-    const auto usage = bucket_usage(state, project_root, scope, session_id);
-    return usage.active_entries >= usage.limit;
-}
-
-[[nodiscard]] MemoryMutationResult active_limit_reached(MemoryScopeUsage usage,
-                                                        std::string_view remedy) {
-    return {.ok = false, .message = std::format(
-        "Memory limit reached: {} scope has {}/{} active entries; cannot {}. "
-        "List this scope and merge only overlapping facts, or update a superseded fact. "
-        "Do not forget unrelated memories to free space or retry unchanged. "
-        "If no safe consolidation exists, skip this capture and continue the user's task; "
-        "report that the new memory was not saved.",
-        usage.scope, usage.active_entries, usage.limit, remedy),
-        .code = "memory_capacity", .capacity = std::move(usage)};
 }
 
 [[nodiscard]] std::optional<MemoryMutationResult> automatic_content_error(
@@ -478,8 +507,9 @@ MemoryState MemoryStore::load_unlocked(std::string* error) const {
         state.settings.skill_curation = core::utils::json::bool_field(settings, "skill_curation");
         state.settings.min_rate_limit_remaining_percent =
             std::clamp(core::utils::json::int_field(settings, "min_rate_limit_remaining_percent", 15), 0, 100);
-        state.settings.max_active_entries =
-            std::max(1, core::utils::json::int_field(settings, "max_active_entries", 120));
+        state.settings.max_active_entries = active_entry_ceiling(
+            core::utils::json::int_field(settings, "max_active_entries",
+                                         kDefaultMaxActiveEntries));
     } else {
         state.settings.enabled = core::utils::json::bool_field(root, "enabled", state.settings.enabled);
         state.settings.auto_capture = core::utils::json::bool_field(root, "auto_capture", state.settings.auto_capture);
@@ -488,8 +518,9 @@ MemoryState MemoryStore::load_unlocked(std::string* error) const {
         state.settings.skill_curation = core::utils::json::bool_field(root, "skill_curation");
         state.settings.min_rate_limit_remaining_percent =
             std::clamp(core::utils::json::int_field(root, "min_rate_limit_remaining_percent", 15), 0, 100);
-        state.settings.max_active_entries =
-            std::max(1, core::utils::json::int_field(root, "max_active_entries", 120));
+        state.settings.max_active_entries = active_entry_ceiling(
+            core::utils::json::int_field(root, "max_active_entries",
+                                         kDefaultMaxActiveEntries));
     }
 
     simdjson::dom::array entries;
@@ -663,15 +694,11 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
                         "The user can restore it with /memory add. Do not retry unchanged.",
                     .code = "memory_archived"};
         }
-        if (entry.archived
-            && active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
-            return active_limit_reached(
-                bucket_usage(state, project_root_, clean_scope, entry_session_id), "restore this memory");
-        }
         entry.archived = false;
         entry.updated_at = now;
         entry.last_used_at = now;
         entry.use_count += 1;
+        retain_active_bucket(state, project_root_, entry.scope, entry.session_id, entry.id, now);
         std::string error;
         if (!save_unlocked(state, &error)) {
             return {.ok = false, .message = error};
@@ -680,10 +707,6 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
     }
 
     if (auto error = automatic_content_error(clean_content, clean_source)) return *error;
-    if (active_bucket_full(state, project_root_, clean_scope, entry_session_id)) {
-        return active_limit_reached(
-            bucket_usage(state, project_root_, clean_scope, entry_session_id), "add another memory");
-    }
 
     std::erase_if(tags, [](const std::string& tag) {
         return core::utils::str::trim_ascii_copy(tag).empty();
@@ -703,6 +726,7 @@ MemoryMutationResult MemoryStore::remember(std::string_view content,
         .session_id = entry_session_id,
     };
     state.entries.push_back(entry);
+    retain_active_bucket(state, project_root_, entry.scope, entry.session_id, entry.id, now);
     std::string error;
     if (!save_unlocked(state, &error)) {
         return {.ok = false, .message = error};
@@ -1039,20 +1063,9 @@ std::string build_memory_prompt_block(const MemoryState& state,
             "Use update with id and exact expected_content to correct or shorten one fact; "
             "use merge with entries containing id and exact expected_content to consolidate overlapping facts "
             "in the same scope while preserving every distinct durable detail. Originals remain archived. "
-            "Never merge unrelated facts, weaken explicit user preferences, or forget valid memories solely to free space. "
-            "Only change a user preference when the user explicitly corrects it. "
-            "On memory_capacity, attempt a safe merge only if overlap is clear; otherwise skip capture, "
-            "report that the new memory was not saved, and continue the user's task. Do not retry unchanged writes.",
+            "Never merge unrelated facts, weaken explicit user preferences, or forget a memory to make room. "
+            "Only change a user preference when the user explicitly corrects it. Do not retry unchanged writes.",
             kMaxAutoMemoryBytes);
-        for (const auto& usage : state.scope_usage) {
-            if (!usage.near_capacity()) continue;
-            out += std::format(
-                "\nMemory capacity: {} scope has {}/{} active entries. {}",
-                usage.scope, usage.active_entries, usage.limit,
-                usage.active_entries >= usage.limit
-                    ? "New entries are blocked; update/merge existing facts instead when appropriate."
-                    : "Check for overlap and consolidate before adding new facts.");
-        }
     }
 
     return out;

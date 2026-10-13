@@ -607,9 +607,8 @@ std::string format_memory_state(const core::memory::MemoryState& state) {
     out << "  Rate-limit reserve: " << state.settings.min_rate_limit_remaining_percent << "%\n";
     out << "  Automatic entry limit: " << core::memory::kMaxAutoMemoryBytes << " UTF-8 bytes\n";
     for (const auto& usage : state.scope_usage) {
-        out << "  " << usage.scope << " capacity: " << usage.active_entries << '/' << usage.limit;
-        if (usage.active_entries >= usage.limit) out << " (full; update or merge overlapping facts)";
-        else if (usage.near_capacity()) out << " (near capacity)";
+        out << "  " << usage.scope << " memories: " << usage.active_entries << '/' << usage.limit;
+        if (usage.active_entries >= usage.limit) out << " (at the retention ceiling)";
         out << '\n';
     }
 

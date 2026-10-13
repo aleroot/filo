@@ -13,6 +13,7 @@
 
 #include <simdjson.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -81,12 +82,6 @@ TEST_CASE("Memory revision frees capacity atomically and retains original facts"
     const auto second = scoped.remember("Run pytest in the project virtual environment.", "project", {"tests"});
     REQUIRE(first.ok);
     REQUIRE(second.ok);
-    const auto rejected = scoped.remember("Prefer concise summaries.");
-    REQUIRE_FALSE(rejected.ok);
-    CHECK(rejected.code == "memory_capacity");
-    REQUIRE(rejected.capacity);
-    CHECK(rejected.capacity->active_entries == 2);
-    CHECK(rejected.capacity->scope == "project");
 
     const auto merged = scoped.revise({{first.entry->id, first.entry->content},
                                        {second.entry->id, second.entry->content}},
@@ -270,16 +265,22 @@ TEST_CASE("Capacity warnings count all scoped entries before recall selection", 
     REQUIRE(projected.scope_usage.size() == 2);
     CHECK(projected.scope_usage[0].active_entries == 8);
     CHECK(projected.scope_usage[1].active_entries == 1);
-    CHECK_THAT(core::memory::build_memory_prompt_block(projected),
-               Catch::Matchers::ContainsSubstring("project scope has 8/10"));
+    CHECK(core::memory::build_memory_prompt_block(projected).find("Memory capacity:") == std::string::npos);
+    for (int i = 0; i < 2; ++i) REQUIRE(scoped.remember("More " + std::to_string(i)).ok);
+    const auto full = scoped.load_for_prompt({.max_entries = 1});
+    CHECK(full.scope_usage[0].active_entries == 10);
+    CHECK(full.scope_usage[0].active_entries >= full.scope_usage[0].limit);
+    const auto full_block = core::memory::build_memory_prompt_block(full);
+    CHECK(full_block.find("Memory capacity:") == std::string::npos);
+    CHECK(full_block.find("was not saved") == std::string::npos);
     const auto empty_projection = scoped.load_for_prompt({.max_entries = 0});
     CHECK(empty_projection.entries.empty());
-    CHECK(empty_projection.scope_usage[0].active_entries == 8);
+    CHECK(empty_projection.scope_usage[0].active_entries == 10);
     context.session_id = "session-b";
     CHECK(store.for_context(context).load().scope_usage[1].active_entries == 0);
 }
 
-TEST_CASE("Memory tool recovers a full scope through merge then capture", "[memory][maintenance][tool]") {
+TEST_CASE("Memory tool keeps a new fact at the retention ceiling", "[memory][maintenance][tool]") {
     TempDir dir{"filo_memory_tool_recovery"};
     core::memory::MemoryStore store{dir.path / "memory.json"};
     auto settings = store.settings();
@@ -290,8 +291,9 @@ TEST_CASE("Memory tool recovers a full scope through merge then capture", "[memo
     core::tools::MemoryTool tool{store};
     REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Use the project virtual environment."})", context), "ok"));
     REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Run pytest in the project virtual environment."})", context), "ok"));
-    const auto blocked = tool.execute(R"({"action":"remember","content":"Prefer concise summaries."})", context);
-    CHECK(core::utils::json::string_field(blocked, "code") == "memory_capacity");
+    const auto stored = tool.execute(R"({"action":"remember","content":"Prefer concise summaries."})", context);
+    CHECK(core::utils::json::bool_field(stored, "ok"));
+    CHECK(core::utils::json::string_field(stored, "code").empty());
     const auto status = tool.execute(R"({"action":"status"})", context);
     simdjson::dom::parser parser;
     simdjson::dom::element doc;
@@ -299,18 +301,22 @@ TEST_CASE("Memory tool recovers a full scope through merge then capture", "[memo
     CHECK(doc["scopes"].at(0)["active_entries"].get_uint64().value() == 2);
     CHECK(doc["scopes"].at(0)["remaining"].get_uint64().value() == 0);
     CHECK(doc["scopes"].at(0)["near_capacity"].get_bool().value());
-    auto entries = store.for_context(context).load().entries;
-    const auto args = revision_args("merge", {{entries[0].id, entries[0].content}, {entries[1].id, entries[1].content}},
+    auto active = store.for_context(context).list();
+    REQUIRE(active.size() == 2);
+    CHECK(std::ranges::any_of(active, [](const auto& entry) {
+        return entry.content == "Prefer concise summaries.";
+    }));
+    const auto args = revision_args("merge", {{active[0].id, active[0].content}, {active[1].id, active[1].content}},
                                     "Use the project virtual environment, including for pytest.");
     const auto validated = core::tools::schema::validate_arguments(tool.get_definition(), args);
     REQUIRE(validated.has_value());
     const auto merged = tool.execute(*validated, context);
     REQUIRE(core::tools::MemoryTool::committed_mutation(core::tools::names::kMemory, args, merged));
-    REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Prefer concise summaries."})", context), "ok"));
+    REQUIRE(core::utils::json::bool_field(tool.execute(R"({"action":"remember","content":"Prefer short status lines."})", context), "ok"));
     CHECK(store.for_context(context).list().size() == 2);
     const auto history_json = tool.execute(R"({"action":"list","include_archived":true})", context);
     REQUIRE(parser.parse(history_json).get(doc) == simdjson::SUCCESS);
-    CHECK(doc["total"].get_uint64().value() == 4);
+    CHECK(doc["total"].get_uint64().value() == 5);
     CHECK(doc["entries"].at(0)["supersedes"].is_array());
 }
 
@@ -369,10 +375,16 @@ TEST_CASE("Memory background cleanup runs before capture and reports unsaved can
     CHECK(scoped.list().size() == 2);
     input.history = {core::llm::Message{.role = "user", .content = "Remember that I prefer concise summaries."}};
     const auto full = service.review(input);
-    CHECK(full.memories_stored == 0);
-    CHECK(full.memories_not_saved == 1);
-    CHECK_THAT(full.message, Catch::Matchers::ContainsSubstring("were not saved"));
-    CHECK(scoped.list().size() == 2);
+    CHECK(full.memories_stored == 1);
+    CHECK(full.memories_not_saved == 0);
+    const auto active = scoped.list();
+    CHECK(active.size() == 2);
+    CHECK(std::ranges::any_of(active, [](const auto& entry) {
+        return entry.content == "Existing fact.";
+    }));
+    CHECK(std::ranges::any_of(active, [](const auto& entry) {
+        return entry.content.find("concise summaries") != std::string::npos;
+    }));
 }
 
 TEST_CASE("Background history replay cannot undo a revision or manual archival", "[memory][maintenance][background]") {
@@ -576,7 +588,7 @@ TEST_CASE("MemoryStore recall updates only entries included in the prompt",
     }
 }
 
-TEST_CASE("MemoryStore enforces max active entries without evicting memories",
+TEST_CASE("New memories stay; the least-recalled automatic note is archived at the ceiling",
           "[memory][limit]") {
     TempDir dir{"filo_memory_store_active_limit"};
     core::memory::MemoryStore store{dir.path / "memory.json"};
@@ -584,23 +596,53 @@ TEST_CASE("MemoryStore enforces max active entries without evicting memories",
     settings.max_active_entries = 2;
     REQUIRE(store.save_settings(settings));
 
-    REQUIRE(store.remember("First active memory.").ok);
-    REQUIRE(store.remember("Second active memory.").ok);
-    const auto rejected = store.remember("Third active memory.");
-    CHECK_FALSE(rejected.ok);
-    CHECK_THAT(rejected.message, Catch::Matchers::ContainsSubstring("Memory limit reached"));
-    REQUIRE(store.list().size() == 2);
+    REQUIRE(store.remember("First active memory.", {}, {}, "agent").ok);
+    REQUIRE(store.remember("Second active memory.", {}, {}, "agent").ok);
+    auto ranked = store.load();
+    for (auto& entry : ranked.entries) {
+        entry.last_used_at = "2026-01-01T00:00:00Z";
+        entry.use_count = entry.content.starts_with("Second") ? 4 : 1;
+    }
+    REQUIRE(store.save(ranked));
 
-    // Updating an existing active entry remains allowed at the limit.
-    CHECK(store.remember("First active memory.").ok);
-    REQUIRE(store.forget("m1").ok);
-    REQUIRE(store.remember("Third active memory.").ok);
+    const auto stored = store.remember("Third active memory.", {}, {}, "agent");
+    REQUIRE(stored.ok);
+    CHECK(stored.code.empty());
+    const auto active = store.list();
+    REQUIRE(active.size() == 2);
+    CHECK(std::ranges::any_of(active, [](const auto& entry) {
+        return entry.content == "Third active memory.";
+    }));
+    CHECK(std::ranges::any_of(active, [](const auto& entry) {
+        return entry.content == "Second active memory.";
+    }));
+    CHECK(std::ranges::none_of(active, [](const auto& entry) {
+        return entry.content == "First active memory.";
+    }));
 
-    // Restoring an archived entry cannot push the scope over its configured cap.
-    const auto restore_rejected = store.remember("First active memory.");
-    CHECK_FALSE(restore_rejected.ok);
-    CHECK_THAT(restore_rejected.message,
-               Catch::Matchers::ContainsSubstring("Memory limit reached"));
+    // Refreshing a live fact does not make room by archiving another.
+    CHECK(store.remember("Second active memory.", {}, {}, "agent").ok);
+    CHECK(store.list().size() == 2);
+
+    // /memory add can restore a note the store archived. Automatic capture cannot.
+    const auto agent_restore = store.remember("First active memory.", {}, {}, "agent");
+    CHECK_FALSE(agent_restore.ok);
+    CHECK(agent_restore.code == "memory_archived");
+    const auto restored = store.remember("First active memory.");
+    REQUIRE(restored.ok);
+    const auto after_restore = store.list();
+    REQUIRE(after_restore.size() == 2);
+    CHECK(std::ranges::any_of(after_restore, [](const auto& entry) {
+        return entry.content == "First active memory.";
+    }));
+
+    core::memory::MemoryStore manuals{dir.path / "manual.json"};
+    auto manual_settings = manuals.settings();
+    manual_settings.max_active_entries = 1;
+    REQUIRE(manuals.save_settings(manual_settings));
+    REQUIRE(manuals.remember("User note.").ok);
+    REQUIRE(manuals.remember("Another user note.").ok);
+    CHECK(manuals.list().size() == 2);
 
     auto oversized = store.load();
     oversized.entries.push_back(core::memory::MemoryEntry{
@@ -612,6 +654,24 @@ TEST_CASE("MemoryStore enforces max active entries without evicting memories",
     CHECK_FALSE(store.save(oversized, &error));
     CHECK_THAT(error, Catch::Matchers::ContainsSubstring("max_active_entries"));
     CHECK(store.list().size() == 2);
+}
+
+TEST_CASE("A store saved with the old ceiling of 120 loads at the current one", "[memory][limit]") {
+    TempDir dir{"filo_memory_legacy_ceiling"};
+    {
+        std::ofstream file(dir.path / "memory.json");
+        file << R"({"version":1,"settings":{"max_active_entries":120},"entries":[{"id":"m1","content":"Keep this fact.","scope":"project","source":"agent"}]})";
+    }
+    const auto loaded = core::memory::MemoryStore{dir.path / "memory.json"}.load();
+    CHECK(loaded.settings.max_active_entries == core::memory::kDefaultMaxActiveEntries);
+    REQUIRE(loaded.entries.size() == 1);
+    CHECK(loaded.entries.front().content == "Keep this fact.");
+
+    {
+        std::ofstream file(dir.path / "chosen.json");
+        file << R"({"version":1,"settings":{"max_active_entries":40},"entries":[]})";
+    }
+    CHECK(core::memory::MemoryStore{dir.path / "chosen.json"}.settings().max_active_entries == 40);
 }
 
 TEST_CASE("MemoryStore serializes concurrent remembers for the same file", "[memory][concurrency]") {

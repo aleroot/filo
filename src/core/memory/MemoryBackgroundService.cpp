@@ -252,7 +252,7 @@ MemoryReviewResult MemoryBackgroundService::review(const MemoryReviewInput& inpu
             result.memories_cleaned,
             result.skill_drafts_written);
         if (result.memories_not_saved > 0) {
-            result.message += std::format(" {} candidate(s) were not saved; check memory capacity and the automatic entry size limit.",
+            result.message += std::format(" {} candidate(s) were not saved; check the automatic entry size limit.",
                 result.memories_not_saved);
         }
     }

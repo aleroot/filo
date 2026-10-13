@@ -10,6 +10,12 @@ namespace core::context { struct SessionContext; }
 
 namespace core::memory {
 
+/// Active memories kept per project, scope, and session. A prompt never carries
+/// this many (see kDefaultPromptEntries). Past the ceiling the store archives
+/// the least-recalled automatic notes. Manual and imported notes stay, and a
+/// new fact is never refused because the ceiling was reached.
+inline constexpr int kDefaultMaxActiveEntries = 1024;
+
 struct MemorySettings {
     bool enabled = true;
     bool auto_capture = true;
@@ -17,7 +23,7 @@ struct MemorySettings {
     bool consolidation = false;
     bool skill_curation = false;
     int min_rate_limit_remaining_percent = 15;
-    int max_active_entries = 120;
+    int max_active_entries = kDefaultMaxActiveEntries;
 };
 
 struct MemoryEntry {
@@ -40,7 +46,7 @@ struct MemoryEntry {
 struct MemoryScopeUsage {
     std::string scope;
     std::size_t active_entries = 0;
-    std::size_t limit = 120;
+    std::size_t limit = kDefaultMaxActiveEntries;
 
     [[nodiscard]] bool near_capacity() const noexcept {
         return active_entries >= limit - limit / 5;
@@ -85,7 +91,6 @@ struct MemoryMutationResult {
     std::string message;
     std::optional<MemoryEntry> entry = {};
     std::string code = {};
-    std::optional<MemoryScopeUsage> capacity = {};
 };
 
 struct MemoryFileResult {

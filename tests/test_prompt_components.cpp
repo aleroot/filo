@@ -37,7 +37,7 @@ TEST_CASE("Memory menu exposes current settings and project actions", "[memory][
     CHECK(overview.current == "/work/project · 1 memory");
     state.scope_usage = {{.scope = "project", .active_entries = 120, .limit = 120}};
     CHECK_THAT(build_memory_menu(MemoryMenuPage::Overview, state, {}, "/work/project").current,
-               Catch::Matchers::ContainsSubstring("project 120/120 full"));
+               Catch::Matchers::ContainsSubstring("project 120/120 retaining"));
     CHECK(std::ranges::any_of(overview.options,
         [](const auto& row) { return row.value == "page:settings"; }));
     const auto settings = build_memory_menu(MemoryMenuPage::Settings, state, {}, "/work/project");

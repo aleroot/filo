@@ -359,7 +359,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         REQUIRE(executor.try_execute(ctx.text, ctx));
         CHECK(option_picker_command->empty());
         CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Filo Memory"));
-        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("project capacity: 120/120 (full"));
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("project memories: 120/120 (at the retention ceiling)"));
     }
 
     SECTION("/memory falls back to text when a picker is unavailable") {
