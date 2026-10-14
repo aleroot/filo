@@ -5,6 +5,7 @@
 #include "core/tools/read/ReaderProfile.hpp"
 #include "core/tools/read/ReadTypes.hpp"
 #include "core/tools/read/SerializedPathRecovery.hpp"
+#include "core/tools/read/PathDiagnostics.hpp"
 #include "core/context/SteeringLoader.hpp"
 #include "core/tools/PathVisibilityToolDecorator.hpp"
 #include "core/tools/WebBackendAdapters.hpp"
@@ -410,6 +411,80 @@ TEST_CASE("Unified read validates every batched source before invoking the worke
     CHECK_THAT(provider->requests[0].messages.back().content, ContainsSubstring("Source 2"));
     CHECK_THAT(tool.execute(R"({"path":["first.txt","/etc/passwd"],"question":"Compare"})", fixture.context()), ContainsSubstring("error"));
     CHECK(provider->requests.size() == 1);
+}
+TEST_CASE("Unified read rejects read argument names written inside the path array", "[read][resources][regression]") {
+    Fixture fixture;
+    fixture.write("source.txt", "one\ntwo\n");
+    fixture.write("offset_line", "a file with an unlucky name\n");
+    ReadTool tool;
+    for (const auto args : {R"({"path":["source.txt","offset_line"]})",
+                            R"({"limit_lines":5,"path":["source.txt","offset_line"]})",
+                            R"({"path":["source.txt","offset_line","40","limit_lines","20"]})"}) {
+        const auto result = tool.execute(args, fixture.context());
+        CHECK_THAT(field(result, "error"), ContainsSubstring(R"(path[1] "offset_line")"));
+        CHECK_THAT(result, ContainsSubstring("not inside its array"));
+    }
+    CHECK_THAT(field(tool.execute(R"({"path":["source.txt","offset_line","limit_lines"]})", fixture.context()), "error"),
+               ContainsSubstring(R"(path[1] "offset_line", path[2] "limit_lines" are read argument names)"));
+    // A string path is never reinterpreted, and ./ still names such a file.
+    CHECK_THAT(tool.execute(R"({"path":"offset_line"})", fixture.context()), ContainsSubstring("unlucky name"));
+    CHECK_THAT(tool.execute(R"({"path":["source.txt","./offset_line"]})", fixture.context()), ContainsSubstring("unlucky name"));
+}
+TEST_CASE("Misplaced argument detection matches only exact read argument names", "[read][regression]") {
+    using read::misplaced_argument_error;
+    const std::vector<std::string> clean{"a.cpp", "./offset_line", "offset_line.txt", "src/view"};
+    CHECK_FALSE(misplaced_argument_error(clean).has_value());
+    for (const auto name : read::kArgumentNames) {
+        const std::vector<std::string> paths{"a.cpp", std::string(name)};
+        const auto error = misplaced_argument_error(paths);
+        REQUIRE(error.has_value());
+        CHECK_THAT(*error, ContainsSubstring("path[1] \"" + std::string(name) + "\" is a read argument name"));
+    }
+}
+TEST_CASE("Unified read returns the readable part of a batch and names each entry it could not read", "[read][resources][regression]") {
+    Fixture fixture;
+    fixture.write("first.txt", "first body\n");
+    ReadTool tool;
+    const auto partial = tool.execute(R"({"path":["first.txt","missing.txt","/etc/passwd"]})", fixture.context());
+    CHECK_THAT(partial, ContainsSubstring("first body"));
+    simdjson::dom::parser parser;
+    simdjson::padded_string padded(partial);
+    simdjson::dom::element doc;
+    REQUIRE(parser.parse(padded).get(doc) == simdjson::SUCCESS);
+    CHECK(doc["error"].error() == simdjson::NO_SUCH_FIELD);
+    simdjson::dom::array sources;
+    REQUIRE(doc["sources"].get(sources) == simdjson::SUCCESS);
+    REQUIRE(sources.size() == 1);
+    CHECK(std::string_view(sources.at(0)["path"].get_string().value()) == "first.txt");
+    simdjson::dom::array unread;
+    REQUIRE(doc["unread"].get(unread) == simdjson::SUCCESS);
+    REQUIRE(unread.size() == 2);
+    CHECK(std::string_view(unread.at(0)["path"].get_string().value()) == "missing.txt");
+    CHECK_THAT(std::string(unread.at(0)["error"].get_string().value()),
+               ContainsSubstring("Cannot read path 'missing.txt': path does not exist"));
+    CHECK(std::string_view(unread.at(1)["path"].get_string().value()) == "/etc/passwd");
+    CHECK_THAT(std::string(unread.at(1)["error"].get_string().value()), ContainsSubstring("Access denied"));
+    CHECK(partial.find("root:") == std::string::npos);
+
+    const auto none = field(tool.execute(R"({"path":["missing.txt","gone.txt"]})", fixture.context()), "error");
+    CHECK_THAT(none, ContainsSubstring("None of the 2 paths could be read."));
+    CHECK_THAT(none, ContainsSubstring("'missing.txt'"));
+    CHECK_THAT(none, ContainsSubstring("'gone.txt'"));
+}
+TEST_CASE("Unified read points a path with a stray leading colon at the readable file", "[read][resources][regression]") {
+    Fixture fixture;
+    fixture.write("source.txt", "data\n");
+    ReadTool tool;
+    const auto hint = "'source.txt' exists, so drop the leading ':'";
+    CHECK_THAT(tool.execute(R"({"path":":source.txt"})", fixture.context()), ContainsSubstring(hint));
+    CHECK_THAT(tool.execute(R"({"path":[":source.txt"]})", fixture.context()), ContainsSubstring(hint));
+    CHECK_THAT(tool.execute(R"({"path":":source.txt","view":"auto"})", fixture.context()), ContainsSubstring(hint));
+    const auto absolute = ":" + (fixture.root / "source.txt").string();
+    CHECK_THAT(tool.execute(R"({"path":")" + absolute + R"("})", fixture.context()),
+               ContainsSubstring("exists, so drop the leading ':'"));
+    // No hint when the stripped path is missing or outside the session scope.
+    CHECK(tool.execute(R"({"path":":absent.txt"})", fixture.context()).find("drop the leading") == std::string::npos);
+    CHECK(tool.execute(R"({"path":":/etc/hosts"})", fixture.context()).find("drop the leading") == std::string::npos);
 }
 TEST_CASE("Unified read directory listings survive dangling symlinks", "[read][resources]") {
     Fixture fixture;

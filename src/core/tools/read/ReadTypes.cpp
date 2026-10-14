@@ -1,4 +1,5 @@
 #include "ReadTypes.hpp"
+#include "PathDiagnostics.hpp"
 #include "../ToolArgumentUtils.hpp"
 #include "../../context/SteeringLoader.hpp"
 #include "../../utils/AsciiUtils.hpp"
@@ -86,8 +87,7 @@ std::expected<Options, std::string> parse_options(std::string_view json) {
     simdjson::padded_string padded{json};
     simdjson::dom::element doc;
     if (parser.parse(padded).get(doc)) return std::unexpected("Invalid JSON arguments for read.");
-    if (auto error = detail::validate_object_arguments(doc, "read",
-            {"path", "view", "question", "offset_line", "limit_lines", "select", "expected_digest"}))
+    if (auto error = detail::validate_object_arguments(doc, "read", kArgumentNames))
         return std::unexpected(*error);
     Options options;
     simdjson::dom::element path;
@@ -104,6 +104,8 @@ std::expected<Options, std::string> parse_options(std::string_view json) {
     }
     if (options.paths.empty() || options.paths.size() > kMaxResources)
         return std::unexpected("read accepts 1 to 8 resources.");
+    if (path.is<simdjson::dom::array>())
+        if (auto error = misplaced_argument_error(options.paths)) return std::unexpected(*error);
     for (const auto& value : options.paths)
         if (value.empty() || value.size() > 1024) return std::unexpected("Paths must contain 1 to 1024 bytes.");
     auto string_field = [&](const char* key, std::string& target) {

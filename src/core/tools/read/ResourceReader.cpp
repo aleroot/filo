@@ -1,6 +1,8 @@
 #include "ResourceReader.hpp"
+#include "PathDiagnostics.hpp"
 #include "../ToolArgumentUtils.hpp"
 #include "../ToolPolicy.hpp"
+#include "../../utils/JsonUtils.hpp"
 #include <fstream>
 #include <algorithm>
 #include <cerrno>
@@ -8,6 +10,33 @@
 #include <system_error>
 
 namespace core::tools::read {
+std::expected<Batch, std::string> ResourceReader::read_all(
+    const Options& options, const ToolInvocationContext& invocation) const {
+    // A question needs the whole batch: an answer over part of the evidence
+    // would read as if it had considered all of it. Anything else keeps the
+    // readable part, so one bad entry neither costs every file nor hides
+    // which entry was wrong.
+    const bool all_or_nothing = options.paths.size() == 1 || !options.question.empty();
+    Batch batch;
+    for (const auto& path : options.paths) {
+        auto source = read(path, options, invocation);
+        if (source) {
+            batch.sources.push_back(std::move(*source));
+            batch.paths.push_back(path);
+            continue;
+        }
+        if (all_or_nothing) return std::unexpected(source.error());
+        // Workspace gates return a complete error envelope; keep its message.
+        auto message = core::utils::json::first_string_field(source.error(), {"error"});
+        batch.unread.push_back({.path = path, .error = message.value_or(source.error())});
+    }
+    if (batch.sources.empty()) {
+        std::string message = "None of the " + std::to_string(batch.unread.size()) + " paths could be read.";
+        for (const auto& entry : batch.unread) message += " " + entry.error;
+        return std::unexpected(std::move(message));
+    }
+    return batch;
+}
 std::expected<Resource, std::string> ResourceReader::read(
     const std::string& path, const Options& options, const ToolInvocationContext& invocation) const {
     if (invocation.cancellation_requested && invocation.cancellation_requested())
@@ -58,9 +87,11 @@ std::expected<Resource, std::string> ResourceReader::read(
         if (ec || status.type() == std::filesystem::file_type::not_found) {
             if (!ec || ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory
                 || status.type() == std::filesystem::file_type::not_found) {
-                return std::unexpected("Cannot read path: path does not exist.");
+                return std::unexpected("Cannot read path '" + path + "': "
+                                       + missing_path_reason(path, context) + ".");
             }
-            return std::unexpected("Cannot read path: failed to inspect path (" + ec.message() + ").");
+            return std::unexpected("Cannot read path '" + path + "': failed to inspect path ("
+                                   + ec.message() + ").");
         }
         if (std::filesystem::is_directory(status)) {
             resource.kind = "directory";

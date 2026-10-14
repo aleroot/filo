@@ -1,4 +1,5 @@
 #include "ReadTypes.hpp"
+#include "PathDiagnostics.hpp"
 #include "../ToolArgumentUtils.hpp"
 #include "../ToolNames.hpp"
 #include "../../utils/JsonUtils.hpp"
@@ -157,13 +158,13 @@ std::string read_text_file(const Options& options, const core::context::SessionC
     if (status_ec) {
         if (status_ec == std::errc::no_such_file_or_directory
             || status_ec == std::errc::not_a_directory) {
-            return format_read_error(path_str, resolved_path_string, "path does not exist");
+            return format_read_error(path_str, resolved_path_string, missing_path_reason(path_str, context));
         }
         return format_read_error(path_str, resolved_path_string,
                                  std::format("failed to inspect path ({})", status_ec.message()));
     }
     if (status.type() == std::filesystem::file_type::not_found) {
-        return format_read_error(path_str, resolved_path_string, "path does not exist");
+        return format_read_error(path_str, resolved_path_string, missing_path_reason(path_str, context));
     }
     if (status.type() != std::filesystem::file_type::regular) {
         return format_read_error(path_str, resolved_path_string,

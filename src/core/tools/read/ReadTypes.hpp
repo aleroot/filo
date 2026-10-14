@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <initializer_list>
 #include <istream>
 #include <string>
 #include <string_view>
@@ -19,6 +20,10 @@ inline constexpr std::size_t kMaxSliceChars = 512 * 1024;
 // file Filo already read must never be silently shortened.
 inline constexpr std::size_t kMaxRemoteSliceChars = 64 * 1024;
 inline constexpr std::size_t kMaxResources = 8;
+// Every argument read accepts: the allowed keys of a call, and the names a
+// path entry must not be (see misplaced_argument_error()).
+inline constexpr std::initializer_list<std::string_view> kArgumentNames = {
+    "path", "view", "question", "offset_line", "limit_lines", "select", "expected_digest"};
 // Subagent profile key that configures the evidence worker. The orchestrator
 // reserves the same name, so both sides agree on what `reader` means.
 inline constexpr std::string_view kReaderProfile = "reader";

@@ -389,6 +389,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/ReadTool.cpp
     src/core/tools/read/ReadTypes.cpp
     src/core/tools/read/SerializedPathRecovery.cpp
+    src/core/tools/read/PathDiagnostics.cpp
     src/core/tools/read/TextFileReader.cpp
     src/core/tools/read/ResourceReader.cpp
     src/core/tools/read/NotebookReader.cpp

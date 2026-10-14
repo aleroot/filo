@@ -30,6 +30,14 @@ void write_selection(core::utils::JsonWriter& writer, const read::Options& optio
     auto object = writer.object();
     if (!options.cell.empty()) writer.kv_str("cell", options.cell);
 }
+void write_unread(core::utils::JsonWriter& writer, const std::vector<read::UnreadPath>& unread) {
+    auto array = writer.array();
+    for (std::size_t i = 0; i < unread.size(); ++i) {
+        if (i) writer.comma();
+        auto item = writer.object();
+        writer.kv_str("path", unread[i].path).comma().kv_str("error", unread[i].error);
+    }
+}
 /// Serialized argument text in `path` is recovered only when no resource by
 /// that literal name exists: a real file always wins over the heuristic.
 std::optional<read::Options> recovered_read(const std::string& args, const read::Options& options,
@@ -69,16 +77,14 @@ std::string ReadTool::execute(const std::string& args, const ToolInvocationConte
     if (uses_legacy_text_path(options))
         return read::read_text_file(options, invocation.session_context);
 
-    std::vector<read::Resource> sources;
-    sources.reserve(options.paths.size());
+    auto batch = resources_.read_all(options, invocation);
+    if (!batch) return error_json(batch.error());
+    const auto& sources = batch->sources;
     bool instructions = false;
     std::size_t source_bytes = 0;
-    for (const auto& path : options.paths) {
-        auto source = resources_.read(path, options, invocation);
-        if (!source) return error_json(source.error());
-        source_bytes += source->text.size();
-        instructions |= read::is_instruction_resource(source->uri);
-        sources.push_back(std::move(*source));
+    for (const auto& source : sources) {
+        source_bytes += source.text.size();
+        instructions |= read::is_instruction_resource(source.uri);
     }
     if (invocation.cancellation_requested && invocation.cancellation_requested()) return error_json("Read cancelled.");
     std::optional<read::Answer> answer;
@@ -138,7 +144,7 @@ std::string ReadTool::execute(const std::string& args, const ToolInvocationConte
                 if (i) writer.comma();
                 const auto& source = sources[i];
                 auto item = writer.object();
-                writer.kv_num("source", i + 1).comma().kv_str("path", options.paths[i]).comma()
+                writer.kv_num("source", i + 1).comma().kv_str("path", batch->paths[i]).comma()
                     .kv_str("kind", source.kind).comma().kv_str("digest", source.digest).comma()
                     .kv_bool("truncated", source.truncated).comma().kv_num("lines", read::line_count(source.text)).comma()
                     .key("select");
@@ -168,6 +174,10 @@ std::string ReadTool::execute(const std::string& args, const ToolInvocationConte
             }
         }
         if (!fallback.empty()) writer.comma().kv_str("fallback_reason", fallback);
+        if (!batch->unread.empty()) {
+            writer.comma().key("unread");
+            write_unread(writer, batch->unread);
+        }
         std::string recovery =
             "Read one source with view=exact, the same select and expected_digest, and offset_line/limit_lines."
             " Locations refer to decoded text. Digests cover bounded snapshots, not unread bytes.";
