@@ -18,6 +18,8 @@
 #include "core/llm/protocols/GeminiProtocol.hpp"
 #include "core/llm/protocols/OllamaProtocol.hpp"
 #include "core/agent/Agent.hpp"
+#include "core/agent/ToolOutputHistory.hpp"
+#include "core/context/SteeringGuard.hpp"
 #include "core/mcp/McpDispatcher.hpp"
 #include "TestSessionContext.hpp"
 #include <simdjson.h>
@@ -31,6 +33,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -123,6 +126,10 @@ TEST_CASE("session references render a text digest without tool output",
     CHECK_THAT(rendered, ContainsSubstring("Assistant: Decision: exponential backoff"));
     CHECK_THAT(rendered, !ContainsSubstring("SECRET TOOL OUTPUT"));
     CHECK_THAT(rendered, !ContainsSubstring("internal synthetic"));
+    // Numbered like the reader, and honest that nothing was left out.
+    CHECK_THAT(rendered, ContainsSubstring("[3] Assistant: Decision"));
+    CHECK_THAT(rendered, ContainsSubstring("Complete: all 3 messages shown in full"));
+    CHECK_THAT(rendered, !ContainsSubstring("Partial"));
     CHECK(rendered.ends_with("[/Context]\n"));
 }
 
@@ -143,6 +150,10 @@ TEST_CASE("session references keep the opening request and newest turns under bu
     CHECK_THAT(rendered, ContainsSubstring("User: Design the retry policy"));
     CHECK_THAT(rendered, ContainsSubstring("earlier messages omitted"));
     CHECK_THAT(rendered, ContainsSubstring("Assistant: LATEST ANSWER"));
+    // The closing line names the gap and where the reader should resume.
+    CHECK_THAT(rendered, ContainsSubstring("Partial: messages 2-"));
+    CHECK_THAT(rendered, ContainsSubstring(R"(session_id="0badcafe", from=2.)"));
+    CHECK_THAT(rendered, !ContainsSubstring("Complete:"));
     CHECK_THAT(rendered, !ContainsSubstring("follow-up number 0x"));
 }
 
@@ -493,6 +504,7 @@ TEST_CASE("digest enforces every budget and preserves UTF-8 framing",
         INFO(limit);
         const auto digest = core::session::render_session_digest(data, "#deadbeef", {.max_bytes = limit});
         CHECK(digest.size() <= limit);
+        if (limit == 32768) CHECK_THAT(digest, ContainsSubstring("from=0."));
         if (!digest.empty()) {
             CHECK(digest.starts_with("\n[Context for #deadbeef]\n"));
             CHECK(digest.ends_with("[/Context]\n"));
@@ -544,7 +556,60 @@ TEST_CASE("prompt references deduplicate ids and respect aggregate limits",
     CHECK_THAT(tiny.display_text, ContainsSubstring("Digest budget too small"));
 }
 
-TEST_CASE("conversation pages complete saved text and detects changes",
+namespace {
+
+struct ToolPage {
+    std::string content;
+    std::string next_cursor;
+    std::int64_t first_message = -1;
+    std::int64_t last_message = -1;
+    std::int64_t total_messages = -1;
+    bool complete = false;
+};
+
+ToolPage parse_page(const std::string& response) {
+    INFO(response);
+    simdjson::dom::parser parser;
+    simdjson::dom::object page;
+    REQUIRE(parser.parse(response).get(page) == simdjson::SUCCESS);
+    std::string_view content, next_cursor;
+    ToolPage out;
+    REQUIRE(page["content"].get(content) == simdjson::SUCCESS);
+    REQUIRE(page["next_cursor"].get(next_cursor) == simdjson::SUCCESS);
+    REQUIRE(page["first_message"].get(out.first_message) == simdjson::SUCCESS);
+    REQUIRE(page["last_message"].get(out.last_message) == simdjson::SUCCESS);
+    REQUIRE(page["total_messages"].get(out.total_messages) == simdjson::SUCCESS);
+    REQUIRE(page["complete"].get(out.complete) == simdjson::SUCCESS);
+    out.content = std::string(content);
+    out.next_cursor = std::string(next_cursor);
+    return out;
+}
+
+/// Follows next_cursor from @p first_args until complete; returns every page's text.
+std::string read_all(core::tools::ConversationTool& tool,
+                     const core::context::SessionContext& context,
+                     std::string_view first_args,
+                     std::size_t limit) {
+    std::string collected;
+    auto page = parse_page(tool.execute(std::string(first_args), context));
+    CHECK(page.content.size() <= limit + 4096);  // the first page adds the header
+    collected += page.content;
+    for (int i = 0; i < 2000 && !page.complete; ++i) {
+        page = parse_page(tool.execute(std::format(
+            R"({{"action":"read","session_id":"deadbeef","limit":{},"cursor":"{}"}})",
+            limit, page.next_cursor), context));
+        CHECK(page.content.size() <= limit);
+        CHECK(simdjson::validate_utf8(page.content.data(), page.content.size()));
+        collected += page.content;
+    }
+    REQUIRE(page.complete);
+    CHECK(page.next_cursor.empty());
+    return collected;
+}
+
+} // namespace
+
+TEST_CASE("conversation pages complete saved text by message cursor",
           "[session][reference][tools][regression]") {
     TempDir tmp("filo_reference_read");
     const core::session::SessionStore store(tmp.path / "sessions");
@@ -556,49 +621,60 @@ TEST_CASE("conversation pages complete saved text and detects changes",
     core::tools::ConversationTool tool(store);
     const auto context = test_support::make_workspace_session_context(
         core::context::SessionTransport::cli, "11111111");
-    std::string collected, revision;
-    std::int64_t offset = 0;
-    bool complete = false;
-    for (int i = 0; i < 1000 && !complete; ++i) {
-        const auto response = tool.execute(std::format(
-            R"({{"action":"read","session_id":"DEADBEEF","offset":{},"limit":127,"revision":"{}"}})",
-            offset, revision), context);
-        simdjson::dom::parser parser;
-        const auto page = parser.parse(response);
-        REQUIRE(page.error() == simdjson::SUCCESS);
-        REQUIRE(page["content"].is_string());
-        const auto text = std::string_view(page["content"].get_string().value());
-        CHECK(text.size() <= 127);
-        CHECK(simdjson::validate_utf8(text.data(), text.size()));
-        collected += text;
-        revision = std::string(page["revision"].get_string().value());
-        complete = page["complete"].get_bool().value();
-        const auto next = page["next_offset"].get_int64().value();
-        if (!complete) REQUIRE(next > offset);
-        offset = next;
-    }
-    REQUIRE(complete);
+
+    const auto collected = read_all(tool, context,
+        R"({"action":"read","session_id":"DEADBEEF","limit":127})", 127);
     CHECK(collected == core::session::render_session_transcript(data));
+    CHECK(collected.starts_with(core::session::render_transcript_header(data)));
     CHECK_THAT(collected, ContainsSubstring(long_text));
+    CHECK_THAT(collected, ContainsSubstring("[4] Assistant: History café"));
     CHECK_THAT(collected, !ContainsSubstring("SECRET TOOL OUTPUT"));
     CHECK_THAT(collected, !ContainsSubstring("internal synthetic"));
-    const auto invalid_offset = collected.find("é") + 1;
-    CHECK_THAT(tool.execute(std::format(
-        R"({{"action":"read","session_id":"deadbeef","offset":{}}})", invalid_offset), context),
-        ContainsSubstring("UTF-8 boundary"));
-    data.messages.push_back(message("assistant", "Changed"));
+
+    // A live conversation keeps growing: an outstanding cursor stays valid and
+    // the continuation picks up the new message.
+    const auto first = parse_page(tool.execute(
+        R"({"action":"read","session_id":"deadbeef","limit":127})", context));
+    REQUIRE_FALSE(first.complete);
+    CHECK(first.first_message == 1);
+    CHECK(first.total_messages == 4);
+    data.messages.push_back(message("assistant", "APPENDED LATER"));
+    REQUIRE(store.save(data));
+    auto page = first;
+    std::string rest;
+    while (!page.complete) {
+        page = parse_page(tool.execute(std::format(
+            R"({{"action":"read","session_id":"deadbeef","limit":32768,"cursor":"{}"}})",
+            page.next_cursor), context));
+        rest += page.content;
+    }
+    CHECK(page.total_messages == 5);
+    CHECK(page.last_message == 5);
+    CHECK(first.content + rest == core::session::render_session_transcript(data));
+    CHECK(rest.ends_with("[5] Assistant: APPENDED LATER\n"));
+
+    // Rewriting what was already read (a compaction) invalidates the cursor.
+    data.context_summary = "Compacted: exponential backoff chosen.";
+    data.messages.erase(data.messages.begin(), data.messages.begin() + 2);
     REQUIRE(store.save(data));
     CHECK_THAT(tool.execute(std::format(
-        R"({{"action":"read","session_id":"deadbeef","offset":127,"revision":"{}"}})", revision), context),
-        ContainsSubstring("Conversation changed"));
+        R"({{"action":"read","session_id":"deadbeef","cursor":"{}"}})", first.next_cursor), context),
+        ContainsSubstring("rewritten"));
+
     for (const auto& args : {"[]", "{}", R"({"session_id":"deadbeef"})",
         R"({"action":"delete","session_id":"deadbeef"})", R"({"action":"read","session_id":"../file"})",
-        R"({"action":"read","session_id":"deadbeef","offset":-1})",
-        R"({"action":"read","session_id":"deadbeef","offset":"1"})",
-        R"({"action":"read","session_id":"deadbeef","offset":99999999})",
+        R"({"action":"read","session_id":"deadbeef","from":"1"})",
+        R"({"action":"read","session_id":"deadbeef","from":99})",
+        R"({"action":"read","session_id":"deadbeef","cursor":7})",
+        R"({"action":"read","session_id":"deadbeef","cursor":"garbage"})",
+        R"({"action":"read","session_id":"deadbeef","cursor":"1.0.0.0123456789abcdef"})",
+        R"({"action":"read","session_id":"deadbeef","from":1,"cursor":"1.0.0.0123456789abcdef"})",
+        R"({"action":"read","session_id":"deadbeef","include_tool_output":"yes"})",
         R"({"action":"read","session_id":"deadbeef","limit":0})",
-        R"({"action":"read","session_id":"deadbeef","limit":8193})",
+        R"({"action":"read","session_id":"deadbeef","limit":-1})",
+        R"({"action":"read","session_id":"deadbeef","limit":32769})",
         R"({"action":"read","session_id":"0000ffff"})"}) {
+        INFO(args);
         CHECK_THAT(tool.execute(args, context), ContainsSubstring("error"));
     }
     const auto self = test_support::make_workspace_session_context(
@@ -606,6 +682,161 @@ TEST_CASE("conversation pages complete saved text and detects changes",
     CHECK_THAT(tool.execute(R"({"action":"read","session_id":"deadbeef"})", self), ContainsSubstring("error"));
     CHECK(core::tools::agent_builtin_tool_options().include_conversation);
     CHECK_FALSE(core::tools::mcp_builtin_tool_options().include_conversation);
+
+    // The advertised page bounds are the reader's.
+    simdjson::dom::parser parser;
+    const auto definition = tool.get_definition();
+    simdjson::dom::element schema;
+    REQUIRE(parser.parse(definition.input_schema).get(schema) == simdjson::SUCCESS);
+    CHECK(schema["properties"]["limit"]["maximum"].get_int64().value()
+          == static_cast<std::int64_t>(core::session::kMaxTranscriptPageBytes));
+    CHECK(schema["properties"]["limit"]["minimum"].get_int64().value()
+          == static_cast<std::int64_t>(core::session::kMinTranscriptPageBytes));
+}
+
+TEST_CASE("conversation reads from a message number, from the end, or the summary",
+          "[session][reference][regression]") {
+    TempDir tmp("filo_reference_from");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    auto data = make_session("deadbeef", "Retry policy");
+    data.context_summary = "Earlier: chose backoff.";
+    data.messages.push_back(message("user", "Fourth message"));
+    data.messages.push_back(message("assistant", "Fifth message"));
+    REQUIRE(store.save(data));
+    const core::session::SessionTranscriptReader reader(store);
+
+    const auto whole = reader.read("deadbeef", "11111111");
+    REQUIRE(whole);
+    CHECK(whole->complete);
+    CHECK(whole->first_message == 0);
+    CHECK(whole->last_message == 5);
+    CHECK(whole->total_messages == 5);
+    CHECK_THAT(whole->content, ContainsSubstring(
+        "[0] Summary of compacted earlier history:\nEarlier: chose backoff.\n[1] User:"));
+
+    const auto third = reader.read("deadbeef", "11111111", {.from = 3});
+    REQUIRE(third);
+    CHECK(third->first_message == 3);
+    CHECK_THAT(third->content, ContainsSubstring("[3] Assistant: Decision"));
+    CHECK_THAT(third->content, !ContainsSubstring("[2] "));
+
+    const auto newest = reader.read("deadbeef", "11111111", {.from = -1});
+    REQUIRE(newest);
+    CHECK(newest->first_message == 5);
+    CHECK_THAT(newest->content, ContainsSubstring("[5] Assistant: Fifth message"));
+    CHECK_THAT(newest->content, !ContainsSubstring("[4] "));
+
+    const auto clamped = reader.read("deadbeef", "11111111", {.from = -99});
+    REQUIRE(clamped);
+    CHECK(clamped->first_message == 1);
+
+    const auto summary = reader.read("deadbeef", "11111111", {.from = 0, .limit = 16});
+    REQUIRE(summary);
+    CHECK(summary->first_message == 0);
+    CHECK_FALSE(summary->complete);
+
+    const auto past = reader.read("deadbeef", "11111111", {.from = 6});
+    REQUIRE_FALSE(past);
+    CHECK_THAT(past.error(), ContainsSubstring("past the last message (5)"));
+
+    // The digest cites the same numbers the reader accepts.
+    const auto digest = core::session::render_session_digest(data, "#deadbeef");
+    CHECK_THAT(digest, ContainsSubstring("[3] Assistant: Decision"));
+    CHECK_THAT(digest, ContainsSubstring("[0] Summary of compacted earlier history:"));
+}
+
+TEST_CASE("conversation includes tool output only on request and never with steering withheld",
+          "[session][reference][tools][steering][regression]") {
+    TempDir tmp("filo_reference_tool_output");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    auto data = make_session("deadbeef", "Retry policy");
+    data.messages[1].tool_calls.front().id = "call-1";
+    data.messages[2].tool_call_id = "call-1";
+    data.messages[2].content = "SECRET TOOL OUTPUT THAT MUST NOT LEAK " + std::string(5000, 'z');
+    REQUIRE(store.save(data));
+    core::tools::ConversationTool tool(store);
+    const auto context = test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli, "11111111");
+
+    const auto plain = parse_page(tool.execute(
+        R"({"action":"read","session_id":"deadbeef"})", context));
+    CHECK_THAT(plain.content, !ContainsSubstring("SECRET TOOL OUTPUT"));
+    CHECK_THAT(plain.content, ContainsSubstring("Tools: read(src/a.cpp)"));
+
+    const auto with_output = core::session::render_session_transcript(
+        data, {.include_tool_output = true});
+    CHECK_THAT(with_output, ContainsSubstring(
+        "[2] Assistant: I will read the client first.\nTool read(src/a.cpp) returned:\n"
+        "SECRET TOOL OUTPUT THAT MUST NOT LEAK zzz"));
+    // Clamped per result, and numbering is unchanged by the option.
+    CHECK_THAT(with_output, !ContainsSubstring(std::string(core::session::kMaxTranscriptToolOutputBytes, 'z')));
+    CHECK_THAT(with_output, ContainsSubstring(" [...]\n[3] Assistant: Decision"));
+    // The cursor carries the option, so later pages need not repeat it.
+    CHECK(read_all(tool, context,
+        R"({"action":"read","session_id":"deadbeef","limit":256,"include_tool_output":true})", 256)
+          == with_output);
+
+    // A saved result may be a withheld steering file: refused, not filtered.
+    TempDir project("filo_reference_steering");
+    {
+        std::ofstream(project.path / "AGENTS.md") << "PROJECT RULES\n";
+    }
+    auto withheld = core::context::make_session_context(
+        core::workspace::WorkspaceSnapshot{
+            .primary = project.path, .additional = {}, .enforce = true, .version = 1},
+        core::context::SessionTransport::cli, "11111111");
+    withheld.steering_policy = core::context::SteeringPolicy{.mode = core::context::SteeringMode::None};
+    REQUIRE_FALSE(core::context::SteeringGuard::for_context(withheld).empty());
+    const auto refused = tool.execute(
+        R"({"action":"read","session_id":"deadbeef","include_tool_output":true})", withheld);
+    CHECK_THAT(refused, ContainsSubstring("steering policy"));
+    CHECK_THAT(refused, !ContainsSubstring("SECRET TOOL OUTPUT"));
+    const auto continued = parse_page(tool.execute(
+        R"({"action":"read","session_id":"deadbeef","limit":16,"include_tool_output":true})", context));
+    CHECK_THAT(tool.execute(std::format(
+        R"({{"action":"read","session_id":"deadbeef","cursor":"{}"}})", continued.next_cursor), withheld),
+        ContainsSubstring("steering policy"));
+    CHECK_THAT(tool.execute(R"({"action":"read","session_id":"deadbeef"})", withheld),
+               ContainsSubstring("Decision: exponential backoff"));
+}
+
+TEST_CASE("a full conversation page reaches the model unclipped",
+          "[session][reference][agent][tool-history][regression]") {
+    TempDir tmp("filo_reference_history");
+    const core::session::SessionStore store(tmp.path / "sessions");
+    auto data = make_session("deadbeef", "Retry policy");
+    // Every byte a quote, backslash or newline: each JSON-escapes to two,
+    // the worst case short of control characters.
+    std::string escaped_heavy;
+    while (escaped_heavy.size() < 3 * core::session::kMaxTranscriptPageBytes) {
+        escaped_heavy += "\"\\\"\\\n";
+    }
+    data.messages.push_back(message("assistant", escaped_heavy));
+    REQUIRE(store.save(data));
+    core::tools::ConversationTool tool(store);
+    const auto context = test_support::make_workspace_session_context(
+        core::context::SessionTransport::cli, "11111111");
+    const std::string arguments = std::format(
+        R"({{"action":"read","session_id":"deadbeef","from":4,"limit":{}}})",
+        core::session::kMaxTranscriptPageBytes);
+    const auto raw = tool.execute(arguments, context);
+    const auto page = parse_page(raw);
+    REQUIRE_FALSE(page.complete);
+    REQUIRE(raw.size() > 2 * 8 * 1024);  // larger than any generic history limit
+
+    namespace history = core::agent::tool_output_history;
+    const std::string session_id = "11111111";
+    for (const std::size_t token_limit : std::vector<std::size_t>{0, 512, 1024, 3072, 8192}) {
+        const auto limits = history::limits_for_tool("conversation", token_limit);
+        // Agent offloads and clamps only results above max_chars.
+        CHECK(raw.size() <= limits.max_chars);
+        for (const auto* mode : {"off", "light", "full", "ultra"}) {
+            INFO(token_limit << " " << mode);
+            CHECK(history::clamp_for_history("conversation", raw, limits, mode,
+                      history::Context{.tool_arguments = arguments, .session_id = session_id})
+                  == raw);
+        }
+    }
 }
 
 TEST_CASE("conversation is hidden and blocked by MCP even in a shared registry",
@@ -781,30 +1012,31 @@ TEST_CASE("saved transcript reader exposes typed pages independently of tools",
     const auto source = make_session("deadbeef", "Retry policy");
     REQUIRE(store.save(source));
     const core::session::SessionTranscriptReader reader(store);
-    const auto first = reader.read("DEADBEEF", "11111111", {.limit = 127});
+    const auto first = reader.read("DEADBEEF", "11111111", {.limit = 16});
     REQUIRE(first);
     CHECK(first->session_id == "deadbeef");
-    CHECK(first->content.starts_with("\n[Context for #deadbeef]\n"));
+    CHECK(first->content.starts_with("Conversation \"Retry policy\" (id deadbeef)\n"));
+    CHECK(first->first_message == 1);
+    CHECK(first->last_message == 1);
+    CHECK(first->total_messages == 3);
     CHECK_FALSE(first->complete);
+    CHECK_FALSE(first->includes_tool_output);
     const auto rest = reader.read("deadbeef", "11111111", {
-        .offset = first->next_offset,
+        .cursor = first->next_cursor,
         .limit = core::session::kMaxTranscriptPageBytes,
-        .revision = first->revision,
     });
     REQUIRE(rest);
     REQUIRE(rest->complete);
+    CHECK(rest->next_cursor.empty());
+    CHECK(rest->first_message == 1);  // continues the entry the first page cut
+    CHECK(rest->last_message == 3);
     CHECK(first->content + rest->content == core::session::render_session_transcript(source));
-    const auto end = reader.read("deadbeef", "11111111", {
-        .offset = rest->next_offset,
-        .revision = rest->revision,
-    });
-    REQUIRE(end);
-    CHECK(end->complete);
-    CHECK(end->content.empty());
-    CHECK(end->total_bytes == rest->total_bytes);
     CHECK_FALSE(reader.read("../file", "11111111"));
     CHECK_FALSE(reader.read("deadbeef", "deadbeef"));
     CHECK_FALSE(reader.read("deadbeef", "11111111", {.limit = 0}));
+    CHECK_FALSE(reader.read("deadbeef", "11111111",
+                            {.limit = core::session::kMaxTranscriptPageBytes + 1}));
+    CHECK_FALSE(reader.read("deadbeef", "11111111", {.cursor = "not-a-cursor"}));
 }
 
 namespace {

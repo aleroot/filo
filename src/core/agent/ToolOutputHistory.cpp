@@ -1,6 +1,7 @@
 #include "ToolOutputHistory.hpp"
 
 #include "../context/SteeringLoader.hpp"
+#include "../session/SessionTranscriptReader.hpp"
 #include "../tools/ToolNames.hpp"
 #include "../utils/JsonUtils.hpp"
 #include "../utils/JsonWriter.hpp"
@@ -1229,6 +1230,15 @@ Limits limits_for_tool(std::string_view tool_name) {
     if (tool_name == core::tools::names::kReadToolResult) {
         return Limits{.max_chars = 32 * 1024, .head_chars = 24 * 1024, .tail_chars = 8 * 1024};
     }
+    if (tool_name == core::tools::names::kConversation) {
+        // The reader already bounds a page: kMaxTranscriptPageBytes of messages
+        // plus a short header. Cutting its middle would hide messages behind a
+        // next_cursor that resumes after them, so the ceiling admits a full page
+        // with every byte JSON-escaped to two (quotes, backslashes, newlines).
+        // Only control-character-dense text can exceed it, and is then offloaded.
+        constexpr std::size_t kPage = 2 * (core::session::kMaxTranscriptPageBytes + 4 * 1024);
+        return Limits{.max_chars = kPage, .head_chars = kPage - 1024, .tail_chars = 1024};
+    }
     if (tool_name == core::tools::names::kRunTerminalCommand
         || tool_name == core::tools::names::kGrepSearch
         || tool_name == core::tools::names::kFileSearch
@@ -1250,7 +1260,8 @@ Limits limits_for_tool(std::string_view tool_name, std::size_t token_limit) {
     if (token_limit == 0
         || token_limit == 3072
         || tool_name == core::tools::names::kActivateSkill
-        || tool_name == core::tools::names::kReadToolResult) {
+        || tool_name == core::tools::names::kReadToolResult
+        || tool_name == core::tools::names::kConversation) {
         return limits;
     }
 

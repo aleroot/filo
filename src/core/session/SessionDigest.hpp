@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace core::session {
 
@@ -12,7 +13,9 @@ namespace core::session {
 // by a `#` reference: header, compaction summary, user/assistant turns and
 // tool calls by name, so the model can build on it without resuming it. Tool
 // output is never copied: it is the bulk of a transcript and the files it
-// describes may have changed since.
+// describes may have changed since. The digest ends by saying whether it is
+// complete and, when it is not, which message the `conversation` reader should
+// start from.
 
 struct SessionDigestOptions {
     /// Budget for the whole rendered block; the oldest turns are dropped first
@@ -29,8 +32,36 @@ struct SessionDigestOptions {
                                                 std::string_view label,
                                                 const SessionDigestOptions& options = {});
 
-/// Complete saved user/assistant text and compaction summary for paged reads.
-/// Excludes tool results, system records, and synthetic context.
-[[nodiscard]] std::string render_session_transcript(const SessionData& session);
+/// Cap on each tool result a transcript includes on request.
+inline constexpr std::size_t kMaxTranscriptToolOutputBytes = 2 * 1024;
+
+struct TranscriptOptions {
+    /// Adds each tool call's saved result, clamped to
+    /// kMaxTranscriptToolOutputBytes, under the assistant message that made it.
+    bool include_tool_output = false;
+};
+
+/// One numbered transcript entry, ending in a newline. Number 0 is the
+/// compaction summary (present only after a compaction); visible user and
+/// assistant messages are numbered from 1 in saved order. The digest and the
+/// reader number identically, and appending to a conversation never renumbers
+/// earlier entries, so a number the digest cites stays readable.
+struct TranscriptEntry {
+    std::size_t number = 0;
+    std::string text;
+};
+
+/// Identity lines opening a transcript: title, id, project, dates and model.
+[[nodiscard]] std::string render_transcript_header(const SessionData& session);
+
+/// Every entry, complete. Excludes system records and synthetic context, and
+/// tool results unless requested.
+[[nodiscard]] std::vector<TranscriptEntry> render_transcript_entries(
+    const SessionData& session,
+    const TranscriptOptions& options = {});
+
+/// The header followed by every entry: what a full read returns.
+[[nodiscard]] std::string render_session_transcript(const SessionData& session,
+                                                    const TranscriptOptions& options = {});
 
 } // namespace core::session
