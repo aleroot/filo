@@ -1500,7 +1500,7 @@ public:
             "  /memory [action]    Manage durable memory and auto capture\n"
             "  /mcp [action]       List or manage workspace/global MCP server overlays\n"
             "  /run [block]        Inspect and run a fenced block from the latest response\n"
-            "  /changes            Open the latest turn's file changes in the diff comparer\n"
+            "  /changes [all]      Open the latest turn's file changes (all: every turn's)\n"
             "  /revert             Put back the files the latest turn changed\n"
             "  !<command>          Execute a shell command  (e.g., !ls -la)\n"
             "\n[Keyboard Shortcuts]\n"
@@ -1519,6 +1519,7 @@ public:
             "  Ctrl+Y   Toggle YOLO auto-approval mode\n"
             "  Ctrl+O   Toggle verbose output view (compact/full)\n"
             "  Ctrl+X   Open the latest turn's file changes in the configured diff comparer\n"
+            "  Ctrl+Shift+X  Open the whole conversation's file changes (/changes all)\n"
             "  Ctrl+D   Delete char right; empty: close secondary or double-press on main to quit\n"
             "  Ctrl+L   Clear the screen\n"
             "  Esc      Stop active generation or terminal command\n"
@@ -3904,25 +3905,33 @@ public:
     }
 };
 
-/// Opens the most recent turn's file changes in the configured diff comparer.
-/// The host decides what "configured" means — the transcript itself, a pager, or
-/// another application — and says why nothing opened when nothing did.
+/// Opens file changes in the configured diff comparer: the most recent turn's,
+/// or with `all` the whole conversation's. The host decides what "configured"
+/// means — the transcript itself, a pager, or another application — and says
+/// why nothing opened when nothing did.
 class ChangesCommand : public Command {
 public:
     std::string get_name() const override { return "/changes"; }
     std::vector<std::string> get_aliases() const override { return {"/diff"}; }
     std::string get_description() const override {
-        return "Open the latest turn's file changes in the configured comparer";
+        return "Open the latest turn's file changes (all: the whole conversation's)";
     }
+    bool accepts_arguments() const override { return true; }
 
     void execute(const CommandContext& ctx) override {
         ctx.clear_input_fn();
+        const std::string argument = to_lower_ascii(trailing_arguments(ctx.text));
+        if (!argument.empty() && argument != "all") {
+            ctx.append_history_fn("\n✗  Usage: /changes [all]\n");
+            return;
+        }
         if (!ctx.open_diff_comparer_fn) {
             ctx.append_history_fn("\n✗  No diff comparer is available in this context.\n");
             return;
         }
 
-        const auto result = ctx.open_diff_comparer_fn();
+        const auto result = ctx.open_diff_comparer_fn(
+            argument.empty() ? ChangesScope::LatestTurn : ChangesScope::Conversation);
         if (!result.ok && !result.message.empty()) {
             ctx.append_history_fn(std::format("\n✗  {}\n", result.message));
         }

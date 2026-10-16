@@ -23,7 +23,15 @@ bool is_panel_dismiss_event(const ftxui::Event& event);
 bool is_refresh_notification(const ftxui::Event& event);
 
 bool is_ctrl_letter_event(const ftxui::Event& event, char letter);
+
+/// True when @p event is Ctrl+Shift+<letter>. Only a terminal speaking the kitty
+/// keyboard protocol or modifyOtherKeys can report it; a legacy one sends the
+/// Ctrl+<letter> control byte, so a binding on it needs another way in.
+bool is_ctrl_shift_letter_event(const ftxui::Event& event, char letter);
+
+/// Ctrl+X, but not Ctrl+Shift+X: the two open different comparisons.
 bool is_ctrl_x_event(const ftxui::Event& event);
+bool is_ctrl_shift_x_event(const ftxui::Event& event);
 bool is_ctrl_o_event(const ftxui::Event& event);
 bool is_ctrl_y_event(const ftxui::Event& event);
 bool is_ctrl_d_event(const ftxui::Event& event);

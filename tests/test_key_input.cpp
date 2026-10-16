@@ -46,6 +46,25 @@ TEST_CASE("KeyInput detects kitty keyboard protocol events", "[tui][key_input]")
     REQUIRE_FALSE(tui::is_ctrl_letter_event(ftxui::Event::Special("\x1B[120;1u"), 'x'));
 }
 
+TEST_CASE("KeyInput tells Ctrl+Shift+X from Ctrl+X where the terminal can",
+          "[tui][key_input]") {
+    // Kitty keyboard protocol: modifier 6 = Shift+Ctrl, 5 = Ctrl.
+    REQUIRE(tui::is_ctrl_shift_x_event(ftxui::Event::Special("\x1B[120;6u")));
+    REQUIRE_FALSE(tui::is_ctrl_x_event(ftxui::Event::Special("\x1B[120;6u")));
+    REQUIRE(tui::is_ctrl_x_event(ftxui::Event::Special("\x1B[120;5u")));
+    REQUIRE_FALSE(tui::is_ctrl_shift_x_event(ftxui::Event::Special("\x1B[120;5u")));
+    // modifyOtherKeys reports the shifted letter.
+    REQUIRE(tui::is_ctrl_shift_x_event(ftxui::Event::Special("\x1B[27;6;88~")));
+    REQUIRE_FALSE(tui::is_ctrl_x_event(ftxui::Event::Special("\x1B[27;6;88~")));
+    // Shift alone is not the binding.
+    REQUIRE_FALSE(tui::is_ctrl_shift_x_event(ftxui::Event::Special("\x1B[120;2u")));
+    // A legacy terminal sends one control byte for both: it can only be Ctrl+X.
+    REQUIRE(tui::is_ctrl_x_event(ftxui::Event::Special({24})));
+    REQUIRE_FALSE(tui::is_ctrl_shift_x_event(ftxui::Event::Special({24})));
+    // Other Ctrl+Shift bindings keep matching their Ctrl binding.
+    REQUIRE(tui::is_ctrl_t_event(ftxui::Event::Special("\x1B[116;6u")));
+}
+
 TEST_CASE("KeyInput detects modifyOtherKeys events", "[tui][key_input]") {
     REQUIRE(tui::is_ctrl_letter_event(ftxui::Event::Special("\x1B[27;5;121~"), 'y'));
     REQUIRE(tui::is_ctrl_y_event(ftxui::Event::Special("\x1B[27;5;121~")));

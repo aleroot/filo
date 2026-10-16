@@ -24,6 +24,11 @@ struct CommandOperationResult {
     std::string message = {};
 };
 
+/// Which file changes a comparer opens: the most recent turn that changed
+/// files (/changes, Ctrl+X) or the whole conversation netted per file
+/// (/changes all, Ctrl+Shift+X).
+enum class ChangesScope { LatestTurn, Conversation };
+
 struct ActiveTerminalInfo {
     std::string session_id;
     std::string command;
@@ -156,10 +161,10 @@ struct CommandContext {
     std::function<CommandOperationResult()> stop_active_terminal_fn = {};
     std::function<void(std::string)> direct_shell_command_fn = {};
     std::function<CommandOperationResult(std::optional<std::size_t>)> open_code_block_runner_fn = {};
-    /// Opens the most recent turn's file changes in the configured diff
-    /// comparer (/changes, Ctrl+X). The host owns the comparison: which turn,
+    /// Opens file changes in the configured diff comparer (/changes, Ctrl+X;
+    /// /changes all, Ctrl+Shift+X). The host owns the comparison: which turns,
     /// which backend, and what the user is told when there is nothing to show.
-    std::function<CommandOperationResult()> open_diff_comparer_fn = {};
+    std::function<CommandOperationResult(ChangesScope)> open_diff_comparer_fn = {};
     /// Puts back the files the most recent turn changed (/revert). The host
     /// owns the revert: which turn, whether the workspace still matches it, and
     /// what the user is told. The conversation is left alone — /rewind and

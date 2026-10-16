@@ -342,7 +342,7 @@ filo -w ../Lampo -w ../filo
 |---|---|
 | **Filo → Lampo (MCP tools)** | Lampo’s local models can call Filo’s coding tools — filesystem, shell, search, patches — outside Lampo’s App Sandbox. |
 | **Lampo → Filo (prompt editor)** | Edit Filo’s current draft in Lampo’s Prompter UI (`Ctrl+G`), then return the saved text to the TUI. |
-| **Lampo → Filo (diff comparer)** | Open the file changes a turn just made in Lampo’s Comparer (`Ctrl+X` or `/changes`), one window with a tab per file. |
+| **Lampo → Filo (diff comparer)** | Open the file changes a turn just made in Lampo’s Comparer (`Ctrl+X` or `/changes`; the whole conversation with `Ctrl+Shift+X` or `/changes all`), one window with a tab per file. |
 
 ### 1) Filo as an MCP tools server for Lampo
 
@@ -443,6 +443,7 @@ Every agent turn ends with the net changes it made, listed under its answer. Fil
 **Usage**
 
 - Press **`Ctrl+X`** or run **`/changes`** to open the most recent turn that changed files
+- Press **`Ctrl+Shift+X`** or run **`/changes all`** to open everything the conversation changed: one net diff per file, from before the first turn touched it to now. `Ctrl+Shift+X` needs a terminal that reports Shift with Ctrl (kitty keyboard protocol or modifyOtherKeys: kitty, Ghostty, WezTerm, iTerm2 with CSI u); macOS Terminal sends the same key for both, so use `/changes all` there. A file edited outside Filo over lines a turn wrote is named instead of being folded into the diff
 - Each file in a change box also carries a **`↗`** affordance that opens just that file
 - Lampo opens one window with a tab per file, reconstructed from the turn’s unified diff
 - A turn that changed nothing, or whose changes carry no diff (binary files, or a file beyond a size budget), says so instead of opening an empty window

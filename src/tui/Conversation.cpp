@@ -4,6 +4,7 @@
 #include "StringUtils.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
+#include "core/changes/ConversationChanges.hpp"
 #include "core/changes/PatchExport.hpp"
 #include "core/tools/ToolDiffUtils.hpp"
 #include "core/tools/ToolNames.hpp"
@@ -2016,7 +2017,9 @@ std::string comparison_omissions(const TurnComparison& comparison) {
         return {};
     }
 
-    std::string sentence = "The comparison is not the whole turn: ";
+    std::string sentence = std::format(
+        "The comparison is not the whole {}: ",
+        comparison.whole_conversation ? "conversation" : "turn");
     sentence += join_with(gaps, "; ");
     sentence += ".";
     return sentence;
@@ -2059,6 +2062,69 @@ std::optional<TurnComparison> turn_comparison(const UiMessage& message, std::str
         };
     }
     return std::nullopt;
+}
+
+ConversationTurns conversation_turns(const std::vector<UiMessage>& messages) {
+    ConversationTurns source;
+    for (std::size_t index = 0; index < messages.size(); ++index) {
+        const UiMessage& message = messages[index];
+        if (message.turn_changes.empty() || message.turn_changes.reverted) {
+            continue;
+        }
+        if (!source.first_index) {
+            source.first_index = index;
+        }
+        source.turns.push_back(message.turn_changes);
+        for (const auto& change : message.turn_changes.files) {
+            if (!change.diff.empty()) {
+                source.disclosure_keys.push_back(turn_file_change_key(message.id, change.path));
+            }
+        }
+    }
+    return source;
+}
+
+std::expected<TurnComparison, std::string> conversation_comparison(
+    const ConversationTurns& source,
+    const std::filesystem::path& workspace_root) {
+    if (source.turns.empty()) {
+        return std::unexpected(std::string(
+            "No turn in this conversation has changed files yet."));
+    }
+    const auto net = core::changes::conversation_changes(source.turns, workspace_root);
+    auto exported = core::changes::export_patch(net.changes);
+
+    TurnComparison comparison{
+        .patch = std::move(exported.patch),
+        .disclosure_keys = source.disclosure_keys,
+        .undiffed = exported.undiffed,
+        .caveats = turn_change_caveats(net.changes),
+        .whole_conversation = true,
+    };
+    // Naming a couple of files says what kind of gap it is; naming every one
+    // of a long conversation would bury the sentence.
+    constexpr std::size_t kNamedGaps = 2;
+    for (std::size_t i = 0; i < std::min(net.gaps.size(), kNamedGaps); ++i) {
+        comparison.caveats.push_back(std::format("{} {}", net.gaps[i].path, net.gaps[i].reason));
+    }
+    if (net.gaps.size() > kNamedGaps) {
+        const auto more = net.gaps.size() - kNamedGaps;
+        comparison.caveats.push_back(std::format(
+            "{} more file{} could not be compared", more, more == 1 ? "" : "s"));
+    }
+
+    if (comparison.patch.empty()) {
+        if (!net.gaps.empty()) {
+            return std::unexpected(std::format(
+                "Nothing the conversation changed can be compared: {}.",
+                join_with(comparison.caveats, "; ")));
+        }
+        return std::unexpected(std::string(net.changes.empty()
+            ? "The conversation's changes cancel out: every file is back as it was."
+            : "The conversation changed files, but none of them has a diff to show "
+              "(binary, too large or over the diff budget)."));
+    }
+    return comparison;
 }
 
 std::string describe_revert(const core::changes::RevertResult& result) {

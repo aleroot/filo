@@ -400,9 +400,11 @@ set(FILO_CORE_SOURCES
     src/core/tools/WriteFileTool.cpp
     src/core/tools/ToolDiffUtils.cpp
     src/core/tools/PatchTargets.cpp
+    src/core/changes/ConversationChanges.cpp
     src/core/changes/FileChangeJson.cpp
     src/core/changes/MutationScope.cpp
     src/core/changes/PatchExport.cpp
+    src/core/changes/StoredDiff.cpp
     src/core/changes/TurnChangeTracker.cpp
     src/core/changes/TurnRevert.cpp
     src/core/tools/ListDirectoryTool.cpp
@@ -746,6 +748,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_conversation.cpp
     tests/test_turn_file_changes.cpp
     tests/test_patch_export.cpp
+    tests/test_conversation_changes.cpp
     tests/test_turn_revert.cpp
     tests/test_diff_comparer.cpp
     tests/test_lampo_cli_session.cpp
@@ -961,6 +964,7 @@ source_group(
         tests/test_conversation.cpp
         tests/test_turn_file_changes.cpp
         tests/test_turn_change_tracker.cpp
+        tests/test_conversation_changes.cpp
         tests/test_turn_revert.cpp
         tests/test_markdown_renderer.cpp
         tests/test_prompt_components.cpp

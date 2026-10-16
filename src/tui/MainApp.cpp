@@ -6199,6 +6199,38 @@ RunResult run(RunOptions opts) {
         return {.ok = true, .message = {}};
     };
 
+    // Ctrl+Shift+X and /changes all: every turn netted into one diff per file,
+    // from the workspace as the conversation found it to the workspace now.
+    // The turns are copied out first, so the files are read and diffed without
+    // holding the UI lock.
+    auto open_conversation_changes = [&]() -> core::commands::CommandOperationResult {
+        // A running turn has edited files it has not reported yet, so they
+        // would compare as changed outside the conversation.
+        if (current_runtime->turn_active()) {
+            return {.ok = false,
+                    .message = "The current turn is still running; open the conversation's "
+                               "changes once it finishes."};
+        }
+        ConversationTurns source;
+        {
+            std::lock_guard lock(ui_mutex);
+            source = conversation_turns(*selected_messages);
+        }
+        auto comparison = conversation_comparison(
+            source, agent->workspace_snapshot().primary());
+        if (!comparison) {
+            return {.ok = false, .message = std::move(comparison.error())};
+        }
+        open_comparison(std::move(*comparison), source.first_index);
+        return {.ok = true, .message = {}};
+    };
+
+    auto open_changes = [&](core::commands::ChangesScope scope) {
+        return scope == core::commands::ChangesScope::Conversation
+            ? open_conversation_changes()
+            : open_latest_changes();
+    };
+
     // /revert: put back the files the most recent turn changed. The revert
     // plans every file before writing any, so a turn whose files have moved on
     // is refused whole rather than half undone. The conversation is left alone:
@@ -7720,7 +7752,7 @@ RunResult run(RunOptions opts) {
             .stop_active_terminal_fn = stop_active_terminal,
             .direct_shell_command_fn = submit_direct_shell_command,
             .open_code_block_runner_fn = open_code_blocks,
-            .open_diff_comparer_fn = open_latest_changes,
+            .open_diff_comparer_fn = open_changes,
             .revert_turn_files_fn = revert_latest_turn_files,
             .change_workspace_root_fn = change_workspace_root,
             .steering_policy_fn = [&]() {
@@ -7793,12 +7825,12 @@ RunResult run(RunOptions opts) {
     };
 
     // The comparer counterpart of open_external_editor: same guard, but the
-    // payload is what the last turn changed rather than the current draft.
-    auto open_diff_comparer = [&]() -> bool {
+    // payload is what the turns changed rather than the current draft.
+    auto open_diff_comparer = [&](core::commands::ChangesScope scope) -> bool {
         if (modal_owns_screen()) {
             return true;
         }
-        if (const auto result = open_latest_changes(); !result.ok && !result.message.empty()) {
+        if (const auto result = open_changes(scope); !result.ok && !result.message.empty()) {
             append_history(std::format("\n✗  {}\n", result.message));
         }
         return true;
@@ -9688,9 +9720,14 @@ RunResult run(RunOptions opts) {
         }
         // Gemini CLI binds Ctrl+X to the same external editor as Ctrl+G. Filo
         // gives the draft Ctrl+G alone and spends Ctrl+X on the other thing
-        // worth opening: what the last turn changed.
+        // worth opening: what the last turn changed. Ctrl+Shift+X widens it to
+        // the whole conversation where the terminal can report Shift; a legacy
+        // one sends Ctrl+X's byte for both, and /changes all covers it.
         if (is_ctrl_x_event(event)) {
-            return open_diff_comparer();
+            return open_diff_comparer(core::commands::ChangesScope::LatestTurn);
+        }
+        if (is_ctrl_shift_x_event(event)) {
+            return open_diff_comparer(core::commands::ChangesScope::Conversation);
         }
         if (is_ctrl_v_event(event)) {  // Ctrl+V — paste clipboard content / image
             if (const auto image_path = read_clipboard_image_to_temp(); image_path.has_value()) {

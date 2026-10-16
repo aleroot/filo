@@ -100,6 +100,7 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
     auto direct_shell_commands = std::make_shared<std::vector<std::string>>();
     auto requested_code_block = std::make_shared<std::optional<std::size_t>>();
     auto comparer_opens = std::make_shared<int>(0);
+    auto comparer_scope = std::make_shared<std::optional<core::commands::ChangesScope>>();
     auto comparer_result = std::make_shared<CommandOperationResult>(CommandOperationResult{.ok = true});
     auto revert_calls = std::make_shared<int>(0);
     auto revert_result = std::make_shared<CommandOperationResult>(CommandOperationResult{.ok = true});
@@ -273,8 +274,10 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
             *requested_code_block = block;
             return CommandOperationResult{.ok = true};
         },
-        .open_diff_comparer_fn = [comparer_opens, comparer_result]() {
+        .open_diff_comparer_fn = [comparer_opens, comparer_scope, comparer_result](
+                                     core::commands::ChangesScope scope) {
             ++*comparer_opens;
+            *comparer_scope = scope;
             return *comparer_result;
         },
         .revert_turn_files_fn = [revert_calls, revert_result]() {
@@ -439,9 +442,29 @@ TEST_CASE("CommandExecutor - Basic Routing", "[commands]") {
         ctx.text = "/changes";
         REQUIRE(executor.try_execute(ctx.text, ctx));
         CHECK(*comparer_opens == 1);
+        CHECK(*comparer_scope == core::commands::ChangesScope::LatestTurn);
         CHECK(*input_cleared == true);
         // A comparison that opened says nothing: the diff is the confirmation.
         CHECK_THAT(*mock_history, !Catch::Matchers::ContainsSubstring("✗"));
+    }
+
+    SECTION("/changes all opens the whole conversation's changes") {
+        ctx.text = "/changes all";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_opens == 1);
+        CHECK(*comparer_scope == core::commands::ChangesScope::Conversation);
+
+        ctx.text = "/diff ALL";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_scope == core::commands::ChangesScope::Conversation);
+    }
+
+    SECTION("/changes refuses an argument it does not know") {
+        *mock_history = "";
+        ctx.text = "/changes everything";
+        REQUIRE(executor.try_execute(ctx.text, ctx));
+        CHECK(*comparer_opens == 0);
+        CHECK_THAT(*mock_history, Catch::Matchers::ContainsSubstring("Usage: /changes [all]"));
     }
 
     SECTION("/diff is another name for /changes") {

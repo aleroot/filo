@@ -3,12 +3,16 @@
 
 #include "tui/Conversation.hpp"
 #include "tui/SessionReplay.hpp"
+#include "core/changes/TurnChangeTracker.hpp"
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <format>
+#include <random>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 
@@ -373,6 +377,83 @@ TEST_CASE("The comparer opens on the most recent turn that changed files",
     CHECK(latest_turn_with_changes(quiet_only).message == nullptr);
     const std::vector<UiMessage> none;
     CHECK(latest_turn_with_changes(none).message == nullptr);
+}
+
+TEST_CASE("The whole conversation compares as one net diff per file",
+          "[tui][turn_file_changes][diff_comparer]") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path()
+        / std::format("filo_conversation_comparison_{}", std::random_device{}());
+    fs::create_directories(root);
+    struct Cleanup {
+        fs::path path;
+        ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); }
+    } cleanup{root};
+    const auto put = [&](std::string_view name, std::string_view content) {
+        std::ofstream(root / name, std::ios::binary) << content;
+    };
+    const auto run_turn = [&](std::string_view name, std::string_view content) {
+        core::changes::TurnChangeTracker tracker(root);
+        tracker.track(core::changes::MutationScope{.paths = {root / name}}, [&] {
+            put(name, content);
+            return 0;
+        });
+        return tracker.changes();
+    };
+
+    put("app.cpp", "one\ntwo\n");
+    UiMessage prompt;
+    prompt.type = MessageType::User;
+    prompt.text = "Start.";
+    auto first = make_assistant_message("First.", "", false);
+    first.turn_changes = run_turn("app.cpp", "one\nTWO\n");
+    auto quiet = make_assistant_message("Nothing touched.", "", false);
+    auto second = make_assistant_message("Second.", "", false);
+    second.turn_changes = run_turn("app.cpp", "one\nTWO\nthree\n");
+
+    const std::vector<UiMessage> messages{prompt, first, quiet, second};
+    const auto source = conversation_turns(messages);
+    CHECK(source.turns.size() == 2);
+    CHECK(source.first_index == 1);
+    CHECK(source.disclosure_keys
+          == std::vector<std::string>{turn_file_change_key(first.id, "app.cpp"),
+                                      turn_file_change_key(second.id, "app.cpp")});
+
+    SECTION("one section per file, from the original to now") {
+        const auto comparison = conversation_comparison(source, root);
+        REQUIRE(comparison.has_value());
+        CHECK(comparison->whole_conversation);
+        CHECK(comparison->patch.find("diff --git") == comparison->patch.rfind("diff --git"));
+        CHECK_THAT(comparison->patch, ContainsSubstring("-two\n"));
+        CHECK_THAT(comparison->patch, ContainsSubstring("+TWO\n+three\n"));
+        CHECK(comparison_omissions(*comparison).empty());
+    }
+    SECTION("a file edited by hand since is named, not folded in") {
+        put("app.cpp", "one\nTWO\nthree, by hand\n");
+        const auto comparison = conversation_comparison(source, root);
+        REQUIRE_FALSE(comparison.has_value());
+        CHECK(comparison.error()
+              == "Nothing the conversation changed can be compared: "
+                 "app.cpp changed outside the conversation.");
+    }
+    SECTION("a conversation without changes says so") {
+        const std::vector<UiMessage> without{prompt, quiet};
+        const auto comparison = conversation_comparison(conversation_turns(without), root);
+        REQUIRE_FALSE(comparison.has_value());
+        CHECK(comparison.error() == "No turn in this conversation has changed files yet.");
+    }
+}
+
+TEST_CASE("A conversation comparison says what it leaves out",
+          "[tui][turn_file_changes][diff_comparer]") {
+    TurnComparison comparison{
+        .patch = "diff",
+        .caveats = {"b.txt changed outside the conversation"},
+        .whole_conversation = true,
+    };
+    CHECK(comparison_omissions(comparison)
+          == "The comparison is not the whole conversation: "
+             "b.txt changed outside the conversation.");
 }
 
 TEST_CASE("A turn that changed files is flagged once a later turn started",

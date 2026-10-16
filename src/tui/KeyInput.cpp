@@ -42,6 +42,10 @@ bool is_ctrl_modifier(int encoded_modifier) {
     return (modifier_bits & 4) != 0;
 }
 
+bool is_shift_modifier(int encoded_modifier) {
+    return encoded_modifier > 0 && ((encoded_modifier - 1) & 1) != 0;
+}
+
 bool is_letter_codepoint(int codepoint, char letter) {
     const unsigned char lower = static_cast<unsigned char>(
         std::tolower(static_cast<unsigned char>(letter)));
@@ -50,15 +54,17 @@ bool is_letter_codepoint(int codepoint, char letter) {
     return codepoint == static_cast<int>(lower) || codepoint == static_cast<int>(upper);
 }
 
-bool is_ctrl_letter_kitty_sequence(std::string_view input, char letter) {
+/// The encoded modifier a kitty keyboard protocol sequence (ESC [ code ; mod u)
+/// reports for `letter`, or nullopt when it is not that letter.
+std::optional<int> kitty_letter_modifier(std::string_view input, char letter) {
     if (!input.starts_with("\x1B[") || !input.ends_with("u")) {
-        return false;
+        return std::nullopt;
     }
 
     const std::string_view body = input.substr(2, input.size() - 3);
     const std::size_t semicolon = body.find(';');
     if (semicolon == std::string_view::npos) {
-        return false;
+        return std::nullopt;
     }
 
     const std::string_view code_token = body.substr(0, semicolon);
@@ -70,11 +76,11 @@ bool is_ctrl_letter_kitty_sequence(std::string_view input, char letter) {
 
     int codepoint = 0;
     int modifier = 0;
-    if (!parse_decimal(code_token, codepoint) || !parse_decimal(modifier_token, modifier)) {
-        return false;
+    if (!parse_decimal(code_token, codepoint) || !parse_decimal(modifier_token, modifier)
+        || !is_letter_codepoint(codepoint, letter)) {
+        return std::nullopt;
     }
-
-    return is_letter_codepoint(codepoint, letter) && is_ctrl_modifier(modifier);
+    return modifier;
 }
 
 // Parse a modifyOtherKeys CSI sequence: ESC [ 27 ; <modifier> ; <key> ~
@@ -101,13 +107,29 @@ parse_modify_other_keys(std::string_view input) {
     return std::make_pair(key_code, modifier);
 }
 
-bool is_ctrl_letter_modify_other_keys_sequence(std::string_view input, char letter) {
+/// The encoded modifier a modifyOtherKeys sequence reports for `letter`, or
+/// nullopt when it is not that letter.
+std::optional<int> modify_other_keys_letter_modifier(std::string_view input, char letter) {
     const auto parsed = parse_modify_other_keys(input);
-    if (!parsed) {
-        return false;
+    if (!parsed || !is_letter_codepoint(parsed->first, letter)) {
+        return std::nullopt;
     }
-    const auto [key_code, modifier] = *parsed;
-    return is_letter_codepoint(key_code, letter) && is_ctrl_modifier(modifier);
+    return parsed->second;
+}
+
+/// The encoded modifier either enhanced-keyboard protocol reports for
+/// `letter`. Only these protocols can report Shift alongside Ctrl: a legacy
+/// terminal sends the same control byte for Ctrl+X and Ctrl+Shift+X.
+std::optional<int> enhanced_letter_modifier(std::string_view input, char letter) {
+    if (auto modifier = kitty_letter_modifier(input, letter)) {
+        return modifier;
+    }
+    return modify_other_keys_letter_modifier(input, letter);
+}
+
+bool is_ctrl_letter_enhanced_sequence(std::string_view input, char letter) {
+    const auto modifier = enhanced_letter_modifier(input, letter);
+    return modifier.has_value() && is_ctrl_modifier(*modifier);
 }
 
 std::optional<unsigned char> ctrl_letter_control_byte(char letter) {
@@ -133,12 +155,20 @@ bool is_ctrl_letter_event(const ftxui::Event& event, char letter) {
         return true;
     }
 
-    return is_ctrl_letter_kitty_sequence(input, letter)
-        || is_ctrl_letter_modify_other_keys_sequence(input, letter);
+    return is_ctrl_letter_enhanced_sequence(input, letter);
+}
+
+bool is_ctrl_shift_letter_event(const ftxui::Event& event, char letter) {
+    const auto modifier = enhanced_letter_modifier(event.input(), letter);
+    return modifier.has_value() && is_ctrl_modifier(*modifier) && is_shift_modifier(*modifier);
 }
 
 bool is_ctrl_x_event(const ftxui::Event& event) {
-    return is_ctrl_letter_event(event, 'x');
+    return is_ctrl_letter_event(event, 'x') && !is_ctrl_shift_letter_event(event, 'x');
+}
+
+bool is_ctrl_shift_x_event(const ftxui::Event& event) {
+    return is_ctrl_shift_letter_event(event, 'x');
 }
 
 bool is_ctrl_o_event(const ftxui::Event& event) {
@@ -195,8 +225,7 @@ bool is_ctrl_j_event(const ftxui::Event& event) {
     // Enter open the thread browser. Only accept unambiguous encoded forms:
     // kitty keyboard protocol and modifyOtherKeys CSI sequences.
     const std::string& input = event.input();
-    return is_ctrl_letter_kitty_sequence(input, 'j')
-        || is_ctrl_letter_modify_other_keys_sequence(input, 'j');
+    return is_ctrl_letter_enhanced_sequence(input, 'j');
 }
 
 bool is_ctrl_h_event(const ftxui::Event& event) {
@@ -204,8 +233,7 @@ bool is_ctrl_h_event(const ftxui::Event& event) {
     // Only enhanced keyboard protocols can distinguish the binding without
     // stealing normal text editing.
     const std::string& input = event.input();
-    return is_ctrl_letter_kitty_sequence(input, 'h')
-        || is_ctrl_letter_modify_other_keys_sequence(input, 'h');
+    return is_ctrl_letter_enhanced_sequence(input, 'h');
 }
 
 bool is_ctrl_enter_event(const ftxui::Event& event) {

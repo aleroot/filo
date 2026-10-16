@@ -9,6 +9,8 @@
 #include <ftxui/screen/box.hpp>
 #include <atomic>
 #include <chrono>
+#include <expected>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -386,9 +388,9 @@ struct TurnWithChanges {
 // The result borrows the messages, so a temporary would leave it dangling.
 TurnWithChanges latest_turn_with_changes(const std::vector<UiMessage>&& messages) = delete;
 
-/// One turn's changes shaped for a comparer: the patch to hand to an external
-/// application, the disclosures that show the same changes inline, and what
-/// the patch cannot contain.
+/// Changes shaped for a comparer — one turn's, or the whole conversation's: the
+/// patch to hand to an external application, the disclosures that show the
+/// same changes inline, and what the patch cannot contain.
 struct TurnComparison {
     /// Git-shaped unified diff; never empty.
     std::string patch;
@@ -398,6 +400,8 @@ struct TurnComparison {
     std::size_t undiffed = 0;
     /// Gaps the turn itself declared, worded as the change box words them.
     std::vector<std::string> caveats;
+    /// Nets every turn of the conversation rather than showing one.
+    bool whole_conversation = false;
 };
 
 /// One sentence naming what `comparison` leaves out, or empty when it is the
@@ -413,6 +417,27 @@ struct TurnComparison {
 [[nodiscard]] std::optional<TurnComparison> turn_comparison(
     const UiMessage& message,
     std::string_view path);
+
+/// The turns a conversation comparison nets, copied out of the transcript so
+/// the comparison can be built without holding it.
+struct ConversationTurns {
+    /// Every turn that changed files and was not reverted, oldest first.
+    std::vector<core::changes::TurnChanges> turns;
+    /// Disclosure key of every file those turns show a diff for.
+    std::vector<std::string> disclosure_keys;
+    /// Position of the earliest of them in the searched messages.
+    std::optional<std::size_t> first_index;
+};
+
+[[nodiscard]] ConversationTurns conversation_turns(const std::vector<UiMessage>& messages);
+
+/// Everything the conversation changed, one net diff per file from its state
+/// before the first turn touched it to its state in `workspace_root` now (see
+/// core::changes::conversation_changes). The error says why there is nothing
+/// to open.
+[[nodiscard]] std::expected<TurnComparison, std::string> conversation_comparison(
+    const ConversationTurns& source,
+    const std::filesystem::path& workspace_root);
 
 /// One transcript line for a revert: what went back, or what stopped it. The
 /// mark that says whether it worked belongs to the command, not to this
