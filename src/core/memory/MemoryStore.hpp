@@ -99,6 +99,17 @@ struct MemoryFileResult {
     std::size_t count = 0;
 };
 
+struct MemoryImportResult {
+    bool ok = false;
+    std::string message;
+    std::size_t added = 0;
+    /// Entries whose fact already exists (active or archived) in the same
+    /// project/scope/session bucket.
+    std::size_t duplicates = 0;
+    /// Automatic notes archived to keep a bucket within the active-entry limit.
+    std::size_t archived = 0;
+};
+
 class MemoryStore {
 public:
     explicit MemoryStore(std::filesystem::path path = default_path());
@@ -143,6 +154,15 @@ public:
     [[nodiscard]] MemoryMutationResult clear() const;
     [[nodiscard]] MemoryFileResult save_markdown(const std::filesystem::path& output_path) const;
     [[nodiscard]] MemoryFileResult load_markdown(const std::filesystem::path& input_path) const;
+    /// Adds entries carried over from another store, keeping their project,
+    /// scope, provenance and usage history. Each one receives a fresh local id
+    /// (and loses `supersedes`, whose ids only meant something in the source
+    /// store). A fact already present in its bucket is counted, not re-added:
+    /// an archived local copy stays archived. Archived or empty input entries
+    /// are ignored. Buckets that grow past the active-entry limit are trimmed
+    /// like after `remember`. With `dry_run`, nothing is written.
+    [[nodiscard]] MemoryImportResult import_entries(std::vector<MemoryEntry> entries,
+                                                    bool dry_run = false) const;
 
     [[nodiscard]] std::filesystem::path path() const noexcept { return path_; }
 
@@ -161,6 +181,11 @@ private:
     std::string project_root_;
     std::string session_id_;
 };
+
+/// The persisted JSON form of one entry, as stored in memory.json.
+[[nodiscard]] std::string serialize_memory_entry(const MemoryEntry& entry);
+/// Inverse of serialize_memory_entry; nullopt when the id or content is missing.
+[[nodiscard]] std::optional<MemoryEntry> parse_memory_entry(std::string_view json);
 
 [[nodiscard]] std::string build_memory_prompt_block(const MemoryState& state,
                                                     std::size_t max_entries = 24,

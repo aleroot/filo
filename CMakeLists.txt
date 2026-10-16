@@ -432,6 +432,7 @@ set(FILO_CORE_SOURCES
     src/core/tools/WebSearchTool.cpp
     src/core/tools/SkillRegistry.cpp
     src/core/utils/JsonUtils.cpp
+    src/core/utils/JsonValue.cpp
     src/core/llm/OneShotCompletion.cpp
     src/core/logging/Logger.cpp
     src/core/commands/CommandExecutor.cpp
@@ -476,6 +477,9 @@ set(FILO_CORE_SOURCES
     src/core/permissions/CommandPolicy.cpp
     src/core/cli/TrustFlagResolver.cpp
     src/core/cli/WorkDirLayout.cpp
+    src/core/cli/ConfigTransfer.cpp
+    src/core/portability/ConfigBundle.cpp
+    src/core/portability/ConfigPortability.cpp
 )
 
 # Lampo is a native macOS App Store app: its backends only exist in Apple
@@ -660,6 +664,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_mime_utils.cpp
     tests/test_uri_utils.cpp
     tests/test_json_writer.cpp
+    tests/test_config_portability.cpp
     tests/test_interprocess_file.cpp
     tests/test_network_traffic.cpp
     tests/test_memory_store.cpp
@@ -895,6 +900,7 @@ source_group(
         tests/test_mime_utils.cpp
         tests/test_uri_utils.cpp
         tests/test_json_writer.cpp
+        tests/test_config_portability.cpp
         tests/test_memory_store.cpp
         tests/test_memory_system.cpp
         tests/test_commands.cpp

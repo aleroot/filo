@@ -43,13 +43,39 @@ void sync_file(const std::string& path) {
     if (result != 0) throw std::runtime_error("Cannot sync OAuth token file: " + path);
 }
 
+constexpr std::string_view kTokenFilePrefix = "oauth_";
+constexpr std::string_view kTokenFileSuffix = ".json";
+constexpr std::size_t kMaxProviderIdLength = 128;
+
 } // namespace
+
+std::string FileTokenStore::file_name(std::string_view provider_id) {
+    return std::string(kTokenFilePrefix).append(provider_id).append(kTokenFileSuffix);
+}
+
+std::optional<std::string> FileTokenStore::provider_id_from_file_name(std::string_view file_name) {
+    if (file_name.size() <= kTokenFilePrefix.size() + kTokenFileSuffix.size()
+        || !file_name.starts_with(kTokenFilePrefix) || !file_name.ends_with(kTokenFileSuffix)) {
+        return std::nullopt;
+    }
+    file_name.remove_prefix(kTokenFilePrefix.size());
+    file_name.remove_suffix(kTokenFileSuffix.size());
+    return std::string(file_name);
+}
+
+bool FileTokenStore::is_valid_provider_id(std::string_view provider_id) noexcept {
+    constexpr std::string_view kAllowed =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.";
+    return !provider_id.empty() && provider_id.size() <= kMaxProviderIdLength
+        && provider_id.front() != '.'
+        && provider_id.find_first_not_of(kAllowed) == std::string_view::npos;
+}
 
 FileTokenStore::FileTokenStore(std::string config_dir)
     : config_dir_(std::move(config_dir)) {}
 
 std::string FileTokenStore::token_path(std::string_view provider_id) const {
-    return config_dir_ + "/oauth_" + std::string(provider_id) + ".json";
+    return config_dir_ + "/" + file_name(provider_id);
 }
 
 std::optional<OAuthToken> FileTokenStore::load(std::string_view provider_id) {

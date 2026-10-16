@@ -1760,6 +1760,10 @@ std::string serialize_mcp_servers_overlay(const std::vector<McpServerConfig>& se
 
 } // namespace
 
+std::string default_user_config_json() {
+    return default_config_json();
+}
+
 std::string ConfigManager::get_config_dir() const {
     const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
     if (xdg_config && xdg_config[0] != '\0') {

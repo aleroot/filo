@@ -6,6 +6,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <format>
+#include <fstream>
+#include <iterator>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -173,7 +175,8 @@ std::filesystem::path lock_path_for(const std::filesystem::path& target) {
 
 bool atomic_write_file(const std::filesystem::path& target,
                        std::string_view content,
-                       std::string* error) {
+                       std::string* error,
+                       std::optional<std::filesystem::perms> permissions) {
     if (error) error->clear();
 
     std::error_code ec;
@@ -191,7 +194,9 @@ bool atomic_write_file(const std::filesystem::path& target,
 
     mode_t mode = 0600;
     struct stat target_stat {};
-    if (::stat(target.c_str(), &target_stat) == 0) {
+    if (permissions) {
+        mode = static_cast<mode_t>(*permissions & std::filesystem::perms::mask);
+    } else if (::stat(target.c_str(), &target_stat) == 0) {
         mode = target_stat.st_mode & 0777;
     }
 
@@ -244,6 +249,14 @@ bool atomic_write_file(const std::filesystem::path& target,
         }
     }
     return true;
+}
+
+std::optional<std::string> read_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::string content(std::istreambuf_iterator<char>(in), {});
+    if (in.bad()) return std::nullopt;
+    return content;
 }
 
 } // namespace core::utils

@@ -104,8 +104,9 @@ constexpr int kLoopbackPortEnd = 17920;
 
 [[nodiscard]] std::string meta_path(std::string_view server_name,
                                     std::string_view config_dir) {
-    return std::string(config_dir) + "/oauth_" + mcp_oauth_provider_id(server_name)
-         + "_meta.json";
+    return std::string(config_dir) + "/"
+         + core::auth::FileTokenStore::file_name(
+               mcp_oauth_meta_id(mcp_oauth_provider_id(server_name)));
 }
 
 /**
@@ -511,6 +512,10 @@ mcp_request_timeout(const core::config::McpServerConfig& config,
 
 std::string mcp_oauth_provider_id(std::string_view server_name) {
     return "mcp_" + sanitize_server_name(server_name);
+}
+
+std::string mcp_oauth_meta_id(std::string_view provider_id) {
+    return std::string(provider_id) + "_meta";
 }
 
 std::optional<std::string>

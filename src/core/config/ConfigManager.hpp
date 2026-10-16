@@ -295,6 +295,11 @@ struct ProfileConfig {
     std::string_view specific_model = {},
     std::string* error = nullptr);
 
+/// The config.json Filo writes on first start. Anything that creates
+/// config.json itself must start from this, or the file would shadow the
+/// shipped defaults forever.
+[[nodiscard]] std::string default_user_config_json();
+
 class ConfigManager {
 public:
     static ConfigManager& get_instance() {

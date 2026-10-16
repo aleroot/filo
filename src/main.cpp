@@ -12,6 +12,7 @@
 #include "core/session/SessionStore.hpp"
 #include "core/utils/StringUtils.hpp"
 #include "core/cli/TrustFlagResolver.hpp"
+#include "core/cli/ConfigTransfer.hpp"
 #include "core/cli/WorkDirLayout.hpp"
 #include "core/landrun/LandrunHelper.hpp"
 #include "core/landrun/LandrunDriverFactory.hpp"
@@ -210,7 +211,57 @@ int main(int argc, char** argv) {
         std::format("Disable loading project steering files (alias for --steering {})",
                     kNoSteeringToken));
 
+    core::cli::ConfigTransferRequest transfer;
+    auto* export_opt = app.add_option(
+        "--export", transfer.export_target,
+        "Export settings, providers, MCP servers, memories (and, with --include-secrets, "
+        "OAuth logins and API keys) to a bundle file, or - for stdout, and exit. "
+        "Without a value, use with --dry-run to list what would be exported.")
+        ->expected(0, 1);
+    auto* import_opt = app.add_option(
+        "--import", transfer.import_source,
+        "Import a bundle written by --export (- reads stdin) and exit. Replaced items "
+        "are backed up first; memories are merged.")
+        ->excludes(export_opt);
+    const std::string selector_help = core::cli::config_transfer_selector_help();
+    auto* only_opt = app.add_option(
+        "--only", transfer.only,
+        "With --export/--import: only these items (comma-separated or repeated). "
+        + selector_help)
+        ->delimiter(',');
+    auto* except_opt = app.add_option(
+        "--except", transfer.except,
+        "With --export/--import: skip these items (same selectors as --only).")
+        ->delimiter(',');
+    app.add_flag(
+        "--include-secrets", transfer.include_secrets,
+        "With --export: include OAuth logins, API keys and MCP headers/env.")
+        ->needs(export_opt);
+    auto* dry_run_opt = app.add_flag(
+        "--dry-run", transfer.dry_run,
+        "With --export/--import: report what would happen without writing anything.");
+    app.add_option(
+        "--map-path", transfer.map_paths,
+        "With --import: rewrite memory project paths, FROM=TO (repeatable). "
+        "Paths under the exporting home directory follow the home directory automatically.")
+        ->needs(import_opt);
+
     CLI11_PARSE(app, argc, argv);
+
+    const bool config_transfer = export_opt->count() > 0 || import_opt->count() > 0;
+    if (!config_transfer
+        && (only_opt->count() > 0 || except_opt->count() > 0 || dry_run_opt->count() > 0)) {
+        std::cerr << "--only, --except and --dry-run apply to --export or --import.\n";
+        return 2;
+    }
+    if (config_transfer) {
+        // --export with no value parses as an empty target: listing only.
+        if (export_opt->count() > 0 && !transfer.export_target) transfer.export_target.emplace();
+        transfer.stdout_is_terminal = isatty(STDOUT_FILENO) != 0;
+        return core::cli::run_config_transfer(
+            transfer, core::portability::PortabilityPaths::current(),
+            std::cin, std::cout, std::cerr);
+    }
 
     if (sandbox_opt->count() > 0) {
         sandbox_mode = requested_sandbox_mode.has_value()

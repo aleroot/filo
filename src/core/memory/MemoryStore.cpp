@@ -228,8 +228,9 @@ std::mutex& mutex_for_path(const std::filesystem::path& path) {
 /// Archive the least-recalled automatic notes in one bucket until it fits the
 /// ceiling. `protected_id` is the fact just saved and is never archived.
 /// Manual and imported notes are not eligible, so a bucket of those may stay
-/// above the ceiling rather than lose an explicit note.
-void retain_active_bucket(MemoryState& state,
+/// above the ceiling rather than lose an explicit note. Returns how many
+/// notes were archived.
+std::size_t retain_active_bucket(MemoryState& state,
                           std::string_view project_root,
                           std::string_view scope,
                           std::string_view session_id,
@@ -248,19 +249,22 @@ void retain_active_bucket(MemoryState& state,
         if (entry.id == protected_id || !retention_eligible(entry)) continue;
         victims.push_back(&entry);
     }
-    if (active <= limit) return;
+    if (active <= limit) return 0;
     std::ranges::sort(victims, [](const MemoryEntry* lhs, const MemoryEntry* rhs) {
         if (lhs->use_count != rhs->use_count) return lhs->use_count < rhs->use_count;
         if (lhs->last_used_at != rhs->last_used_at) return lhs->last_used_at < rhs->last_used_at;
         if (lhs->created_at != rhs->created_at) return lhs->created_at < rhs->created_at;
         return lhs->id < rhs->id;
     });
+    std::size_t archived = 0;
     for (auto* entry : victims) {
         if (active <= limit) break;
         entry->archived = true;
         entry->updated_at = std::string(now);
         --active;
+        ++archived;
     }
+    return archived;
 }
 
 /// Count one project/scope/session bucket, independently of prompt selection.
@@ -996,6 +1000,71 @@ MemoryFileResult MemoryStore::load_markdown(const std::filesystem::path& input_p
             : std::format("Loaded {} markdown memory item(s) from {}.", imported, input_path.string()),
         .count = imported,
     };
+}
+
+MemoryImportResult MemoryStore::import_entries(std::vector<MemoryEntry> entries,
+                                               bool dry_run) const {
+    std::lock_guard lock(mutex_for_path(path_));
+    std::string lock_error;
+    auto file_lock = core::utils::InterprocessFileLock::acquire(
+        core::utils::lock_path_for(path_), &lock_error);
+    if (!file_lock) return {.ok = false, .message = lock_error};
+    std::string read_error;
+    auto state = load_unlocked(&read_error);
+    if (!read_error.empty()) return {.ok = false, .message = read_error};
+
+    using Bucket = std::tuple<std::string, std::string, std::string>;
+    std::set<std::tuple<std::string, std::string, std::string, std::string>> present;
+    for (const auto& entry : state.entries) {
+        present.emplace(entry.project_root, entry.scope, entry.session_id,
+                        normalize_for_match(entry.content));
+    }
+
+    const std::string now = now_iso8601();
+    std::set<Bucket> touched;
+    MemoryImportResult result{.ok = true};
+    for (auto& entry : entries) {
+        entry.content = core::utils::str::trim_ascii_copy(entry.content);
+        if (entry.archived || entry.content.empty()) continue;
+        if (entry.scope.empty()) entry.scope = "global";
+        if (!present.emplace(entry.project_root, entry.scope, entry.session_id,
+                             normalize_for_match(entry.content)).second) {
+            ++result.duplicates;
+            continue;
+        }
+        entry.id = next_id(state.entries);
+        entry.supersedes.clear();
+        if (entry.created_at.empty()) entry.created_at = now;
+        if (entry.updated_at.empty()) entry.updated_at = now;
+        touched.emplace(entry.project_root, entry.scope, entry.session_id);
+        state.entries.push_back(std::move(entry));
+        ++result.added;
+    }
+    for (const auto& [project_root, scope, session_id] : touched) {
+        result.archived += retain_active_bucket(state, project_root, scope, session_id, {}, now);
+    }
+
+    if (!dry_run && result.added > 0) {
+        std::string error;
+        if (!save_unlocked(state, &error)) return {.ok = false, .message = error};
+    }
+    result.message = std::format("{} memory item(s) added, {} already present, {} archived.",
+                                 result.added, result.duplicates, result.archived);
+    return result;
+}
+
+std::string serialize_memory_entry(const MemoryEntry& entry) {
+    std::string out;
+    append_entry_json(out, entry);
+    return out;
+}
+
+std::optional<MemoryEntry> parse_memory_entry(std::string_view json) {
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded(json);
+    simdjson::dom::object object;
+    if (parser.parse(padded).get(object) != simdjson::SUCCESS) return std::nullopt;
+    return parse_entry(object);
 }
 
 std::string MemoryStore::normalize_for_match(std::string_view value) {

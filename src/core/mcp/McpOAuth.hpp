@@ -40,6 +40,12 @@ struct McpOAuthMeta {
 [[nodiscard]] std::string mcp_oauth_provider_id(std::string_view server_name);
 
 /**
+ * Token-store id under which the metadata for @p provider_id's login is kept
+ * (endpoints + client registration, needed to refresh the token).
+ */
+[[nodiscard]] std::string mcp_oauth_meta_id(std::string_view provider_id);
+
+/**
  * Resolve the effective JSON-RPC request timeout for an MCP server config.
  * @p transport_default is used when request_timeout_ms is unset/non-positive.
  */

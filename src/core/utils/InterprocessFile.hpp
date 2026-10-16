@@ -53,11 +53,23 @@ private:
 [[nodiscard]] std::filesystem::path lock_path_for(
     const std::filesystem::path& target);
 
+// Read/write for the owner only (0600): the mode for files holding secrets.
+inline constexpr std::filesystem::perms kPrivateFilePermissions =
+    std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+
 // Crash-safe replacement: unique private temp file, fsync, atomic rename, then
 // best-effort directory fsync. Callers that perform read/modify/write must hold
 // an InterprocessFileLock across the complete transaction.
+//
+// The file keeps the target's current permissions (0600 when it is new) unless
+// `permissions` is given; then the replacement is created with exactly those,
+// so a secret is never readable under a wider mode, not even briefly.
 [[nodiscard]] bool atomic_write_file(const std::filesystem::path& target,
                                      std::string_view content,
-                                     std::string* error = nullptr);
+                                     std::string* error = nullptr,
+                                     std::optional<std::filesystem::perms> permissions = std::nullopt);
+
+// Whole-file read; nullopt when the file cannot be opened or read.
+[[nodiscard]] std::optional<std::string> read_file(const std::filesystem::path& path);
 
 } // namespace core::utils

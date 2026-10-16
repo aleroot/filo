@@ -1,4 +1,24 @@
-# Filo
+<p align="center">
+  <h1 align="center">Filo</h1>
+  <p align="center">A high-performance AI coding agent for the terminal, written in modern C++.</p>
+</p>
+
+<p align="center">
+  <a href="https://github.com/aleroot/filo/actions/workflows/ci.yml"><img src="https://github.com/aleroot/filo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/C%2B%2B-26-00599C?logo=cplusplus&logoColor=white" alt="C++26">
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue" alt="Platforms: Linux | macOS">
+  <img src="https://img.shields.io/badge/MCP-server%20%2B%20client-8A2BE2" alt="MCP server and client">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License: Apache 2.0"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#runtime-modes">Runtime modes</a> ·
+  <a href="#lampo">Lampo</a> ·
+  <a href="#settings">Settings</a> ·
+  <a href="#moving-your-setup-to-another-machine">Moving your setup</a>
+</p>
 
 <p align="center">
   <img src="docs/filo.png" alt="Filo terminal UI screenshot" width="1100" />
@@ -20,6 +40,8 @@ It runs in multiple runtime modes:
 
 Switch models with `--model` or `/model` — local, hybrid, or remote, no lock-in.
 
+## Highlights
+
 <table>
 <tr><td><b>A real terminal interface</b></td><td>Full FTXUI TUI with streaming tool output, slash-command autocomplete, session resume, context mentions, and clipboard image paste.</td></tr>
 <tr><td><b>Embedded local AI</b></td><td>C++ core can link <code>llama.cpp</code> for in-process GGUF inference; Ollama over localhost is first-class too. The HTTP daemon binds <code>127.0.0.1</code> by default.</td></tr>
@@ -30,9 +52,7 @@ Switch models with `--model` or `/model` — local, hybrid, or remote, no lock-i
 <tr><td><b>Embedded Python</b></td><td>Persistent in-process interpreter tool with optional <code>FILO_PYTHON_VENV</code> isolation.</td></tr>
 </table>
 
----
-
-## Quick Start
+## Quick start
 
 ### Prerequisites
 
@@ -41,9 +61,10 @@ Switch models with `--model` or `/model` — local, hybrid, or remote, no lock-i
 - OpenSSL
 - Python 3 (required when `FILO_ENABLE_PYTHON=ON`, which is the default)
 
-## Build And Run
+### Build and run
 
-### Linux
+<details>
+<summary><b>Linux</b></summary>
 
 ```bash
 cmake --preset linux-debug
@@ -53,7 +74,10 @@ cmake --build --preset linux-debug --target run_integration_tests
 ./build/Linux/linux-debug/filo
 ```
 
-### macOS
+</details>
+
+<details>
+<summary><b>macOS</b></summary>
 
 ```bash
 cmake --preset xcode-debug
@@ -62,6 +86,22 @@ ctest --preset xcode-debug --output-on-failure
 cmake --build --preset xcode-debug --target run_integration_tests
 ./build/Darwin/xcode-debug/Debug/filo
 ```
+
+</details>
+
+<details>
+<summary><b>With embedded <code>llama.cpp</code></b></summary>
+
+Build with embedded local GGUF inference:
+
+```bash
+cmake --preset linux-debug -DFILO_ENABLE_LLAMACPP=ON
+cmake --build --preset linux-debug
+```
+
+Then select a `llamacpp` provider/model from the TUI (`/model`) after configuring the local backend.
+
+</details>
 
 ### Install
 
@@ -77,9 +117,7 @@ The executable is installed to `<prefix>/bin/filo`. Verify with `filo --version`
 
 Configure providers and credentials from the TUI (`/settings`, `/model`, `/login`) or your preferred environment. Local backends such as Ollama (`http://localhost:11434` by default) and embedded `llama.cpp` need no cloud keys.
 
----
-
-## What Makes Filo Different
+## Features
 
 ### Local-first architecture
 
@@ -102,20 +140,6 @@ Configure providers and credentials from the TUI (`/settings`, `/model`, `/login
 - Interpreter state persists across calls (variables/imports/functions carry over).
 - Optional venv isolation via `FILO_PYTHON_VENV`.
 
-### Feature highlights
-
-- C++26 core with streaming-first provider protocols
-- TUI built with FTXUI
-- Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
-- Conversation references: type `#` and a few words of a past conversation's title to pick it (rows show turns, age and date); the prompt gets `#<session-id>`, which inlines a bounded digest of that conversation — its opening request, the most recent user/assistant turns and the tools it called, never tool output. Messages are numbered and the digest ends by saying whether it is complete; when it is not, the agent reads the rest with its `conversation` tool, page by page from any message number (tool output on request, unless steering is withheld), and a read stays valid while the referenced conversation keeps growing. `#"name"` works for `/rename`d sessions. In the picker, `#1`, `#2`… pick this project's conversations newest-first (like `/resume 1`) and `#-1` the oldest; Tab swaps the number for the stable id, so a sent `#2` stays plain text. `#` stays plain text unless it names a saved session (`#123`, `# Heading`, `#include` are untouched), and is ignored inside ``` fences.
-- Agent Skills support with `.filo/skills` and on-demand activation
-- `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
-- First-class thread management (`Ctrl+N` new thread, `/threads` for active runtimes; `Ctrl+H`/`Ctrl+J` aliases on enhanced-keyboard terminals) — project-named tabs let you switch without tmux/screen while hidden threads keep working. On an empty prompt, `Ctrl+D` archives and closes the current idle secondary thread; the main thread retains double-`Ctrl+D` app exit. In `/threads`, `C` closes any idle non-main thread without deleting its saved session. `/sessions` remains the saved-conversation manager.
-- Session persistence and resume
-- Global + workspace config layering
-- MCP dispatcher shared across stdio and HTTP transports
-- OAuth and API-key credentials
-
 ### Agent execution modes
 
 | Mode | Behaviour |
@@ -131,7 +155,8 @@ frontier through subagents, while the parent stays the single writer. It records
 branch, revision, and dirty paths, then audits the final state so branch/HEAD transitions or lost
 pre-existing changes cannot pass silently.
 
-### Execution profiles
+<details>
+<summary><b>Execution profiles: subagents on another provider or model</b></summary>
 
 Subagent profiles can deliberately use a different configured provider and model from the parent conversation. Give the profile a descriptive, task-oriented name and ask the parent to select it with `subagent_type`. The parent cannot override a profile's provider or model in its prompt.
 
@@ -152,6 +177,11 @@ Subagent profiles can deliberately use a different configured provider and model
 ```
 
 Profiles inherit the parent provider/model when their respective fields are omitted.
+
+</details>
+
+<details>
+<summary><b>Verification, recipes and hooks</b></summary>
 
 A turn that changed the workspace must end with fresh verification evidence. On `stop` Filo runs
 project completion hooks; a successful hook marked `quality_gate` is authoritative. Otherwise AUTO
@@ -187,9 +217,26 @@ Hook events are `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, `post_too
 on exit `0` and can request another turn with exit `2` or `{"decision":"block","reason":"…"}`;
 repeated feedback is capped at three turns so a broken hook cannot loop forever.
 
----
+</details>
 
-## Runtime Modes
+<details>
+<summary><b>More features</b></summary>
+
+- C++26 core with streaming-first provider protocols
+- TUI built with FTXUI
+- Context mentions (`@file`, quoted paths, and escaped paths like `@My\ Folder/file.txt`)
+- Conversation references: type `#` and a few words of a past conversation's title to pick it (rows show turns, age and date); the prompt gets `#<session-id>`, which inlines a bounded digest of that conversation — its opening request, the most recent user/assistant turns and the tools it called, never tool output. Messages are numbered and the digest ends by saying whether it is complete; when it is not, the agent reads the rest with its `conversation` tool, page by page from any message number (tool output on request, unless steering is withheld), and a read stays valid while the referenced conversation keeps growing. `#"name"` works for `/rename`d sessions. In the picker, `#1`, `#2`… pick this project's conversations newest-first (like `/resume 1`) and `#-1` the oldest; Tab swaps the number for the stable id, so a sent `#2` stays plain text. `#` stays plain text unless it names a saved session (`#123`, `# Heading`, `#include` are untouched), and is ignored inside fenced code blocks.
+- Agent Skills support with `.filo/skills` and on-demand activation
+- `Ctrl+V` clipboard paste support (text paste and clipboard-image insertion as `@"<path>"`)
+- First-class thread management (`Ctrl+N` new thread, `/threads` for active runtimes; `Ctrl+H`/`Ctrl+J` aliases on enhanced-keyboard terminals) — project-named tabs let you switch without tmux/screen while hidden threads keep working. On an empty prompt, `Ctrl+D` archives and closes the current idle secondary thread; the main thread retains double-`Ctrl+D` app exit. In `/threads`, `C` closes any idle non-main thread without deleting its saved session. `/sessions` remains the saved-conversation manager.
+- Session persistence and resume
+- Global + workspace config layering
+- MCP dispatcher shared across stdio and HTTP transports
+- OAuth and API-key credentials
+
+</details>
+
+## Runtime modes
 
 | Mode | Command |
 |---|---|
@@ -200,7 +247,8 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
 | API gateway only | `filo --api --headless --port 8080` |
 | MCP + API gateway | `filo --mcp --headless --api --port 8080` |
 
-### Daemon / transport
+<details>
+<summary><b>Daemon and transport</b></summary>
 
 - `--mcp` without a value defaults to `tcp`.
 - `--mcp tcp` starts the HTTP daemon and exposes MCP on `/mcp`.
@@ -219,28 +267,46 @@ repeated feedback is capped at three turns so a broken hook cannot loop forever.
   - `<provider>/<model>` routes directly to a configured provider/model.
   - `<provider>` routes to that provider's default configured model.
 
-### Useful CLI flags
+</details>
+
+<details>
+<summary><b>Command-line flags</b></summary>
+
+**Modes**
 
 - `--version` print the Filo version and exit
 - `--mcp [tcp|stdio]` run as MCP server (default transport: `tcp`)
 - `--daemon` deprecated alias for `--mcp tcp`
 - `--api` enable optional chat API proxy mode
 - `filo --auth <provider> [login|logout]` authenticate or sign out and exit
-- `--list-sessions` list resumable sessions
+- `--export <file|->` / `--import <file|->` move settings, providers, logins and memories between machines (see [Moving your setup to another machine](#moving-your-setup-to-another-machine))
+
+**Sessions and models**
+
 - `--model <MODEL|PROVIDER|PROVIDER/MODEL>` select a model for this process only without changing saved defaults
 - `-r, --resume [id|index|name]` resume a saved session (names are set with `/rename`)
+- `-c, --continue` continue the latest project-scoped session (TUI + prompter)
+- `--list-sessions` list resumable sessions
+
+**Prompter**
+
 - `--prompter` force non-interactive mode
 - `--prompt`, `-p` prompt text
 - `--output-format`, `-o` one of `text`, `json`, `stream-json`
 - `--input-format` one of `text`, `stream-json`
 - `--include-partial-messages` include deltas in `stream-json`
-- `-c, --continue` continue the latest project-scoped session (TUI + prompter)
+
+**Workspace and safety**
+
 - `--work-dir`, `-w` add a workspace directory; the first one is primary and later ones are additional allowed directories. Relative entries resolve against the directory Filo was **launched from**, not against the primary, so `-w proj -w .` opens `proj` as primary and its parent as an additional root. Redundant roots (duplicates, paths inside the primary, missing paths) are dropped with a warning naming each one.
 - `--steering [default|fallback|none|<path>]` which project steering files to load; overrides the saved `steering_mode` setting for that run. `fallback` walks the workspace roots in order and uses the first one that has any. A bare path selects a custom file or directory.
 - `--no-steering` alias for `--steering none`
 - `--sandbox [read-only|workspace-write|off]` controls `landrun` (default: `off`); bare `--sandbox` enables `workspace-write`. `read-only` blocks workspace mutations from both native file tools and child processes while preserving a writable private temp root. Opt-in secure modes use native Landlock + seccomp on Linux and the native Seatbelt SPI on macOS—never `sandbox-exec`—and deny child network access.
 
-### Prompter examples
+</details>
+
+<details>
+<summary><b>Prompter examples</b></summary>
 
 ```bash
 # Direct prompt
@@ -266,7 +332,7 @@ filo --continue -p "Now apply the follow-up refactor"
 filo -w ../Lampo -w ../filo
 ```
 
----
+</details>
 
 ## Lampo
 
@@ -293,7 +359,8 @@ Filo’s MCP server (`filo-mcp`) exposes local coding tools so a host such as La
 
 Paths may be absolute or relative to the active workspace. Use `--work-dir` / `-w` to set the primary project and optional additional allowed roots.
 
-#### Streamable HTTP (Filo daemon)
+<details>
+<summary><b>Streamable HTTP (Filo daemon)</b></summary>
 
 Best when Filo should keep running independently of Lampo:
 
@@ -326,19 +393,24 @@ filo --mcp tcp --headless --host 127.0.0.1 --port 8080
 
 Clients must then send `Authorization: Bearer <token>`. Prefer localhost unless remote access is required; if you bind `0.0.0.0`, combine a bearer token with firewall rules and never expose MCP to the public internet unprotected.
 
-> **macOS: transparent daemon with `launchctl`**
->
-> To keep Filo available for Lampo without a terminal window, install a user LaunchAgent that runs the same MCP TCP command at login and restarts it if it exits.
->
-> ```bash
-> # 1) Write ~/Library/LaunchAgents/com.filo.mcp.plist (adjust ProgramArguments paths)
-> # 2) Load it:
-> launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
-> # later:
-> launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
-> ```
->
-> Minimal plist shape: `Label` `com.filo.mcp`, `RunAtLoad` + `KeepAlive` true, `ProgramArguments` = absolute path to `filo` plus `--mcp` `tcp` `--headless` `--host` `127.0.0.1` `--port` `8080`, optional `StandardOutPath` / `StandardErrorPath` under `~/Library/Logs`. Point Lampo at `http://127.0.0.1:8080/mcp` as usual.
+</details>
+
+<details>
+<summary><b>macOS: run the daemon transparently with <code>launchctl</code></b></summary>
+
+To keep Filo available for Lampo without a terminal window, install a user LaunchAgent that runs the same MCP TCP command at login and restarts it if it exits.
+
+```bash
+# 1) Write ~/Library/LaunchAgents/com.filo.mcp.plist (adjust ProgramArguments paths)
+# 2) Load it:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
+# later:
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.filo.mcp.plist
+```
+
+Minimal plist shape: `Label` `com.filo.mcp`, `RunAtLoad` + `KeepAlive` true, `ProgramArguments` = absolute path to `filo` plus `--mcp` `tcp` `--headless` `--host` `127.0.0.1` `--port` `8080`, optional `StandardOutPath` / `StandardErrorPath` under `~/Library/Logs`. Point Lampo at `http://127.0.0.1:8080/mcp` as usual.
+
+</details>
 
 ### 2) Lampo as Filo’s prompt editor
 
@@ -377,13 +449,14 @@ Every agent turn ends with the net changes it made, listed under its answer. Fil
 
 > The comparer is opt-in. `Built in` keeps every diff in the transcript, and `Terminal` pages it through `$PAGER` — on any platform.
 
----
-
 ## Settings
 
 Most day-to-day options live in the interactive TUI. Open **`/settings`** for user/workspace preferences (start mode, approval mode, UI chrome, prompt editor, diff comparer, auto-compaction, tool compression, steering mode). Model selection is separate via **`/model`**.
 
 Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settings.json` (workspace). Workspace values override user values.
+
+<details>
+<summary><b>All settings</b></summary>
 
 | Setting | Key | Options |
 |---|---|---|
@@ -405,7 +478,9 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 
 `--steering` on the command line overrides the saved `steering_mode` for that run only.
 
-Useful slash commands:
+</details>
+
+### Slash commands
 
 | Command | What it does |
 |---|---|
@@ -430,6 +505,8 @@ Skills are discovered from every workspace root and the primary wins name collis
 except executable (Python `entry_point`) skills, which load only from your own skill
 directories and the primary workspace.
 
+### Memory
+
 Durable memory and automatic capture are enabled by default. Models can save stable
 preferences and project facts in `~/.config/filo/memory.json` (or
 `$XDG_CONFIG_HOME/filo/memory.json`). Entries are bound to the current project's
@@ -445,26 +522,90 @@ skill curation remain off by default.
 Run `/memory` to open the interactive menu for project entries, capture settings,
 session controls, and Markdown import/export. `/memory status` prints the text summary.
 
----
+## Moving your setup to another machine
 
-## Enable Embedded `llama.cpp`
-
-Build with embedded local GGUF inference:
+`filo --export` writes your user configuration to one portable JSON bundle and
+`filo --import` applies it on another machine, so you do not have to sign in or
+reconfigure providers again. Both commands do their work and exit.
 
 ```bash
-cmake --preset linux-debug -DFILO_ENABLE_LLAMACPP=ON
-cmake --build --preset linux-debug
+# Everything except secrets: settings, providers, MCP servers, memories
+filo --export filo-setup.json
+
+# Include OAuth logins, API keys and MCP headers/env
+filo --export filo-setup.json --include-secrets
+
+# Only Claude (its provider entry and its OAuth login)
+filo --export claude.json --only claude --include-secrets
+
+# See what would be exported, without writing anything
+filo --export --dry-run --only providers
+
+# On the other machine: preview, then apply
+filo --import filo-setup.json --dry-run
+filo --import filo-setup.json
+
+# Encrypt in transit with any tool that reads stdin, e.g. age
+filo --export - --include-secrets | age -p > filo-setup.age
+age -d filo-setup.age | filo --import -
 ```
 
-Then select a `llamacpp` provider/model from the TUI (`/model`) after configuring the local backend.
+<details>
+<summary><b>Selecting items</b></summary>
 
----
+`--only` and `--except` take comma-separated or repeated
+selectors and work with both commands. A selector is a kind, `kind:pattern`, or a
+bare pattern that matches item names of every kind. Patterns support `*` and `?`.
+
+| Kind | One item per | Notes |
+|---|---|---|
+| `settings` | top-level key of `config.json`, `auth_defaults.json`, `model_defaults.json`, `profile_defaults.json`, `settings.json` | e.g. `settings:default_provider` |
+| `providers` | `providers.<name>` across those files | `api_key` is a secret |
+| `mcp` | user-level MCP server | `headers`, `env` and client secrets are secrets |
+| `credentials` | OAuth login (`oauth_<name>.json`, plus companion files such as Kimi's device id) | exported only with `--include-secrets` |
+| `memories` | project (`~/src/app`) or `global` | archived and session-scoped memories stay behind |
+
+Examples: `--only providers,credentials`, `--only 'memories:*filo'`,
+`--except settings`, `--only 'providers:qwen*'`.
+
+</details>
+
+<details>
+<summary><b>Secrets and shared logins</b></summary>
+
+Without `--include-secrets`, logins are left out and secret fields
+are cut from the remaining items. The export report lists what was withheld.
+Importing a bundle without secrets never erases a key: the destination keeps
+its own value for every field that was withheld. Bundle files are created
+owner-only (`0600`), and Filo refuses to print a bundle containing credentials
+to a terminal. Anyone holding a bundle with secrets can use your accounts, so
+move it privately and delete it afterwards.
+
+**Shared logins.** Many providers rotate refresh tokens. If two machines use one
+imported login at the same time, the first one to refresh it can sign the other
+out. In that case, sign in again with `filo --auth <provider>`.
+
+</details>
+
+<details>
+<summary><b>Import behaviour</b></summary>
+
+Every selected item is checked before anything is written.
+If one item is invalid, nothing is imported. Configuration items replace the
+destination's entry with the same name. A `config.json` that does not exist yet
+starts from Filo's shipped defaults. Items that will be replaced are first saved to
+`~/.config/filo/backups/import-<time>.json`, which `filo --import` can restore.
+Memories are merged: facts already present are skipped, and each new fact gets
+a fresh local id. Memory paths under the exporting user's home directory move to
+the importing user's home directory automatically. For other layouts, use
+`--map-path FROM=TO`, for example `--map-path /work=/srv/work`. You can write
+`FROM` as stored in the bundle (`~/...`) or as it was on the source machine.
+
+</details>
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and code style.
-
----
 
 ## License
 
