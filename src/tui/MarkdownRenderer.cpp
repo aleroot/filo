@@ -21,19 +21,22 @@ namespace {
 // Colours used only by the markdown renderer
 // ============================================================================
 
-inline constexpr RgbColor kMdCodeFg{255, 210, 100};
-inline constexpr RgbColor kMdCodeBg{32, 32, 40};
-inline constexpr RgbColor kMdCodeBorder{72, 72, 88};
-inline constexpr RgbColor kMdLinkFg{100, 200, 255};
-inline const Color kMdQuoteFg   = Color::GrayLight;
-inline constexpr RgbColor kMdQuoteBar{90, 90, 110};
-inline const Color kMdH1Fg      = Color::White;
-inline constexpr RgbColor kMdH3Fg{255, 246, 61};   // ColorYellowBright
-inline constexpr RgbColor kMdH4Fg{255, 192, 32};   // ColorYellowDark
-inline const Color kMdTableHdrFg= Color::White;
-inline const Color kMdTableRowFg= Color::GrayLight;
-inline constexpr RgbColor kMdBulletFg{255, 192, 32};   // ColorYellowDark
-inline constexpr RgbColor kMdNumFg{255, 192, 32};
+// Themed, never `const Color`: a namespace-scope ftxui::Color would be fixed
+// at static initialisation, before the terminal theme is known.
+inline constexpr ThemedColor kMdCodeFg{RgbColor{255, 210, 100}, RgbColor{150, 84, 0}};
+inline constexpr ThemedColor kMdCodeBg{RgbColor{32, 32, 40}, RgbColor{238, 236, 228}};
+inline constexpr ThemedColor kMdCodeBorder{RgbColor{72, 72, 88}, RgbColor{196, 196, 206}};
+inline constexpr ThemedColor kMdCodeText{RgbColor{220, 220, 200}, RgbColor{56, 56, 48}};
+inline constexpr ThemedColor kMdLinkFg{RgbColor{100, 200, 255}, RgbColor{0, 95, 175}};
+inline constexpr ThemedColor kMdQuoteFg = ColorTextSecondary;
+inline constexpr ThemedColor kMdQuoteBar{RgbColor{90, 90, 110}, RgbColor{140, 140, 156}};
+inline constexpr ThemedColor kMdH1Fg = ColorText;
+inline constexpr ThemedColor kMdH3Fg = ColorYellowBright;
+inline constexpr ThemedColor kMdH4Fg = ColorYellowDark;
+inline constexpr ThemedColor kMdTableHdrFg = ColorText;
+inline constexpr ThemedColor kMdTableRowFg = ColorTextSecondary;
+inline constexpr ThemedColor kMdBulletFg = ColorYellowDark;
+inline constexpr ThemedColor kMdNumFg = ColorYellowDark;
 
 // ============================================================================
 // Text sanitization for FTXUI
@@ -434,7 +437,7 @@ static Element apply_span_style(Element e, const TextSpan& span, Color base)
             e = std::move(e) | ftxui::color(kMdCodeFg) | ftxui::bgcolor(kMdCodeBg);
             break;
         case SpanKind::LinkUrl:
-            e = std::move(e) | ftxui::color(Color::GrayDark) | dim;
+            e = std::move(e) | ftxui::color(ColorTextMuted) | dim;
             break;
     }
 
@@ -936,7 +939,7 @@ static Element render_heading(const Block& block)
             out.push_back(make_inline(kMdH4Fg, true,  false, false));
             break;
         default: // 5-6
-            out.push_back(make_inline(Color::GrayLight, false, false, false) | dim);
+            out.push_back(make_inline(ColorTextSecondary, false, false, false) | dim);
             break;
     }
     return vbox(std::move(out));
@@ -951,13 +954,13 @@ static Element render_code_block(const Block& block)
         rows.push_back(
             hbox({
                 ftxui::text("  "),
-                ftxui::text(cl) | ftxui::color(Color::RGB(220, 220, 200)),
+                ftxui::text(cl) | ftxui::color(kMdCodeText),
                 filler(),
             }) | xflex
         );
     }
     if (rows.empty()) {
-        rows.push_back(ftxui::text("  ") | ftxui::color(Color::RGB(220, 220, 200)));
+        rows.push_back(ftxui::text("  ") | ftxui::color(kMdCodeText));
     }
 
     Element content = vbox(std::move(rows));
@@ -1032,7 +1035,7 @@ static Element render_table(const Block& block)
         grid.push_back(std::move(row_elems));
     }
 
-    return gridbox(std::move(grid)) | UiBorder(Color::GrayDark) | xflex;
+    return gridbox(std::move(grid)) | UiBorder(ColorTextMuted) | xflex;
 }
 
 static std::string join_soft_lines(const std::vector<std::string>& lines)
@@ -1166,7 +1169,7 @@ static Element render_block(const Block& block, Color base)
 {
     switch (block.kind) {
         case BlockKind::BlankLine:      return ftxui::text("");
-        case BlockKind::HorizontalRule: return separatorHeavy() | ftxui::color(Color::GrayDark);
+        case BlockKind::HorizontalRule: return separatorHeavy() | ftxui::color(ColorTextMuted);
         case BlockKind::Heading:        return render_heading(block);
         case BlockKind::FencedCode:     [[fallthrough]];
         case BlockKind::IndentedCode:   return render_code_block(block);

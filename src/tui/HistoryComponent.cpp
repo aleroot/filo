@@ -77,7 +77,7 @@ ftxui::Element HistoryComponent::OnRender() {
     auto badge = ftxui::text(" \u2193 new content ")
         | ftxui::bold
         | ftxui::color(ftxui::Color::Black)
-        | ftxui::bgcolor(static_cast<ftxui::Color>(tui::ColorYellowBright));
+        | ftxui::bgcolor(tui::FillYellowBright);
 
     return ftxui::dbox({
         std::move(panel),
@@ -335,6 +335,8 @@ std::size_t HistoryComponent::compute_render_cache_key(
     seed = combine_hash(seed, options.expand_tool_results ? 1 : 0);
     seed = combine_hash(seed, options.show_diff_comparer_affordance ? 1 : 0);
     seed = combine_hash(seed, options.tool_result_preview_max_lines);
+    // Colours resolve when cards are built, so a theme switch must rebuild.
+    seed = combine_hash(seed, static_cast<std::size_t>(tui::active_theme()));
     // Per-message disclosure (▶/▼) toggle state — toggling a card must rebuild.
     // Accumulated with wrapping addition so the digest depends only on the set of
     // entries: `disclosure_expanded_` is unordered, and an order-sensitive fold

@@ -29,6 +29,7 @@ enum class ManagedSettingKey {
     UiTimestamps,
     UiSpinner,
     UiReasoning,
+    UiTheme,
     AutoCompactThreshold,
     ContextCompression,
     SteeringMode,
@@ -47,6 +48,7 @@ struct ManagedSettings {
     std::optional<std::string> ui_timestamps;
     std::optional<std::string> ui_spinner;
     std::optional<std::string> ui_reasoning;
+    std::optional<std::string> ui_theme;
     std::optional<std::string> auto_compact_threshold;
     std::optional<std::string> context_compression;
     std::optional<std::string> steering_mode;
@@ -249,6 +251,8 @@ struct AppConfig {
     std::string ui_timestamps;
     std::string ui_spinner;
     std::string ui_reasoning;
+    // auto | dark | light — see tui::theme_preference_options().
+    std::string ui_theme;
     int         auto_compact_threshold = 0;
     bool        auto_compact_threshold_explicit = false;
     int         tool_output_token_limit = 0;

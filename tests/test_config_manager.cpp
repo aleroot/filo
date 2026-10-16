@@ -91,6 +91,8 @@ const std::optional<std::string>& managed_overlay_value(
             return settings.ui_spinner;
         case core::config::ManagedSettingKey::UiReasoning:
             return settings.ui_reasoning;
+        case core::config::ManagedSettingKey::UiTheme:
+            return settings.ui_theme;
         case core::config::ManagedSettingKey::AutoCompactThreshold:
             return settings.auto_compact_threshold;
         case core::config::ManagedSettingKey::ContextCompression:
@@ -128,6 +130,8 @@ std::string effective_managed_value(const core::config::AppConfig& config,
             return config.ui_spinner;
         case core::config::ManagedSettingKey::UiReasoning:
             return config.ui_reasoning;
+        case core::config::ManagedSettingKey::UiTheme:
+            return config.ui_theme;
         case core::config::ManagedSettingKey::AutoCompactThreshold:
             return std::to_string(config.auto_compact_threshold);
         case core::config::ManagedSettingKey::ContextCompression:
@@ -738,6 +742,7 @@ TEST_CASE("ConfigManager writes Grok-first defaults for a fresh install", "[conf
     REQUIRE(config.ui_context_usage == "show");
     REQUIRE(config.ui_timestamps == "show");
     REQUIRE(config.ui_spinner == "show");
+    REQUIRE(config.ui_theme == "auto");
     REQUIRE(config.auto_compact_threshold == 25000);
     REQUIRE_FALSE(config.auto_compact_threshold_explicit);
     REQUIRE(config.tool_output_token_limit == 3072);
@@ -1413,6 +1418,11 @@ TEST_CASE("ConfigManager managed settings table covers every persisted setting",
             core::config::ManagedSettingKey::UiSpinner,
             "ui_spinner",
             "hide",
+        },
+        ManagedSettingCase{
+            core::config::ManagedSettingKey::UiTheme,
+            "ui_theme",
+            "light",
         },
         ManagedSettingCase{
             core::config::ManagedSettingKey::AutoCompactThreshold,

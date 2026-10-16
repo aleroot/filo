@@ -59,7 +59,7 @@ struct ManagedSettingDescriptor {
     std::optional<std::string> ManagedSettings::*slot;
 };
 
-static constexpr std::array<ManagedSettingDescriptor, 15> kManagedSettingDescriptors{{
+static constexpr std::array<ManagedSettingDescriptor, 16> kManagedSettingDescriptors{{
     { ManagedSettingKey::DefaultMode, "default_mode", &ManagedSettings::default_mode },
     { ManagedSettingKey::DefaultApprovalMode,
       "default_approval_mode",
@@ -78,6 +78,7 @@ static constexpr std::array<ManagedSettingDescriptor, 15> kManagedSettingDescrip
     { ManagedSettingKey::UiTimestamps, "ui_timestamps", &ManagedSettings::ui_timestamps },
     { ManagedSettingKey::UiSpinner, "ui_spinner", &ManagedSettings::ui_spinner },
     { ManagedSettingKey::UiReasoning, "ui_reasoning", &ManagedSettings::ui_reasoning },
+    { ManagedSettingKey::UiTheme, "ui_theme", &ManagedSettings::ui_theme },
     { ManagedSettingKey::AutoCompactThreshold,
       "auto_compact_threshold",
       &ManagedSettings::auto_compact_threshold },
@@ -145,6 +146,9 @@ void apply_managed_setting_value(ManagedSettingKey key,
             break;
         case ManagedSettingKey::UiReasoning:
             config.ui_reasoning = value;
+            break;
+        case ManagedSettingKey::UiTheme:
+            config.ui_theme = value;
             break;
         case ManagedSettingKey::AutoCompactThreshold:
             try {
@@ -541,6 +545,7 @@ AppConfig make_default_config() {
     config.ui_timestamps = "show";
     config.ui_spinner = "show";
     config.ui_reasoning = "show";
+    config.ui_theme = "auto";
     config.auto_compact_threshold = 25000;
     config.tool_output_token_limit = 3072;
     config.tool_recovery = true;
@@ -1157,6 +1162,9 @@ void parse_config_object(simdjson::dom::object doc, AppConfig& parsed) {
     if (!doc["ui_reasoning"].get(value)) {
         parsed.ui_reasoning = std::string(value);
     }
+    if (!doc["ui_theme"].get(value)) {
+        parsed.ui_theme = std::string(value);
+    }
     if (!doc["context_compression"].get(value)) {
         parsed.context_compression = std::string(value);
     }
@@ -1485,6 +1493,9 @@ void merge_into(AppConfig& base, const AppConfig& overlay) {
     }
     if (!overlay.ui_reasoning.empty()) {
         base.ui_reasoning = overlay.ui_reasoning;
+    }
+    if (!overlay.ui_theme.empty()) {
+        base.ui_theme = overlay.ui_theme;
     }
     if (overlay.auto_compact_threshold_explicit || overlay.auto_compact_threshold > 0) {
         base.auto_compact_threshold = overlay.auto_compact_threshold;

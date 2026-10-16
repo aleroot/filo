@@ -212,14 +212,18 @@ ftxui::Element render_live_lightbulb_prefix(const ConversationRenderOptions& opt
         const std::size_t up = phase <= half ? phase : (kPeriod - phase);
         const float t = static_cast<float>(up) / static_cast<float>(half);  // 0..1
         // Interpolate dim amber -> bright glow. Keeps the bulb clearly visible
-        // at its dimmest so it never appears to vanish.
+        // at its dimmest so it never appears to vanish. On a light background
+        // a glow reads as deepening, so the light range runs pale -> dark.
+        const bool light = active_theme() == Theme::Light;
+        const RgbColor dim = light ? RgbColor{205, 180, 120} : RgbColor{150, 110, 20};
+        const RgbColor peak = light ? RgbColor{150, 100, 0} : RgbColor{255, 246, 90};
         const auto lerp = [t](unsigned char lo, unsigned char hi) -> int {
             return static_cast<int>(lo + (hi - lo) * t);
         };
         return ftxui::Color::RGB(
-            static_cast<uint8_t>(lerp(150, 255)),
-            static_cast<uint8_t>(lerp(110, 246)),
-            static_cast<uint8_t>(lerp(20, 90)));
+            static_cast<uint8_t>(lerp(dim.red, peak.red)),
+            static_cast<uint8_t>(lerp(dim.green, peak.green)),
+            static_cast<uint8_t>(lerp(dim.blue, peak.blue)));
     });
     return hbox({
         std::move(glow),
@@ -240,7 +244,7 @@ ftxui::Element render_working_prefix(bool active,
         ? status_spinner_text(fallback_tick, options)
         : ftxui::text("○");
     return hbox({
-        std::move(glyph) | ftxui::color(Color::GrayDark) | dim,
+        std::move(glyph) | ftxui::color(ColorTextMuted) | dim,
         ftxui::text(" "),
     });
 }
@@ -1017,7 +1021,7 @@ std::string format_message_time_label(std::string_view timestamp,
 Element user_message_bubble(std::string_view content,
                             std::string_view timestamp,
                             std::string_view elapsed) {
-    auto body = render_text_lines_preserving_newlines(content, Color::White);
+    auto body = render_text_lines_preserving_newlines(content, ColorText);
     auto time_label = format_message_time_label(timestamp, elapsed);
     if (time_label.empty()) {
         return body | UiBorder(ColorYellowBright);
@@ -1025,7 +1029,7 @@ Element user_message_bubble(std::string_view content,
     // Keep the clock/elapsed row inside the yellow question box so start time
     // and completed-turn duration share the same chrome as the prompt itself.
     return vbox({
-        hbox({ filler(), ftxui::text(std::move(time_label)) | ftxui::color(Color::GrayDark) }),
+        hbox({ filler(), ftxui::text(std::move(time_label)) | ftxui::color(ColorTextMuted) }),
         std::move(body),
     }) | UiBorder(ColorYellowBright);
 }
@@ -1079,7 +1083,7 @@ std::size_t specialized_preview_limit(const ConversationRenderOptions& options,
 }
 
 Element placeholder_text(std::string_view label) {
-    return ftxui::text(std::string(label)) | ftxui::color(Color::GrayDark) | dim;
+    return ftxui::text(std::string(label)) | ftxui::color(ColorTextMuted) | dim;
 }
 
 /// Shared skeleton for every list-shaped tool renderer: clamp to the compact
@@ -1102,7 +1106,7 @@ Element render_limited_rows(std::size_t total,
     if (shown < total) {
         rows.push_back(
             ftxui::text(std::format("  … {} more {}", total - shown, overflow_noun))
-            | ftxui::color(Color::GrayDark)
+            | ftxui::color(ColorTextMuted)
             | dim);
     }
     return vbox(std::move(rows)) | xflex;
@@ -1131,9 +1135,9 @@ Element render_numbered_tool_text(std::string_view content,
                 hbox({
                     ftxui::text(std::format(
                         "{:>{}}", start_line + static_cast<std::int64_t>(i), number_width))
-                        | ftxui::color(Color::GrayDark),
+                        | ftxui::color(ColorTextMuted),
                     ftxui::text(" │ ") | ftxui::color(ColorYellowDark) | dim,
-                    paragraph(std::string(lines[i])) | ftxui::color(Color::GrayLight) | xflex,
+                    paragraph(std::string(lines[i])) | ftxui::color(ColorTextSecondary) | xflex,
                 }) | xflex);
         });
 }
@@ -1159,9 +1163,9 @@ Element render_search_results(const ToolResultView& view,
             rows.push_back(
                 hbox({
                     ftxui::text(std::format("{:>5}", match.line))
-                        | ftxui::color(Color::GrayDark),
+                        | ftxui::color(ColorTextMuted),
                     ftxui::text(" │ ") | ftxui::color(ColorYellowDark) | dim,
-                    paragraph(match.text) | ftxui::color(Color::GrayLight) | xflex,
+                    paragraph(match.text) | ftxui::color(ColorTextSecondary) | xflex,
                 }) | xflex);
         });
 }
@@ -1179,7 +1183,7 @@ Element render_path_results(const ToolResultView& view,
                     ftxui::text(std::format("{} ", view.path_rows[i].marker))
                         | ftxui::color(ColorYellowDark),
                     ftxui::text(view.path_rows[i].path)
-                        | ftxui::color(Color::GrayLight)
+                        | ftxui::color(ColorTextSecondary)
                         | xflex,
                 }) | xflex);
         });
@@ -1198,7 +1202,7 @@ Element render_web_results(const ToolResultView& view,
                 hbox({
                     ftxui::text(std::format("{}  ", i + 1)) | ftxui::color(ColorYellowDark),
                     paragraph(result.title)
-                        | ftxui::color(Color::GrayLight)
+                        | ftxui::color(ColorTextSecondary)
                         | ftxui::bold
                         | xflex,
                 }) | xflex);
@@ -1206,7 +1210,7 @@ Element render_web_results(const ToolResultView& view,
                 rows.push_back(
                     hbox({
                         ftxui::text("   "),
-                        paragraph(result.url) | ftxui::color(Color::GrayDark) | dim | xflex,
+                        paragraph(result.url) | ftxui::color(ColorTextMuted) | dim | xflex,
                     }) | xflex);
             }
             if (!result.snippet.empty()) {
@@ -1214,7 +1218,7 @@ Element render_web_results(const ToolResultView& view,
                     hbox({
                         ftxui::text("   "),
                         paragraph(truncate_preview(result.snippet, kWebSnippetPreviewChars))
-                            | ftxui::color(Color::GrayLight)
+                            | ftxui::color(ColorTextSecondary)
                             | xflex,
                     }) | xflex);
             }
@@ -1237,7 +1241,7 @@ Element render_todo_results(const ToolResultView& view) {
             : active ? static_cast<Color>(ColorYellowBright)
                      : static_cast<Color>(ColorToolPending);
         Element content = paragraph(todo.content)
-            | ftxui::color(done ? Color::GrayDark : Color::GrayLight)
+            | ftxui::color(done ? ColorTextMuted : ColorTextSecondary)
             | xflex;
         if (done) content = std::move(content) | dim;
         rows.push_back(
@@ -1253,7 +1257,7 @@ Element render_fetch_result(const ToolActivity& tool,
                             const ToolResultView& view,
                             const ConversationRenderOptions& options) {
     if (!view.fetch.parsed) {
-        return render_text_lines_preserving_newlines(tool.result.summary, Color::GrayLight);
+        return render_text_lines_preserving_newlines(tool.result.summary, ColorTextSecondary);
     }
 
     std::vector<std::string> metadata;
@@ -1266,7 +1270,7 @@ Element render_fetch_result(const ToolActivity& tool,
     std::vector<Element> rows;
     if (!view.fetch.title.empty()) {
         rows.push_back(
-            paragraph(view.fetch.title) | ftxui::color(Color::GrayLight) | ftxui::bold | xflex);
+            paragraph(view.fetch.title) | ftxui::color(ColorTextSecondary) | ftxui::bold | xflex);
     }
     if (!metadata.empty()) {
         rows.push_back(
@@ -1276,20 +1280,20 @@ Element render_fetch_result(const ToolActivity& tool,
     }
     // The description already shows the URL for most fetches; repeating it is noise.
     if (!view.fetch.url.empty() && view.fetch.url != tool.description) {
-        rows.push_back(paragraph(view.fetch.url) | ftxui::color(Color::GrayDark) | dim | xflex);
+        rows.push_back(paragraph(view.fetch.url) | ftxui::color(ColorTextMuted) | dim | xflex);
     }
 
     const auto display = options.expand_tool_results
         ? LimitedTextResult{.text = tool.result.summary, .hidden_lines = 0}
         : clamp_tool_result_lines(tool.result.summary, specialized_preview_limit(options));
     if (!display.text.empty()) {
-        rows.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
-        rows.push_back(render_text_lines_preserving_newlines(display.text, Color::GrayLight));
+        rows.push_back(separator() | ftxui::color(ColorTextMuted) | dim);
+        rows.push_back(render_text_lines_preserving_newlines(display.text, ColorTextSecondary));
     }
     if (display.hidden_lines > 0) {
         rows.push_back(
             ftxui::text(std::format("… {} more lines", display.hidden_lines))
-            | ftxui::color(Color::GrayDark)
+            | ftxui::color(ColorTextMuted)
             | dim);
     }
     return vbox(std::move(rows)) | xflex;
@@ -1343,7 +1347,7 @@ Element render_tool_header(const ToolActivity& tool,
     if (!description.empty()) {
         header_items.push_back(ftxui::text("  "));
         header_items.push_back(
-            ftxui::text(description) | ftxui::color(Color::GrayDark) | xflex);
+            ftxui::text(description) | ftxui::color(ColorTextMuted) | xflex);
     }
 
     // Right-edge label. A collapsed card is the only thing standing between the
@@ -1404,7 +1408,7 @@ Element render_tool_result(const ToolActivity& tool,
 
     const bool is_error = tool.status == ToolActivity::Status::Failed ||
                           tool.status == ToolActivity::Status::Denied;
-    const Color text_color = is_error ? static_cast<Color>(ColorToolFail) : Color{Color::GrayLight};
+    const Color text_color = is_error ? static_cast<Color>(ColorToolFail) : Color{ColorTextSecondary};
 
     // Specialized renderers assume a well-formed success payload. Anything else
     // — failed, denied, cancelled mid-write — falls back to plain text so a
@@ -1457,7 +1461,7 @@ Element render_tool_result(const ToolActivity& tool,
             ftxui::text(std::format(
                 "... {} more lines hidden to keep the conversation readable.",
                 display_result.hidden_lines))
-            | ftxui::color(Color::GrayDark)
+            | ftxui::color(ColorTextMuted)
             | dim);
     }
 
@@ -1470,7 +1474,7 @@ Element render_tool_result(const ToolActivity& tool,
 
     Element content = vbox(std::move(rows)) | xflex;
     if (is_terminal_output) {
-        content = content | UiBorder(Color::GrayDark);
+        content = content | UiBorder(ColorTextMuted);
     }
     return content;
 }
@@ -1510,10 +1514,10 @@ Element render_raw_tool_result_disclosure(
     }
 
     Element toggle = hbox({
-        ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(Color::GrayDark) | dim,
-        ftxui::text("Raw result") | ftxui::color(Color::GrayLight),
+        ftxui::text(expanded ? "▼ " : "▶ ") | ftxui::color(ColorTextMuted) | dim,
+        ftxui::text("Raw result") | ftxui::color(ColorTextSecondary),
         filler(),
-        ftxui::text("JSON") | ftxui::color(Color::GrayDark) | dim,
+        ftxui::text("JSON") | ftxui::color(ColorTextMuted) | dim,
     }) | xflex;
     if (options.system_disclosure_hitboxes != nullptr) {
         auto& box =
@@ -1524,10 +1528,10 @@ Element render_raw_tool_result_disclosure(
     std::vector<Element> rows;
     rows.push_back(std::move(toggle));
     if (expanded) {
-        rows.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
+        rows.push_back(separator() | ftxui::color(ColorTextMuted) | dim);
         rows.push_back(render_tool_result(tool, view, options, terminal_width));
     }
-    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
+    return vbox(std::move(rows)) | UiBorder(ColorTextMuted);
 }
 
 /// Draws a diff at the budget the current disclosure state allows.
@@ -1550,24 +1554,24 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview, std::size_t max
     }
 
     for (const auto& line : std::span{all_lines}.first(shown)) {
-        Color line_color = Color::GrayLight;
+        Color line_color = ColorTextSecondary;
         std::string prefix = "  ";
         
         switch (line.kind) {
             case DiffLineKind::Add:
-                line_color = Color::RGB(120, 220, 130);
+                line_color = ColorDiffAdd;
                 prefix = "+ ";
                 break;
             case DiffLineKind::Delete:
-                line_color = Color::RGB(255, 150, 130);
+                line_color = ColorDiffDelete;
                 prefix = "- ";
                 break;
             case DiffLineKind::Hunk:
-                line_color = Color::RGB(145, 196, 255);
+                line_color = ColorDiffHunk;
                 prefix = "@@ ";
                 break;
             case DiffLineKind::Header:
-                line_color = Color::GrayDark;
+                line_color = ColorTextMuted;
                 prefix = "  ";
                 break;
             default:
@@ -1589,10 +1593,10 @@ Element render_tool_diff_preview(const ToolDiffPreview& preview, std::size_t max
             ? std::format("... {} more lines — showing the first {} of {}",
                           hidden, shown, preview.total_line_count)
             : std::format("... {} more lines — diff too large to display in full", hidden);
-        rows.push_back(ftxui::text(note) | dim | ftxui::color(Color::GrayDark));
+        rows.push_back(ftxui::text(note) | dim | ftxui::color(ColorTextMuted));
     }
     
-    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
+    return vbox(std::move(rows)) | UiBorder(ColorTextMuted);
 }
 
 std::string subagent_status_label(const ToolActivity::SubagentActivity& subagent) {
@@ -1636,7 +1640,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
     if (!subagent.description.empty()) {
         header.push_back(ftxui::text("  "));
         header.push_back(ftxui::text(truncate_preview(subagent.description, 64))
-                         | ftxui::color(Color::GrayLight)
+                         | ftxui::color(ColorTextSecondary)
                          | xflex);
     } else {
         header.push_back(filler());
@@ -1656,7 +1660,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
         rows.push_back(
             hbox({
                 ftxui::text("    "),
-                ftxui::text(runtime) | ftxui::color(Color::GrayDark) | dim,
+                ftxui::text(runtime) | ftxui::color(ColorTextMuted) | dim,
             }));
     }
 
@@ -1673,7 +1677,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
                 ftxui::text(" "),
                 ftxui::text(tool.name) | ftxui::color(ColorYellowDark),
                 ftxui::text(tool.description.empty() ? "" : "  "),
-                ftxui::text(tool.description) | ftxui::color(Color::GrayDark) | xflex,
+                ftxui::text(tool.description) | ftxui::color(ColorTextMuted) | xflex,
             }) | xflex);
     }
     if (hidden_tools > 0) {
@@ -1681,7 +1685,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
             hbox({
                 ftxui::text("    "),
                 ftxui::text(std::format("{} earlier tool {} hidden", hidden_tools, hidden_tools == 1 ? "call" : "calls"))
-                | ftxui::color(Color::GrayDark)
+                | ftxui::color(ColorTextMuted)
                 | dim,
             }));
     }
@@ -1691,7 +1695,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
             hbox({
                 ftxui::text("    "),
                 paragraph(truncate_preview(subagent.summary, options.expand_tool_results ? 1200 : 180))
-                    | ftxui::color(Color::GrayLight)
+                    | ftxui::color(ColorTextSecondary)
                     | xflex,
             }) | xflex);
     } else if (running && !subagent.latest_text.empty() && options.expand_tool_results) {
@@ -1699,7 +1703,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
             hbox({
                 ftxui::text("    "),
                 paragraph(truncate_preview(subagent.latest_text, 320))
-                    | ftxui::color(Color::GrayDark)
+                    | ftxui::color(ColorTextMuted)
                     | xflex,
             }) | xflex);
     }
@@ -1793,7 +1797,7 @@ Element render_tool_item(const ToolActivity& tool,
     std::vector<Element> body;
     const auto add_section = [&body](Element element) {
         if (!body.empty()) {
-            body.push_back(separator() | ftxui::color(Color::GrayDark));
+            body.push_back(separator() | ftxui::color(ColorTextMuted));
         }
         body.push_back(std::move(element));
     };
@@ -1874,7 +1878,7 @@ Element render_tool_group_container(const UiMessage& msg,
     }
     
     const int content_width = terminal_width - 4;
-    const Color border_color = Color::GrayDark;
+    const Color border_color = ColorTextMuted;
     
     std::vector<Element> content_elements;
     
@@ -1888,7 +1892,7 @@ Element render_tool_group_container(const UiMessage& msg,
                              border_color, is_first, is_last));
 
         if (!is_last) {
-            content_elements.push_back(separator() | ftxui::color(Color::GrayDark) | dim);
+            content_elements.push_back(separator() | ftxui::color(ColorTextMuted) | dim);
         }
     }
     
@@ -2462,21 +2466,21 @@ Element render_shell_command_message(const UiMessage& msg,
     std::vector<Element> rows;
     if (options.show_timestamps && !msg.timestamp.empty()) {
         rows.push_back(
-            hbox({ filler(), ftxui::text(msg.timestamp) | ftxui::color(Color::GrayDark) }));
+            hbox({ filler(), ftxui::text(msg.timestamp) | ftxui::color(ColorTextMuted) }));
     }
 
     rows.push_back(
         hbox({
             ftxui::text("$ ") | ftxui::color(ColorYellowBright) | ftxui::bold,
-            paragraph(msg.text) | ftxui::color(Color::White) | xflex,
+            paragraph(msg.text) | ftxui::color(ColorText) | xflex,
         }));
 
     const ftxui::Color output_color = msg.stopped
         ? static_cast<ftxui::Color>(ColorToolFail)
-        : ftxui::Color::GrayLight;
+        : ColorTextSecondary;
     const ftxui::Color border_color = msg.stopped
-        ? static_cast<ftxui::Color>(ColorToolFail)
-        : static_cast<ftxui::Color>(ColorYellowDark);
+        ? graphic(ColorToolFail)
+        : graphic(ColorYellowDark);
 
     if (msg.pending) {
         Element label = options.show_spinner
@@ -2501,7 +2505,7 @@ Element render_shell_command_message(const UiMessage& msg,
             hbox({
                 ftxui::text("  "),
                 ftxui::text("Command completed with no output.")
-                    | ftxui::color(Color::GrayDark)
+                    | ftxui::color(ColorTextMuted)
                     | dim,
             }));
     }
@@ -2577,8 +2581,8 @@ namespace {
     rows.push_back(std::move(header));
     if (expanded) {
         rows.push_back(hbox({
-            ftxui::text("  │ ") | ftxui::color(Color::GrayDark) | dim,
-            render_markdown(msg.disclosure_text, Color::GrayLight) | xflex,
+            ftxui::text("  │ ") | ftxui::color(ColorTextMuted) | dim,
+            render_markdown(msg.disclosure_text, ColorTextSecondary) | xflex,
         }) | xflex);
     }
     return vbox(std::move(rows)) | xflex;
@@ -2641,11 +2645,11 @@ namespace {
                     const auto value = elapsed(message_id);
                     return value.empty() ? std::string{} : std::format(" ({})", value);
                 })
-                | ftxui::color(Color::GrayDark) | dim);
+                | ftxui::color(ColorTextMuted) | dim);
         } else if (!msg.activity_elapsed.empty()) {
             header.push_back(
                 ftxui::text(std::format(" ({})", msg.activity_elapsed))
-                | ftxui::color(Color::GrayDark) | dim);
+                | ftxui::color(ColorTextMuted) | dim);
         }
     } else {
         const std::string past(activity_past_label(msg.reasoning_kind));
@@ -2690,7 +2694,7 @@ namespace {
             lines.push_back(
                 hbox({
                     ftxui::text("  "),
-                    paragraph(line) | ftxui::color(Color::GrayDark) | dim | xflex,
+                    paragraph(line) | ftxui::color(ColorTextMuted) | dim | xflex,
                 }) | xflex);
         }
     }
@@ -2743,10 +2747,10 @@ namespace {
 [[nodiscard]] Element render_count_pair(std::size_t added, std::size_t deleted) {
     return hbox({
         ftxui::text(std::format("+{}", added))
-            | ftxui::color(ftxui::Color::RGB(120, 220, 130)),
+            | ftxui::color(ColorDiffAdd),
         ftxui::text(" "),
         ftxui::text(std::format("-{}", deleted))
-            | ftxui::color(ftxui::Color::RGB(255, 150, 130)),
+            | ftxui::color(ColorDiffDelete),
     });
 }
 
@@ -2791,10 +2795,10 @@ namespace {
     Elements header{
         ftxui::text(expandable ? (expanded ? "▼ " : "▶ ") : "• ")
             | ftxui::color(ColorYellowDark),
-        ftxui::text(change.path) | ftxui::color(Color::GrayLight),
+        ftxui::text(change.path) | ftxui::color(ColorTextSecondary),
     };
     if (const auto note = file_change_note(change); !note.empty()) {
-        header.push_back(ftxui::text("  " + note) | ftxui::color(Color::GrayDark) | dim);
+        header.push_back(ftxui::text("  " + note) | ftxui::color(ColorTextMuted) | dim);
     }
     header.push_back(ftxui::filler());
     if (change.added > 0 || change.deleted > 0) {
@@ -2809,7 +2813,7 @@ namespace {
     if (comparable) {
         header.push_back(ftxui::text("  "));
         header.push_back(
-            (ftxui::text("\u2197") | ftxui::color(Color::GrayLight))
+            (ftxui::text("\u2197") | ftxui::color(ColorTextSecondary))
             | reflect((*options.system_disclosure_hitboxes)[
                 turn_file_change_open_key(msg.id, change.path)]));
     }
@@ -2843,7 +2847,7 @@ namespace {
     const std::size_t count = files.size();
     Elements summary{
         ftxui::text(std::format("{} {} changed", count, count == 1 ? "file" : "files"))
-            | ftxui::color(Color::GrayLight) | ftxui::bold,
+            | ftxui::color(ColorTextSecondary) | ftxui::bold,
     };
     if (added > 0 || deleted > 0) {
         summary.push_back(ftxui::text("  "));
@@ -2854,7 +2858,7 @@ namespace {
         // no longer what it left behind.
         summary.push_back(ftxui::text("  "));
         summary.push_back(ftxui::text("\u21b6 undone")
-                          | ftxui::color(Color::GrayDark) | dim);
+                          | ftxui::color(ColorTextMuted) | dim);
     }
 
     Elements rows{hbox(std::move(summary))};
@@ -2864,15 +2868,15 @@ namespace {
     }
     if (shown < count) {
         rows.push_back(ftxui::text(std::format("… {} more not listed", count - shown))
-                       | ftxui::color(Color::GrayDark) | dim);
+                       | ftxui::color(ColorTextMuted) | dim);
     }
     for (const auto& caveat : turn_change_caveats(msg.turn_changes)) {
         rows.push_back(hbox({
             ftxui::text("⚠ ") | ftxui::color(ColorYellowDark),
-            ftxui::text(caveat) | ftxui::color(Color::GrayDark) | dim,
+            ftxui::text(caveat) | ftxui::color(ColorTextMuted) | dim,
         }));
     }
-    return vbox(std::move(rows)) | UiBorder(Color::GrayDark);
+    return vbox(std::move(rows)) | UiBorder(ColorTextMuted);
 }
 
 } // namespace
@@ -2890,7 +2894,7 @@ Element render_assistant_message(const UiMessage& msg,
         elements.push_back(
             hbox({
                 render_working_prefix(show, options, tick),
-                ftxui::text(label) | ftxui::color(Color::GrayLight) | dim
+                ftxui::text(label) | ftxui::color(ColorTextSecondary) | dim
             }));
     }
 
@@ -2911,7 +2915,7 @@ Element render_assistant_message(const UiMessage& msg,
         if (has_reasoning) {
             elements.push_back(ftxui::text(""));
         }
-        elements.push_back(render_markdown(msg.text, Color::White));
+        elements.push_back(render_markdown(msg.text, ColorText));
     }
 
     if (!msg.disclosure_summary.empty() && !msg.disclosure_text.empty()) {
@@ -2950,7 +2954,7 @@ Element render_assistant_message(const UiMessage& msg,
             : ftxui::text("Working...");
         Elements indicator_row = {
             render_working_prefix(true, options, tick),
-            std::move(label) | ftxui::color(Color::GrayLight) | dim
+            std::move(label) | ftxui::color(ColorTextSecondary) | dim
         };
         if (options.activity_elapsed) {
             const auto elapsed = options.activity_elapsed;
@@ -2960,12 +2964,12 @@ Element render_assistant_message(const UiMessage& msg,
                     const auto value = elapsed(message_id);
                     return value.empty() ? std::string{} : std::format(" ({})", value);
                 })
-                | ftxui::color(Color::GrayDark)
+                | ftxui::color(ColorTextMuted)
                 | dim);
         } else if (!msg.activity_elapsed.empty()) {
             indicator_row.push_back(
                 ftxui::text(std::format(" ({})", msg.activity_elapsed))
-                | ftxui::color(Color::GrayDark)
+                | ftxui::color(ColorTextMuted)
                 | dim);
         }
         elements.push_back(
@@ -2992,7 +2996,7 @@ Element render_assistant_message(const UiMessage& msg,
         if (!time_label.empty()) {
             elements.push_back(
                 hbox({
-                    ftxui::text(std::move(time_label)) | ftxui::color(Color::GrayDark),
+                    ftxui::text(std::move(time_label)) | ftxui::color(ColorTextMuted),
                     filler(),
                 }));
         }
@@ -3018,7 +3022,7 @@ Element render_info_message(const UiMessage& msg) {
             hbox({
                 ftxui::text(std::string(icon.size(), ' ')),
                 ftxui::text(" "),
-                ftxui::text(msg.secondary_text) | ftxui::color(Color::GrayDark)
+                ftxui::text(msg.secondary_text) | ftxui::color(ColorTextMuted)
             }));
     }
     
@@ -3112,7 +3116,7 @@ Element render_system_message(const UiMessage& msg,
                         paragraph(std::format(
                             "Collapsed {} repeated events. Showing latest details.",
                             msg.repeat_count))
-                        | ftxui::color(Color::GrayDark)
+                        | ftxui::color(ColorTextMuted)
                         | dim
                         | xflex,
                     }) | xflex);
@@ -3125,7 +3129,7 @@ Element render_system_message(const UiMessage& msg,
                 lines.push_back(
                     hbox({
                         ftxui::text("  "),
-                        paragraph(line) | ftxui::color(Color::GrayDark) | xflex,
+                        paragraph(line) | ftxui::color(ColorTextMuted) | xflex,
                     }) | xflex);
             }
         }
@@ -3290,10 +3294,10 @@ Color tool_status_color(ToolActivity::Status status) {
         case ToolActivity::Status::Executing:  return ColorYellowBright;
         case ToolActivity::Status::Succeeded:  return ColorToolDone;
         case ToolActivity::Status::Failed:     return ColorToolFail;
-        case ToolActivity::Status::Denied:     return Color::GrayLight;
-        case ToolActivity::Status::Cancelled:  return Color::GrayLight;
+        case ToolActivity::Status::Denied:     return ColorTextSecondary;
+        case ToolActivity::Status::Cancelled:  return ColorTextSecondary;
     }
-    return Color::White;
+    return ColorText;
 }
 
 std::string_view tool_status_icon(ToolActivity::Status status) {

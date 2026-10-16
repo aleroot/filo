@@ -212,6 +212,7 @@ set(FILO_CORE_SOURCES
     src/tui/SessionReplay.cpp
     src/tui/Text.cpp
     src/tui/TextLayout.cpp
+    src/tui/TerminalTheme.cpp
     src/tui/PromptInput.cpp
     src/tui/PromptComponents.cpp
     src/tui/QuestionDialog.cpp
@@ -759,6 +760,7 @@ set(FILO_UNIT_TEST_SOURCES
     tests/test_prompt_editor.cpp
     tests/test_session_replay.cpp
     tests/test_text.cpp
+    tests/test_tui_theme.cpp
     tests/test_permission_system.cpp
     tests/test_permission_gate_deadlock.cpp
     tests/test_concurrent_queue.cpp
@@ -969,6 +971,7 @@ source_group(
         tests/test_prompt_editor.cpp
         tests/test_session_replay.cpp
         tests/test_text.cpp
+        tests/test_tui_theme.cpp
         tests/test_agent_freeze.cpp
         tests/test_workspace.cpp
         tests/test_tui_freeze.cpp

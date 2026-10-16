@@ -472,6 +472,7 @@ Preferences persist to `~/.config/filo/settings.json` (user) and `./.filo/settin
 | Message Timestamps | `ui_timestamps` | `show`, `hide` |
 | Activity Spinner | `ui_spinner` | `show`, `hide` |
 | Reasoning | `ui_reasoning` | `show`, `hide` |
+| Theme | `ui_theme` | `auto` (asks the terminal for its background at startup), `dark`, `light` |
 | Auto-Compaction | `auto_compact_threshold` | `0` (off), `25000`, `50000`, `100000`, `200000` |
 | Tool Compression | `context_compression` | `off`, `light`, `full`, `ultra` |
 | Steering Mode | `steering_mode` | `default`, `fallback`, `none` |

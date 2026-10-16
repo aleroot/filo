@@ -39,10 +39,10 @@ namespace {
         case ReviewGroupRow::State::RiskPass: return ColorQuestionCyan;
         case ReviewGroupRow::State::Done:
             return row.blocking > 0 ? ColorToolFail : ColorToolDone;
-        case ReviewGroupRow::State::Skipped:  return Color::GrayLight;
+        case ReviewGroupRow::State::Skipped:  return ColorTextSecondary;
         case ReviewGroupRow::State::Failed:   return ColorToolFail;
     }
-    return Color::White;
+    return ColorText;
 }
 
 [[nodiscard]] Element row_marker(const ReviewGroupRow& row) {
@@ -168,7 +168,7 @@ Element render_review_card(const ReviewProgressView& view,
                                      : "✗");
     const Color header_color = !view.failure.empty()
         ? Color(ColorToolFail)
-        : view.interrupted ? Color(Color::GrayLight)
+        : view.interrupted ? Color(ColorTextSecondary)
         : running          ? Color(ColorYellowBright)
                            : Color(ColorToolDone);
 
@@ -180,7 +180,7 @@ Element render_review_card(const ReviewProgressView& view,
     };
     if (!view.hint.empty()) {
         header.push_back(text("  "));
-        header.push_back(text(view.hint) | ftxui::color(Color::GrayDark) | xflex);
+        header.push_back(text(view.hint) | ftxui::color(ColorTextMuted) | xflex);
     }
 
     std::vector<std::string> header_metrics;
@@ -205,7 +205,7 @@ Element render_review_card(const ReviewProgressView& view,
             text("   "),
             row_marker(row),
             text(" "),
-            text(row.label) | ftxui::color(Color::GrayLight),
+            text(row.label) | ftxui::color(ColorTextSecondary),
         };
 
         std::vector<std::string> metrics;
@@ -236,14 +236,14 @@ Element render_review_card(const ReviewProgressView& view,
         lines.push_back(hbox({
             text("   "),
             text(message)
-                | ftxui::color(Color::GrayLight)
+                | ftxui::color(ColorTextSecondary)
                 | dim
                 | xflex,
         }) | xflex);
     } else if (view.finished) {
         lines.push_back(hbox({
             text("   "),
-            text(review_summary_line(view)) | ftxui::color(Color::GrayDark) | dim | xflex,
+            text(review_summary_line(view)) | ftxui::color(ColorTextMuted) | dim | xflex,
         }) | xflex);
     }
 
@@ -276,7 +276,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
     }
     rows.push_back(hbox({
         text("  "),
-        text(join_metrics(status_parts)) | ftxui::color(Color::White) | xflex,
+        text(join_metrics(status_parts)) | ftxui::color(ColorText) | xflex,
     }));
 
     std::vector<std::string> totals;
@@ -295,7 +295,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
     }
     rows.push_back(hbox({
         text("  "),
-        text(join_metrics(totals)) | ftxui::color(Color::GrayLight) | dim | xflex,
+        text(join_metrics(totals)) | ftxui::color(ColorTextSecondary) | dim | xflex,
     }));
     rows.push_back(text(""));
 
@@ -303,7 +303,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
         rows.push_back(hbox({
             text("  "),
             text(running ? "Planning review units…" : "No review units.")
-                | ftxui::color(Color::GrayLight)
+                | ftxui::color(ColorTextSecondary)
                 | dim,
         }));
     }
@@ -316,7 +316,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
         rows.push_back(hbox({
             text("  "),
             text(std::format("… {} earlier unit(s)", first))
-                | ftxui::color(Color::GrayDark)
+                | ftxui::color(ColorTextMuted)
                 | dim,
         }));
     }
@@ -326,7 +326,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
             text("  "),
             row_marker(row),
             text(" "),
-            text(row.label) | ftxui::color(Color::GrayLight),
+            text(row.label) | ftxui::color(ColorTextSecondary),
             filler(),
         };
         std::vector<std::string> metrics;
@@ -354,7 +354,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
         rows.push_back(hbox({
             text("  "),
             text(message)
-                | ftxui::color(Color::GrayLight)
+                | ftxui::color(ColorTextSecondary)
                 | dim,
         }));
     }
@@ -362,7 +362,7 @@ Element render_review_details_panel(const ReviewProgressView& view,
     rows.push_back(text(""));
     rows.push_back(
         text("  Esc, q, or click the review pill to close")
-        | ftxui::color(Color::GrayDark)
+        | ftxui::color(ColorTextMuted)
         | dim);
 
     return UiWindow(

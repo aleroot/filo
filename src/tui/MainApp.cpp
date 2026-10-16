@@ -107,6 +107,7 @@
 #include "core/review/ReviewTargets.hpp"
 #include "core/commands/SkillTurnResolver.hpp"
 #include "core/utils/StringUtils.hpp"
+#include "tui/TerminalTheme.hpp"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -793,6 +794,22 @@ RunResult run(RunOptions opts) {
     bool ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
     bool tool_output_expanded = false;
 
+    // The terminal can only be asked for its background here, before FTXUI
+    // starts reading the tty, so the answer is kept for later `ui_theme`
+    // changes. An explicit theme skips the probe; a later switch to auto then
+    // has only COLORFGBG to go on.
+    const auto theme_preference_of = [](std::string_view value) {
+        return parse_theme_preference(value).value_or(ThemePreference::Auto);
+    };
+    const std::optional<Theme> detected_terminal_theme =
+        theme_preference_of(config.ui_theme) == ThemePreference::Auto
+            ? detect_terminal_theme()
+            : theme_from_environment();
+    const auto apply_theme_setting = [&](std::string_view value) {
+        set_active_theme(resolve_theme(theme_preference_of(value), detected_terminal_theme));
+    };
+    apply_theme_setting(config.ui_theme);
+
     // One MemorySystem for this TUI process: Agent, MemoryTool, /memory, and
     // thread agents all share it. Not a singleton — owned here and passed down.
     auto memory_system = core::memory::make_memory_system(
@@ -1361,7 +1378,7 @@ RunResult run(RunOptions opts) {
         case core::agent::AgentMode::Build:
           return Color::Blue;
         case core::agent::AgentMode::Debug:
-          return ColorWarn;
+          return FillWarn;
         case core::agent::AgentMode::Research:
           return Color::Green;
         case core::agent::AgentMode::Execute:
@@ -1521,6 +1538,20 @@ RunResult run(RunOptions opts) {
             .label = "Reasoning",
             .description = "Show or hide the model's collapsible thinking/analyzing disclosure.",
             .choices = visibility_choices(),
+        });
+        std::vector<SettingsChoice> theme_choices;
+        for (const auto& option : theme_preference_options()) {
+            theme_choices.push_back(SettingsChoice{
+                .value = std::string(option.token),
+                .label = std::string(option.label),
+            });
+        }
+        settings_definitions.push_back(SettingsDefinition{
+            .key = core::config::ManagedSettingKey::UiTheme,
+            .category = "UI",
+            .label = "Theme",
+            .description = "Colours for a dark or light terminal. Auto asks the terminal at startup.",
+            .choices = std::move(theme_choices),
         });
         settings_definitions.push_back(SettingsDefinition{
             .key = core::config::ManagedSettingKey::AutoCompactThreshold,
@@ -3455,6 +3486,7 @@ RunResult run(RunOptions opts) {
         ui_show_timestamps = visibility_setting_enabled(config.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(config.ui_spinner, true);
         ui_show_reasoning = visibility_setting_enabled(config.ui_reasoning, true);
+        apply_theme_setting(config.ui_theme);
         agent->set_auto_compact_threshold(
             config.auto_compact_threshold,
             !config.auto_compact_threshold_explicit);
@@ -4807,6 +4839,8 @@ RunResult run(RunOptions opts) {
                 return settings.ui_spinner;
             case core::config::ManagedSettingKey::UiReasoning:
                 return settings.ui_reasoning;
+            case core::config::ManagedSettingKey::UiTheme:
+                return settings.ui_theme;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return settings.auto_compact_threshold;
             case core::config::ManagedSettingKey::ContextCompression:
@@ -4850,6 +4884,8 @@ RunResult run(RunOptions opts) {
                 return effective.ui_spinner;
             case core::config::ManagedSettingKey::UiReasoning:
                 return effective.ui_reasoning;
+            case core::config::ManagedSettingKey::UiTheme:
+                return effective.ui_theme;
             case core::config::ManagedSettingKey::AutoCompactThreshold:
                 return std::to_string(effective.auto_compact_threshold);
             case core::config::ManagedSettingKey::ContextCompression:
@@ -4899,6 +4935,7 @@ RunResult run(RunOptions opts) {
         config.ui_timestamps = after.ui_timestamps;
         config.ui_spinner = after.ui_spinner;
         config.ui_reasoning = after.ui_reasoning;
+        config.ui_theme = after.ui_theme;
         config.context_compression = after.context_compression;
         config.steering_mode = after.steering_mode;
 
@@ -4949,6 +4986,7 @@ RunResult run(RunOptions opts) {
         ui_show_timestamps = visibility_setting_enabled(after.ui_timestamps, true);
         ui_show_spinner = visibility_setting_enabled(after.ui_spinner, true);
         ui_show_reasoning = visibility_setting_enabled(after.ui_reasoning, true);
+        apply_theme_setting(after.ui_theme);
         animation_cv.notify_one();
 
         return std::nullopt;
@@ -7450,7 +7488,7 @@ RunResult run(RunOptions opts) {
     auto input_option = InputOption();
     input_option.transform = [](InputState state) {
         if (state.is_placeholder) {
-            return state.element | color(Color::GrayDark);
+            return state.element | color(ColorTextMuted);
         }
         return state.element | color(tui::ColorYellowBright);
     };
@@ -10080,8 +10118,8 @@ RunResult run(RunOptions opts) {
         if (!external_session_status.empty()) {
             bottom_el = render_default_prompt_panel(
                 hbox({
-                    text(external_session_status) | color(Color::GrayLight) | xflex,
-                    text("Esc to cancel") | color(Color::GrayDark),
+                    text(external_session_status) | color(ColorTextSecondary) | xflex,
+                    text("Esc to cancel") | color(ColorTextMuted),
                 }),
                 {});
         } else if (workspace_panel_snapshot.active) {
@@ -10361,7 +10399,7 @@ RunResult run(RunOptions opts) {
         Element right_el;
         if (quit_confirm_active()) {
             right_el = text(" Press " + quit_confirm_key + " again to quit ")
-                | color(Color::GrayDark);
+                | color(ColorTextMuted);
         } else {
             Elements right_items;
             // Keep the workspace protection affordance quiet and colocated with its scope.
@@ -10376,7 +10414,7 @@ RunResult run(RunOptions opts) {
                     text(format_workspace_status_label(
                         cwd_str,
                         core::landrun::LandrunSettings::instance().enabled()))
-                    | color(workspace_panel_snapshot.active ? Color(ColorYellowBright) : Color::GrayLight)
+                    | color(workspace_panel_snapshot.active ? Color(ColorYellowBright) : ColorTextSecondary)
                     | reflect(workspace_status_box));
             }
             // Context left percentage
@@ -10401,10 +10439,10 @@ RunResult run(RunOptions opts) {
                     total,
                     !rate_limit_info.usage_windows.empty());
                 if (!token_usage.empty()) {
-                    budget_el = text("  " + token_usage) | color(Color::GrayLight);
+                    budget_el = text("  " + token_usage) | color(ColorTextSecondary);
                 }
             } else {
-                budget_el = text("  " + budget_str) | color(Color::GrayLight);
+                budget_el = text("  " + budget_str) | color(ColorTextSecondary);
             }
         }
 
@@ -10506,7 +10544,7 @@ RunResult run(RunOptions opts) {
             const std::string guardrail_summary = router_provider->last_guardrail_summary();
             if (!guardrail_summary.empty()) {
                 guardrail_el = text(" GR " + compact_single_line(guardrail_summary, 72) + " ")
-                               | bgcolor(ColorWarn) | color(Color::Black);
+                               | bgcolor(FillWarn) | color(Color::Black);
             }
         }
 
@@ -10519,7 +10557,7 @@ RunResult run(RunOptions opts) {
                 text(" " + review_status_pill_label(review_view_snapshot) + " ")
                     | color(review_details_panel_visible
                                 ? Color(ColorYellowBright)
-                                : Color(Color::GrayLight)),
+                                : Color(ColorTextSecondary)),
             }) | reflect(review_status_box);
         } else {
             review_status_box = {0, -1, 0, -1};
@@ -10529,7 +10567,7 @@ RunResult run(RunOptions opts) {
         if (queued_steering_count > 0) {
             queued_steering_el =
                 text(std::format(" steer queued:{} ", queued_steering_count))
-                | bgcolor(ColorWarn)
+                | bgcolor(FillWarn)
                 | color(Color::Black);
         }
         
@@ -10543,7 +10581,7 @@ RunResult run(RunOptions opts) {
                     core::llm::provider_display_name(active_provider_name),
                     active_model_name,
                     session_effort_value))
-                    | bgcolor(ColorYellowDark) | color(Color::Black));
+                    | bgcolor(FillYellowDark) | color(Color::Black));
         }
         left_items.push_back(usage_dashboard_el);
         left_items.push_back(budget_el);
@@ -10635,10 +10673,12 @@ RunResult run(RunOptions opts) {
         }
         window_rows.push_back(std::move(status_el));
 
+        // The frame takes the graphic value; content that sets no colour of
+        // its own keeps the text-strength one (identical on a dark theme).
         return UiWindow(
             text(std::format(" {} ", kAppVersion)) | color(ColorYellowBright) | ftxui::bold,
-            vbox(std::move(window_rows))
-        ) | color(ColorYellowBright);
+            vbox(std::move(window_rows)) | color(ColorYellowBright)
+        ) | color(graphic(ColorYellowBright));
     });
 
     std::jthread animation_thread([&](std::stop_token stop_token) {

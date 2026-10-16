@@ -55,9 +55,9 @@ constexpr int kScrollMargin = 3;
         case FileSystemRowRole::Directory:
             return ColorYellowDark;
         case FileSystemRowRole::File:
-            return row.selectable ? Color{Color::White} : Color{Color::GrayDark};
+            return row.selectable ? Color{ColorText} : Color{ColorTextMuted};
     }
-    return Color::White;
+    return ColorText;
 }
 
 /// Left-truncate a path to @p width *without* padding it out. `fit_path_column`
@@ -80,8 +80,8 @@ constexpr int kScrollMargin = 3;
     const Color accent = focused ? Color{Color::Black} : role_color(row);
     const Color label_color = focused
         ? Color{Color::Black}
-        : (row.selectable || row.navigable ? Color{Color::White}
-                                           : Color{Color::GrayDark});
+        : (row.selectable || row.navigable ? Color{ColorText}
+                                           : Color{ColorTextMuted});
 
     Element label = text(row.label) | color(label_color);
     if (!row.selectable && !row.navigable && !focused) {
@@ -96,9 +96,9 @@ constexpr int kScrollMargin = 3;
         text(choose_marker(row, focused)) | color(accent) | ftxui::bold,
         filler(),
         text(right_align_detail(row.detail, kDetailWidth))
-            | color(focused ? Color{Color::Black} : Color{Color::GrayDark}),
+            | color(focused ? Color{Color::Black} : Color{ColorTextMuted}),
     });
-    return focused ? (std::move(line) | bgcolor(ColorYellowDark)) : line;
+    return focused ? (std::move(line) | bgcolor(FillYellowDark)) : line;
 }
 
 /// Fixed-height scrolling window with "N more" affordances at both ends. The
@@ -121,7 +121,7 @@ constexpr int kScrollMargin = 3;
     if (first > 0) {
         elements.push_back(hbox({
             text(" \xe2\x86\x91 ") | color(ColorYellowDark),
-            text(std::format("{} more above", first)) | color(Color::GrayDark) | dim | xflex,
+            text(std::format("{} more above", first)) | color(ColorTextMuted) | dim | xflex,
         }));
     }
     for (int index = first; index < last; ++index) {
@@ -131,7 +131,7 @@ constexpr int kScrollMargin = 3;
     if (const int below = total - last; below > 0) {
         elements.push_back(hbox({
             text(" \xe2\x86\x93 ") | color(ColorYellowDark),
-            text(std::format("{} more below", below)) | color(Color::GrayDark) | dim | xflex,
+            text(std::format("{} more below", below)) | color(ColorTextMuted) | dim | xflex,
         }));
     }
     return elements;
@@ -161,7 +161,7 @@ constexpr int kScrollMargin = 3;
 [[nodiscard]] Element render_locator(const FileSystemPickerState& state) {
     if (state.mode == FileSystemPickerMode::PathEntry) {
         return hbox({
-            text("  path ") | color(Color::GrayDark),
+            text("  path ") | color(ColorTextMuted),
             text(state.path_buffer) | color(ColorYellowBright),
             text("\xe2\x96\x8f") | color(ColorYellowBright),  // ▏ cursor
         });
@@ -183,12 +183,12 @@ constexpr int kScrollMargin = 3;
         text("  "),
         text(shorten_path(core::utils::path::abbreviate_user_path(state.directory),
                           std::max(16, kBreadcrumbWidth - filter_width)))
-            | color(Color::GrayLight),
+            | color(ColorTextSecondary),
     };
     if (!state.filter.empty()) {
-        cells.push_back(text("   filter ") | color(Color::GrayDark));
+        cells.push_back(text("   filter ") | color(ColorTextMuted));
         cells.push_back(text(state.filter) | color(ColorYellowBright) | ftxui::bold);
-        cells.push_back(text(match_count) | color(Color::GrayDark) | dim);
+        cells.push_back(text(match_count) | color(ColorTextMuted) | dim);
     }
     cells.push_back(filler());
     return hbox(std::move(cells));
@@ -214,14 +214,14 @@ constexpr int kScrollMargin = 3;
                 kFileSystemPickerMaxEntries);
         }
         if (!hint.empty()) {
-            message = paragraph(hint) | color(Color::GrayDark) | dim;
+            message = paragraph(hint) | color(ColorTextMuted) | dim;
         }
     }
 
     std::vector<Element> lines{hbox({text("  "), std::move(message)})};
     if (const auto mechanics = mechanic_hints(state); !mechanics.empty()) {
         lines.push_back(hbox({
-            text(std::format("  {}", mechanics)) | color(Color::GrayDark) | dim,
+            text(std::format("  {}", mechanics)) | color(ColorTextMuted) | dim,
             filler(),
         }));
     }
@@ -234,9 +234,9 @@ Element render_file_system_picker_panel(const FileSystemPickerState& state) {
     return vbox({
                hbox({
                    text(std::format(" {} ", state.request.title))
-                       | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+                       | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
                    filler(),
-                   text(decision_hints(state)) | color(Color::GrayDark),
+                   text(decision_hints(state)) | color(ColorTextMuted),
                }),
                separator(),
                render_locator(state),

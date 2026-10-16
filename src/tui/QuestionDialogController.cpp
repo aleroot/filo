@@ -33,12 +33,12 @@ QuestionDialogController::QuestionDialogController() {
             return input_state.element
                 | color(input_state.focused
                             ? static_cast<Color>(ColorQuestionCyan)
-                            : Color{Color::GrayLight});
+                            : Color{ColorTextSecondary});
         }
         return input_state.element
             | color(input_state.focused
                         ? static_cast<Color>(ColorQuestionCyan)
-                        : Color{Color::White});
+                        : Color{ColorText});
     };
     option.multiline = false;
     option.cursor_position = &state_.other_input_cursor_position;

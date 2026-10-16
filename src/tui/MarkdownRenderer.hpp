@@ -4,6 +4,8 @@
 #include <ftxui/screen/color.hpp>
 #include <string_view>
 
+#include "TuiTheme.hpp"
+
 namespace tui {
 
 // Render a markdown string as a FTXUI element tree.
@@ -17,6 +19,6 @@ namespace tui {
 //
 // Plain paragraphs and mixed inline spans both wrap to the viewport width.
 ftxui::Element render_markdown(std::string_view text,
-                               ftxui::Color base_color = ftxui::Color::White);
+                               ftxui::Color base_color = ColorText);
 
 } // namespace tui

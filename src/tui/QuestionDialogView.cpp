@@ -14,7 +14,7 @@ namespace tui {
 
 namespace {
 
-inline constexpr RgbColor ColorQuestionYellow{255, 200, 80};
+inline constexpr ThemedColor ColorQuestionYellow{RgbColor{255, 200, 80}, RgbColor{156, 100, 0}};
 
 Element render_question_tabs(const QuestionDialogState& state) {
     if (state.questions.size() <= 1) {
@@ -38,11 +38,11 @@ Element render_question_tabs(const QuestionDialogState& state) {
             style = Color::Green;
         } else {
             icon = "\xe2\x97\x8b";  // ○
-            style = Color::GrayDark;
+            style = ColorTextMuted;
         }
 
         if (i > 0) {
-            tabs.push_back(text("  ") | color(Color::GrayDark));
+            tabs.push_back(text("  ") | color(ColorTextMuted));
         }
         tabs.push_back(
             text(std::format("{} {}", icon, label)) | color(style));
@@ -71,7 +71,7 @@ Element render_question_option(
 
         const Color prefix_color = is_selected
             ? static_cast<Color>(ColorQuestionCyan)
-            : Color::GrayLight;
+            : ColorTextSecondary;
         auto input_row = hbox({
             text(std::format(
                 "{} [{}] ",
@@ -99,7 +99,7 @@ Element render_question_option(
         const std::string checkbox = checked ? "[\xe2\x9c\x93]" : "[ ]";
         const Color option_color = is_selected
             ? static_cast<Color>(ColorQuestionCyan)
-            : Color::GrayLight;
+            : ColorTextSecondary;
         option_line = text(std::format("{} {}", checkbox, option.label))
             | color(option_color);
     } else {
@@ -107,7 +107,7 @@ Element render_question_option(
             ? text(std::format("\xe2\x86\x92 [{}] {}", number, option.label))
                 | color(ColorQuestionCyan)
             : text(std::format("  [{}] {}", number, option.label))
-                | color(Color::GrayLight);
+                | color(ColorTextSecondary);
     }
     lines.push_back(std::move(option_line));
 
@@ -197,7 +197,7 @@ Element render_question_dialog_panel(
                       | ftxui::bold | color(ColorQuestionCyan)
                 : text(""),
             filler(),
-            text(help) | color(Color::GrayDark),
+            text(help) | color(ColorTextMuted),
         }),
         separator(),
         std::move(content),

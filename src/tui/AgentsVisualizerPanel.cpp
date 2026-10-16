@@ -42,15 +42,15 @@ Element render_agents_visualizer_panel(
         }
         rows.push_back(hbox({
             text("  ℹ ") | color(ColorYellowBright) | bold,
-            text("No agent instruction files active in this workspace.") | color(Color::White),
+            text("No agent instruction files active in this workspace.") | color(ColorText),
         }));
         rows.push_back(text(""));
         rows.push_back(text("  Create an AGENTS.md file in your workspace root or .filo/steering/*.md")
-                       | color(Color::GrayLight));
+                       | color(ColorTextSecondary));
         rows.push_back(text("  to provide project-specific rules, steering, and instructions.")
-                       | color(Color::GrayLight));
+                       | color(ColorTextSecondary));
         rows.push_back(text(""));
-        rows.push_back(text("  Esc, q, or click header to close") | color(Color::GrayDark) | dim);
+        rows.push_back(text("  Esc, q, or click header to close") | color(ColorTextMuted) | dim);
 
         return UiWindow(
             text(" 🤖 Agent Instructions ") | color(ColorYellowBright) | bold,
@@ -74,7 +74,7 @@ Element render_agents_visualizer_panel(
             const bool is_active = (i == active_index);
             const std::string mark = file.enabled ? "" : "[OFF] ";
             auto tab_el = text(std::format(" {}{} ", mark, file.label))
-                | (is_active ? (file.enabled ? (bgcolor(ColorYellowDark) | color(Color::Black) | bold)
+                | (is_active ? (file.enabled ? (bgcolor(FillYellowDark) | color(Color::Black) | bold)
                                              : (bgcolor(Color::Red) | color(Color::White) | bold))
                              : (file.enabled ? color(ColorYellowBright)
                                              : (color(Color::Red) | dim)));
@@ -85,7 +85,7 @@ Element render_agents_visualizer_panel(
             tabs.push_back(text(" "));
         }
         rows.push_back(hbox({
-            text("  Files: ") | color(Color::GrayLight),
+            text("  Files: ") | color(ColorTextSecondary),
             hbox(std::move(tabs)),
         }));
         rows.push_back(text(""));
@@ -117,35 +117,35 @@ Element render_agents_visualizer_panel(
         : std::min(100.0f, (static_cast<float>(view_end) / static_cast<float>(total_lines)) * 100.0f);
 
     rows.push_back(hbox({
-        text("  Source: ") | color(Color::GrayLight),
-        text(cur_file.path.string()) | bold | color(Color::White) | xflex,
+        text("  Source: ") | color(ColorTextSecondary),
+        text(cur_file.path.string()) | bold | color(ColorText) | xflex,
     }));
 
     rows.push_back(hbox({
-        text("  Status: ") | color(Color::GrayLight),
+        text("  Status: ") | color(ColorTextSecondary),
         cur_file.enabled
             ? (text("LOADED (active in prompt context)") | bold | color(Color::Green))
             : (text("UNLOADED (excluded from prompt context)") | bold | color(Color::Red)),
     }));
 
     Elements stats_elements = {
-        text("  Stats:  ") | color(Color::GrayLight),
+        text("  Stats:  ") | color(ColorTextSecondary),
         text(std::format("{} lines", total_lines)) | bold | color(ColorYellowBright),
-        text(" · ") | color(Color::GrayDark),
-        text(format_file_size(cur_file.content.size())) | color(Color::White),
+        text(" · ") | color(ColorTextMuted),
+        text(format_file_size(cur_file.content.size())) | color(ColorText),
     };
     if (section_count > 0) {
-        stats_elements.push_back(text(" · ") | color(Color::GrayDark));
-        stats_elements.push_back(text(std::format("{} sections", section_count)) | color(Color::GrayLight));
+        stats_elements.push_back(text(" · ") | color(ColorTextMuted));
+        stats_elements.push_back(text(std::format("{} sections", section_count)) | color(ColorTextSecondary));
     }
-    stats_elements.push_back(text(" · ") | color(Color::GrayDark));
+    stats_elements.push_back(text(" · ") | color(ColorTextMuted));
     stats_elements.push_back(
         text(std::format("showing lines {}-{} of {} ({:.0f}%)",
                          total_lines == 0 ? 0 : clamped_scroll + 1,
                          view_end,
                          total_lines,
                          view_pct))
-        | color(Color::GrayLight));
+        | color(ColorTextSecondary));
 
     rows.push_back(hbox(std::move(stats_elements)));
     rows.push_back(text(""));
@@ -155,7 +155,7 @@ Element render_agents_visualizer_panel(
         rows.push_back(hbox({
             text("  ▲ ") | color(ColorYellowDark),
             text(std::format("{} more lines above", clamped_scroll))
-                | color(Color::GrayDark) | dim,
+                | color(ColorTextMuted) | dim,
         }));
     }
 
@@ -168,14 +168,14 @@ Element render_agents_visualizer_panel(
     if (!visible_content.empty()) {
         rows.push_back(render_markdown(visible_content) | xflex);
     } else {
-        rows.push_back(text("  (empty file)") | color(Color::GrayDark) | dim);
+        rows.push_back(text("  (empty file)") | color(ColorTextMuted) | dim);
     }
 
     if (view_end < total_lines) {
         rows.push_back(hbox({
             text("  ▼ ") | color(ColorYellowDark),
             text(std::format("{} more lines below", total_lines - view_end))
-                | color(Color::GrayDark) | dim,
+                | color(ColorTextMuted) | dim,
         }));
     }
 
@@ -185,7 +185,7 @@ Element render_agents_visualizer_panel(
     if (files.size() > 1) {
         help_str += "   ←/→/Tab: switch file";
     }
-    rows.push_back(text(std::move(help_str)) | color(Color::GrayDark) | dim);
+    rows.push_back(text(std::move(help_str)) | color(ColorTextMuted) | dim);
 
     return UiWindow(
         text(" 🤖 Agent Instructions ") | color(ColorYellowBright) | bold,

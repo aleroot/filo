@@ -102,10 +102,10 @@ Element render_quota_progress_bar(float utilization, int width) {
     for (int i = 0; i < empty; ++i) bar_empty += "░";
 
     return hbox({
-        text("[") | ftxui::color(ftxui::Color::GrayDark),
+        text("[") | ftxui::color(ColorTextMuted),
         text(std::move(bar_filled)) | ftxui::color(utilization_color(utilization)),
-        text(std::move(bar_empty)) | ftxui::color(ftxui::Color::GrayDark),
-        text("]") | ftxui::color(ftxui::Color::GrayDark),
+        text(std::move(bar_empty)) | ftxui::color(ColorTextMuted),
+        text("]") | ftxui::color(ColorTextMuted),
     });
 }
 
@@ -135,12 +135,12 @@ Element render_usage_details_panel(
     }
 
     rows.push_back(hbox({
-        text("  Provider: ") | ftxui::color(ftxui::Color::GrayLight),
+        text("  Provider: ") | ftxui::color(ColorTextSecondary),
         text(std::string(active_provider_name)) | ftxui::bold | ftxui::color(ColorYellowBright),
-        text("   Model: ") | ftxui::color(ftxui::Color::GrayLight),
-        text(std::move(model_str)) | ftxui::bold | ftxui::color(ftxui::Color::White),
-        text("   Tier: ") | ftxui::color(ftxui::Color::GrayLight),
-        text(std::move(tier_label)) | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
+        text("   Model: ") | ftxui::color(ColorTextSecondary),
+        text(std::move(model_str)) | ftxui::bold | ftxui::color(ColorText),
+        text("   Tier: ") | ftxui::color(ColorTextSecondary),
+        text(std::move(tier_label)) | ftxui::color(ColorTextSecondary) | ftxui::dim,
     }));
     rows.push_back(text(""));
 
@@ -167,13 +167,13 @@ Element render_usage_details_panel(
             }
 
             Elements window_items;
-            window_items.push_back(text("    • ") | ftxui::color(ftxui::Color::GrayDark));
-            window_items.push_back(text(title + ": ") | ftxui::bold | ftxui::color(ftxui::Color::White));
+            window_items.push_back(text("    • ") | ftxui::color(ColorTextMuted));
+            window_items.push_back(text(title + ": ") | ftxui::bold | ftxui::color(ColorText));
             window_items.push_back(render_quota_progress_bar(w.utilization, 16));
             window_items.push_back(text(" " + pct_label + " ") | ftxui::bold | ftxui::color(col));
 
             if (is_governing) {
-                window_items.push_back(text(" ★ Governing ") | ftxui::bgcolor(ColorYellowDark) | ftxui::color(ftxui::Color::Black));
+                window_items.push_back(text(" ★ Governing ") | ftxui::bgcolor(FillYellowDark) | ftxui::color(ftxui::Color::Black));
             }
 
             rows.push_back(hbox(std::move(window_items)));
@@ -183,14 +183,14 @@ Element render_usage_details_panel(
                 const std::string reset_str = format_quota_reset_display(w.resets_at);
                 if (!reset_str.empty()) {
                     rows.push_back(hbox({
-                        text("      ⏳ Resets at: ") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
+                        text("      ⏳ Resets at: ") | ftxui::color(ColorTextSecondary) | ftxui::dim,
                         text(reset_str) | ftxui::color(ColorYellowBright),
                     }));
                 }
             } else {
                 rows.push_back(hbox({
-                    text("      ⏳ Reset time: ") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
-                    text("not reported by provider") | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim,
+                    text("      ⏳ Reset time: ") | ftxui::color(ColorTextSecondary) | ftxui::dim,
+                    text("not reported by provider") | ftxui::color(ColorTextSecondary) | ftxui::dim,
                 }));
             }
         }
@@ -204,7 +204,7 @@ Element render_usage_details_panel(
         if (!sub_end_str.empty()) {
             rows.push_back(hbox({
                 text("  🗓 Subscription period ends: ")
-                    | ftxui::color(ftxui::Color::GrayLight),
+                    | ftxui::color(ColorTextSecondary),
                 text(sub_end_str) | ftxui::bold | ftxui::color(ColorYellowBright),
             }));
             rows.push_back(text(""));
@@ -249,7 +249,7 @@ Element render_usage_details_panel(
             if (rate_limit_info.requests_reset > 0) {
                 req_text += "   ⏳ Resets: " + format_quota_reset_display(rate_limit_info.requests_reset);
             }
-            rows.push_back(text(std::move(req_text)) | ftxui::color(ftxui::Color::White));
+            rows.push_back(text(std::move(req_text)) | ftxui::color(ColorText));
         }
 
         if (rate_limit_info.tokens_limit > 0 || rate_limit_info.tokens_remaining > 0) {
@@ -259,7 +259,7 @@ Element render_usage_details_panel(
             if (rate_limit_info.tokens_reset > 0) {
                 tok_text += "   ⏳ Resets: " + format_quota_reset_display(rate_limit_info.tokens_reset);
             }
-            rows.push_back(text(std::move(tok_text)) | ftxui::color(ftxui::Color::White));
+            rows.push_back(text(std::move(tok_text)) | ftxui::color(ColorText));
         }
 
         if (rate_limit_info.is_rate_limited) {
@@ -280,12 +280,12 @@ Element render_usage_details_panel(
     rows.push_back(text("  Session Consumption:") | ftxui::bold | ftxui::color(ColorYellowDark));
     {
         Elements session_items;
-        session_items.push_back(text("    • Total Tokens: ") | ftxui::color(ftxui::Color::GrayLight));
-        session_items.push_back(text(format_compact_number(session_tokens.total_tokens)) | ftxui::bold | ftxui::color(ftxui::Color::White));
+        session_items.push_back(text("    • Total Tokens: ") | ftxui::color(ColorTextSecondary));
+        session_items.push_back(text(format_compact_number(session_tokens.total_tokens)) | ftxui::bold | ftxui::color(ColorText));
         session_items.push_back(text(std::format(" ({} prompt, {} completion)",
                                                  format_compact_number(session_tokens.prompt_tokens),
                                                  format_compact_number(session_tokens.completion_tokens)))
-                                | ftxui::color(ftxui::Color::GrayLight) | ftxui::dim);
+                                | ftxui::color(ColorTextSecondary) | ftxui::dim);
 
         if (session_tokens.cached_prompt_tokens > 0) {
             session_items.push_back(text(std::format(" · {} cached", format_compact_number(session_tokens.cached_prompt_tokens)))
@@ -300,7 +300,7 @@ Element render_usage_details_panel(
 
     if (!is_subscription && session_cost_usd > 0.0) {
         rows.push_back(hbox({
-            text("    • Estimated Cost: ") | ftxui::color(ftxui::Color::GrayLight),
+            text("    • Estimated Cost: ") | ftxui::color(ColorTextSecondary),
             text(std::format("${:.4f} USD", session_cost_usd)) | ftxui::bold | ftxui::color(ftxui::Color::Green),
         }));
     }
@@ -310,7 +310,7 @@ Element render_usage_details_panel(
             ? ftxui::Color(ftxui::Color::Red)
             : (context_pct < 50 ? ftxui::Color(ColorWarn) : ftxui::Color(ftxui::Color::Green));
         rows.push_back(hbox({
-            text("    • Context Window: ") | ftxui::color(ftxui::Color::GrayLight),
+            text("    • Context Window: ") | ftxui::color(ColorTextSecondary),
             text(std::format("{}% remaining", context_pct)) | ftxui::bold | ftxui::color(ctx_col),
         }));
     }
@@ -329,7 +329,7 @@ Element render_usage_details_panel(
     rows.push_back(text(""));
     rows.push_back(
         text("  Esc, q, or click status bar to close")
-        | ftxui::color(ftxui::Color::GrayDark)
+        | ftxui::color(ColorTextMuted)
         | ftxui::dim);
 
     return UiWindow(

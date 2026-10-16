@@ -59,7 +59,7 @@ ftxui::Element render_path_entry(
         text(std::format(" {}. {} · {}", index + 1, name, kind))
             | bold | color(selected ? Color(ColorYellowBright) : label_color),
         flexbox(std::move(glyphs), FlexboxConfig().SetGap(0, 0))
-            | color(Color::White) | xflex,
+            | color(ColorText) | xflex,
     });
     if (selected) entry = std::move(entry) | focus;
     return entry;
@@ -134,11 +134,11 @@ ftxui::Element render_workspace_details_panel(
         const bool primary = !workspace.primary.empty() && i == 0;
         workspace_entries.push_back(render_path_entry(
             sections.workspaces[i], i, primary ? "Primary" : "Additional",
-            i == active_index, Color::GrayLight));
+            i == active_index, ColorTextSecondary));
     }
     if (workspace_entries.empty()) {
         workspace_entries.push_back(
-            text(" No workspaces loaded") | color(Color::GrayLight));
+            text(" No workspaces loaded") | color(ColorTextSecondary));
     }
 
     Elements groups;
@@ -167,7 +167,7 @@ ftxui::Element render_workspace_details_panel(
                 | size(HEIGHT, LESS_THAN, std::max(1, max_visible_lines)),
             text(""),
             paragraph("↑/↓/Wheel: browse · Esc, q, or click workspace label to close")
-                | color(Color::GrayDark) | dim,
+                | color(ColorTextMuted) | dim,
         }) | xflex);
 }
 

@@ -102,9 +102,9 @@ constexpr std::chrono::minutes kClientStaleAfter{1};
         case RemoteToolStatus::failed:
             return ColorToolFail;
         case RemoteToolStatus::cancelled:
-            return Color::GrayLight;
+            return ColorTextSecondary;
     }
-    return Color::GrayLight;
+    return ColorTextSecondary;
 }
 
 [[nodiscard]] std::string_view status_icon(RemoteToolStatus status) {
@@ -286,7 +286,7 @@ RemoteFooterStatus format_remote_footer_status(
 Element render_remote_footer_status(const RemoteFooterStatus& status) {
     if (status.label.empty()) return text("");
 
-    Color foreground = Color::GrayLight;
+    Color foreground = ColorTextSecondary;
     switch (status.tone) {
         case RemoteFooterTone::ready:
         case RemoteFooterTone::success:
@@ -327,7 +327,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     if (snapshot.clients.empty()) {
         rows.push_back(
             text("  Waiting for an MCP client to initialize…")
-            | color(Color::GrayLight)
+            | color(ColorTextSecondary)
             | dim);
     } else {
         constexpr std::size_t kVisibleClients = 4;
@@ -345,15 +345,15 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
             rows.push_back(
                 hbox({
                     text(client.closed ? "  ○ " : stale ? "  ◌ " : "  ● ")
-                        | color(client.closed ? Color::GrayDark
-                                : stale ? Color::GrayLight : Color::Green),
+                        | color(client.closed ? ColorTextMuted
+                                : stale ? Color{ColorTextSecondary} : Color{Color::Green}),
                     text(client.name + version) | bold,
                     filler(),
                     text(std::format(
                         "{} · seen {}",
                         state,
                         elapsed_label(client.last_seen, now)))
-                        | color(Color::GrayDark)
+                        | color(ColorTextMuted)
                         | dim,
                 }) | xflex);
         }
@@ -363,7 +363,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                     "    … {} more client{}",
                     snapshot.clients.size() - visible_clients,
                     snapshot.clients.size() - visible_clients == 1 ? "" : "s"))
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
                 | dim);
         }
     }
@@ -374,7 +374,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     if (snapshot.activities.empty()) {
         rows.push_back(
             text("  No remote tools have been used yet.")
-            | color(Color::GrayLight)
+            | color(ColorTextSecondary)
             | dim);
     } else {
         constexpr std::size_t kVisibleRows = 8;
@@ -398,7 +398,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                         "{} newer activit{}",
                         start,
                         start == 1 ? "y" : "ies"))
-                        | color(Color::GrayDark)
+                        | color(ColorTextMuted)
                         | dim,
                 }));
         }
@@ -417,10 +417,10 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                         | color(ColorYellowBright)
                         | bold,
                     elided_text("  " + activity_summary(activity))
-                        | color(Color::GrayLight)
+                        | color(ColorTextSecondary)
                         | xflex,
                     text("  " + client_name_for(snapshot, activity.session_id))
-                        | color(Color::GrayDark)
+                        | color(ColorTextMuted)
                         | dim,
                     text("  " + activity_duration(activity, now))
                         | color(status_color(activity.status)),
@@ -436,7 +436,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                         "{} older activit{}",
                         older,
                         older == 1 ? "y" : "ies"))
-                        | color(Color::GrayDark)
+                        | color(ColorTextMuted)
                         | dim,
                 }));
         }
@@ -451,13 +451,13 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                 client_name_for(snapshot, selected_item.session_id),
                 selected_item.tool_name,
                 activity_duration(selected_item, now)))
-            | color(Color::GrayLight));
+            | color(ColorTextSecondary));
         if (const std::string result = result_summary(selected_item); !result.empty()) {
             rows.push_back(
                 paragraph("  " + compact_single_line(result, 240))
                 | color(selected_item.status == RemoteToolStatus::failed
                             ? static_cast<Color>(ColorToolFail)
-                            : Color{Color::GrayLight}));
+                            : Color{ColorTextSecondary}));
         }
     }
 
@@ -465,7 +465,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
     Elements footer;
     footer.push_back(
         elided_text("  ↑/↓ select   C clear completed   Esc close")
-        | color(Color::GrayDark)
+        | color(ColorTextMuted)
         | dim
         | xflex);
     if (!snapshot.activities.empty()) {
@@ -476,7 +476,7 @@ Element render_remote_activity_panel(const RemoteActivitySnapshot& snapshot,
                 "  {} of {} · newest first  ",
                 selected + 1,
                 snapshot.activities.size()))
-            | color(Color::GrayDark)
+            | color(ColorTextMuted)
             | dim);
     }
     rows.push_back(hbox(std::move(footer)) | xflex);

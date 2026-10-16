@@ -257,7 +257,7 @@ Element render_permission_fields(std::string_view tool_name,
         rows.push_back(
             hbox({
                 text(fields[i].label + ":") | dim | size(WIDTH, EQUAL, 12),
-                paragraph(fields[i].value) | color(Color::White) | xflex
+                paragraph(fields[i].value) | color(ColorText) | xflex
             }));
         if (i + 1 < fields.size()) {
             rows.push_back(separator());
@@ -293,12 +293,12 @@ std::string format_diff_line_number(const std::optional<int>& line_number, std::
 }
 
 Element render_permission_diff_line(const DiffLinePreview& line, std::size_t number_width) {
-    const auto add_color = Color::RGB(120, 220, 130);
-    const auto del_color = Color::RGB(255, 150, 130);
-    const auto hunk_color = Color::RGB(145, 196, 255);
+    const Color add_color = ColorDiffAdd;
+    const Color del_color = ColorDiffDelete;
+    const Color hunk_color = ColorDiffHunk;
 
     if (line.kind == DiffLineKind::Header) {
-        return text(line.content) | color(Color::GrayDark) | dim;
+        return text(line.content) | color(ColorTextMuted) | dim;
     }
 
     if (line.kind == DiffLineKind::Hunk) {
@@ -306,8 +306,8 @@ Element render_permission_diff_line(const DiffLinePreview& line, std::size_t num
     }
 
     std::string marker = " ";
-    Color marker_color = Color::GrayLight;
-    Color line_color = Color::GrayLight;
+    Color marker_color = ColorTextSecondary;
+    Color line_color = ColorTextSecondary;
     switch (line.kind) {
         case DiffLineKind::Add:
             marker = "+";
@@ -321,13 +321,13 @@ Element render_permission_diff_line(const DiffLinePreview& line, std::size_t num
             break;
         case DiffLineKind::Context:
             marker = " ";
-            marker_color = Color::GrayDark;
-            line_color = Color::GrayLight;
+            marker_color = ColorTextMuted;
+            line_color = ColorTextSecondary;
             break;
         case DiffLineKind::Other:
             marker = " ";
-            marker_color = Color::GrayDark;
-            line_color = Color::GrayDark;
+            marker_color = ColorTextMuted;
+            line_color = ColorTextMuted;
             break;
         case DiffLineKind::Hunk:
         case DiffLineKind::Header:
@@ -338,7 +338,7 @@ Element render_permission_diff_line(const DiffLinePreview& line, std::size_t num
     const std::string new_col = format_diff_line_number(line.new_line, number_width);
 
     return hbox({
-        text(std::format("{} {} ", old_col, new_col)) | color(Color::GrayDark),
+        text(std::format("{} {} ", old_col, new_col)) | color(ColorTextMuted),
         text(marker + " ") | color(marker_color) | ftxui::bold,
         text(line.content.empty() ? " " : line.content) | color(line_color) | xflex
     });
@@ -360,7 +360,7 @@ Element render_permission_diff_preview(const ToolDiffPreview& preview) {
     if (preview.hidden_line_count > 0) {
         rows.push_back(
             text(std::format("… {} more diff lines", preview.hidden_line_count))
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
                 | dim);
     }
 
@@ -372,7 +372,7 @@ Element render_permission_diff_preview(const ToolDiffPreview& preview) {
         | size(HEIGHT, LESS_THAN, body_max_height);
 
     Elements panel_rows = {
-        hbox({ text("Diff Preview") | dim, text(" (changes to be applied)") | color(Color::GrayDark) }),
+        hbox({ text("Diff Preview") | dim, text(" (changes to be applied)") | color(ColorTextMuted) }),
         separator(),
     };
 
@@ -390,21 +390,24 @@ Element render_permission_diff_preview(const ToolDiffPreview& preview) {
     return vbox(std::move(panel_rows)) | UiBorder(ColorYellowDark);
 }
 
+// `border` is drawn on the terminal background, `tag_fill` sits under
+// `tag_text`; they differ on a light theme (see TuiTheme.hpp inks vs fills).
 Element make_panel_shell(std::string_view tag,
                          std::string_view helper,
                          Element body,
                          int min_body_height,
-                         Color accent,
+                         Color border,
+                         Color tag_fill,
                          Color tag_text = Color::Black) {
     return vbox({
         hbox({
-            text(std::format(" {} ", tag)) | ftxui::bold | color(tag_text) | bgcolor(accent),
+            text(std::format(" {} ", tag)) | ftxui::bold | color(tag_text) | bgcolor(tag_fill),
             filler(),
-            text(std::string(helper)) | color(Color::GrayDark)
+            text(std::string(helper)) | color(ColorTextMuted)
         }),
         separator(),
         body | size(HEIGHT, GREATER_THAN, min_body_height)
-    }) | UiBorder(accent);
+    }) | UiBorder(border);
 }
 
 Element make_prompt_line(Element input_line) {
@@ -414,26 +417,53 @@ Element make_prompt_line(Element input_line) {
     }) | xflex;
 }
 
-Element make_prompt_box(Element input_line,
-                        Color accent = ColorYellowDark) {
+Element make_prompt_box(Element input_line, Color border) {
     return make_prompt_line(std::move(input_line))
-        | UiBorder(accent)
+        | UiBorder(border)
         | xflex;
+}
+
+Element make_prompt_box(Element input_line,
+                        const ThemedColor& accent = ColorYellowDark) {
+    return make_prompt_box(std::move(input_line), graphic(accent));
+}
+
+// Block letters (█) in ColorLogo, outline glyphs in ColorYellowBright. Both are
+// the same colour on a dark theme, so the split only shows on a light one.
+Element render_banner_logo_line(std::string_view line) {
+    static constexpr std::string_view kBlock = "\u2588";
+    Elements runs;
+    while (!line.empty()) {
+        const bool block = line.starts_with(kBlock);
+        std::size_t length = 0;
+        while (length < line.size() && line.substr(length).starts_with(kBlock) == block) {
+            length += block ? kBlock.size() : 1;
+            // Step over UTF-8 continuation bytes so a run never splits a glyph.
+            while (!block && length < line.size()
+                   && (static_cast<unsigned char>(line[length]) & 0xC0) == 0x80) {
+                ++length;
+            }
+        }
+        runs.push_back(text(std::string(line.substr(0, length)))
+                       | color(block ? Color{ColorLogo} : Color{ColorYellowBright}));
+        line.remove_prefix(length);
+    }
+    return hbox(std::move(runs)) | ftxui::bold;
 }
 
 Element make_selection_row(std::string_view label,
                            std::string_view description,
                            bool selected,
-                           Color accent) {
+                           Color selected_fill) {
     auto row = vbox({
         text(std::string(label)) | ftxui::bold,
         text(std::string(description)) | dim
     });
 
     if (selected) {
-        return row | bgcolor(accent) | color(Color::Black);
+        return row | bgcolor(selected_fill) | color(Color::Black);
     }
-    return row | color(Color::White);
+    return row | color(ColorText);
 }
 
 // Shared chrome for both /settings navigation levels, so the category overview
@@ -456,13 +486,13 @@ Element make_settings_frame(std::string_view scope_label,
 
     Elements content{
         hbox({
-            text(" SETTINGS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SETTINGS ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             text("  " + scope_text) | ftxui::bold | color(ColorYellowBright),
             filler(),
-            text(std::string(hints)) | color(Color::GrayDark)
+            text(std::string(hints)) | color(ColorTextMuted)
         }),
         separator(),
-        text(std::string(scope_path)) | color(Color::GrayDark),
+        text(std::string(scope_path)) | color(ColorTextMuted),
         separator(),
     };
     content.reserve(content.size() + body.size() + 2);
@@ -478,7 +508,7 @@ Element make_settings_frame(std::string_view scope_label,
 
 Element make_command_selection_row(const CommandSuggestion& suggestion,
                                    bool selected) {
-    const Color meta_color = selected ? Color::Black : Color::GrayDark;
+    const Color meta_color = selected ? Color{Color::Black} : ColorTextMuted;
     const Color badge_color = selected ? Color{Color::Black} : static_cast<Color>(ColorYellowDark);
     const std::string description = suggestion.description.empty()
         ? "No description available."
@@ -504,17 +534,17 @@ Element make_command_selection_row(const CommandSuggestion& suggestion,
     });
 
     if (selected) {
-        return row | bgcolor(ColorYellowDark) | color(Color::Black);
+        return row | bgcolor(FillYellowDark) | color(Color::Black);
     }
-    return row | color(Color::White);
+    return row | color(ColorText);
 }
 
 Element render_search_snippet(std::string_view snippet,
                               std::string_view query,
                               bool selected) {
-    const Color base_color = selected ? Color::White : Color::GrayLight;
+    const Color base_color = selected ? ColorText : ColorTextSecondary;
     const Color match_fg = selected ? Color::Black : Color::Black;
-    const Color match_bg = selected ? ColorYellowBright : ColorYellowDark;
+    const Color match_bg = selected ? FillYellowBright : FillYellowDark;
 
     const auto match = core::utils::str::find_case_insensitive(snippet, query);
     if (!match.has_value() || query.empty()) {
@@ -567,7 +597,7 @@ Element render_picker_panel(std::string_view tag,
     if (above > 0) {
         visible.push_back(hbox({
             text(" ↑ ") | color(ColorYellowDark),
-            text(std::format("{} more above", above)) | color(Color::GrayDark) | dim | xflex
+            text(std::format("{} more above", above)) | color(ColorTextMuted) | dim | xflex
         }));
     }
     for (int i = view_start; i < view_end; ++i) {
@@ -576,7 +606,7 @@ Element render_picker_panel(std::string_view tag,
     if (below > 0) {
         visible.push_back(hbox({
             text(" ↓ ") | color(ColorYellowDark),
-            text(std::format("{} more below", below)) | color(Color::GrayDark) | dim | xflex
+            text(std::format("{} more below", below)) | color(ColorTextMuted) | dim | xflex
         }));
     }
 
@@ -593,7 +623,8 @@ Element render_picker_panel(std::string_view tag,
             make_prompt_box(std::move(input_line))
         }),
         prompt_body_height(input_text, 2),
-        ColorYellowDark);
+        graphic(ColorYellowDark),
+        FillYellowDark);
 }
 
 } // namespace
@@ -757,11 +788,11 @@ Element render_startup_banner_panel(std::string_view provider_name,
     Elements logo_rows;
     logo_rows.reserve(kBannerLogoLines.size());
     for (const auto line : kBannerLogoLines) {
-        logo_rows.push_back(text(std::string(line)) | color(ColorYellowBright) | ftxui::bold);
+        logo_rows.push_back(render_banner_logo_line(line));
     }
     Element clock = clock_label.empty()
         ? emptyElement()
-        : text(std::string(clock_label) + " ") | color(Color::GrayLight)
+        : text(std::string(clock_label) + " ") | color(ColorTextSecondary)
             | ftxui::align_right;
 
     const bool show_thread_tabs = thread_tabs.size() > 1;
@@ -788,7 +819,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
             auto rendered = text(std::format(" {}{} ", marker, fit_column(tab.label, 16)))
                 | color(tab_color);
             if (tab.active) {
-                rendered = rendered | ftxui::bold | bgcolor(ColorYellowDark);
+                rendered = rendered | ftxui::bold | bgcolor(FillYellowDark);
             }
             if (thread_tab_hitboxes) {
                 rendered = std::move(rendered) | reflect((*thread_tab_hitboxes)[i]);
@@ -800,7 +831,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
     Elements banner_right_column{std::move(clock)};
     if (show_thread_tabs && !context_sources_label.empty()) {
         auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
-            | color(Color::GrayLight)
+            | color(ColorTextSecondary)
             | ftxui::align_right;
         if (context_sources_hitbox) {
             label_el = std::move(label_el) | reflect(*context_sources_hitbox);
@@ -821,12 +852,12 @@ Element render_startup_banner_panel(std::string_view provider_name,
 
     if (!context_sources_label.empty() || show_thread_tabs) {
         Elements summary_row{
-            text(summary) | color(Color::White),
+            text(summary) | color(ColorText),
             filler(),
         };
         if (!show_thread_tabs && !context_sources_label.empty()) {
             auto label_el = text(std::format(" 🤖 {} ", context_sources_label))
-                | color(Color::GrayLight);
+                | color(ColorTextSecondary);
             if (context_sources_hitbox) {
                 label_el = std::move(label_el) | reflect(*context_sources_hitbox);
             }
@@ -837,7 +868,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
         }
         rows.push_back(hbox(std::move(summary_row)));
     } else {
-        rows.push_back(paragraph(summary) | color(Color::White) | xflex);
+        rows.push_back(paragraph(summary) | color(ColorText) | xflex);
     }
 
     const auto hint_lines = split_lines(std::string(provider_setup_hint));
@@ -845,7 +876,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
         if (line.empty()) {
             continue;
         }
-        rows.push_back(paragraph(line) | color(Color::GrayLight) | xflex);
+        rows.push_back(paragraph(line) | color(ColorTextSecondary) | xflex);
     }
 
     return vbox(std::move(rows)) | UiBorder(ColorYellowDark);
@@ -854,7 +885,7 @@ Element render_startup_banner_panel(std::string_view provider_name,
 Element render_default_prompt_panel(Element input_line,
                                     std::string_view) {
     return vbox({
-        separator(),
+        separator() | color(graphic(ColorYellowBright)),
         make_prompt_box(std::move(input_line), ColorYellowBright) | xflex
     });
 }
@@ -903,13 +934,13 @@ Element render_mention_prompt_panel(const std::vector<MentionSuggestion>& sugges
             text(badge)
                 | color(s.is_directory
                     ? (sel ? Color{Color::Black} : static_cast<Color>(ColorYellowBright))
-                    : Color{Color::GrayDark}),
+                    : Color{ColorTextMuted}),
             text(s.display_path)
-                | color(sel ? Color::Black : Color::White)
+                | color(sel ? Color{Color::Black} : ColorText)
                 | xflex,
         });
 
-        rows.push_back(sel ? (row | bgcolor(ColorYellowDark))
+        rows.push_back(sel ? (row | bgcolor(FillYellowDark))
                            : row);
     }
 
@@ -933,7 +964,7 @@ Elements highlighted_title(std::string_view title,
         }
     }
 
-    const Color base = selected ? Color::Black : Color::White;
+    const Color base = selected ? Color{Color::Black} : ColorText;
     const Color accent = selected ? Color::Black : static_cast<Color>(ColorYellowBright);
     Elements spans;
     std::size_t start = 0;
@@ -969,8 +1000,8 @@ Element render_session_reference_prompt_panel(
     for (std::size_t i = 0; i < suggestions.size(); ++i) {
         const auto& s = suggestions[i];
         const bool sel = static_cast<int>(i) == selected_index;
-        const Color muted = sel ? Color::Black : Color::GrayDark;
-        const Color soft = sel ? Color::Black : Color::GrayLight;
+        const Color muted = sel ? Color{Color::Black} : ColorTextMuted;
+        const Color soft = sel ? Color{Color::Black} : ColorTextSecondary;
 
         const std::string title = core::utils::str::trim_trailing(fit_column(s.title, kTitleWidth), ' ');
         const std::string turns = s.turn_count == 1
@@ -1008,7 +1039,7 @@ Element render_session_reference_prompt_panel(
             }),
             hbox(std::move(details)),
         });
-        rows.push_back(sel ? (std::move(row) | bgcolor(ColorYellowDark)) : std::move(row));
+        rows.push_back(sel ? (std::move(row) | bgcolor(FillYellowDark)) : std::move(row));
     }
 
     return render_picker_panel("CONVERSATIONS",
@@ -1031,22 +1062,22 @@ Element render_permission_prompt_panel(std::string_view tool_name,
         "[1] Yes",
         "Run this tool call now.",
         selected_index == 0,
-        ColorWarn);
+        FillWarn);
     const auto option_always = make_selection_row(
         std::format("[2] Yes, don't ask again for {}", allow_label),
         "Auto-approve matching calls for the rest of this session.",
         selected_index == 1,
-        ColorWarn);
+        FillWarn);
     const auto option_yolo = make_selection_row(
         "[3] Yes, enable YOLO mode",
         "Auto-approve ALL sensitive tools for this session.",
         selected_index == 2,
-        ColorWarn);
+        FillWarn);
     const auto option_reject = make_selection_row(
         "[4] No, suggest something",
         "Reject this call and tell Filo what to do instead.",
         selected_index == 3,
-        ColorWarn);
+        FillWarn);
 
     auto preview_box = vbox({
         hbox({ text("Tool") | dim, filler(), text(std::string(tool_name)) | ftxui::bold | color(ColorYellowBright) }),
@@ -1065,11 +1096,11 @@ Element render_permission_prompt_panel(std::string_view tool_name,
                 : text(""),
             filler(),
             text("Up/Down: select  Enter: confirm  1/Y  2/A  3  4/N")
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
         }),
         separator(),
         text(permission_intent_message(tool_name))
-            | color(Color::White),
+            | color(ColorText),
         filler(),
         preview_box,
     };
@@ -1103,7 +1134,7 @@ Element render_model_selection_panel(int selected_index,
         "[1] Manual",
         manual_description,
         selected_index == 0,
-        ColorYellowDark);
+        FillYellowDark);
 
     const std::string router_label = router_available
         ? std::format("[2] Router ({})", router_policy.empty() ? "policy not set" : router_policy)
@@ -1113,7 +1144,7 @@ Element render_model_selection_panel(int selected_index,
         router_label,
         router_description,
         selected_index == 1,
-        router_available ? static_cast<Color>(ColorYellowDark) : Color{Color::GrayDark});
+        router_available ? Color{FillYellowDark} : Color{FillSelection});
 
     const std::string auto_label = router_available
         ? "[3] Auto"
@@ -1123,17 +1154,17 @@ Element render_model_selection_panel(int selected_index,
         auto_label,
         auto_description,
         selected_index == 2,
-        router_available ? static_cast<Color>(ColorYellowDark) : Color{Color::GrayDark});
+        router_available ? Color{FillYellowDark} : Color{FillSelection});
 
     return vbox({
         hbox({
-            text(" SELECT MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SELECT MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
             text("Up/Down: select  Enter: confirm  1/2/3: quick choose")
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
         }),
         separator(),
-        text("Choose how Filo routes model calls for this session.") | color(Color::White),
+        text("Choose how Filo routes model calls for this session.") | color(ColorText),
         filler(),
         manual_option,
         router_option,
@@ -1163,19 +1194,19 @@ Element render_model_provider_picker_panel(
             provider.description,
             selected_index == static_cast<int>(i),
             provider.credentials_missing
-                ? Color{Color::GrayDark}
-                : static_cast<Color>(ColorYellowDark)));
+                ? Color{FillSelection}
+                : Color{FillYellowDark}));
     }
 
     return vbox({
         hbox({
-            text(" MODEL PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" MODEL PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
             text("Up/Down: select  Enter: models  1-9: quick choose")
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
         }),
         separator(),
-        text("Select a provider to choose a model.") | color(Color::White),
+        text("Select a provider to choose a model.") | color(ColorText),
         filler(),
         vbox(std::move(rows)),
         filler(),
@@ -1205,20 +1236,20 @@ Element render_provider_model_picker_panel(
             model.description,
             selected_index == static_cast<int>(i),
             model.credentials_missing
-                ? Color{Color::GrayDark}
-                : static_cast<Color>(ColorYellowDark)));
+                ? Color{FillSelection}
+                : Color{FillYellowDark}));
     }
 
     return vbox({
         hbox({
-            text(" MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             text("  " + std::string(provider_name)) | ftxui::bold | color(ColorYellowBright),
             filler(),
             text("Up/Down: select  Enter: switch  Esc: providers")
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
         }),
         separator(),
-        text(std::format("Select a {} model.", provider_name)) | color(Color::White),
+        text(std::format("Select a {} model.", provider_name)) | color(ColorText),
         filler(),
         vbox(std::move(rows)),
         filler(),
@@ -1251,7 +1282,7 @@ Element render_option_selection_panel(std::string_view title,
             label,
             option.description,
             selected_index == static_cast<int>(i),
-            ColorYellowDark));
+            FillYellowDark));
     }
     if (last < static_cast<int>(options.size())) {
         rows.push_back(text(std::format("↓ {} more below", options.size() - last)) | dim);
@@ -1259,15 +1290,15 @@ Element render_option_selection_panel(std::string_view title,
 
     return vbox({
         hbox({
-            text(" " + std::string(title) + " ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" " + std::string(title) + " ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
             text(std::format(
                 "Up/Down: select  Enter: confirm  1-{}: quick choose",
                 std::min<std::size_t>(options.size(), 9)))
-                | color(Color::GrayDark)
+                | color(ColorTextMuted)
         }),
         separator(),
-        text(std::format("Current: {}", current)) | color(Color::White),
+        text(std::format("Current: {}", current)) | color(ColorText),
         filler(),
         vbox(std::move(rows)),
         filler(),
@@ -1287,18 +1318,18 @@ Element render_provider_selection_panel(const std::vector<std::string>& provider
             text(std::format(" [{}] ", i + 1)) | color(ColorYellowBright),
             text(providers[i]) | ftxui::bold
         });
-        rows.push_back(sel ? (row | bgcolor(ColorYellowDark) | color(Color::Black))
-                           : (row | color(Color::White)));
+        rows.push_back(sel ? (row | bgcolor(FillYellowDark) | color(Color::Black))
+                           : (row | color(ColorText)));
     }
 
     return vbox({
         hbox({
-            text(" AUTH PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" AUTH PROVIDER ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
-            text("Up/Down: select  Enter: confirm  Esc: cancel") | color(Color::GrayDark)
+            text("Up/Down: select  Enter: confirm  Esc: cancel") | color(ColorTextMuted)
         }),
         separator(),
-        text("Select an authentication provider:") | color(Color::White),
+        text("Select an authentication provider:") | color(ColorText),
         separator(),
         vbox(std::move(rows)),
         filler(),
@@ -1332,7 +1363,7 @@ Element render_authentication_recovery_panel(
             std::format("[{}] {}", i + 1, options[i].first),
             options[i].second,
             selected_index == static_cast<int>(i),
-            ColorYellowDark));
+            FillYellowDark));
     }
 
     const std::string title = provider_name.empty()
@@ -1345,14 +1376,14 @@ Element render_authentication_recovery_panel(
     return vbox({
         hbox({
             text(" " + title + " ") | ftxui::bold | color(Color::Black)
-                | bgcolor(ColorYellowBright),
+                | bgcolor(FillYellowBright),
             filler(),
             text("Up/Down: select  Enter: confirm  Esc: not now")
-                | color(Color::GrayDark),
+                | color(ColorTextMuted),
         }),
         separator(),
-        text("Sign-in required") | ftxui::bold | color(Color::White),
-        paragraph(explanation) | color(Color::GrayLight),
+        text("Sign-in required") | ftxui::bold | color(ColorText),
+        paragraph(explanation) | color(ColorTextSecondary),
         filler(),
         vbox(std::move(rows)),
     }) | UiBorder(ColorYellowBright) | size(HEIGHT, GREATER_THAN, 13);
@@ -1380,7 +1411,7 @@ Element render_settings_panel(std::string_view scope_label,
             make_selection_row(label,
                                description,
                                selected,
-                               ColorYellowDark));
+                               FillYellowDark));
     }
 
     return make_settings_frame(
@@ -1412,7 +1443,7 @@ Element render_settings_categories_panel(std::string_view scope_label,
             make_selection_row(label,
                                category.description,
                                selected_index == static_cast<int>(i),
-                               ColorYellowDark));
+                               FillYellowDark));
     }
 
     return make_settings_frame(
@@ -1446,7 +1477,7 @@ Element render_local_model_picker_panel(std::string_view current_dir,
         if (above > 0) {
             visible_rows.push_back(hbox({
                 text(" \xe2\x86\x91 ") | color(ColorYellowDark),
-                text(std::format("{} more above", above)) | color(Color::GrayDark) | dim | xflex
+                text(std::format("{} more above", above)) | color(ColorTextMuted) | dim | xflex
             }));
         }
         for (int i = view_start; i < view_end; ++i) {
@@ -1456,27 +1487,27 @@ Element render_local_model_picker_panel(std::string_view current_dir,
             auto row = hbox({
                 text(badge) | color(e.is_directory
                     ? (sel ? Color{Color::Black} : static_cast<Color>(ColorYellowBright))
-                    : Color{Color::GrayDark}),
-                text(e.name) | color(sel ? Color::Black : Color::White) | xflex,
+                    : Color{ColorTextMuted}),
+                text(e.name) | color(sel ? Color{Color::Black} : ColorText) | xflex,
             });
-            visible_rows.push_back(sel ? (row | bgcolor(ColorYellowDark)) : row);
+            visible_rows.push_back(sel ? (row | bgcolor(FillYellowDark)) : row);
         }
         if (below > 0) {
             visible_rows.push_back(hbox({
                 text(" \xe2\x86\x93 ") | color(ColorYellowDark),
-                text(std::format("{} more below", below)) | color(Color::GrayDark) | dim | xflex
+                text(std::format("{} more below", below)) | color(ColorTextMuted) | dim | xflex
             }));
         }
     }
 
     return vbox({
         hbox({
-            text(" LOCAL MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" LOCAL MODEL ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
-            text("\xe2\x86\x91\xe2\x86\x93  Enter: open/select  Esc: go up / close") | color(Color::GrayDark)
+            text("\xe2\x86\x91\xe2\x86\x93  Enter: open/select  Esc: go up / close") | color(ColorTextMuted)
         }),
         separator(),
-        text(std::format("  {}", current_dir)) | color(Color::GrayLight) | dim,
+        text(std::format("  {}", current_dir)) | color(ColorTextSecondary) | dim,
         separator(),
         vbox(std::move(visible_rows)),
         filler(),
@@ -1509,7 +1540,7 @@ Element render_session_picker_panel(
 
     const auto header_cell = [](std::string_view label, int width, bool right = false) {
         return text(right ? fit_column_right(label, width) : fit_column(label, width))
-               | color(Color::GrayDark);
+               | color(ColorTextMuted);
     };
 
     const bool browsing_threads =
@@ -1522,21 +1553,21 @@ Element render_session_picker_panel(
     Elements chrome = {
         hbox({
             text(std::string{title}) | ftxui::bold | color(Color::Black)
-                | bgcolor(ColorYellowBright),
+                | bgcolor(FillYellowBright),
             text(filtered.empty()
                      ? "  empty"
                      : std::format("  {} of {}",
                                    std::clamp(selected_index, 0,
                                               std::max(0, static_cast<int>(filtered.size()) - 1)) + 1,
                                    filtered.size()))
-                | color(Color::GrayLight),
+                | color(ColorTextSecondary),
             filler(),
             text(rename_active
                      ? "Enter save  ·  Esc cancel"
                      : filter_active
                          ? "type to filter  ·  Enter/Esc done"
                          : std::string{browse_help})
-                | color(Color::GrayDark),
+                | color(ColorTextMuted),
         }),
         separator(),
     };
@@ -1544,7 +1575,7 @@ Element render_session_picker_panel(
     if (filter_active || !query.empty()) {
         chrome.push_back(hbox({
             text(filter_active ? " Filter: " : " Filtered: ") | color(ColorYellowBright),
-            text(std::string{query}) | color(Color::White),
+            text(std::string{query}) | color(ColorText),
             text(filter_active ? "█" : "") | color(ColorYellowBright),
             filler(),
         }));
@@ -1552,13 +1583,13 @@ Element render_session_picker_panel(
     if (rename_active) {
         chrome.push_back(hbox({
             text(" Rename: ") | color(ColorYellowBright),
-            text(std::string{rename_buffer}) | color(Color::White),
+            text(std::string{rename_buffer}) | color(ColorText),
             text("█") | color(ColorYellowBright),
             filler(),
         }));
     }
     if (!status_message.empty() && !rename_active && !filter_active) {
-        chrome.push_back(text(std::format("  {}", status_message)) | color(Color::GrayLight));
+        chrome.push_back(text(std::format("  {}", status_message)) | color(ColorTextSecondary));
     }
 
     if (filtered.empty()) {
@@ -1570,7 +1601,7 @@ Element render_session_picker_panel(
                    ? "  No active threads match this filter."
                    : "  No saved sessions match this filter.");
         chrome.push_back(text(empty_message)
-                         | color(Color::White));
+                         | color(ColorText));
         chrome.push_back(text(browsing_threads
                                   ? "  /threads switches live work; N creates another active thread."
                                   : "  Sessions are stored automatically once a conversation starts.")
@@ -1625,8 +1656,8 @@ Element render_session_picker_panel(
         const auto& row = rows[static_cast<std::size_t>(ri)];
         if (row.is_header) {
             visible_rows.push_back(hbox({
-                text(std::format("  {} ", row.header_label)) | ftxui::bold | color(Color::GrayLight),
-                text(std::string(24, '-')) | color(Color::GrayDark) | dim,
+                text(std::format("  {} ", row.header_label)) | ftxui::bold | color(ColorTextSecondary),
+                text(std::string(24, '-')) | color(ColorTextMuted) | dim,
                 filler(),
             }));
             continue;
@@ -1642,8 +1673,8 @@ Element render_session_picker_panel(
         const std::string title = core::session::thread_display_title(s);
         const std::string model_cell = core::session::thread_model_label(s.provider, s.model);
 
-        const Color primary_color = is_selected ? Color::Black : Color::White;
-        const Color muted_color   = is_selected ? Color::Black : Color::GrayDark;
+        const Color primary_color = is_selected ? Color{Color::Black} : ColorText;
+        const Color muted_color   = is_selected ? Color{Color::Black} : ColorTextMuted;
         const Color id_color = is_selected
             ? Color{Color::Black}
             : static_cast<Color>(ColorYellowBright);
@@ -1655,7 +1686,7 @@ Element render_session_picker_panel(
                         | color(is_selected ? Color{Color::Black}
                                             : ((is_current || is_running)
                                                    ? static_cast<Color>(ColorYellowBright)
-                                                          : Color{Color::GrayDark})));
+                                                          : Color{ColorTextMuted})));
         cells.push_back(text(fit_column(s.session_id, kIdWidth)) | ftxui::bold | color(id_color));
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_column(title, kTitleWidth)) | color(primary_color));
@@ -1670,7 +1701,7 @@ Element render_session_picker_panel(
                         | color(s.working_dir.empty() ? muted_color : primary_color));
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_column(model_cell, kModelWidth))
-                        | color(is_selected ? Color::Black : Color::GrayLight));
+                        | color(is_selected ? Color{Color::Black} : ColorTextSecondary));
         cells.push_back(text(std::string{kGap}));
         cells.push_back(text(fit_column_right(std::to_string(s.turn_count), kTurnsWidth))
                         | color(muted_color));
@@ -1691,7 +1722,7 @@ Element render_session_picker_panel(
 
         auto rendered = hbox(std::move(cells));
         if (is_selected) {
-            rendered = rendered | bgcolor(ColorYellowDark);
+            rendered = rendered | bgcolor(FillYellowDark);
         }
         visible_rows.push_back(std::move(rendered));
     }
@@ -1699,13 +1730,13 @@ Element render_session_picker_panel(
     if (start_idx > 0) {
         visible_rows.insert(visible_rows.begin(), hbox({
             text(" ↑ ") | color(ColorYellowDark),
-            text(std::format("{} more above", start_idx)) | color(Color::GrayDark) | dim,
+            text(std::format("{} more above", start_idx)) | color(ColorTextMuted) | dim,
         }));
     }
     if (end_idx < row_total) {
         visible_rows.push_back(hbox({
             text(" ↓ ") | color(ColorYellowDark),
-            text(std::format("{} more below", row_total - end_idx)) | color(Color::GrayDark) | dim,
+            text(std::format("{} more below", row_total - end_idx)) | color(ColorTextMuted) | dim,
         }));
     }
 
@@ -1770,12 +1801,12 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
     if (prompts.empty()) {
         return vbox({
             hbox({
-                text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+                text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
                 filler(),
-                text("Esc: close") | color(Color::GrayDark),
+                text("Esc: close") | color(ColorTextMuted),
             }),
             separator(),
-            text("  No prompt history yet.") | color(Color::White),
+            text("  No prompt history yet.") | color(ColorText),
             text("  Prompts are saved automatically once you send a message.") | dim,
             filler(),
         }) | UiBorder(ColorYellowBright)
@@ -1795,14 +1826,14 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
 
     for (int i = start_idx; i < end_idx; ++i) {
         const bool is_selected = (i == selected);
-        const Color primary_color = is_selected ? Color::Black : Color::White;
+        const Color primary_color = is_selected ? Color{Color::Black} : ColorText;
         const Color index_color   = is_selected
             ? Color{Color::Black}
             : static_cast<Color>(ColorYellowDark);
 
         Elements cells;
         cells.push_back(text(is_selected ? " \xe2\x96\xb6 " : "   ")
-                        | color(is_selected ? Color{Color::Black} : Color{Color::GrayDark}));
+                        | color(is_selected ? Color{Color::Black} : Color{ColorTextMuted}));
         cells.push_back(text(fit_column_right(std::to_string(i + 1), kIndexWidth))
                         | ftxui::bold | color(index_color));
         cells.push_back(text(std::string{kGap}));
@@ -1813,7 +1844,7 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
 
         auto row = hbox(std::move(cells));
         if (is_selected) {
-            row = row | bgcolor(ColorYellowDark);
+            row = row | bgcolor(FillYellowDark);
         }
         list_rows.push_back(std::move(row));
     }
@@ -1821,13 +1852,13 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
     if (start_idx > 0) {
         list_rows.insert(list_rows.begin(), hbox({
             text(" \xe2\x86\x91 ") | color(ColorYellowDark),
-            text(std::format("{} more above", start_idx)) | color(Color::GrayDark) | dim,
+            text(std::format("{} more above", start_idx)) | color(ColorTextMuted) | dim,
         }));
     }
     if (end_idx < total) {
         list_rows.push_back(hbox({
             text(" \xe2\x86\x93 ") | color(ColorYellowDark),
-            text(std::format("{} more below", total - end_idx)) | color(Color::GrayDark) | dim,
+            text(std::format("{} more below", total - end_idx)) | color(ColorTextMuted) | dim,
         }));
     }
 
@@ -1842,38 +1873,38 @@ Element render_prompts_picker_panel(const std::vector<std::string>& prompts,
             preview_body.push_back(
                 text(std::format("  \xe2\x80\xa6 {} more line(s)",
                                  preview_lines.size() - kMaxPreviewLines))
-                | color(Color::GrayDark) | dim);
+                | color(ColorTextMuted) | dim);
             break;
         }
         preview_body.push_back(text(std::string{"  "} + std::string{line})
-                               | color(Color::GrayLight));
+                               | color(ColorTextSecondary));
         ++shown;
     }
     if (preview_body.empty()) {
-        preview_body.push_back(text("  (empty)") | color(Color::GrayDark));
+        preview_body.push_back(text("  (empty)") | color(ColorTextMuted));
     }
 
     // ── Assemble ──────────────────────────────────────────────────────────
     Elements header_cells;
     header_cells.push_back(text(std::string(static_cast<std::size_t>(kMarkerWidth), ' ')));
-    header_cells.push_back(text(fit_column_right("#", kIndexWidth)) | color(Color::GrayDark));
+    header_cells.push_back(text(fit_column_right("#", kIndexWidth)) | color(ColorTextMuted));
     header_cells.push_back(text(std::string{kGap}));
-    header_cells.push_back(text(fit_column("PROMPT", kPreviewWidth)) | color(Color::GrayDark));
+    header_cells.push_back(text(fit_column("PROMPT", kPreviewWidth)) | color(ColorTextMuted));
     header_cells.push_back(filler());
 
     Elements children;
     children.push_back(hbox({
-        text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
-        text(std::format("  {} of {}", selected + 1, total)) | color(Color::GrayLight),
+        text(" PROMPTS ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
+        text(std::format("  {} of {}", selected + 1, total)) | color(ColorTextSecondary),
         filler(),
         text("\xe2\x86\x91\xe2\x86\x93 navigate  \xc2\xb7  Enter use  \xc2\xb7  Ctrl+\xe2\x86\xb5 copy  \xc2\xb7  Del delete  \xc2\xb7  Esc close")
-            | color(Color::GrayDark),
+            | color(ColorTextMuted),
     }));
     children.push_back(separator());
     children.push_back(hbox(std::move(header_cells)) | dim);
     children.push_back(vbox(std::move(list_rows)));
     children.push_back(separator());
-    children.push_back(text(" PREVIEW") | color(Color::GrayDark) | ftxui::bold);
+    children.push_back(text(" PREVIEW") | color(ColorTextMuted) | ftxui::bold);
     children.push_back(vbox(std::move(preview_body)));
     if (!status_message.empty()) {
         children.push_back(separator());
@@ -1895,24 +1926,24 @@ Element render_review_picker_panel(ReviewPickerMode mode,
     const auto options = core::review::review_menu_options();
     Elements children;
     children.push_back(hbox({
-        text(" REVIEW ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        text(" REVIEW ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
         filler(),
         text(mode == ReviewPickerMode::SelectTarget
                  ? std::format(
                        "Up/Down: select  Enter: confirm  1-{}: quick choose  Esc: cancel",
                        options.size())
                  : std::string("Type to edit  Enter: start review  Esc: back"))
-            | color(Color::GrayDark)
+            | color(ColorTextMuted)
     }));
     children.push_back(separator());
-    children.push_back(text("Choose how /review should run.") | color(Color::White));
+    children.push_back(text("Choose how /review should run.") | color(ColorText));
     children.push_back(filler());
     for (std::size_t i = 0; i < options.size(); ++i) {
         children.push_back(make_selection_row(
             std::string(options[i].label),
             std::string(options[i].description),
             selected_index == static_cast<int>(i),
-            ColorYellowDark));
+            FillYellowDark));
     }
     children.push_back(filler());
 
@@ -1920,7 +1951,7 @@ Element render_review_picker_panel(ReviewPickerMode mode,
         const std::string display = input_text.empty() ? "<branch>" : std::string(input_text);
         children.push_back(separator());
         children.push_back(text("Base branch") | color(ColorYellowBright));
-        children.push_back(text(std::format("  > {}█", display)) | color(Color::White));
+        children.push_back(text(std::format("  > {}█", display)) | color(ColorText));
         if (!base_refs.empty()) {
             children.push_back(text("Type to filter or enter a custom ref. Enter selects the highlighted ref.") | dim);
 
@@ -1938,14 +1969,14 @@ Element render_review_picker_panel(ReviewPickerMode mode,
                 const bool is_selected = (i == clamped_selected);
                 auto row = hbox({
                     text(is_selected ? " \xe2\x96\xb6 " : "   ") | color(ColorYellowBright),
-                    text(ref.name) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
+                    text(ref.name) | ftxui::bold | color(is_selected ? static_cast<Color>(ColorYellowBright) : Color{ColorText}),
                     ref.description.empty()
                         ? text("")
-                        : (text(std::format("  {}", ref.description)) | color(Color::GrayDark)),
+                        : (text(std::format("  {}", ref.description)) | color(ColorTextMuted)),
                     filler(),
                 });
                 if (is_selected) {
-                    row = row | bgcolor(Color::GrayDark);
+                    row = row | bgcolor(FillSelection);
                 }
                 ref_rows.push_back(std::move(row));
             }
@@ -1966,7 +1997,7 @@ Element render_review_picker_panel(ReviewPickerMode mode,
             input_text.empty() ? "<custom review prompt>" : std::string(input_text);
         children.push_back(separator());
         children.push_back(text("Custom review prompt") | color(ColorYellowBright));
-        children.push_back(text(std::format("  > {}█", display)) | color(Color::White));
+        children.push_back(text(std::format("  > {}█", display)) | color(ColorText));
         children.push_back(text("Write custom review instructions here. Esc returns to the menu.") | dim);
     }
 
@@ -1991,7 +2022,7 @@ Element render_conversation_search_panel(std::string_view query,
     if (query.empty()) {
         rows.push_back(text("Type to search message text, tool output, and status lines.") | dim);
     } else if (hits.empty()) {
-        rows.push_back(text(std::format("No matches for '{}'.", query)) | color(Color::GrayLight));
+        rows.push_back(text(std::format("No matches for '{}'.", query)) | color(ColorTextSecondary));
     } else {
         for (int i = start_idx; i < end_idx; ++i) {
             const auto& hit = hits[static_cast<std::size_t>(i)];
@@ -2001,7 +2032,7 @@ Element render_conversation_search_panel(std::string_view query,
                 hbox({
                     text(selected ? " > " : "   ") | color(ColorYellowBright),
                     text(std::format("[{}] ", hit.message_index + 1)) | color(ColorYellowDark),
-                    text(hit.role) | ftxui::bold | color(selected ? static_cast<Color>(ColorYellowBright) : Color{Color::White}),
+                    text(hit.role) | ftxui::bold | color(selected ? static_cast<Color>(ColorYellowBright) : Color{ColorText}),
                 }),
                 hbox({
                     text("   "),
@@ -2010,7 +2041,7 @@ Element render_conversation_search_panel(std::string_view query,
             });
 
             if (selected) {
-                row = row | bgcolor(Color::GrayDark);
+                row = row | bgcolor(FillSelection);
             }
             rows.push_back(std::move(row));
         }
@@ -2027,16 +2058,16 @@ Element render_conversation_search_panel(std::string_view query,
 
     return vbox({
         hbox({
-            text(" SEARCH ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+            text(" SEARCH ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
             filler(),
             text("Ctrl+F/Esc: close  Enter: jump  Backspace: edit  ↑↓: navigate")
-                | color(Color::GrayDark),
+                | color(ColorTextMuted),
         }),
         separator(),
         hbox({
             text(" Query: ") | color(ColorYellowBright),
             text(std::string(query.empty() ? "<empty>" : query))
-                | color(Color::White)
+                | color(ColorText)
                 | ftxui::bold
                 | xflex
         }),
@@ -2052,9 +2083,9 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
     Elements rows;
     rows.reserve(kMaxVisibleOptions + 4);
     rows.push_back(hbox({
-        text(" REWIND ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        text(" REWIND ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
         filler(),
-        text("Esc: close") | color(Color::GrayDark),
+        text("Esc: close") | color(ColorTextMuted),
     }));
     rows.push_back(separator());
 
@@ -2078,13 +2109,13 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
             text(option.label) | ftxui::bold | xflex,
             text(option.description) | dim,
         });
-        rows.push_back(selected ? (row | bgcolor(ColorYellowDark) | color(Color::Black))
+        rows.push_back(selected ? (row | bgcolor(FillYellowDark) | color(Color::Black))
                                 : std::move(row));
     }
 
     rows.push_back(separator());
     rows.push_back(text("Up/Down: select  Enter: continue  1-9: quick choose")
-                   | color(Color::GrayDark));
+                   | color(ColorTextMuted));
 
     return vbox(std::move(rows)) | UiBorder(ColorYellowBright)
       | size(HEIGHT, GREATER_THAN, 8);
@@ -2093,9 +2124,9 @@ Element render_rewind_picker_panel(const std::vector<RewindPickerOption>& option
 Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
     Elements rows;
     rows.push_back(hbox({
-        text(" RUN CODE ") | ftxui::bold | color(Color::Black) | bgcolor(ColorYellowBright),
+        text(" RUN CODE ") | ftxui::bold | color(Color::Black) | bgcolor(FillYellowBright),
         filler(),
-        text("Ctrl+R · Esc: close/back") | color(Color::GrayDark),
+        text("Ctrl+R · Esc: close/back") | color(ColorTextMuted),
     }));
     rows.push_back(separator());
 
@@ -2120,15 +2151,15 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
                 text(std::format("  L{}-{}  ", item.block.first_line, item.block.last_line)) | dim,
                 paragraph(core::code::code_block_preview(item.block.source)) | xflex,
                 text(item.plan.has_value() ? " runnable" : " copy only")
-                    | color(item.plan.has_value() ? Color::Green : Color::GrayDark),
+                    | color(item.plan.has_value() ? Color{Color::Green} : ColorTextMuted),
             });
             rows.push_back(selected_row
-                ? row | bgcolor(ColorYellowDark) | color(Color::Black)
+                ? row | bgcolor(FillYellowDark) | color(Color::Black)
                 : std::move(row));
         }
         rows.push_back(separator());
         rows.push_back(text("Up/Down: select  Enter: inspect  1-9: quick choose")
-                       | color(Color::GrayDark));
+                       | color(ColorTextMuted));
     } else if (state.mode == CodeBlockRunnerMode::Confirm && selected_item != nullptr) {
         const std::string language = selected_item->block.language.empty()
             ? "shell (inferred)" : selected_item->block.language;
@@ -2139,7 +2170,7 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
             selected_item->block.first_line,
             selected_item->block.last_line)) | ftxui::bold);
         rows.push_back(paragraph(core::code::code_block_preview(
-            selected_item->block.source, 180)) | color(Color::White));
+            selected_item->block.source, 180)) | color(ColorText));
         if (selected_item->plan.has_value()) {
             rows.push_back(text(std::format(
                 "Runs with '{}' in {}. Filo's current workspace sandbox policy is preserved.",
@@ -2154,7 +2185,7 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
                                : index == 1 ? "Copy the exact fenced source without executing it."
                                             : "Choose another fenced block.",
                     state.selected_action == index,
-                    ColorYellowDark));
+                    FillYellowDark));
             }
         } else {
             rows.push_back(paragraph(selected_item->unavailable_reason)
@@ -2166,12 +2197,12 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
                     actions[static_cast<std::size_t>(index)],
                     index == 0 ? "Copy without executing." : "Choose another fenced block.",
                     state.selected_action == index,
-                    ColorYellowDark));
+                    FillYellowDark));
             }
         }
         rows.push_back(separator());
         rows.push_back(text("Up/Down: select  Enter: confirm  Esc: back")
-                       | color(Color::GrayDark));
+                       | color(ColorTextMuted));
     } else {
         if (state.result) {
             const auto& result = *state.result;
@@ -2205,11 +2236,11 @@ Element render_code_block_runner_panel(const CodeBlockRunnerState& state) {
                     : index == 2 ? "Return to the execution confirmation."
                                  : "Return to the prompt.",
                 state.selected_action == index,
-                ColorYellowDark));
+                FillYellowDark));
         }
         rows.push_back(separator());
         rows.push_back(text("Up/Down: select  Enter: confirm  Esc: dismiss")
-                       | color(Color::GrayDark));
+                       | color(ColorTextMuted));
     }
 
     return vbox(std::move(rows)) | UiBorder(ColorYellowBright)
@@ -2225,7 +2256,7 @@ Element render_stderr_panel(const std::vector<std::string>& lines) {
     Elements rows;
     rows.reserve(lines.size() - start);
     for (std::size_t i = start; i < lines.size(); ++i) {
-        rows.push_back(paragraph(lines[i]) | color(Color::White) | xflex);
+        rows.push_back(paragraph(lines[i]) | color(ColorText) | xflex);
     }
     if (rows.empty()) {
         rows.push_back(text("No stderr errors.") | dim);
@@ -2236,6 +2267,7 @@ Element render_stderr_panel(const std::vector<std::string>& lines) {
         "Esc/c/x close",
         vbox(std::move(rows)),
         2,
+        Color::Red,
         Color::Red,
         Color::White)
         | size(HEIGHT, LESS_THAN, 9);
