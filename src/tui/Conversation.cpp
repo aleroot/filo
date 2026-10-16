@@ -2,6 +2,7 @@
 #include "Constants.hpp"
 #include "MarkdownRenderer.hpp"
 #include "StringUtils.hpp"
+#include "TextLayout.hpp"
 #include "TuiTheme.hpp"
 #include "core/permissions/PermissionSystem.hpp"
 #include "core/changes/ConversationChanges.hpp"
@@ -354,15 +355,26 @@ void LiveAssistantTimeline::finish(
 
 namespace {
 
+/// Collapses @p text onto one line and bounds it to @p max_len bytes, cutting
+/// on a codepoint boundary so a multi-byte glyph is never split.
 std::string truncate_preview(std::string_view text, std::size_t max_len = kToolPreviewMaxLen) {
+    constexpr std::string_view kMarker = "...";
     std::string cleaned = core::utils::str::collapse_ascii_whitespace_copy(text);
     if (cleaned.size() <= max_len) {
         return cleaned;
     }
-    if (max_len <= 1) {
-        return cleaned.substr(0, max_len);
+    if (max_len <= kMarker.size()) {
+        return core::tools::read::bounded_prefix(cleaned, max_len);
     }
-    return cleaned.substr(0, max_len - 1) + "...";
+    return core::tools::read::bounded_prefix(cleaned, max_len - kMarker.size())
+        + std::string(kMarker);
+}
+
+/// One-line argument summary for a tool header. Scripts and heredocs span
+/// lines, which a single-row header cannot draw, so whitespace collapses; the
+/// width is left to the renderer, which elides to the space it really has.
+std::string tool_description_line(std::string_view text) {
+    return truncate_preview(text, kToolDescriptionMaxBytes);
 }
 
 bool has_output_truncation_marker(std::string_view output) {
@@ -393,12 +405,12 @@ std::string extract_patch_preview(std::string_view patch) {
         
         for (const auto prefix : prefixes) {
             if (line.starts_with(prefix)) {
-                return truncate_preview(line.substr(prefix.size()));
+                return tool_description_line(line.substr(prefix.size()));
             }
         }
         
         if (!core::utils::str::trim_ascii_copy(line).empty()) {
-            return truncate_preview(line);
+            return tool_description_line(line);
         }
         
         if (end == std::string_view::npos) {
@@ -1348,7 +1360,7 @@ Element render_tool_header(const ToolActivity& tool,
     if (!description.empty()) {
         header_items.push_back(ftxui::text("  "));
         header_items.push_back(
-            ftxui::text(description) | ftxui::color(ColorTextMuted) | xflex);
+            elided_text(description) | ftxui::color(ColorTextMuted) | xflex);
     }
 
     // Right-edge label. A collapsed card is the only thing standing between the
@@ -1640,7 +1652,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
                      | ftxui::color(ColorYellowBright));
     if (!subagent.description.empty()) {
         header.push_back(ftxui::text("  "));
-        header.push_back(ftxui::text(truncate_preview(subagent.description, 64))
+        header.push_back(elided_text(tool_description_line(subagent.description))
                          | ftxui::color(ColorTextSecondary)
                          | xflex);
     } else {
@@ -1678,7 +1690,7 @@ Element render_subagent_activity(const ToolActivity::SubagentActivity& subagent,
                 ftxui::text(" "),
                 ftxui::text(tool.name) | ftxui::color(ColorYellowDark),
                 ftxui::text(tool.description.empty() ? "" : "  "),
-                ftxui::text(tool.description) | ftxui::color(ColorTextMuted) | xflex,
+                elided_text(tool.description) | ftxui::color(ColorTextMuted) | xflex,
             }) | xflex);
     }
     if (hidden_tools > 0) {
@@ -3476,15 +3488,15 @@ std::string summarize_read_arguments(const core::tools::read::Options& options) 
     if (!options.cell.empty()) rest += " cell=" + options.cell;
     if (options.view != "exact" && options.question.empty()) rest += " view=" + options.view;
     if (!options.question.empty()) rest += " ? " + options.question;
-    // Truncate long paths on a codepoint boundary, reserving room for the
-    // range when it is included in a standalone argument summary.
-    if (paths.size() + range.size() > kToolPreviewMaxLen) {
-        const auto keep = kToolPreviewMaxLen > range.size() + 3
-            ? kToolPreviewMaxLen - range.size() - 3 : 1;
-        // Cut on a codepoint boundary; a path is bytes, not glyphs.
+    // Past the byte bound, the path gives way before the range: the range is
+    // what tells two reads of one file apart. Cut on a codepoint boundary; a
+    // path is bytes, not glyphs.
+    if (paths.size() + range.size() > kToolDescriptionMaxBytes) {
+        const auto keep = kToolDescriptionMaxBytes > range.size() + 3
+            ? kToolDescriptionMaxBytes - range.size() - 3 : 1;
         return core::tools::read::bounded_prefix(paths, keep) + "..." + range;
     }
-    return truncate_preview(paths + range + rest);
+    return tool_description_line(paths + range + rest);
 }
 } // namespace
 
@@ -3498,25 +3510,25 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
     simdjson::dom::parser parser;
     simdjson::dom::element document;
     if (parser.parse(tool_args).get(document) != simdjson::SUCCESS) {
-        return truncate_preview(tool_args);
+        return tool_description_line(tool_args);
     }
 
     simdjson::dom::object object;
     if (document.get(object) != simdjson::SUCCESS) {
-        return truncate_preview(tool_args);
+        return tool_description_line(tool_args);
     }
 
     if (tool_name == "task") {
         const auto worker = core::utils::json::first_string_field(object, {"subagent_type", "worker", "agent"});
         const auto description = core::utils::json::first_string_field(object, {"description", "title", "task"});
         if (worker && description) {
-            return truncate_preview("@" + *worker + " · " + *description);
+            return tool_description_line("@" + *worker + " · " + *description);
         }
         if (description) {
-            return truncate_preview(*description);
+            return tool_description_line(*description);
         }
         if (worker) {
-            return truncate_preview("@" + *worker);
+            return tool_description_line("@" + *worker);
         }
     }
 
@@ -3524,7 +3536,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         const auto source = core::utils::json::first_string_field(object, {"source_path", "from_path"});
         const auto destination = core::utils::json::first_string_field(object, {"destination_path", "to_path"});
         if (source && destination) {
-            return truncate_preview(*source + " -> " + *destination);
+            return tool_description_line(*source + " -> " + *destination);
         }
     }
 
@@ -3532,7 +3544,7 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         const auto pattern = core::utils::json::first_string_field(object, {"pattern"});
         const auto dir = core::utils::json::first_string_field(object, {"path"});
         if (pattern && dir) {
-            return truncate_preview(*pattern + " in " + *dir);
+            return tool_description_line(*pattern + " in " + *dir);
         }
     }
 
@@ -3546,10 +3558,11 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
         const auto command = core::utils::json::first_string_field(object, {"command"});
         const auto working_dir = core::utils::json::first_string_field(object, {"working_dir"});
         if (command && working_dir) {
-            return std::format("cwd: {} | cmd: {}", *working_dir, *command);
+            return tool_description_line(
+                std::format("cwd: {} | cmd: {}", *working_dir, *command));
         }
         if (command) {
-            return *command;
+            return tool_description_line(*command);
         }
     }
 
@@ -3565,11 +3578,11 @@ std::string summarize_tool_arguments(std::string_view tool_name, std::string_vie
             "url",
             "name"
         })) {
-        return truncate_preview(*preview);
+        return tool_description_line(*preview);
     }
 
     if (const auto preview = core::utils::json::first_string_field(object)) {
-        return truncate_preview(*preview);
+        return tool_description_line(*preview);
     }
 
     return {};

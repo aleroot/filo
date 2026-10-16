@@ -31,6 +31,12 @@ inline constexpr std::size_t kPermissionArgsPreviewMaxLen = 300;
 /// to the tool-call activity in the conversation history.
 inline constexpr std::size_t kToolPreviewMaxLen = 88;
 
+/// Byte bound on the argument summary shown in a tool call's header. This is a
+/// memory bound, not a layout one: it sits well past any terminal width, and
+/// the header elides the summary to the width it is actually given at render
+/// time, so a wide terminal shows as much as fits instead of a fixed prefix.
+inline constexpr std::size_t kToolDescriptionMaxBytes = 1024;
+
 /// Longest diff a tool card still opens on its own. A change that fits here is
 /// worth showing without a click; anything longer would bury the transcript, so
 /// the card starts collapsed and advertises its size in the header instead.

@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "tui/Constants.hpp"
 #include "tui/Conversation.hpp"
 #include "tui/RewindPicker.hpp"
 #include "tui/TuiTheme.hpp"
@@ -367,6 +368,33 @@ TEST_CASE("summarize_tool_arguments — run_terminal_command without working_dir
     REQUIRE(result == "ls -la");
 }
 
+TEST_CASE("summarize_tool_arguments — python keeps the whole script on one line",
+          "[tui][conversation][args]") {
+    // Like the shell, the header decides how much fits; the summary must not
+    // cut a script at a fixed width first.
+    const std::string body(150, 'x');
+    const auto result = summarize_tool_arguments(
+        "python", R"({"code":"import os\nprint(')" + body + R"(')\n"})");
+    REQUIRE(result == "import os print('" + body + "')");
+}
+
+TEST_CASE("summarize_tool_arguments — multi-line shell commands render on one line",
+          "[tui][conversation][args]") {
+    const auto result = summarize_tool_arguments(
+        "run_terminal_command", R"({"command":"cd build &&\n  ninja"})");
+    REQUIRE(result == "cd build && ninja");
+}
+
+TEST_CASE("summarize_tool_arguments — bounds runaway arguments on a codepoint boundary",
+          "[tui][conversation][args]") {
+    std::string code = "#";
+    while (code.size() < 2 * tui::kToolDescriptionMaxBytes) code += "é";
+    const auto result = summarize_tool_arguments("python", R"({"code":")" + code + R"("})");
+    REQUIRE(result.size() <= tui::kToolDescriptionMaxBytes);
+    REQUIRE(result.ends_with("..."));
+    REQUIRE(static_cast<unsigned char>(result[result.size() - 4]) != 0xC3);
+}
+
 TEST_CASE("summarize_tool_arguments — move_file", "[tui][conversation][args]") {
     const auto result = summarize_tool_arguments(
         "move_file", R"({"source_path":"a.txt","destination_path":"b.txt"})");
@@ -395,8 +423,8 @@ TEST_CASE("summarize_tool_arguments — read", "[tui][conversation][args]") {
     const auto long_read = summarize_tool_arguments(
         "read",
         std::string(R"({"path":")") + long_path + R"(","offset_line":2820,"limit_lines":220})");
-    REQUIRE_THAT(long_read, ContainsSubstring(":2820+220"));
-    REQUIRE(long_read.size() <= 88);
+    // The terminal, not the summary, decides how much of a path fits.
+    REQUIRE_THAT(long_read, ContainsSubstring(long_path + ":2820+220"));
     REQUIRE_THAT(
         summarize_tool_arguments("read", R"({"path":"src","view":"auto"})"),
         ContainsSubstring("view=auto"));
@@ -820,14 +848,46 @@ TEST_CASE("render_history_panel — repeated system disclosure shows counter and
 
 namespace {
 std::string render_panel_text(const std::vector<UiMessage>& messages,
-                              ConversationRenderOptions options = {}) {
+                              ConversationRenderOptions options = {},
+                              int width = 160) {
     auto panel = render_history_panel(messages, 0, std::move(options));
-    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(160),
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(width),
                                         ftxui::Dimension::Fit(panel));
     ftxui::Render(screen, panel);
     return strip_ansi(screen.ToString());
 }
 } // namespace
+
+TEST_CASE("tool headers use the terminal's width and elide only when it runs out",
+          "[tui][conversation][render][tool]") {
+    const std::string tail = "print('end-of-script')";
+    const std::string args =
+        R"({"code":"import os\n)" + std::string(120, 'y') + R"(\n)" + tail + R"("})";
+    const auto build = [&](std::string_view tool_name) {
+        std::vector<UiMessage> messages;
+        auto msg = make_assistant_message("", "", false);
+        auto tool = make_tool_activity("tool-1", std::string(tool_name),
+                                       args, summarize_tool_arguments(tool_name, args));
+        apply_tool_result(tool, "done");
+        msg.tools.push_back(std::move(tool));
+        messages.push_back(std::move(msg));
+        return messages;
+    };
+
+    const auto wide = render_panel_text(build("python"), {}, 240);
+    REQUIRE_THAT(wide, ContainsSubstring(tail));
+    REQUIRE(wide.find("\xe2\x80\xa6") == std::string::npos);
+
+    // A narrow terminal still gets one header row, ending in an ellipsis
+    // instead of a hard clip, with the status metric kept on the right.
+    const auto narrow = render_panel_text(build("python"), {}, 80);
+    REQUIRE(narrow.find(tail) == std::string::npos);
+    const auto header_end = narrow.find("Done");
+    REQUIRE(header_end != std::string::npos);
+    const auto header_start = narrow.rfind('\n', header_end) + 1;
+    REQUIRE_THAT(narrow.substr(header_start, header_end - header_start),
+                 ContainsSubstring("\xe2\x80\xa6"));
+}
 
 TEST_CASE("tool presentation uses semantic labels and compact result metrics",
           "[tui][conversation][render][tool]") {
@@ -884,9 +944,12 @@ TEST_CASE("read header metric reports original lines for compressed summaries",
 
 TEST_CASE("read argument preview truncates paths on codepoint boundaries",
           "[tui][conversation][render][tool][read]") {
-    // An odd-length prefix puts the 88-byte preview cut mid-codepoint.
+    // The longest path `read` accepts (1024 bytes) plus its range overruns the
+    // summary's byte bound, and the odd-length prefix puts the cut
+    // mid-codepoint.
     std::string path = "src";
-    while (path.size() < 200) path += "é";  // two bytes per codepoint
+    while (path.size() + 2 <= 1024) path += "é";  // two bytes per codepoint
+    REQUIRE(path.size() + std::string_view{":2820+220"}.size() > tui::kToolDescriptionMaxBytes);
     const auto summary = summarize_tool_arguments(
         "read",
         R"({"path":")" + path + R"(","offset_line":2820,"limit_lines":220})");
